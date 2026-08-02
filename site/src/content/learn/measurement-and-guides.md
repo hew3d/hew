@@ -45,6 +45,8 @@ Arrow keys also lock the guide or measurement's own direction, mid-gesture. For 
 
 The corner widget keeps showing your last reading after you finish a measurement or place a guide — it doesn't clear until you switch to a different tool, so there's time to actually read the number instead of catching it out of the corner of your eye. And you don't have to type the target length while the gesture is still live: measure two real points normally, look at the finished distance sitting in the widget, and *then* type a new length and press `Enter` — Hew offers the same "resize the model?" confirmation this produces mid-drag, just triggered after the fact instead of during. `Esc` at that point drops the typed number and puts the original reading back, without disturbing anything; typing again still offers to resize against the same two points.
 
+If a group or component is open for editing when you arm that confirmation, it resizes just that container instead of the whole model: the dialog names it ("Resize Group 1?", "Resize Door?") rather than asking about the model, and the resize is anchored at the *first* point you measured from, so that point doesn't move. A component resize reaches every placement of it, since they share one definition; a group resize touches only that group's contents. Either way, geometry outside the open container stays put, and so does the camera — only the whole-model resize at the top level moves the view to match. Step out (`Esc`) with the new size in place, same as any other edit made inside a group or component.
+
 ## Protractor
 
 The Protractor (Tools ▸ Protractor) measures an angle and drops an **angular guide line** through a point:

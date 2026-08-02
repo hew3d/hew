@@ -12,11 +12,15 @@ A group bundles objects (and other groups — they nest) into one selectable, mo
 
 - **Create:** select two or more things and choose **Edit ▸ Group** (`⌘G` / `Ctrl+G`), or click **Group** on the contextual dock.
 - **Dissolve:** select a group and choose **Edit ▸ Ungroup** (`⇧⌘G` / `Ctrl+Shift+G`); the members return to being independent, unchanged.
-- **Edit the contents:** double-click the group (or click **Edit** on the contextual dock). You're now *inside* the group's context: the rest of the scene dims, and selection and drawing are scoped to the group's members. Press `Esc` to step back out one level.
+- **Edit the contents:** double-click the group (or click **Edit** on the contextual dock). You're now *inside* it: the rest of the scene dims, the Outliner marks the open group "editing", and the breadcrumb reads Model → the group's name → …. Every tool works on the members from here, not just selection and drawing — Push/Pull, Follow Me, Union/Subtract/Intersect between two members, Slice, and Move/Rotate/Scale on an individual member, the same set that works inside a component (below). Anything you create while you're in there — a new group, a component instance, an imported model, 3D text — becomes a member when you step out. Press `Esc`, or double-click empty space, to step back out one level.
+
+Groups nest, and editing follows the nesting: double-click a member group to open it too, one more level on the breadcrumb, one more `Esc` to leave. A component instance inside a group opens for editing the ordinary way — double-click it — once you've drilled in through the group to reach it.
 
 ![A group named "Enclosure" selected: Object Info shows its name, type, and tag; the contextual dock offers Edit, Move, Scale, Make Component, Ungroup, Erase](/docs/organization.png)
 
 Moving, rotating, or scaling a group transforms everything inside it together, and Move with `Option`/`Alt` held copies the whole group — nested groups, names, tags, and materials included; component instances inside come along as new instances of the same definition ([Move](/learn/moving-and-transforming/)). Groups also work as boolean operands: Union, Subtract, and Intersect accept a group anywhere they accept a solid ([Combining solids](/learn/combining-solids/)). Hiding a group (the eye toggle in the Outliner) hides all of its contents. Groups are also handy purely as selection sets — a group's name in the Outliner and Object Info makes big models legible.
+
+Delete everything inside an open group and step out, and the group goes with it — undo brings it all back, same as a component left with nothing (below).
 
 ## Components
 
@@ -26,13 +30,13 @@ A component is shared geometry: one **definition**, any number of placed **insta
 - **Place more instances:** select an instance and choose **Edit ▸ Place Copy**; the new instance lands just beside the original, ready to Move into position. Or Move an instance with copy mode on (tap `Option`/`Alt`) to drop copies where you want them — and type `x5` right after a copy to place a whole row ([Move](/learn/moving-and-transforming/)).
 - **Edit the definition:** double-click any instance. Every other placement of the component disappears for the moment — there's only one copy of the shape, and it's yours to edit — while the members themselves behave exactly like ordinary top-level geometry. Every tool works on them, not just Push/Pull and Paint: draw new geometry (on a member's face, or on any plane — press an arrow key to lock it, exactly like drawing at the top level), Push/Pull, Follow Me, Union/Subtract/Intersect between two members, Slice, and Move/Rotate/Scale on an individual member. Anything you draw while you're in there becomes part of the component too. Step out (`Esc`, or double-click outside the component) and every placement reappears showing the change, wherever it's placed, however it's rotated, scaled, or mirrored — there's still only one shape underneath.
 
-An instance that's mirrored, scaled unevenly on one axis, or kept inside a group (or whose sibling placements are) edits a little differently: its siblings stay visible the whole time instead of stepping out of view, because that placement can't be lifted out to edit alone. Everything else — the tools, drawing, stepping out — works the same, except that a definition edited this way still needs at least one member: deleting its last one is refused, rather than emptying the component.
+An instance that's mirrored, scaled unevenly on one axis, or has a sibling placement kept inside some *other* group, edits a little differently: its siblings stay visible the whole time instead of stepping out of view, because that placement can't be lifted out to edit alone. Everything else — the tools, drawing, stepping out — works the same, except that a definition edited this way still needs at least one member: deleting its last one is refused, rather than emptying the component.
 
 Deleting a member otherwise works the same way you'd delete anything else. Delete every member and step out, and the whole component — and every instance of it — disappears with it (undo brings it all back).
 
 Saving works normally while you're in the middle of editing a component, autosave included — your place in the edit holds, and the saved file reflects the component as it stands.
 
-Construction guides (Tape Measure, Protractor) stay ground-truthed to the world even while you're inside a component — a guide dropped there won't follow the member around. Use guides at the top level, or on an exploded copy, when you need them for a component's own shape.
+Construction guides (Tape Measure, Protractor) stay ground-truthed to the world even while you're inside a group or component — a guide dropped there won't follow the member around. Use guides at the top level, or on an exploded copy, when you need them for a component's own shape. The Tape Measure's resize gesture is the exception: measure and type a new length while a group or component is open, and it offers to resize just that container instead of the whole model ([Precision, measurement, and guides](/learn/measurement-and-guides/)).
 
 ### Names and tags
 
@@ -54,7 +58,7 @@ Two commands take an instance out of the shared-definition world, both available
 
 ## In the Outliner
 
-Groups appear as folders you can expand; component instances get their own hexagon icon. Double-clicking a row in the Outliner enters that item's editing context, same as double-clicking in the viewport. The breadcrumb at the top of the Outliner shows where you are and offers one-click exits.
+Groups appear as folders you can expand; component instances get their own hexagon icon. Double-clicking a row in the Outliner opens every level between the top and that row in one step — group, nested group, instance, whatever the chain is — landing in the same state you'd reach clicking through the viewport one level at a time, with each level on the breadcrumb marked "editing". The breadcrumb at the top of the Outliner shows where you are and offers one-click exits.
 
 ## Current limits
 

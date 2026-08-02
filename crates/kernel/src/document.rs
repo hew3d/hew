@@ -311,6 +311,50 @@ struct ExplodeSession {
     undo_len_at_open: usize,
 }
 
+/// Transient state for an open GROUP editing session
+/// (docs/design/group-session.md): entering a group temporarily applies
+/// the document's existing *ungroup posture* — every direct member's
+/// parent cleared to the top level, the group record hidden with its
+/// member list intact — so the user edits members with the entirely
+/// unmodified plain-object tool set (the replacing ops included: a
+/// session member is never a [`DocumentError::GroupedOperand`]). Closing
+/// the session re-homes the survivors and folds in whatever was created
+/// meanwhile. No pose is involved, so unlike [`ExplodeSession`] there is
+/// nothing to bake and no pristine snapshots to keep — the ownership flip
+/// is exactly reversible.
+///
+/// NOT serialized — the same posture as [`ExplodeSession`].
+#[derive(Debug, Clone)]
+struct GroupSession {
+    /// The group the user entered.
+    group: GroupId,
+    /// Direct members at open time, in `GroupRecord.members` order. The
+    /// hidden group's own stored list is never edited mid-session, so this
+    /// equals `GroupRecord.members` for the session's whole duration.
+    members: Vec<NodeId>,
+    /// `self.undo.actions.len()` immediately after `GroupSessionOpened`
+    /// was pushed — the fold-in boundary, exactly like
+    /// [`ExplodeSession::undo_len_at_open`].
+    undo_len_at_open: usize,
+}
+
+/// One open editing frame on [`Document::sessions`] — the session stack
+/// (docs/design/group-session.md). Frames open and close strictly LIFO,
+/// and a `Component` frame is always innermost: definitions are flat, so
+/// nothing inside one can host a further frame, and
+/// [`Document::open_explode_session`] refuses while one is already open.
+#[derive(Debug, Clone)]
+enum SessionFrame {
+    /// A component explode session — a transient *explode* of an instance
+    /// (docs/design/explode-session-prototype.md). Boxed: an
+    /// [`ExplodeSession`] carries pristine snapshots and is an order of
+    /// magnitude larger than a [`GroupSession`].
+    Component(Box<ExplodeSession>),
+    /// A group editing session — a transient *ungroup*
+    /// (docs/design/group-session.md).
+    Group(GroupSession),
+}
+
 /// One document-level step on the undo stack.
 ///
 /// Object creation is undone by hiding (not deleting), so the `ObjectId` never
@@ -544,20 +588,29 @@ enum DocAction {
     /// and its hidden/visible state).
     Rescale {
         factor: f64,
+        /// The scale's fixed point: the world origin for
+        /// `rescale_document`, the measured anchor for `rescale_session`
+        /// (docs/design/group-session.md). Redo rebuilds the transform
+        /// from `factor` + `anchor` through [`rescale_transform`], the
+        /// same helper the commits used, so it reproduces them
+        /// bit-for-bit.
+        anchor: Point3,
         objects: Vec<(ObjectId, Object)>,
         sketches: Vec<(SketchId, Sketch)>,
         guides: Vec<(GuideId, Guide)>,
         instances: Vec<(InstanceId, Transform)>,
         /// The movable drawing axes' PRE-scale origin (tool-parity design
-        /// §4). A rescale moves this along with every other world-length
-        /// quantity — the axes gizmo and every frame-relative
+        /// §4). A whole-document rescale moves this along with every other
+        /// world-length quantity — the axes gizmo and every frame-relative
         /// drawing/inference operation read through
         /// [`Document::axes`], so leaving the frame's origin fixed while the
         /// geometry it anchors moves detaches the two. `x`/`y` are unit
         /// directions, not positions, and are never touched by a rescale.
         /// Recorded here (not recomputed) for the same rule-9 reason as
-        /// every other field above: undo restores it verbatim.
-        axes_origin: Point3,
+        /// every other field above: undo restores it verbatim. `None` for a
+        /// SESSION rescale — the world (and its axes frame) is not what is
+        /// being resized, so both arms leave the axes alone.
+        axes_origin: Option<Point3>,
     },
     /// `set_axes` swapped the document's movable drawing axes (tool-parity
     /// design §4). Unlike every geometry-bearing action above, there is no
@@ -883,6 +936,53 @@ enum DocAction {
         /// the session; the instances stay hidden either way (a session
         /// hides them, an emptied close keeps them hidden).
         emptied: bool,
+    },
+    /// `open_group_session` applied the ungroup posture to a top-level
+    /// group for an editing session (docs/design/group-session.md):
+    /// members' parents cleared, the group hidden with its member list
+    /// intact, the frame pushed. Undo restores each member's parent,
+    /// unhides the group, restores `reanchored` verbatim, and pops the
+    /// frame; redo re-applies the posture and re-pushes the frame.
+    GroupSessionOpened {
+        group: GroupId,
+        /// Direct members at open, in `GroupRecord.members` order.
+        members: Vec<NodeId>,
+        /// The exact before/after `detached` snapshot of every annotation
+        /// [`Document::reevaluate_liveness_recorded`] changed when the
+        /// open hid the group node (members are only reparented, never
+        /// hidden — mirrors [`DocAction::Ungrouped::reanchored`]).
+        reanchored: Vec<AnnotationReanchor>,
+    },
+    /// `close_group_session` re-homed a group session's surviving members
+    /// and folded in everything created mid-session
+    /// (docs/design/group-session.md), or deleted the group outright when
+    /// nothing survived (`emptied`). Undo re-applies the ungroup posture
+    /// over exactly `members` (the list the close installed), restores
+    /// `prev_members` and `reanchored` verbatim, and reinstalls the frame
+    /// (asserting the boundary sits on the matching
+    /// [`DocAction::GroupSessionOpened`]); redo re-runs the close core and
+    /// DISCARDS the freshly built action — redo's shared tail re-pushes
+    /// the original (the [`DocAction::SessionClosed`] double-push lesson).
+    GroupSessionClosed {
+        group: GroupId,
+        /// The session's fold-in boundary, to reinstall the frame on undo.
+        undo_len_at_open: usize,
+        /// The group's member list at open (unchanged through the session
+        /// — a hidden group's list is never edited mid-session), restored
+        /// by undo together with the reinstalled frame.
+        prev_members: Vec<NodeId>,
+        /// The member list the close installed: survivors in original
+        /// order, then fold-ins in creation order.
+        members: Vec<NodeId>,
+        /// The exact before/after `detached` snapshot of every annotation
+        /// the close's own liveness recompute changed when the group
+        /// returned (empty for an emptied close — the group stays
+        /// hidden). Undo/redo restore it verbatim. An EMPTIED close
+        /// (`members` empty: nothing survived, nothing folded in) deletes
+        /// the group outright — it stays hidden, id stable — and records
+        /// no reanchors; undo re-opens the session over `prev_members`
+        /// either way, so no separate flag is carried.
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// `paint_face` reassigned a face's material. Non-topological, so it
     /// touches no [`History`]; undo restores `prev` exactly, redo re-applies
@@ -1252,7 +1352,10 @@ impl DocAction {
             DocAction::Imported { objects, .. } => objects.clone(),
             DocAction::DeletedDefMember { object, .. } => vec![*object],
             DocAction::ConsumedScaffolding { .. } => Vec::new(),
-            DocAction::SessionOpened { .. } | DocAction::SessionClosed { .. } => Vec::new(),
+            DocAction::SessionOpened { .. }
+            | DocAction::SessionClosed { .. }
+            | DocAction::GroupSessionOpened { .. }
+            | DocAction::GroupSessionClosed { .. } => Vec::new(),
         }
     }
 
@@ -1321,7 +1424,10 @@ impl DocAction {
             | DocAction::Imported { .. }
             | DocAction::DeletedDefMember { .. } => Vec::new(),
             DocAction::ConsumedScaffolding { sketch, .. } => vec![*sketch],
-            DocAction::SessionOpened { .. } | DocAction::SessionClosed { .. } => Vec::new(),
+            DocAction::SessionOpened { .. }
+            | DocAction::SessionClosed { .. }
+            | DocAction::GroupSessionOpened { .. }
+            | DocAction::GroupSessionClosed { .. } => Vec::new(),
         }
     }
 
@@ -1371,6 +1477,80 @@ impl DocAction {
             DocAction::FollowMeFace { result, .. } => (vec![*result], Vec::new()),
             DocAction::Imported { objects, .. } => (objects.clone(), Vec::new()),
             _ => (Vec::new(), Vec::new()),
+        }
+    }
+
+    /// The tree NODES a single action created — objects, groups, and
+    /// instances — the group-session close's fold-in walk
+    /// (docs/design/group-session.md). The object/sketch analog above
+    /// feeds the component close, which folds leaf geometry into a flat
+    /// definition; this one feeds the group close, which folds whole
+    /// nodes. Same wildcard posture: only minting variants are named, and
+    /// the close filters to nodes still live and still top-level (so a
+    /// definition member listed by `Imported::objects`, or a node a later
+    /// inner session already re-homed, never folds).
+    fn created_nodes(&self) -> Vec<NodeId> {
+        let objects_only =
+            |objs: &[ObjectId]| objs.iter().map(|&o| NodeId::Object(o)).collect::<Vec<_>>();
+        match self {
+            DocAction::Compound { actions } | DocAction::PlaceTextCompound(actions) => {
+                actions.iter().flat_map(|a| a.created_nodes()).collect()
+            }
+            DocAction::CreatedObject { id, .. } => vec![NodeId::Object(*id)],
+            DocAction::Boolean { result, .. } => vec![NodeId::Object(*result)],
+            DocAction::BooleanNodes { result_objects, .. } => objects_only(result_objects),
+            DocAction::Sliced { a, b, .. } => vec![NodeId::Object(*a), NodeId::Object(*b)],
+            DocAction::PushThrough { results, .. } => objects_only(results),
+            DocAction::FollowMeFace { result, .. } => vec![NodeId::Object(*result)],
+            DocAction::Exploded { created, .. } => objects_only(created),
+            DocAction::Grouped { group, .. } => vec![NodeId::Group(*group)],
+            DocAction::MadeComponent { instance, .. } => vec![NodeId::Instance(*instance)],
+            DocAction::PlacedInstance { instance } => vec![NodeId::Instance(*instance)],
+            DocAction::Duplicated {
+                objects,
+                groups,
+                instances,
+                ..
+            }
+            | DocAction::DuplicatedArray {
+                objects,
+                groups,
+                instances,
+                ..
+            } => objects
+                .iter()
+                .map(|&o| NodeId::Object(o))
+                .chain(groups.iter().map(|&g| NodeId::Group(g)))
+                .chain(instances.iter().map(|&i| NodeId::Instance(i)))
+                .collect(),
+            DocAction::Imported {
+                objects,
+                instances,
+                groups,
+                ..
+            } => objects
+                .iter()
+                .map(|&o| NodeId::Object(o))
+                .chain(groups.iter().map(|&g| NodeId::Group(g)))
+                .chain(instances.iter().map(|&i| NodeId::Instance(i)))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The construction guides a single action created —
+    /// [`Document::rescale_session`]'s scope walk (a guide placed while a
+    /// session is open belongs to the open context and resizes with it;
+    /// docs/design/group-session.md). Same wildcard posture as the
+    /// creation walks above.
+    fn created_guides(&self) -> Vec<GuideId> {
+        match self {
+            DocAction::Compound { actions } | DocAction::PlaceTextCompound(actions) => {
+                actions.iter().flat_map(|a| a.created_guides()).collect()
+            }
+            DocAction::CreatedGuide { guide } => vec![*guide],
+            DocAction::Imported { guides, .. } => guides.clone(),
+            _ => Vec::new(),
         }
     }
 }
@@ -1663,6 +1843,13 @@ pub enum DocumentError {
     /// editing model for exactly this case, the same way it does for a
     /// non-similarity pose.
     ExplodeSessionGroupedInstance,
+    /// `open_group_session` was given a group that is still nested inside
+    /// another group. A group session opens on top-level groups only —
+    /// entering a nested group goes through its ancestors outermost-first
+    /// (each open re-homes the next level to the top), so the app's
+    /// drill-down never hits this; it is the kernel backstop for a direct
+    /// caller skipping levels.
+    ExplodeSessionNestedGroup,
 }
 
 impl std::fmt::Display for DocumentError {
@@ -1809,6 +1996,11 @@ impl std::fmt::Display for DocumentError {
                 f,
                 "a placement of this component is inside a group; it opens in \
                  the in-context editing mode instead"
+            ),
+            DocumentError::ExplodeSessionNestedGroup => write!(
+                f,
+                "cannot open a nested group for editing directly — enter its \
+                 enclosing group first"
             ),
         }
     }
@@ -1957,11 +2149,12 @@ pub struct Document {
     axes: AxesFrame,
     undo: ActionStack,
     redo: ActionStack,
-    /// The open explode session, if any (docs/design/explode-session-
-    /// prototype.md). NOT serialized — see [`Document::save_guarded`], the
-    /// save guard backstopping the app's own "close before saving" rule.
-    /// Session-only, exactly like `pending_sketch_gesture`.
-    explode_session: Option<ExplodeSession>,
+    /// The open editing-session STACK, innermost last (docs/design/
+    /// group-session.md; docs/design/explode-session-prototype.md for the
+    /// component frame). NOT serialized — see [`Document::save_guarded`],
+    /// the save guard backstopping the app's own "close before saving"
+    /// rule. Session-only, exactly like `pending_sketch_gesture`.
+    sessions: Vec<SessionFrame>,
     /// Torture/"paranoid" mode (docs/DEVELOPMENT.md): when on, the topology
     /// validator runs after **every** op even in release builds (where
     /// `check_invariants` / `debug_assert!` are compiled out), so a flaky op
@@ -2610,7 +2803,7 @@ impl Document {
     ) -> Result<(ImportReport, DocChange), DocumentError> {
         // An import's world-tree creations mid-session would all fold into
         // the open definition at close — never what an import means.
-        self.refuse_during_explode_session()?;
+        self.refuse_during_component_session()?;
         use crate::serialize::NO_MATERIAL;
 
         // ── 1. Insert materials → build dense→MaterialId map ──────────────
@@ -6256,16 +6449,12 @@ impl Document {
         b: NodeId,
     ) -> Result<(NodeId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "boolean_nodes", boolean_op = ?op);
-        if self.explode_session.is_some() {
-            // While a session is open: object operands must be session
-            // geometry; a group or instance operand is outside the session
-            // by construction (a session holds neither).
-            for n in [a, b] {
-                match n {
-                    NodeId::Object(id) => self.explode_scope_object(id)?,
-                    _ => return Err(DocumentError::ExplodeSessionScope),
-                }
-            }
+        // While a session is open, both operands must be session geometry
+        // — under a component frame that means session OBJECTS only; under
+        // a group frame any member node (nested groups and instances
+        // included) or mid-session creation qualifies.
+        for n in [a, b] {
+            self.explode_scope_node(n)?;
         }
         if a == b {
             // A node cannot be combined with itself (fully coincident faces —
@@ -7356,7 +7545,15 @@ impl Document {
         // Grouping a session object would hand it a `World { parent }` the
         // close's `Definition` retarget silently breaks (the group would
         // keep listing an object that left the world tree).
-        self.refuse_during_explode_session()?;
+        self.refuse_during_component_session()?;
+        // Under a group frame every grouped node must be session geometry —
+        // the new group folds into the session group at close, so grouping
+        // an outside node would silently move it inside the open group.
+        if matches!(self.sessions.last(), Some(SessionFrame::Group(_))) {
+            for &m in members {
+                self.explode_scope_node(m)?;
+            }
+        }
         if members.is_empty() {
             return Err(DocumentError::EmptyGroup);
         }
@@ -7419,6 +7616,15 @@ impl Document {
         info!(target: "kernel::op", op = "ungroup");
         if !self.group_is_live(group) {
             return Err(DocumentError::UnknownGroup);
+        }
+        // Under a group frame the dissolved group must be session geometry
+        // — ungrouping an OUTSIDE group would release members the close's
+        // fold-in walk ([`Document::nodes_surfaced_since`]) then absorbs
+        // into the session group. (During a component session ungroup stays
+        // deliberately ungated, as before: released members keep their
+        // world parents and never fold into a definition.)
+        if matches!(self.sessions.last(), Some(SessionFrame::Group(_))) {
+            self.explode_scope_node(NodeId::Group(group))?;
         }
         let parent = self.groups[group].parent;
         let members = self.groups[group].members.clone();
@@ -7815,7 +8021,7 @@ impl Document {
         // authored size, only instance poses scale") — which would silently
         // invalidate the session's captured pose: the close would unbake
         // through a frame the instance no longer has.
-        self.refuse_during_explode_session()?;
+        self.refuse_during_any_session()?;
         if !factor.is_finite() || factor <= 0.0 {
             return Err(DocumentError::InvalidRescaleFactor);
         }
@@ -7895,11 +8101,12 @@ impl Document {
 
         self.undo.push(DocAction::Rescale {
             factor,
+            anchor: Point3::new(0.0, 0.0, 0.0),
             objects: pre_objects,
             sketches: pre_sketches,
             guides: pre_guides,
             instances: pre_instances,
-            axes_origin: pre_axes_origin,
+            axes_origin: Some(pre_axes_origin),
         });
         self.redo.clear();
         self.debug_validate();
@@ -7908,6 +8115,183 @@ impl Document {
             objects_touched: object_ids,
             sketches_touched: sketch_ids,
             groups_touched: Vec::new(),
+            instances_touched: instance_ids,
+            components_touched: Vec::new(),
+            guides_touched: guide_ids,
+        })
+    }
+
+    /// Resizes the contents of the INNERMOST open session frame by
+    /// `factor` about `anchor` (docs/design/group-session.md) — the Tape
+    /// Measure's in-context resize. Under a component frame every live
+    /// session object and sketch scales and is dirty-marked by the
+    /// recorded action, so the close unbakes the scaled geometry into the
+    /// definition and every instance resizes about its own image of the
+    /// anchor. Under a group frame the session's contents scale in place:
+    /// leaf objects (nested member groups included) bake the transform,
+    /// member instances compose it into their poses ("definitions stay at
+    /// their authored size, only instance poses scale"), and the sketches
+    /// and guides created since the open scale along. The world — outside
+    /// geometry, pre-session sketches, the drawing axes — is untouched.
+    /// Recorded as [`DocAction::Rescale`] with the anchor and no axes
+    /// snapshot.
+    ///
+    /// # Errors
+    /// - [`DocumentError::ExplodeSessionNotOpen`] — no session frame is
+    ///   open (the whole-document path is [`Document::rescale_document`]).
+    /// - [`DocumentError::InvalidRescaleFactor`] — non-finite or
+    ///   non-positive `factor`, or a non-finite `anchor` component.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn rescale_session(
+        &mut self,
+        factor: f64,
+        anchor: Point3,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "rescale_session", factor);
+        if self.sessions.is_empty() {
+            return Err(DocumentError::ExplodeSessionNotOpen);
+        }
+        if !factor.is_finite() || factor <= 0.0 || !point_is_finite(anchor) {
+            return Err(DocumentError::InvalidRescaleFactor);
+        }
+        let scale = rescale_transform(factor, anchor);
+
+        let undo_len = match self.sessions.last().expect("stack checked non-empty") {
+            SessionFrame::Component(s) => s.undo_len_at_open,
+            SessionFrame::Group(s) => s.undo_len_at_open,
+        };
+
+        let (object_ids, sketch_ids, instance_ids, group_ids) =
+            if matches!(self.sessions.last(), Some(SessionFrame::Group(_))) {
+                let scope = self
+                    .group_session_scope()
+                    .expect("innermost frame is a group session");
+                let mut object_ids: Vec<ObjectId> = Vec::new();
+                let mut instance_ids: Vec<InstanceId> = Vec::new();
+                let mut group_ids: Vec<GroupId> = Vec::new();
+                for n in scope {
+                    // Deleted members, and members that left the world
+                    // (consumed into a definition mid-session), do not
+                    // scale — their replacements are in scope themselves.
+                    if !self.node_is_top_level_world(n) {
+                        continue;
+                    }
+                    let mut subtree = Vec::new();
+                    self.collect_subtree(n, &mut subtree);
+                    for nd in subtree {
+                        match nd {
+                            NodeId::Object(id) => object_ids.push(id),
+                            NodeId::Instance(id) => instance_ids.push(id),
+                            NodeId::Group(id) => group_ids.push(id),
+                        }
+                    }
+                }
+                // Sketches drawn while the session is open resize with it;
+                // pre-existing world sketches are outside geometry. (The
+                // component arm's scope list already includes its
+                // definition-owned and mid-session sketches.)
+                let mut sketch_ids: Vec<SketchId> = Vec::new();
+                for action in &self.undo.actions[undo_len..] {
+                    for s in action.created_objects_and_sketches().1 {
+                        if !sketch_ids.contains(&s) {
+                            sketch_ids.push(s);
+                        }
+                    }
+                }
+                for &s in &self.fresh_sketches {
+                    if !sketch_ids.contains(&s) {
+                        sketch_ids.push(s);
+                    }
+                }
+                sketch_ids.retain(|s| {
+                    self.sketches.contains_key(*s) && !self.hidden_sketches.contains(s)
+                });
+                (object_ids, sketch_ids, instance_ids, group_ids)
+            } else {
+                let (objs, sks) = self
+                    .explode_session_scope()
+                    .expect("component frame is innermost");
+                let object_ids: Vec<ObjectId> = objs
+                    .into_iter()
+                    .filter(|&o| self.objects.get(o).is_some_and(|r| !r.hidden))
+                    .collect();
+                let sketch_ids: Vec<SketchId> = sks
+                    .into_iter()
+                    .filter(|s| self.sketches.contains_key(*s) && !self.hidden_sketches.contains(s))
+                    .collect();
+                (object_ids, sketch_ids, Vec::new(), Vec::new())
+            };
+
+        // Guides placed while the session is open (the Tape Measure's own
+        // markings among them) belong to the open context and resize with
+        // it; pre-session guides are outside geometry.
+        let mut guide_ids: Vec<GuideId> = Vec::new();
+        for action in &self.undo.actions[undo_len..] {
+            for g in action.created_guides() {
+                if !guide_ids.contains(&g) {
+                    guide_ids.push(g);
+                }
+            }
+        }
+        guide_ids.retain(|&g| self.guides.get(g).is_some_and(|r| !r.hidden));
+
+        // Snapshot every touched entity's PRE-scale state before mutating
+        // anything (`rescale_document`'s posture: undo restores this
+        // verbatim, never a recomputed inverse).
+        let pre_objects: Vec<(ObjectId, Object)> = object_ids
+            .iter()
+            .map(|&id| (id, self.objects[id].object.clone()))
+            .collect();
+        let pre_sketches: Vec<(SketchId, Sketch)> = sketch_ids
+            .iter()
+            .map(|&id| (id, self.sketches[id].clone()))
+            .collect();
+        let pre_guides: Vec<(GuideId, Guide)> = guide_ids
+            .iter()
+            .map(|&id| (id, self.guides[id].guide))
+            .collect();
+        let pre_instances: Vec<(InstanceId, Transform)> = instance_ids
+            .iter()
+            .map(|&id| (id, self.instances[id].pose))
+            .collect();
+
+        for &id in &object_ids {
+            self.objects[id]
+                .object
+                .apply_transform(&scale)
+                .expect("an anchored positive uniform scale is never singular or reflecting");
+        }
+        for &id in &sketch_ids {
+            self.sketches[id]
+                .apply_transform(&scale)
+                .expect("an anchored positive uniform scale is never singular or reflecting");
+        }
+        for &id in &guide_ids {
+            let rec = &mut self.guides[id];
+            rec.guide = scale_guide(rec.guide, &scale);
+        }
+        for &id in &instance_ids {
+            let rec = &mut self.instances[id];
+            rec.pose = rec.pose.then(&scale);
+        }
+
+        self.undo.push(DocAction::Rescale {
+            factor,
+            anchor,
+            objects: pre_objects,
+            sketches: pre_sketches,
+            guides: pre_guides,
+            instances: pre_instances,
+            axes_origin: None,
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        Ok(DocChange {
+            objects_touched: object_ids,
+            sketches_touched: sketch_ids,
+            groups_touched: group_ids,
             instances_touched: instance_ids,
             components_touched: Vec::new(),
             guides_touched: guide_ids,
@@ -7975,7 +8359,15 @@ impl Document {
         // A component minted mid-session would either nest (definition
         // inside a definition — unsupported) or steal session members into
         // a second definition out from under the close.
-        self.refuse_during_explode_session()?;
+        self.refuse_during_component_session()?;
+        // Under a group frame every selected node must be session geometry
+        // — the replacement instance folds into the session group at
+        // close, so an outside selection would be stolen into the group.
+        if matches!(self.sessions.last(), Some(SessionFrame::Group(_))) {
+            for &m in members {
+                self.explode_scope_node(m)?;
+            }
+        }
         if members.is_empty() {
             return Err(DocumentError::EmptyComponent);
         }
@@ -8112,7 +8504,7 @@ impl Document {
         // A new placement mid-session would be a live instance whose
         // definition's geometry is on loan to the session (out-of-date
         // render) or a nested placement the close cannot fold.
-        self.refuse_during_explode_session()?;
+        self.refuse_during_component_session()?;
         if self.components.get(component).is_none_or(|c| c.hidden) {
             return Err(DocumentError::UnknownComponent);
         }
@@ -8210,7 +8602,7 @@ impl Document {
         // 3D Text folds its letters into a fresh component + instance —
         // both structural creations the close cannot fold (nested
         // definitions are unsupported).
-        self.refuse_during_explode_session()?;
+        self.refuse_during_component_session()?;
         if let Some(gid) = group
             && (!self.groups.contains_key(gid) || self.groups[gid].hidden)
         {
@@ -8543,6 +8935,12 @@ impl Document {
         &mut self,
         instance: InstanceId,
     ) -> Result<(Vec<ObjectId>, DocChange), DocumentError> {
+        // Mid-session, the exploded instance must be session geometry: its
+        // baked objects are CREATED nodes, which the close folds into the
+        // open group (group frame) or definition (component frame — where
+        // every placement of any def is either hidden or outside the
+        // session by construction, so the op refuses outright there).
+        self.explode_scope_node(NodeId::Instance(instance))?;
         let (def, pose, parent) = match self.instances.get(instance) {
             Some(rec) if !rec.hidden => (rec.def, rec.pose, rec.parent),
             _ => return Err(DocumentError::UnknownInstance),
@@ -8800,7 +9198,17 @@ impl Document {
     /// if no session is open — the app's resync query after undo/redo
     /// crosses a session boundary (the wasm-api surface just wraps this).
     pub fn explode_session_instance(&self) -> Option<InstanceId> {
-        self.explode_session.as_ref().map(|s| s.instance)
+        self.component_session().map(|s| s.instance)
+    }
+
+    /// The open component explode session, if the innermost frame is one.
+    /// A `Component` frame is always innermost (see [`SessionFrame`]), so
+    /// this is the only place a component session can sit on the stack.
+    fn component_session(&self) -> Option<&ExplodeSession> {
+        match self.sessions.last() {
+            Some(SessionFrame::Component(s)) => Some(s),
+            _ => None,
+        }
     }
 
     /// The definition an open explode session is editing, or `None` if no
@@ -8810,7 +9218,7 @@ impl Document {
     /// session's duration, so the ordinary instance→definition queries
     /// answer `None` for it.
     pub fn explode_session_component(&self) -> Option<ComponentId> {
-        self.explode_session.as_ref().map(|s| s.component)
+        self.component_session().map(|s| s.component)
     }
 
     /// Bakes `pose` into the LIVE entries of the given member Object /
@@ -8839,7 +9247,7 @@ impl Document {
     /// member with no pristine snapshot (see `exit_explode_session`'s
     /// no-snapshot rule), which is exactly this revived case.
     ///
-    /// Does not touch `self.explode_session`, `self.undo`, or `self.redo` —
+    /// Does not touch `self.sessions`, `self.undo`, or `self.redo` —
     /// callers own recording the action and installing the returned session.
     fn bake_explode_session(
         &mut self,
@@ -8917,7 +9325,7 @@ impl Document {
         &mut self,
         instance: InstanceId,
     ) -> Result<DocChange, DocumentError> {
-        if self.explode_session.is_some() {
+        if self.component_session().is_some() {
             return Err(DocumentError::ExplodeSessionOpen);
         }
         let (component, pose) = self.instance_component(instance)?;
@@ -8996,7 +9404,8 @@ impl Document {
             components_touched: vec![component],
             ..Default::default()
         };
-        self.explode_session = Some(session);
+        self.sessions
+            .push(SessionFrame::Component(Box::new(session)));
         self.debug_validate();
         Ok(change)
     }
@@ -9004,8 +9413,8 @@ impl Document {
     /// The mutating core of [`Document::close_explode_session`], shared with
     /// `redo`'s `SessionClosed` arm (see that arm for why re-running this on
     /// replay is safe/exact when reached via a full forward redo sequence).
-    /// Takes and clears `self.explode_session`; panics if none is open (both
-    /// callers guarantee one is).
+    /// Pops the innermost frame off `self.sessions`; panics unless it is a
+    /// component session (every caller guarantees one is innermost).
     ///
     /// Returns the change AND the [`DocAction::SessionClosed`] describing it
     /// — the CALLER owns pushing it (or discarding it): `close_explode_session`
@@ -9015,10 +9424,9 @@ impl Document {
     /// one original — leaving a phantom stack entry that corrupted the next
     /// undos); `save_for_persistence`'s clone discards everything.
     fn exit_explode_session(&mut self) -> (DocChange, DocAction) {
-        let session = self
-            .explode_session
-            .take()
-            .expect("exit_explode_session called with no session open — caller bug");
+        let Some(SessionFrame::Component(session)) = self.sessions.pop() else {
+            panic!("exit_explode_session called with no component session innermost — caller bug");
+        };
 
         // Dirty-tracking walk (docs/design/explode-session-prototype.md):
         // every ObjectId/SketchId an intra-session action touched, plus
@@ -9223,7 +9631,7 @@ impl Document {
     /// # Errors
     /// - [`DocumentError::ExplodeSessionNotOpen`] — no session is open.
     pub fn close_explode_session(&mut self) -> Result<DocChange, DocumentError> {
-        if self.explode_session.is_none() {
+        if self.component_session().is_none() {
             return Err(DocumentError::ExplodeSessionNotOpen);
         }
         let (change, action) = self.exit_explode_session();
@@ -9233,13 +9641,239 @@ impl Document {
         Ok(change)
     }
 
+    /// Whether `node` is live, world-owned, and sitting at the top level —
+    /// the group-session close's re-home/fold-in eligibility test
+    /// (docs/design/group-session.md). An object that left the world
+    /// mid-session (folded into a definition by `make_component`), or a
+    /// node an inner session's close already re-homed into its own group,
+    /// fails this and is deliberately left where it is.
+    fn node_is_top_level_world(&self, node: NodeId) -> bool {
+        match node {
+            NodeId::Object(id) => self
+                .objects
+                .get(id)
+                .is_some_and(|r| !r.hidden && r.owner == ObjectOwner::World { parent: None }),
+            NodeId::Group(id) => self
+                .groups
+                .get(id)
+                .is_some_and(|r| !r.hidden && r.parent.is_none()),
+            NodeId::Instance(id) => self
+                .instances
+                .get(id)
+                .is_some_and(|r| !r.hidden && r.parent.is_none()),
+        }
+    }
+
+    /// Opens a group editing session on `group`: applies the ungroup
+    /// posture — every direct member's parent cleared to the top level,
+    /// the group hidden with its member list intact — so the ordinary
+    /// plain-object tool set (replacing ops included) works on the members
+    /// unmodified (docs/design/group-session.md). Recorded as
+    /// [`DocAction::GroupSessionOpened`].
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownGroup`] — the group is stale/hidden.
+    /// - [`DocumentError::ExplodeSessionOpen`] — a component session is
+    ///   open (a `Component` frame is always innermost; nothing opens
+    ///   inside it).
+    /// - [`DocumentError::ExplodeSessionNestedGroup`] — the group is
+    ///   nested inside another group (enter the outer group first).
+    ///
+    /// On `Err` the document is untouched.
+    pub fn open_group_session(&mut self, group: GroupId) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "open_group_session");
+        if self.component_session().is_some() {
+            return Err(DocumentError::ExplodeSessionOpen);
+        }
+        if !self.group_is_live(group) {
+            return Err(DocumentError::UnknownGroup);
+        }
+        if self.groups[group].parent.is_some() {
+            return Err(DocumentError::ExplodeSessionNestedGroup);
+        }
+
+        let members = self.groups[group].members.clone();
+        for &m in &members {
+            self.set_node_parent(m, None);
+        }
+        self.groups[group].hidden = true;
+        // Hiding the group node is a consumption event for annotations
+        // anchored to it directly (members are only reparented, never
+        // hidden) — the same liveness pass `ungroup` runs.
+        let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Group(group)]);
+
+        self.undo.push(DocAction::GroupSessionOpened {
+            group,
+            members: members.clone(),
+            reanchored,
+        });
+        self.redo.clear();
+        let undo_len_at_open = self.undo.actions.len();
+        self.sessions.push(SessionFrame::Group(GroupSession {
+            group,
+            members: members.clone(),
+            undo_len_at_open,
+        }));
+        self.debug_validate();
+        Ok(group_change(group, None, &members))
+    }
+
+    /// The mutating core of [`Document::close_group_session`], shared with
+    /// `redo`'s `GroupSessionClosed` arm and
+    /// [`Document::save_for_persistence`]'s clone. Pops the innermost
+    /// frame (panics unless it is a group session — every caller
+    /// guarantees one is innermost) and returns the change AND the
+    /// [`DocAction::GroupSessionClosed`] describing it — the CALLER owns
+    /// pushing or discarding it, exactly like
+    /// [`Document::exit_explode_session`].
+    fn exit_group_session(&mut self) -> (DocChange, DocAction) {
+        let Some(SessionFrame::Group(session)) = self.sessions.pop() else {
+            panic!("exit_group_session called with no group session innermost — caller bug");
+        };
+
+        // Fold-in discovery: every node surfaced into the session's frame
+        // since the open — minted nodes AND the members a mid-session
+        // ungroup released to the top level — in order, deduplicated. The
+        // close filters to live, top-level, world-owned nodes below —
+        // anything an inner session already re-homed, or that left the
+        // world, stays where it is.
+        let created = self.nodes_surfaced_since(session.undo_len_at_open);
+
+        let prev_members = self.groups[session.group].members.clone();
+
+        // Survivors in original order, then fold-ins in creation order. An
+        // original member re-created in `created` cannot happen (creation
+        // mints fresh ids), so the two lists are disjoint by construction.
+        let mut members: Vec<NodeId> = session
+            .members
+            .iter()
+            .copied()
+            .filter(|&m| self.node_is_top_level_world(m))
+            .collect();
+        members.extend(
+            created
+                .into_iter()
+                .filter(|&n| self.node_is_top_level_world(n)),
+        );
+
+        for &m in &members {
+            self.set_node_parent(m, Some(session.group));
+        }
+        self.groups[session.group].members = members.clone();
+
+        // An emptied group (every member deleted or consumed mid-session,
+        // nothing folded in) does not survive the close: it stays hidden —
+        // deleted outright, tombstone-style, the ungroup posture's own
+        // deletion — matching the component close's emptied-definition
+        // rule. Otherwise the group returns and a fresh liveness recompute
+        // reattaches annotations whose anchors are all live again.
+        let emptied = members.is_empty();
+        let reanchored = if emptied {
+            Vec::new()
+        } else {
+            self.groups[session.group].hidden = false;
+            self.reevaluate_liveness_recorded(&[NodeId::Group(session.group)])
+        };
+
+        let change = group_change(session.group, None, &members);
+        let action = DocAction::GroupSessionClosed {
+            group: session.group,
+            undo_len_at_open: session.undo_len_at_open,
+            prev_members,
+            members,
+            reanchored,
+        };
+        (change, action)
+    }
+
+    /// Closes the open group session, re-homing survivors and folding in
+    /// everything created meanwhile — see
+    /// [`Document::exit_group_session`] for the mechanics. Recorded as
+    /// [`DocAction::GroupSessionClosed`].
+    ///
+    /// # Errors
+    /// - [`DocumentError::ExplodeSessionNotOpen`] — the innermost frame is
+    ///   not a group session.
+    pub fn close_group_session(&mut self) -> Result<DocChange, DocumentError> {
+        if !matches!(self.sessions.last(), Some(SessionFrame::Group(_))) {
+            return Err(DocumentError::ExplodeSessionNotOpen);
+        }
+        let (change, action) = self.exit_group_session();
+        self.undo.push(action);
+        self.redo.clear();
+        self.debug_validate();
+        Ok(change)
+    }
+
+    /// Closes the INNERMOST open session frame, whichever kind it is — the
+    /// app's Escape / double-click-outside gesture. Refuses
+    /// [`DocumentError::ExplodeSessionNotOpen`] when the stack is empty.
+    pub fn close_innermost_session(&mut self) -> Result<DocChange, DocumentError> {
+        match self.sessions.last() {
+            None => Err(DocumentError::ExplodeSessionNotOpen),
+            Some(SessionFrame::Component(_)) => self.close_explode_session(),
+            Some(SessionFrame::Group(_)) => self.close_group_session(),
+        }
+    }
+
+    /// The group an open innermost group session is editing, or `None` —
+    /// the group analog of [`Document::explode_session_component`].
+    pub fn group_session_group(&self) -> Option<GroupId> {
+        match self.sessions.last() {
+            Some(SessionFrame::Group(s)) => Some(s.group),
+            _ => None,
+        }
+    }
+
+    /// The innermost open frame's live DIRECT members as the app should
+    /// list them — for a group frame: original members plus mid-session
+    /// surfacings, filtered to live top-level world nodes; for a component
+    /// frame: the live session objects. `None` when nothing is open. The
+    /// app's Outliner session rows, pick scoping, and dimming derive from
+    /// THIS (kernel truth) rather than an app-side snapshot, so they stay
+    /// correct across undo/redo re-entry into any earlier session bracket.
+    pub fn session_direct_members(&self) -> Option<Vec<NodeId>> {
+        match self.sessions.last()? {
+            SessionFrame::Component(_) => Some(
+                self.explode_session_objects()?
+                    .into_iter()
+                    .map(NodeId::Object)
+                    .collect(),
+            ),
+            SessionFrame::Group(_) => {
+                let scope = self
+                    .group_session_scope()
+                    .expect("innermost frame is a group session");
+                Some(
+                    scope
+                        .into_iter()
+                        .filter(|&n| self.node_is_top_level_world(n))
+                        .collect(),
+                )
+            }
+        }
+    }
+
+    /// The whole open session stack, outermost first: each frame as the
+    /// node the user entered (the group, or the component instance). The
+    /// app renders its breadcrumb / "editing" chips from this.
+    pub fn session_stack(&self) -> Vec<NodeId> {
+        self.sessions
+            .iter()
+            .map(|f| match f {
+                SessionFrame::Component(s) => NodeId::Instance(s.instance),
+                SessionFrame::Group(s) => NodeId::Group(s.group),
+            })
+            .collect()
+    }
+
     /// The set of `ObjectId`s/`SketchId`s "inside" the open explode session:
     /// the session's own member/sketch lists plus everything CREATED since
     /// the open (derived from the same undo-stack walk the close's fold-in
     /// uses, so the two always agree on what belongs to the session).
     /// `None` when no session is open.
     fn explode_session_scope(&self) -> Option<(BTreeSet<ObjectId>, BTreeSet<SketchId>)> {
-        let session = self.explode_session.as_ref()?;
+        let session = self.component_session()?;
         let mut objects: BTreeSet<ObjectId> = session.members.iter().copied().collect();
         let mut sketches: BTreeSet<SketchId> = session.sketches.iter().copied().collect();
         for action in &self.undo.actions[session.undo_len_at_open..] {
@@ -9259,27 +9893,115 @@ impl Document {
         Some((objects, sketches))
     }
 
-    /// Typed refusal for ops that can never run while an explode session is
-    /// open: they would restructure the tree (grouping, component/instance
-    /// creation, import) or mutate instance poses out from under the
-    /// session's captured frame (whole-document rescale). No-op when no
-    /// session is open.
+    /// Typed refusal for whole-document rescale, which cannot run while ANY
+    /// session frame is open: it mutates world geometry and instance poses
+    /// out from under every open frame's captured state. In-context
+    /// resizing goes through the scoped rescale instead
+    /// (docs/design/group-session.md). No-op when the stack is empty.
     ///
     /// # Errors
-    /// - [`DocumentError::ExplodeSessionScope`] — a session is open.
-    fn refuse_during_explode_session(&self) -> Result<(), DocumentError> {
-        if self.explode_session.is_some() {
+    /// - [`DocumentError::ExplodeSessionScope`] — a session frame is open.
+    fn refuse_during_any_session(&self) -> Result<(), DocumentError> {
+        if !self.sessions.is_empty() {
             return Err(DocumentError::ExplodeSessionScope);
         }
         Ok(())
     }
 
-    /// While a session is open, `object` must be part of it (an original
-    /// member or a mid-session creation) — see
-    /// [`DocumentError::ExplodeSessionScope`] for why an outside-fed
-    /// creation would corrupt the close's fold-in. No-op when no session is
+    /// Typed refusal for ops that can never run while a COMPONENT session
+    /// is open: they would restructure the tree (grouping,
+    /// component/instance creation, import) around geometry on loan from a
+    /// definition. Group frames deliberately do NOT refuse these — their
+    /// products fold into the open group at close
+    /// (docs/design/group-session.md). No-op when no component session is
     /// open.
+    ///
+    /// # Errors
+    /// - [`DocumentError::ExplodeSessionScope`] — a component session is open.
+    fn refuse_during_component_session(&self) -> Result<(), DocumentError> {
+        if self.component_session().is_some() {
+            return Err(DocumentError::ExplodeSessionScope);
+        }
+        Ok(())
+    }
+
+    /// Every node the actions from index `from` onward SURFACED into the
+    /// current frame: minted nodes ([`DocAction::created_nodes`]) plus the
+    /// members a mid-session `ungroup` released to the top level (the
+    /// dissolved group's record keeps its list, so the release is
+    /// recoverable from the action alone). In order, deduplicated. Shared
+    /// by [`Document::group_session_scope`] and the group close's fold-in
+    /// walk, so the scope gates and the close always agree on what belongs
+    /// to the session — an ungrouped nested member's contents join the
+    /// open context, SketchUp's explode-inside-a-context semantic.
+    fn nodes_surfaced_since(&self, from: usize) -> Vec<NodeId> {
+        let mut out: Vec<NodeId> = Vec::new();
+        for action in &self.undo.actions[from..] {
+            for n in action.created_nodes() {
+                // Linear dedup — mid-session creations number in the tens,
+                // and `NodeId` has no `Ord` for a set-based sweep.
+                if !out.contains(&n) {
+                    out.push(n);
+                }
+            }
+            if let DocAction::Ungrouped { group, .. } = action {
+                for &m in &self.groups[*group].members {
+                    if !out.contains(&m) {
+                        out.push(m);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The `NodeId` scope of an open innermost GROUP session: original
+    /// members plus every node surfaced since the open (the same walk the
+    /// close's fold-in uses, so the two always agree on what belongs to
+    /// the session). `None` when the innermost frame is not a group
+    /// session.
+    fn group_session_scope(&self) -> Option<Vec<NodeId>> {
+        let Some(SessionFrame::Group(session)) = self.sessions.last() else {
+            return None;
+        };
+        let mut scope = session.members.clone();
+        for n in self.nodes_surfaced_since(session.undo_len_at_open) {
+            if !scope.contains(&n) {
+                scope.push(n);
+            }
+        }
+        Some(scope)
+    }
+
+    /// Group-frame membership test: `node` is session geometry if it, or
+    /// ANY container above it, is a member or a mid-session surfacing — a
+    /// nested member group's internals are session-owned too (their
+    /// derived results land inside that nested container or fold in, never
+    /// outside), so ops on them must not lose capability just because the
+    /// enclosing session opened.
+    fn node_in_group_scope(&self, scope: &[NodeId], node: NodeId) -> bool {
+        let mut cur = Some(node);
+        while let Some(n) = cur {
+            if scope.contains(&n) {
+                return true;
+            }
+            cur = self.node_parent(n).map(NodeId::Group);
+        }
+        false
+    }
+
+    /// While a session is open, `object` must be part of it (an original
+    /// member, a mid-session surfacing, or — under a group frame — inside
+    /// a member's subtree) — see [`DocumentError::ExplodeSessionScope`]
+    /// for why an outside-fed creation would corrupt the close's fold-in.
+    /// No-op when no session is open.
     fn explode_scope_object(&self, object: ObjectId) -> Result<(), DocumentError> {
+        if let Some(scope) = self.group_session_scope() {
+            if !self.node_in_group_scope(&scope, NodeId::Object(object)) {
+                return Err(DocumentError::ExplodeSessionScope);
+            }
+            return Ok(());
+        }
         if self
             .explode_session_scope()
             .is_some_and(|(objects, _)| !objects.contains(&object))
@@ -9289,8 +10011,15 @@ impl Document {
         Ok(())
     }
 
-    /// [`Document::explode_scope_object`]'s sketch analog.
+    /// [`Document::explode_scope_object`]'s sketch analog. A GROUP frame
+    /// deliberately does not restrict sketch operands: world sketches are
+    /// global (a group owns none), there is no pose to corrupt, and
+    /// extruding any of them mid-session simply folds the result in —
+    /// SketchUp's "what you draw while editing goes into the context".
     fn explode_scope_sketch(&self, sketch: SketchId) -> Result<(), DocumentError> {
+        if matches!(self.sessions.last(), Some(SessionFrame::Group(_))) {
+            return Ok(());
+        }
         if self
             .explode_session_scope()
             .is_some_and(|(_, sketches)| !sketches.contains(&sketch))
@@ -9300,18 +10029,56 @@ impl Document {
         Ok(())
     }
 
+    /// Scope check for a whole-NODE operand (`boolean_nodes`,
+    /// duplication): under a GROUP frame any member or mid-session
+    /// creation is legal — nested member groups and member instances
+    /// included, they are genuinely top-level for the session's duration —
+    /// while under a COMPONENT frame only session objects are (a
+    /// definition holds neither groups nor instances). No-op when no
+    /// session is open.
+    fn explode_scope_node(&self, node: NodeId) -> Result<(), DocumentError> {
+        match self.sessions.last() {
+            None => Ok(()),
+            Some(SessionFrame::Group(_)) => {
+                let scope = self
+                    .group_session_scope()
+                    .expect("innermost frame is a group session");
+                if self.node_in_group_scope(&scope, node) {
+                    Ok(())
+                } else {
+                    Err(DocumentError::ExplodeSessionScope)
+                }
+            }
+            Some(SessionFrame::Component(_)) => match node {
+                NodeId::Object(id) => self.explode_scope_object(id),
+                _ => Err(DocumentError::ExplodeSessionScope),
+            },
+        }
+    }
+
     /// Scope check for a Follow Me path source: its sketch or object must be
     /// inside the open session (an `InstanceFaceLoop` path never is — every
     /// instance is hidden for the session's duration). No-op when no session
     /// is open.
     fn explode_scope_follow_path(&self, path: &FollowMePath) -> Result<(), DocumentError> {
-        if self.explode_session.is_none() {
-            return Ok(());
-        }
-        match *path {
-            FollowMePath::SketchEdges { sketch, .. } => self.explode_scope_sketch(sketch),
-            FollowMePath::FaceLoop { object, .. } => self.explode_scope_object(object),
-            FollowMePath::InstanceFaceLoop { .. } => Err(DocumentError::ExplodeSessionScope),
+        match self.sessions.last() {
+            None => Ok(()),
+            Some(SessionFrame::Group(_)) => match *path {
+                // World sketches are unrestricted under a group frame (see
+                // `explode_scope_sketch`); a face-loop or instance path
+                // must be session geometry — a member instance is genuinely
+                // top-level mid-session and its loop is a legal path.
+                FollowMePath::SketchEdges { .. } => Ok(()),
+                FollowMePath::FaceLoop { object, .. } => self.explode_scope_object(object),
+                FollowMePath::InstanceFaceLoop { instance, .. } => {
+                    self.explode_scope_node(NodeId::Instance(instance))
+                }
+            },
+            Some(SessionFrame::Component(_)) => match *path {
+                FollowMePath::SketchEdges { sketch, .. } => self.explode_scope_sketch(sketch),
+                FollowMePath::FaceLoop { object, .. } => self.explode_scope_object(object),
+                FollowMePath::InstanceFaceLoop { .. } => Err(DocumentError::ExplodeSessionScope),
+            },
         }
     }
 
@@ -9326,11 +10093,16 @@ impl Document {
     /// byte-identical serialization of the CURRENT in-memory state is
     /// needed for its own sake (state-hash/replay determinism checks).
     pub fn save_for_persistence(&self) -> Vec<u8> {
-        if self.explode_session.is_none() {
+        if self.sessions.is_empty() {
             return self.save();
         }
         let mut closed = self.clone();
-        let _ = closed.exit_explode_session();
+        while let Some(frame) = closed.sessions.last() {
+            let _ = match frame {
+                SessionFrame::Component(_) => closed.exit_explode_session(),
+                SessionFrame::Group(_) => closed.exit_group_session(),
+            };
+        }
         closed.save()
     }
 
@@ -9370,16 +10142,12 @@ impl Document {
         placement: &Transform,
     ) -> Result<(NodeId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "duplicate_node", node = ?node);
-        if self.explode_session.is_some() {
-            // Mid-session, only a session object may be duplicated (the copy
-            // folds into the definition at close); a group/instance copy is
-            // structural and an outside object's copy would fold foreign
-            // geometry in.
-            match node {
-                NodeId::Object(id) => self.explode_scope_object(id)?,
-                _ => return Err(DocumentError::ExplodeSessionScope),
-            }
-        }
+        // Mid-session, only session geometry may be duplicated (the copy
+        // folds into the open definition/group at close; an outside node's
+        // copy would fold foreign geometry in). Under a group frame that
+        // includes member groups and instances — their copies are ordinary
+        // structural nodes that fold in whole.
+        self.explode_scope_node(node)?;
         if !self.node_is_live(node) {
             return Err(match node {
                 NodeId::Object(_) => DocumentError::UnknownObject,
@@ -9485,15 +10253,11 @@ impl Document {
         if nodes.is_empty() {
             return Err(DocumentError::EmptySelection);
         }
-        if self.explode_session.is_some() {
-            // Same rule as `duplicate_node`: mid-session copies must be of
-            // session objects (each copy folds into the definition at close).
-            for &n in nodes {
-                match n {
-                    NodeId::Object(id) => self.explode_scope_object(id)?,
-                    _ => return Err(DocumentError::ExplodeSessionScope),
-                }
-            }
+        // Same rule as `duplicate_node`: mid-session copies must be of
+        // session geometry (each copy folds into the open definition/group
+        // at close).
+        for &n in nodes {
+            self.explode_scope_node(n)?;
         }
         // Selections are small; a linear repeat scan stays deterministic and
         // avoids requiring Ord on NodeId.
@@ -10542,6 +11306,7 @@ impl Document {
             }
             DocAction::Rescale {
                 factor: _,
+                anchor: _,
                 objects,
                 sketches,
                 guides,
@@ -10551,9 +11316,13 @@ impl Document {
                 // Undo a rescale: restore every entity's RECORDED pre-scale
                 // state verbatim (never a recomputed `1/factor` inverse —
                 // see `Document::rescale_document`'s doc comment). The axes
-                // frame's origin is restored the same way; its directions
-                // were never touched, so there is nothing to restore there.
-                self.axes.origin = *axes_origin;
+                // frame's origin is restored the same way when the rescale
+                // moved it (`None` = a session rescale that never did); its
+                // directions were never touched, so there is nothing to
+                // restore there.
+                if let Some(origin) = axes_origin {
+                    self.axes.origin = *origin;
+                }
                 let mut objects_touched = Vec::with_capacity(objects.len());
                 for (id, obj) in objects {
                     self.objects[*id].object = obj.clone();
@@ -11320,8 +12089,8 @@ impl Document {
                 // EXACT undo — no inverse-transform (docs/design/explode-
                 // session-prototype.md): restore each member/sketch's
                 // recorded pre-bake snapshot verbatim and retarget to
-                // `Definition`, independent of whatever `self.explode_session`
-                // (if anything) currently holds.
+                // `Definition`, independent of whatever `self.sessions`
+                // (if anything) currently holds innermost.
                 let component = *component;
                 for (id, obj) in pristine_objects {
                     self.objects[*id].object = obj.clone();
@@ -11334,7 +12103,9 @@ impl Document {
                 for &i in hidden_instances {
                     self.instances[i].hidden = false;
                 }
-                self.explode_session = None;
+                if matches!(self.sessions.last(), Some(SessionFrame::Component(_))) {
+                    self.sessions.pop();
+                }
                 DocChange {
                     objects_touched: members.clone(),
                     sketches_touched: sketches.clone(),
@@ -11433,8 +12204,76 @@ impl Document {
                     components_touched: vec![component],
                     ..Default::default()
                 };
-                self.explode_session = Some(session);
+                self.sessions
+                    .push(SessionFrame::Component(Box::new(session)));
                 change
+            }
+            DocAction::GroupSessionOpened {
+                group,
+                members,
+                reanchored,
+            } => {
+                // Undo of a group-session open = the exact inverse of the
+                // ungroup posture: reparent members back, unhide the
+                // group, restore annotation liveness verbatim, pop the
+                // frame (tolerating its absence, like `SessionOpened`).
+                let group = *group;
+                for &m in members {
+                    self.set_node_parent(m, Some(group));
+                }
+                self.groups[group].hidden = false;
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
+                }
+                if matches!(
+                    self.sessions.last(),
+                    Some(SessionFrame::Group(s)) if s.group == group
+                ) {
+                    self.sessions.pop();
+                }
+                group_change(group, None, members)
+            }
+            &DocAction::GroupSessionClosed {
+                group,
+                undo_len_at_open,
+                ref prev_members,
+                ref members,
+                ref reanchored,
+            } => {
+                // Re-opens the session: re-apply the ungroup posture over
+                // exactly the nodes the close re-homed (`members`), restore
+                // the group's open-time list and its annotation liveness
+                // verbatim, and reinstall the frame with the recorded
+                // boundary. An emptied close changed no parents and
+                // recorded no reanchors, so both loops are no-ops there —
+                // only the member-list restore and the reinstall matter.
+                for &m in members {
+                    self.set_node_parent(m, None);
+                }
+                self.groups[group].hidden = true;
+                self.groups[group].members = prev_members.clone();
+                // `before` is the PRE-close state (mid-session, detached) —
+                // this is an undo, walking backwards.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
+                }
+                debug_assert!(
+                    matches!(
+                        undo_len_at_open
+                            .checked_sub(1)
+                            .and_then(|i| self.undo.actions.get(i)),
+                        Some(DocAction::GroupSessionOpened { group: g, .. }) if *g == group
+                    ),
+                    "GroupSessionClosed's boundary does not sit on its GroupSessionOpened — kernel bug"
+                );
+                self.sessions.push(SessionFrame::Group(GroupSession {
+                    group,
+                    members: prev_members.clone(),
+                    undo_len_at_open,
+                }));
+                group_change(group, None, members)
             }
             &DocAction::PaintFace {
                 object, face, prev, ..
@@ -11709,19 +12548,23 @@ impl Document {
             }
             DocAction::Rescale {
                 factor,
+                anchor,
                 objects,
                 sketches,
                 guides,
                 instances,
                 axes_origin,
             } => {
-                // Redo a rescale: re-apply `factor` to the SAME recorded
-                // pre-scale snapshot — deterministic float ops on identical
-                // operands reproduce the original commit bit-for-bit (see
-                // `Document::rescale_document`'s doc comment). Same for the
-                // axes frame's origin.
-                let scale = Transform::uniform_scale(*factor);
-                self.axes.origin = scale.apply_point(*axes_origin);
+                // Redo a rescale: re-apply the recorded factor/anchor to
+                // the SAME recorded pre-scale snapshot — deterministic
+                // float ops on identical operands reproduce the original
+                // commit bit-for-bit (see `Document::rescale_document`'s
+                // doc comment). Same for the axes frame's origin, when the
+                // rescale moved it.
+                let scale = rescale_transform(*factor, *anchor);
+                if let Some(origin) = axes_origin {
+                    self.axes.origin = scale.apply_point(*origin);
+                }
                 let mut objects_touched = Vec::with_capacity(objects.len());
                 for (id, obj) in objects {
                     let mut fresh = obj.clone();
@@ -12475,7 +13318,8 @@ impl Document {
                     components_touched: vec![*component],
                     ..Default::default()
                 };
-                self.explode_session = Some(session);
+                self.sessions
+                    .push(SessionFrame::Component(Box::new(session)));
                 change
             }
             &DocAction::SessionClosed { .. } => {
@@ -12489,6 +13333,39 @@ impl Document {
                 // pushing both left a phantom duplicate that corrupted the
                 // next undos (adversarial-review finding).
                 let (change, _fresh_action) = self.exit_explode_session();
+                change
+            }
+            DocAction::GroupSessionOpened {
+                group,
+                members,
+                reanchored,
+            } => {
+                // Re-applies the ungroup posture over the RECORDED member
+                // list and re-pushes the frame — the group analog of the
+                // `SessionOpened` redo arm above.
+                let group = *group;
+                for &m in members {
+                    self.set_node_parent(m, None);
+                }
+                self.groups[group].hidden = true;
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
+                }
+                self.sessions.push(SessionFrame::Group(GroupSession {
+                    group,
+                    members: members.clone(),
+                    // The shared tail below pushes the original action.
+                    undo_len_at_open: self.undo.actions.len() + 1,
+                }));
+                group_change(group, None, members)
+            }
+            &DocAction::GroupSessionClosed { .. } => {
+                // Re-closes fresh via the same core `close` uses; the
+                // freshly built action is DISCARDED — redo's shared tail
+                // pushes the ORIGINAL back (the `SessionClosed` double-push
+                // lesson applies verbatim).
+                let (change, _fresh_action) = self.exit_group_session();
                 change
             }
             &DocAction::PaintFace {
@@ -12726,7 +13603,7 @@ impl Document {
         // narrowly keyed on THIS component rather than reshuffling
         // membership to keep the invariant honest for every other
         // definition).
-        let session_component = self.explode_session.as_ref().map(|s| s.component);
+        let session_component = self.component_session().map(|s| s.component);
         for (cid, def) in self.components.iter().filter(|(_, c)| !c.hidden) {
             for (i, &m) in def.members.iter().enumerate() {
                 debug_assert!(
@@ -12955,6 +13832,25 @@ fn scale_guide(guide: Guide, scale: &Transform) -> Guide {
             position: scale.apply_point(position),
         },
     }
+}
+
+/// The uniform-scale transform a rescale applies: about the world origin
+/// for the exact-zero anchor (the whole-document path — kept as the bare
+/// [`Transform::uniform_scale`] so replays of pre-anchor recordings stay
+/// bit-identical), else conjugated about `anchor`
+/// (docs/design/group-session.md: the scoped rescale holds the measured
+/// point fixed). Both the commit paths and the `Rescale` redo arm build
+/// the transform through HERE, so a redo reproduces its commit
+/// bit-for-bit.
+fn rescale_transform(factor: f64, anchor: Point3) -> Transform {
+    if anchor == Point3::new(0.0, 0.0, 0.0) {
+        return Transform::uniform_scale(factor);
+    }
+    Transform::translation(Vec3::new(-anchor.x, -anchor.y, -anchor.z))
+        .then(&Transform::uniform_scale(factor))
+        .then(&Transform::translation(Vec3::new(
+            anchor.x, anchor.y, anchor.z,
+        )))
 }
 
 /// The [`DocChange`] for a group/ungroup: the group, its parent, and any member

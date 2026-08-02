@@ -24,7 +24,7 @@ import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
 import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, collectLeafIds as collectLeafIdsShared, pruneDeadSelection, type NodeRef } from './panels/treeModel'
+import { nextSelection, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, collectLeafIds as collectLeafIdsShared, pruneDeadSelection, type NodeRef } from './panels/treeModel'
 import { tagPathKey, isPathUnder } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
@@ -175,6 +175,23 @@ function isPanicError(message: string): boolean {
   return PANIC_SIGNATURES.some((sig) => lower.includes(sig))
 }
 
+/** Whether two session stacks are the SAME sequence of frames (identity at
+ *  every position, ignoring label — a label can legitimately change under a
+ *  stack that is otherwise the same frame, e.g. a rename) — `handleSessionChange`'s
+ *  pending-rescale invalidation (finding 5, group-session.md) fires whenever
+ *  this is false, not just when the innermost frame's identity changes:
+ *  undo/redo stays live behind the confirmation dialog, and a change ANYWHERE
+ *  in the stack (an outer frame popping, a sibling frame's identity shifting)
+ *  means the kernel's own idea of "the innermost frame" when Confirm is
+ *  eventually clicked may no longer be the one the dialog named. */
+export function sameSessionStackIdentity(
+  a: { node: NodeRef }[],
+  b: { node: NodeRef }[],
+): boolean {
+  if (a.length !== b.length) return false
+  return a.every((f, i) => nodeEq(f.node, b[i].node))
+}
+
 export default function App() {
   const [state, setState] = useState<AppState | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -248,16 +265,34 @@ export default function App() {
   const [selectedAnnotation, setSelectedAnnotation] = useState<bigint | null>(null)
   /** Session-only hidden node set (keyed by nodeKey). Cleared on load/new. */
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
-  /** Active context path. Empty = top level. */
+  /** Object-context path: app-only sticky editing of at most one plain
+   *  object (or, via the K1/K2 fallback, a component instance whose pose/
+   *  grouping can't support a real session), sitting logically inside the
+   *  innermost open session frame, if any (docs/design/group-session.md).
+   *  Empty = nothing pushed past the session stack (or top level, if no
+   *  session is open either). A group NodeRef is never pushed here anymore
+   *  — a group entry always opens a session instead (`sessionStack` below). */
   const [activeContext, setActiveContext] = useState<NodeRef[]>([])
-  /** The open explode session, or null. Mirrors the viewport's own belief
-   *  (`ViewportApi.explodeSessionInstance`), pushed up via
-   *  `onExplodeSessionChange` on open, close, and every undo/redo resync —
-   *  drives menu gating (Make Group/Make Component/Place Copy/Import/3D
-   *  Text/rescale all refuse while a session is open) and the "Editing
-   *  <name>" status text. Scoping/dimming stay inside the viewport, which
-   *  owns the renderer and needs no cross-render state to apply them. */
-  const [explodeSession, setExplodeSession] = useState<{ instanceId: bigint; label: string } | null>(null)
+  /** The open kernel session stack, outermost first — mirrors the
+   *  viewport's own belief (`ViewportApi.sessionStack`), pushed up via
+   *  `onSessionChange` on open, close, and every undo/redo resync. Each
+   *  frame is a group or a component instance (always innermost) plus its
+   *  display label. Drives menu gating (Make Group/Make Component/Place
+   *  Copy/Import/3D Text refuse only while the INNERMOST frame is a
+   *  component; whole-model rescale refuses while ANY frame is open) and
+   *  the breadcrumb/"editing" chips. Scoping/dimming stay inside the
+   *  viewport, which owns the renderer and needs no cross-render state to
+   *  apply them. */
+  const [sessionStack, setSessionStack] = useState<{ node: NodeRef; label: string }[]>([])
+  /** The innermost open session frame's NodeRef, or `null`. */
+  const innermostSessionNode: NodeRef | null =
+    sessionStack.length > 0 ? sessionStack[sessionStack.length - 1].node : null
+  /** Whether a COMPONENT frame is innermost — the gate for grouping/
+   *  Make Component/Place Copy/Import/3D Text (docs/design/group-session.md
+   *  §"Gate changes"): the kernel permits all of these during a group-only
+   *  stack, so this is narrower than "any session open"
+   *  (`sessionStack.length > 0`, still used for whole-model rescale). */
+  const componentFrameOpen = innermostSessionNode?.kind === 'instance'
   /** Bumped on any document change so the tree re-queries entity lists. */
   const [docRev, setDocRev] = useState(0)
   /** Currently selected material id for the Paint tool. */
@@ -338,9 +373,30 @@ export default function App() {
   const [importingName, setImportingName] = useState('')
   /** STL units-chooser modal: the picked file's name, or null when closed. */
   const [pendingStlImport, setPendingStlImport] = useState<{ name: string } | null>(null)
-  /** Tape Measure "resize the model?" confirmation (design tool-parity §3);
-   *  null when closed. */
-  const [pendingRescaleConfirm, setPendingRescaleConfirm] = useState<RescaleConfirmInfo | null>(null)
+  /** Tape Measure "resize the model?" confirmation (design tool-parity §3,
+   *  and group-session.md's scoped-rescale phase); null when closed. `scope`
+   *  is the decision made HERE, in `handleRescaleArmed`, from the same
+   *  `sessionStack` the confirm call below threads straight through — so the
+   *  dialog's copy and the eventual `rescale_session`-vs-`rescale_document`
+   *  call can never disagree. `null` = whole-model rescale. `scope.node` is
+   *  the captured innermost frame's own identity (finding 5) — Ctrl/Cmd+Z
+   *  and the native Edit>Undo both stay live while this dialog is up, so the
+   *  session stack can change out from under it before Confirm; both
+   *  `handleSessionChange` (any stack change while this is non-null) and the
+   *  dialog's own onConfirm (a fresh re-read right before applying) use it to
+   *  invalidate the pending arm rather than let the kernel rescale whatever
+   *  frame is NOW innermost. */
+  const [pendingRescaleConfirm, setPendingRescaleConfirm] = useState<{
+    info: RescaleConfirmInfo
+    scope: { label: string; isComponent: boolean; node: NodeRef } | null
+  } | null>(null)
+  /** Mirrors `pendingRescaleConfirm` for `handleSessionChange`'s call-time
+   *  read — that callback has a stable (`[]`-deps) identity called from the
+   *  viewport's own stable closures, so it can't read fresh render state
+   *  directly; this ref is kept in lockstep by every `setPendingRescaleConfirm`
+   *  call site (finding 5). */
+  const pendingRescaleConfirmRef = useRef(pendingRescaleConfirm)
+  pendingRescaleConfirmRef.current = pendingRescaleConfirm
   /** Recovery snapshot to offer at startup (null = no dialog). */
   const [recoveryPrompt, setRecoveryPrompt] = useState<RecoveryListing[] | null>(null)
   /** Welcome screen on a bare launch (startup-handoff effect decides). */
@@ -697,19 +753,21 @@ export default function App() {
     setAnnotationEditor(null)
   }, [])
 
+  /** Push an object-context (or K1/K2 instance-fallback) entry — the
+   *  viewport's own double-click gesture calls this directly (it already
+   *  resolved one container level at a time, and only ever hands this a
+   *  plain object or a K1/K2 instance fallback, never a group — groups
+   *  route to a session open instead, `Viewport.tsx`'s dblclick handler).
+   *  Object pushes are allowed even while a session is open now (design:
+   *  an object context sits logically inside the innermost frame) — the
+   *  old "no-op while a session is open" guard is gone. The Outliner and
+   *  the contextual dock's "enter-context" verb go through `enterNode`
+   *  below instead, since THEY can be handed any node kind including one
+   *  buried behind session frames that aren't open yet. */
   const handleEnterContext = useCallback((node: NodeRef) => {
-    // Mutual exclusion with an open explode session (Escape/close it first):
-    // this is the ONE choke point every "enter a K1/K2 context" gesture
-    // shares (the viewport's own double-click, the Outliner's double-click,
-    // and the contextual dock's "enter-context" verb) — the viewport's
-    // double-click handler additionally guards its OWN gesture (so it never
-    // even attempts the redundant call), but this is what closes the gap
-    // for the other two, which reach here directly without going through
-    // the viewport's session state at all.
-    if (explodeSession !== null) return
     setActiveContext((prev) => [...prev, node])
     setSelectedIds([node])
-  }, [explodeSession])
+  }, [])
 
   const handleExitContext = useCallback(() => {
     setActiveContext((prev) => prev.slice(0, -1))
@@ -720,46 +778,227 @@ export default function App() {
     setSelectedIds([])
   }, [])
 
-  /** Truncate the context path to `depth` entries. */
-  const handleSetContextDepth = useCallback((depth: number) => {
-    setActiveContext((prev) => prev.slice(0, depth))
-    setSelectedIds([])
-  }, [])
-
-  /** Clear the whole context path — the viewport's undo/redo reconcile
-   *  calls this when a history step re-opens an explode session while a
-   *  K1/K2 context is still active (mutual exclusion across history
-   *  boundaries; the kernel's answer wins). */
+  /** Clear the whole OBJECT-context path (never the session stack) — the
+   *  viewport's undo/redo reconcile calls this when a history step changes
+   *  which session frames are open while an object context is still
+   *  pushed on top (the object context's assumptions about "logically
+   *  inside the innermost frame" no longer hold; the kernel's answer
+   *  wins). */
   const handleExitAllContexts = useCallback(() => {
     setActiveContext([])
     setSelectedIds([])
   }, [])
 
   /**
-   * The viewport's explode-session state changed: opened, closed, or
-   * resynced across an undo/redo boundary (`ViewportApi.explodeSessionInstance`
-   * crossing a boundary the same way `activeContext` can). Clearing the
-   * selection on any actual CHANGE of instance — not just on close — matters
-   * because opening a session on instance B while some OTHER node was
-   * selected (e.g. from before instance B's session opened) would otherwise
+   * The viewport's session stack changed: a frame opened, closed, or the
+   * whole stack resynced across an undo/redo boundary
+   * (`ViewportApi.sessionStack` crossing a boundary the same way
+   * `activeContext` can). Clearing the selection whenever the INNERMOST
+   * frame's identity actually changes — not just on close — matters
+   * because opening a session on group/instance B while some OTHER node
+   * was selected (e.g. from before B's session opened) would otherwise
    * leave that stale selection sitting outside the new session's scope,
-   * lighting up commands (Make Unique, Place Copy, boolean's 2-operand gate)
-   * for geometry the app is supposed to treat as unreachable while the
-   * session is open.
+   * lighting up commands (Make Unique, Place Copy, boolean's 2-operand
+   * gate) for geometry the app is supposed to treat as unreachable while
+   * the session is open. A mid-session commit that leaves the innermost
+   * frame's IDENTITY unchanged (the common case: drawing/editing inside an
+   * open group) must NOT clear the selection on every refresh.
    */
-  const handleExplodeSessionChange = useCallback(
-    (info: { instanceId: bigint; label: string } | null) => {
-      setExplodeSession((prev) => {
-        if ((prev?.instanceId ?? null) !== (info?.instanceId ?? null)) {
-          setSelectedIds([])
-          setSelectedGuide(null)
-          setSelectedAnnotation(null)
-        }
-        return info
-      })
+  /** Mirrors `sessionStack` for `handleSessionChange`'s call-time comparison
+   *  (finding 4): the callback below reads and writes this ref directly,
+   *  as ordinary call-time state, INSTEAD of diffing inside a
+   *  `setSessionStack` updater. An updater runs at React's reconciliation
+   *  time, not synchronously when `handleSessionChange` is called — so a
+   *  `setSelectedIds([])` written inside one used to land on a LATER render
+   *  pass, after `enterNode`'s own trailing `setSelectedIds([target])` (a
+   *  plain call-time setState in the same synchronous call stack) had
+   *  already resolved, silently clobbering it. Doing the diff and every
+   *  clear here at call time, before `setSessionStack` even runs, restores
+   *  ordinary call-order semantics: whichever `setSelectedIds` call happens
+   *  LAST in the synchronous stack wins, so `enterNode`'s final selection
+   *  sticks. */
+  const prevSessionStackRef = useRef<{ node: NodeRef; label: string }[]>([])
+  const handleSessionChange = useCallback(
+    (frames: { node: NodeRef; label: string }[]) => {
+      const prev = prevSessionStackRef.current
+      const prevInnermost = prev.length > 0 ? prev[prev.length - 1].node : null
+      const nextInnermost = frames.length > 0 ? frames[frames.length - 1].node : null
+      const innermostChanged = prevInnermost === null || nextInnermost === null
+        ? prevInnermost !== nextInnermost
+        : !nodeEq(prevInnermost, nextInnermost)
+      if (innermostChanged) {
+        setSelectedIds([])
+        setSelectedGuide(null)
+        setSelectedAnnotation(null)
+      }
+      // Tape Measure scoped-rescale invalidation (finding 5,
+      // group-session.md): the confirmation dialog captured a specific
+      // innermost frame at arm time. Undo/redo (Ctrl/Cmd+Z and the native
+      // Edit menu) stay live while it's up, so the stack can change before
+      // Confirm — ANY change, not just the innermost frame's identity,
+      // since even an outer frame changing means the captured scope no
+      // longer names a session state the kernel actually has. Cancel the
+      // arm outright rather than let a stale confirm apply to whatever is
+      // innermost NOW.
+      if (pendingRescaleConfirmRef.current !== null && !sameSessionStackIdentity(prev, frames)) {
+        viewportApi.current?.cancelPendingRescale()
+        pendingRescaleConfirmRef.current = null
+        setPendingRescaleConfirm(null)
+      }
+      prevSessionStackRef.current = frames
+      setSessionStack(frames)
     },
     [],
   )
+
+  /**
+   * Entry convergence (docs/design/group-session.md): the ONE shared
+   * helper the Outliner's double-click rows and the contextual dock's
+   * "enter-context" verb both call, given ANY target node — unlike the
+   * viewport's own double-click (which resolves and enters one container
+   * level at a time), these two callers can be handed a node buried behind
+   * session frames that aren't open yet (a nested object two groups deep,
+   * clicked directly in the Outliner). Builds the target's full container
+   * chain root→leaf (walking `node_parent`), diffs it against the
+   * currently open session stack (the common outermost prefix stays open),
+   * closes whatever's open past the divergence innermost-first, opens the
+   * remainder outermost-first (groups via `runOpenGroupSession`, an
+   * instance via the same fallback-aware open the viewport's own double-
+   * click uses), and finishes with an object-context push if the leaf is a
+   * plain object. This is what makes the Outliner and the viewport reach
+   * IDENTICAL state for the same target — before this helper, the Outliner
+   * pushed the bare clicked node with no ancestor walk, producing
+   * non-contiguous breadcrumbs like "Model → Object 1" for a nested object
+   * with no Group shown.
+   */
+  const enterNode = useCallback((target: NodeRef) => {
+    const scene = sceneRef.current
+    const api = viewportApi.current
+    if (scene === null || api === null) return
+    // An armed gesture owns this click, same as Escape's own refusal
+    // posture (finding 3, adversarial review): re-homing session state out
+    // from under a mid-flight Move/Rotate/PushPull/draw gesture would either
+    // fold geometry back while the gesture still holds stale handles, or
+    // silently retarget the gesture's eventual commit via the shallower
+    // EditContext this would push. Silently ignore, no toast — exactly what
+    // Escape does when `toolHasArmedGesture` is true.
+    if (api.hasArmedGesture()) return
+    if (
+      target.kind === 'sketch' || target.kind === 'sketch-island' ||
+      target.kind === 'sketch-curve' || target.kind === 'sketch-edge'
+    ) {
+      // No kernel NodeId / container chain — select-only, same as today.
+      setSelectedIds([target])
+      return
+    }
+
+    // Build the root→leaf container chain by walking node_parent upward,
+    // then reversing.
+    const ancestors: NodeRef[] = []
+    let cur: NodeRef | undefined = target
+    while (cur !== undefined) {
+      ancestors.push(cur)
+      const kindNum = cur.kind === 'group' ? 1 : cur.kind === 'instance' ? 2 : 0
+      const parentGroupId = scene.node_parent(kindNum, cur.id)
+      cur = parentGroupId !== undefined ? { kind: 'group', id: parentGroupId } : undefined
+    }
+    ancestors.reverse()
+
+    // An open session frame erases exactly the parent links of its OWN
+    // direct members (the ungroup posture / explode bake) — so walking
+    // `node_parent` from any target reachable only THROUGH an open session
+    // stops short, landing on one of the innermost frame's own live members
+    // as the chain's (spurious) root, with every open frame above it
+    // missing entirely (finding 1). Recognize that case via
+    // `sessionMembers()` (kernel truth for the innermost frame's live direct
+    // members) and splice the WHOLE open stack back in as the chain's
+    // prefix, rather than let the short walked chain read as "outside every
+    // open frame" and have the diff below close the entire stack. A target
+    // that is genuinely outside the open stack (its walked root matches none
+    // of the innermost frame's members) falls through unchanged — the
+    // existing close-all behavior stands for that case.
+    const openStack = api.sessionStack()
+    const innermostMembers = api.sessionMembers()
+    const walkedRoot = ancestors[0]
+    const rootIsSessionMember = openStack.length > 0 && innermostMembers !== null &&
+      walkedRoot !== undefined && innermostMembers.some((m) => nodeEq(m, walkedRoot))
+    const fullChain = rootIsSessionMember ? [...openStack, ...ancestors] : ancestors
+
+    // Split into the SESSIONABLE prefix (group/instance frames) and a
+    // trailing plain-object leaf, if any.
+    const leaf = fullChain[fullChain.length - 1]
+    const objectLeaf = leaf?.kind === 'object' ? leaf : null
+    const framesChain = objectLeaf !== null ? fullChain.slice(0, -1) : fullChain
+
+    // Diff against the open stack — common outermost prefix stays open.
+    let common = 0
+    while (
+      common < openStack.length && common < framesChain.length &&
+      nodeEq(openStack[common], framesChain[common])
+    ) common++
+
+    setActiveContext([])
+    for (let i = openStack.length; i > common; i--) {
+      api.runCloseInnermostSession()
+    }
+    for (let i = common; i < framesChain.length; i++) {
+      const frame = framesChain[i]
+      if (frame.kind === 'group') {
+        api.runOpenGroupSession(frame.id)
+      } else if (frame.kind === 'instance') {
+        // Fallback-aware: silently pushes the instance as a K1/K2 context
+        // via the SAME `onEnterContext` callback wiring the viewport's own
+        // double-click uses, on the two refusals the design treats as "no
+        // session for this instance" — identical behavior reaching a
+        // component frame through the Outliner/dock instead of a direct
+        // viewport double-click.
+        api.runOpenExplodeSessionOrFallback(frame.id, frame)
+      }
+    }
+    if (objectLeaf !== null) {
+      setActiveContext((prev) => [...prev, objectLeaf])
+    }
+    setSelectedIds([target])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  /** Breadcrumb crumb click at combined depth `depth` (0 = outermost
+   *  session frame … sessionStack.length + activeContext.length - 1 = the
+   *  deepest object-context entry): close/pop everything past it. A crumb
+   *  inside the session-stack region closes frames innermost-first (and
+   *  drops any object-context tail, which sits inside whatever frame is
+   *  closing); a crumb inside the object-context region just truncates
+   *  `activeContext`. */
+  const handleSetPathDepth = useCallback((depth: number) => {
+    const api = viewportApi.current
+    // An armed gesture owns the click — same refusal posture as Escape and
+    // `enterNode` above (finding 3): a crumb click bypassed this guard
+    // entirely before, so closing a session (or popping an object context)
+    // mid-gesture could re-home geometry the gesture still holds stale
+    // handles into. Silently ignore, no toast.
+    if (api?.hasArmedGesture()) return
+    const stackLen = sessionStack.length
+    if (depth < stackLen) {
+      setActiveContext([])
+      setSelectedIds([])
+      for (let i = stackLen; i > depth; i--) api?.runCloseInnermostSession()
+    } else {
+      setActiveContext((prev) => prev.slice(0, depth - stackLen))
+      setSelectedIds([])
+    }
+  }, [sessionStack])
+
+  /** The root "Model" breadcrumb crumb: exit everything — every open
+   *  session frame, innermost-first, plus the object-context tail. */
+  const handleExitToModel = useCallback(() => {
+    const api = viewportApi.current
+    // Same armed-gesture refusal as `handleSetPathDepth`/`enterNode` above
+    // (finding 3) — the Model crumb is a close path too.
+    if (api?.hasArmedGesture()) return
+    setActiveContext([])
+    setSelectedIds([])
+    for (let i = sessionStack.length; i > 0; i--) api?.runCloseInnermostSession()
+  }, [sessionStack])
 
   /** Validate and trim the context path when the document changes. */
   const trimContextPath = useCallback((scene: Scene, path: NodeRef[]): NodeRef[] => {
@@ -898,22 +1137,19 @@ export default function App() {
   }, [])
 
   const handleRescaleArmed = useCallback((info: RescaleConfirmInfo) => {
-    // Whole-document rescale is one of the ops the kernel refuses outright
-    // while an explode session is open (`ExplodeSessionScope`) — a session
-    // bakes an instance's pose into world geometry for its duration, and
-    // rescaling the whole document out from under that captured frame would
-    // corrupt the fold-back. The tool has already armed its own
-    // `pendingRescale` stage by the time this fires; decline it exactly the
-    // way the confirmation dialog's own Cancel button does (falls through
-    // to the ordinary guide-point commit) rather than showing a dialog for
-    // an action that's about to refuse.
-    if (explodeSession !== null) {
-      viewportApi.current?.cancelPendingRescale()
-      handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
-      return
-    }
-    setPendingRescaleConfirm(info)
-  }, [explodeSession, handleToast])
+    // Tape Measure scoped rescale (docs/design/group-session.md): with a
+    // session frame open, the confirmation names the innermost frame and
+    // (on Confirm) resizes just its contents in place, rather than refusing
+    // outright — the design's replacement for the old blanket
+    // `ExplodeSessionScope` decline this block used to show. The decision
+    // is made HERE, once, and threaded through `pendingRescaleConfirm` so
+    // the dialog and the eventual commit read the same answer.
+    const innermost = sessionStack[sessionStack.length - 1]
+    const scope = innermost === undefined
+      ? null
+      : { label: innermost.label, isComponent: innermost.node.kind === 'instance', node: innermost.node }
+    setPendingRescaleConfirm({ info, scope })
+  }, [sessionStack])
 
   // Report Bug — assemble the bundle and tell the user what happened.
   // The write is otherwise silent (Tauri saves a file, web downloads), so
@@ -972,6 +1208,19 @@ export default function App() {
     })
     return unsub
   }, [])
+
+  // The innermost open session frame's current direct-member list (any node
+  // kind) — `ViewportApi.sessionMembers()`, re-read whenever the document or
+  // the session stack itself changes (mid-session fold-ins/deletes shift
+  // membership without changing the session stack's own identity). `null`
+  // when no session is open. Threaded to the Outliner (DocumentTree) so it
+  // can nest the innermost frame's members under its synthetic header row.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const sessionMembers = useMemo(
+    () => viewportApi.current?.sessionMembers?.() ?? null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [docRev, sessionStack],
+  )
 
   // Compute the lit set for isolation.
   // When the context is non-empty, compute the leaf objects of the deepest context node.
@@ -1075,22 +1324,30 @@ export default function App() {
     // Sketch-scoped selections have no kernel NodeId — any in the selection
     // disqualifies the node-level commands.
     const hasSketch = selectedIds.some(isSketchKind)
-    // The kernel refuses grouping, component creation, and instance
-    // placement outright while an explode session is open
+    // The kernel refuses grouping, component creation, instance placement,
+    // import, and 3D Text outright while a COMPONENT frame is open
     // (`DocumentError::ExplodeSessionScope` — each would either restructure
     // the document tree or place a new instance the session can't fold
-    // back cleanly). Selection is already scoped to the session's own
-    // objects (`explodeSession`'s change handler clears any stale selection
-    // on every session-instance change), so these would rarely light up on
-    // their own — this is the explicit, defensive gate the instructions
-    // call for, matching `canMakeComponent`'s existing `activeContext`
-    // guard rather than relying solely on that transitive effect. Boolean/
-    // ungroup/explode/make-unique are deliberately NOT gated here: a
-    // boolean between two session members is exactly the "unmodified tool
-    // set" editing a session is for, and the other three all require an
+    // back cleanly; a definition is flat, so nothing can host a session or
+    // absorb a fold-in inside one). A GROUP-only stack does NOT refuse
+    // these — their products fold into the open group at close, the same
+    // "everything you make while editing goes into the context" semantic
+    // replacing ops already get inside a group session
+    // (docs/design/group-session.md) — so the gate keys on the INNERMOST
+    // frame's kind, not "any session open". Selection is already scoped to
+    // the innermost frame's own scope (`handleSessionChange` clears any
+    // stale selection whenever the innermost frame's identity changes), so
+    // these would rarely light up on their own inside a component frame —
+    // this is the explicit, defensive gate the instructions call for,
+    // matching `canMakeComponent`'s existing `activeContext` guard rather
+    // than relying solely on that transitive effect. Boolean/ungroup/
+    // explode/make-unique are deliberately NOT gated here: a boolean
+    // between two session members is exactly the "unmodified tool set"
+    // editing a session is for, and the other three all require an
     // 'instance' selection, which scoped picking already makes unreachable
-    // while a session is open.
-    const sessionOpen = explodeSession !== null
+    // while a component frame is open. `componentFrameOpen` itself is the
+    // top-level derived const (shared with the import/3D-Text gates and the
+    // native menu sync below).
     return {
       booleanOperands,
       // Same top-level rule the kernel enforces (GroupedOperand): a nested
@@ -1106,17 +1363,17 @@ export default function App() {
               if (componentMemberIds === null) return false
               return canBooleanInComponent(selectedIds, (n) => componentMemberIds.has(n.id))
             })(),
-      canGroup: !sessionOpen && !hasSketch && canGroupHelper(selectedIds, parentOf),
+      canGroup: !componentFrameOpen && !hasSketch && canGroupHelper(selectedIds, parentOf),
       canUngroup: !hasSketch && canUngroupHelper(selectedIds),
       canMakeComponent:
-        !sessionOpen && activeContext.length === 0 && canMakeComponent(selectedIds, parentOf),
-      canPlaceCopy: !sessionOpen && canPlaceInstance(selectedIds),
+        !componentFrameOpen && activeContext.length === 0 && canMakeComponent(selectedIds, parentOf),
+      canPlaceCopy: !componentFrameOpen && canPlaceInstance(selectedIds),
       canExplode: canExplodeInstance(selectedIds),
       canMakeUnique: canMakeUnique(selectedIds),
     }
     // docRev: entity lists change on every mutation without changing identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, selectedIds, activeContext, docRev, explodeSession])
+  }, [state, selectedIds, activeContext, docRev, sessionStack])
 
   // Choosing a Draw tool at top level clears the selection: the user is
   // about to create geometry, so a still-selected object/group/component
@@ -1580,13 +1837,15 @@ export default function App() {
     const scene = sceneRef.current
     if (scene === null) return
     // Importing into the current document restructures it (new top-level
-    // nodes at minimum) — refused outright by the kernel while an explode
-    // session is open (`ExplodeSessionScope`). The menu item is disabled
-    // for this reason too (see `editGates.canImport`); this re-check covers
-    // the keyboard shortcut and command-palette dispatch, which bypass a
-    // disabled menu item the same way `handleGroup`/`handleMakeComponent`'s
-    // re-checks do for their own gates.
-    if (explodeSession !== null) {
+    // nodes at minimum) — refused outright by the kernel only while a
+    // COMPONENT frame is open (`ExplodeSessionScope`; a group-only stack
+    // folds the import's products in at close, docs/design/group-session.md).
+    // The menu item is disabled for this reason too (see
+    // `editGates.canImport`); this re-check covers the keyboard shortcut and
+    // command-palette dispatch, which bypass a disabled menu item the same
+    // way `handleGroup`/`handleMakeComponent`'s re-checks do for their own
+    // gates.
+    if (componentFrameOpen) {
       handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
       return
     }
@@ -1646,7 +1905,7 @@ export default function App() {
     } finally {
       openInFlightRef.current = false
     }
-  }, [confirmDiscard, handleToast, runImportPick, explodeSession])
+  }, [confirmDiscard, handleToast, runImportPick, componentFrameOpen])
 
   const saveDocument = useCallback(() => {
     const scene = sceneRef.current
@@ -2089,20 +2348,22 @@ export default function App() {
   // the dialog and this handler never touch the kernel directly.
   const [textDialogOpen, setTextDialogOpen] = useState(false)
 
-  // 3D Text placement is one of the ops the kernel refuses outright while an
-  // explode session is open (`ExplodeSessionScope`: placing a component
-  // instance mid-session is exactly the "instance placement" the kernel
-  // guards against). Gating the dialog's OPEN keeps the user from ever
-  // reaching the refusal in normal use; both the MenuBar item (disabled via
-  // `editGates.canDrawText`) and the command-palette/native-menu dispatch
-  // route through this one function.
+  // 3D Text placement is one of the ops the kernel refuses outright while a
+  // COMPONENT frame is open (`ExplodeSessionScope`: placing a component
+  // instance is exactly the "instance placement" a definition — flat, no
+  // sessions inside it — can't host). A group-only stack folds the placed
+  // text in at close instead (docs/design/group-session.md), so this only
+  // gates on `componentFrameOpen`. Gating the dialog's OPEN keeps the user
+  // from ever reaching the refusal in normal use; both the MenuBar item
+  // (disabled via `editGates.canDrawText`) and the command-palette/native-
+  // menu dispatch route through this one function.
   const openTextDialog = useCallback(() => {
-    if (explodeSession !== null) {
+    if (componentFrameOpen) {
       handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
       return
     }
     setTextDialogOpen(true)
-  }, [explodeSession, handleToast])
+  }, [componentFrameOpen, handleToast])
 
   const handleTextPlace = useCallback((result: TextDialogResult) => {
     setTextDialogOpen(false)
@@ -2326,7 +2587,12 @@ export default function App() {
       // the switch only ever *runs* on a later click, by which point this
       // render has fully executed and the closure sees the real function.
       case 'enter-context':
-        if (selectedIds.length === 1) handleEnterContext(selectedIds[0])
+        // Entry convergence (docs/design/group-session.md): the dock can
+        // hand this ANY selected node kind, including a group/instance
+        // buried behind session frames that aren't open yet — `enterNode`
+        // (not the simpler `handleEnterContext`) opens/closes exactly the
+        // frames needed.
+        if (selectedIds.length === 1) enterNode(selectedIds[0])
         break
       case 'ungroup': handleUngroup(); break
       case 'make-unique': handleMakeUnique(); break
@@ -2846,12 +3112,12 @@ export default function App() {
       'edit-subtract': menuGates?.canBoolean ?? false,
       'edit-intersect': menuGates?.canBoolean ?? false,
       'view-section-plane': sectionPlaneMenuState.exists,
-      // Import and 3D Text refuse while an explode session is open
+      // Import and 3D Text refuse only while a COMPONENT frame is open
       // (ExplodeSessionScope) — gate the NATIVE items the same way the web
       // MenuBar/palette already are, so the kernel refusal stays a backstop
       // rather than a toast a user actually meets.
-      'file-import': explodeSession === null,
-      'draw-3d-text': explodeSession === null,
+      'file-import': !componentFrameOpen,
+      'draw-3d-text': !componentFrameOpen,
     }
     import('@tauri-apps/api/core')
       .then(({ invoke }) => invoke('sync_menu_state', { checked, enabled }))
@@ -2873,7 +3139,7 @@ export default function App() {
     menuGates,
     menuFocusTick,
     parallelProjection,
-    explodeSession,
+    componentFrameOpen,
   ])
 
   // ---------------------------------------------------------------- drag-drop open
@@ -3292,8 +3558,8 @@ export default function App() {
           canExplode: canExplode,
           canMakeUnique: canUnique,
           canBoolean,
-          canImport: explodeSession === null,
-          canDrawText: explodeSession === null,
+          canImport: !componentFrameOpen,
+          canDrawText: !componentFrameOpen,
         }}
         onZoomExtents={handleZoomExtents}
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
@@ -3393,7 +3659,7 @@ export default function App() {
             onEnterContext={handleEnterContext}
             onExitContext={handleExitContext}
             onExitAllContexts={handleExitAllContexts}
-            onExplodeSessionChange={handleExplodeSessionChange}
+            onSessionChange={handleSessionChange}
             onDocumentChanged={handleDocumentChanged}
             onSectionChanged={handleSectionChanged}
             onHistoryChanged={handleHistoryChanged}
@@ -3439,12 +3705,12 @@ export default function App() {
             />
           </div>
 
-          {/* Explode session status: the only other place the app names the
-              current edit target is the Outliner's breadcrumb/"editing" row
-              chip (DocumentTree.tsx) — an explode session doesn't push
-              activeContext, so it never grows that breadcrumb, and needs
-              its own top-of-viewport status text instead. */}
-          {explodeSession !== null && (
+          {/* Session status: the only other place the app names the current
+              edit target is the Outliner's breadcrumb/"editing" row chips
+              (DocumentTree.tsx), which lives in a collapsible panel — this
+              top-of-viewport text stays visible regardless. Names the
+              INNERMOST open frame (group or component alike). */}
+          {sessionStack.length > 0 && (
             <div
               style={{
                 position: 'absolute',
@@ -3466,7 +3732,7 @@ export default function App() {
                 pointerEvents: 'none',
               }}
             >
-              Editing {explodeSession.label}
+              Editing {sessionStack[sessionStack.length - 1].label}
             </div>
           )}
 
@@ -3624,13 +3890,14 @@ export default function App() {
               watertightMap={watertightMap}
               selectedIds={selectedIds}
               activeContext={activeContext}
+              sessionStack={sessionStack}
+              sessionMembers={sessionMembers}
               onSelect={handleSelect}
-              onEnterContext={handleEnterContext}
-              onExitContext={handleExitContext}
-              onSetContextDepth={handleSetContextDepth}
+              onEnterContext={enterNode}
+              onExitContext={handleExitToModel}
+              onSetContextDepth={handleSetPathDepth}
               hiddenKeys={hiddenKeys}
               onToggleHidden={handleToggleHidden}
-              explodeSession={explodeSession}
             />
           </TraySection>
           <TraySection title="Materials" collapsed={!showMaterials} onToggle={() => setShowMaterials((v) => !v)}>
@@ -3762,15 +4029,38 @@ export default function App() {
         />
       )}
 
-      {/* Tape Measure resize-the-model confirmation (design tool-parity §3) */}
+      {/* Tape Measure resize-the-model / resize-in-context confirmation
+          (design tool-parity §3; group-session.md's scoped-rescale phase). */}
       {pendingRescaleConfirm !== null && (
         <RescaleConfirmDialog
-          currentDistance={pendingRescaleConfirm.currentDistance}
-          typedDistance={pendingRescaleConfirm.typedDistance}
-          factor={pendingRescaleConfirm.factor}
+          currentDistance={pendingRescaleConfirm.info.currentDistance}
+          typedDistance={pendingRescaleConfirm.info.typedDistance}
+          factor={pendingRescaleConfirm.info.factor}
+          scope={pendingRescaleConfirm.scope}
           onConfirm={() => {
+            const { scope } = pendingRescaleConfirm
             setPendingRescaleConfirm(null)
-            viewportApi.current?.confirmPendingRescale()
+            const api = viewportApi.current
+            // Belt-and-suspenders re-check (finding 5, group-session.md):
+            // `handleSessionChange`'s invalidation above already cancels this
+            // arm the moment the stack changes while the dialog is up, but
+            // re-read the LIVE stack right here too rather than trust that
+            // every session mutation is guaranteed to route through
+            // `onSessionChange` before this click resolves. If the captured
+            // scope's innermost node no longer matches what's actually
+            // innermost now, decline instead of letting the kernel rescale
+            // whatever frame it finds — the dialog would then be lying about
+            // what it just applied.
+            const liveStack = api?.sessionStack() ?? []
+            const liveInnermost = liveStack.length > 0 ? liveStack[liveStack.length - 1] : null
+            const stillMatches = scope === null
+              ? liveInnermost === null
+              : liveInnermost !== null && nodeEq(liveInnermost, scope.node)
+            if (!stillMatches) {
+              api?.cancelPendingRescale()
+              return
+            }
+            api?.confirmPendingRescale(scope !== null, scope?.label ?? null)
           }}
           onCancel={() => {
             setPendingRescaleConfirm(null)
@@ -3893,8 +4183,8 @@ export default function App() {
           canExplode: menuGates?.canExplode ?? false,
           canMakeUnique: menuGates?.canMakeUnique ?? false,
           canBoolean: menuGates?.canBoolean ?? false,
-          canImport: explodeSession === null,
-          canDrawText: explodeSession === null,
+          canImport: !componentFrameOpen,
+          canDrawText: !componentFrameOpen,
         }}
       />
 

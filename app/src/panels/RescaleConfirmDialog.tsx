@@ -13,6 +13,14 @@
  * pending gesture to fall back to, so cancelling just restores the frozen
  * reading and leaves the recall available to re-arm.
  *
+ * `scope` (group-session.md's "Tape Measure scoped rescale") swaps the copy
+ * for an IN-CONTEXT resize when a group/component session is open: instead
+ * of the whole model, only the named frame's contents resize (anchored at
+ * the measurement's first point, not the origin) — and for a component
+ * frame, every other instance of it resizes too, since they share one
+ * definition. `scope` is null — the whole-model copy below, unchanged — at
+ * the top level.
+ *
  * Styling follows the StlUnitsDialog family — theme tokens with the same
  * dark fallbacks the rest of the token consumers carry. Escape cancels,
  * same as the STL units chooser.
@@ -29,6 +37,12 @@ interface RescaleConfirmDialogProps {
   /** `typedDistance / currentDistance` — shown so the effect is legible
    *  before committing to it. */
   factor: number
+  /** The innermost open session frame's display label and whether it's a
+   *  component (vs. group) frame, or `null` for the whole-model rescale
+   *  (top level, or the design's pre-existing behavior). Decided once by
+   *  the caller (App's `handleRescaleArmed`) so this dialog's copy and the
+   *  eventual commit call can never disagree about which is happening. */
+  scope: { label: string; isComponent: boolean } | null
   /** Apply the rescale. */
   onConfirm: () => void
   /** Decline. For a LIVE arm (typed mid-gesture), falls back to the normal
@@ -113,9 +127,12 @@ export function RescaleConfirmDialog({
   currentDistance,
   typedDistance,
   factor,
+  scope,
   onConfirm,
   onCancel,
 }: RescaleConfirmDialogProps) {
+  const heading = scope === null ? 'Resize the model?' : `Resize ${scope.label}?`
+  const ariaLabel = scope === null ? 'Resize the model' : `Resize ${scope.label}`
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -147,12 +164,26 @@ export function RescaleConfirmDialog({
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="Resize the model"
+        aria-label={ariaLabel}
       >
-        <div style={HEADING_STYLE}>Resize the model?</div>
+        <div style={HEADING_STYLE}>{heading}</div>
         <div style={BODY_STYLE}>
-          The measured distance is {formatLength(currentDistance)}. Resize the whole model so it
-          becomes {formatLength(typedDistance)}?
+          {scope === null ? (
+            <>
+              The measured distance is {formatLength(currentDistance)}. Resize the whole model so it
+              becomes {formatLength(typedDistance)}?
+            </>
+          ) : scope.isComponent ? (
+            <>
+              The measured distance is {formatLength(currentDistance)}. Resize {scope.label} — every
+              copy of it — so it becomes {formatLength(typedDistance)}? Geometry outside it stays put.
+            </>
+          ) : (
+            <>
+              The measured distance is {formatLength(currentDistance)}. Resize {scope.label} so it
+              becomes {formatLength(typedDistance)}? Geometry outside it stays put.
+            </>
+          )}
         </div>
         <div style={FACTOR_STYLE}>Scale factor: {factor.toFixed(4)}</div>
         <div style={BUTTON_ROW_STYLE}>

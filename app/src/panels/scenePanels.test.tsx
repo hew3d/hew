@@ -1585,13 +1585,14 @@ const docTreeBase = {
   watertightMap: new Map<bigint, boolean>(),
   selectedIds: [] as { kind: 'object' | 'group' | 'instance' | 'sketch'; id: bigint }[],
   activeContext: [] as { kind: 'object' | 'group' | 'instance' | 'sketch'; id: bigint }[],
+  sessionStack: [] as { node: { kind: 'object' | 'group' | 'instance' | 'sketch'; id: bigint }; label: string }[],
+  sessionMembers: null as { kind: 'object' | 'group' | 'instance' | 'sketch'; id: bigint }[] | null,
   onSelect: vi.fn(),
   onEnterContext: vi.fn(),
   onExitContext: vi.fn(),
   onSetContextDepth: vi.fn(),
   hiddenKeys: new Set<string>(),
   onToggleHidden: vi.fn(),
-  explodeSession: null as { instanceId: bigint; label: string } | null,
 }
 
 describe('DocumentTree', () => {
@@ -1874,27 +1875,29 @@ describe('DocumentTree', () => {
   // the definition instead of appearing as unexplained top-level rows.
   // -------------------------------------------------------------------------
 
-  describe('explode session', () => {
-    it('groups the session objects under a def header instead of loose top-level rows', () => {
+  describe('session (component or group)', () => {
+    it('groups the session members under a frame header instead of loose top-level rows', () => {
       const scene = makeScene({
         top_level_nodes: () => [
           { kind: 'object', id: 1n },
           { kind: 'object', id: 2n },
         ],
         object_ids: () => new BigUint64Array([1n, 2n]),
-        explode_session_objects: () => new BigUint64Array([1n, 2n]),
       })
       render(
         <DocumentTree
           {...docTreeBase}
           scene={scene}
           watertightMap={new Map([[1n, true], [2n, true]])}
-          explodeSession={{ instanceId: 9n, label: 'Box Def' }}
+          sessionStack={[{ node: { kind: 'instance', id: 9n }, label: 'Box Def' }]}
+          sessionMembers={[{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }]}
         />,
       )
-      // The def header is labeled with the definition name and carries the
-      // same "editing" chip an active context row uses.
-      expect(screen.getByText('Box Def')).toBeInTheDocument()
+      // The frame header is labeled with the caller-supplied label and
+      // carries the same "editing" chip an active context row uses. "Box
+      // Def" appears twice: once as the breadcrumb crumb (design: every
+      // session frame gets a crumb now), once as the tree header row.
+      expect(screen.getAllByText('Box Def')).toHaveLength(2)
       expect(screen.getByText('editing')).toBeInTheDocument()
       // Members are nested underneath — and appear exactly once each, not
       // also as loose top-level rows (the playtest's duplicate-row bug).
@@ -1917,14 +1920,14 @@ describe('DocumentTree', () => {
           { kind: 'object', id: 3n },
         ],
         object_ids: () => new BigUint64Array([1n, 2n, 3n]),
-        explode_session_objects: () => new BigUint64Array([1n, 3n]),
       })
       render(
         <DocumentTree
           {...docTreeBase}
           scene={scene}
           watertightMap={new Map([[1n, true], [2n, true], [3n, true]])}
-          explodeSession={{ instanceId: 9n, label: 'Box Def' }}
+          sessionStack={[{ node: { kind: 'instance', id: 9n }, label: 'Box Def' }]}
+          sessionMembers={[{ kind: 'object', id: 1n }, { kind: 'object', id: 3n }]}
         />,
       )
       expect(screen.getAllByText('Object 1')).toHaveLength(1)
@@ -1932,11 +1935,10 @@ describe('DocumentTree', () => {
       expect(screen.getAllByText('Object 3')).toHaveLength(1)
     })
 
-    it('lets a session object row be clicked like any normal object row', () => {
+    it('lets a session member row be clicked like any normal object row', () => {
       const scene = makeScene({
         top_level_nodes: () => [{ kind: 'object', id: 1n }],
         object_ids: () => new BigUint64Array([1n]),
-        explode_session_objects: () => new BigUint64Array([1n]),
         object_name: () => 'Panel',
       })
       const onSelect = vi.fn()
@@ -1945,7 +1947,8 @@ describe('DocumentTree', () => {
           {...docTreeBase}
           scene={scene}
           watertightMap={new Map([[1n, true]])}
-          explodeSession={{ instanceId: 9n, label: 'Box Def' }}
+          sessionStack={[{ node: { kind: 'instance', id: 9n }, label: 'Box Def' }]}
+          sessionMembers={[{ kind: 'object', id: 1n }]}
           onSelect={onSelect}
         />,
       )
@@ -1953,13 +1956,12 @@ describe('DocumentTree', () => {
       expect(onSelect).toHaveBeenCalledWith({ kind: 'object', id: 1n }, false)
     })
 
-    it('reflects mid-session object creation under the def header (derived per docRev, not once)', () => {
+    it('reflects mid-session object creation under the frame header (derived per docRev, not once)', () => {
       const ids: bigint[] = [1n]
       const sessionIds: bigint[] = [1n]
       const scene = makeScene({
         top_level_nodes: () => ids.map((id) => ({ kind: 'object', id })),
         object_ids: () => new BigUint64Array(ids),
-        explode_session_objects: () => new BigUint64Array(sessionIds),
       })
       const { rerender } = render(
         <DocumentTree
@@ -1967,7 +1969,8 @@ describe('DocumentTree', () => {
           scene={scene}
           docRev={0}
           watertightMap={new Map([[1n, true]])}
-          explodeSession={{ instanceId: 9n, label: 'Box Def' }}
+          sessionStack={[{ node: { kind: 'instance', id: 9n }, label: 'Box Def' }]}
+          sessionMembers={sessionIds.map((id) => ({ kind: 'object' as const, id }))}
         />,
       )
       expect(screen.getAllByText('Object 1')).toHaveLength(1)
@@ -1975,7 +1978,8 @@ describe('DocumentTree', () => {
 
       // Simulate a new object created mid-session (e.g. Push/Pull splitting a
       // face): it joins both the document's top-level nodes AND the session's
-      // live object list.
+      // live member list (the parent re-reads `ViewportApi.sessionMembers()`
+      // whenever docRev changes — this rerender mirrors that).
       ids.push(2n)
       sessionIds.push(2n)
       rerender(
@@ -1984,7 +1988,8 @@ describe('DocumentTree', () => {
           scene={scene}
           docRev={1}
           watertightMap={new Map([[1n, true], [2n, true]])}
-          explodeSession={{ instanceId: 9n, label: 'Box Def' }}
+          sessionStack={[{ node: { kind: 'instance', id: 9n }, label: 'Box Def' }]}
+          sessionMembers={sessionIds.map((id) => ({ kind: 'object' as const, id }))}
         />,
       )
       expect(screen.getAllByText('Object 2')).toHaveLength(1)
@@ -1994,7 +1999,6 @@ describe('DocumentTree', () => {
       const scene = makeScene({
         top_level_nodes: () => [{ kind: 'object', id: 1n }],
         object_ids: () => new BigUint64Array([1n]),
-        explode_session_objects: () => new BigUint64Array([1n]),
       })
       const { rerender } = render(
         <DocumentTree
@@ -2002,10 +2006,11 @@ describe('DocumentTree', () => {
           scene={scene}
           docRev={0}
           watertightMap={new Map([[1n, true]])}
-          explodeSession={{ instanceId: 9n, label: 'Box Def' }}
+          sessionStack={[{ node: { kind: 'instance', id: 9n }, label: 'Box Def' }]}
+          sessionMembers={[{ kind: 'object', id: 1n }]}
         />,
       )
-      expect(screen.getByText('Box Def')).toBeInTheDocument()
+      expect(screen.getAllByText('Box Def')).toHaveLength(2) // breadcrumb crumb + header row
       expect(screen.getByText('editing')).toBeInTheDocument()
 
       rerender(
@@ -2014,12 +2019,65 @@ describe('DocumentTree', () => {
           scene={scene}
           docRev={1}
           watertightMap={new Map([[1n, true]])}
-          explodeSession={null}
+          sessionStack={[]}
+          sessionMembers={null}
         />,
       )
       expect(screen.queryByText('Box Def')).not.toBeInTheDocument()
       expect(screen.queryByText('editing')).not.toBeInTheDocument()
       expect(screen.getAllByText('Object 1')).toHaveLength(1)
+    })
+
+    it('opens a GROUP session with a "Group N" fallback label and no chip duplication', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [
+          { kind: 'object', id: 1n },
+          { kind: 'object', id: 2n },
+        ],
+        object_ids: () => new BigUint64Array([1n, 2n]),
+      })
+      render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true], [2n, true]])}
+          sessionStack={[{ node: { kind: 'group', id: 20n }, label: 'Group 1' }]}
+          sessionMembers={[{ kind: 'object', id: 1n }]}
+        />,
+      )
+      expect(screen.getAllByText('Group 1')).toHaveLength(2) // breadcrumb crumb + header row
+      expect(screen.getAllByText('editing')).toHaveLength(1)
+      // Object 1 is the group's member (nested); Object 2 is an unrelated
+      // top-level sibling and still renders as its own loose row.
+      expect(screen.getAllByText('Object 1')).toHaveLength(1)
+      expect(screen.getAllByText('Object 2')).toHaveLength(1)
+    })
+
+    it('gives every frame on a nested session stack its own header + editing chip', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [{ kind: 'object', id: 1n }],
+        object_ids: () => new BigUint64Array([1n]),
+      })
+      render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true]])}
+          sessionStack={[
+            { node: { kind: 'group', id: 20n }, label: 'Outer Group' },
+            { node: { kind: 'group', id: 21n }, label: 'Inner Group' },
+          ]}
+          sessionMembers={[{ kind: 'object', id: 1n }]}
+        />,
+      )
+      // Each label appears twice: once as its own breadcrumb crumb (design:
+      // every session frame gets a crumb), once as its tree header row.
+      expect(screen.getAllByText('Outer Group')).toHaveLength(2)
+      expect(screen.getAllByText('Inner Group')).toHaveLength(2)
+      // Both frame headers get the chip, not just the innermost.
+      expect(screen.getAllByText('editing')).toHaveLength(2)
+      // The breadcrumb reflects both frames, outermost first.
+      expect(screen.getByText('Model')).toBeInTheDocument()
     })
   })
 })

@@ -480,7 +480,7 @@ describe('StlUnitsDialog', () => {
 // ---------------------------------------------------------------------------
 
 describe('RescaleConfirmDialog', () => {
-  const props = { currentDistance: 2, typedDistance: 3, factor: 1.5 }
+  const props = { currentDistance: 2, typedDistance: 3, factor: 1.5, scope: null }
 
   it('shows the measured distance, typed distance, and scale factor', () => {
     render(<RescaleConfirmDialog {...props} onConfirm={vi.fn()} onCancel={vi.fn()} />)
@@ -539,6 +539,47 @@ describe('RescaleConfirmDialog', () => {
     } finally {
       window.removeEventListener('keydown', windowListener)
     }
+  })
+
+  // Scoped variant (docs/design/group-session.md's "Tape Measure scoped
+  // rescale"): a group/component session open at arm time swaps the
+  // whole-model copy for one naming the innermost frame, without touching
+  // the whole-model copy above at all (`scope: null` is untouched by any of
+  // this — see the tests above, unchanged).
+  describe('scoped (a session frame open)', () => {
+    const groupScope = { ...props, scope: { label: 'Group 1', isComponent: false } }
+    const componentScope = { ...props, scope: { label: 'Widget', isComponent: true } }
+
+    it('names the group frame instead of "the model"', () => {
+      render(<RescaleConfirmDialog {...groupScope} onConfirm={vi.fn()} onCancel={vi.fn()} />)
+      expect(screen.getByRole('dialog', { name: 'Resize Group 1' })).toBeInTheDocument()
+      expect(screen.getByText(/Resize Group 1 so it becomes/)).toBeInTheDocument()
+      expect(screen.queryByText(/the whole model/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/the model\?/)).not.toBeInTheDocument()
+    })
+
+    it('mentions every copy resizing for a component frame', () => {
+      render(<RescaleConfirmDialog {...componentScope} onConfirm={vi.fn()} onCancel={vi.fn()} />)
+      expect(screen.getByRole('dialog', { name: 'Resize Widget' })).toBeInTheDocument()
+      expect(screen.getByText(/every.*copy of it/)).toBeInTheDocument()
+    })
+
+    it('still shows the measured/typed distances and factor', () => {
+      render(<RescaleConfirmDialog {...groupScope} onConfirm={vi.fn()} onCancel={vi.fn()} />)
+      expect(screen.getByText(/2 m/)).toBeInTheDocument()
+      expect(screen.getByText(/3 m/)).toBeInTheDocument()
+      expect(screen.getByText(/1\.5000/)).toBeInTheDocument()
+    })
+
+    it('Confirm/Cancel/Escape still resolve the same way as the whole-model variant', () => {
+      const onConfirm = vi.fn()
+      const onCancel = vi.fn()
+      render(<RescaleConfirmDialog {...groupScope} onConfirm={onConfirm} onCancel={onCancel} />)
+      fireEvent.click(screen.getByRole('button', { name: /resize/i }))
+      expect(onConfirm).toHaveBeenCalledOnce()
+      fireEvent.keyDown(document, { key: 'Escape' })
+      expect(onCancel).toHaveBeenCalledOnce()
+    })
   })
 })
 

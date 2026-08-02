@@ -122,17 +122,15 @@ document creates or extends a Sketch; drawing after entering an Object
 applies that Object's sticky rules. Selection was considered as the
 triggering signal and rejected: it is a weaker, more modal proxy for "what am
 I editing" than an explicit enter/exit context, and it doesn't generalize
-cleanly to nested Groups and Components. The enter/exit gesture itself —
-which node the double-click targeted, the breadcrumb path back out — is
-session state that lives entirely in the application layer, not part of the
-persisted document model. Entering a Group keeps that as the whole story:
-nothing in the kernel changes. Entering a Component instance is the one
-exception, and it does reach the kernel: it opens an **explode session**
-(2.11), transient `Document` state holding the definition's members baked
-into ordinary world geometry for the edit's duration. That state is never
-serialized — a save mid-session transparently writes the document as if the
-session were closed — so the persisted document model is unaffected even
-though the live, in-memory one temporarily is.
+cleanly to nested Groups and Components. Entering a plain Object is pure
+application-layer state — the breadcrumb path back out, nothing in the
+kernel. Entering a Group or a Component instance reaches the kernel: it
+opens a **session frame** (2.11) — transient `Document` state holding the
+container's contents surfaced as ordinary top-level world geometry for the
+edit's duration, one stacked frame per nesting level. That state is never
+serialized — a save mid-session transparently writes the document as if
+every open frame were closed — so the persisted document model is
+unaffected even though the live, in-memory one temporarily is.
 
 ### 2.6 Sketches are first-class, not zero-thickness solids
 
@@ -252,21 +250,37 @@ is designed so that watertightness can never be broken as a side effect:
   model exists to prevent. Removing material or punching an opening always
   routes through push-through instead.
 
-### 2.11 The explode-session component-editing model
+### 2.11 The session model: editing containers with the unmodified tool set
 
-Editing a Component's shared geometry has to reconcile two things: the
-model's insistence that every instance of a definition is the identical
-geometry (2.7), and the fact that Hew's tool set — push/pull, Follow Me,
-booleans, slice, sketching — is written entirely in terms of ordinary world
-Objects, with no notion of a definition or a pose. Rather than teach every
-tool a second, definition-relative code path, Hew changes what the member
-Objects temporarily ARE, and lets the unmodified tool set do the rest. The
-insight this leans on is structural: a definition's members are already
-real Objects (2.7), merely owned by a `ComponentId` instead of the world —
-so editing one in place is an ownership retarget plus a pose bake, not a
-new mode.
+Editing inside a container — a Group's members, a Component's shared
+geometry — has to reconcile the container's semantics with the fact that
+Hew's tool set — push/pull, Follow Me, booleans, slice, sketching — is
+written entirely in terms of ordinary top-level world Objects, with no
+notion of a parent, a definition, or a pose. Rather than teach every tool
+a second, container-relative code path, Hew changes what the contents
+temporarily ARE, and lets the unmodified tool set do the rest. Entering a
+container opens a **session frame** on a kernel-held stack; frames nest
+one per container level and close strictly LIFO (Escape, double-click
+outside). Both frame kinds lean on the same structural insight: the
+contents are already real Objects, merely attached to a container.
 
-Double-clicking a component instance opens an **explode session**: the
+Entering a **Group** is a transient *ungroup*: the group's direct members
+have their parents cleared to the top level and the group record hides
+with its member list intact — precisely the document's existing ungroup
+posture, so no invariant changes. There is no pose and nothing to bake;
+the flip is exact. Every tool then sees genuinely top-level geometry, and
+the replacing operations that refuse a grouped operand outside a session —
+booleans, slice, push/pull-through, the merging Follow Me forms — simply
+work. Closing the frame regroups: survivors re-home in their original
+order, everything created during the session that is still live and
+top-level folds in as a new member (grouping, component and instance
+creation, import, and 3D text are all legal inside a group frame for
+exactly this reason), members deleted or consumed mid-session drop out,
+and a group left with nothing is deleted outright.
+
+Entering a **Component instance** opens an **explode session** — the
+transient-*explode* analog, and always the innermost frame (definitions
+are flat, so nothing inside one can host a further frame): the
 kernel bakes the instance's pose into the definition's member Objects and
 sketches — the SAME `ObjectId`/`SketchId`s, a move of ownership rather than
 a copy — and retargets them from the definition to the world tree. From
@@ -295,13 +309,28 @@ winding and produce an inside-out solid. Group nesting gates a session the
 same way: the bake produces top-level world objects and must hide every
 placement of the definition, neither of which a group-nested placement can
 survive coherently (splicing baked members into a containing group is not
-modeled, and a group may not list a hidden member). An instance that fails
-either gate — a non-uniform scale, a mirror, or any placement of the
-definition nested inside a group — falls back to the previous in-context
-editing model instead: the tool set operates on the definition's members
-directly, through the pose, without baking or retargeting anything. That
-model remains fully supported for exactly these cases; the explode session
-is the default path, not a replacement for it.
+modeled, and a group may not list a hidden member). Session nesting
+dissolves the common case of that gate: an instance inside a Group is
+genuinely top-level while its group's frame is open, so drilling in
+through the group opens its explode session normally — only a
+same-definition placement grouped *elsewhere* still trips it. An instance
+that fails either gate — a non-uniform scale, a mirror, or a sibling
+placement nested inside some other group — falls back to the previous
+in-context editing model instead: the tool set operates on the
+definition's members directly, through the pose, without baking or
+retargeting anything. That model remains fully supported for exactly
+these cases; the session stack is the default path, not a replacement for
+it.
+
+The stack also gives in-context resize a natural target: the Tape
+Measure's measure-then-type-a-length gesture, which resizes the whole
+model at the top level, instead resizes exactly the innermost open
+frame's contents about the measured point (`rescale_session`). Under a
+group frame the members scale in place — leaf objects bake the transform,
+member instances absorb it into their poses, definitions stay at their
+authored size; under a component frame the scaled members fold back into
+the definition at close, so every placement resizes about its own image
+of the anchor. The world outside the frame never moves.
 
 A session that deletes every member leaves the definition with nothing to
 fold back into: closing it deletes the definition and every instance of it

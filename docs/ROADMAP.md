@@ -168,19 +168,31 @@ below.
   or an axis-locked plane, from bundled fonts or any font loaded from disk —
   letter counters become genuine holes, and each placement folds into one
   component so repeated words stay editable in one place
-- Component editing via explode session: double-click an instance and its
-  definition's members become ordinary world geometry for the edit — every
-  tool (sketching, extrusion, Follow Me, booleans, slice, transforms) works
-  on them by construction, no component-aware code path needed. Sibling
-  instances hide for the session's duration instead of updating live;
-  closing (Escape, double-click outside) folds the edit back into the
-  definition and every placement shows the result. Requires the instance's
-  pose to be a similarity (uniform scale, no mirror) and every placement of
-  the definition to sit at the top level; a non-uniformly-scaled, mirrored,
-  or group-nested placement falls back to the previous in-context editing
-  model (the component-edit-parity machinery, still fully supported for
-  those cases). Session open/close are ordinary undo steps, and saving — autosave
-  included — works transparently mid-session
+- Container editing via the session stack: double-click a group or a
+  component instance and its contents become ordinary top-level world
+  geometry for the edit — every tool (sketching, extrusion, Follow Me,
+  booleans, slice, push/pull-through, transforms) works on them by
+  construction, no container-aware code path needed. A group session is a
+  transient ungroup (nothing bakes; grouping, component/instance creation,
+  import, and 3D text stay available inside one, their products folding
+  into the group); a component session is a transient explode of the
+  instance's pose, always the innermost frame, with sibling instances
+  hidden for the session's duration instead of updating live. Frames nest
+  per container level and close LIFO (Escape, double-click outside),
+  folding edits and mid-session creations back into the container; both
+  entry paths — viewport drill-down and Outliner double-click — produce
+  the same breadcrumb, with every level on it marked as editing. A
+  component session requires the instance's pose to be a similarity
+  (uniform scale, no mirror); a group-nested placement now opens through
+  its group's session, and a non-uniformly-scaled, mirrored, or
+  elsewhere-grouped-sibling placement falls back to the previous
+  in-context editing model (the component-edit-parity machinery, still
+  fully supported for those cases). Session open/close are ordinary undo
+  steps, and saving — autosave included — works transparently mid-session
+- In-context resize: the Tape Measure's measure-then-type gesture inside
+  an open group or component resizes just that container's contents about
+  the measured point — a component resize reaches every placement — while
+  the same gesture at the top level still resizes the whole model
 - Movable drawing axes: place and orient a document-level frame that axis
   locks, draw planes, inference snapping, axis colors, and the rendered
   triad all follow, with Reset Axes to return to the world frame

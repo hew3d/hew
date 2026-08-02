@@ -67,6 +67,7 @@ function makeWasmScene() {
     pick_sketch: vi.fn(() => undefined),
     sketch_plane: vi.fn(() => undefined),
     rescale_document: vi.fn(),
+    rescale_session: vi.fn(),
     // No face under the cursor in these fixtures (WP-4's offset-plane
     // face-pick fallback is covered separately in TapeMeasureTool.plane.test.ts).
     pick_face: vi.fn(() => undefined),
@@ -452,6 +453,9 @@ describe('TapeMeasureTool — resize-the-model confirmation', () => {
     expect(info.currentDistance).toBeCloseTo(2)
     expect(info.typedDistance).toBeCloseTo(3)
     expect(info.factor).toBeCloseTo(1.5)
+    // The measurement's FIRST point (group-session.md's scoped-rescale
+    // anchor) — the second click's endpoint plays no part in it.
+    expect(info.anchor).toEqual([0, 0, 0])
     // Nothing committed yet — the decision is still pending.
     expect(guidePoints.length).toBe(0)
     expect(scene.rescale_document).not.toHaveBeenCalled()
@@ -472,8 +476,48 @@ describe('TapeMeasureTool — resize-the-model confirmation', () => {
     // The factor is passed through to the callback so the Viewport can
     // re-scale the camera about the same world-origin pivot (tool-parity §3
     // "the view jumps around" fix) — see viewport/math.test.ts for the pure
-    // scaling math itself.
-    expect(onRescaleApplied).toHaveBeenCalledWith(1.5)
+    // scaling math itself. `scoped` is false — no `confirmRescale` argument
+    // was passed, the pre-existing whole-model default.
+    expect(onRescaleApplied).toHaveBeenCalledWith(1.5, false)
+    expect(tool.capturingInput()).toBe(false)
+  })
+
+  // Scoped rescale (docs/design/group-session.md's "Tape Measure scoped
+  // rescale"): `confirmRescale(true, …)` — the caller's decision, made from
+  // its own `sessionStack` at arm time and threaded straight through here —
+  // calls `rescale_session` anchored at the measurement's first point
+  // instead of `rescale_document`, and reports `scoped: true` to the
+  // Viewport so it skips the camera/grid companion scaling.
+  it('confirmRescale(true, …) applies rescale_session anchored at the measured first point', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onRescaleApplied } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 3, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 3, y: 2, z: 3, kind: 'endpoint' }), RAY)
+    typeAndEnter(tool, '3')
+
+    tool.confirmRescale(true, 'Group 1')
+
+    expect(scene.rescale_document).not.toHaveBeenCalled()
+    expect(scene.rescale_session).toHaveBeenCalledWith(1.5, 1, 2, 3)
+    expect(onRescaleApplied).toHaveBeenCalledWith(1.5, true)
+    expect(tool.capturingInput()).toBe(false)
+  })
+
+  it('a refused rescale_session toasts a scoped-aware message and still returns to idle', () => {
+    const { scene } = makeWasmScene()
+    ;(scene as unknown as { rescale_session: ReturnType<typeof vi.fn> }).rescale_session.mockImplementation(() => {
+      throw new Error('ExplodeSessionNotOpen: no session frame is open')
+    })
+    const { tool, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    typeAndEnter(tool, '3')
+
+    tool.confirmRescale(true, 'Group 1')
+
+    expect(onToast).toHaveBeenCalledWith(expect.stringContaining("Couldn't resize Group 1:"))
     expect(tool.capturingInput()).toBe(false)
   })
 
@@ -598,6 +642,142 @@ describe('TapeMeasureTool — resize-the-model confirmation', () => {
 
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(tool.capturingInput()).toBe(false)
+  })
+})
+
+// Scoped-rescale arm gate (adversarial-review finding 6, group-session.md):
+// inference/snapping stays unscoped while a session is open, so a
+// measurement's two points can land on geometry OUTSIDE the open session —
+// arming a scoped resize on one would translate the session's contents by a
+// wrong anchor while the measured distance itself never changes. `setSessionScope`
+// (the Viewport's push, mirrored here directly) gates the arm on BOTH
+// endpoints' own `object`/`instance`/`sketch` attribution.
+describe('TapeMeasureTool — scoped-rescale arm gate (adversarial-review finding 6)', () => {
+  it('arms normally when both endpoints are on in-scope OBJECT geometry', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onRescaleArmed, onToast } = makeTool(scene)
+    tool.setSessionScope({ objectIds: new Set([7n]), instanceIds: new Set(), sketchIds: new Set() })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint', object: 7n }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint', object: 7n }), RAY)
+    typeAndEnter(tool, '3')
+
+    expect(onRescaleArmed).toHaveBeenCalledTimes(1)
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
+  it('declines the arm — toast, no dialog, falls through to the ordinary guide commit — when the SECOND endpoint is on OUT-of-scope geometry', () => {
+    const { scene, guidePoints } = makeWasmScene()
+    const { tool, onRescaleArmed, onToast } = makeTool(scene)
+    tool.setSessionScope({ objectIds: new Set([7n]), instanceIds: new Set(), sketchIds: new Set() })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint', object: 7n }), RAY) // in scope
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint', object: 42n }), RAY) // NOT in scope
+    typeAndEnter(tool, '3')
+
+    expect(onRescaleArmed).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toMatch(/outside the open group or component/i)
+    // Declined arms fall through exactly like an empty-space endpoint would:
+    // the ordinary typed-exact guide-point commit still runs.
+    expect(guidePoints.length).toBe(1)
+    expect(scene.rescale_document).not.toHaveBeenCalled()
+    expect(scene.rescale_session).not.toHaveBeenCalled()
+  })
+
+  it('declines the arm when the FIRST endpoint is on out-of-scope geometry, even though the second is in scope', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onRescaleArmed, onToast } = makeTool(scene)
+    tool.setSessionScope({ objectIds: new Set([7n]), instanceIds: new Set(), sketchIds: new Set() })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint', object: 42n }), RAY) // NOT in scope
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint', object: 7n }), RAY) // in scope
+    typeAndEnter(tool, '3')
+
+    expect(onRescaleArmed).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
+  })
+
+  it('an INSTANCE-attributed endpoint (object reached through a placed component) is gated on the instance id, not the definition-local object id', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onRescaleArmed } = makeTool(scene)
+    tool.setSessionScope({ objectIds: new Set(), instanceIds: new Set([50n]), sketchIds: new Set() })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint', object: 3n, instance: 50n }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint', object: 3n, instance: 50n }), RAY)
+    typeAndEnter(tool, '3')
+
+    expect(onRescaleArmed).toHaveBeenCalledTimes(1)
+  })
+
+  it('the same instance-attributed endpoint declines when the PLACEMENT (not the definition object) is out of scope', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onRescaleArmed, onToast } = makeTool(scene)
+    // The definition-local object id (3n) happens to coincide with something
+    // in `objectIds` — the gate must still key off `instance`, not `object`,
+    // once a snap carries both.
+    tool.setSessionScope({ objectIds: new Set([3n]), instanceIds: new Set([50n]), sketchIds: new Set() })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint', object: 3n, instance: 50n }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint', object: 3n, instance: 99n }), RAY) // different placement
+    typeAndEnter(tool, '3')
+
+    expect(onRescaleArmed).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
+  })
+
+  it('a SKETCH-attributed endpoint is gated on sketchIds', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onRescaleArmed, onToast } = makeTool(scene)
+    tool.setSessionScope({ objectIds: new Set(), instanceIds: new Set(), sketchIds: new Set([8n]) })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint', elementKind: 'sketch-edge', sketch: 8n }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint', elementKind: 'sketch-edge', sketch: 9n }), RAY) // different sketch
+    typeAndEnter(tool, '3')
+
+    expect(onRescaleArmed).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
+  })
+
+  it('imposes no restriction at all when no session is open (setSessionScope(null), the default)', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onRescaleArmed } = makeTool(scene)
+    // Never called `setSessionScope` — `_sessionScope` starts `null`.
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint', object: 7n }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint', object: 42n }), RAY)
+    typeAndEnter(tool, '3')
+
+    expect(onRescaleArmed).toHaveBeenCalledTimes(1)
+  })
+
+  it('an out-of-scope RECALLED arm (idle "5" + Enter) declines too, restoring the frozen reading and leaving the recall intact', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onRescaleArmed, onToast, onMeasurement } = makeTool(scene)
+    tool.setSessionScope({ objectIds: new Set([7n]), instanceIds: new Set(), sketchIds: new Set() })
+
+    // A real two-click measurement, both ends on IN-scope geometry, so the
+    // recall is recorded.
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint', object: 7n }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint', object: 7n }), RAY)
+    tool.onPointerDown(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint', object: 7n }), RAY)
+
+    // The scope then narrows (e.g. a DIFFERENT, smaller session opened) so
+    // the SAME recalled measurement no longer qualifies.
+    tool.setSessionScope({ objectIds: new Set([99n]), instanceIds: new Set(), sketchIds: new Set() })
+
+    pressKey(tool, '5')
+    pressKey(tool, 'Enter')
+
+    expect(onRescaleArmed).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
+    const last = onMeasurement.mock.calls[onMeasurement.mock.calls.length - 1]
+    expect(last).toEqual([formatLength(2), true]) // frozen original reading restored
+
+    // The recall itself survives — a fresh in-scope measurement (or a
+    // widened scope) could still use it; this mirrors `cancelRescale`'s own
+    // fromRecall contract.
+    expect(tool.capturesKey('5')).toBe(true)
   })
 })
 
@@ -996,7 +1176,12 @@ describe('TapeMeasureTool — retroactive rescale recall', () => {
     pressKey(tool, '5')
     pressKey(tool, 'Enter')
 
-    expect(onRescaleArmed).toHaveBeenCalledWith({ currentDistance: 2, typedDistance: 5, factor: 2.5 })
+    expect(onRescaleArmed).toHaveBeenCalledWith({
+      currentDistance: 2,
+      typedDistance: 5,
+      factor: 2.5,
+      anchor: [0, 0, 0],
+    })
     const stage = (tool as unknown as { stage: { kind: string; fromRecall?: boolean } }).stage
     expect(stage.kind).toBe('pendingRescale')
     expect(stage.fromRecall).toBe(true)

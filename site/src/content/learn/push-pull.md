@@ -52,6 +52,6 @@ You can type the depth instead of dragging to choose the direction: a plain numb
 
 ![A bracket-shaped model with a rectangular notch cut from its upright](/docs/bracket-scene.png)
 
-## Inside components
+## Inside groups and components
 
-Push/pull works inside a component's editing context too. The edit applies to the component *definition*, so every instance updates together ([Groups and components](/learn/groups-and-components/)).
+Push/pull works while you're editing a group or a component, through-cuts included — draw on a member's face and cut straight through it, the same gesture as at the top level. Inside a component, the edit applies to the *definition*, so every instance updates together; inside a group, the result folds back in as a member when you step out ([Groups and components](/learn/groups-and-components/)).

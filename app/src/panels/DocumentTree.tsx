@@ -4,7 +4,8 @@
  * One unified tree list: the document's top-level nodes (Objects, Groups,
  * Component instances — recursive, with expand/collapse for groups) followed
  * by free-standing sketches as ordinary rows in the same list. Breadcrumb
- * shows the active context path.
+ * shows the combined path: Model → open session frames (outermost first) →
+ * object context (docs/design/group-session.md).
  *
  * Click to select; double-click to enter context. Structural actions
  * (booleans, group/ungroup, component ops) live in the menus/dock — this
@@ -34,29 +35,51 @@ interface Props {
   watertightMap: Map<bigint, boolean>
   /** Selected nodes (ordered; index 0 = primary). */
   selectedIds: NodeRef[]
-  /** Active context path. Empty = top level. */
+  /** Object-context path: app-only sticky editing of at most one plain
+   *  object (or, via the K1/K2 fallback, a component instance), sitting
+   *  logically inside the innermost open session frame if any. Empty =
+   *  nothing pushed past the session stack. Combined with `sessionStack`
+   *  below (session frames first, this tail last) for the breadcrumb/
+   *  dimming/"editing"-chip path — see `fullPath` in the component body. */
   activeContext: NodeRef[]
+  /** The open kernel session stack, outermost first — empty when nothing is
+   *  open. Each frame's label is supplied by the caller (Viewport) since a
+   *  session HIDES its own node (its name is unreadable through the
+   *  ordinary `group_name`/`instance_name` queries once hidden — see
+   *  `Viewport.tsx`'s `runOpenGroupSession`/`componentSessionLabel`). */
+  sessionStack: { node: NodeRef; label: string }[]
+  /** The innermost open session frame's current direct-member list (any
+   *  node kind), or `null` when no session is open —
+   *  `ViewportApi.sessionMembers()`, re-read by the parent whenever
+   *  `docRev`/`sessionStack` change. While a session is open, its members
+   *  are plain top-level nodes in the kernel (the ungroup posture /
+   *  `Document::open_explode_session`'s bake alike) — left alone, they'd
+   *  render as loose, unlabeled rows with no indication of what they are,
+   *  while the group/instance row that used to explain them vanishes
+   *  (hidden for the session's duration). Instead the tree nests them under
+   *  the innermost frame's synthetic header row, generalizing the single-
+   *  instance "explode session member list" it rendered before groups
+   *  existed. */
+  sessionMembers: NodeRef[] | null
   /** `additive` = shift/ctrl-click (multi-select). */
   onSelect: (node: NodeRef, additive: boolean) => void
+  /** Entry convergence (docs/design/group-session.md): given ANY target
+   *  node — including one buried behind session frames that aren't open
+   *  yet — opens/closes exactly the frames needed and pushes an object
+   *  context if the target is a plain object, converging on the same state
+   *  shape a viewport double-click would reach one level at a time. */
   onEnterContext: (node: NodeRef) => void
-  /** Pop one level off the context path (breadcrumb root = exit to top). */
+  /** Root "Model" breadcrumb crumb: exit everything (every open session
+   *  frame, innermost-first, plus the object-context tail). */
   onExitContext: () => void
-  /** Truncate the context path to a given depth (crumb click). */
+  /** A non-root breadcrumb crumb click, at combined-path depth (session
+   *  frames first, then the object-context tail): close/pop everything
+   *  past it. */
   onSetContextDepth: (depth: number) => void
   /** Set of nodeKey strings for nodes that are currently hidden. */
   hiddenKeys: Set<string>
   /** Toggle hide/show for a node (and its descendants if it's a group). */
   onToggleHidden: (node: NodeRef) => void
-  /** The open explode session (App.tsx), or null when none is open. While a
-   * session is open, its definition's baked-out members are plain top-level
-   * world objects in the kernel (`Document::open_explode_session` sets each
-   * member's owner to `World { parent: None }`) — left alone, they'd render
-   * as loose, unlabeled "Object N" rows with no indication of what they are,
-   * while the instance rows that used to explain them vanish (hidden for the
-   * session's duration). Instead the tree groups them under one synthetic,
-   * non-selectable header row named for the definition, marked with the same
-   * "editing" treatment a context row uses. */
-  explodeSession: { instanceId: bigint; label: string } | null
 }
 
 const ROW_BASE: React.CSSProperties = {
@@ -79,13 +102,14 @@ export function DocumentTree({
   watertightMap,
   selectedIds,
   activeContext,
+  sessionStack,
+  sessionMembers,
   onSelect,
   onEnterContext,
   onExitContext,
   onSetContextDepth,
   hiddenKeys,
   onToggleHidden,
-  explodeSession,
 }: Props) {
   // Re-query the entity lists whenever the document changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -94,28 +118,16 @@ export function DocumentTree({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [scene, docRev],
   )
-  // The session's live objects, re-derived every render/docRev — mid-session
-  // creations and deletes change this set without changing `explodeSession`'s
-  // identity, so it can't be computed once at session-open time. `null` when
-  // no session is open (distinct from an open session with zero members).
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const sessionObjectIds = useMemo(
-    () => (explodeSession === null ? null : Array.from(scene.explode_session_objects() ?? [])),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [scene, docRev, explodeSession],
+  const sessionMemberKeySet = useMemo(
+    () => (sessionMembers === null ? null : new Set(sessionMembers.map(nodeKey))),
+    [sessionMembers],
   )
-  const sessionObjectIdSet = useMemo(
-    () => (sessionObjectIds === null ? null : new Set(sessionObjectIds)),
-    [sessionObjectIds],
-  )
-  // Top-level array index per object id — the positional-label index a
-  // session member keeps when rendered nested under the definition header
-  // (see the nested NodeRow's `index` prop for why).
-  const topIndexByObjectId = useMemo(() => {
-    const m = new Map<bigint, number>()
-    topNodes.forEach((n, i) => {
-      if (n.kind === 'object') m.set(n.id, i)
-    })
+  // Top-level array index per node key — the positional-label index a
+  // session member keeps when rendered nested under the innermost frame's
+  // header (see the nested NodeRow's `index` prop for why).
+  const topIndexByKey = useMemo(() => {
+    const m = new Map<string, number>()
+    topNodes.forEach((n, i) => m.set(nodeKey(n), i))
     return m
   }, [topNodes])
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -200,7 +212,16 @@ export function DocumentTree({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIds, scene, docRev])
 
-  const deepestCtx = activeContext.length > 0 ? activeContext[activeContext.length - 1] : null
+  // The combined path every breadcrumb/dimming/"editing"-chip computation
+  // walks: open session frames outermost-first, then the object-context
+  // tail (docs/design/group-session.md). `treeModel`'s `breadcrumb`/
+  // `isTreeRowDimmed` are already generic over `NodeRef[]` — no changes
+  // needed there, just feeding them this combined path instead of
+  // `activeContext` alone.
+  const fullPath = useMemo(
+    () => [...sessionStack.map((f) => f.node), ...activeContext],
+    [sessionStack, activeContext],
+  )
 
   // Positional indices for breadcrumb labels: position within the parent
   // container, so a crumb for an unnamed nested node reads exactly like its
@@ -217,8 +238,19 @@ export function DocumentTree({
     [topNodes, scene, docRev],
   )
 
+  // A session frame's own node is HIDDEN in the kernel for the session's
+  // duration (the ungroup posture / explode-session bake), so the ordinary
+  // scene-query label resolution below answers nothing for it — the
+  // caller-supplied label (captured before hiding) is the only source.
+  const frameLabelByKey = useMemo(
+    () => new Map(sessionStack.map((f) => [nodeKey(f.node), f.label])),
+    [sessionStack],
+  )
+
   // Label resolver for breadcrumbs.
   const labelFor = (node: NodeRef): string => {
+    const frameLabel = frameLabelByKey.get(nodeKey(node))
+    if (frameLabel !== undefined) return frameLabel
     const idx = treeIndex.get(nodeKey(node)) ?? 0
     if (node.kind === 'group') {
       return resolveLabel(scene.group_name(node.id), undefined, 'group', idx)
@@ -231,11 +263,12 @@ export function DocumentTree({
     }
   }
 
-  const crumbs = breadcrumb(activeContext, labelFor)
+  const crumbs = breadcrumb(fullPath, labelFor)
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-      {/* Breadcrumb */}
+      {/* Breadcrumb — every entry on `fullPath` gets a crumb, including
+          every open session frame (docs/design/group-session.md). */}
       <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '2px', fontSize: '12px', fontFamily: 'var(--font-family-ui)' }}>
         {crumbs.map((c, i) => (
           <span key={i} style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
@@ -246,10 +279,16 @@ export function DocumentTree({
               <button
                 onClick={() => {
                   if (c.depth === -1) {
-                    // Root: exit to top
+                    // Root: exit to top — every open session frame plus the
+                    // object-context tail.
                     onExitContext()
                   } else {
-                    // Truncate path to depth d+1
+                    // Truncate the COMBINED path to depth d+1: closes
+                    // session frames innermost-first down to that depth if
+                    // the crumb sits in the session-stack region, or just
+                    // truncates the object-context tail otherwise (parent
+                    // dispatches on `sessionStack.length` — see
+                    // `handleSetPathDepth`).
                     onSetContextDepth(c.depth + 1)
                   }
                 }}
@@ -273,59 +312,67 @@ export function DocumentTree({
       {/* Unified node tree: top-level nodes first, then free-standing sketches.
           An empty document renders no rows at all — no placeholder text. */}
       <div>
-        {explodeSession !== null && (
-          <>
-            {/* Synthetic, non-selectable header for the definition being
-                edited — reuses the exact "active context" row treatment
-                (accent tint, bold, inset rail, "editing" chip) so it reads
-                as the same kind of thing as a context-breadcrumb row. No
-                expand chevron (its members are always shown) and no hide
-                toggle (it isn't a real node). */}
-            <Row
-              label={explodeSession.label}
-              icon={<NodeIcon kind="instance" />}
-              selected={false}
-              active
-              dimmed={false}
-              indent={0}
-              onClick={() => {}}
-            />
-            {(sessionObjectIds ?? []).map((id, sessionIndex) => (
-              <NodeRow
-                key={`session-object:${id}`}
-                node={{ kind: 'object', id }}
-                // Positional-label index: an unnamed object's "Object N"
-                // fallback must be the SAME N it carries as a top-level row
-                // (session members are genuinely top-level world objects, so
-                // they are in `topNodes`) — a fresh 0-based sequence here
-                // made a nested member and a surviving top-level row share
-                // one label (delta-review finding), and would also relabel
-                // members across every open/close. Objects born mid-session
-                // that a render races ahead of `topNodes` fall back past
-                // its end rather than colliding.
-                index={topIndexByObjectId.get(id) ?? topNodes.length + sessionIndex}
-                depth={1}
-                scene={scene}
-                docRev={docRev}
-                watertightMap={watertightMap}
-                activeContext={activeContext}
-                deepestCtx={deepestCtx}
-                isSelected={isSelected}
-                primaryKey={primaryKey}
-                selectedRowRef={selectedRowRef}
-                ancestorGroupKeys={ancestorGroupKeys}
-                hiddenKeys={hiddenKeys}
-                onToggleHidden={onToggleHidden}
-                onSelect={onSelect}
-                onEnterContext={onEnterContext}
-              />
-            ))}
-          </>
-        )}
+        {/* One synthetic, non-selectable header row per open session frame,
+            outermost first, each indented one level deeper — reuses the
+            exact "active context" row treatment (accent tint, bold, inset
+            rail, "editing" chip) so it reads as the same kind of thing as a
+            context-breadcrumb row. No expand chevron (a frame's own node is
+            hidden, so it has no real children to toggle) and no hide toggle
+            (it isn't a selectable node). Only the INNERMOST frame's members
+            are listed (nested one level deeper still) — an ancestor frame's
+            own live members aren't independently reachable from the app
+            side (docs/design/group-session.md: no per-ancestor scope
+            tracking), so it renders as a plain labeled waypoint on the
+            path, matching "outer frames' nodes render undimmed on the
+            path." */}
+        {sessionStack.map((frame, i) => (
+          <Row
+            key={`session-frame:${nodeKey(frame.node)}`}
+            label={frame.label}
+            icon={<NodeIcon kind={frame.node.kind === 'instance' ? 'instance' : 'group'} />}
+            selected={false}
+            active
+            dimmed={false}
+            indent={i}
+            onClick={() => {}}
+          />
+        ))}
+        {sessionStack.length > 0 && (sessionMembers ?? []).map((node, sessionIndex) => (
+          <NodeRow
+            key={`session-member:${nodeKey(node)}`}
+            node={node}
+            // Positional-label index: an unnamed member's fallback label
+            // must be the SAME index it carries as a top-level row (session
+            // members are genuinely top-level nodes right now, so they're
+            // in `topNodes`) — a fresh 0-based sequence here would make a
+            // nested member and a surviving top-level row share one label
+            // (delta-review finding, carried over from the single-instance
+            // explode session), and would relabel members across every
+            // open/close. A node born mid-session that a render races ahead
+            // of `topNodes` falls back past its end rather than colliding.
+            index={topIndexByKey.get(nodeKey(node)) ?? topNodes.length + sessionIndex}
+            depth={sessionStack.length}
+            scene={scene}
+            docRev={docRev}
+            watertightMap={watertightMap}
+            fullPath={fullPath}
+            isSelected={isSelected}
+            primaryKey={primaryKey}
+            selectedRowRef={selectedRowRef}
+            ancestorGroupKeys={ancestorGroupKeys}
+            hiddenKeys={hiddenKeys}
+            onToggleHidden={onToggleHidden}
+            onSelect={onSelect}
+            onEnterContext={onEnterContext}
+          />
+        ))}
         {topNodes.map((node, index) => {
-          // Session members are rendered nested under the definition header
-          // above — skip their loose top-level row so they don't appear twice.
-          if (sessionObjectIdSet !== null && node.kind === 'object' && sessionObjectIdSet.has(node.id)) {
+          // The innermost session frame's members are rendered nested under
+          // its header above — skip their loose top-level row so they don't
+          // appear twice. (Every OTHER open frame's own node is already
+          // excluded from `topNodes` by the kernel's hidden filter — see
+          // the session-frame header block above.)
+          if (sessionMemberKeySet !== null && sessionMemberKeySet.has(nodeKey(node))) {
             return null
           }
           return (
@@ -337,8 +384,7 @@ export function DocumentTree({
               scene={scene}
               docRev={docRev}
               watertightMap={watertightMap}
-              activeContext={activeContext}
-              deepestCtx={deepestCtx}
+              fullPath={fullPath}
               isSelected={isSelected}
               primaryKey={primaryKey}
               selectedRowRef={selectedRowRef}
@@ -360,7 +406,7 @@ export function DocumentTree({
               selected={isSelected(node)}
               isPrimary={primaryKey === nodeKey(node)}
               active={false}
-              dimmed={activeContext.length > 0}
+              dimmed={fullPath.length > 0}
               indent={0}
               rowRef={primaryKey === nodeKey(node) ? selectedRowRef : undefined}
               onClick={(additive) => onSelect(node, additive)}
@@ -380,8 +426,7 @@ function NodeRow({
   scene,
   docRev,
   watertightMap,
-  activeContext,
-  deepestCtx,
+  fullPath,
   isSelected,
   primaryKey,
   selectedRowRef,
@@ -397,8 +442,11 @@ function NodeRow({
   scene: WasmScene
   docRev: number
   watertightMap: Map<bigint, boolean>
-  activeContext: NodeRef[]
-  deepestCtx: NodeRef | null
+  /** The combined session-stack + object-context path (see the parent
+   *  component's `fullPath`) — every entry on it gets the "editing"
+   *  treatment (design: not just the deepest), via the same
+   *  positional depth-match `isTreeRowDimmed` already used. */
+  fullPath: NodeRef[]
   isSelected: (n: NodeRef) => boolean
   primaryKey: string | null
   selectedRowRef: React.RefObject<HTMLDivElement>
@@ -421,9 +469,13 @@ function NodeRow({
 
   const selected = isSelected(node)
   const isPrimary = primaryKey !== null && nodeKey(node) === primaryKey
-  const active = deepestCtx !== null &&
-    deepestCtx.kind === node.kind && deepestCtx.id === node.id
-  const dimmed = isTreeRowDimmed(activeContext, node, depth)
+  // This row is exactly the path entry at ITS OWN depth — the same
+  // condition `isTreeRowDimmed` checks for "not dimmed" — so EVERY row on
+  // the path gets the "editing" chip, not just the deepest (design).
+  const pathEntry = fullPath[depth]
+  const active = pathEntry !== undefined &&
+    pathEntry.kind === node.kind && pathEntry.id === node.id
+  const dimmed = isTreeRowDimmed(fullPath, node, depth)
   const hidden = hiddenKeys.has(nodeKey(node))
 
   if (node.kind === 'object') {
@@ -503,8 +555,7 @@ function NodeRow({
           scene={scene}
           docRev={docRev}
           watertightMap={watertightMap}
-          activeContext={activeContext}
-          deepestCtx={deepestCtx}
+          fullPath={fullPath}
           isSelected={isSelected}
           primaryKey={primaryKey}
           selectedRowRef={selectedRowRef}

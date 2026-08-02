@@ -27,6 +27,8 @@ Either side of a boolean can be a whole [group](/learn/groups-and-components/) i
 
 One thing a boolean won't do is quietly consume a component instance — instances share their geometry with every other copy, and a boolean destroys its inputs. If an operand is (or contains) an instance, the command refuses and tells you so; **Explode** the instance first (or **Make Unique**, then Explode) and combine the result.
 
+Booleans also work between two individual members while a group is open for editing — Union, Subtract, or Intersect them just like top-level objects — and the result folds back in as the group's member when you close it.
+
 ## Slice
 
 The **Slice** tool (Tools ▸ Slice) is the opposite move: cut one solid into two independent, watertight solids along a plane. It's the tool for splitting a model into printable halves.
@@ -40,7 +42,7 @@ The **Slice** tool (Tools ▸ Slice) is the opposite move: cut one solid into tw
 
 ![A box sliced by an angled plane, with the two halves moved apart](/docs/slice-halves.png)
 
-Both halves are complete, closed solids (Hew caps the cut faces), and one of them is selected afterward so you can immediately Move it apart. Slicing empty space, or a plane that misses the solid, is refused with a message.
+Both halves are complete, closed solids (Hew caps the cut faces), and one of them is selected afterward so you can immediately Move it apart. Slicing empty space, or a plane that misses the solid, is refused with a message. Slice works on a group's members too, while the group is open for editing — both halves fold back in as members when you step out.
 
 ## Which tool when?
 

@@ -80,7 +80,7 @@ The one case that merges *without* the modifier is a solid-face profile taken fr
 
 ## Sweeping into a group
 
-Follow Me works while you're editing a group, same as drawing or push/pull — no need to step back out first. The new solid lands as a member of the group you're in, rather than appearing loose at the top level.
+Follow Me works while you're editing a group, same as drawing or push/pull — no need to step back out first. The new solid lands as a member of the group you're in, rather than appearing loose at the top level. The merge gesture works there too: Ctrl/Cmd-click a group member's face as the profile and the swept shape merges straight into that member, the same as it would into a top-level solid.
 
 ## What Follow Me refuses
 

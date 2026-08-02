@@ -3761,6 +3761,98 @@ impl Scene {
             .map(|v| v.iter().map(|s| s.data().as_ffi()).collect())
     }
 
+    /// Opens a group editing session on `group`
+    /// (docs/design/group-session.md): applies the ungroup posture — the
+    /// group's direct members surface at the top level, the group hides —
+    /// so the app's ordinary, unmodified tool set (the replacing ops
+    /// included) can edit them; `close_group_session` re-homes the
+    /// survivors and folds in whatever was created meanwhile. Refuses
+    /// typed on a stale/hidden group, a nested group (drill down through
+    /// its ancestors), or while a component session is open.
+    pub fn open_group_session(&mut self, group: u64) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .open_group_session(group_id(group))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::OpenGroupSession { group });
+        Ok(())
+    }
+
+    /// Closes the open group session (the innermost frame must be one),
+    /// re-homing survivors and folding in mid-session creations. Refuses
+    /// typed otherwise.
+    pub fn close_group_session(&mut self) -> Result<(), ApiError> {
+        let change = self.doc.close_group_session().map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::CloseGroupSession);
+        Ok(())
+    }
+
+    /// Closes the INNERMOST open session frame, whichever kind it is —
+    /// the app's Escape / double-click-outside gesture. Dispatches to the
+    /// specific close, so the recording stays replay-exact.
+    pub fn close_innermost_session(&mut self) -> Result<(), ApiError> {
+        match self.doc.session_stack().last() {
+            Some(NodeId::Instance(_)) => self.close_explode_session(),
+            Some(_) => self.close_group_session(),
+            None => Err(doc_err(kernel::DocumentError::ExplodeSessionNotOpen)),
+        }
+    }
+
+    /// The group an open innermost group session is editing, or
+    /// `undefined` — the group analog of
+    /// [`Scene::explode_session_component`], for the app's session label
+    /// and resync-after-undo query.
+    pub fn group_session_group(&self) -> Option<u64> {
+        self.doc.group_session_group().map(|g| g.data().as_ffi())
+    }
+
+    /// The whole open session stack, outermost first: each frame as the
+    /// node the user entered — a group, or a component instance for the
+    /// (always innermost) explode session. Empty when nothing is open.
+    /// The app renders its breadcrumb and "editing" chips from this.
+    pub fn session_stack(&self) -> Vec<NodeJs> {
+        self.doc.session_stack().into_iter().map(node_js).collect()
+    }
+
+    /// The innermost open frame's live direct members — kernel truth for
+    /// the app's session-scoped Outliner rows, picking, and dimming
+    /// (correct across undo/redo re-entry into any earlier session
+    /// bracket, unlike an app-side open-time snapshot). `undefined` when
+    /// nothing is open.
+    pub fn session_members(&self) -> Option<Vec<NodeJs>> {
+        self.doc
+            .session_direct_members()
+            .map(|v| v.into_iter().map(node_js).collect())
+    }
+
+    /// Resizes the contents of the INNERMOST open session frame by
+    /// `factor` about the world-space anchor `(ax, ay, az)` — the Tape
+    /// Measure's in-context resize (docs/design/group-session.md). The
+    /// world outside the session is untouched, so unlike
+    /// [`Scene::rescale_document`] the app applies no camera/grid
+    /// companion scaling. Refuses typed when no session is open or the
+    /// factor/anchor is non-finite.
+    pub fn rescale_session(
+        &mut self,
+        factor: f64,
+        ax: f64,
+        ay: f64,
+        az: f64,
+    ) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .rescale_session(factor, Point3::new(ax, ay, az))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::RescaleSession {
+            factor,
+            anchor: [ax, ay, az],
+        });
+        Ok(())
+    }
+
     /// Handles of all currently visible component instances.
     pub fn instance_ids(&self) -> Vec<u64> {
         self.doc
@@ -7276,6 +7368,15 @@ impl Scene {
                     }
                     CloseExplodeSession => {
                         self.close_explode_session()?;
+                    }
+                    OpenGroupSession { group } => {
+                        self.open_group_session(group)?;
+                    }
+                    CloseGroupSession => {
+                        self.close_group_session()?;
+                    }
+                    RescaleSession { factor, anchor } => {
+                        self.rescale_session(factor, anchor[0], anchor[1], anchor[2])?;
                     }
                     PushPullInComponent {
                         instance,

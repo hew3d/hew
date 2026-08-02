@@ -378,6 +378,14 @@ pub enum RecordedCall {
     OpenExplodeSession { instance: u64 },
     /// `close_explode_session()`.
     CloseExplodeSession,
+    /// `open_group_session(group)` (docs/design/group-session.md).
+    OpenGroupSession { group: u64 },
+    /// `close_group_session()`.
+    CloseGroupSession,
+    /// `rescale_session(factor, anchor)` — the Tape Measure's in-context
+    /// resize of the innermost open session frame about a measured anchor
+    /// (docs/design/group-session.md).
+    RescaleSession { factor: f64, anchor: [f64; 3] },
     /// `push_pull_in_component(instance, object, face, distance)` —
     /// `instance` (not `component`) since `distance` is a WORLD-space length
     /// mapped through that specific instance's pose (delta-review fix on

@@ -165,6 +165,29 @@
  * `hasArmedGesture` exist so the Viewport's key routing and Escape-vs-
  * context-pop precedence (component-edit-parity.md phase A2) both see this
  * idle recall as "armed" too, the same as a live gesture.
+ *
+ * Scoped-rescale arm gating (adversarial-review finding 6, group-session.md):
+ * inference/snapping stays deliberately UNSCOPED while a session is open
+ * (ARCHITECTURE.md 2.4 — a read-only query), so a measurement's two points
+ * can freely land on geometry OUTSIDE the open session even though a
+ * scoped `rescale_session` call only ever touches what's INSIDE it. Arming
+ * on such a measurement would silently translate the session's contents by
+ * whatever the anchor happens to be, while the measured distance itself
+ * never changes size — a wrong-anchor rescale, not the resize the dialog
+ * describes. `setSessionScope` (pushed by the Viewport on every session
+ * refresh, and once at tool construction) carries the innermost frame's
+ * object/instance/sketch id sets; `_attributionOf` reads each snap's own
+ * `object`/`instance`/`sketch` id (the same fields SnapJs already reports),
+ * and both `_commitFromTyped`'s live arm and `_armRescaleFromRecall`'s idle
+ * arm check BOTH endpoints against the scope before ever calling
+ * `onRescaleArmed` — an out-of-scope endpoint declines the arm outright
+ * (toast + the ordinary non-rescale fallback each path already has for an
+ * otherwise-ineligible commit), never reaching the dialog. `_recall` itself
+ * carries each endpoint's attribution too, and `setSessionScope`/
+ * `forgetRecall` cooperate (via the Viewport) to drop it across any session
+ * open/close/stack-change boundary — a stale recall from before/outside the
+ * boundary must not arm against an anchor that belonged to a different
+ * session (or no session at all).
  */
 
 import * as THREE from 'three'
@@ -200,14 +223,52 @@ function snapOnGeometry(snap: Snap): boolean {
   return snap.kind !== 'ground' && snap.kind !== 'plane'
 }
 
+/** The open session's live object/instance/sketch id scope (finding 6,
+ *  group-session.md) — pushed by the Viewport via `setSessionScope` on
+ *  every session refresh (open, close, undo/redo resync, mid-session
+ *  fold-in) and once at tool construction; `null` means no session is open,
+ *  so the scoped-rescale arm gate below imposes no restriction at all. */
+export interface SessionScopeIds {
+  objectIds: ReadonlySet<bigint>
+  instanceIds: ReadonlySet<bigint>
+  sketchIds: ReadonlySet<bigint>
+}
+
+/** What real geometry a snap landed on, for the scoped-rescale arm gate —
+ *  `null` for a snap that isn't `snapOnGeometry` (ground/plane fallback), or
+ *  one that reports none of `sketch`/`instance`/`object` (shouldn't happen
+ *  for an on-geometry snap in practice, but treated as unattributable —
+ *  never assumed in-scope — if it ever does). */
+type GeometryAttribution =
+  | { kind: 'sketch'; sketch: bigint }
+  | { kind: 'instance'; instance: bigint }
+  | { kind: 'object'; object: bigint }
+  | null
+
+/** Read a snap's own geometry attribution (`sketch`/`instance`/`object` —
+ *  the same fields `SnapJs` already reports for any real pick), gated on
+ *  `snapOnGeometry`. A sketch-edge/region/curve snap attributes to its
+ *  sketch; an object snap that also carries an `instance` (geometry reached
+ *  through a placed component) attributes to that PLACEMENT, since that is
+ *  what a session's `instanceIds` scope tracks — the defining object lives
+ *  in the instance's definition, not the world. */
+function attributionOf(snap: Snap): GeometryAttribution {
+  if (!snapOnGeometry(snap)) return null
+  if (snap.sketch !== undefined) return { kind: 'sketch', sketch: snap.sketch }
+  if (snap.instance !== undefined) return { kind: 'instance', instance: snap.instance }
+  if (snap.object !== undefined) return { kind: 'object', object: snap.object }
+  return null
+}
+
 export type OnGuideCreated = () => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string, frozen?: boolean) => void
 
 /** Info describing an armed "resize the model?" confirmation (design
  *  tool-parity §3), passed to `OnRescaleArmed` so the Viewport/App can render
- *  the confirmation modal. `factor` is the value `rescale_document` will be
- *  called with on confirm — `typedDistance / currentDistance`. */
+ *  the confirmation modal. `factor` is the value `rescale_document`/
+ *  `rescale_session` will be called with on confirm — `typedDistance /
+ *  currentDistance`. */
 export interface RescaleConfirmInfo {
   /** The real, currently-measured distance between the two picked points. */
   currentDistance: number
@@ -215,6 +276,13 @@ export interface RescaleConfirmInfo {
   typedDistance: number
   /** `typedDistance / currentDistance`. */
   factor: number
+  /** The measurement's FIRST point, in world space (`p0` of the measured
+   *  segment for a live arm; the recalled measurement's first point for a
+   *  recall arm) — `rescale_session`'s anchor (group-session.md's "Tape
+   *  Measure scoped rescale": scoped resizes are anchored at the first
+   *  measured point, not the world origin). Unused by the whole-model path,
+   *  which still anchors at the origin via `rescale_document`. */
+  anchor: [number, number, number]
 }
 
 export type OnRescaleArmed = (info: RescaleConfirmInfo) => void
@@ -224,8 +292,17 @@ export type OnRescaleArmed = (info: RescaleConfirmInfo) => void
  *  Carries the applied `factor` so the Viewport can also re-scale the
  *  CAMERA about the same world-origin pivot by the same factor (design
  *  tool-parity §3's "the view jumps around" fix) — a view-side adjustment
- *  the kernel has no part in and that has no undo of its own. */
-export type OnRescaleApplied = (factor: number) => void
+ *  the kernel has no part in and that has no undo of its own. `scoped` is
+ *  true when this was an in-context `rescale_session` (group-session.md):
+ *  the world outside the open session didn't change size, so the Viewport
+ *  must NOT apply that camera/grid companion scaling in that case. */
+export type OnRescaleApplied = (factor: number, scoped: boolean) => void
+
+/** Toast shown when a session is open and the scoped-rescale arm gate
+ *  (finding 6, group-session.md) declines because one of the two measured
+ *  endpoints lies outside it — points the user at what actually resizes. */
+const SESSION_SCOPE_RESCALE_DECLINE_MESSAGE =
+  "That measurement reaches outside the open group or component — measure its own geometry to resize it."
 
 /** Half-length of the previewed parallel-guide line (meters). */
 const GUIDE_HALF_LENGTH = 50
@@ -319,10 +396,16 @@ type Stage =
        *  (design tool-parity §3): resizing to preserve an arbitrary
        *  empty-space-anchored distance has no meaningful "this distance". */
       p0OnGeometry: boolean
+      /** What `p0` landed on (finding 6, group-session.md) — the scoped-
+       *  rescale arm gate's other endpoint, alongside `p1Attribution`. */
+      p0Attribution: GeometryAttribution
       /** Last cursor point (snapped), in world space. */
       p1: [number, number, number]
       /** Whether the cursor is currently resting on real geometry (vs. empty space). */
       onGeometry: boolean
+      /** What the cursor is currently resting on (finding 6) — kept in sync
+       *  with `p1`/`onGeometry` by every write site. */
+      p1Attribution: GeometryAttribution
     }
   | {
       kind: 'pendingRescale'
@@ -634,8 +717,48 @@ export class TapeMeasureTool implements Tool {
    *  non-degenerate. Non-null IS the eligibility fact — an ineligible
    *  measurement is simply never recorded. Survives `_resetToIdle`; cleared
    *  by `cancel()`, by the first click of any new gesture, by
-   *  `confirmRescale()`, by `forgetRecall()`, and by `onDocumentReset()`. */
-  private _recall: { p0: [number, number, number]; p1: [number, number, number]; dist: number } | null = null
+   *  `confirmRescale()`, by `forgetRecall()`, and by `onDocumentReset()` —
+   *  and, via the Viewport's `forgetRecall()` call, by any session open/
+   *  close/stack-change boundary (finding 6): a recalled arm's anchor can
+   *  otherwise belong to a session that's no longer (or not yet) open.
+   *  `p0Attribution`/`p1Attribution` are the scoped-rescale arm gate's
+   *  record of what each endpoint landed on. */
+  private _recall: {
+    p0: [number, number, number]
+    p0Attribution: GeometryAttribution
+    p1: [number, number, number]
+    p1Attribution: GeometryAttribution
+    dist: number
+  } | null = null
+
+  /** The open session's live object/instance/sketch scope (finding 6,
+   *  group-session.md), or `null` while no session is open — see
+   *  `SessionScopeIds`'s doc. Pushed by the Viewport via `setSessionScope`;
+   *  read only by `_isAttributionInScope`. */
+  private _sessionScope: SessionScopeIds | null = null
+
+  /** Pushed by the Viewport on every session refresh (open, close, undo/
+   *  redo resync, mid-session fold-in) and once at tool construction —
+   *  `null` means no session is open. */
+  setSessionScope(scope: SessionScopeIds | null): void {
+    this._sessionScope = scope
+  }
+
+  /** Whether `attr` lies inside the currently open session's scope — always
+   *  `true` when no session is open (`_sessionScope === null`), so this
+   *  imposes no restriction on the pre-existing whole-model rescale. An
+   *  unattributable on-geometry snap (`attr === null`, shouldn't normally
+   *  happen — see `attributionOf`'s doc) is conservatively treated as
+   *  OUT of scope: the gate exists to prevent a wrong-anchor rescale, and a
+   *  false decline is always the safe direction, never a false accept. */
+  private _isAttributionInScope(attr: GeometryAttribution): boolean {
+    const scope = this._sessionScope
+    if (scope === null) return true
+    if (attr === null) return false
+    if (attr.kind === 'sketch') return scope.sketchIds.has(attr.sketch)
+    if (attr.kind === 'instance') return scope.instanceIds.has(attr.instance)
+    return scope.objectIds.has(attr.object)
+  }
 
   constructor(
     wasmScene: WasmScene,
@@ -862,6 +985,7 @@ export class TapeMeasureTool implements Tool {
     if (this.stage.kind === 'measure') {
       this.stage.p1 = this._measurePoint(snap, ray)
       this.stage.onGeometry = snapOnGeometry(snap)
+      this.stage.p1Attribution = attributionOf(snap)
       this._updatePreviewLine()
       this._reportDistanceOrTyped(this.stage.p0, this.stage.p1)
       // WP-7 item 2: same retry as the parallel branch above (degenerate
@@ -913,9 +1037,13 @@ export class TapeMeasureTool implements Tool {
       // needed here, unlike a later measure-stage snap.
       const p0: [number, number, number] = [snap.x, snap.y, snap.z]
       const p0OnGeometry = snapOnGeometry(snap)
+      const p0Attribution = attributionOf(snap)
       this.lockAxis = null
       this._snapProjected = false
-      this.stage = { kind: 'measure', p0, p0OnGeometry, p1: p0, onGeometry: p0OnGeometry }
+      this.stage = {
+        kind: 'measure', p0, p0OnGeometry, p0Attribution,
+        p1: p0, onGeometry: p0OnGeometry, p1Attribution: p0Attribution,
+      }
       this._updatePreviewLine()
       return
     }
@@ -936,7 +1064,10 @@ export class TapeMeasureTool implements Tool {
       // A real second click (not a typed distance — `_commitFromTyped` never
       // calls this) — remember it for the retroactive-rescale recall
       // (tape-measure-rework part 2) before committing.
-      this._rememberMeasurement(this.stage.p0, this.stage.p0OnGeometry, p1, snapOnGeometry(snap))
+      this._rememberMeasurement(
+        this.stage.p0, this.stage.p0OnGeometry, this.stage.p0Attribution,
+        p1, snapOnGeometry(snap), attributionOf(snap),
+      )
       this._commitMeasure(this.stage.p0, p1, snapOnGeometry(snap))
     }
   }
@@ -1581,12 +1712,14 @@ export class TapeMeasureTool implements Tool {
    * already uses.
    */
   private _rememberMeasurement(
-    p0: [number, number, number], p0OnGeometry: boolean,
-    p1: [number, number, number], p1OnGeometry: boolean,
+    p0: [number, number, number], p0OnGeometry: boolean, p0Attribution: GeometryAttribution,
+    p1: [number, number, number], p1OnGeometry: boolean, p1Attribution: GeometryAttribution,
   ): void {
     const dx = p1[0] - p0[0], dy = p1[1] - p0[1], dz = p1[2] - p0[2]
     const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
-    this._recall = (p0OnGeometry && p1OnGeometry && dist > 1e-6) ? { p0, p1, dist } : null
+    this._recall = (p0OnGeometry && p1OnGeometry && dist > 1e-6)
+      ? { p0, p0Attribution, p1, p1Attribution, dist }
+      : null
   }
 
   private _commitParallelGuide(origin: [number, number, number], dir: [number, number, number]): void {
@@ -1690,7 +1823,7 @@ export class TapeMeasureTool implements Tool {
     }
 
     if (this.stage.kind === 'measure') {
-      const { p0, p0OnGeometry, p1, onGeometry } = this.stage
+      const { p0, p0OnGeometry, p0Attribution, p1, onGeometry, p1Attribution } = this.stage
       const rel: [number, number, number] = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]]
       const relLen = Math.sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2])
       let dir: [number, number, number]
@@ -1722,6 +1855,19 @@ export class TapeMeasureTool implements Tool {
       // current/typed length has no meaningful "this distance", and falls
       // through to that ordinary commit unchanged.
       if (p0OnGeometry && onGeometry && relLen > 1e-6 && dist > 1e-6) {
+        // Scoped-rescale arm gate (finding 6, group-session.md): a session
+        // is open AND one of the two measured endpoints lies outside its
+        // scope — arming here would let a scoped `rescale_session` translate
+        // the session's contents by whatever this out-of-scope anchor
+        // happens to be, while the measured distance itself never changes
+        // size. Decline the arm outright, exactly like `cancelRescale`'s
+        // live-arm fallback would (the ordinary guide-point commit), rather
+        // than ever reaching the confirmation dialog.
+        if (!this._isAttributionInScope(p0Attribution) || !this._isAttributionInScope(p1Attribution)) {
+          this.onToast(SESSION_SCOPE_RESCALE_DECLINE_MESSAGE)
+          this._commitMeasure(p0, endpoint, false)
+          return
+        }
         this.stage = {
           kind: 'pendingRescale',
           p0,
@@ -1736,7 +1882,7 @@ export class TapeMeasureTool implements Tool {
         // dialog is now asking about (tape-measure-rework part 1.5), rather
         // than blanking it.
         this._pushReadout(formatLength(dist), true)
-        this.onRescaleArmed({ currentDistance: relLen, typedDistance: dist, factor: dist / relLen })
+        this.onRescaleArmed({ currentDistance: relLen, typedDistance: dist, factor: dist / relLen, anchor: p0 })
         return
       }
 
@@ -1762,6 +1908,19 @@ export class TapeMeasureTool implements Tool {
       this.onToast('Type a length greater than zero to resize the model.')
       return
     }
+    // Scoped-rescale arm gate (finding 6, group-session.md) — see
+    // `_commitFromTyped`'s identical gate for the rationale. A recalled arm
+    // has no pending gesture to fall back to, so decline mirrors
+    // `cancelRescale`'s OWN `fromRecall` branch: drop back to idle with the
+    // frozen original reading restored, and leave `_recall` itself intact
+    // (typing again would just decline the same way, harmlessly — a fresh
+    // eligible measurement is what actually clears it).
+    if (!this._isAttributionInScope(r.p0Attribution) || !this._isAttributionInScope(r.p1Attribution)) {
+      this.onToast(SESSION_SCOPE_RESCALE_DECLINE_MESSAGE)
+      this.typed = ''
+      this._pushReadout(formatLength(r.dist), true)
+      return
+    }
     const dir: [number, number, number] = [
       (r.p1[0] - r.p0[0]) / r.dist, (r.p1[1] - r.p0[1]) / r.dist, (r.p1[2] - r.p0[2]) / r.dist,
     ]
@@ -1777,7 +1936,7 @@ export class TapeMeasureTool implements Tool {
     this.typed = ''
     this._clearPreviewLine()
     this._pushReadout(formatLength(dist), true)
-    this.onRescaleArmed({ currentDistance: r.dist, typedDistance: dist, factor })
+    this.onRescaleArmed({ currentDistance: r.dist, typedDistance: dist, factor, anchor: r.p0 })
   }
 
   /**
@@ -1785,18 +1944,37 @@ export class TapeMeasureTool implements Tool {
    * nothing is armed (stray/late call — e.g. Escape and the dialog's own
    * button both resolving the same arm). Errors (a refused factor) toast;
    * either way the tool returns to idle.
+   *
+   * `scoped`/`scopeLabel` are decided by the caller (App's `handleRescaleArmed`,
+   * at ARM time, from the same `sessionStack` the confirmation dialog itself
+   * read) and threaded straight through here rather than re-derived from a
+   * fresh `wasmScene.session_stack()` query — group-session.md's "Tape
+   * Measure scoped rescale": the dialog's copy and this commit must never
+   * disagree about whether a session frame is open. `scoped` false (the
+   * default) is the pre-existing whole-model path, unchanged.
    */
-  confirmRescale(): void {
+  confirmRescale(scoped = false, scopeLabel: string | null = null): void {
     if (this.stage.kind !== 'pendingRescale') return
-    const { factor } = this.stage
+    const { factor, p0 } = this.stage
     try {
-      this.wasmScene.rescale_document(factor)
-      this.onRescaleApplied(factor)
+      if (scoped) {
+        // In-context resize (docs/design/group-session.md): anchored at the
+        // measurement's first point, not the world origin — each session
+        // scope (and, for a component frame, each sibling instance) scales
+        // about its own image of that anchor. The world outside the open
+        // session is untouched, so `onRescaleApplied`'s `scoped` flag tells
+        // the Viewport to skip the camera/grid companion scaling below.
+        this.wasmScene.rescale_session(factor, p0[0], p0[1], p0[2])
+      } else {
+        this.wasmScene.rescale_document(factor)
+      }
+      this.onRescaleApplied(factor, scoped)
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err)
-      this.onToast(`Couldn't resize the model: ${raw}`)
+      const target = scoped ? (scopeLabel ?? 'the selection') : 'the model'
+      this.onToast(`Couldn't resize ${target}: ${raw}`)
     }
-    // The whole document just rescaled — the saved world points (if any
+    // The document/session just rescaled — the saved world points (if any
     // recall was still around) are now stale. Don't rescale them, just drop
     // them (tape-measure-rework part 2).
     this._recall = null

@@ -157,7 +157,7 @@ import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/tr
 import { setShowWelcome } from './settings/welcomeScreen'
 import { resetStlImportUnitForTest } from './settings/stlImportUnit'
 import { makeFileHost, type FileHost } from './io/fileHost'
-import { isPristineDocument } from './App'
+import { isPristineDocument, sameSessionStackIdentity } from './App'
 import type { DocSessionState } from './io/documentSession'
 import type { Scene } from './wasm/loader'
 
@@ -1354,6 +1354,570 @@ describe('App — boolean auto-explode failure surfacing (finding 2)', () => {
       mockScene.object_ids = priorObjectIds
       mockScene.can_scene_undo = priorCanUndo
     }
+  })
+})
+
+describe('App — session-stack menu gating (docs/design/group-session.md)', () => {
+  // Matches every other top-level describe block's own reset (e.g. the
+  // Section Plane block above): without it, `vi.mocked(Viewport).mock.calls`
+  // accumulates across the whole file.
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  /** The `onSessionChange` callback and the (mutable) `apiRef` App handed
+   *  the (mocked) Viewport on its last render — mirrors the Section Plane
+   *  block's `latestViewportProps`. The real Viewport calls this whenever
+   *  the session stack changes; the mock does neither, so the test drives
+   *  it by hand. */
+  function latestViewportProps(): {
+    onSessionChange?: (frames: { node: { kind: string; id: bigint }; label: string }[]) => void
+    apiRef?: { current: { runGroup: (nodes: unknown[]) => unknown } | null }
+  } {
+    const calls = vi.mocked(Viewport).mock.calls
+    return calls[calls.length - 1][0] as never
+  }
+
+  /** Open the Edit menu — a no-op if it's already open. `MenuItem`'s
+   *  `withClose` wrapper only closes the dropdown on an ENABLED item's
+   *  click (its `onClick` fires); a disabled item's `onMouseDown` never
+   *  calls `onClick`, so the menu stays open after probing one — clicking
+   *  the "Edit" trigger again would TOGGLE it closed instead of leaving it
+   *  open, breaking a second probe in the same test. Checking for "Group"
+   *  first (present iff the Edit menu is open) makes opening idempotent
+   *  regardless of which path the previous probe took. */
+  function openEditMenu(): void {
+    if (menubar().queryByText('Group') === null) {
+      fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+    }
+  }
+
+  it('Edit > Group stays enabled while only a GROUP frame is open — its product folds into the group at close', async () => {
+    const priorObjectIds = mockScene.object_ids
+    mockScene.object_ids = vi.fn(() => BigUint64Array.from([1n, 2n]))
+    try {
+      await renderAndLoad()
+
+      const { apiRef, onSessionChange } = latestViewportProps()
+      const runGroup = vi.fn(() => 99n)
+      act(() => {
+        if (apiRef !== undefined) apiRef.current = { runGroup }
+        onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Group 1' }])
+      })
+      // Select AFTER the session opens: `handleSessionChange` clears the
+      // selection on every innermost-frame identity change (design: opening
+      // a session on B while some OTHER node was selected must not leave a
+      // stale, out-of-scope selection lighting up commands), so selecting
+      // first would be wiped out by the session-open itself.
+      act(() => window.__hew_test!.selectObjects(['1', '2']))
+
+      openEditMenu()
+      fireEvent.mouseDown(menubar().getByText('Group'))
+      expect(runGroup).toHaveBeenCalledTimes(1)
+    } finally {
+      mockScene.object_ids = priorObjectIds
+    }
+  })
+
+  it('Edit > Group disables once the INNERMOST frame is a COMPONENT — the kernel refuses ExplodeSessionScope for it', async () => {
+    const priorObjectIds = mockScene.object_ids
+    mockScene.object_ids = vi.fn(() => BigUint64Array.from([1n, 2n]))
+    try {
+      await renderAndLoad()
+
+      const { apiRef, onSessionChange } = latestViewportProps()
+      const runGroup = vi.fn(() => 99n)
+      act(() => {
+        if (apiRef !== undefined) apiRef.current = { runGroup }
+        onSessionChange?.([{ node: { kind: 'instance', id: 60n }, label: 'Box' }])
+      })
+      act(() => window.__hew_test!.selectObjects(['1', '2']))
+
+      openEditMenu()
+      fireEvent.mouseDown(menubar().getByText('Group'))
+      // The disabled item's own onMouseDown never calls onClick — runGroup
+      // must never be reached.
+      expect(runGroup).not.toHaveBeenCalled()
+    } finally {
+      mockScene.object_ids = priorObjectIds
+    }
+  })
+
+  it('re-enables Edit > Group once the component frame closes back to a group-only stack (resync, not a one-shot latch)', async () => {
+    const priorObjectIds = mockScene.object_ids
+    mockScene.object_ids = vi.fn(() => BigUint64Array.from([1n, 2n]))
+    try {
+      await renderAndLoad()
+
+      const { apiRef, onSessionChange } = latestViewportProps()
+      const runGroup = vi.fn(() => 99n)
+      act(() => {
+        if (apiRef !== undefined) apiRef.current = { runGroup }
+        // Nested stack: an outer group with a component frame innermost.
+        onSessionChange?.([
+          { node: { kind: 'group', id: 50n }, label: 'Group 1' },
+          { node: { kind: 'instance', id: 60n }, label: 'Box' },
+        ])
+      })
+      act(() => window.__hew_test!.selectObjects(['1', '2']))
+      openEditMenu()
+      fireEvent.mouseDown(menubar().getByText('Group'))
+      expect(runGroup).not.toHaveBeenCalled()
+
+      // The component frame closes — back to a group-only stack.
+      act(() => {
+        onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Group 1' }])
+      })
+      // Re-select (the innermost frame's identity changed, which clears the
+      // selection — design: `handleSessionChange` clears on every innermost
+      // identity change) before re-checking the gate.
+      act(() => window.__hew_test!.selectObjects(['1', '2']))
+      openEditMenu()
+      fireEvent.mouseDown(menubar().getByText('Group'))
+      expect(runGroup).toHaveBeenCalledTimes(1)
+    } finally {
+      mockScene.object_ids = priorObjectIds
+    }
+  })
+})
+
+describe('App — enterNode entry convergence (adversarial-review finding 1)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    // jsdom does not implement scrollIntoView; DocumentTree calls it on the
+    // selected row's mount effect (see panels/scenePanels.test.tsx's own
+    // polyfill for the same gap).
+    Element.prototype.scrollIntoView = vi.fn()
+  })
+
+  /** Mirrors the session-stack menu-gating block's own helper. */
+  function latestViewportProps(): {
+    onSessionChange?: (frames: { node: { kind: string; id: bigint }; label: string }[]) => void
+    apiRef?: { current: Record<string, unknown> | null }
+  } {
+    const calls = vi.mocked(Viewport).mock.calls
+    return calls[calls.length - 1][0] as never
+  }
+
+  it('repro (a): double-clicking a session MEMBER row keeps the open session open and pushes the member as an object context, instead of closing the session', async () => {
+    await renderAndLoad()
+    const { apiRef, onSessionChange } = latestViewportProps()
+    const runCloseInnermostSession = vi.fn(() => true)
+    const runOpenGroupSession = vi.fn(() => true)
+    const runOpenExplodeSessionOrFallback = vi.fn()
+    act(() => {
+      if (apiRef !== undefined) {
+        apiRef.current = {
+          // The group's session is open — its only member (object 1) has
+          // had its parent link erased by the ungroup posture, so
+          // `scene.node_parent` (the mock's default) reports it as a bare
+          // top-level object with no ancestor: exactly the state that used
+          // to fool `enterNode`'s walk into reading it as "outside every
+          // open frame."
+          sessionStack: () => [{ kind: 'group', id: 50n }],
+          sessionMembers: () => [{ kind: 'object', id: 1n }],
+          hasArmedGesture: () => false,
+          runCloseInnermostSession,
+          runOpenGroupSession,
+          runOpenExplodeSessionOrFallback,
+        }
+      }
+      onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Group 1' }])
+    })
+
+    // The session-member row nests under the group's synthetic header,
+    // labeled positionally ("Object 1" — the group's only, unnamed member).
+    fireEvent.doubleClick(screen.getByText('Object 1'))
+
+    // The bug this fixes closed the WHOLE stack (reading the member's
+    // parent-erased chain as "outside every open frame") before re-homing
+    // the object at the top level. Fixed: the session stays open — no close
+    // call at all — and the member is pushed as a plain object context.
+    expect(runCloseInnermostSession).not.toHaveBeenCalled()
+    expect(runOpenGroupSession).not.toHaveBeenCalled()
+    expect(runOpenExplodeSessionOrFallback).not.toHaveBeenCalled()
+    expect(window.__hew_test!.getSelection()).toEqual([{ kind: 'object', id: '1' }])
+  })
+
+  it('repro (b): double-clicking a nested member GROUP mid-session opens its session directly, without closing the outer frame first', async () => {
+    await renderAndLoad()
+    const { apiRef, onSessionChange } = latestViewportProps()
+    const runCloseInnermostSession = vi.fn(() => true)
+    const runOpenGroupSession = vi.fn(() => true)
+    const runOpenExplodeSessionOrFallback = vi.fn()
+    act(() => {
+      if (apiRef !== undefined) {
+        apiRef.current = {
+          // Group G (id 50) is open; nested group H (id 70) is one of its
+          // live top-level members now (not yet opened itself) — H's OWN
+          // parent link (originally G) was erased the same way, so
+          // `node_parent` reports it with no ancestor either.
+          sessionStack: () => [{ kind: 'group', id: 50n }],
+          sessionMembers: () => [{ kind: 'group', id: 70n }],
+          hasArmedGesture: () => false,
+          runCloseInnermostSession,
+          runOpenGroupSession,
+          runOpenExplodeSessionOrFallback,
+        }
+      }
+      // A distinct label for G's own session-frame header row, so its text
+      // can't collide with H's positional member-row label below.
+      onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Group G' }])
+    })
+
+    // H's positional label as G's sole, unnamed member: "Group 1".
+    fireEvent.doubleClick(screen.getByText('Group 1'))
+
+    // The bug this fixes closed G first (reading H's parent-erased chain as
+    // "outside every open frame"), then tried to open H — hitting the
+    // kernel's `ExplodeSessionNestedGroup` refusal for a session opened on
+    // a target that's no longer top-level. Fixed: G is never closed, and H
+    // opens directly on top of it.
+    expect(runCloseInnermostSession).not.toHaveBeenCalled()
+    expect(runOpenGroupSession).toHaveBeenCalledWith(70n)
+    expect(runOpenExplodeSessionOrFallback).not.toHaveBeenCalled()
+  })
+
+  it('a target genuinely outside the open session still closes the whole stack (unchanged fallback behavior)', async () => {
+    const priorTopLevel = mockScene.top_level_nodes
+    // An unrelated top-level group (id 90), disjoint from the open session
+    // (id 50) and not among its members — the walked chain's root (the
+    // group itself) matches none of `sessionMembers()`.
+    mockScene.top_level_nodes = () => [{ kind: 'group', id: 90n }]
+    try {
+      await renderAndLoad()
+      const { apiRef, onSessionChange } = latestViewportProps()
+      const runCloseInnermostSession = vi.fn(() => true)
+      const runOpenGroupSession = vi.fn(() => true)
+      act(() => {
+        if (apiRef !== undefined) {
+          apiRef.current = {
+            sessionStack: () => [{ kind: 'group', id: 50n }],
+            sessionMembers: () => [{ kind: 'object', id: 1n }],
+            hasArmedGesture: () => false,
+            runCloseInnermostSession,
+            runOpenGroupSession,
+            runOpenExplodeSessionOrFallback: vi.fn(),
+          }
+        }
+        // A distinct label for the OPEN frame's header row, so it can't
+        // collide with the unrelated top-level group's own positional
+        // "Group 1" label below.
+        onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Open Group' }])
+      })
+
+      // The unrelated top-level group's positional label — rendered
+      // undimmed on the path per design, but its walked chain root (itself)
+      // matches none of the open session's members.
+      fireEvent.doubleClick(screen.getByText('Group 1'))
+
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+    } finally {
+      mockScene.top_level_nodes = priorTopLevel
+    }
+  })
+
+  it('finding 3: an armed tool gesture makes enterNode a silent no-op, even for a session member', async () => {
+    await renderAndLoad()
+    const { apiRef, onSessionChange } = latestViewportProps()
+    const runCloseInnermostSession = vi.fn(() => true)
+    act(() => {
+      if (apiRef !== undefined) {
+        apiRef.current = {
+          sessionStack: () => [{ kind: 'group', id: 50n }],
+          sessionMembers: () => [{ kind: 'object', id: 1n }],
+          hasArmedGesture: () => true,
+          runCloseInnermostSession,
+          runOpenGroupSession: vi.fn(() => true),
+          runOpenExplodeSessionOrFallback: vi.fn(),
+        }
+      }
+      onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Group 1' }])
+    })
+
+    fireEvent.doubleClick(screen.getByText('Object 1'))
+
+    // No close, no open, no selection change — matches Escape's own
+    // refusal posture while a gesture is armed (silently ignored).
+    expect(runCloseInnermostSession).not.toHaveBeenCalled()
+    expect(window.__hew_test!.getSelection()).toEqual([])
+  })
+})
+
+describe('sameSessionStackIdentity (adversarial-review finding 5 helper)', () => {
+  it('true for two empty stacks', () => {
+    expect(sameSessionStackIdentity([], [])).toBe(true)
+  })
+
+  it('false when lengths differ', () => {
+    expect(sameSessionStackIdentity([{ node: { kind: 'group', id: 1n } }], [])).toBe(false)
+  })
+
+  it('false when any frame identity differs, even deep in the stack', () => {
+    const a = [{ node: { kind: 'group' as const, id: 1n } }, { node: { kind: 'group' as const, id: 2n } }]
+    const b = [{ node: { kind: 'group' as const, id: 1n } }, { node: { kind: 'group' as const, id: 3n } }]
+    expect(sameSessionStackIdentity(a, b)).toBe(false)
+  })
+
+  it('true for the same frame identities, ignoring an unrelated label field', () => {
+    const a = [{ node: { kind: 'instance' as const, id: 9n }, label: 'Box' }]
+    const b = [{ node: { kind: 'instance' as const, id: 9n }, label: 'Box (renamed)' }]
+    expect(sameSessionStackIdentity(a, b)).toBe(true)
+  })
+})
+
+describe('App — Tape Measure rescale confirmation invalidation (adversarial-review finding 5)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  function latestViewportProps(): {
+    onSessionChange?: (frames: { node: { kind: string; id: bigint }; label: string }[]) => void
+    onRescaleArmed?: (info: { currentDistance: number; typedDistance: number; factor: number; anchor: [number, number, number] }) => void
+    apiRef?: { current: Record<string, unknown> | null }
+  } {
+    const calls = vi.mocked(Viewport).mock.calls
+    return calls[calls.length - 1][0] as never
+  }
+
+  it('any session-stack change while the dialog is pending cancels it instead of leaving it armed against a stale scope', async () => {
+    await renderAndLoad()
+    const { apiRef, onSessionChange } = latestViewportProps()
+    const cancelPendingRescale = vi.fn()
+    const confirmPendingRescale = vi.fn()
+    act(() => {
+      if (apiRef !== undefined) {
+        apiRef.current = {
+          sessionStack: () => [{ kind: 'group', id: 50n }],
+          hasArmedGesture: () => false,
+          cancelPendingRescale,
+          confirmPendingRescale,
+          runCloseInnermostSession: vi.fn(() => true),
+        }
+      }
+      // Arm inside a group session — the dialog captures its innermost
+      // frame (group 50) as the scoped-rescale target.
+      onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Group 1' }])
+    })
+    // Re-fetch: `handleRescaleArmed`'s `[sessionStack]` dep means Viewport
+    // re-rendered with a FRESH `onRescaleArmed` closure after the state
+    // update above — the one destructured before it read the pre-open
+    // (empty) `sessionStack` and would arm the whole-model, unscoped path.
+    act(() => {
+      latestViewportProps().onRescaleArmed?.({ currentDistance: 1, typedDistance: 2, factor: 2, anchor: [0, 0, 0] })
+    })
+    expect(screen.getByRole('dialog', { name: 'Resize Group 1' })).toBeTruthy()
+
+    // The stack changes while the dialog is still up — e.g. Ctrl/Cmd+Z
+    // popped the group session (still live behind the modal). ANY change,
+    // not just the innermost frame's identity, must invalidate the arm.
+    act(() => {
+      onSessionChange?.([])
+    })
+
+    expect(cancelPendingRescale).toHaveBeenCalledTimes(1)
+    expect(confirmPendingRescale).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('a session-stack refresh that leaves every frame identity unchanged does NOT cancel the pending dialog', async () => {
+    await renderAndLoad()
+    const { apiRef, onSessionChange } = latestViewportProps()
+    const cancelPendingRescale = vi.fn()
+    act(() => {
+      if (apiRef !== undefined) {
+        apiRef.current = {
+          sessionStack: () => [{ kind: 'group', id: 50n }],
+          hasArmedGesture: () => false,
+          cancelPendingRescale,
+          confirmPendingRescale: vi.fn(),
+          runCloseInnermostSession: vi.fn(() => true),
+        }
+      }
+      onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Group 1' }])
+    })
+    act(() => {
+      latestViewportProps().onRescaleArmed?.({ currentDistance: 1, typedDistance: 2, factor: 2, anchor: [0, 0, 0] })
+    })
+    expect(screen.getByRole('dialog', { name: 'Resize Group 1' })).toBeTruthy()
+
+    // A same-identity re-push (e.g. a mid-session fold-in re-deriving the
+    // same one-frame stack, unrelated to the dialog) must leave it alone.
+    act(() => {
+      onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Group 1' }])
+    })
+
+    expect(cancelPendingRescale).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog', { name: 'Resize Group 1' })).toBeTruthy()
+  })
+
+  it('Confirm re-checks the live stack and declines instead of applying when it no longer matches the captured scope', async () => {
+    await renderAndLoad()
+    const { apiRef, onSessionChange } = latestViewportProps()
+    const cancelPendingRescale = vi.fn()
+    const confirmPendingRescale = vi.fn()
+    // A mutable box `sessionStack()` reads live — the dialog's onConfirm
+    // handler re-queries this at click time, independent of what
+    // `onSessionChange` last pushed.
+    let liveStack: { kind: string; id: bigint }[] = [{ kind: 'group', id: 50n }]
+    act(() => {
+      if (apiRef !== undefined) {
+        apiRef.current = {
+          sessionStack: () => liveStack,
+          hasArmedGesture: () => false,
+          cancelPendingRescale,
+          confirmPendingRescale,
+          runCloseInnermostSession: vi.fn(() => true),
+        }
+      }
+      onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Group 1' }])
+    })
+    act(() => {
+      latestViewportProps().onRescaleArmed?.({ currentDistance: 1, typedDistance: 2, factor: 2, anchor: [0, 0, 0] })
+    })
+    const dialog = screen.getByRole('dialog', { name: 'Resize Group 1' })
+    expect(dialog).toBeTruthy()
+
+    // The live stack diverges WITHOUT an intervening `onSessionChange` push
+    // (the belt-and-suspenders scenario this re-check exists for).
+    liveStack = [{ kind: 'group', id: 99n }]
+
+    fireEvent.click(within(dialog).getByRole('button', { name: /resize/i }))
+
+    expect(confirmPendingRescale).not.toHaveBeenCalled()
+    expect(cancelPendingRescale).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('App — handleSessionChange selection ordering (adversarial-review finding 4)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    Element.prototype.scrollIntoView = vi.fn()
+  })
+
+  function latestViewportProps(): {
+    onSessionChange?: (frames: { node: { kind: string; id: bigint }; label: string }[]) => void
+    apiRef?: { current: Record<string, unknown> | null }
+  } {
+    const calls = vi.mocked(Viewport).mock.calls
+    return calls[calls.length - 1][0] as never
+  }
+
+  it('enterNode opening a session (which fires onSessionChange synchronously, clearing the selection) still ends with the target selected, not clobbered', async () => {
+    const priorTopLevel = mockScene.top_level_nodes
+    mockScene.top_level_nodes = () => [{ kind: 'group', id: 50n }]
+    try {
+      await renderAndLoad()
+      const { apiRef } = latestViewportProps()
+      // A prior selection that must NOT survive the session opening —
+      // `handleSessionChange`'s own clear-on-innermost-change contract.
+      act(() => window.__hew_test!.selectObjects(['7']))
+      expect(window.__hew_test!.getSelection()).toEqual([{ kind: 'object', id: '7' }])
+
+      act(() => {
+        if (apiRef !== undefined) {
+          apiRef.current = {
+            sessionStack: () => [],
+            sessionMembers: () => null,
+            hasArmedGesture: () => false,
+            runCloseInnermostSession: vi.fn(() => true),
+            // Mirrors the real Viewport: opening the session fires
+            // `onSessionChange` SYNCHRONOUSLY, inside this very call —
+            // exactly the reentrant ordering the old `setSessionStack`
+            // updater-based clear used to lose to `enterNode`'s own
+            // trailing `setSelectedIds([target])`.
+            runOpenGroupSession: (id: bigint) => {
+              latestViewportProps().onSessionChange?.([{ node: { kind: 'group', id }, label: 'Group 1' }])
+              return true
+            },
+            runOpenExplodeSessionOrFallback: vi.fn(),
+          }
+        }
+      })
+
+      fireEvent.doubleClick(screen.getByText('Group 1'))
+
+      // The target (the group just opened) is selected — the session-open
+      // reentrant clear happened first (call order), enterNode's own
+      // trailing select happened last and won.
+      expect(window.__hew_test!.getSelection()).toEqual([{ kind: 'group', id: '50' }])
+    } finally {
+      mockScene.top_level_nodes = priorTopLevel
+    }
+  })
+})
+
+describe('App — armed-gesture guard on breadcrumb close paths (adversarial-review finding 3)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    Element.prototype.scrollIntoView = vi.fn()
+  })
+
+  function latestViewportProps(): {
+    onSessionChange?: (frames: { node: { kind: string; id: bigint }; label: string }[]) => void
+    apiRef?: { current: Record<string, unknown> | null }
+  } {
+    const calls = vi.mocked(Viewport).mock.calls
+    return calls[calls.length - 1][0] as never
+  }
+
+  it('a non-root crumb spanning a session-close is a no-op while a gesture is armed, and works once it is not', async () => {
+    await renderAndLoad()
+    const { apiRef, onSessionChange } = latestViewportProps()
+    const runCloseInnermostSession = vi.fn(() => true)
+    let armed = true
+    act(() => {
+      if (apiRef !== undefined) {
+        apiRef.current = {
+          sessionStack: () => [{ kind: 'group', id: 50n }, { kind: 'group', id: 60n }],
+          sessionMembers: () => null,
+          hasArmedGesture: () => armed,
+          runCloseInnermostSession,
+          runOpenGroupSession: vi.fn(() => true),
+          runOpenExplodeSessionOrFallback: vi.fn(),
+        }
+      }
+      // Two nested group frames — the outer's own crumb (depth 0) is not
+      // the terminal breadcrumb entry, so it renders as a clickable button.
+      onSessionChange?.([
+        { node: { kind: 'group', id: 50n }, label: 'Outer Group' },
+        { node: { kind: 'group', id: 60n }, label: 'Inner Group' },
+      ])
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Outer Group' }))
+    expect(runCloseInnermostSession).not.toHaveBeenCalled()
+
+    armed = false
+    fireEvent.click(screen.getByRole('button', { name: 'Outer Group' }))
+    expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('the root "Model" crumb (handleExitToModel) is a no-op while a gesture is armed, and works once it is not', async () => {
+    await renderAndLoad()
+    const { apiRef, onSessionChange } = latestViewportProps()
+    const runCloseInnermostSession = vi.fn(() => true)
+    let armed = true
+    act(() => {
+      if (apiRef !== undefined) {
+        apiRef.current = {
+          sessionStack: () => [{ kind: 'group', id: 50n }],
+          sessionMembers: () => null,
+          hasArmedGesture: () => armed,
+          runCloseInnermostSession,
+          runOpenGroupSession: vi.fn(() => true),
+          runOpenExplodeSessionOrFallback: vi.fn(),
+        }
+      }
+      onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Group 1' }])
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Model' }))
+    expect(runCloseInnermostSession).not.toHaveBeenCalled()
+
+    armed = false
+    fireEvent.click(screen.getByRole('button', { name: 'Model' }))
+    expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
   })
 })
 
