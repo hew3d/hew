@@ -117,6 +117,27 @@ Only mutations that actually succeeded are recorded — a rejected or failed
 operation never appears, so a recording can't reproduce an operation that
 never really happened.
 
+Mutations that arrive over the live API (an agent or script driving the
+open document, HEW_API.md §11.2) are recorded too, as `api_dispatch`
+entries holding the request verbatim. A session co-authored by a person
+and an agent therefore replays whole; without this the agent's half would
+be invisible, and a bug report built from such a session would silently
+reconstruct a different document than the one that broke. They are stored
+at API altitude rather than expanded into the kernel calls they perform:
+the API is a versioned contract, so a recorded envelope survives kernel
+refactors that would invalidate a kernel-shaped capture, and one envelope
+may be a whole transaction whose grouping into a single undo entry is part
+of what a faithful reproducer has to preserve. Read-only API traffic — an
+agent polling the scene — is not recorded.
+
+Adding this entry did not bump the format version, following the same
+rule every other added call follows: a recording that never used the new
+entry replays on an older build unchanged, and one that does fails to
+parse there loudly rather than replaying into a different document. The
+version marks a breaking change to the envelope's shape, and replay
+rejects anything that does not match it exactly — so bumping for an
+addition would strand every previously frozen reproducer.
+
 High-level command recording runs continuously in the background for every
 open document; it is cheap because operations occur at user-gesture
 frequency, not per frame. A second, optional layer — enabled together with
@@ -142,7 +163,9 @@ A recording is one JSON object.
     { "method": "slice_object", "object": 3, "plane": [0,0,1, 0,0,1] },
     { "method": "transform_object", "object": 3,
       "affine": [1,0,0,0.5, 0,1,0,0, 0,0,1,0] },
-    { "method": "delete_node", "kind": 0, "id": 4 }
+    { "method": "delete_node", "kind": 0, "id": 4 },
+    { "method": "api_dispatch",
+      "frame": "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"hew.solid.extrude\",\"params\":{}}" }
   ],
   "golden_hash": 5678,       // u64. Document state digest after the last
                              //   call — the replay oracle.
@@ -156,6 +179,7 @@ literal internal handles from the recording session.
 
 | `method` | Arguments | Effect |
 |---|---|---|
+| `api_dispatch` | `frame` | re-dispatch one document-mutating live-API request, verbatim (HEW_API.md §11.2) |
 | `begin_ground_sketch` | — | begin a ground-plane sketch |
 | `begin_sketch_on_plane` | `px`,`py`,`pz`,`nx`,`ny`,`nz` | begin a sketch on an arbitrary plane (point + normal, normalized) — the idle plane lock's first-click mint (sketches-on-any-plane design §5) |
 | `sketch_begin_gesture` / `sketch_end_gesture` | `sketch` | bracket one multi-segment commit as a single undo step |

@@ -21,6 +21,7 @@
 //! `version()`/`demo_mesh()` remain from M0 until the viewport fully retires
 //! the demo path.
 
+mod live;
 mod log;
 mod recording;
 
@@ -1323,6 +1324,26 @@ pub struct Scene {
     /// scoped avoids duplicate/ghost inference at sibling placements.
     active_inference_instance: Option<InstanceId>,
     active_inference_sketches: Vec<SketchId>,
+    /// Open live API connections (docs/HEW_API.md §11.2), keyed by the id
+    /// [`Scene::api_connection_open`] minted. Each holds its own
+    /// `api::Connection` dispatch state (granted profile, hello/attach
+    /// lifecycle) — session-only, like `hidden_objects` above, never
+    /// persisted and never fed into the canonical serialization.
+    api_connections: std::collections::HashMap<u32, api::Connection>,
+    /// The next id [`Scene::api_connection_open`] mints. Monotonic for
+    /// this `Scene`'s lifetime — wrapping is astronomically unreachable
+    /// (2^32 live connections in one session) but wraps rather than
+    /// panics if it ever were.
+    next_api_conn_id: u32,
+    /// A JSON-encoded [`live::ViewDirective`] left by the most recent
+    /// [`Scene::api_dispatch`] call whose command was `hew.view.camera`,
+    /// `hew.view.zoom_extents`, or `hew.view.units` and succeeded —
+    /// `None` otherwise, including for a refused view command (which
+    /// changes nothing, view included). [`Scene::take_pending_view_directive`]
+    /// is how the live bridge collects it; see that method and
+    /// `live::ViewDirective`'s doc comment for why this rides a separate
+    /// accessor rather than the JSON-RPC reply itself.
+    pending_view_directive: Option<String>,
 }
 
 impl Default for Scene {
@@ -1727,6 +1748,9 @@ impl Scene {
             hidden_instances: std::collections::HashSet::new(),
             active_inference_instance: None,
             active_inference_sketches: Vec::new(),
+            api_connections: std::collections::HashMap::new(),
+            next_api_conn_id: 0,
+            pending_view_directive: None,
         }
     }
 
@@ -1734,6 +1758,212 @@ impl Scene {
     /// being edited. `None` removes those posed candidates immediately.
     pub fn set_active_inference_instance(&mut self, instance: Option<u64>) {
         self.active_inference_instance = instance.map(instance_id);
+        self.refresh_active_definition_inference();
+    }
+
+    // -------------------------------------------------------------- live API
+
+    /// Opens a new live API connection against this scene's document,
+    /// granted `Profile::App` (docs/HEW_API.md §10, §11.2). Returns the
+    /// connection id the caller must pass to every subsequent
+    /// [`Scene::api_dispatch`]/[`Scene::api_connection_close`] call. The
+    /// Tauri shell opens exactly one of these per accepted socket
+    /// connection, after that connection's `hello` token has already
+    /// checked out (`crates/wasm-api` never sees the token itself).
+    pub fn api_connection_open(&mut self) -> u32 {
+        let id = self.next_api_conn_id;
+        self.next_api_conn_id = self.next_api_conn_id.wrapping_add(1);
+        let identity = format!("live:{id}");
+        self.api_connections
+            .insert(id, api::Connection::new(api::Profile::App, &identity));
+        id
+    }
+
+    /// Closes a live API connection and drops its dispatch state. A no-op
+    /// for an unknown `conn_id` (already closed, or never opened) — the
+    /// Tauri shell's own socket close is the source of truth for when a
+    /// connection ends; this just releases what `Scene` was holding for it.
+    pub fn api_connection_close(&mut self, conn_id: u32) {
+        self.api_connections.remove(&conn_id);
+    }
+
+    /// Dispatches one newline-delimited JSON-RPC frame (docs/HEW_API.md
+    /// §4, §11.2) against `conn_id`'s connection and this scene's live
+    /// document. Returns the serialized JSON-RPC response frame to send
+    /// back, or `None` when the frame carried no reply: a malformed-JSON
+    /// frame still gets an error response (`id: null`), but a
+    /// well-formed client-originated *notification* (no `id`) is dropped
+    /// unexecuted per §4.1 and — per JSON-RPC 2.0 — answers nothing at
+    /// all, not even an error; an unknown `conn_id` also answers nothing,
+    /// since there is no connection to reply through.
+    ///
+    /// A successful non-read-only dispatch reconciles the scene's derived
+    /// caches (inference, mesh cache) exactly as every other `Scene`
+    /// mutator does via [`Scene::reconcile`], so the change is visible in
+    /// the live viewport immediately — docs/HEW_API.md §12's "in front of
+    /// the user's eyes" requirement for `--live`. `crates/api` hands back
+    /// no `DocChange` (it stays kernel-only per DEVELOPMENT.md rule 1, so
+    /// it cannot know about `inference`/`tessellate` caches), so this
+    /// does a full resync ([`Scene::full_resync`]) rather than
+    /// `reconcile`'s touched-set-only update — more work, but still cheap
+    /// for any Hew-sized document since it only re-registers inference
+    /// candidates and never re-tessellates.
+    pub fn api_dispatch(&mut self, conn_id: u32, frame: &str) -> Option<String> {
+        // Cleared unconditionally up front, so every early-return path
+        // below (parse error, unknown connection, a dropped notification)
+        // leaves nothing stale for `take_pending_view_directive` to hand
+        // out from a PREVIOUS dispatch — only a `hew.view.*` command that
+        // both runs and succeeds in this very call sets it again below.
+        self.pending_view_directive = None;
+        let request: api::Request = match serde_json::from_str(frame) {
+            Ok(r) => r,
+            Err(e) => {
+                let resp = api::Response::err(
+                    None,
+                    api::codes::PARSE_ERROR,
+                    &format!("malformed JSON-RPC frame: {e}"),
+                );
+                return Some(serde_json::to_string(&resp).expect("Response serializes"));
+            }
+        };
+        let Some(conn) = self.api_connections.get_mut(&conn_id) else {
+            // Not a protocol case reachable by any well-behaved client —
+            // an unknown conn_id is a Tauri-bridge bug, not a client
+            // error. Best-effort typed reply (id echoed when the frame
+            // had one) rather than a wasm panic.
+            let resp = api::Response::err(
+                request.id.clone(),
+                api::codes::INTERNAL_FAULT,
+                "unknown API connection",
+            );
+            return Some(serde_json::to_string(&resp).expect("Response serializes"));
+        };
+        // Snapshot the method's class before `dispatch` consumes the
+        // request, so the mutation check below doesn't need `crates/api`
+        // to hand anything more back than the JSON-RPC response it
+        // already returns.
+        let method = request.method.clone();
+        // The registry's own answer, not a guess derived from the
+        // command class: class governs transaction eligibility, and
+        // hew.history.undo/redo are solitary for that reason while
+        // plainly changing the document (see
+        // `api::CommandDecl::mutates_document`).
+        let mutates = conn
+            .registry()
+            .get(&method)
+            .is_some_and(|c| c.mutates_document);
+        let mut host = live::LiveHost::default();
+        let outcome = conn.dispatch(&mut self.doc, &mut host, request);
+        let api::DispatchOutcome::Reply(resp) = outcome else {
+            // A dropped client-originated notification: no side effect,
+            // no reply (§4.1).
+            return None;
+        };
+        if resp.error.is_none() && mutates {
+            // Capture and resync on ONE condition, so a recording can
+            // never disagree with the viewport about what changed
+            // (recording::RecordedCall::ApiDispatch). Without this, a
+            // session co-authored by a user and an agent replays with
+            // only half its history — the reproducer silently differs
+            // from the document that broke.
+            recording::record(recording::RecordedCall::ApiDispatch {
+                frame: frame.to_string(),
+            });
+            self.full_resync();
+        }
+        if resp.error.is_none() {
+            // `hew.view.camera`/`zoom_extents`/`units` are NOT `mutates`
+            // (they change no document state — registry.rs's
+            // `mutates_document = false`), so they never reach the branch
+            // above; this is their own hand-off, unconditional on
+            // `mutates` and gated only on success (a refused view command
+            // changes nothing, view included, matching every other
+            // refusal's untouched-document guarantee).
+            self.pending_view_directive = host
+                .directive
+                .take()
+                .map(|d| serde_json::to_string(&d).expect("ViewDirective serializes"));
+        }
+        Some(serde_json::to_string(&resp).expect("Response serializes"))
+    }
+
+    /// Takes (clears) the [`live::ViewDirective`] left by the dispatch this
+    /// `Scene` just ran, JSON-encoded — `None` unless that dispatch's
+    /// command was `hew.view.camera`, `hew.view.zoom_extents`, or
+    /// `hew.view.units` and it succeeded. `app/src/api/liveBridge.ts` calls
+    /// this immediately after every [`Scene::api_dispatch`], in the same
+    /// synchronous JS task, and applies the directive itself: a `Camera`
+    /// directive through the mounted `Viewport`'s existing
+    /// `setCamera`/`setStandardView` (the same calls the Camera menu
+    /// makes), a `ZoomExtents` directive through `Viewport.zoomExtents()`,
+    /// and a `Units` directive through `app/src/settings/units.ts`'s
+    /// `setLengthUnit` directly (not a viewport call). See
+    /// [`live::ViewDirective`]'s doc comment for why this is a separate
+    /// accessor rather than a field riding the JSON-RPC reply itself.
+    ///
+    /// "Takes" rather than "peeks": a directive is one-shot intent from one
+    /// dispatch, not scene state, so leaving it behind would let a LATER,
+    /// unrelated `api_dispatch` call (or a caller that simply forgets to
+    /// check) accidentally replay it.
+    pub fn take_pending_view_directive(&mut self) -> Option<String> {
+        self.pending_view_directive.take()
+    }
+
+    /// Whether `method` is a document-mutating API command, straight
+    /// from the registry (`crates/api`) — the authority on command
+    /// class, and the same fact [`Scene::api_dispatch`] itself uses to
+    /// decide whether to record and re-sync.
+    ///
+    /// Exposed so the webview's live bridge answers "does this dispatch
+    /// need a re-render?" from the registry instead of guessing from the
+    /// method's name. A future mutating command that did not match the
+    /// naming convention would otherwise leave the user's viewport
+    /// silently stale — showing a document that no longer exists.
+    ///
+    /// An unknown method answers `false`: it cannot mutate anything, it
+    /// can only come back as a method-not-found error.
+    pub fn api_method_mutates(&self, method: &str) -> bool {
+        api::Registry::protocol_1()
+            .get(method)
+            .is_some_and(|c| c.mutates_document)
+    }
+
+    /// Fully rebuilds `inference` and clears `mesh_cache` from the
+    /// Document's current state — the live-API-dispatch analogue of
+    /// [`Scene::reconcile`], used by [`Scene::api_dispatch`] after any
+    /// successful non-read-only dispatch. Every visible world object is
+    /// registered at identity, every visible instance's definition
+    /// members at its pose, every guide and sketch re-registered —
+    /// respecting the session-only `hidden_objects`/`hidden_instances`
+    /// sets, unlike [`Scene::load_core`]'s rebuild (which clears those
+    /// sets first, since a whole-document replacement invalidates
+    /// session-only view state that `api_dispatch`'s in-place mutations
+    /// do not).
+    fn full_resync(&mut self) {
+        self.mesh_cache = SecondaryMap::new();
+        self.inference = InferenceScene::new();
+        self.inference.set_axes_frame(self.doc.axes());
+        for id in self.doc.visible_object_ids() {
+            if self.hidden_objects.contains(&id) {
+                continue;
+            }
+            if let Some(object) = self.doc.object(id) {
+                self.inference.add_object(id, object, &Transform::IDENTITY);
+            }
+        }
+        for iid in self.doc.instance_ids() {
+            if !self.hidden_instances.contains(&iid) {
+                self.register_instance(iid);
+            }
+        }
+        for id in self.doc.guide_ids() {
+            if let Some(g) = self.doc.guide(id) {
+                self.inference.add_guide(id, g);
+            }
+        }
+        for sid in self.doc.sketch_ids() {
+            self.register_sketch(sid);
+        }
         self.refresh_active_definition_inference();
     }
 
@@ -6966,6 +7196,38 @@ impl Scene {
         self.doc.save_for_persistence()
     }
 
+    /// Exports the document to `format` (`"stl" | "3mf" | "glb" | "gltf"`)
+    /// via `crates/mesh-export` — the same writers `hew-cli` and the
+    /// `hew.doc.export` live-API command use, now the desktop app's own
+    /// File > Export path too (the app's former TypeScript exporters,
+    /// `app/src/io/exporters/{stlExport,threeMfExport,gltfExport}.ts`, are
+    /// retired). `segments_per_turn` is the curve re-facet resolution (0 =
+    /// stored facets).
+    ///
+    /// Returns `None` — never a refusal — when nothing survives the
+    /// traversal (an empty document, or every object collapsing to
+    /// degenerate triangles): the same "nothing to export" the app's own
+    /// retired writers reported, now [`mesh_export::ExportError::NothingToExport`]
+    /// underneath. Passes `solids_only: false` (`crates/mesh-export`'s
+    /// module doc, "Non-solid inclusion"): the app's own solid-gating
+    /// dialog (`collectNonSolidObjects`, `app/src/App.tsx`) warns about
+    /// non-solid objects before an STL/3MF export, but the export itself
+    /// has always included them regardless — this keeps that exact
+    /// behavior rather than starting to silently drop geometry.
+    ///
+    /// wasm-bindgen marshals `Option<Vec<u8>>` to `Uint8Array | undefined`.
+    pub fn export(
+        &self,
+        format: &str,
+        segments_per_turn: u32,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        match mesh_export::export(&self.doc, format, segments_per_turn, false) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(mesh_export::ExportError::NothingToExport) => Ok(None),
+            Err(e) => Err(ApiError::new(e.name(), &e.message())),
+        }
+    }
+
     /// A canonical, deterministic digest of the document's live state
     /// ([`Document::state_hash`],  / docs/DEVELOPMENT.md). Read-only — the oracle
     /// for record/replay, the diagnostic-log op stamps, and the determinism
@@ -7053,6 +7315,9 @@ impl Scene {
                 ),
             ));
         }
+        // Opened on the first recorded API envelope, if any — a
+        // recording with none pays nothing.
+        let mut replay_conn: Option<u32> = None;
         recording::without_capture(|| {
             for call in rec.calls {
                 match call {
@@ -7839,10 +8104,53 @@ impl Scene {
                             &affine,
                         )?;
                     }
+                    ApiDispatch { frame } => {
+                        // Replayed through a real connection, so the
+                        // envelope takes exactly the path it took live —
+                        // including the transaction bracket that makes it
+                        // one compound undo entry. The connection is
+                        // opened lazily and primed once: only mutating
+                        // frames are recorded, and the handshake that
+                        // precedes them is read-only, so it is never in
+                        // the stream and has to be synthesized here.
+                        let conn = match replay_conn {
+                            Some(id) => id,
+                            None => {
+                                let id = self.api_connection_open();
+                                self.api_dispatch(
+                                    id,
+                                    r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+                                );
+                                self.api_dispatch(
+                                    id,
+                                    r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+                                );
+                                replay_conn = Some(id);
+                                id
+                            }
+                        };
+                        let reply = self.api_dispatch(conn, &frame);
+                        // A frame is only ever recorded once it has
+                        // succeeded, so a refusal here means the replay
+                        // has already diverged from the session — fail
+                        // loudly rather than hand back a wrong hash.
+                        if let Some(reply) = reply
+                            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&reply)
+                            && let Some(err) = value.get("error")
+                        {
+                            return Err(ApiError::new(
+                                "REPLAY",
+                                &format!("recorded API envelope was refused on replay: {err}"),
+                            ));
+                        }
+                    }
                 }
             }
             Ok(())
         })?;
+        if let Some(id) = replay_conn {
+            self.api_connection_close(id);
+        }
         Ok(self.doc.state_hash())
     }
 
@@ -8026,6 +8334,41 @@ mod tests {
             .unwrap()
             .expect("loaded circle center snaps");
         assert_eq!(snap.kind(), "center");
+    }
+
+    /// `Scene::export` reaches the exact same shared writer
+    /// `crates/mesh-export` gives every host — mirrors
+    /// `crates/wasm-api/src/live.rs`'s `export_document_hands_back_bytes_
+    /// matching_the_shared_writer`, but for the desktop app's own
+    /// interactive path (`Scene::export`) rather than the `hew.doc.export`
+    /// dispatch (`LiveHost::export_document`) — the two differ in exactly
+    /// one argument (`solids_only`), pinned here.
+    #[test]
+    fn export_reaches_the_shared_writer_with_solids_only_false() {
+        let mut scene = Scene::new();
+        let sketch = scene.begin_ground_sketch();
+        draw_rect(&mut scene, sketch, 0.0, 0.0, 1.0, 1.0);
+        let region = scene.sketch_regions(sketch).unwrap()[0];
+        scene.extrude_region(sketch, region, 1.0).unwrap();
+
+        let bytes = scene
+            .export("stl", 0)
+            .expect("a solid box exports")
+            .expect("bytes come back, not a nothing-to-export null");
+        let direct = mesh_export::export(&scene.doc, "stl", 0, false)
+            .expect("the same writer, called directly with the same solids_only");
+        assert_eq!(
+            bytes, direct,
+            "Scene::export matches mesh_export::export(..., solids_only: false) byte for byte"
+        );
+
+        // An unrecognized format still refuses, typed.
+        let err = scene.export("obj", 0).unwrap_err();
+        assert!(format!("{err:?}").contains("host_capability_missing"));
+
+        // Nothing at all: None, not a refusal.
+        let empty = Scene::new();
+        assert_eq!(empty.export("stl", 0).unwrap(), None);
     }
 
     /// Move+Alt's sketch copy is a translated replay through the drawing
@@ -10049,6 +10392,181 @@ mod tests {
 
         // Stale object/face reads back undefined, not a stale range.
         assert_eq!(scene.face_mesh_range(u64::MAX, face), None);
+    }
+
+    /// A session co-authored by the user and an agent — UI gestures
+    /// interleaved with live-API envelopes — replays WHOLE. Before
+    /// `RecordedCall::ApiDispatch`, the API half was invisible to the
+    /// recorder, so a reproducer built from such a session silently
+    /// reconstructed a different document: the agent's geometry simply
+    /// missing, the golden hash unmatchable. That is the exact failure
+    /// this pins.
+    #[test]
+    fn a_session_mixing_ui_gestures_and_live_api_envelopes_replays_whole() {
+        let mut scene = Scene::new();
+        recording::start();
+
+        // UI half: draw and extrude a square the ordinary way.
+        let (sketch, region) = ground_unit_square(&mut scene);
+        scene.extrude_region(sketch, region, 0.5).expect("extrude");
+
+        // Agent half: a second solid, built entirely over the live API
+        // inside one transaction ($ref chaining, exactly as an MCP client
+        // drives it).
+        let conn = scene.api_connection_open();
+        scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+        );
+        scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+        );
+        let reply = scene
+            .api_dispatch(
+                conn,
+                r#"{"jsonrpc":"2.0","id":2,"method":"hew.doc.transact","params":{"label":"Agent box","commands":[
+                    {"method":"hew.sketch.draw_rect","as":"s1","params":{"plane":{"origin":[5,0,0],"normal":[0,0,1]},"corner_a":[5,0,0],"corner_b":[6,1,0]}},
+                    {"method":"hew.solid.extrude","params":{"region":{"$ref":"s1#/region_id"},"distance":0.25}}]}}"#,
+            )
+            .expect("transact replies");
+        assert!(
+            !reply.contains("\"error\""),
+            "the agent's transaction must succeed: {reply}"
+        );
+        scene.api_connection_close(conn);
+
+        let golden = scene.state_hash();
+        recording::stop();
+        let calls = recording::take_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, recording::RecordedCall::ApiDispatch { .. })),
+            "the API envelope must have been captured"
+        );
+
+        let artifact = serde_json::to_string(&recording::Recording {
+            version: recording::RECORDING_FORMAT_VERSION,
+            calls,
+            golden_hash: golden,
+        })
+        .expect("recording serializes");
+
+        let mut fresh = Scene::new();
+        let replayed = fresh.replay(&artifact).expect("replay succeeds");
+        assert_eq!(
+            replayed, golden,
+            "replaying both halves must reproduce the session's document exactly"
+        );
+    }
+
+    /// `hew.history.undo` over the live API is a document change and must
+    /// be recorded like any other. It is classed `Solitary` — it cannot
+    /// ride inside the very history it moves — so deriving "did this
+    /// mutate?" from the command class skipped it: the recording lost the
+    /// undo, and the viewport kept showing geometry the agent had just
+    /// removed. Found by adversarial review.
+    #[test]
+    fn a_live_api_undo_is_recorded_and_replays() {
+        let mut scene = Scene::new();
+        recording::start();
+        let (sketch, region) = ground_unit_square(&mut scene);
+        scene.extrude_region(sketch, region, 0.5).expect("extrude");
+
+        let conn = scene.api_connection_open();
+        scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+        );
+        scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+        );
+        let reply = scene
+            .api_dispatch(
+                conn,
+                r#"{"jsonrpc":"2.0","id":2,"method":"hew.history.undo","params":{}}"#,
+            )
+            .expect("undo replies");
+        assert!(!reply.contains("\"error\""), "undo must succeed: {reply}");
+        scene.api_connection_close(conn);
+
+        let golden = scene.state_hash();
+        recording::stop();
+        let calls = recording::take_calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| matches!(c, recording::RecordedCall::ApiDispatch { frame } if frame.contains("history.undo"))),
+            "the agent's undo must be in the recording: {calls:?}"
+        );
+
+        let artifact = serde_json::to_string(&recording::Recording {
+            version: recording::RECORDING_FORMAT_VERSION,
+            calls,
+            golden_hash: golden,
+        })
+        .expect("recording serializes");
+        let mut fresh = Scene::new();
+        assert_eq!(
+            fresh.replay(&artifact).expect("replay succeeds"),
+            golden,
+            "a session ending in an API undo must replay to the same document"
+        );
+    }
+
+    /// A read-only envelope is NOT recorded — an agent polling
+    /// `hew.query.scene` must not bloat every recording with traffic that
+    /// changed nothing.
+    #[test]
+    fn read_only_api_traffic_is_not_recorded() {
+        let mut scene = Scene::new();
+        recording::start();
+        let conn = scene.api_connection_open();
+        scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+        );
+        scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+        );
+        scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","id":2,"method":"hew.query.scene","params":{}}"#,
+        );
+        recording::stop();
+        let calls = recording::take_calls();
+        assert!(
+            calls.is_empty(),
+            "read-only API traffic must not be recorded: {calls:?}"
+        );
+    }
+
+    /// The bridge's "does this need a re-render?" question is answered by
+    /// the registry, not by a method-name convention.
+    #[test]
+    fn api_method_mutates_reads_the_registry() {
+        let scene = Scene::new();
+        assert!(scene.api_method_mutates("hew.solid.extrude"));
+        assert!(scene.api_method_mutates("hew.doc.transact"));
+        assert!(!scene.api_method_mutates("hew.query.scene"));
+        assert!(
+            !scene.api_method_mutates("hew.doc.attach"),
+            "attach is connection state, not a document change"
+        );
+        assert!(
+            scene.api_method_mutates("hew.history.undo"),
+            "undo is solitary because it cannot ride inside the history it moves — \
+             but it absolutely changes the document, and a host that skipped it \
+             would leave the viewport showing geometry that is no longer there"
+        );
+        assert!(scene.api_method_mutates("hew.history.redo"));
+        assert!(
+            !scene.api_method_mutates("hew.not.a.command"),
+            "an unknown method cannot mutate — it can only come back as method-not-found"
+        );
     }
 
     /// A version mismatch in a recording artifact is rejected, not mis-replayed.
@@ -13312,5 +13830,127 @@ mod tests {
             "replaying a begin_sketch_on_plane session reproduces the golden state_hash"
         );
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    // ------------------------------------------------------------ live API
+
+    fn hello_and_attach(scene: &mut Scene, conn: u32) {
+        assert!(
+            scene
+                .api_dispatch(
+                    conn,
+                    r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+                )
+                .unwrap()
+                .contains("\"profile\":\"app\"")
+        );
+        let reply = scene
+            .api_dispatch(
+                conn,
+                r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+            )
+            .unwrap();
+        assert!(reply.contains("\"result\""), "attach succeeds: {reply}");
+    }
+
+    #[test]
+    fn api_dispatch_runs_a_mutating_command_and_it_shows_up_live() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+
+        let reply = scene
+            .api_dispatch(
+                conn,
+                r#"{"jsonrpc":"2.0","id":2,"method":"hew.sketch.draw_rect",
+                    "params":{"plane":{"ground":true},"corner_a":[0.0,0.0,0.0],"corner_b":[1.0,1.0,0.0]}}"#,
+            )
+            .expect("a request always gets a reply");
+        assert!(reply.contains("\"result\""), "draw_rect succeeds: {reply}");
+        assert_eq!(
+            scene.sketch_ids().len(),
+            1,
+            "the sketch dispatched over the live API is the SAME document the viewport reads"
+        );
+    }
+
+    #[test]
+    fn api_dispatch_malformed_json_answers_a_parse_error_with_null_id() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        let reply = scene.api_dispatch(conn, "not json").unwrap();
+        assert!(reply.contains("\"id\":null"), "got {reply}");
+        assert!(reply.contains("-32700"), "PARSE_ERROR code: {reply}");
+    }
+
+    #[test]
+    fn api_dispatch_unknown_connection_answers_typed_instead_of_panicking() {
+        let mut scene = Scene::new();
+        let reply = scene
+            .api_dispatch(
+                999,
+                r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+            )
+            .unwrap();
+        assert!(reply.contains("-32003"), "INTERNAL_FAULT code: {reply}");
+    }
+
+    #[test]
+    fn api_dispatch_notification_is_dropped_with_no_reply() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let reply = scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","method":"hew.sketch.draw_rect",
+                "params":{"plane":{"ground":true},"corner_a":[0.0,0.0,0.0],"corner_b":[1.0,1.0,0.0]}}"#,
+        );
+        assert!(reply.is_none(), "a notification (no id) gets no reply");
+        assert!(
+            scene.sketch_ids().is_empty(),
+            "a dropped notification must not execute (§4.1)"
+        );
+    }
+
+    #[test]
+    fn api_connection_close_forgets_the_connection() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        scene.api_connection_close(conn);
+        let reply = scene
+            .api_dispatch(
+                conn,
+                r#"{"jsonrpc":"2.0","id":5,"method":"hew.query.scene","params":{}}"#,
+            )
+            .unwrap();
+        assert!(
+            reply.contains("-32003"),
+            "a closed connection is unknown again: {reply}"
+        );
+    }
+
+    /// `hew.doc.new` is host-served and `LiveHost` refuses it typed
+    /// (crates/wasm-api/src/live.rs) — a remote connection must not be
+    /// able to wipe the user's live document out from under them.
+    #[test]
+    fn api_dispatch_refuses_doc_new_and_leaves_the_document_untouched() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        scene.begin_ground_sketch();
+
+        let reply = scene
+            .api_dispatch(
+                conn,
+                r#"{"jsonrpc":"2.0","id":2,"method":"hew.doc.new","params":{}}"#,
+            )
+            .unwrap();
+        assert!(reply.contains("host_capability_missing"), "got {reply}");
+        assert_eq!(
+            scene.sketch_ids().len(),
+            1,
+            "the refused hew.doc.new left the live document untouched"
+        );
     }
 }

@@ -29,6 +29,7 @@ import { tagPathKey, isPathUnder } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { installTestHarness } from './test/harness'
+import { installLiveBridge } from './api/liveBridge'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
 import { makeFileHost, isTauri, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
@@ -57,7 +58,7 @@ import { setLastStlImportUnit } from './settings/stlImportUnit'
 import { ExportDialog, type ExportFormat } from './panels/ExportDialog'
 import { TextDialog, type TextDialogResult } from './panels/TextDialog'
 import { layoutGlyphRun } from './text/glyphRun'
-import { collectNonSolidObjects } from './io/exporters/stlExport'
+import { collectNonSolidObjects } from './io/solidGating'
 import { friendlyErrorText, isErrorLevelCode, kernelErrorMessage } from './kernelErrors'
 import { CommandPalette } from './palette/CommandPalette'
 import { toolHint, toolActionId, type PaletteEntry } from './palette/registry'
@@ -1110,6 +1111,18 @@ export default function App() {
       loadBytes: (bytes) => applyLoadedBytesRef.current?.(bytes) ?? false,
       toggleTagPath: (path) => toggleTagPathRef.current(path),
       deleteTag: (path) => deleteTagRef.current(path),
+    })
+  }, [])
+
+  // The desktop half of `--live` (docs/HEW_API.md §11.2): wires the Tauri
+  // shell's local-socket JSON-RPC frames to this document's own live
+  // Scene, exactly like installTestHarness above — a no-op outside Tauri
+  // (isTauri gate lives inside installLiveBridge itself).
+  useEffect(() => {
+    return installLiveBridge({
+      getScene: () => sceneRef.current,
+      getViewportApi: () => viewportApi.current,
+      reconcile: () => reconcileRef.current(),
     })
   }, [])
 
@@ -2242,14 +2255,14 @@ export default function App() {
       handleToast('Export failed: viewport not ready.')
       return
     }
-    let result: Awaited<ReturnType<typeof api.exportStl>>
+    let bytes: Uint8Array | null
     try {
-      result = await api.exportStl(stlSegmentsRef.current)
+      bytes = await api.exportStl(stlSegmentsRef.current)
     } catch (err: unknown) {
       handleToast(`Export failed: ${friendlyErrorText(err)}`)
       return
     }
-    if (result === null) {
+    if (bytes === null) {
       handleToast('Nothing to export — the model has no solids.')
       return
     }
@@ -2257,20 +2270,14 @@ export default function App() {
     const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
     const base = rawBase.replace(/\.hew$/i, '')
     try {
-      const ok = await fileHostRef.current.exportBinary(result.bytes, base, {
+      const ok = await fileHostRef.current.exportBinary(bytes, base, {
         description: 'STL (Binary)',
         ext: 'stl',
         mime: 'model/stl',
       })
       if (ok) {
         handleToast('Exported STL.')
-        LogStore.log.info(
-          'app',
-          `Exported STL (${result.triangleCount} triangles, ${result.bytes.length} bytes` +
-            (result.skippedDegenerate > 0
-              ? `, ${result.skippedDegenerate} degenerate triangles skipped)`
-              : ')'),
-        )
+        LogStore.log.info('app', `Exported STL (${bytes.length} bytes)`)
       }
     } catch (err: unknown) {
       handleToast(`Export failed: ${friendlyErrorText(err)}`)
@@ -2285,14 +2292,14 @@ export default function App() {
       handleToast('Export failed: viewport not ready.')
       return
     }
-    let result: Awaited<ReturnType<typeof api.export3mf>>
+    let bytes: Uint8Array | null
     try {
-      result = await api.export3mf()
+      bytes = await api.export3mf()
     } catch (err: unknown) {
       handleToast(`Export failed: ${friendlyErrorText(err)}`)
       return
     }
-    if (result === null) {
+    if (bytes === null) {
       handleToast('Nothing to export — the model has no solids.')
       return
     }
@@ -2300,21 +2307,14 @@ export default function App() {
     const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
     const base = rawBase.replace(/\.hew$/i, '')
     try {
-      const ok = await fileHostRef.current.exportBinary(result.bytes, base, {
+      const ok = await fileHostRef.current.exportBinary(bytes, base, {
         description: '3MF',
         ext: '3mf',
         mime: 'model/3mf',
       })
       if (ok) {
         handleToast('Exported 3MF.')
-        LogStore.log.info(
-          'app',
-          `Exported 3MF (${result.objectCount} parts, ${result.triangleCount} triangles, ` +
-            `${result.bytes.length} bytes` +
-            (result.skippedDegenerate > 0
-              ? `, ${result.skippedDegenerate} degenerate triangles skipped)`
-              : ')'),
-        )
+        LogStore.log.info('app', `Exported 3MF (${bytes.length} bytes)`)
       }
     } catch (err: unknown) {
       handleToast(`Export failed: ${friendlyErrorText(err)}`)

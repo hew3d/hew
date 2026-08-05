@@ -34,9 +34,6 @@ import { SceneRenderer, type RefreshTouched } from './SceneRenderer'
 import { expandByVisibleObject } from './visibleBounds'
 import { SectionManager, rescaleSectionPlane } from './sectionManager'
 import * as inputRecorder from '../recording/inputRecorder'
-import { exportSceneToGlb } from '../io/exporters/gltfExport'
-import { exportSceneToStl, type StlBuildResult } from '../io/exporters/stlExport'
-import { exportSceneTo3mf, type ThreeMfBuildResult } from '../io/exporters/threeMfExport'
 import { ToolController } from '../tools/ToolController'
 import { RectangleTool } from '../tools/RectangleTool'
 import { CircleTool } from '../tools/CircleTool'
@@ -619,12 +616,19 @@ export interface ViewportApi {
    * Pin the camera to an explicit pose ( `__hew_test.setCamera`): position,
    * orbit target, up, vertical FOV (deg). Deterministic framing for E2E / pixel
    * tests; mirrors the recorded `camera` input shape and  `PINNED_CAMERA`.
+   *
+   * `projection` defaults to `'perspective'` — `__hew_test`'s only caller
+   * (`harness.ts`) never passes it, preserving that path's original
+   * "always forces perspective" behavior exactly. `hew.view.camera`'s live
+   * bridge (`app/src/api/liveBridge.ts`) is the one caller that passes
+   * `'parallel'` explicitly, for a camera spec whose `projection` says so.
    */
   setCamera: (
     position: [number, number, number],
     target: [number, number, number],
     up: [number, number, number],
     fovDeg: number,
+    projection?: Projection,
   ) => void
   /**
    * Render the scene at the current camera and read the framebuffer back
@@ -774,23 +778,26 @@ export interface ViewportApi {
     clipPlane: { normal: [number, number, number]; constant: number } | null
   }
   /**
-   * Serialize the current solid geometry (objects + instances) to a binary
-   * glTF (.glb) buffer. Resolves null when the model has no solids.
+   * Serialize the current scene (objects + instances) to a binary glTF
+   * (.glb) buffer via `crates/mesh-export` (the shared Rust writer,
+   * `wasmScene.export`). Resolves null when nothing exports (an empty
+   * document, or everything collapsing to degenerate triangles).
    */
   exportGlb: () => Promise<Uint8Array | null>
   /**
-   * Serialize the current solid geometry (objects + instances) to a binary
-   * STL buffer — millimeter scale, Z-up, cylinder walls re-faceted at
-   * `segmentsPerTurn` (0 = stored facets). Resolves null when the model has
-   * no solids.
+   * Serialize the current scene (objects + instances) to a binary STL
+   * buffer via `crates/mesh-export` — millimeter scale, Z-up, cylinder
+   * walls re-faceted at `segmentsPerTurn` (0 = stored facets). Resolves
+   * null when nothing exports.
    */
-  exportStl: (segmentsPerTurn: number) => Promise<StlBuildResult | null>
+  exportStl: (segmentsPerTurn: number) => Promise<Uint8Array | null>
   /**
-   * Serialize the current solid geometry (objects + instances) to a 3MF
-   * container — millimeter unit, Z-up, one named colored mesh per part.
-   * Resolves null when the model has no solids.
+   * Serialize the current scene (objects + instances) to a 3MF container
+   * via `crates/mesh-export` — meter unit, Z-up, one named colored mesh
+   * per part, colors via core-spec `<basematerials>`. Resolves null when
+   * nothing exports.
    */
-  export3mf: () => Promise<ThreeMfBuildResult | null>
+  export3mf: () => Promise<Uint8Array | null>
   /**
    * Camera ▸ Parallel Projection (docs/design/camera.md §1): toggles between
    * perspective and parallel projection, visually stable at the orbit
@@ -4233,17 +4240,24 @@ export default function Viewport({
       target: [number, number, number],
       up: [number, number, number],
       fovDeg: number,
+      projection: Projection = 'perspective',
     ): void {
-      // Test-pinning helper (__hew_test.setCamera): always forces perspective
-      // — deterministic framing for E2E/pixel tests shouldn't depend on
-      // whatever projection a PRIOR test left the rig in. Routed through the
-      // SAME rebindControlsForProjectionChange helper the interactive
-      // Camera ▸ Parallel Projection toggle uses (below) instead of
-      // reassigning `camera` inline — forcing the rig's projection without
-      // also rebuilding OrbitControls left `controls` bound to the
-      // now-inactive camera, permanently freezing input (OrbitControls
-      // binds to one camera for its whole lifetime; a projection change
-      // can't just mutate `.object`).
+      // Test-pinning helper (__hew_test.setCamera) and hew.view.camera's
+      // live bridge share this. Always poses the PERSPECTIVE camera first,
+      // regardless of the REQUESTED `projection`: `CameraRig.toggleProjection`'s
+      // perspective->parallel half (`matchOrthoToPerspective`) derives the
+      // ortho frustum from the perspective camera's CURRENT pose/fov, so a
+      // 'parallel' request still needs a correctly-posed perspective camera
+      // to toggle FROM — hence forcing to perspective up front (whatever
+      // the rig's prior projection was) rather than only when the request
+      // itself is perspective. Routed through the SAME
+      // rebindControlsForProjectionChange helper the interactive Camera ▸
+      // Parallel Projection toggle uses (below) instead of reassigning
+      // `camera` inline — forcing the rig's projection without also
+      // rebuilding OrbitControls left `controls` bound to the now-inactive
+      // camera, permanently freezing input (OrbitControls binds to one
+      // camera for its whole lifetime; a projection change can't just
+      // mutate `.object`).
       if (rig.projection !== 'perspective') {
         rig.toggleProjection(controls.target)
         rebindControlsForProjectionChange()
@@ -4252,6 +4266,10 @@ export default function Viewport({
       controls.target.set(target[0], target[1], target[2])
       rig.perspective.up.set(up[0], up[1], up[2])
       rig.setFov(fovDeg)
+      if (projection === 'parallel') {
+        rig.toggleProjection(controls.target)
+        rebindControlsForProjectionChange()
+      }
       controls.update()
       scheduleRender()
     }
@@ -4677,18 +4695,20 @@ export default function Viewport({
       }
     }
 
+    // All three formats now go through the one shared Rust writer
+    // (`crates/mesh-export`, exposed as `Scene.export`) rather than the
+    // app's own retired TypeScript exporters — the three.js scene is not
+    // involved for any of them anymore.
     async function exportGlb(): Promise<Uint8Array | null> {
-      return exportSceneToGlb(sceneRenderer)
+      return wasmScene.export('glb', 0) ?? null
     }
 
-    async function exportStl(segmentsPerTurn: number): Promise<StlBuildResult | null> {
-      // Kernel-sourced: the wasm scene serves export tessellation directly
-      // (re-faceted true curves); the three.js scene is not involved.
-      return exportSceneToStl(wasmScene, segmentsPerTurn)
+    async function exportStl(segmentsPerTurn: number): Promise<Uint8Array | null> {
+      return wasmScene.export('stl', segmentsPerTurn) ?? null
     }
 
-    async function export3mf(): Promise<ThreeMfBuildResult | null> {
-      return exportSceneTo3mf(sceneRenderer, wasmSceneRef.current)
+    async function export3mf(): Promise<Uint8Array | null> {
+      return wasmScene.export('3mf', 0) ?? null
     }
 
     if (apiRefRef.current !== undefined) {

@@ -32,6 +32,31 @@ tauri-plugin-opener = "2.5.4"
 # this (DEVELOPMENT.md rule 1).
 fontdb = "0.23.0"
 
+# Windows named-pipe transport for `--live` (docs/HEW_API.md §11.2):
+# CreateNamedPipeW/ConnectNamedPipe/ReadFile/WriteFile, a per-user security
+# descriptor (Win32_Security_Authorization), BCryptGenRandom for the
+# discovery token, and OpenProcess for the stale-discovery-file sweep. All
+# synchronous, mirroring the unix half's plain std::thread design — see
+# src/live.rs's module doc for why windows-sys (not tokio, already
+# transitively present via tauri/reqwest) was chosen. Target-gated so
+# macOS/Linux builds gain nothing.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    # Not used directly (no overlapped I/O here — every pipe handle is
+    # blocking), but `ConnectNamedPipe`/`ReadFile`/`WriteFile` all take an
+    # `OVERLAPPED` parameter (always null in this transport) in their
+    # signatures, so windows-sys gates those functions' very existence
+    # behind this feature.
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+] }
+
 [features]
 # The in-app auto-updater: a check on launch plus a manual "Check for
 # Updates" menu item, talking to the signed `latest.json` published on

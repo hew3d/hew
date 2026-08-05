@@ -25,9 +25,16 @@ use std::cell::{Cell, RefCell};
 
 use serde::{Deserialize, Serialize};
 
-/// Bump on any breaking change to the [`Recording`] JSON shape. v2 = typed
-/// replayable calls (v1 was the log-tap hash-chain). See
+/// Bump on any breaking change to the [`Recording`] JSON shape. v2 =
+/// typed replayable calls (v1 was the log-tap hash-chain). See
 /// `docs/DIAGNOSTICS.md`.
+///
+/// [`RecordedCall::ApiDispatch`] did NOT bump this, matching the posture
+/// every other additive variant documents: an old recording replays on a
+/// new build unchanged, and a new recording using the variant fails to
+/// parse on an old build — loudly, never silently divergent. Bumping
+/// instead would strand every frozen reproducer, since replay gates on
+/// exact version equality.
 pub const RECORDING_FORMAT_VERSION: u32 = 2;
 
 /// One committed `Scene` mutation, captured with the exact arguments needed to
@@ -795,6 +802,37 @@ pub enum RecordedCall {
         island_sketches: Vec<u64>,
         islands: Vec<u64>,
         affine: [f64; 12],
+    },
+    /// One document-mutating envelope that arrived over the live API
+    /// (`Scene::api_dispatch` — an agent or script driving the open
+    /// document, docs/HEW_API.md §11.2), stored as the raw JSON-RPC
+    /// request text.
+    ///
+    /// Recorded at API altitude rather than expanded into the kernel
+    /// calls it performs, deliberately. The API is the versioned public
+    /// contract (§14's evolution rules), so a recorded envelope stays
+    /// replayable across kernel refactors that would invalidate a
+    /// kernel-shaped capture; and one envelope may be a whole
+    /// transaction, whose label, origin, and single-compound-undo-entry
+    /// grouping are exactly what a faithful reproducer has to preserve.
+    /// Expanding it would reproduce the geometry while silently losing
+    /// the history structure the user sees.
+    ///
+    /// The stored frame's public ids resolve on replay for the same
+    /// reason recorded slotmap handles do (see this module's header): the
+    /// kernel is deterministic, public ids derive from stable ids minted
+    /// in op order, so re-issuing the identical sequence into a fresh
+    /// document mints the identical ids.
+    ///
+    /// Only frames that actually mutated are captured, on the same
+    /// condition that triggers the post-dispatch resync — so a recording
+    /// and the viewport can never disagree about what changed. Read-only
+    /// traffic (an agent polling `hew.query.scene`) is not recorded, and
+    /// no captured frame can carry a discovery token: the handshake that
+    /// bears one is read-only.
+    ApiDispatch {
+        /// The JSON-RPC request text, verbatim.
+        frame: String,
     },
 }
 

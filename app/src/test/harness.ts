@@ -28,7 +28,6 @@
 
 import type { Scene } from '../wasm/loader'
 import type { ViewportApi } from '../viewport/Viewport'
-import { exportSceneToStl, type StlExportScene } from '../io/exporters/stlExport'
 import { nodeKindToNumber, type NodeKind, type NodeRef } from '../panels/treeModel'
 import * as inputRecorder from '../recording/inputRecorder'
 import { buildSessionRecording } from '../recording/sessionRecording'
@@ -214,10 +213,13 @@ export interface HewTestHarness {
   // (portable + structured-cloneable); a box is tiny, so the cost is moot.
   save(): number[]
   load(bytes: number[]): void
-  /** Export the current solid geometry to binary STL bytes (mm, Z-up) through
-   * the app's REAL exporter (`exportSceneToStl`); instances flatten into the
-   * soup. `segmentsPerTurn` re-facets curved walls (0 = stored facets). Null
-   * when nothing solid. Test-only — the round-trip verification uses it. */
+  /** Export the current scene to binary STL bytes (mm, Z-up) through the
+   * app's REAL exporter (`wasmScene.export`, `crates/mesh-export`);
+   * instances flatten into the soup. `segmentsPerTurn` re-facets curved
+   * walls (0 = stored facets). Null when nothing exports. `triangleCount`
+   * is read back out of the binary STL header itself (byte offset 80), not
+   * writer-side bookkeeping. Test-only — the round-trip verification uses
+   * it. */
   exportStl(segmentsPerTurn: number): { bytes: number[]; triangleCount: number } | null
   /** Import binary/ASCII STL bytes through the REAL `scene.import_stl`,
    * returning the ImportReport (object/watertight/leaky/skipped/warnings).
@@ -1137,12 +1139,13 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     exportStl: (segmentsPerTurn) =>
       query((s) => {
-        // The wasm `Scene` structurally satisfies StlExportScene (object_ids /
-        // instance_ids / instance_def / instance_pose / object_export_triangles).
-        const out = exportSceneToStl(s as unknown as StlExportScene, segmentsPerTurn)
-        return out === null
-          ? null
-          : { bytes: Array.from(out.bytes), triangleCount: out.triangleCount }
+        const out = s.export('stl', segmentsPerTurn)
+        if (out === undefined) return null
+        // Binary STL header: 80-byte text header, then a little-endian u32
+        // triangle count (crates/mesh-export's `write_binary_stl`).
+        const view = new DataView(out.buffer, out.byteOffset, out.byteLength)
+        const triangleCount = view.getUint32(80, true)
+        return { bytes: Array.from(out), triangleCount }
       }),
 
     importStl: (bytes, unitScale) =>

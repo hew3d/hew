@@ -26,6 +26,12 @@ use tauri::{
 // (`read_font_file` takes an opaque token, never a path).
 mod fonts;
 
+// The desktop half of `--live` (docs/HEW_API.md §11.2): the local socket
+// transport, the discovery file, and the token gate. See live.rs's
+// top-of-file doc comment for the full contract with
+// crates/wasm-api/src/live.rs (the webview-side dispatch half).
+mod live;
+
 // ---------------------------------------------------------------------------
 // In-app auto-updater (compiled in via the `updater` feature — see Cargo.toml).
 //
@@ -2750,6 +2756,13 @@ fn main() {
                 tauri::async_runtime::spawn(async move { updater::run_check(handle, false).await });
             }
 
+            // `--live` (docs/HEW_API.md §11.2): sweep stale discovery files
+            // from a previous unclean exit, then bind this launch's own
+            // socket and publish its discovery file. Best-effort — see
+            // live::start's doc comment for why a failure here never blocks
+            // the app from starting normally.
+            live::start(handle);
+
             Ok(())
         })
         // Per-window bookkeeping: focus tracking for menu/open routing,
@@ -2931,6 +2944,10 @@ fn main() {
                 if let Some(main_window) = app.get_webview_window("main") {
                     save_window_state(app, &main_window.as_ref().window_ref(), true);
                 }
+                // "removes it on exit" (docs/HEW_API.md §11.2) — a crash
+                // (no RunEvent at all) is instead cleaned up by the NEXT
+                // launch's live::start sweeping stale discovery files.
+                live::cleanup();
             }
             // macOS: intercept "open document" Apple events (warm + cold
             // start). deliver_open emits to the active document window once
