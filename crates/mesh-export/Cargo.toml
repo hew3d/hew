@@ -1,0 +1,11 @@
+[package]
+name = "mesh-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernel.workspace = true
+tessellate.workspace = true
+zip.workspace = true
+serde_json.workspace = true

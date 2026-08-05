@@ -16,11 +16,16 @@ use kernel::{FaceId, MaterialId, MaterialPalette, Object, Rgba8};
 
 mod refacet;
 
-pub use refacet::{MAX_SEGMENTS_PER_TURN, MIN_SEGMENTS_PER_TURN, export_triangles};
+pub use refacet::{
+    MAX_SEGMENTS_PER_TURN, MIN_SEGMENTS_PER_TURN, export_triangles, export_triangles_with_faces,
+};
 
 /// Default face color when no material is assigned (or the id is stale):
-/// a neutral light gray (`0xcccccc`).
-const DEFAULT_MATERIAL_RGBA: Rgba8 = Rgba8::rgb(0xcc, 0xcc, 0xcc);
+/// a neutral light gray (`0xcccccc`). Exposed so other crates resolving a
+/// face's effective color (`crates/mesh-export`'s material-aware export)
+/// use the exact same fallback as the live renderer's own [`tessellate`],
+/// rather than a second copy of the magic number.
+pub const DEFAULT_MATERIAL_RGBA: Rgba8 = Rgba8::rgb(0xcc, 0xcc, 0xcc);
 
 /// Tessellation failed; the Object uses topology this version cannot
 /// triangulate honestly.
@@ -390,8 +395,11 @@ pub fn tessellate(
 
 /// Constructs an orthonormal basis (u, v) on a plane with unit normal `n`,
 /// such that u × v = n (right-handed). Mirrors the implementation in
-/// `crates/inference/src/lib.rs::plane_basis`.
-fn plane_basis(n: kernel::Vec3) -> (kernel::Vec3, kernel::Vec3) {
+/// `crates/inference/src/lib.rs::plane_basis`. Public so a caller resolving
+/// a face's planar UV projection outside this crate (`crates/mesh-export`'s
+/// material-aware export) uses the identical basis [`tessellate`] does,
+/// rather than a second, potentially-diverging copy.
+pub fn plane_basis(n: kernel::Vec3) -> (kernel::Vec3, kernel::Vec3) {
     let helper = if n.x.abs() < 0.9 {
         kernel::Vec3::new(1.0, 0.0, 0.0)
     } else {

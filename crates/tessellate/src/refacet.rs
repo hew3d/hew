@@ -53,7 +53,31 @@ pub fn export_triangles(
     object: &Object,
     segments_per_turn: u32,
 ) -> Result<Vec<f64>, TessellateError> {
+    export_triangles_with_faces(object, segments_per_turn).map(|(soup, _)| soup)
+}
+
+/// Same export as [`export_triangles`], but alongside the triangle soup
+/// returns one [`FaceId`] per emitted triangle — the *originating* face for
+/// a cap/polygon triangle, or a band's chosen *representative* face
+/// (`Band::faces[0]`, the first face slot-order contributed to the band) for
+/// every triangle a re-faceted cylinder wall emits.
+///
+/// That representative choice is the honest one available: a re-faceted
+/// band's stations are resampled on the analytic circle at the caller's
+/// chosen resolution, which deliberately abandons the original per-facet
+/// boundaries (the whole point of true-curve export) — there is no single
+/// "originating face" for a station triangle in general. Callers that need
+/// this for per-triangle material (`crates/mesh-export`) accept that a band
+/// exports under one representative face's material/UV; a band whose facets
+/// were painted uniformly (the common case) loses nothing, and mixed-paint
+/// bands are a narrow, documented approximation rather than a fabricated
+/// per-triangle value.
+pub fn export_triangles_with_faces(
+    object: &Object,
+    segments_per_turn: u32,
+) -> Result<(Vec<f64>, Vec<FaceId>), TessellateError> {
     let mut soup: Vec<f64> = Vec::new();
+    let mut face_ids: Vec<FaceId> = Vec::new();
 
     let refacet_enabled =
         segments_per_turn != 0 && object.watertight() == WatertightState::Watertight;
@@ -110,7 +134,11 @@ pub fn export_triangles(
             continue;
         }
         band_face_set.extend(band.faces.iter().copied());
+        let before = soup.len();
         emit_band(band, &mut soup);
+        let added = (soup.len() - before) / 9;
+        let representative = *band.faces.first().expect("a band always has faces");
+        face_ids.extend(std::iter::repeat_n(representative, added));
     }
 
     for (fid, face) in object.faces() {
@@ -124,10 +152,14 @@ pub fn export_triangles(
                 .map(|l| object.loop_positions(l).collect())
                 .collect(),
         };
+        let before = soup.len();
         emit_polygon(fid, face.plane.normal(), &loops, &mut soup)?;
+        let added = (soup.len() - before) / 9;
+        face_ids.extend(std::iter::repeat_n(fid, added));
     }
 
-    Ok(soup)
+    debug_assert_eq!(soup.len() / 9, face_ids.len());
+    Ok((soup, face_ids))
 }
 
 // ─────────────────────────────────────────────────────────────── bands
