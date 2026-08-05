@@ -1,0 +1,42 @@
+[package]
+name = "hew-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Standalone binary: MCP adapter, script runner, one-shot dispatch
+# (docs/HEW_API.md §12). Headless — embeds `api` + the kernel + the
+# importer crates directly; no UI process anywhere. Not a workspace
+# dependency of anything else (nothing links a binary crate).
+[[bin]]
+name = "hew-cli"
+path = "src/main.rs"
+
+[dependencies]
+api = { workspace = true }
+kernel = { workspace = true }
+tessellate = { workspace = true }
+softrender = { workspace = true }
+mesh-export = { workspace = true }
+stl-import = { workspace = true }
+gltf-import = { workspace = true }
+dae-import = { workspace = true }
+skp-import = { workspace = true }
+serde_json = { workspace = true }
+
+# Windows named-pipe transport for `--live` (docs/HEW_API.md §11.2, §12):
+# CreateFileW/ReadFile/WriteFile/WaitNamedPipeW/OpenProcess, all synchronous
+# — the client stays plain std::thread like its unix counterpart, no async
+# runtime. Target-gated so macOS/Linux builds gain nothing; see
+# src/live.rs's module doc for why windows-sys (not tokio) was chosen.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    # CreateFileW's signature references SECURITY_ATTRIBUTES even though
+    # this client always passes null for it.
+    "Win32_Security",
+] }
