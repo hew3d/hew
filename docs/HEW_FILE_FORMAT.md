@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `13`**, and **geometry buffer format version `6`**. Both are covered
+version `14`**, and **geometry buffer format version `6`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,13 +59,13 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 13,
-  "geometry_version": 5,
+  "format_version": 14,
+  "geometry_version": 6,
   "app": "hew",
   "app_version": "0.1.0",
 
   "materials": [
-    { "id": 0, "name": "Red", "color": [220, 50, 40, 255],
+    { "id": 0, "sid": 0, "name": "Red", "color": [220, 50, 40, 255],
       "texture": {                  // omitted entirely for a flat-color material
         "asset": "textures/tex_0.png",
         "format": "png",            // "png" | "jpg"
@@ -73,26 +73,29 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       } }
   ],
   "objects": [
-    { "id": 0, "geometry": "geometry/obj_0.bin", "base_material": 0,
+    { "id": 0, "sid": 1, "geometry": "geometry/obj_0.bin", "base_material": 0,
       "name": "Counter_Base",
-      "tags": [["Architecture", "Walls"], ["Level", "L1"]] }
+      "tags": [["Architecture", "Walls"], ["Level", "L1"]],
+      "attrs": {                     // v14+; omitted entirely when empty
+        "com.example.shelving": { "part_no": "SHLF-204", "load_kg": 35.5 }
+      } }
   ],
   "groups": [
-    { "id": 0, "members": [ {"kind":"object","id":0}, {"kind":"group","id":1} ],
+    { "id": 0, "sid": 4, "members": [ {"kind":"object","id":0}, {"kind":"group","id":1} ],
       "name": "MyGroup",
       "tags": [["Architecture"]] }
   ],
   "components": [
-    { "id": 0, "members": [2, 3], "name": "MyComponent" }
+    { "id": 0, "sid": 5, "members": [2, 3], "name": "MyComponent" }
   ],
   "instances": [
-    { "id": 0, "def": 0,
+    { "id": 0, "sid": 6, "def": 0,
       "pose": [1,0,0,0, 0,1,0,0, 0,0,1,0],
       "name": "Chair_1",
       "tags": [["Furniture"]] }
   ],
   "sketches": [
-    { "id": 0,
+    { "id": 0, "sid": 7,
       "plane": [0.0, 0.0, 1.0, 0.0],
       "vertices": [ {"id":0, "p":[0.0, 0.0, 0.0]} ],
       "edges":    [ {"id":0, "from":0, "to":1, "curve":0} ],
@@ -104,8 +107,8 @@ ascending dense-id order (the array index equals the entry's own `id` field).
     }
   ],
   "guides": [
-    { "id": 0, "kind": "line", "p": [0.0, 0.0, 0.0], "dir": [1.0, 0.0, 0.0] },
-    { "id": 1, "kind": "point", "p": [2.0, 3.0, 0.0] }
+    { "id": 0, "sid": 8, "kind": "line", "p": [0.0, 0.0, 0.0], "dir": [1.0, 0.0, 0.0] },
+    { "id": 1, "sid": 9, "kind": "point", "p": [2.0, 3.0, 0.0] }
   ],
   "annotations": [
     { "id": 0, "kind": "linear",
@@ -123,8 +126,8 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "detached": true }
   ],
   "roots": [ {"kind":"object","id":0}, {"kind":"instance","id":0} ],
-  "tags": [ {"path": ["Architecture", "Walls"]},
-            {"path": ["Mock Walls"], "hidden": true} ],
+  "tags": [ {"path": ["Architecture", "Walls"], "sid": 10},
+            {"path": ["Mock Walls"], "sid": 11, "hidden": true} ],
   "camera": {                        // v13+; omitted entirely if never saved
     "projection": "perspective",     // "perspective" | "parallel"
     "fov_deg": 45.0,
@@ -133,15 +136,18 @@ ascending dense-id order (the array index equals the entry's own `id` field).
     "up": [0.0, 0.0, 1.0]
   },
   "axes": { "origin": [1.0, 2.0, 0.0],           // v13+; omitted entirely at world identity
-            "x": [0.0, 1.0, 0.0], "y": [-1.0, 0.0, 0.0] }
+            "x": [0.0, 1.0, 0.0], "y": [-1.0, 0.0, 0.0] },
+  "attrs": {                         // v14+; the DOCUMENT's own dictionaries
+    "com.example.project": { "site": "Bergen" }
+  }
 }
 ```
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `13`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `14`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
-  used by every entry under `geometry/` in this file. Current: `5`.
+  used by every entry under `geometry/` in this file. Current: `6`.
   Redundant with the per-buffer version in each buffer's own header (),
   but lets a reader reject a whole file up front without opening buffers.
 - **`app`**, **`app_version`** (`string`, required) — free-form writer
@@ -157,7 +163,29 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 - **`annotations`** — dimension and leader-text entities ().
 - **`roots`** — the document's top-level nodes, in display order ().
 - **`tags`** — the tag metadata registry: known tag paths with their
-  hidden-by-default flags.
+  hidden-by-default flags. Paths are the registry's key: a duplicate path
+  is a fatal, typed error at every version, and an empty path is one at
+  v14+ (it would consume a stable id nothing can address).
+- **`sid`** (`u64`, v14+, required at v14+) — on every `materials[]`,
+  `objects[]`, `groups[]`, `components[]`, `instances[]`, `sketches[]`,
+  `guides[]`, and `tags[]` entry: the entity's **stable id**, the
+  persistent identity that survives save/load where dense ids do not
+  (§4.2). Globally unique across every kind in one file — a duplicate, or
+  a missing `sid` in a v14+ manifest, is a fatal, typed load error, never
+  silently re-minted. Annotations deliberately carry none (they are not
+  independently addressable entities; their identity is their anchor).
+- **`attrs`** (v14+, optional) — attribute dictionaries (docs/HEW_API.md
+  §8): on every entity kind that carries a `sid`, and once at the manifest
+  top level for the document's own. Shape: `namespace → key → value`,
+  namespaces and keys non-empty strings (namespaces reverse-DNS by
+  convention; `"hew"`/`"hew.*"` reserved for first-party use), values
+  arbitrary JSON whose numbers are all finite — NaN/Infinity cannot occur
+  in JSON, and an integer too large for exact storage (beyond 2^63−1) is a
+  fatal, typed error, as is a value nested more than 64 levels deep
+  (lists and objects count one level each). Omitted entirely when empty, so an attribute-free
+  document is byte-identical to one written before the field existed. The
+  kernel stores and round-trips dictionaries verbatim and never interprets
+  them.
 - **`camera`** (v13+, optional) — the camera's working view at last save.
 - **`axes`** (optional object, v13+) — the document-level movable drawing
   axes frame: `origin` (`[f64;3]`), `x` and `y` (`[f64;3]`, unit length and
@@ -219,6 +247,8 @@ of the manifest:
 | `camera` (top-level object) | 13 | absent — the app falls back to today's home framing, exactly as every pre-v13 file already does |
 | `axes` (top-level object) | 13 | world identity (origin `[0,0,0]`, `x`=`[1,0,0]`, `y`=`[0,1,0]`) |
 | `annotations` (top-level array) | 13 | empty list (no dimensions/leader text) |
+| `sid` on `materials[]`/`objects[]`/`groups[]`/`components[]`/`instances[]`/`sketches[]`/`guides[]`/`tags[]` | 14 | pre-v14 upgrade: the loader mints fresh stable ids in dense order (deterministic). At v14+ absence is a fatal, typed error, not a default |
+| `attrs` on the same entity kinds, and top-level `attrs` | 14 | empty (no dictionaries) |
 
 Four fields land in the same v13 bump (four efforts in flight at once) and
 are version-gated the same way the retired fields below are (just in the
@@ -246,6 +276,22 @@ with any subset of them, or none, is perfectly ordinary.
   same reason: a file declaring a version older than 13 that still carries
   `annotations` is malformed for its own declared version and MUST be
   rejected rather than silently loaded.
+- **`sid` (v14) is gated in both directions.** A file declaring a version
+  older than 14 that carries any `sid` field is malformed for its own
+  declared version and MUST be rejected (no pre-v14 writer ever emitted
+  one). A file at v14 or newer must carry a `sid` on **every** entity entry
+  of the kinds listed in the field reference, all globally unique; a
+  missing or duplicated `sid` is a fatal, typed error — a reader MUST NOT
+  re-mint or renumber to "fix" the file (reject-not-repair). The mint
+  counter itself is deliberately **not** serialized: a loader resumes
+  minting at `max(all sids) + 1`, so ids of entities that never reached
+  the file (an undone creation, say) are simply never observed.
+- **`attrs` (v14)** is version-gated the usual single direction: a file
+  declaring a version older than 14 that carries any `attrs` field is
+  malformed for its own declared version and MUST be rejected. At v14+ the
+  field is optional (absence means no dictionaries), but a present one
+  must satisfy the field reference's shape rules — an empty namespace or
+  key string, or an unrepresentable number, is a fatal, typed error.
 
 Three fields existed only in older versions and are **retired at v11**: the
 top-level `consumed` list (v1–v10), `objects[].source` (v8 only), and
@@ -295,7 +341,7 @@ All multi-byte integers and all floats are **little-endian**. Material ids
 inside a buffer are the same dense ids used by `manifest.json`'s `materials`
 array — one shared id space, not a buffer-local one.
 
-### 3.1 Layout (current version, `5`)
+### 3.1 Layout (current version, `6`)
 
 ```
 offset  type                field
@@ -490,6 +536,20 @@ Consequently dense ids are **not stable across saves** — the same logical
 object may get a different id next time the document is saved. A reader
 must not cache a dense id across independent loads and expect it to mean
 the same entity.
+
+The identity that IS stable is the **`sid`** (v14+): a `u64` minted once
+when its entity is created, carried on the entity for the document's whole
+life, and written with it on every save. Two saves of the same document
+renumber their dense ids freely but agree on every `sid`, so a client that
+must remember "this object" across independent loads caches the `sid` and
+re-resolves it after each load. Stable ids are globally unique across
+every entity kind in one file (an object and a material never share one),
+are never reused within a document's lifetime, and survive undo/redo —
+undoing a deletion restores the entity's original `sid`. The sketch-local
+dense ids of vertices/edges/regions have no stable counterpart: sketch
+sub-entities remain addressable only relative to their sketch and only
+within one load (docs/HEW_API.md §5.1 builds its public sub-entity ids on
+exactly that contract).
 
 A *required* reference that does not resolve to a live entry of the
 expected kind — a dangling group member, an out-of-range material id, an
@@ -798,7 +858,7 @@ a save, so the persisted view reflects "what you were looking at when you
 last saved" rather than every transient camera position visited along the
 way.
 
-### 4.11 Movable drawing axes
+### 4.12 Movable drawing axes
 
 The top-level `axes` object (manifest v13+) is a document-level coordinate
 frame that reorients drawing and inference away from the world frame — no

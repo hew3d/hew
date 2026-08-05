@@ -53,8 +53,7 @@ use crate::serialize::{
     encode_document,
 };
 use crate::sketch::{
-    CurveGeom, Sketch, SketchCurveId, SketchEdgeId, SketchError, SketchIslandId, SketchRegionId,
-    SketchVertexId,
+    CurveGeom, Sketch, SketchEdgeId, SketchError, SketchIslandId, SketchRegionId, SketchVertexId,
 };
 use crate::tol;
 use crate::topo::{Object, WatertightState};
@@ -72,6 +71,36 @@ pub enum NodeId {
     /// A component instance: a tree node placing a shared
     /// [`ComponentDef`] at a per-instance pose (ARCHITECTURE.md).
     Instance(InstanceId),
+}
+
+/// What an attribute dictionary hangs on (docs/HEW_API.md §8): a document
+/// entity, or the document itself. The key of [`Document`]'s attribute
+/// table and the `target` of [`Document::attr_set`]/[`Document::attr_get`]/
+/// [`Document::attr_delete`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AttrTarget {
+    /// The document's own dictionary (project metadata, say).
+    Document,
+    /// A per-entity dictionary. The entity must be live when written.
+    Entity(EntityRef),
+}
+
+/// Every kind of document entity that carries a **stable id** (manifest
+/// v14+; docs/HEW_API.md §5.1) — the superset of [`NodeId`] covering
+/// non-tree entities too. Tags are identified by their root-first path
+/// (the registry key in [`Document::tag_meta`]); everything else by its
+/// generational runtime handle. The stable id attached to an `EntityRef`
+/// is what survives save/load; the handle inside it does not.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EntityRef {
+    Object(ObjectId),
+    Sketch(SketchId),
+    Group(GroupId),
+    Component(ComponentId),
+    Instance(InstanceId),
+    Guide(GuideId),
+    Material(MaterialId),
+    Tag(Vec<String>),
 }
 
 /// Who owns an [`Object`] (ARCHITECTURE.md). A `World` object is a top-level or
@@ -355,6 +384,65 @@ enum SessionFrame {
     Group(GroupSession),
 }
 
+/// What a [`SessionFrame`] is a frame *on* — the identity
+/// [`Document::commit_transaction`]'s balance guard compares, so that a
+/// transaction which swaps one open frame for another at the same depth is
+/// refused just like one that leaves a frame dangling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionFrameId {
+    Component(InstanceId),
+    Group(GroupId),
+}
+
+impl SessionFrame {
+    fn identity(&self) -> SessionFrameId {
+        match self {
+            SessionFrame::Component(s) => SessionFrameId::Component(s.instance),
+            SessionFrame::Group(s) => SessionFrameId::Group(s.group),
+        }
+    }
+}
+
+/// Who authored a history entry: the user's own editing, or an API
+/// connection identified by the string its host assigned it (the Hew API
+/// spec's `origin` — docs/HEW_API.md §6.1). Session-scoped provenance,
+/// never serialized into `.hew` — exactly like the undo log that carries
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistoryOrigin {
+    /// A UI-authored edit (every entry that predates the API, and every
+    /// entry committed outside [`Document::commit_transaction`]).
+    User,
+    /// An API envelope, tagged with the connection identity its host
+    /// reported. The kernel stores and returns the string verbatim; it
+    /// never interprets it.
+    Connection(String),
+}
+
+/// The label and origin a committed transaction stamps on its compound
+/// history entry ([`Document::commit_transaction`]). Read back through
+/// [`Document::peek_undo_meta`] — the source for the API's
+/// `hew.history.status` and its `expected_label` undo guard. UI-authored
+/// entries carry no `CompoundMeta`; readers treat that as
+/// [`HistoryOrigin::User`] with no label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompoundMeta {
+    /// The transaction's human-readable label (`"Table leg"`), shown in
+    /// undo UI and matched by the API's `expected_label` guard.
+    pub label: String,
+    /// Who committed the transaction.
+    pub origin: HistoryOrigin,
+}
+
+/// An open transaction bracket: the whole-document snapshot
+/// [`Document::begin_transaction`] captured. Opaque and linear — hand it
+/// back to exactly one of [`Document::commit_transaction`] or
+/// [`Document::abort_transaction`].
+#[derive(Debug)]
+pub struct DocTransaction {
+    snapshot: Document,
+}
+
 /// One document-level step on the undo stack.
 ///
 /// Object creation is undone by hiding (not deleting), so the `ObjectId` never
@@ -367,11 +455,40 @@ enum SessionFrame {
 // such bound) — a manual impl would be dead weight.
 #[derive(Debug, Clone)]
 enum DocAction {
-    /// Several ordinary actions committed as one user gesture. Children stay
+    /// Several ordinary actions committed as one step. Children stay
     /// in their original commit order; undo applies them in reverse and redo
-    /// in forward order. Used where a component-edit selection spans object
-    /// members and definition-owned sketch islands.
-    Compound { actions: Vec<DocAction> },
+    /// in forward order. Two producers: a component-edit selection spanning
+    /// object members and definition-owned sketch islands (`meta: None` — a
+    /// plain user gesture), and [`Document::commit_transaction`], which
+    /// stamps the API transaction's label and origin on the entry.
+    Compound {
+        actions: Vec<DocAction>,
+        /// Present exactly when this entry was committed through
+        /// [`Document::commit_transaction`]; travels with the action
+        /// through undo⇄redo unchanged.
+        meta: Option<CompoundMeta>,
+    },
+    /// [`Document::attr_set`] wrote one attribute key. Undo restores
+    /// `prior` exactly — including removing the namespace/target entries
+    /// the write created, so the table round-trips byte-identically.
+    AttrSet {
+        target: AttrTarget,
+        ns: String,
+        key: String,
+        /// The key's previous value, `None` if it did not exist.
+        prior: Option<crate::attr::AttrValue>,
+        value: crate::attr::AttrValue,
+    },
+    /// [`Document::attr_delete`] removed one key (`whole_ns: false`,
+    /// `removed` holds that single pair) or a whole namespace
+    /// (`whole_ns: true`, `removed` holds every pair in order). Undo
+    /// re-inserts them all.
+    AttrDeleted {
+        target: AttrTarget,
+        ns: String,
+        removed: Vec<(String, crate::attr::AttrValue)>,
+        whole_ns: bool,
+    },
     /// `extrude_region` created an Object from a sketch region and DELETED
     /// the region's scaffolding from the sketch (Model D,
     /// the sketch-solid-model design: the sketch is the larval form of
@@ -389,14 +506,15 @@ enum DocAction {
         id: ObjectId,
         /// The sketch the extrusion consumed geometry from.
         sketch: SketchId,
-        /// The deleted scaffolding as rows of (endpoint, endpoint,
-        /// curve-chain id) — everything undo needs to re-insert it, and
-        /// everything redo needs to re-delete it BY GEOMETRY
-        /// ([`Sketch::edge_at_positions`]): an interleaved gesture
-        /// undo/redo on the same sketch restores snapshots carrying the
-        /// outline's original edge ids, so an id set would go stale where
-        /// the geometry itself stays exact.
-        removed: Vec<(Point3, Point3, Option<SketchCurveId>)>,
+        /// The deleted scaffolding — edge rows plus doomed-vertex
+        /// positions, each in its own ascending-original-slot order
+        /// ([`crate::sketch::RemovedScaffolding`]): everything undo needs
+        /// to re-insert it slot-exactly, and everything redo needs to
+        /// re-delete it BY GEOMETRY ([`Sketch::edge_at_positions`]): an
+        /// interleaved gesture undo/redo on the same sketch restores
+        /// snapshots carrying the outline's original edge ids, so an id
+        /// set would go stale where the geometry itself stays exact.
+        removed: crate::sketch::RemovedScaffolding,
         /// The deletion emptied the sketch, so the extrusion also removed
         /// the sketch itself from view (it fully became the solid). Undo
         /// brings it back; redo removes it again.
@@ -488,42 +606,70 @@ enum DocAction {
     },
     /// A move/rotate/scale baked into one or more objects' geometry. A single
     /// object carries one target; a group transform carries every leaf object
-    /// beneath it. Undo bakes `inverse` into each, redo bakes `forward`;
-    /// the transform is handle-stable so the `ObjectId`s never change.
-    /// `reanchored` is the exact before/after snapshot of every annotation
-    /// this bake re-anchored — undo/redo restore it verbatim (see
+    /// beneath it. Undo restores each target's RECORDED pre-transform
+    /// snapshot verbatim — never a recomputed inverse: floating-point
+    /// multiply/add is not its own exact inverse (`(p+d)-d != p` in general),
+    /// the same rule-9 posture as [`DocAction::Rescale`], scoped to this
+    /// smaller target list. Redo re-applies `forward` to that SAME snapshot,
+    /// which reproduces the original commit bit-for-bit (deterministic float
+    /// ops on identical operands), so any number of undo/redo cycles never
+    /// drifts. The transform is handle-stable so the `ObjectId`s never
+    /// change. `reanchored` is the exact before/after snapshot of every
+    /// annotation this bake re-anchored — undo/redo restore it verbatim (see
     /// [`Document::reanchor_touched`]).
     Transform {
-        objects: Vec<ObjectId>,
+        /// Every baked target's id paired with its exact pre-transform
+        /// snapshot.
+        objects: Vec<(ObjectId, Object)>,
         forward: Transform,
-        inverse: Transform,
         reanchored: Vec<AnnotationReanchor>,
     },
     /// A move/rotate/scale baked into a free-standing sketch's geometry (Phase
-    /// D). The sketch analogue of [`DocAction::Transform`]: undo bakes
-    /// `inverse`, redo bakes `forward`; the `SketchId` is handle-stable.
+    /// D). The sketch analogue of [`DocAction::Transform`]: undo restores the
+    /// RECORDED pre-transform `prior` snapshot verbatim, redo re-applies
+    /// `forward` to that same snapshot (same rule-9 posture as
+    /// [`DocAction::Transform`]/[`DocAction::Rescale`] — never a recomputed
+    /// inverse); the `SketchId` is handle-stable.
     TransformSketch {
         sketch: SketchId,
+        /// The sketch's exact pre-transform snapshot.
+        prior: Sketch,
         forward: Transform,
-        inverse: Transform,
     },
     /// A move/rotate baked into ONE island of a sketch (per-island Move).
-    /// Undo bakes `inverse`, redo bakes `forward`; the island id is stable
-    /// across the transform (its edge set never changes) and therefore
-    /// across undo/redo too.
+    /// Undo restores the RECORDED pre-transform `prior` snapshot of the
+    /// WHOLE sketch verbatim — never a recomputed inverse, the same rule-9
+    /// posture as [`DocAction::TransformSketch`]/[`DocAction::Rescale`].
+    /// Redo re-applies `forward` to `island` inside a fresh clone of that
+    /// same `prior`, reproducing the original commit bit-for-bit.
+    ///
+    /// A whole-sketch clone (rather than an island-scoped partial snapshot)
+    /// is the honest cost here: two islands can share geometry only through
+    /// the sketch's plane, never through vertices (a shared vertex would
+    /// merge them into one island), but OTHER islands can still be edited
+    /// after this action commits and before it's undone — a partial
+    /// snapshot could not tell "this island's own prior state" apart from
+    /// "state a later, unrelated edit to another island also touched", so
+    /// the whole sketch is captured, matching what
+    /// [`Document::transform_sketch`] already does one level up.
+    ///
+    /// This also makes the OLD anchor-based re-resolution unnecessary: it
+    /// existed because island ids are NOT stable across a consume-and-
+    /// restore cycle (a sweep or extrusion eats the island's edges; undoing
+    /// THAT restores them under a fresh id — the `restore_edges` philosophy
+    /// applied to islands), which could leave the recorded `island` stale
+    /// in the LIVE sketch by the time this action's own undo/redo ran. Now
+    /// that undo/redo always operate on `prior` — a snapshot frozen at this
+    /// action's own commit time, when `island` was validated live — the
+    /// recorded id is guaranteed valid there forever, regardless of any
+    /// later churn to the live document.
     TransformSketchIsland {
         sketch: SketchId,
         island: SketchIslandId,
+        /// The WHOLE sketch's exact pre-transform snapshot (see above for
+        /// why whole-sketch, not island-scoped).
+        prior: Sketch,
         forward: Transform,
-        inverse: Transform,
-        /// The island's canonical anchor BEFORE the transform (redo's key)
-        /// and AFTER it (undo's key). Island ids are NOT stable across a
-        /// consume-and-restore cycle (a sweep or extrusion eats the
-        /// island's edges; undoing restores them under fresh ids), so
-        /// undo/redo re-resolve the island BY GEOMETRY when the stored id
-        /// is stale — the `restore_edges` philosophy applied to islands.
-        anchor_before: Point3,
-        anchor_after: Point3,
     },
     /// An OUT-OF-PLANE island transform detached the island into its own
     /// new sketch (a sketch is planar; an island leaving the plane cannot
@@ -539,7 +685,7 @@ enum DocAction {
     DetachedSketchIsland {
         source: SketchId,
         detached: SketchId,
-        removed: Vec<(Point3, Point3, Option<SketchCurveId>)>,
+        removed: crate::sketch::RemovedScaffolding,
     },
     /// An OUT-OF-PLANE sketch COPY (Move+Alt off the sketch plane) built a
     /// NEW sketch holding one or more of the source's islands with the
@@ -554,17 +700,22 @@ enum DocAction {
     /// A move/rotate/scale applied to a whole mixed selection in one step
     /// (`transform_selection`: select-all → Move). Baked into every world
     /// leaf object and listed sketch; composed into every leaf instance's
-    /// pose. Undo bakes `inverse` into the baked targets and restores each
-    /// instance's exact prior pose; redo bakes `forward` and re-composes
-    /// each prior pose with it (bit-identical to the original application).
-    /// All handles are stable across undo/redo.
+    /// pose. Undo restores every baked target's RECORDED pre-transform
+    /// snapshot verbatim and each instance's exact prior pose — never a
+    /// recomputed inverse, the same rule-9 posture as [`DocAction::Transform`]/
+    /// [`DocAction::Rescale`]. Redo re-applies `forward` to those same
+    /// snapshots/poses, reproducing the original commit bit-for-bit. All
+    /// handles are stable across undo/redo.
     TransformSelection {
-        objects: Vec<ObjectId>,
-        sketches: Vec<SketchId>,
+        /// Every baked object's id paired with its exact pre-transform
+        /// snapshot.
+        objects: Vec<(ObjectId, Object)>,
+        /// Every baked sketch's id paired with its exact pre-transform
+        /// snapshot.
+        sketches: Vec<(SketchId, Sketch)>,
         /// `(instance, prior pose)` pairs, in flattening order.
         instances: Vec<(InstanceId, Transform)>,
         forward: Transform,
-        inverse: Transform,
         /// The exact before/after snapshot of every annotation this bake
         /// re-anchored — see [`Document::reanchor_touched`].
         reanchored: Vec<AnnotationReanchor>,
@@ -572,10 +723,10 @@ enum DocAction {
     /// `rescale_document` uniformly scaled the WHOLE model about the world
     /// origin (design tool-parity §3 — the Tape Measure "resize the model"
     /// flow): every world Object, every Sketch, every guide, and every
-    /// instance pose. Unlike [`DocAction::TransformSelection`] (which bakes
-    /// a recomputed `inverse` matrix into objects/sketches, tolerating the
-    /// resulting ULP noise), EVERY touched entity's exact pre-scale state is
-    /// recorded here — a factor's inverse (`1/factor`) is not its own exact
+    /// instance pose. Like [`DocAction::TransformSelection`] (which takes the
+    /// identical snapshot posture at its own, usually smaller, scope), EVERY
+    /// touched entity's exact pre-scale state is recorded here — a factor's
+    /// inverse (`1/factor`) is not its own exact
     /// floating-point undo (`(p·f)/f ≠ p` in general), and that imprecision
     /// would be far more consequential spread across an entire document
     /// than a single selection's move (rule 9 posture: undo restores
@@ -1092,6 +1243,11 @@ enum DocAction {
     TagDeleted {
         /// Registry entries removed: `(path, hidden flag)`, for exact restore.
         registry: Vec<(Vec<String>, bool)>,
+        /// Each removed path's stable id and attribute dictionaries
+        /// (possibly empty), captured so undo restores the ORIGINAL
+        /// identity — a tag re-created after the delete is a NEW entity
+        /// with a fresh id and no attributes, never a resurrection.
+        identities: Vec<(Vec<String>, u64, crate::attr::AttrDict)>,
         /// Per-node tag lists: `(node, tags before, tags after)`.
         nodes: Vec<TagListTransition>,
     },
@@ -1174,10 +1330,11 @@ enum DocAction {
     /// (the last region's own extrusion already emptied the sketch).
     ConsumedScaffolding {
         sketch: SketchId,
-        /// The discarded rows, in [`DocAction::CreatedObject::removed`]'s
-        /// exact shape — everything undo needs to re-insert them and redo
-        /// needs to re-delete them by geometry.
-        removed: Vec<(Point3, Point3, Option<SketchCurveId>)>,
+        /// The discarded scaffolding, in
+        /// [`DocAction::CreatedObject::removed`]'s exact shape —
+        /// everything undo needs to re-insert it slot-exactly and redo
+        /// needs to re-delete it by geometry.
+        removed: crate::sketch::RemovedScaffolding,
     },
     /// [`Document::place_text`] (3D Text, docs/design/3d-text.md) bundles
     /// several ordinary steps into ONE undo/redo entry: the glyph-injection
@@ -1235,7 +1392,9 @@ impl DocAction {
     /// silently falling through.
     fn touched_objects(&self) -> Vec<ObjectId> {
         match self {
-            DocAction::Compound { actions } => actions
+            // Attribute writes never touch geometry or visibility.
+            DocAction::AttrSet { .. } | DocAction::AttrDeleted { .. } => Vec::new(),
+            DocAction::Compound { actions, .. } => actions
                 .iter()
                 .flat_map(DocAction::touched_objects)
                 .collect(),
@@ -1272,12 +1431,14 @@ impl DocAction {
                 v.extend(results.iter().copied());
                 v
             }
-            DocAction::Transform { objects, .. } => objects.clone(),
+            DocAction::Transform { objects, .. } => objects.iter().map(|&(id, _)| id).collect(),
             DocAction::TransformSketch { .. }
             | DocAction::TransformSketchIsland { .. }
             | DocAction::DetachedSketchIsland { .. }
             | DocAction::CopiedSketchIslands { .. } => Vec::new(),
-            DocAction::TransformSelection { objects, .. } => objects.clone(),
+            DocAction::TransformSelection { objects, .. } => {
+                objects.iter().map(|&(id, _)| id).collect()
+            }
             DocAction::Rescale { objects, .. } => objects.iter().map(|&(id, _)| id).collect(),
             DocAction::SetAxes { .. } | DocAction::MovedSketchVertex { .. } => Vec::new(),
             DocAction::SketchGesture { .. } => Vec::new(),
@@ -1365,7 +1526,8 @@ impl DocAction {
     /// reason.
     fn touched_sketches(&self) -> Vec<SketchId> {
         match self {
-            DocAction::Compound { actions } => actions
+            DocAction::AttrSet { .. } | DocAction::AttrDeleted { .. } => Vec::new(),
+            DocAction::Compound { actions, .. } => actions
                 .iter()
                 .flat_map(DocAction::touched_sketches)
                 .collect(),
@@ -1388,7 +1550,9 @@ impl DocAction {
                 vec![*source, *detached]
             }
             DocAction::CopiedSketchIslands { copy } => vec![*copy],
-            DocAction::TransformSelection { sketches, .. } => sketches.clone(),
+            DocAction::TransformSelection { sketches, .. } => {
+                sketches.iter().map(|&(id, _)| id).collect()
+            }
             DocAction::Rescale { sketches, .. } => sketches.iter().map(|&(id, _)| id).collect(),
             DocAction::SetAxes { .. } => Vec::new(),
             DocAction::MovedSketchVertex { sketch, .. } => vec![*sketch],
@@ -1441,7 +1605,7 @@ impl DocAction {
     /// named.
     fn created_objects_and_sketches(&self) -> (Vec<ObjectId>, Vec<SketchId>) {
         match self {
-            DocAction::Compound { actions } | DocAction::PlaceTextCompound(actions) => {
+            DocAction::Compound { actions, .. } | DocAction::PlaceTextCompound(actions) => {
                 let mut objs = Vec::new();
                 let mut sks = Vec::new();
                 for a in actions {
@@ -1493,7 +1657,7 @@ impl DocAction {
         let objects_only =
             |objs: &[ObjectId]| objs.iter().map(|&o| NodeId::Object(o)).collect::<Vec<_>>();
         match self {
-            DocAction::Compound { actions } | DocAction::PlaceTextCompound(actions) => {
+            DocAction::Compound { actions, .. } | DocAction::PlaceTextCompound(actions) => {
                 actions.iter().flat_map(|a| a.created_nodes()).collect()
             }
             DocAction::CreatedObject { id, .. } => vec![NodeId::Object(*id)],
@@ -1545,7 +1709,7 @@ impl DocAction {
     /// creation walks above.
     fn created_guides(&self) -> Vec<GuideId> {
         match self {
-            DocAction::Compound { actions } | DocAction::PlaceTextCompound(actions) => {
+            DocAction::Compound { actions, .. } | DocAction::PlaceTextCompound(actions) => {
                 actions.iter().flat_map(|a| a.created_guides()).collect()
             }
             DocAction::CreatedGuide { guide } => vec![*guide],
@@ -1785,6 +1949,45 @@ pub enum DocumentError {
     /// factor. Nothing is silently clamped or repaired (DEVELOPMENT.md rule
     /// 4); the document is untouched.
     InvalidRescaleFactor,
+    /// [`Document::commit_transaction`] found an undo entry recorded before
+    /// its bracket had been popped inside it (an undo ran mid-transaction).
+    /// The commit restored the `begin_transaction` snapshot before
+    /// returning — the document is exactly as it was at `begin`.
+    TransactionHistoryDisturbed,
+    /// [`Document::commit_transaction`] found the editing-session stack
+    /// holding different frames than at `begin_transaction` (compared by
+    /// frame identity, so a same-depth swap counts): the transaction opened
+    /// a group/component session it never closed, closed one it never
+    /// opened, or replaced one with another. Refused whole (a dangling or
+    /// swapped frame would silently change what the user's next stroke
+    /// welds to); the snapshot was restored — the document is exactly as it
+    /// was at `begin`.
+    TransactionSessionUnbalanced,
+    /// [`Document::commit_transaction`] found a sketch-drawing gesture
+    /// ([`Document::begin_sketch_gesture`]) open that was not open at
+    /// `begin_transaction` (or vice versa, or open on a different sketch) —
+    /// the same dangling-bracket hazard as an unbalanced session, on the
+    /// gesture channel. The snapshot was restored — the document is exactly
+    /// as it was at `begin`.
+    TransactionGestureUnbalanced,
+    /// An attribute operation named a tag path the registry does not hold.
+    UnknownTag,
+    /// An attribute namespace or key was empty. Names are free-form
+    /// otherwise (namespaces are reverse-DNS by convention, not enforced
+    /// here), but the empty string cannot address anything.
+    InvalidAttrName,
+    /// An attribute value contained a non-finite number (NaN or ±Inf) —
+    /// invalid anywhere in the model, refused rather than repaired
+    /// (DEVELOPMENT.md rule 4 posture).
+    NonFiniteAttrValue,
+    /// An attribute value nested deeper than
+    /// [`crate::attr::MAX_ATTR_DEPTH`] levels. Accepting it would make
+    /// every later traversal of the stored tree a stack hazard, so it is
+    /// refused typed at the boundary — never accepted, never crashed on.
+    AttrValueTooDeep,
+    /// [`Document::attr_delete`] named a namespace or key that does not
+    /// exist on the target. The document is untouched.
+    UnknownAttr,
     /// `set_axes` was called with a candidate frame that fails
     /// [`AxesFrame::new`]'s validation (non-finite, or not orthonormal).
     /// Nothing is silently renormalized or reoriented (DEVELOPMENT.md rule
@@ -1965,6 +2168,39 @@ impl std::fmt::Display for DocumentError {
             ),
             DocumentError::InvalidRescaleFactor => {
                 write!(f, "rescale factor must be a positive, finite number")
+            }
+            DocumentError::TransactionHistoryDisturbed => write!(
+                f,
+                "the undo stack was disturbed inside the transaction \
+                 (an undo ran mid-bracket); the transaction was rolled back"
+            ),
+            DocumentError::TransactionSessionUnbalanced => write!(
+                f,
+                "the transaction left the editing-session stack holding \
+                 different frames than when it began (opened, closed, or \
+                 swapped a session it shouldn't have); the transaction was \
+                 rolled back"
+            ),
+            DocumentError::TransactionGestureUnbalanced => write!(
+                f,
+                "the transaction left a sketch-drawing gesture open that it \
+                 never closed (or closed one it never opened); the \
+                 transaction was rolled back"
+            ),
+            DocumentError::UnknownTag => write!(f, "no such tag is registered"),
+            DocumentError::InvalidAttrName => {
+                write!(f, "attribute namespaces and keys must be non-empty")
+            }
+            DocumentError::NonFiniteAttrValue => {
+                write!(f, "attribute numbers must be finite (no NaN or infinity)")
+            }
+            DocumentError::AttrValueTooDeep => write!(
+                f,
+                "attribute value nests deeper than {} levels",
+                crate::attr::MAX_ATTR_DEPTH
+            ),
+            DocumentError::UnknownAttr => {
+                write!(f, "no such attribute namespace or key on this target")
             }
             DocumentError::InvalidAxesFrame(e) => write!(f, "{e}"),
             DocumentError::ReplaceMaterialReplayStale => write!(
@@ -2147,6 +2383,29 @@ pub struct Document {
     /// deliberately do NOT read this (design's v1 scope) — they stay
     /// world-aligned.
     axes: AxesFrame,
+    /// Persistent per-entity **stable ids** (manifest v14+; docs/HEW_API.md
+    /// §5.1): the identity that survives save/load, undo/redo, and the
+    /// dense-id renumbering every save performs (HEW_FILE_FORMAT.md §4.2).
+    /// Minted once per entity by [`Document::mint_sid`] at creation and
+    /// never re-minted for the same entity: an undone creation keeps its
+    /// entry (tombstoned records stay in their slotmaps), so redo restores
+    /// the same stable id. Entries for truly-removed records are simply
+    /// orphaned — encoding walks live entities only, so an orphan never
+    /// serializes and never collides (the counter is monotonic in-session).
+    sids: BTreeMap<EntityRef, u64>,
+    /// The next stable id [`Document::mint_sid`] hands out. Deliberately
+    /// NOT serialized: [`Document::load`] recomputes it as max(live sids)+1,
+    /// which keeps "undo restores the prior save bytes" true without any
+    /// counter-rollback bookkeeping (an undone creation's id simply never
+    /// reached the file).
+    next_sid: u64,
+    /// Attribute dictionaries (docs/HEW_API.md §8; manifest v14+):
+    /// namespaced client data per entity plus the document's own, stored
+    /// and round-tripped, never interpreted. Keyed by [`AttrTarget`];
+    /// entries for tombstoned entities stay in the table (like `sids`), so
+    /// undoing a deletion restores the entity's dictionaries with it, and
+    /// encoding — which walks live rows only — never writes them.
+    attrs: BTreeMap<AttrTarget, crate::attr::AttrDict>,
     undo: ActionStack,
     redo: ActionStack,
     /// The open editing-session STACK, innermost last (docs/design/
@@ -2181,6 +2440,313 @@ impl Document {
     /// Whether torture mode is enabled (see [`Document::set_torture_mode`]).
     pub fn torture_mode(&self) -> bool {
         self.torture
+    }
+
+    // -------------------------------------------------------- stable ids
+
+    /// The entity's persistent stable id (manifest v14+; docs/HEW_API.md
+    /// §5.1) — the identity a client may cache across saves, unlike the
+    /// file's dense ids (HEW_FILE_FORMAT.md §4.2) or the generational
+    /// runtime handle inside `entity`. `None` for a handle that never
+    /// named a live entity of this document.
+    pub fn sid_of(&self, entity: &EntityRef) -> Option<u64> {
+        self.sids.get(entity).copied()
+    }
+
+    /// Every `(entity, stable id)` pair this document holds, in
+    /// deterministic order — the api layer builds its reverse (sid →
+    /// entity) map from this. Includes tombstoned (undone-creation)
+    /// entities: their ids are retired, not reused, and redo revives them.
+    pub fn sids(&self) -> impl Iterator<Item = (&EntityRef, u64)> {
+        self.sids.iter().map(|(e, &s)| (e, s))
+    }
+
+    /// Mints the next stable id. Monotonic for the document's in-memory
+    /// lifetime; see the `next_sid` field for why it is never serialized.
+    fn mint_sid(&mut self) -> u64 {
+        let sid = self.next_sid;
+        self.next_sid += 1;
+        sid
+    }
+
+    /// Load-path sid assignment: a v14+ manifest supplies the recorded id;
+    /// a pre-v14 file supplies `None` and gets a fresh dense-order mint
+    /// (deterministic — the documented upgrade path, not repair). `load`
+    /// re-seats `next_sid` past the maximum afterwards either way.
+    fn restore_sid(&mut self, entity: EntityRef, recorded: Option<u64>) {
+        let sid = match recorded {
+            Some(s) => s,
+            None => self.mint_sid(),
+        };
+        self.sids.insert(entity, sid);
+    }
+
+    // Insertion helpers: the ONLY sanctioned way a fresh record enters a
+    // slotmap, so an entity can never exist without a stable id (the
+    // debug validator enforces exactly that — rule 2). Load overwrites
+    // the ids these mint with the manifest's recorded ones (v14+) or
+    // keeps them (pre-v14 upgrade: dense-order minting is deterministic).
+
+    fn insert_object_record(&mut self, rec: ObjectRecord) -> ObjectId {
+        let id = self.objects.insert(rec);
+        let sid = self.mint_sid();
+        self.sids.insert(EntityRef::Object(id), sid);
+        id
+    }
+
+    fn insert_sketch_record(&mut self, sketch: Sketch) -> SketchId {
+        let id = self.sketches.insert(sketch);
+        let sid = self.mint_sid();
+        self.sids.insert(EntityRef::Sketch(id), sid);
+        id
+    }
+
+    fn insert_group_record(&mut self, rec: GroupRecord) -> GroupId {
+        let id = self.groups.insert(rec);
+        let sid = self.mint_sid();
+        self.sids.insert(EntityRef::Group(id), sid);
+        id
+    }
+
+    fn insert_component_record(&mut self, def: ComponentDef) -> ComponentId {
+        let id = self.components.insert(def);
+        let sid = self.mint_sid();
+        self.sids.insert(EntityRef::Component(id), sid);
+        id
+    }
+
+    fn insert_instance_record(&mut self, rec: InstanceRecord) -> InstanceId {
+        let id = self.instances.insert(rec);
+        let sid = self.mint_sid();
+        self.sids.insert(EntityRef::Instance(id), sid);
+        id
+    }
+
+    fn insert_guide_record(&mut self, rec: GuideRecord) -> GuideId {
+        let id = self.guides.insert(rec);
+        let sid = self.mint_sid();
+        self.sids.insert(EntityRef::Guide(id), sid);
+        id
+    }
+
+    fn insert_material_record(&mut self, material: Material) -> MaterialId {
+        let id = self.materials.insert(material);
+        let sid = self.mint_sid();
+        self.sids.insert(EntityRef::Material(id), sid);
+        id
+    }
+
+    /// Registers `path` in the tag registry, minting its stable id on
+    /// first sight. Idempotent: re-registering an existing path keeps its
+    /// id and only updates the hidden flag.
+    fn register_tag(&mut self, path: Vec<String>, hidden: bool) {
+        let key = EntityRef::Tag(path.clone());
+        if !self.sids.contains_key(&key) {
+            let sid = self.mint_sid();
+            self.sids.insert(key, sid);
+        }
+        self.tag_meta.insert(path, hidden);
+    }
+
+    // -------------------------------------------- attribute dictionaries
+
+    /// Refuses an attribute target that is not live: stale/tombstoned
+    /// handles and unregistered tag paths answer the same typed errors the
+    /// rest of the document API uses for that kind.
+    fn attr_target_live(&self, target: &AttrTarget) -> Result<(), DocumentError> {
+        let entity = match target {
+            AttrTarget::Document => return Ok(()),
+            AttrTarget::Entity(e) => e,
+        };
+        let live = match entity {
+            EntityRef::Object(id) => self.objects.get(*id).is_some_and(|r| !r.hidden),
+            EntityRef::Sketch(id) => {
+                self.sketches.contains_key(*id) && !self.hidden_sketches.contains(id)
+            }
+            EntityRef::Group(id) => self.groups.get(*id).is_some_and(|r| !r.hidden),
+            EntityRef::Component(id) => self.components.get(*id).is_some_and(|r| !r.hidden),
+            EntityRef::Instance(id) => self.instances.get(*id).is_some_and(|r| !r.hidden),
+            EntityRef::Guide(id) => self.guides.get(*id).is_some_and(|r| !r.hidden),
+            EntityRef::Material(id) => self.materials.contains_key(*id),
+            EntityRef::Tag(path) => self.tag_meta.contains_key(path),
+        };
+        if live {
+            Ok(())
+        } else {
+            Err(match entity {
+                EntityRef::Object(_) => DocumentError::UnknownObject,
+                EntityRef::Sketch(_) => DocumentError::UnknownSketch,
+                EntityRef::Group(_) => DocumentError::UnknownGroup,
+                EntityRef::Component(_) => DocumentError::UnknownComponent,
+                EntityRef::Instance(_) => DocumentError::UnknownInstance,
+                EntityRef::Guide(_) => DocumentError::UnknownGuide,
+                EntityRef::Material(_) => DocumentError::UnknownMaterial,
+                EntityRef::Tag(_) => DocumentError::UnknownTag,
+            })
+        }
+    }
+
+    /// Writes one attribute key (docs/HEW_API.md §8): an ordinary,
+    /// undoable mutation, one undo entry per call. The value is validated
+    /// whole before anything changes (non-finite numbers refuse typed —
+    /// rule 4 posture); on `Err` the document is untouched.
+    pub fn attr_set(
+        &mut self,
+        target: AttrTarget,
+        ns: &str,
+        key: &str,
+        value: crate::attr::AttrValue,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "attr_set", ns, key);
+        if ns.is_empty() || key.is_empty() {
+            return Err(DocumentError::InvalidAttrName);
+        }
+        self.attr_target_live(&target)?;
+        value.validate().map_err(|e| match e {
+            crate::attr::AttrValueError::TooDeep => DocumentError::AttrValueTooDeep,
+            _ => DocumentError::NonFiniteAttrValue,
+        })?;
+        let prior = self.apply_attr_set(&target, ns, key, value.clone());
+        self.undo.push(DocAction::AttrSet {
+            target,
+            ns: ns.to_string(),
+            key: key.to_string(),
+            prior,
+            value,
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(DocChange::default())
+    }
+
+    /// The target's dictionaries: namespace → key → value, or `None` when
+    /// it has none. Read-only; a stale target answers its typed error
+    /// rather than an empty dict, so a caller can tell "nothing stored"
+    /// from "nothing there".
+    pub fn attr_get(
+        &self,
+        target: &AttrTarget,
+    ) -> Result<Option<&crate::attr::AttrDict>, DocumentError> {
+        self.attr_target_live(target)?;
+        Ok(self.attrs.get(target))
+    }
+
+    /// Deletes one key (`key: Some`) or a whole namespace (`key: None`).
+    /// A namespace or key that does not exist refuses typed
+    /// ([`DocumentError::UnknownAttr`]), document untouched — deleting
+    /// nothing is an answerable mistake, not a no-op.
+    pub fn attr_delete(
+        &mut self,
+        target: AttrTarget,
+        ns: &str,
+        key: Option<&str>,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "attr_delete", ns);
+        if ns.is_empty() || key == Some("") {
+            return Err(DocumentError::InvalidAttrName);
+        }
+        self.attr_target_live(&target)?;
+        let holds = self
+            .attrs
+            .get(&target)
+            .and_then(|dict| dict.get(ns))
+            .is_some_and(|entries| key.is_none_or(|k| entries.contains_key(k)));
+        if !holds {
+            return Err(DocumentError::UnknownAttr);
+        }
+        let removed = self.apply_attr_remove(&target, ns, key);
+        self.undo.push(DocAction::AttrDeleted {
+            target,
+            ns: ns.to_string(),
+            removed,
+            whole_ns: key.is_none(),
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(DocChange::default())
+    }
+
+    /// Inserts `value` at `(target, ns, key)`, returning the key's prior
+    /// value. The shared apply for the forward op and its redo.
+    fn apply_attr_set(
+        &mut self,
+        target: &AttrTarget,
+        ns: &str,
+        key: &str,
+        value: crate::attr::AttrValue,
+    ) -> Option<crate::attr::AttrValue> {
+        self.attrs
+            .entry(target.clone())
+            .or_default()
+            .entry(ns.to_string())
+            .or_default()
+            .insert(key.to_string(), value)
+    }
+
+    /// Removes one key or a whole namespace, returning the removed pairs
+    /// in order, and tidies empty maps behind it — the table never holds
+    /// an empty namespace or an empty target entry, which is what makes
+    /// undo's restore-by-reinsert byte-exact.
+    fn apply_attr_remove(
+        &mut self,
+        target: &AttrTarget,
+        ns: &str,
+        key: Option<&str>,
+    ) -> Vec<(String, crate::attr::AttrValue)> {
+        let Some(dict) = self.attrs.get_mut(target) else {
+            return Vec::new();
+        };
+        let removed = match key {
+            None => dict
+                .remove(ns)
+                .map(|entries| entries.into_iter().collect())
+                .unwrap_or_default(),
+            Some(k) => {
+                let mut removed = Vec::new();
+                if let Some(entries) = dict.get_mut(ns) {
+                    if let Some(v) = entries.remove(k) {
+                        removed.push((k.to_string(), v));
+                    }
+                    if entries.is_empty() {
+                        dict.remove(ns);
+                    }
+                }
+                removed
+            }
+        };
+        if dict.is_empty() {
+            self.attrs.remove(target);
+        }
+        removed
+    }
+
+    /// Re-inserts previously removed pairs — undo of a delete, redo of a
+    /// set's restore path.
+    fn apply_attr_restore(
+        &mut self,
+        target: &AttrTarget,
+        ns: &str,
+        pairs: &[(String, crate::attr::AttrValue)],
+    ) {
+        let entries = self
+            .attrs
+            .entry(target.clone())
+            .or_default()
+            .entry(ns.to_string())
+            .or_default();
+        for (k, v) in pairs {
+            entries.insert(k.clone(), v.clone());
+        }
+    }
+
+    /// Copies every dictionary of `from` onto `to` — the deep-copy
+    /// semantics of docs/HEW_API.md §8 (a duplicated entity carries its
+    /// source's attributes; the copy then evolves independently). No-op
+    /// when the source has none.
+    fn copy_attrs(&mut self, from: &EntityRef, to: EntityRef) {
+        if let Some(dict) = self.attrs.get(&AttrTarget::Entity(from.clone())).cloned() {
+            self.attrs.insert(AttrTarget::Entity(to), dict);
+        }
     }
 
     // --------------------------------------------------------------- axes
@@ -2396,6 +2962,8 @@ impl Document {
             instance_hidden: self.user_hidden_instances.clone(),
             camera: self.camera,
             axes: self.axes,
+            sids: self.sids.clone(),
+            attrs: self.attrs.clone(),
         })
     }
 
@@ -2503,11 +3071,12 @@ impl Document {
         // ── 3b. Insert guides — order among independent collections
         // doesn't matter; after sketches is fine, and is deterministic since
         // `raw.guides` is already in dense (save-time) order.
+        let mut guide_ids: Vec<GuideId> = Vec::with_capacity(raw.guides.len());
         for guide in raw.guides {
-            doc.guides.insert(GuideRecord {
+            guide_ids.push(doc.guides.insert(GuideRecord {
                 guide,
                 hidden: false,
-            });
+            }));
         }
 
         // ── 4. Insert components → build dense→ComponentId map ────────────
@@ -2748,10 +3317,96 @@ impl Document {
         }
 
         // ── Tag metadata registry (manifest v5; empty in v1–v4 files) ─────
-        for (path, hidden) in raw.tag_meta {
+        for (i, (path, hidden)) in raw.tag_meta.iter().enumerate() {
             if !path.is_empty() {
-                doc.tag_meta.insert(path, hidden);
+                doc.tag_meta.insert(path.clone(), *hidden);
+                doc.restore_sid(EntityRef::Tag(path.clone()), raw.tag_sids.get(i).copied());
             }
+        }
+
+        // ── Stable ids (manifest v14+, HEW_FILE_FORMAT.md §4.2) ───────────
+        // v14+ manifests recorded every entity's persistent id (decode
+        // enforced presence and global uniqueness); older files mint fresh
+        // ones here in dense order — deterministic, per-load. The counter
+        // then resumes past the maximum in use, so nothing minted later can
+        // collide.
+        for (i, &mid) in mat_ids.iter().enumerate() {
+            doc.restore_sid(EntityRef::Material(mid), raw.material_sids.get(i).copied());
+        }
+        for (i, &oid) in dense_obj_ids.iter().enumerate() {
+            doc.restore_sid(EntityRef::Object(oid), raw.obj_sids.get(i).copied());
+        }
+        for (i, &skid) in sketch_ids.iter().enumerate() {
+            doc.restore_sid(EntityRef::Sketch(skid), raw.sketch_sids.get(i).copied());
+        }
+        for (i, &gid) in guide_ids.iter().enumerate() {
+            doc.restore_sid(EntityRef::Guide(gid), raw.guide_sids.get(i).copied());
+        }
+        for (i, &cid) in comp_ids.iter().enumerate() {
+            doc.restore_sid(
+                EntityRef::Component(cid),
+                raw.component_sids.get(i).copied(),
+            );
+        }
+        for (i, &iid) in inst_ids.iter().enumerate() {
+            doc.restore_sid(EntityRef::Instance(iid), raw.instance_sids.get(i).copied());
+        }
+        for (i, &gid) in grp_ids.iter().enumerate() {
+            doc.restore_sid(EntityRef::Group(gid), raw.group_sids.get(i).copied());
+        }
+        doc.next_sid = doc.sids.values().max().map_or(0, |m| m + 1);
+
+        // ── Attribute dictionaries (manifest v14+, docs/HEW_API.md §8) ────
+        // Decode already validated shapes and values; only non-empty dicts
+        // enter the table (the live mutation path keeps the same tidiness,
+        // so a round trip is byte-exact).
+        {
+            let mut put = |target: AttrTarget, dict: &crate::attr::AttrDict| {
+                if !dict.is_empty() {
+                    doc.attrs.insert(target, dict.clone());
+                }
+            };
+            for (i, &mid) in mat_ids.iter().enumerate() {
+                if let Some(d) = raw.material_attrs.get(i) {
+                    put(AttrTarget::Entity(EntityRef::Material(mid)), d);
+                }
+            }
+            for (i, &oid) in dense_obj_ids.iter().enumerate() {
+                if let Some(d) = raw.obj_attrs.get(i) {
+                    put(AttrTarget::Entity(EntityRef::Object(oid)), d);
+                }
+            }
+            for (i, &skid) in sketch_ids.iter().enumerate() {
+                if let Some(d) = raw.sketch_attrs.get(i) {
+                    put(AttrTarget::Entity(EntityRef::Sketch(skid)), d);
+                }
+            }
+            for (i, &gid) in guide_ids.iter().enumerate() {
+                if let Some(d) = raw.guide_attrs.get(i) {
+                    put(AttrTarget::Entity(EntityRef::Guide(gid)), d);
+                }
+            }
+            for (i, &cid) in comp_ids.iter().enumerate() {
+                if let Some(d) = raw.component_attrs.get(i) {
+                    put(AttrTarget::Entity(EntityRef::Component(cid)), d);
+                }
+            }
+            for (i, &iid) in inst_ids.iter().enumerate() {
+                if let Some(d) = raw.instance_attrs.get(i) {
+                    put(AttrTarget::Entity(EntityRef::Instance(iid)), d);
+                }
+            }
+            for (i, &gid) in grp_ids.iter().enumerate() {
+                if let Some(d) = raw.group_attrs.get(i) {
+                    put(AttrTarget::Entity(EntityRef::Group(gid)), d);
+                }
+            }
+            for (i, (path, _)) in raw.tag_meta.iter().enumerate() {
+                if let (false, Some(d)) = (path.is_empty(), raw.tag_attrs.get(i)) {
+                    put(AttrTarget::Entity(EntityRef::Tag(path.clone())), d);
+                }
+            }
+            put(AttrTarget::Document, &raw.doc_attrs);
         }
 
         // ── USER-hidden view state (manifest v6; empty pre-v6) ────────────
@@ -2810,7 +3465,7 @@ impl Document {
         let mat_ids: Vec<MaterialId> = scene
             .materials
             .into_iter()
-            .map(|m| self.materials.insert(m))
+            .map(|m| self.insert_material_record(m))
             .collect();
         let dense_to_mat = |dense: u32| -> Option<MaterialId> {
             if dense == NO_MATERIAL {
@@ -2836,7 +3491,7 @@ impl Document {
         let mut def_cid: Vec<Option<ComponentId>> = Vec::with_capacity(scene.defs.len());
         for def_recipe in scene.defs {
             // Pre-allocate the component so members can reference it.
-            let cid = self.components.insert(ComponentDef {
+            let cid = self.insert_component_record(ComponentDef {
                 members: Vec::new(),
                 hidden: false,
                 name: def_recipe.name,
@@ -2900,7 +3555,7 @@ impl Document {
                     let dir = direction.normalized().ok();
                     match dir {
                         Some(d) if point_is_finite(origin) && vec_is_finite(d) => {
-                            all_guides.push(self.guides.insert(GuideRecord {
+                            all_guides.push(self.insert_guide_record(GuideRecord {
                                 guide: Guide::Line {
                                     origin,
                                     direction: d,
@@ -2917,7 +3572,7 @@ impl Document {
                 }
                 crate::import::ImportGuide::Point { position } => {
                     if point_is_finite(position) {
-                        all_guides.push(self.guides.insert(GuideRecord {
+                        all_guides.push(self.insert_guide_record(GuideRecord {
                             guide: Guide::Point { position },
                             hidden: false,
                         }));
@@ -2938,7 +3593,7 @@ impl Document {
         let mut tags_added: Vec<(Vec<String>, bool)> = Vec::new();
         for t in scene.tags {
             if !t.path.is_empty() && !self.tag_meta.contains_key(&t.path) {
-                self.tag_meta.insert(t.path.clone(), t.hidden);
+                self.register_tag(t.path.clone(), t.hidden);
                 tags_added.push((t.path, t.hidden));
             }
         }
@@ -2982,7 +3637,7 @@ impl Document {
     /// — existing sketches are untouched, so independent coplanar shapes can
     /// coexist. Plane choice (ground or a face) is the caller's concern.
     pub fn add_sketch(&mut self, plane: Plane) -> SketchId {
-        let id = self.sketches.insert(Sketch::on_plane(plane));
+        let id = self.insert_sketch_record(Sketch::on_plane(plane));
         // Not undoable on its own: an empty sketch draws nothing. The first
         // gesture recorded into it folds the creation into its undo step.
         self.fresh_sketches.insert(id);
@@ -3030,7 +3685,7 @@ impl Document {
             .apply_plane(&plane)
             .map_err(DocumentError::Transform)?;
 
-        let id = self.sketches.insert(Sketch::on_plane(local_plane));
+        let id = self.insert_sketch_record(Sketch::on_plane(local_plane));
         self.fresh_sketches.insert(id);
         self.def_sketches.insert(id, component);
 
@@ -3269,7 +3924,7 @@ impl Document {
     ///
     /// [`paint_face`]: Document::paint_face
     pub fn add_material(&mut self, material: Material) -> MaterialId {
-        self.materials.insert(material)
+        self.insert_material_record(material)
     }
 
     /// Set an existing palette material's opacity (alpha channel of its
@@ -3723,7 +4378,7 @@ impl Document {
             .normalized()
             .map_err(|_: MathError| DocumentError::DegenerateGuide)?;
         let guide = Guide::Line { origin, direction };
-        let id = self.guides.insert(GuideRecord {
+        let id = self.insert_guide_record(GuideRecord {
             guide,
             hidden: false,
         });
@@ -3746,7 +4401,7 @@ impl Document {
             return Err(DocumentError::DegenerateGuide);
         }
         let guide = Guide::Point { position };
-        let id = self.guides.insert(GuideRecord {
+        let id = self.insert_guide_record(GuideRecord {
             guide,
             hidden: false,
         });
@@ -4275,7 +4930,7 @@ impl Document {
         if path.is_empty() {
             return;
         }
-        self.tag_meta.insert(path, hidden);
+        self.register_tag(path, hidden);
     }
 
     /// The camera's working view at last save (manifest v13+; docs/design/
@@ -4494,8 +5149,22 @@ impl Document {
             .filter(|(p, _)| covers(p))
             .map(|(p, &hidden)| (p.clone(), hidden))
             .collect();
+        let mut identities: Vec<(Vec<String>, u64, crate::attr::AttrDict)> = Vec::new();
         for (p, _) in &registry {
             self.tag_meta.remove(p);
+            // A deleted tag's identity dies with it: retire the stable id
+            // and dictionaries into the action (undo restores them), so a
+            // same-path tag created later is a NEW entity — `register_tag`
+            // mints fresh because these entries are gone.
+            let sid = self
+                .sids
+                .remove(&EntityRef::Tag(p.clone()))
+                .expect("registered tag carries a stable id (rule 2 validator)");
+            let dict = self
+                .attrs
+                .remove(&AttrTarget::Entity(EntityRef::Tag(p.clone())))
+                .unwrap_or_default();
+            identities.push((p.clone(), sid, dict));
         }
 
         // Unassign the path (and nested paths) from every visible node.
@@ -4533,7 +5202,11 @@ impl Document {
             // Unknown tag — nothing changed, no undo entry.
             return Ok(DocChange::default());
         }
-        self.undo.push(DocAction::TagDeleted { registry, nodes });
+        self.undo.push(DocAction::TagDeleted {
+            registry,
+            identities,
+            nodes,
+        });
         self.redo.clear();
         self.debug_validate();
         Ok(change)
@@ -5489,7 +6162,7 @@ impl Document {
 
         let merges = matches!(path, FollowMePath::FaceLoop { object: po, .. } if *po == object);
         if !merges {
-            let id = self.objects.insert(ObjectRecord {
+            let id = self.insert_object_record(ObjectRecord {
                 object: swept,
                 history: History::new(),
                 hidden: false,
@@ -5534,7 +6207,7 @@ impl Document {
         let preserve = base.coplanar_edge_segments();
         result.merge_coplanar_faces(&preserve);
 
-        let id = self.objects.insert(ObjectRecord {
+        let id = self.insert_object_record(ObjectRecord {
             object: result,
             history: History::new(),
             hidden: false,
@@ -5753,7 +6426,7 @@ impl Document {
 
         let merges = matches!(path, FollowMePath::FaceLoop { object: po, .. } if *po == object);
         if !merges {
-            let id = self.objects.insert(ObjectRecord {
+            let id = self.insert_object_record(ObjectRecord {
                 object: swept,
                 history: History::new(),
                 hidden: false,
@@ -5792,7 +6465,7 @@ impl Document {
         let preserve = base.coplanar_edge_segments();
         result.merge_coplanar_faces(&preserve);
 
-        let id = self.objects.insert(ObjectRecord {
+        let id = self.insert_object_record(ObjectRecord {
             object: result,
             history: History::new(),
             hidden: false,
@@ -5864,7 +6537,7 @@ impl Document {
         // Everything that can fail has succeeded; commit — a fresh
         // top-level world Object, born untethered from the source (see
         // `follow_me_face`'s identical non-merging insertion).
-        let id = self.objects.insert(ObjectRecord {
+        let id = self.insert_object_record(ObjectRecord {
             object: new_object,
             history: History::new(),
             hidden: false,
@@ -6098,17 +6771,7 @@ impl Document {
             .sketches
             .get(sketch)
             .expect("caller verified the sketch");
-        let removed: Vec<(Point3, Point3, Option<SketchCurveId>)> = scaffolding
-            .iter()
-            .map(|&eid| {
-                let e = s.edges()[eid];
-                (
-                    s.vertices()[e.from].position,
-                    s.vertices()[e.to].position,
-                    e.curve,
-                )
-            })
-            .collect();
+        let removed = s.scaffolding_removal(scaffolding);
         let sk = self.sketches.get_mut(sketch).expect("sketch was just read");
         sk.remove_edges(scaffolding);
         let emptied = sk.edges().is_empty();
@@ -6124,7 +6787,7 @@ impl Document {
                 parent: parent_group,
             },
         };
-        let id = self.objects.insert(ObjectRecord {
+        let id = self.insert_object_record(ObjectRecord {
             object,
             history: History::new(),
             hidden: false,
@@ -6266,7 +6929,7 @@ impl Document {
             .collect();
         result.merge_coplanar_faces(&preserve);
 
-        let id = self.objects.insert(ObjectRecord {
+        let id = self.insert_object_record(ObjectRecord {
             object: result,
             history: History::new(),
             hidden: false,
@@ -6363,7 +7026,7 @@ impl Document {
             .collect();
         result.merge_coplanar_faces(&preserve);
 
-        let id = self.objects.insert(ObjectRecord {
+        let id = self.insert_object_record(ObjectRecord {
             object: result,
             history: History::new(),
             hidden: false,
@@ -6527,7 +7190,7 @@ impl Document {
         let reanchored = self.reevaluate_liveness_recorded(&hidden_operands);
 
         let result_group = group_name.map(|name| {
-            self.groups.insert(GroupRecord {
+            self.insert_group_record(GroupRecord {
                 members: Vec::new(),
                 parent: None,
                 hidden: false,
@@ -6537,7 +7200,7 @@ impl Document {
         });
         let mut result_objects: Vec<ObjectId> = Vec::with_capacity(pieces.len());
         for piece in pieces {
-            let id = self.objects.insert(ObjectRecord {
+            let id = self.insert_object_record(ObjectRecord {
                 object: piece,
                 history: History::new(),
                 hidden: false,
@@ -6671,7 +7334,7 @@ impl Document {
         }
         let (positive, negative) = rec.object.slice(plane).map_err(DocumentError::Slice)?;
 
-        let a = self.objects.insert(ObjectRecord {
+        let a = self.insert_object_record(ObjectRecord {
             object: positive,
             history: History::new(),
             hidden: false,
@@ -6679,7 +7342,7 @@ impl Document {
             name: None,
             tags: Vec::new(),
         });
-        let b = self.objects.insert(ObjectRecord {
+        let b = self.insert_object_record(ObjectRecord {
             object: negative,
             history: History::new(),
             hidden: false,
@@ -6757,7 +7420,7 @@ impl Document {
             .slice(&local_plane)
             .map_err(DocumentError::Slice)?;
 
-        let a = self.objects.insert(ObjectRecord {
+        let a = self.insert_object_record(ObjectRecord {
             object: positive,
             history: History::new(),
             hidden: false,
@@ -6765,7 +7428,7 @@ impl Document {
             name: None,
             tags: Vec::new(),
         });
-        let b = self.objects.insert(ObjectRecord {
+        let b = self.insert_object_record(ObjectRecord {
             object: negative,
             history: History::new(),
             hidden: false,
@@ -6834,7 +7497,7 @@ impl Document {
 
         let mut results: Vec<ObjectId> = Vec::with_capacity(pieces.len());
         for piece in pieces {
-            let id = self.objects.insert(ObjectRecord {
+            let id = self.insert_object_record(ObjectRecord {
                 object: piece,
                 history: History::new(),
                 hidden: false,
@@ -6910,7 +7573,7 @@ impl Document {
 
         let mut results = Vec::with_capacity(pieces.len());
         for piece in pieces {
-            let id = self.objects.insert(ObjectRecord {
+            let id = self.insert_object_record(ObjectRecord {
                 object: piece,
                 history: History::new(),
                 hidden: false,
@@ -6945,30 +7608,34 @@ impl Document {
     }
 
     /// Move / rotate / scale a visible object by baking `t` into its geometry.
-    /// Undoable via the exact inverse; the object keeps its handle. `Err` if the
-    /// object is unknown/hidden or `t` is singular or orientation-flipping —
-    /// nothing changes in that case (the op's strong guarantee).
+    /// Undo restores the recorded pre-transform snapshot verbatim (rule 9
+    /// posture — see [`DocAction::Transform`]'s doc comment); the object
+    /// keeps its handle. `Err` if the object is unknown/hidden or `t` is
+    /// singular or orientation-flipping — nothing changes in that case (the
+    /// op's strong guarantee).
     pub fn transform_object(
         &mut self,
         object: ObjectId,
         t: &Transform,
     ) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "transform_object");
-        // Capture the inverse first: it both validates invertibility and is what
-        // undo will bake. (`apply_transform` re-checks and also rejects det<0.)
-        let inverse = t.inverse().map_err(DocumentError::Transform)?;
+        // Validate invertibility before mutating anything (`apply_transform`
+        // re-checks and also rejects det<0); the exact inverse itself is not
+        // stored — undo restores the snapshot below verbatim instead.
+        t.inverse().map_err(DocumentError::Transform)?;
         let rec = match self.objects.get_mut(object) {
             Some(rec) if !rec.hidden && rec.is_world() => rec,
             _ => return Err(DocumentError::UnknownObject),
         };
+        // Snapshot the PRE-transform state before mutating anything.
+        let prior = rec.object.clone();
         rec.object
             .apply_transform(t)
             .map_err(DocumentError::Transform)?;
         let reanchored = self.reanchor_touched(&[NodeId::Object(object)], t);
         self.undo.push(DocAction::Transform {
-            objects: vec![object],
+            objects: vec![(object, prior)],
             forward: *t,
-            inverse,
             reanchored,
         });
         self.redo.clear();
@@ -7032,21 +7699,23 @@ impl Document {
         // local_t maps a LOCAL point p the way `t` maps its world image:
         // world = pose(p); world' = t(world); p' = pose⁻¹(world').
         let local_t = pose.then(t).then(&pose_inv);
-        // Capture the inverse first: it both validates invertibility and is
-        // what undo will bake (mirrors `transform_object`).
-        let inverse = local_t.inverse().map_err(DocumentError::Transform)?;
+        // Validate invertibility before mutating anything (mirrors
+        // `transform_object`); undo restores the snapshot below verbatim, so
+        // the inverse itself is not stored.
+        local_t.inverse().map_err(DocumentError::Transform)?;
         let rec = match self.objects.get_mut(object) {
             Some(rec) if !rec.hidden && rec.owner == ObjectOwner::Definition(component) => rec,
             _ => return Err(DocumentError::UnknownObject),
         };
+        // Snapshot the PRE-transform state before mutating anything.
+        let prior = rec.object.clone();
         rec.object
             .apply_transform(&local_t)
             .map_err(DocumentError::Transform)?;
         let reanchored = self.reanchor_touched(&[NodeId::Object(object)], &local_t);
         self.undo.push(DocAction::Transform {
-            objects: vec![object],
+            objects: vec![(object, prior)],
             forward: local_t,
-            inverse,
             reanchored,
         });
         self.redo.clear();
@@ -7143,7 +7812,10 @@ impl Document {
             return Err(error);
         }
         let actions: Vec<DocAction> = self.undo.actions.drain(undo_start..).collect();
-        self.undo.push(DocAction::Compound { actions });
+        self.undo.push(DocAction::Compound {
+            actions,
+            meta: None,
+        });
         self.redo.clear();
         self.debug_validate();
         Ok(change)
@@ -7180,19 +7852,22 @@ impl Document {
         sketch: SketchId,
         t: &Transform,
     ) -> Result<DocChange, DocumentError> {
-        // Capture the inverse first: it both validates invertibility and is what
-        // undo will bake. (`apply_transform` re-checks and also rejects det<0.)
-        let inverse = t.inverse().map_err(DocumentError::Transform)?;
+        // Validate invertibility before mutating anything (`apply_transform`
+        // re-checks and also rejects det<0); undo restores the snapshot
+        // below verbatim, so the inverse itself is not stored.
+        t.inverse().map_err(DocumentError::Transform)?;
         if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
+        // Snapshot the PRE-transform state before mutating anything.
+        let prior = self.sketches[sketch].clone();
         self.sketches[sketch]
             .apply_transform(t)
             .map_err(DocumentError::Transform)?;
         self.undo.push(DocAction::TransformSketch {
             sketch,
+            prior,
             forward: *t,
-            inverse,
         });
         self.redo.clear();
         self.debug_validate();
@@ -7246,27 +7921,27 @@ impl Document {
         island: SketchIslandId,
         t: &Transform,
     ) -> Result<DocChange, DocumentError> {
-        let inverse = t.inverse().map_err(DocumentError::Transform)?;
+        // Validate invertibility before mutating anything (mirrors
+        // `transform_object`/`transform_sketch`); undo restores the
+        // snapshot below verbatim, so the inverse itself is not stored.
+        t.inverse().map_err(DocumentError::Transform)?;
         if t.determinant() < 0.0 {
             return Err(DocumentError::Transform(TransformError::Reflection));
         }
         if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
-        let anchor_before = self.sketches[sketch].island_anchor(island);
+        // Snapshot the WHOLE sketch's PRE-transform state before mutating
+        // anything (rule 9 posture — see the `DocAction::TransformSketchIsland`
+        // doc comment for why whole-sketch, not island-scoped).
+        let prior = self.sketches[sketch].clone();
         match self.sketches[sketch].apply_transform_island(island, t) {
             Ok(()) => {
-                let anchor_after = self.sketches[sketch]
-                    .island_anchor(island)
-                    .expect("island live immediately after its own transform");
                 self.undo.push(DocAction::TransformSketchIsland {
                     sketch,
                     island,
+                    prior,
                     forward: *t,
-                    inverse,
-                    anchor_before: anchor_before
-                        .expect("island live immediately before its own transform"),
-                    anchor_after,
                 });
                 self.redo.clear();
                 self.debug_validate();
@@ -7371,24 +8046,13 @@ impl Document {
         // a later undo re-links surviving analytic identity) — the
         // extrusion-consumption shape, restored the same way.
         let isl = &src.islands()[island];
-        let removed: Vec<(Point3, Point3, Option<SketchCurveId>)> = isl
-            .edges
-            .iter()
-            .map(|&eid| {
-                let e = src.edges()[eid];
-                (
-                    src.vertices()[e.from].position,
-                    src.vertices()[e.to].position,
-                    e.curve,
-                )
-            })
-            .collect();
         let scaffolding: std::collections::BTreeSet<SketchEdgeId> =
             isl.edges.iter().copied().collect();
+        let removed = src.scaffolding_removal(&scaffolding);
 
         // Nothing left can fail; commit.
         self.sketches[source].remove_edges(&scaffolding);
-        let detached = self.sketches.insert(fresh);
+        let detached = self.insert_sketch_record(fresh);
         if let Some(component) = self.sketch_owner_component(source) {
             self.def_sketches.insert(detached, component);
         }
@@ -7468,7 +8132,7 @@ impl Document {
             .map_err(DocumentError::Sketch)?;
 
         // Nothing left can fail; commit. The source is not touched.
-        let copy = self.sketches.insert(fresh);
+        let copy = self.insert_sketch_record(fresh);
         self.undo.push(DocAction::CopiedSketchIslands { copy });
         self.redo.clear();
         self.debug_validate();
@@ -7577,7 +8241,7 @@ impl Document {
         }
 
         let prev_parent_members = parent.map(|pg| self.groups[pg].members.clone());
-        let group = self.groups.insert(GroupRecord {
+        let group = self.insert_group_record(GroupRecord {
             members: members.to_vec(),
             parent,
             hidden: false,
@@ -7712,15 +8376,19 @@ impl Document {
 
     /// Move / rotate / scale a group: **bake** `t` into every world leaf object
     /// beneath it and **compose** it into the pose of every instance
-    /// beneath it — the group itself holds no pose. Undoable via the exact
-    /// inverse; all handles stay stable. `Err` (document untouched) if the group
-    /// is unknown/hidden or `t` is singular or orientation-flipping.
+    /// beneath it — the group itself holds no pose. Undo restores each
+    /// leaf's recorded pre-transform snapshot verbatim (rule 9 posture — see
+    /// [`DocAction::Transform`]'s doc comment); all handles stay stable.
+    /// `Err` (document untouched) if the group is unknown/hidden or `t` is
+    /// singular or orientation-flipping.
     pub fn transform_group(
         &mut self,
         group: GroupId,
         t: &Transform,
     ) -> Result<DocChange, DocumentError> {
-        // Pre-validate invertibility before mutating; this is also undo's bake.
+        // Pre-validate invertibility before mutating; also this call's own
+        // strong-guarantee rollback below (never stored — undo restores the
+        // snapshot verbatim instead).
         let inverse = t.inverse().map_err(DocumentError::Transform)?;
         if !self.group_is_live(group) {
             return Err(DocumentError::UnknownGroup);
@@ -7731,6 +8399,14 @@ impl Document {
         // carry their prior poses for an exact undo. Unreachable until the
         // instance ops below land (no instance can be a group member yet), so
         // baking world leaves here stays correct for the current model.
+
+        // Snapshot every leaf's PRE-transform state before mutating anything
+        // (rule 9 posture: undo restores this verbatim, never a recomputed
+        // inverse).
+        let pre_objects: Vec<(ObjectId, Object)> = leaves
+            .iter()
+            .map(|&id| (id, self.objects[id].object.clone()))
+            .collect();
 
         // `t` is invertible and non-reflecting, so per-leaf apply cannot fail
         // for geometric reasons. Should one somehow err, roll back the leaves
@@ -7763,9 +8439,8 @@ impl Document {
         touched.extend(subgroups.iter().map(|&g| NodeId::Group(g)));
         let reanchored = self.reanchor_touched(&touched, t);
         self.undo.push(DocAction::Transform {
-            objects: leaves.clone(),
+            objects: pre_objects,
             forward: *t,
-            inverse,
             reanchored,
         });
         self.redo.clear();
@@ -7878,6 +8553,19 @@ impl Document {
             return Err(DocumentError::EmptySelection);
         }
 
+        // Snapshot every baked target's PRE-transform state before mutating
+        // anything (rule 9 posture — same as [`DocAction::Transform`]/
+        // [`DocAction::Rescale`]: undo restores this verbatim, never a
+        // recomputed inverse).
+        let pre_objects: Vec<(ObjectId, Object)> = objects
+            .iter()
+            .map(|&id| (id, self.objects[id].object.clone()))
+            .collect();
+        let pre_sketches: Vec<(SketchId, Sketch)> = sketch_targets
+            .iter()
+            .map(|&id| (id, self.sketches[id].clone()))
+            .collect();
+
         // Bake into objects, then sketches. `t` is invertible, so a per-target
         // failure (a reflecting `t` hitting a baked target) can only happen on
         // the first bake — but roll back whatever was already baked either
@@ -7936,11 +8624,10 @@ impl Document {
             .collect();
         let reanchored = self.reanchor_touched(&touched, t);
         self.undo.push(DocAction::TransformSelection {
-            objects: objects.clone(),
-            sketches: sketch_targets.clone(),
+            objects: pre_objects,
+            sketches: pre_sketches,
             instances: instance_prevs,
             forward: *t,
-            inverse,
             reanchored,
         });
         self.redo.clear();
@@ -8435,7 +9122,7 @@ impl Document {
 
         // Build the definition + its single identity-posed instance. No geometry
         // moves: the definition-local frame is the world frame at creation.
-        let component = self.components.insert(ComponentDef {
+        let component = self.insert_component_record(ComponentDef {
             members: leaves.clone(),
             hidden: false,
             name: Some(def_name),
@@ -8456,7 +9143,7 @@ impl Document {
         folded.extend(consumed_groups.iter().map(|&g| NodeId::Group(g)));
         let reanchored = self.reevaluate_liveness_recorded(&folded);
 
-        let instance = self.instances.insert(InstanceRecord {
+        let instance = self.insert_instance_record(InstanceRecord {
             def: component,
             pose: Transform::IDENTITY,
             parent,
@@ -8511,7 +9198,7 @@ impl Document {
         // Reject a singular pose; reflection and non-uniform scale are fine.
         pose.inverse().map_err(DocumentError::Transform)?;
 
-        let instance = self.instances.insert(InstanceRecord {
+        let instance = self.insert_instance_record(InstanceRecord {
             def: component,
             pose,
             parent: None,
@@ -8675,17 +9362,7 @@ impl Document {
                 .expect("sketch confirmed live above");
             let remaining: BTreeSet<SketchEdgeId> = sk.edges().keys().collect();
             if !remaining.is_empty() {
-                let removed: Vec<(Point3, Point3, Option<SketchCurveId>)> = remaining
-                    .iter()
-                    .map(|&eid| {
-                        let e = sk.edges()[eid];
-                        (
-                            sk.vertices()[e.from].position,
-                            sk.vertices()[e.to].position,
-                            e.curve,
-                        )
-                    })
-                    .collect();
+                let removed = sk.scaffolding_removal(&remaining);
                 let sk = self
                     .sketches
                     .get_mut(sketch)
@@ -8797,9 +9474,15 @@ impl Document {
             }
             _ => return Err(DocumentError::UnknownComponent),
         }
+        // A tombstoned member (delete_def_member, or an undone in-definition
+        // birth) stays listed in `members` (hide-not-delete) but is not a
+        // live operand — mutating it would record an undo entry for an
+        // invisible edit and clear the redo stack that could revive it.
+        // Same refusal the world path (`apply_object_op`) gives the state.
         let rec = self
             .objects
             .get_mut(object)
+            .filter(|r| !r.hidden)
             .ok_or(DocumentError::UnknownObject)?;
         let report = rec
             .history
@@ -9002,7 +9685,7 @@ impl Document {
             } else {
                 self.objects[m].name.clone()
             };
-            let id = self.objects.insert(ObjectRecord {
+            let id = self.insert_object_record(ObjectRecord {
                 object,
                 history: History::new(),
                 hidden: false,
@@ -9010,6 +9693,7 @@ impl Document {
                 name,
                 tags: self.objects[m].tags.clone(),
             });
+            self.copy_attrs(&EntityRef::Object(m), EntityRef::Object(id));
             created.push(id);
         }
 
@@ -9026,7 +9710,9 @@ impl Document {
             clone
                 .apply_transform(&pose)
                 .map_err(DocumentError::Transform)?;
-            created_sketches.push(self.sketches.insert(clone));
+            let new_sid = self.insert_sketch_record(clone);
+            self.copy_attrs(&EntityRef::Sketch(sid), EntityRef::Sketch(new_sid));
+            created_sketches.push(new_sid);
         }
 
         self.instances[instance].hidden = true;
@@ -9113,15 +9799,19 @@ impl Document {
 
         // Deep-copy each member into a fresh private definition (def-local
         // geometry, fresh per-object history).
-        let new_def = self.components.insert(ComponentDef {
+        let new_def = self.insert_component_record(ComponentDef {
             members: Vec::new(),
             hidden: false,
             name: new_name,
         });
+        self.copy_attrs(
+            &EntityRef::Component(prev_def),
+            EntityRef::Component(new_def),
+        );
         let mut new_members: Vec<ObjectId> = Vec::with_capacity(members.len());
         for m in members {
             let object = self.objects[m].object.clone();
-            let id = self.objects.insert(ObjectRecord {
+            let id = self.insert_object_record(ObjectRecord {
                 object,
                 history: History::new(),
                 hidden: false,
@@ -9129,6 +9819,7 @@ impl Document {
                 name: None,
                 tags: Vec::new(),
             });
+            self.copy_attrs(&EntityRef::Object(m), EntityRef::Object(id));
             new_members.push(id);
         }
         self.components[new_def].members = new_members;
@@ -9157,7 +9848,8 @@ impl Document {
         let mut cloned_sketches: Vec<SketchId> = Vec::with_capacity(source_sketches.len());
         for sid in source_sketches {
             let clone = self.sketches[sid].clone();
-            let new_sid = self.sketches.insert(clone);
+            let new_sid = self.insert_sketch_record(clone);
+            self.copy_attrs(&EntityRef::Sketch(sid), EntityRef::Sketch(new_sid));
             self.def_sketches.insert(new_sid, new_def);
             cloned_sketches.push(new_sid);
         }
@@ -10082,19 +10774,26 @@ impl Document {
         }
     }
 
-    /// Serializes the document for a genuine save-to-disk, transparently AS
-    /// IF any open explode session had been closed first — without touching
-    /// the live document (the user's session stays open; no history is
-    /// recorded anywhere). A session bakes definition members into
-    /// world-owned objects for its duration, a state the `.hew` format
-    /// never represents, so the bytes come from a clone on which the
-    /// session's own close procedure has run. Infallible, like
-    /// [`Document::save`] itself — which stays the entry point wherever the
-    /// byte-identical serialization of the CURRENT in-memory state is
-    /// needed for its own sake (state-hash/replay determinism checks).
-    pub fn save_for_persistence(&self) -> Vec<u8> {
+    /// A session-normalized view of `self`: unchanged (borrowed, no clone)
+    /// if no explode/group session is open, or a clone with every open
+    /// session transparently closed — without touching the live document
+    /// (the user's session stays open; no history is recorded anywhere).
+    ///
+    /// A session bakes definition members into world-owned objects for its
+    /// duration and hides every sibling placement of the entered component
+    /// (`Document::open_explode_session`) — a state neither the `.hew`
+    /// format nor a mesh export represents, so both need the SAME "as if
+    /// closed" view before reading the document, not two separate
+    /// approximations of it. [`Document::save_for_persistence`] and
+    /// `crates/mesh-export`'s writers both call this — the fix for a
+    /// defect where a live `hew.doc.export` mid-session silently dropped
+    /// every hidden sibling instance while `hew.doc.save` (already routed
+    /// through the closed view) did not: docs/HEW_API.md's promise that
+    /// "the same command produces the same file headless or live" held for
+    /// save but not export.
+    pub fn session_closed(&self) -> std::borrow::Cow<'_, Document> {
         if self.sessions.is_empty() {
-            return self.save();
+            return std::borrow::Cow::Borrowed(self);
         }
         let mut closed = self.clone();
         while let Some(frame) = closed.sessions.last() {
@@ -10103,7 +10802,17 @@ impl Document {
                 SessionFrame::Group(_) => closed.exit_group_session(),
             };
         }
-        closed.save()
+        std::borrow::Cow::Owned(closed)
+    }
+
+    /// Serializes the document for a genuine save-to-disk, transparently AS
+    /// IF any open explode session had been closed first (see
+    /// [`Document::session_closed`]). Infallible, like [`Document::save`]
+    /// itself — which stays the entry point wherever the byte-identical
+    /// serialization of the CURRENT in-memory state is needed for its own
+    /// sake (state-hash/replay determinism checks).
+    pub fn save_for_persistence(&self) -> Vec<u8> {
+        self.session_closed().save()
     }
 
     /// Deep-clone a node (Object / Group / Instance) and place the copy under the
@@ -10169,12 +10878,19 @@ impl Document {
                 // outside `created` has been mutated yet.
                 for o in created.objects {
                     self.objects.remove(o);
+                    self.sids.remove(&EntityRef::Object(o));
+                    self.attrs.remove(&AttrTarget::Entity(EntityRef::Object(o)));
                 }
                 for g in created.groups {
                     self.groups.remove(g);
+                    self.sids.remove(&EntityRef::Group(g));
+                    self.attrs.remove(&AttrTarget::Entity(EntityRef::Group(g)));
                 }
                 for i in created.instances {
                     self.instances.remove(i);
+                    self.sids.remove(&EntityRef::Instance(i));
+                    self.attrs
+                        .remove(&AttrTarget::Entity(EntityRef::Instance(i)));
                 }
                 return Err(e);
             }
@@ -10297,12 +11013,19 @@ impl Document {
                         // roots are appended to parents only after the loop.
                         for o in created.objects {
                             self.objects.remove(o);
+                            self.sids.remove(&EntityRef::Object(o));
+                            self.attrs.remove(&AttrTarget::Entity(EntityRef::Object(o)));
                         }
                         for g in created.groups {
                             self.groups.remove(g);
+                            self.sids.remove(&EntityRef::Group(g));
+                            self.attrs.remove(&AttrTarget::Entity(EntityRef::Group(g)));
                         }
                         for i in created.instances {
                             self.instances.remove(i);
+                            self.sids.remove(&EntityRef::Instance(i));
+                            self.attrs
+                                .remove(&AttrTarget::Entity(EntityRef::Instance(i)));
                         }
                         return Err(e);
                     }
@@ -10364,7 +11087,7 @@ impl Document {
                 object
                     .apply_transform(placement)
                     .map_err(DocumentError::Transform)?;
-                let new_id = self.objects.insert(ObjectRecord {
+                let new_id = self.insert_object_record(ObjectRecord {
                     object,
                     history: History::new(),
                     hidden: false,
@@ -10373,6 +11096,7 @@ impl Document {
                     tags,
                 });
                 created.objects.push(new_id);
+                self.copy_attrs(&EntityRef::Object(id), EntityRef::Object(new_id));
                 Ok(NodeId::Object(new_id))
             }
             NodeId::Instance(id) => {
@@ -10383,7 +11107,7 @@ impl Document {
                 let def = src.def;
                 let name = src.name.clone();
                 let tags = src.tags.clone();
-                let new_id = self.instances.insert(InstanceRecord {
+                let new_id = self.insert_instance_record(InstanceRecord {
                     def,
                     pose,
                     parent: new_parent,
@@ -10392,13 +11116,14 @@ impl Document {
                     tags,
                 });
                 created.instances.push(new_id);
+                self.copy_attrs(&EntityRef::Instance(id), EntityRef::Instance(new_id));
                 Ok(NodeId::Instance(new_id))
             }
             NodeId::Group(id) => {
                 let members = self.groups[id].members.clone();
                 let name = self.groups[id].name.clone();
                 let tags = self.groups[id].tags.clone();
-                let new_gid = self.groups.insert(GroupRecord {
+                let new_gid = self.insert_group_record(GroupRecord {
                     members: Vec::new(),
                     parent: new_parent,
                     hidden: false,
@@ -10406,6 +11131,7 @@ impl Document {
                     tags,
                 });
                 created.groups.push(new_gid);
+                self.copy_attrs(&EntityRef::Group(id), EntityRef::Group(new_gid));
                 let mut new_members = Vec::with_capacity(members.len());
                 for m in members {
                     let child = self.clone_subtree(m, Some(new_gid), placement, created)?;
@@ -10521,6 +11247,145 @@ impl Document {
     /// [`Document::peek_undo_action_kind`]'s redo-side mirror.
     pub fn peek_redo_action_kind(&self) -> Option<PendingActionKind> {
         self.redo.last().map(DocAction::kind)
+    }
+
+    // ------------------------------------------------------- transactions
+
+    /// How many entries the next [`Document::undo`] could pop, one at a
+    /// time. With [`Document::peek_undo_meta`], the source for the API's
+    /// `hew.history.status` (docs/HEW_API.md §7).
+    pub fn undo_depth(&self) -> usize {
+        self.undo.actions.len()
+    }
+
+    /// [`Document::undo_depth`]'s redo-side mirror.
+    pub fn redo_depth(&self) -> usize {
+        self.redo.actions.len()
+    }
+
+    /// The label and origin stamped on the pending undo entry, when it was
+    /// committed through [`Document::commit_transaction`] — `None` for
+    /// every UI-authored entry (readers treat that as
+    /// [`HistoryOrigin::User`] with no label) and when there is nothing to
+    /// undo. This is what the API's `expected_label` undo guard and
+    /// `hew.history.status` read.
+    pub fn peek_undo_meta(&self) -> Option<&CompoundMeta> {
+        match self.undo.last()? {
+            DocAction::Compound { meta, .. } => meta.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// Opens a transaction bracket: snapshots the whole document so the
+    /// mutations that follow can later be committed as ONE labeled undo
+    /// entry ([`Document::commit_transaction`]) or discarded wholesale
+    /// ([`Document::abort_transaction`]). The Hew API's
+    /// one-envelope-one-undo guarantee (docs/HEW_API.md §6.1) is built on
+    /// this bracket; the snapshot-clone is the same checkpoint idiom
+    /// compound undo itself uses.
+    ///
+    /// The bracket imposes no mode on the document — between `begin` and
+    /// `commit`/`abort` the caller drives ordinary public mutations, each
+    /// recording its ordinary undo entry. Commit then drains those entries
+    /// into one [`DocAction::Compound`]. Brackets may nest textually (an
+    /// inner commit simply becomes one child entry of the outer bracket),
+    /// but the API layer never nests them.
+    #[must_use = "a transaction bracket must be committed or aborted"]
+    pub fn begin_transaction(&self) -> DocTransaction {
+        DocTransaction {
+            snapshot: self.clone(),
+        }
+    }
+
+    /// Discards everything since [`Document::begin_transaction`], restoring
+    /// the snapshot byte-identically — geometry, undo/redo stacks, session
+    /// stack, all of it. The abort path of a refused API transaction:
+    /// "document untouched" is this restore.
+    pub fn abort_transaction(&mut self, txn: DocTransaction) {
+        *self = txn.snapshot;
+    }
+
+    /// Commits the bracket opened by [`Document::begin_transaction`]: every
+    /// undo entry recorded since then is drained — in its original commit
+    /// order — into one [`DocAction::Compound`] stamped with `meta`, which
+    /// undo reverses and redo replays atomically (children through their
+    /// own rule-9 proof-carrying replay paths; DEVELOPMENT.md rule 9).
+    /// Returns `true` when an entry was committed, `false` when the bracket
+    /// recorded no mutations (a read-only transaction adds no undo entry —
+    /// the API's accounting in docs/HEW_API.md §6.4).
+    ///
+    /// Three defensive refusals, each restoring the snapshot before
+    /// returning (so a refused commit IS the abort, and the document is
+    /// exactly as it was at `begin`):
+    ///
+    /// - [`DocumentError::TransactionHistoryDisturbed`] — [`Document::undo`]
+    ///   ran inside the bracket (detected by the redo stack's push count:
+    ///   undo is the only operation that ever pushes onto it), so the
+    ///   bracket no longer brackets what it thinks. History commands are
+    ///   envelope-solitary in the API precisely so this cannot happen; the
+    ///   kernel still refuses rather than trusts. (A [`Document::redo`] of
+    ///   a pre-bracket redo entry, before any mutation clears the redo
+    ///   stack, is not an error: the redone entry simply commits as one
+    ///   child of the compound.)
+    /// - [`DocumentError::TransactionSessionUnbalanced`] — the editing
+    ///   session stack is not the same stack of frames (compared by frame
+    ///   identity: which group, which instance) it was at `begin`: the
+    ///   transaction opened a session it never closed, closed one it never
+    ///   opened, or swapped a pre-existing frame for a different one at the
+    ///   same depth. A dangling or swapped frame would silently change what
+    ///   the user's next stroke welds to (docs/HEW_API.md §6.3), so the
+    ///   commit refuses typed instead. (Closing and re-opening the SAME
+    ///   frame inside one bracket lands identity-equal and is not detected
+    ///   — the API layer's static context-balance check is the primary
+    ///   guard; this one is the kernel backstop for the dangerous cases.)
+    /// - [`DocumentError::TransactionGestureUnbalanced`] — a sketch-drawing
+    ///   gesture ([`Document::begin_sketch_gesture`]) is open at commit that
+    ///   was not open at `begin` (or vice versa, or on a different sketch).
+    ///   An open gesture is the same class of dangling bracket as an open
+    ///   session frame, and one leaked through a commit would block every
+    ///   future gesture on the document.
+    pub fn commit_transaction(
+        &mut self,
+        txn: DocTransaction,
+        meta: CompoundMeta,
+    ) -> Result<bool, DocumentError> {
+        let start_len = txn.snapshot.undo.actions.len();
+        // Only `Document::undo` ever pushes onto the redo stack, so a grown
+        // push count is exactly "an undo ran inside the bracket". A
+        // length↔push-count arithmetic would be wrong here: drain-and-bundle
+        // producers (`transform_def_selection`, `place_text`, a nested
+        // commit of this very bracket) legitimately push N children and
+        // collapse them to one entry.
+        let undo_ran = self.redo.pushes != txn.snapshot.redo.pushes;
+        if undo_ran || self.undo.actions.len() < start_len {
+            *self = txn.snapshot;
+            return Err(DocumentError::TransactionHistoryDisturbed);
+        }
+        // Frame-identity comparison, not depth: a same-depth swap (close the
+        // user's frame, open a different one) must refuse too.
+        let frame_ids = |frames: &[SessionFrame]| -> Vec<SessionFrameId> {
+            frames.iter().map(SessionFrame::identity).collect()
+        };
+        if frame_ids(&self.sessions) != frame_ids(&txn.snapshot.sessions) {
+            *self = txn.snapshot;
+            return Err(DocumentError::TransactionSessionUnbalanced);
+        }
+        let gesture = |d: &Document| d.pending_sketch_gesture.as_ref().map(|p| p.sketch);
+        if gesture(self) != gesture(&txn.snapshot) {
+            *self = txn.snapshot;
+            return Err(DocumentError::TransactionGestureUnbalanced);
+        }
+        if self.undo.actions.len() == start_len {
+            return Ok(false);
+        }
+        let actions: Vec<DocAction> = self.undo.actions.drain(start_len..).collect();
+        self.undo.push(DocAction::Compound {
+            actions,
+            meta: Some(meta),
+        });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(true)
     }
 
     /// Undo one extrusion: hide the solid and RE-INSERT the scaffolding it
@@ -10666,6 +11531,7 @@ impl Document {
             .get_mut(sketch)
             .expect("sketch slots are never removed");
         let scaffolding: BTreeSet<SketchEdgeId> = removed
+            .rows
             .iter()
             .filter_map(|&(a, b, _)| sk.edge_at_positions(a, b))
             .collect();
@@ -10799,6 +11665,7 @@ impl Document {
             .get_mut(source)
             .expect("sketch slots are never removed");
         let scaffolding: std::collections::BTreeSet<SketchEdgeId> = removed
+            .rows
             .iter()
             .filter_map(|&(a, b, _)| sk.edge_at_positions(a, b))
             .collect();
@@ -11076,6 +11943,7 @@ impl Document {
                         .get_mut(sketch)
                         .expect("sketch slots are never removed");
                     let scaffolding: BTreeSet<SketchEdgeId> = removed
+                        .rows
                         .iter()
                         .filter_map(|&(a, b, _)| sk.edge_at_positions(a, b))
                         .collect();
@@ -11181,7 +12049,7 @@ impl Document {
     /// per-Object ops alike) and returns what it touched.
     pub fn undo(&mut self) -> Result<DocChange, DocumentError> {
         let action = self.undo.pop().ok_or(DocumentError::NothingToUndo)?;
-        if let DocAction::Compound { actions } = &action {
+        if let DocAction::Compound { actions, .. } = &action {
             let checkpoint = self.clone();
             let redo_start = self.redo.actions.len();
             for child in actions {
@@ -11224,6 +12092,35 @@ impl Document {
         }
         let change = match &action {
             DocAction::Compound { .. } => unreachable!("Compound is handled before the match"),
+            DocAction::AttrSet {
+                target,
+                ns,
+                key,
+                prior,
+                ..
+            } => {
+                // Restore the key's prior state exactly; a write that
+                // created the namespace/target entries removes them again
+                // (apply_attr_remove tidies), so the table round-trips.
+                match prior {
+                    Some(v) => {
+                        self.apply_attr_set(target, ns, key, v.clone());
+                    }
+                    None => {
+                        self.apply_attr_remove(target, ns, Some(key));
+                    }
+                }
+                DocChange::default()
+            }
+            DocAction::AttrDeleted {
+                target,
+                ns,
+                removed,
+                ..
+            } => {
+                self.apply_attr_restore(target, ns, removed);
+                DocChange::default()
+            }
             // Dispatched to their dedicated helpers before this match.
             DocAction::CreatedObject { .. } => {
                 unreachable!("CreatedObject is handled before the match")
@@ -11489,17 +12386,16 @@ impl Document {
             }
             DocAction::Transform {
                 objects,
-                inverse,
                 reanchored,
                 ..
             } => {
-                // Undo a transform by baking its exact inverse into every target.
-                for &obj in objects {
-                    self.objects[obj]
-                        .object
-                        .apply_transform(inverse)
-                        .expect("inverse of a validated transform must re-apply");
+                // Undo a transform by restoring every target's RECORDED
+                // pre-transform snapshot verbatim (never a recomputed
+                // inverse — see the doc comment above).
+                for (id, obj) in objects {
+                    self.objects[*id].object = obj.clone();
                 }
+                let objects_touched: Vec<ObjectId> = objects.iter().map(|&(id, _)| id).collect();
                 // A definition-owned target (component-edit-parity.md phase
                 // K2: `transform_def_member`) needs every instance of its
                 // definition to re-resolve; `transform_object`/
@@ -11507,7 +12403,7 @@ impl Document {
                 // this is always empty.
                 let mut components_touched = Vec::new();
                 let mut instances_touched = Vec::new();
-                for &obj in objects {
+                for &obj in &objects_touched {
                     let (c, i) = self.def_owner_change(obj);
                     for cc in c {
                         if !components_touched.contains(&cc) {
@@ -11527,7 +12423,7 @@ impl Document {
                     self.annotations[r.annotation].detached = r.before_detached;
                 }
                 DocChange {
-                    objects_touched: objects.clone(),
+                    objects_touched,
                     sketches_touched: Vec::new(),
                     groups_touched: Vec::new(),
                     instances_touched,
@@ -11535,60 +12431,30 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
-            &DocAction::TransformSketchIsland {
-                sketch,
-                island,
-                forward,
-                inverse,
-                anchor_before,
-                anchor_after,
-            } => {
-                // Undo an island transform by baking its exact inverse.
-                // The stored id can be STALE — a later sweep/extrusion
-                // consumed the island and its own undo restored the edges
-                // under fresh ids — so re-resolve by the recorded anchor
-                // when needed; a typed refusal (action re-pushed, document
-                // untouched) if the geometry itself is gone.
-                let resolved = if self.sketches[sketch].islands().contains_key(island) {
-                    Some(island)
-                } else {
-                    self.sketches[sketch].island_at_anchor(anchor_after)
-                };
-                let action = DocAction::TransformSketchIsland {
-                    sketch,
-                    island: resolved.unwrap_or(island),
-                    forward,
-                    inverse,
-                    anchor_before,
-                    anchor_after,
-                };
-                let Some(resolved) = resolved else {
-                    self.undo.push(action);
-                    return Err(DocumentError::Sketch(SketchError::UnknownIsland));
-                };
-                if let Err(e) = self.sketches[sketch].apply_transform_island(resolved, &inverse) {
-                    self.undo.push(action);
-                    return Err(DocumentError::Sketch(e));
-                }
-                self.redo.push(action);
-                self.debug_validate();
+            DocAction::TransformSketchIsland { sketch, prior, .. } => {
+                // Undo an island transform by restoring the RECORDED
+                // whole-sketch pre-transform snapshot verbatim — never a
+                // recomputed inverse, and never a live-sketch island
+                // lookup (see the doc comment above: `prior` makes the old
+                // anchor-based re-resolution unnecessary).
+                let sketch = *sketch;
+                self.sketches[sketch] = prior.clone();
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
-                return Ok(DocChange {
+                DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
                     groups_touched: Vec::new(),
                     instances_touched,
                     components_touched,
                     guides_touched: Vec::new(),
-                });
+                }
             }
-            &DocAction::TransformSketch {
-                sketch, inverse, ..
-            } => {
-                // Undo a sketch transform by baking its exact inverse.
-                self.sketches[sketch]
-                    .apply_transform(&inverse)
-                    .expect("inverse of a validated transform must re-apply");
+            DocAction::TransformSketch { sketch, prior, .. } => {
+                // Undo a sketch transform by restoring the RECORDED
+                // pre-transform snapshot verbatim (never a recomputed
+                // inverse — see the doc comment above).
+                let sketch = *sketch;
+                self.sketches[sketch] = prior.clone();
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
                 DocChange {
                     objects_touched: Vec::new(),
@@ -11603,22 +12469,18 @@ impl Document {
                 objects,
                 sketches,
                 instances,
-                inverse,
                 reanchored,
                 ..
             } => {
-                // Undo by baking the exact inverse into every baked target and
-                // restoring every instance's exact prior pose.
-                for &obj in objects {
-                    self.objects[obj]
-                        .object
-                        .apply_transform(inverse)
-                        .expect("inverse of a validated transform must re-apply");
+                // Undo by restoring every baked target's RECORDED
+                // pre-transform snapshot verbatim and every instance's exact
+                // prior pose (never a recomputed inverse — see the doc
+                // comment above).
+                for (id, obj) in objects {
+                    self.objects[*id].object = obj.clone();
                 }
-                for &s in sketches {
-                    self.sketches[s]
-                        .apply_transform(inverse)
-                        .expect("inverse of a validated transform must re-apply");
+                for (id, sk) in sketches {
+                    self.sketches[*id] = sk.clone();
                 }
                 for &(inst, prev) in instances {
                     self.instances[inst].pose = prev;
@@ -11630,8 +12492,8 @@ impl Document {
                     self.annotations[r.annotation].detached = r.before_detached;
                 }
                 DocChange {
-                    objects_touched: objects.clone(),
-                    sketches_touched: sketches.clone(),
+                    objects_touched: objects.iter().map(|&(id, _)| id).collect(),
+                    sketches_touched: sketches.iter().map(|&(id, _)| id).collect(),
                     groups_touched: Vec::new(),
                     instances_touched: instances.iter().map(|&(i, _)| i).collect(),
                     components_touched: Vec::new(),
@@ -12356,16 +13218,30 @@ impl Document {
                 self.components[component].name = prev_name.clone();
                 self.component_change(component)
             }
-            DocAction::TagDeleted { registry, nodes } => {
+            DocAction::TagDeleted {
+                registry,
+                identities,
+                nodes,
+            } => {
                 // Undo: re-register the removed entries (restoring their
-                // hidden flags) and restore every affected node's tag list.
-                // A path the user RE-registered after the delete keeps its
-                // current flag: `set_tag_hidden` is deliberately non-undoable
-                // view state, so a fresh post-delete registration must not
-                // be clobbered by the captured pre-delete value.
+                // hidden flags, ORIGINAL stable ids, and dictionaries) and
+                // restore every affected node's tag list. A path the user
+                // RE-registered after the delete keeps its current flag AND
+                // its fresh identity: `set_tag_hidden` is deliberately
+                // non-undoable view state, and the fresh registration is a
+                // new entity a later undo must not overwrite.
                 for (path, hidden) in registry.iter() {
                     if !self.tag_meta.contains_key(path) {
                         self.tag_meta.insert(path.clone(), *hidden);
+                        if let Some((_, sid, dict)) = identities.iter().find(|(p, ..)| p == path) {
+                            self.sids.insert(EntityRef::Tag(path.clone()), *sid);
+                            if !dict.is_empty() {
+                                self.attrs.insert(
+                                    AttrTarget::Entity(EntityRef::Tag(path.clone())),
+                                    dict.clone(),
+                                );
+                            }
+                        }
                     }
                 }
                 let mut change = DocChange::default();
@@ -12439,7 +13315,7 @@ impl Document {
     /// redo never has to remap ids.
     pub fn redo(&mut self) -> Result<DocChange, DocumentError> {
         let action = self.redo.pop().ok_or(DocumentError::NothingToRedo)?;
-        if let DocAction::Compound { actions } = &action {
+        if let DocAction::Compound { actions, .. } = &action {
             let checkpoint = self.clone();
             let undo_start = self.undo.actions.len();
             for child in actions.iter().rev() {
@@ -12473,6 +13349,32 @@ impl Document {
         }
         let change = match &action {
             DocAction::Compound { .. } => unreachable!("Compound is handled before the match"),
+            DocAction::AttrSet {
+                target,
+                ns,
+                key,
+                value,
+                ..
+            } => {
+                self.apply_attr_set(target, ns, key, value.clone());
+                DocChange::default()
+            }
+            DocAction::AttrDeleted {
+                target,
+                ns,
+                removed,
+                whole_ns,
+            } => {
+                if *whole_ns {
+                    self.apply_attr_remove(target, ns, None);
+                } else {
+                    for (k, _) in removed {
+                        let k = k.clone();
+                        self.apply_attr_remove(target, ns, Some(&k));
+                    }
+                }
+                DocChange::default()
+            }
             // Dispatched to their dedicated helpers before this match.
             DocAction::CreatedObject { .. } => {
                 unreachable!("CreatedObject is handled before the match")
@@ -12737,18 +13639,24 @@ impl Document {
                 reanchored,
                 ..
             } => {
-                // Redo a transform by re-baking the forward into every target.
-                for &obj in objects {
-                    self.objects[obj]
-                        .object
-                        .apply_transform(forward)
-                        .expect("forward of a validated transform must re-apply");
+                // Redo a transform by re-applying `forward` to the SAME
+                // recorded pre-transform snapshot — deterministic float ops
+                // on identical operands reproduce the original commit
+                // bit-for-bit (see the doc comment above).
+                for (id, obj) in objects {
+                    let mut fresh = obj.clone();
+                    fresh.apply_transform(forward).expect(
+                        "re-applying the recorded pre-transform snapshot cannot fail: the \
+                         same transform already applied once without refusing",
+                    );
+                    self.objects[*id].object = fresh;
                 }
+                let objects_touched: Vec<ObjectId> = objects.iter().map(|&(id, _)| id).collect();
                 // See the matching undo comment for the def-owned-target
                 // touched-list rationale.
                 let mut components_touched = Vec::new();
                 let mut instances_touched = Vec::new();
-                for &obj in objects {
+                for &obj in &objects_touched {
                     let (c, i) = self.def_owner_change(obj);
                     for cc in c {
                         if !components_touched.contains(&cc) {
@@ -12768,7 +13676,7 @@ impl Document {
                     self.annotations[r.annotation].detached = r.after_detached;
                 }
                 DocChange {
-                    objects_touched: objects.clone(),
+                    objects_touched,
                     sketches_touched: Vec::new(),
                     groups_touched: Vec::new(),
                     instances_touched,
@@ -12776,59 +13684,52 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
-            &DocAction::TransformSketchIsland {
+            DocAction::TransformSketchIsland {
                 sketch,
                 island,
+                prior,
                 forward,
-                inverse,
-                anchor_before,
-                anchor_after,
             } => {
-                // Redo an island transform by re-baking the forward (the
-                // destination was validated when first applied). The id can
-                // be stale for the same reason undo's can — re-resolve by
-                // the pre-transform anchor; typed refusal if the geometry
-                // is gone (action re-pushed, document untouched).
-                let resolved = if self.sketches[sketch].islands().contains_key(island) {
-                    Some(island)
-                } else {
-                    self.sketches[sketch].island_at_anchor(anchor_before)
-                };
-                let action = DocAction::TransformSketchIsland {
-                    sketch,
-                    island: resolved.unwrap_or(island),
-                    forward,
-                    inverse,
-                    anchor_before,
-                    anchor_after,
-                };
-                let Some(resolved) = resolved else {
-                    self.redo.push(action);
-                    return Err(DocumentError::Sketch(SketchError::UnknownIsland));
-                };
-                if let Err(e) = self.sketches[sketch].apply_transform_island(resolved, &forward) {
-                    self.redo.push(action);
-                    return Err(DocumentError::Sketch(e));
-                }
-                self.undo.push(action);
-                self.debug_validate();
+                // Redo an island transform by re-applying `forward` to
+                // `island` inside a FRESH CLONE of the SAME recorded
+                // pre-transform snapshot — deterministic float ops on
+                // identical operands reproduce the original commit
+                // bit-for-bit (see the doc comment above). `island` is
+                // guaranteed present in `prior`: it was validated live at
+                // the exact moment `prior` was captured, and `prior` never
+                // changes afterward.
+                let sketch = *sketch;
+                let mut fresh = prior.clone();
+                fresh.apply_transform_island(*island, forward).expect(
+                    "re-applying the recorded pre-transform snapshot cannot fail: the \
+                     same transform already applied once without refusing",
+                );
+                self.sketches[sketch] = fresh;
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
-                return Ok(DocChange {
+                DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
                     groups_touched: Vec::new(),
                     instances_touched,
                     components_touched,
                     guides_touched: Vec::new(),
-                });
+                }
             }
-            &DocAction::TransformSketch {
-                sketch, forward, ..
+            DocAction::TransformSketch {
+                sketch,
+                prior,
+                forward,
             } => {
-                // Redo a sketch transform by re-baking the forward.
-                self.sketches[sketch]
-                    .apply_transform(&forward)
-                    .expect("forward of a validated transform must re-apply");
+                // Redo a sketch transform by re-applying `forward` to the
+                // SAME recorded pre-transform snapshot (see the doc comment
+                // above).
+                let sketch = *sketch;
+                let mut fresh = prior.clone();
+                fresh.apply_transform(forward).expect(
+                    "re-applying the recorded pre-transform snapshot cannot fail: the same \
+                     transform already applied once without refusing",
+                );
+                self.sketches[sketch] = fresh;
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
                 DocChange {
                     objects_touched: Vec::new(),
@@ -12847,19 +13748,24 @@ impl Document {
                 reanchored,
                 ..
             } => {
-                // Redo by re-baking the forward and re-composing each prior
-                // pose with it — the same computation as the original
-                // application, so the result is bit-identical.
-                for &obj in objects {
-                    self.objects[obj]
-                        .object
-                        .apply_transform(forward)
-                        .expect("forward of a validated transform must re-apply");
+                // Redo by re-applying `forward` to the SAME recorded
+                // pre-transform snapshots/poses — the same computation as
+                // the original application, so the result is bit-identical.
+                for (id, obj) in objects {
+                    let mut fresh = obj.clone();
+                    fresh.apply_transform(forward).expect(
+                        "re-applying the recorded pre-transform snapshot cannot fail: the \
+                         same transform already applied once without refusing",
+                    );
+                    self.objects[*id].object = fresh;
                 }
-                for &s in sketches {
-                    self.sketches[s]
-                        .apply_transform(forward)
-                        .expect("forward of a validated transform must re-apply");
+                for (id, sk) in sketches {
+                    let mut fresh = sk.clone();
+                    fresh.apply_transform(forward).expect(
+                        "re-applying the recorded pre-transform snapshot cannot fail: the \
+                         same transform already applied once without refusing",
+                    );
+                    self.sketches[*id] = fresh;
                 }
                 for &(inst, prev) in instances.iter() {
                     self.instances[inst].pose = prev.then(forward);
@@ -12871,8 +13777,8 @@ impl Document {
                     self.annotations[r.annotation].detached = r.after_detached;
                 }
                 DocChange {
-                    objects_touched: objects.clone(),
-                    sketches_touched: sketches.clone(),
+                    objects_touched: objects.iter().map(|&(id, _)| id).collect(),
+                    sketches_touched: sketches.iter().map(|&(id, _)| id).collect(),
                     groups_touched: Vec::new(),
                     instances_touched: instances.iter().map(|&(i, _)| i).collect(),
                     components_touched: Vec::new(),
@@ -13446,10 +14352,17 @@ impl Document {
                 self.components[component].name = next_name.clone();
                 self.component_change(component)
             }
-            DocAction::TagDeleted { registry, nodes } => {
-                // Redo: unregister the entries and strip the tag lists again.
+            DocAction::TagDeleted {
+                registry, nodes, ..
+            } => {
+                // Redo: unregister the entries — retiring whatever identity
+                // each path holds NOW (the restored original, or a fresh
+                // post-delete registration) — and strip the tag lists again.
                 for (path, _) in registry.iter() {
                     self.tag_meta.remove(path);
+                    self.sids.remove(&EntityRef::Tag(path.clone()));
+                    self.attrs
+                        .remove(&AttrTarget::Entity(EntityRef::Tag(path.clone())));
                 }
                 let mut change = DocChange::default();
                 for (node, _, next_tags) in nodes.clone() {
@@ -13472,9 +14385,10 @@ impl Document {
                 ..
             } => {
                 // Redo import: unhide every created entity; re-register the
-                // import's tags with their original hidden flags.
+                // import's tags with their original hidden flags (their
+                // stable ids survived the undo and are kept).
                 for (path, hidden) in tags.iter() {
-                    self.tag_meta.insert(path.clone(), *hidden);
+                    self.register_tag(path.clone(), *hidden);
                 }
                 for &oid in objects.iter() {
                     if let Some(rec) = self.objects.get_mut(oid) {
@@ -13541,6 +14455,58 @@ impl Document {
                     .expect("document holds an invalid visible object — kernel bug");
             }
             self.debug_validate_tree();
+            self.debug_validate_sids();
+        }
+    }
+
+    /// Stable-id invariants (rule 2 coverage for the minting helpers):
+    /// every record in every slotmap — tombstoned ones included — and every
+    /// registered tag path carries a stable id, and no two entities share
+    /// one. An entity without a sid means a creation path bypassed its
+    /// `insert_*_record` helper; a duplicate means a copy path cloned a
+    /// table entry instead of minting.
+    fn debug_validate_sids(&self) {
+        let check = |entity: EntityRef| {
+            debug_assert!(
+                self.sids.contains_key(&entity),
+                "entity without a stable id (creation bypassed its insert helper): {entity:?}"
+            );
+        };
+        for id in self.objects.keys() {
+            check(EntityRef::Object(id));
+        }
+        for id in self.sketches.keys() {
+            check(EntityRef::Sketch(id));
+        }
+        for id in self.groups.keys() {
+            check(EntityRef::Group(id));
+        }
+        for id in self.components.keys() {
+            check(EntityRef::Component(id));
+        }
+        for id in self.instances.keys() {
+            check(EntityRef::Instance(id));
+        }
+        for id in self.guides.keys() {
+            check(EntityRef::Guide(id));
+        }
+        for id in self.materials.keys() {
+            check(EntityRef::Material(id));
+        }
+        for path in self.tag_meta.keys() {
+            check(EntityRef::Tag(path.clone()));
+        }
+        let mut seen = BTreeSet::new();
+        for (entity, &sid) in &self.sids {
+            debug_assert!(
+                seen.insert(sid),
+                "duplicate stable id {sid} (a copy path cloned instead of minting): {entity:?}"
+            );
+            debug_assert!(
+                sid < self.next_sid,
+                "stable id {sid} at or beyond next_sid {} — counter went backwards: {entity:?}",
+                self.next_sid
+            );
         }
     }
 
@@ -13690,7 +14656,7 @@ fn ingest_build_mesh(
                 WatertightState::Watertight => *watertight_count += 1,
                 WatertightState::Open => *leaky_count += 1,
             }
-            let oid = doc.objects.insert(ObjectRecord {
+            let oid = doc.insert_object_record(ObjectRecord {
                 object: obj,
                 history: History::new(),
                 hidden: false,
@@ -13745,7 +14711,7 @@ fn ingest_build_node(
             hidden,
         } => {
             let cid = def_cid.get(def).copied().flatten()?;
-            let iid = doc.instances.insert(InstanceRecord {
+            let iid = doc.insert_instance_record(InstanceRecord {
                 def: cid,
                 pose,
                 parent,
@@ -13767,7 +14733,7 @@ fn ingest_build_node(
             tags,
             hidden,
         } => {
-            let gid = doc.groups.insert(GroupRecord {
+            let gid = doc.insert_group_record(GroupRecord {
                 members: Vec::new(),
                 parent,
                 hidden: false,

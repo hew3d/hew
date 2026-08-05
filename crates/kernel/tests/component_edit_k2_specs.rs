@@ -2113,3 +2113,65 @@ fn transform_def_member_undo_redo_round_trips() {
         [inst, sibling].into_iter().collect()
     );
 }
+
+/// A tombstoned member (`delete_def_member` hides it while keeping it
+/// listed in `ComponentDef.members` — hide-not-delete) is not a live
+/// operand: `apply_def_op` must refuse it with `UnknownObject`, exactly
+/// as the world path (`apply_object_op`) refuses a hidden object —
+/// otherwise a stale handle silently mutates invisible shared geometry,
+/// records an undo entry for an edit nobody can see, and clears the redo
+/// stack that could have revived the member. Found by adversarial review.
+#[test]
+fn apply_def_op_refuses_a_tombstoned_member() {
+    let mut doc = Document::new();
+    // Two members, so tombstoning one is legal (LastDefinitionMember
+    // forbids emptying a definition).
+    let gs = doc.add_sketch(ground());
+    let ra = draw_rect(
+        &mut doc,
+        gs,
+        [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ],
+    );
+    let (a, _) = doc.extrude_region(gs, ra, 1.0).expect("extrude a");
+    let gs2 = doc.add_sketch(ground());
+    let rb = draw_rect(
+        &mut doc,
+        gs2,
+        [
+            Point3::new(3.0, 0.0, 0.0),
+            Point3::new(4.0, 0.0, 0.0),
+            Point3::new(4.0, 1.0, 0.0),
+            Point3::new(3.0, 1.0, 0.0),
+        ],
+    );
+    let (b, _) = doc.extrude_region(gs2, rb, 1.0).expect("extrude b");
+    let (component, _inst, _) = doc
+        .make_component(&[NodeId::Object(a), NodeId::Object(b)])
+        .expect("make_component");
+    let member = doc.def_members(component).expect("live component")[1];
+    doc.delete_def_member(component, member)
+        .expect("tombstone the second member");
+    let before = doc.save();
+
+    let op = KernelOp::PushPull {
+        face: FaceId::default(),
+        distance: 0.1,
+    };
+    let err = doc
+        .apply_def_op(component, member, op)
+        .expect_err("a tombstoned member is not a live operand");
+    assert!(
+        matches!(err, DocumentError::UnknownObject),
+        "expected UnknownObject, got {err:?}"
+    );
+    assert_eq!(
+        doc.save(),
+        before,
+        "a refused def op must leave the document untouched"
+    );
+}

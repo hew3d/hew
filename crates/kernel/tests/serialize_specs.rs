@@ -490,6 +490,7 @@ fn camera_block_smuggled_into_a_downgraded_manifest_is_rejected() {
 
     let smuggled = patch_manifest(&bytes, |m| {
         m["format_version"] = serde_json::json!(12);
+        strip_sids(m);
     });
     assert!(
         matches!(
@@ -1024,6 +1025,7 @@ fn v2_manifest_loads_with_empty_tags() {
     // Parse as generic JSON Value, remove "tags" fields, set format_version=2.
     let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
     manifest["format_version"] = serde_json::json!(2);
+    strip_sids(&mut manifest);
     // Strip `tags` from objects, groups, instances.
     for arr_key in ["objects", "groups", "instances"] {
         if let Some(arr) = manifest[arr_key].as_array_mut() {
@@ -1069,6 +1071,31 @@ fn v2_manifest_loads_with_empty_tags() {
             &[] as &[Vec<String>],
             "tags default to empty for v2 files"
         );
+    }
+}
+
+/// Remove every `sid` key (manifest v14+, stable ids) from a manifest
+/// value — required by any test that patches `format_version` below 14:
+/// the loader rejects a sid smuggled under an older declared version
+/// (reject-not-repair), which would mask the behavior under test.
+fn strip_sids(manifest: &mut serde_json::Value) {
+    for arr_key in [
+        "objects",
+        "groups",
+        "components",
+        "instances",
+        "sketches",
+        "guides",
+        "materials",
+        "tags",
+    ] {
+        if let Some(arr) = manifest.get_mut(arr_key).and_then(|v| v.as_array_mut()) {
+            for entry in arr.iter_mut() {
+                if let Some(m) = entry.as_object_mut() {
+                    m.remove("sid");
+                }
+            }
+        }
     }
 }
 
@@ -1181,6 +1208,7 @@ fn older_files_consumed_claims_become_deletion_on_load() {
 
     let patched_bytes = patch_manifest(&bytes, |manifest| {
         manifest["format_version"] = serde_json::json!(10);
+        strip_sids(manifest);
         manifest["consumed"] = serde_json::json!([[0, left_dense], [1, 0]]);
         // Retired per-object fields ride along and must be ignored.
         let objs = manifest["objects"].as_array_mut().unwrap();
@@ -1235,7 +1263,10 @@ fn older_files_consumed_claims_become_deletion_on_load() {
             .unwrap();
         s
     };
-    assert!(resaved_manifest.contains("\"format_version\": 13"));
+    assert!(resaved_manifest.contains(&format!(
+        "\"format_version\": {}",
+        kernel::MANIFEST_FORMAT_VERSION
+    )));
     assert!(!resaved_manifest.contains("\"consumed\""));
     assert!(!resaved_manifest.contains("\"footprints\""));
     assert!(!resaved_manifest.contains("\"source\""));
@@ -1311,6 +1342,7 @@ fn sketch_owner_smuggled_into_a_v12_file_is_rejected() {
     // pre-K1 declared version.
     let smuggled = patch_manifest(&bytes, |m| {
         m["format_version"] = serde_json::json!(12);
+        strip_sids(m);
         m["sketches"][0]["owner"] = serde_json::json!(0);
     });
     assert!(
@@ -1345,6 +1377,7 @@ fn older_files_dangling_consumed_pairs_are_rejected() {
 
     let bad_region = patch_manifest(&bytes, |m| {
         m["format_version"] = serde_json::json!(10);
+        strip_sids(m);
         m["consumed"] = serde_json::json!([[0, 5]]);
     });
     assert!(
@@ -1357,6 +1390,7 @@ fn older_files_dangling_consumed_pairs_are_rejected() {
 
     let bad_sketch = patch_manifest(&bytes, |m| {
         m["format_version"] = serde_json::json!(10);
+        strip_sids(m);
         m["consumed"] = serde_json::json!([[7, 0]]);
     });
     assert!(
@@ -1620,6 +1654,7 @@ fn pre_v4_manifest_loads_with_no_guides() {
 
     let mut manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
     manifest["format_version"] = serde_json::json!(3);
+    strip_sids(&mut manifest);
     // This doc has no guides, so `skip_serializing_if = "Vec::is_empty"` already
     // omitted the key — exactly the pre-v4 shape we want to test. Assert that
     // omission here (rather than removing the key ourselves) so the test fails
@@ -2158,6 +2193,7 @@ fn manifest_without_curve_kind_loads_every_chain_as_a_circle() {
     let bytes = circle_and_polygon_doc().save();
     let downgraded = with_patched_manifest(&bytes, |m| {
         m["format_version"] = serde_json::json!(11);
+        strip_sids(m);
         for sk in m["sketches"].as_array_mut().unwrap() {
             for c in sk["curves"].as_array_mut().unwrap() {
                 c.as_object_mut().unwrap().remove("kind");
@@ -2462,7 +2498,10 @@ fn unmoved_axes_write_no_manifest_key() {
         manifest.get("axes").is_none(),
         "an unmoved document must not write an axes key"
     );
-    assert_eq!(manifest["format_version"], serde_json::json!(13));
+    assert_eq!(
+        manifest["format_version"],
+        serde_json::json!(kernel::MANIFEST_FORMAT_VERSION)
+    );
 }
 
 /// Moving the axes round-trips exactly through save/load: origin, x, y, and
@@ -2516,6 +2555,7 @@ fn axes_field_smuggled_into_an_older_file_is_rejected() {
 
     let smuggled = patch_manifest(&bytes, |m| {
         m["format_version"] = serde_json::json!(12);
+        strip_sids(m);
     });
     assert!(
         matches!(

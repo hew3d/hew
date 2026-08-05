@@ -173,16 +173,43 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// Geometry buffer unchanged by any of these fields (`GEOMETRY_FORMAT_VERSION`
 /// stays 6).
 ///
-/// v13 is shared by sibling branches bumping independently for their own
-/// additive fields — expect this constant and its doc comment to conflict at
-/// rebase. Reconcile the prose; keep exactly ONE
-/// `pub const MANIFEST_FORMAT_VERSION: u32 = 13`. Each field stays
+/// A version may be shared by sibling branches bumping independently for
+/// their own additive fields — expect this constant and its doc comment to
+/// conflict at rebase. Reconcile the prose; keep exactly ONE
+/// `pub const MANIFEST_FORMAT_VERSION` declaration. Each field stays
 /// independently gated by its own `_MIN_VERSION` constant (see
 /// `SKETCH_OWNER_MIN_VERSION`/`CAMERA_MANIFEST_VERSION`/`AXES_MIN_VERSION`/
 /// `ANNOTATIONS_MANIFEST_VERSION` below), never by the shared manifest
 /// version alone, so multiple fields coexisting under one version number is
 /// intentional, not a collision to design around.
-pub const MANIFEST_FORMAT_VERSION: u32 = 13;
+/// **v14** (stable ids, docs/HEW_API.md §5.1): every serialized entity —
+/// materials, objects, sketches, guides, components, instances, groups,
+/// and tag registry entries — carries a persistent `sid: u64`, the
+/// identity that survives save/load where dense ids do not
+/// (HEW_FILE_FORMAT.md §4.2). Required at v14 (a missing or duplicate
+/// `sid` is a malformed manifest); rejected as smuggled below it. The
+/// mint counter is deliberately NOT serialized — loaders resume at
+/// max(sid)+1. Geometry buffer unchanged (`GEOMETRY_FORMAT_VERSION`
+/// stays 6).
+pub const MANIFEST_FORMAT_VERSION: u32 = 14;
+
+/// The manifest version at which per-entity stable ids (`sid`) were
+/// introduced (docs/HEW_API.md §5.1). Version-gated both ways: a file
+/// declaring an OLDER version that carries any `sid` field is malformed
+/// for its own declared version and rejected (reject-not-repair, the
+/// [`SKETCH_OWNER_MIN_VERSION`] posture), and a file AT or above it must
+/// carry a distinct `sid` on every entity — absence or duplication is
+/// [`LoadError::MalformedManifest`], never silently re-minted.
+pub(crate) const SID_MIN_VERSION: u32 = 14;
+
+/// The manifest version at which attribute dictionaries (`attrs` — on
+/// entities and at the manifest top level; docs/HEW_API.md §8) were
+/// introduced. Version-gated like every sibling field: presence below
+/// this version is a smuggled field and rejected. Unlike `sid`, `attrs`
+/// is OPTIONAL at v14+ — absence simply means "no dictionaries", which
+/// keeps an attribute-free document's manifest byte-identical to one
+/// written before the field existed.
+pub(crate) const ATTRS_MIN_VERSION: u32 = 14;
 
 /// The manifest version at which the stored sketch–solid claim fields
 /// (`consumed`, `objects[].footprints`, `objects[].source`) were retired.
@@ -225,6 +252,61 @@ pub(crate) const AXES_MIN_VERSION: u32 = 13;
 /// declared version is malformed for its own declared version and is
 /// rejected rather than silently loaded.
 pub(crate) const ANNOTATIONS_MANIFEST_VERSION: u32 = 13;
+
+/// The `attrs` wire shape (manifest v14+): namespace → key → JSON value,
+/// `BTreeMap` end to end so serialization order is deterministic.
+pub(crate) type AttrsDto = BTreeMap<String, BTreeMap<String, serde_json::Value>>;
+
+/// Encodes an in-memory dictionary for the manifest. Total: stored values
+/// were validated finite at the mutation boundary.
+fn attrs_to_dto(dict: &crate::attr::AttrDict) -> AttrsDto {
+    dict.iter()
+        .map(|(ns, entries)| {
+            (
+                ns.clone(),
+                entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.to_json()))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Decodes a manifest dictionary, enforcing what [`crate::Document::attr_set`]
+/// enforces live: non-empty names, representable finite numbers. A
+/// violation is a malformed manifest — reject-not-repair.
+fn attrs_from_dto(dto: &AttrsDto, what: &str) -> Result<crate::attr::AttrDict, LoadError> {
+    let mut dict = crate::attr::AttrDict::new();
+    for (ns, entries) in dto {
+        if ns.is_empty() {
+            return Err(LoadError::MalformedManifest {
+                what: format!("{what}: empty attribute namespace"),
+            });
+        }
+        let mut out = BTreeMap::new();
+        for (key, value) in entries {
+            if key.is_empty() {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("{what}: empty attribute key in namespace '{ns}'"),
+                });
+            }
+            let parsed = crate::attr::AttrValue::from_json(value).map_err(|e| {
+                LoadError::MalformedManifest {
+                    what: format!("{what}: attribute '{ns}':'{key}': {e}"),
+                }
+            })?;
+            out.insert(key.clone(), parsed);
+        }
+        // A key-less namespace holds nothing addressable; the live table
+        // never stores one (apply_attr_remove tidies), so don't let a
+        // hand-written file introduce it either.
+        if !out.is_empty() {
+            dict.insert(ns.clone(), out);
+        }
+    }
+    Ok(dict)
+}
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
 /// geometry buffer (HEW_FILE_FORMAT.md/). Dense material ids never reach it.
@@ -1443,6 +1525,11 @@ pub(crate) struct Manifest {
     /// v1-v12 files → no annotations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<AnnotationDto>,
+    /// The DOCUMENT's own attribute dictionaries (manifest v14+,
+    /// docs/HEW_API.md §8) — same shape and gating as the per-entity
+    /// `attrs` fields.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
 }
 
 /// A document-level movable drawing axes frame (manifest v13+). `z` is not
@@ -1480,6 +1567,18 @@ pub(crate) const CAMERA_PROJECTION_PARALLEL: &str = "parallel";
 pub(crate) struct TagDto {
     /// Root-first tag path segments.
     pub path: Vec<String>,
+    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// identity that survives save/load, unlike the dense `id` above.
+    /// Required at v14+ (absence is a malformed manifest); its presence in
+    /// an older file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<u64>,
+    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// namespace → key → JSON value. Absent/empty means none — an
+    /// attribute-free entity writes no key at all. Presence in a pre-v14
+    /// file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Hidden by default (seeds the UI's tag visibility on load).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
@@ -1489,6 +1588,18 @@ pub(crate) struct TagDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct GuideDto {
     pub id: u32,
+    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// identity that survives save/load, unlike the dense `id` above.
+    /// Required at v14+ (absence is a malformed manifest); its presence in
+    /// an older file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<u64>,
+    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// namespace → key → JSON value. Absent/empty means none — an
+    /// attribute-free entity writes no key at all. Presence in a pre-v14
+    /// file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// `"line"` | `"point"`.
     pub kind: String,
     /// line: origin; point: position.
@@ -1576,6 +1687,18 @@ pub(crate) const RADIAL_KIND_DIAMETER: &str = "diameter";
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct MaterialDto {
     pub id: u32,
+    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// identity that survives save/load, unlike the dense `id` above.
+    /// Required at v14+ (absence is a malformed manifest); its presence in
+    /// an older file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<u64>,
+    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// namespace → key → JSON value. Absent/empty means none — an
+    /// attribute-free entity writes no key at all. Presence in a pre-v14
+    /// file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     pub name: String,
     /// [r, g, b, a], 0–255 each.
     pub color: [u8; 4],
@@ -1598,6 +1721,18 @@ pub(crate) struct TextureDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ObjectDto {
     pub id: u32,
+    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// identity that survives save/load, unlike the dense `id` above.
+    /// Required at v14+ (absence is a malformed manifest); its presence in
+    /// an older file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<u64>,
+    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// namespace → key → JSON value. Absent/empty means none — an
+    /// attribute-free entity writes no key at all. Presence in a pre-v14
+    /// file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Path of the geometry buffer inside the zip.
     pub geometry: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1617,6 +1752,18 @@ pub(crate) struct ObjectDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct GroupDto {
     pub id: u32,
+    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// identity that survives save/load, unlike the dense `id` above.
+    /// Required at v14+ (absence is a malformed manifest); its presence in
+    /// an older file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<u64>,
+    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// namespace → key → JSON value. Absent/empty means none — an
+    /// attribute-free entity writes no key at all. Presence in a pre-v14
+    /// file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     pub members: Vec<NodeRefDto>,
     /// Optional display name (manifest v2+). Absent in v1 files → `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1633,6 +1780,18 @@ pub(crate) struct GroupDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ComponentDto {
     pub id: u32,
+    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// identity that survives save/load, unlike the dense `id` above.
+    /// Required at v14+ (absence is a malformed manifest); its presence in
+    /// an older file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<u64>,
+    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// namespace → key → JSON value. Absent/empty means none — an
+    /// attribute-free entity writes no key at all. Presence in a pre-v14
+    /// file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Dense object ids belonging to this definition.
     pub members: Vec<u32>,
     /// Optional definition name (manifest v2+). Absent in v1 files → `None`.
@@ -1644,6 +1803,18 @@ pub(crate) struct ComponentDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct InstanceDto {
     pub id: u32,
+    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// identity that survives save/load, unlike the dense `id` above.
+    /// Required at v14+ (absence is a malformed manifest); its presence in
+    /// an older file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<u64>,
+    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// namespace → key → JSON value. Absent/empty means none — an
+    /// attribute-free entity writes no key at all. Presence in a pre-v14
+    /// file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     pub def: u32,
     /// Row-major 3×4 affine: [m00,m01,m02,tx, m10,m11,m12,ty, m20,m21,m22,tz].
     pub pose: [f64; 12],
@@ -1662,6 +1833,18 @@ pub(crate) struct InstanceDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SketchDto {
     pub id: u32,
+    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// identity that survives save/load, unlike the dense `id` above.
+    /// Required at v14+ (absence is a malformed manifest); its presence in
+    /// an older file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<u64>,
+    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// namespace → key → JSON value. Absent/empty means none — an
+    /// attribute-free entity writes no key at all. Presence in a pre-v14
+    /// file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// [nx, ny, nz, offset] — unit normal + plane offset.
     pub plane: [f64; 4],
     pub vertices: Vec<SketchVertexDto>,
@@ -1854,6 +2037,13 @@ pub(crate) struct DocSaveData {
     pub camera: Option<CameraState>,
     /// Movable drawing axes (manifest v13+, tool-parity design §4).
     pub axes: AxesFrame,
+    /// Per-entity stable ids (manifest v14+, docs/HEW_API.md §5.1) — the
+    /// document's whole table; `encode_document` looks up only the live
+    /// rows above, so tombstoned/orphaned entries never serialize.
+    pub sids: std::collections::BTreeMap<crate::document::EntityRef, u64>,
+    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8) — the
+    /// whole table, same live-rows-only lookup posture as `sids`.
+    pub attrs: std::collections::BTreeMap<crate::document::AttrTarget, crate::attr::AttrDict>,
 }
 
 /// Encodes a complete document into `.hew` zip bytes (HEW_FILE_FORMAT.md).
@@ -1900,6 +2090,22 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
     }
 
     let material_dense = |mid: MaterialId| -> u32 { *mat_to_dense.get(&mid).unwrap() };
+    // A live entity without a stable id is a kernel bug the debug validator
+    // (`debug_validate_sids`, rule 2) exists to catch before it gets here.
+    let sid_for = |e: crate::document::EntityRef| -> Option<u64> {
+        Some(
+            *data
+                .sids
+                .get(&e)
+                .expect("live entity without a stable id — kernel bug"),
+        )
+    };
+    let attrs_for = |e: crate::document::EntityRef| -> AttrsDto {
+        data.attrs
+            .get(&crate::document::AttrTarget::Entity(e))
+            .map(attrs_to_dto)
+            .unwrap_or_default()
+    };
     let node_to_dto = |n: &crate::document::NodeId| -> NodeRefDto {
         match n {
             crate::document::NodeId::Object(oid) => NodeRefDto {
@@ -1928,7 +2134,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
     // Textures in ascending material dense id order.
     let mut texture_entries: Vec<(String, Vec<u8>)> = Vec::new();
     let mut mat_dtos: Vec<MaterialDto> = Vec::new();
-    for (i, (_, mat)) in data.materials.iter().enumerate() {
+    for (i, (mid, mat)) in data.materials.iter().enumerate() {
         let tex_dto = if let Some(tex) = &mat.texture {
             let ext = match tex.format {
                 ImageFormat::Png => "png",
@@ -1946,6 +2152,8 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         };
         mat_dtos.push(MaterialDto {
             id: i as u32,
+            sid: sid_for(crate::document::EntityRef::Material(*mid)),
+            attrs: attrs_for(crate::document::EntityRef::Material(*mid)),
             name: mat.name.clone(),
             color: [mat.color.r, mat.color.g, mat.color.b, mat.color.a],
             texture: tex_dto,
@@ -1972,6 +2180,8 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 .unwrap_or(None);
             ObjectDto {
                 id: i as u32,
+                sid: sid_for(crate::document::EntityRef::Object(*oid)),
+                attrs: attrs_for(crate::document::EntityRef::Object(*oid)),
                 geometry: format!("geometry/obj_{i}.bin"),
                 base_material: base_mat.map(&material_dense),
                 name: data.obj_names.get(oid).cloned().flatten(),
@@ -1987,6 +2197,8 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .enumerate()
         .map(|(i, (gid, members, name, tags))| GroupDto {
             id: i as u32,
+            sid: sid_for(crate::document::EntityRef::Group(*gid)),
+            attrs: attrs_for(crate::document::EntityRef::Group(*gid)),
             members: members.iter().map(&node_to_dto).collect(),
             name: name.clone(),
             tags: tags.clone(),
@@ -1998,8 +2210,10 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .components
         .iter()
         .enumerate()
-        .map(|(i, (_, members, name))| ComponentDto {
+        .map(|(i, (cid, members, name))| ComponentDto {
             id: i as u32,
+            sid: sid_for(crate::document::EntityRef::Component(*cid)),
+            attrs: attrs_for(crate::document::EntityRef::Component(*cid)),
             members: members.iter().map(|oid| obj_to_dense[oid]).collect(),
             name: name.clone(),
         })
@@ -2011,6 +2225,8 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .enumerate()
         .map(|(i, (iid, def, pose, name, tags))| InstanceDto {
             id: i as u32,
+            sid: sid_for(crate::document::EntityRef::Instance(*iid)),
+            attrs: attrs_for(crate::document::EntityRef::Instance(*iid)),
             def: comp_to_dense[def],
             pose: pose.to_affine(),
             name: name.clone(),
@@ -2031,9 +2247,11 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .into_iter()
         .zip(data.sketches.iter())
         .enumerate()
-        .map(|(i, (mut dto, (sid, _)))| {
+        .map(|(i, (mut dto, (sk_id, _)))| {
             dto.id = i as u32;
-            dto.owner = data.sketch_owner.get(sid).map(|cid| comp_to_dense[cid]);
+            dto.sid = sid_for(crate::document::EntityRef::Sketch(*sk_id));
+            dto.attrs = attrs_for(crate::document::EntityRef::Sketch(*sk_id));
+            dto.owner = data.sketch_owner.get(sk_id).map(|cid| comp_to_dense[cid]);
             dto
         })
         .collect();
@@ -2044,15 +2262,19 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .guides
         .iter()
         .enumerate()
-        .map(|(i, (_, guide))| match guide {
+        .map(|(i, (gid, guide))| match guide {
             Guide::Line { origin, direction } => GuideDto {
                 id: i as u32,
+                sid: sid_for(crate::document::EntityRef::Guide(*gid)),
+                attrs: attrs_for(crate::document::EntityRef::Guide(*gid)),
                 kind: "line".to_string(),
                 p: [origin.x, origin.y, origin.z],
                 dir: Some([direction.x, direction.y, direction.z]),
             },
             Guide::Point { position } => GuideDto {
                 id: i as u32,
+                sid: sid_for(crate::document::EntityRef::Guide(*gid)),
+                attrs: attrs_for(crate::document::EntityRef::Guide(*gid)),
                 kind: "point".to_string(),
                 p: [position.x, position.y, position.z],
                 dir: None,
@@ -2139,9 +2361,16 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             .iter()
             .map(|(path, hidden)| TagDto {
                 path: path.clone(),
+                sid: sid_for(crate::document::EntityRef::Tag(path.clone())),
+                attrs: attrs_for(crate::document::EntityRef::Tag(path.clone())),
                 hidden: *hidden,
             })
             .collect(),
+        attrs: data
+            .attrs
+            .get(&crate::document::AttrTarget::Document)
+            .map(attrs_to_dto)
+            .unwrap_or_default(),
         camera: data.camera.map(encode_camera),
         axes: if data.axes == AxesFrame::IDENTITY {
             None
@@ -2256,7 +2485,9 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
     curve_dtos.sort_by_key(|c| c.id);
 
     SketchDto {
-        id: 0, // patched by caller
+        id: 0,                  // patched by caller
+        sid: None,              // patched by the caller, like `id`
+        attrs: BTreeMap::new(), // patched by the caller, like `id`
         plane: plane_arr,
         vertices: vert_dtos,
         edges: edge_dtos,
@@ -2450,6 +2681,31 @@ pub(crate) struct DocLoadRaw {
     /// Movable drawing axes (manifest v13+; [`AxesFrame::IDENTITY`] for
     /// older files or a v13+ file that never moved them).
     pub axes: AxesFrame,
+    /// Per-entity stable ids (manifest v14+, docs/HEW_API.md §5.1), each
+    /// vector parallel to its entity collection in dense order; tag sids
+    /// parallel to `tag_meta`. ALL EMPTY for pre-v14 files (the loader
+    /// mints dense-order ids instead); at v14+ decode has already enforced
+    /// presence and global uniqueness.
+    pub material_sids: Vec<u64>,
+    pub obj_sids: Vec<u64>,
+    pub group_sids: Vec<u64>,
+    pub component_sids: Vec<u64>,
+    pub instance_sids: Vec<u64>,
+    pub sketch_sids: Vec<u64>,
+    pub guide_sids: Vec<u64>,
+    pub tag_sids: Vec<u64>,
+    /// Attribute dictionaries (manifest v14+), parallel to each entity
+    /// collection in dense order (empty dict = none stored), plus the
+    /// document's own. All empty for pre-v14 files.
+    pub material_attrs: Vec<crate::attr::AttrDict>,
+    pub obj_attrs: Vec<crate::attr::AttrDict>,
+    pub group_attrs: Vec<crate::attr::AttrDict>,
+    pub component_attrs: Vec<crate::attr::AttrDict>,
+    pub instance_attrs: Vec<crate::attr::AttrDict>,
+    pub sketch_attrs: Vec<crate::attr::AttrDict>,
+    pub guide_attrs: Vec<crate::attr::AttrDict>,
+    pub tag_attrs: Vec<crate::attr::AttrDict>,
+    pub doc_attrs: crate::attr::AttrDict,
 }
 
 pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError> {
@@ -2583,6 +2839,149 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     let instance_tags: Vec<Vec<Vec<String>>> =
         manifest.instances.iter().map(|i| i.tags.clone()).collect();
 
+    // Stable ids (manifest v14+, docs/HEW_API.md §5.1) are version-gated
+    // both ways: smuggled below SID_MIN_VERSION is rejected exactly like a
+    // smuggled sketch owner, and at v14+ every entity must carry a globally
+    // unique sid — absence or a duplicate is a malformed manifest, never
+    // silently re-minted (reject-not-repair).
+    let mut seen_sids: BTreeMap<u64, String> = BTreeMap::new();
+    let mut take_sid =
+        |kind: &str, dense: usize, sid: Option<u64>| -> Result<Option<u64>, LoadError> {
+            match sid {
+                Some(_) if manifest.format_version < SID_MIN_VERSION => {
+                    Err(LoadError::MalformedManifest {
+                        what: format!(
+                            "{kind} {dense} carries a sid in a v{} manifest (introduced at v{})",
+                            manifest.format_version, SID_MIN_VERSION
+                        ),
+                    })
+                }
+                None if manifest.format_version >= SID_MIN_VERSION => {
+                    Err(LoadError::MalformedManifest {
+                        what: format!(
+                            "{kind} {dense} is missing its sid (required at v{}+)",
+                            SID_MIN_VERSION
+                        ),
+                    })
+                }
+                Some(s) => {
+                    if let Some(prev) = seen_sids.insert(s, format!("{kind} {dense}")) {
+                        return Err(LoadError::MalformedManifest {
+                            what: format!("duplicate sid {s} ({prev} and {kind} {dense})"),
+                        });
+                    }
+                    Ok(Some(s))
+                }
+                None => Ok(None),
+            }
+        };
+    let mut material_sids = Vec::new();
+    for (i, m) in manifest.materials.iter().enumerate() {
+        material_sids.extend(take_sid("material", i, m.sid)?);
+    }
+    let mut obj_sids = Vec::new();
+    for (i, o) in manifest.objects.iter().enumerate() {
+        obj_sids.extend(take_sid("object", i, o.sid)?);
+    }
+    let mut group_sids = Vec::new();
+    for (i, g) in manifest.groups.iter().enumerate() {
+        group_sids.extend(take_sid("group", i, g.sid)?);
+    }
+    let mut component_sids = Vec::new();
+    for (i, c) in manifest.components.iter().enumerate() {
+        component_sids.extend(take_sid("component", i, c.sid)?);
+    }
+    let mut instance_sids = Vec::new();
+    for (i, inst) in manifest.instances.iter().enumerate() {
+        instance_sids.extend(take_sid("instance", i, inst.sid)?);
+    }
+    let mut sketch_sids = Vec::new();
+    for (i, sk) in manifest.sketches.iter().enumerate() {
+        sketch_sids.extend(take_sid("sketch", i, sk.sid)?);
+    }
+    let mut guide_sids = Vec::new();
+    for (i, g) in manifest.guides.iter().enumerate() {
+        guide_sids.extend(take_sid("guide", i, g.sid)?);
+    }
+    // The tag registry is keyed by path (HEW_FILE_FORMAT.md §4.10): a
+    // duplicate path is structurally invalid — loading it last-wins would
+    // silently drop one entry's identity and merge two dictionaries — and
+    // at v14+ an empty path would consume a stable id nothing can ever
+    // address. Reject, never repair.
+    {
+        let mut seen_paths: std::collections::BTreeSet<&Vec<String>> =
+            std::collections::BTreeSet::new();
+        for (i, t) in manifest.tags.iter().enumerate() {
+            if !seen_paths.insert(&t.path) {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("duplicate tag path at tags[{i}]: {:?}", t.path),
+                });
+            }
+            if t.path.is_empty() && manifest.format_version >= SID_MIN_VERSION {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("empty tag path at tags[{i}] (invalid at v14+)"),
+                });
+            }
+        }
+    }
+    let mut tag_sids = Vec::new();
+    for (i, t) in manifest.tags.iter().enumerate() {
+        tag_sids.extend(take_sid("tag", i, t.sid)?);
+    }
+
+    // Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    // smuggled below ATTRS_MIN_VERSION is rejected like every other
+    // version-gated field; at v14+ they are optional, validated to the
+    // same rules the live mutation path enforces.
+    let take_attrs =
+        |kind: &str, dense: usize, dto: &AttrsDto| -> Result<crate::attr::AttrDict, LoadError> {
+            if dto.is_empty() {
+                return Ok(crate::attr::AttrDict::new());
+            }
+            if manifest.format_version < ATTRS_MIN_VERSION {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "{kind} {dense} carries attrs in a v{} manifest (introduced at v{})",
+                        manifest.format_version, ATTRS_MIN_VERSION
+                    ),
+                });
+            }
+            attrs_from_dto(dto, &format!("{kind} {dense}"))
+        };
+    let mut material_attrs = Vec::new();
+    for (i, m) in manifest.materials.iter().enumerate() {
+        material_attrs.push(take_attrs("material", i, &m.attrs)?);
+    }
+    let mut obj_attrs = Vec::new();
+    for (i, o) in manifest.objects.iter().enumerate() {
+        obj_attrs.push(take_attrs("object", i, &o.attrs)?);
+    }
+    let mut group_attrs = Vec::new();
+    for (i, g) in manifest.groups.iter().enumerate() {
+        group_attrs.push(take_attrs("group", i, &g.attrs)?);
+    }
+    let mut component_attrs = Vec::new();
+    for (i, c) in manifest.components.iter().enumerate() {
+        component_attrs.push(take_attrs("component", i, &c.attrs)?);
+    }
+    let mut instance_attrs = Vec::new();
+    for (i, inst) in manifest.instances.iter().enumerate() {
+        instance_attrs.push(take_attrs("instance", i, &inst.attrs)?);
+    }
+    let mut sketch_attrs = Vec::new();
+    for (i, sk) in manifest.sketches.iter().enumerate() {
+        sketch_attrs.push(take_attrs("sketch", i, &sk.attrs)?);
+    }
+    let mut guide_attrs = Vec::new();
+    for (i, g) in manifest.guides.iter().enumerate() {
+        guide_attrs.push(take_attrs("guide", i, &g.attrs)?);
+    }
+    let mut tag_attrs = Vec::new();
+    for (i, t) in manifest.tags.iter().enumerate() {
+        tag_attrs.push(take_attrs("tag", i, &t.attrs)?);
+    }
+    let doc_attrs = take_attrs("document", 0, &manifest.attrs)?;
+
     Ok(DocLoadRaw {
         format_version: manifest.format_version,
         materials,
@@ -2622,6 +3021,23 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         instance_hidden: manifest.instances.iter().map(|i| i.hidden).collect(),
         camera,
         axes,
+        material_sids,
+        obj_sids,
+        group_sids,
+        component_sids,
+        instance_sids,
+        sketch_sids,
+        guide_sids,
+        tag_sids,
+        material_attrs,
+        obj_attrs,
+        group_attrs,
+        component_attrs,
+        instance_attrs,
+        sketch_attrs,
+        guide_attrs,
+        tag_attrs,
+        doc_attrs,
     })
 }
 
@@ -3211,6 +3627,7 @@ mod camera_manifest_tests {
             camera,
             axes: None,
             annotations: Vec::new(),
+            attrs: BTreeMap::new(),
         }
     }
 

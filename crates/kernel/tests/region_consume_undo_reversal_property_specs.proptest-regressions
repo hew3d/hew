@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 88b241368bcdca7ff585436be5d951b728ce1c5cae2ffcf0f402b93a797a9787 # shrinks to wave_a = [(Rect { w: 0.3, h: 0.3 }, 0.0, 0.2)], wave_b = [(Rect { w: 0.3, h: 0.3 }, 0.0, 0.2, false)]
+cc afa690016b9d13aa9b77cdb79f56f36796574b7850b86f2d923fbc6de9b415ff # shrinks to wave_a = [(Rect { w: 0.3, h: 0.3 }, 0.0, 0.2)], wave_b = [(Rect { w: 0.3, h: 0.3 }, 0.0, 0.2, true)]

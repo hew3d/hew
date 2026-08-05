@@ -456,6 +456,29 @@ pub struct Sketch {
     active_curve: Option<SketchCurveId>,
 }
 
+/// Everything an undo needs to re-insert consumed scaffolding
+/// slot-exactly: the removed edges as geometry rows (ascending
+/// original-edge-slot order, [`Sketch::scaffolding_removal`]'s `BTreeSet`
+/// capture order) plus the positions of the vertices the removal doomed
+/// (ascending original-vertex-slot order). The vertex list is recorded —
+/// not re-derived from the rows — because a row order sorted by edge id
+/// does NOT determine the vertices' first-encounter order: an edge living
+/// in a reused (low) slot sorts before older edges while referencing
+/// newer (high-slot) vertices, so any single replay order can weld
+/// vertices back into permuted slots. Recording both orders independently
+/// is what lets [`Sketch::restore_edges`] restore each side into its
+/// exact original slot.
+#[derive(Debug, Clone)]
+pub(crate) struct RemovedScaffolding {
+    /// One row per removed edge: (endpoint, endpoint, curve-chain id), in
+    /// ascending original-edge-slot order.
+    pub rows: Vec<(Point3, Point3, Option<SketchCurveId>)>,
+    /// The doomed vertices' positions in ascending original-vertex-slot
+    /// order — exactly the vertices [`Sketch::remove_edges`] will delete
+    /// for this edge set (every incident edge is in the set).
+    pub vertices: Vec<Point3>,
+}
+
 impl Sketch {
     /// An empty sketch on `plane`.
     pub fn on_plane(plane: Plane) -> Sketch {
@@ -765,60 +788,6 @@ impl Sketch {
     pub fn islands(&self) -> &SlotMap<SketchIslandId, SketchIsland> {
         &self.islands
     }
-
-    /// The island `edge` belongs to, or `None` for a stale handle.
-    /// The island's canonical ANCHOR: the lexicographically smallest vertex
-    /// position among its edges (total order over x, then y, then z). Stable
-    /// under island-id churn — the geometric key the undo log uses to
-    /// re-find an island whose id died and was reborn across a
-    /// consume-and-restore cycle. `None` for a stale id or an empty island.
-    pub(crate) fn island_anchor(&self, island: SketchIslandId) -> Option<Point3> {
-        let isl = self.islands.get(island)?;
-        let mut best: Option<Point3> = None;
-        for &eid in &isl.edges {
-            let e = self.edges.get(eid)?;
-            for v in [e.from, e.to] {
-                let p = self.vertices[v].position;
-                let smaller = match best {
-                    None => true,
-                    Some(b) => (p.x, p.y, p.z) < (b.x, b.y, b.z),
-                };
-                if smaller {
-                    best = Some(p);
-                }
-            }
-        }
-        best
-    }
-
-    /// The island whose [`Self::island_anchor`] lies within
-    /// [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) of `p` — geometric
-    /// re-resolution for a stale island id. `None` when no island's anchor
-    /// matches (the geometry itself is gone or moved) — AND when MORE THAN
-    /// ONE island's anchor matches: two distinct islands sharing the same
-    /// lexicographically-smallest vertex is a real (if narrow) case — e.g.
-    /// two separate shapes both cornered at the same point — and re-
-    /// resolving by anchor alone can't tell them apart. Picking one
-    /// arbitrarily would risk silently re-attaching the undo/redo action to
-    /// the WRONG island; ambiguous is treated the same as absent, the
-    /// existing typed refusal (action re-pushed, document untouched) rather
-    /// than a guess.
-    pub(crate) fn island_at_anchor(&self, p: Point3) -> Option<SketchIslandId> {
-        let mut found: Option<SketchIslandId> = None;
-        for id in self.islands.keys() {
-            if self
-                .island_anchor(id)
-                .is_some_and(|a| a.approx_eq(p, tol::POINT_MERGE))
-            {
-                if found.is_some() {
-                    return None; // ambiguous — more than one match
-                }
-                found = Some(id);
-            }
-        }
-        found
-    }
-
     pub fn island_of_edge(&self, edge: SketchEdgeId) -> Option<SketchIslandId> {
         self.islands
             .iter()
@@ -1748,6 +1717,49 @@ impl Sketch {
         consumed_edges.difference(&live_edges).copied().collect()
     }
 
+    /// Captures the exact removal record for `edges` — the rows and doomed
+    /// vertices [`Sketch::restore_edges`] needs to undo the removal
+    /// slot-exactly. Pure query; call BEFORE [`Sketch::remove_edges`].
+    pub(crate) fn scaffolding_removal(
+        &self,
+        edges: &std::collections::BTreeSet<SketchEdgeId>,
+    ) -> RemovedScaffolding {
+        let rows: Vec<(Point3, Point3, Option<SketchCurveId>)> = edges
+            .iter()
+            .filter_map(|&eid| self.edges.get(eid))
+            .map(|e| {
+                (
+                    self.vertices[e.from].position,
+                    self.vertices[e.to].position,
+                    e.curve,
+                )
+            })
+            .collect();
+        // A vertex dies iff it has at least one incident edge and every
+        // incident edge is being removed — the same criterion
+        // `remove_edges`'s `vertex_has_edges` filter applies after the
+        // fact. Slotmap iteration is ascending slot order.
+        let mut incident: std::collections::BTreeMap<SketchVertexId, (usize, usize)> =
+            std::collections::BTreeMap::new();
+        for (eid, e) in &self.edges {
+            let doomed = edges.contains(&eid);
+            for vid in [e.from, e.to] {
+                let entry = incident.entry(vid).or_insert((0, 0));
+                entry.0 += 1;
+                if doomed {
+                    entry.1 += 1;
+                }
+            }
+        }
+        let vertices: Vec<Point3> = self
+            .vertices
+            .iter()
+            .filter(|(vid, _)| matches!(incident.get(vid), Some(&(total, doomed)) if total > 0 && total == doomed))
+            .map(|(_, v)| v.position)
+            .collect();
+        RemovedScaffolding { rows, vertices }
+    }
+
     /// Re-inserts scaffolding an extrusion deleted — the undo half of
     /// [`Sketch::remove_edges`]. Each row is an edge as endpoint positions
     /// plus its curve-chain id; endpoints weld to existing vertices within
@@ -1755,6 +1767,25 @@ impl Sketch {
     /// and re-form regions/islands through the ordinary sticky machinery,
     /// merging with whatever the sketch holds NOW — never a whole-sketch
     /// snapshot, so edits made after the extrusion survive its undo.
+    ///
+    /// Slot exactness: the doomed vertices are re-created FIRST, in
+    /// `removed.vertices`' recorded (ascending original-slot) order — each
+    /// pops its exact original slot back off the free list, thanks to
+    /// [`Sketch::remove_edges`]' descending frees. Only then are the edge
+    /// rows replayed, in their own recorded (ascending original-edge-slot)
+    /// order; every endpoint welds to an existing vertex (pre-created or
+    /// survivor), so each row consumes exactly one edge slot — its own.
+    /// The two orders are independent on purpose: neither can be derived
+    /// from the other once any slot has ever been freed and reused
+    /// (eraser deletions, earlier consumptions), which is what broke the
+    /// previous rows-only replay.
+    ///
+    /// A pre-created vertex is skipped when the sketch ALREADY has a
+    /// vertex (or an edge interior) within
+    /// [`tol::POINT_MERGE`](crate::tol::POINT_MERGE) of its position —
+    /// that only happens when something drew there after the extrusion,
+    /// the merge case where slot exactness is out of scope anyway; the
+    /// row replay then welds or refuses exactly as before.
     ///
     /// A row that cannot re-insert faithfully — it would split, cross, or
     /// collinearly overlap geometry drawn since (any sticky event beyond a
@@ -1766,14 +1797,52 @@ impl Sketch {
     ///
     pub(crate) fn restore_edges(
         &mut self,
-        rows: &[(Point3, Point3, Option<SketchCurveId>)],
+        removed: &RemovedScaffolding,
     ) -> Result<(), SketchError> {
         let mut s = self.clone();
-        for &(a, b, curve) in rows {
+        for &p in &removed.vertices {
+            let occupied = s
+                .vertices
+                .iter()
+                .any(|(_, v)| v.position.approx_eq(p, tol::POINT_MERGE))
+                || s.edges.iter().any(|(_, e)| {
+                    crate::geom2d::point_near_segment(
+                        p,
+                        s.vertices[e.from].position,
+                        s.vertices[e.to].position,
+                        tol::POINT_MERGE,
+                    )
+                });
+            if !occupied {
+                s.vertices.insert(SketchVertex { position: p });
+            }
+        }
+        for &(a, b, curve) in &removed.rows {
             let report = s
                 .add_segment_inner(a, b)
                 .map_err(|_| SketchError::RestoreConflicts)?;
             if !report.split_edges.is_empty() || report.new_edges.len() != 1 {
+                return Err(SketchError::RestoreConflicts);
+            }
+            // The slot correspondence rests on every DOOMED endpoint
+            // welding to its pre-created vertex. A row that instead
+            // CREATES a vertex at a recorded doomed position means the
+            // pre-creation above was skipped (its occupancy guard is
+            // deliberately conservative — metric distance, while the
+            // sticky split filters are parametric, so the two can
+            // disagree in the sub-tolerance band of a long surviving
+            // edge): the pops are already desynchronized, and committing
+            // would silently permute slots. Refuse typed instead — the
+            // documented outcome for any restore that cannot be faithful.
+            // A created vertex at a NON-doomed position is the ordinary
+            // merge case (a surviving endpoint erased since the
+            // extrusion) and stays allowed: pre-creation completed before
+            // any row ran, so the doomed set's slots are already exact.
+            if report
+                .new_vertices
+                .iter()
+                .any(|&vid| removed.vertices.contains(&s.vertices[vid].position))
+            {
                 return Err(SketchError::RestoreConflicts);
             }
             let eid = report.new_edges[0];
@@ -1794,7 +1863,13 @@ impl Sketch {
     /// scaffolding by geometry: an interleaved gesture undo/redo restores
     /// snapshots carrying the outline's ORIGINAL edge ids, so a stored id
     /// set can go stale while the geometry itself is exact.
-    pub(crate) fn edge_at_positions(&self, a: Point3, b: Point3) -> Option<SketchEdgeId> {
+    ///
+    /// Public (not `pub(crate)`) because `crates/api`'s sketch-edge
+    /// locator (docs/HEW_API.md §5.2) reuses this exact geometry match for
+    /// its by-two-endpoints form, rather than duplicating the tolerant
+    /// endpoint comparison at the API boundary — a read-only accessor, no
+    /// new kernel behavior.
+    pub fn edge_at_positions(&self, a: Point3, b: Point3) -> Option<SketchEdgeId> {
         self.edges
             .iter()
             .find(|(_, e)| {
@@ -1813,18 +1888,55 @@ impl Sketch {
     /// identity survives on any remaining member edges, and a chain's
     /// analytic [`CurveGeom`] stays valid — deletion removes facets, it
     /// never deforms the ones that remain.
+    ///
+    /// ## Freed slots go back in DESCENDING id order
+    ///
+    /// `edges` and the derived `touched` vertex set are both freed
+    /// highest-id-first, not in their natural ascending iteration order.
+    /// This is load-bearing for undo byte-identity, not cosmetic:
+    ///
+    /// `slotmap::SlotMap::remove` pushes each freed slot onto an internal
+    /// free list that the next `insert()` pops LIFO (most-recently-freed
+    /// slot first). Freeing the doomed subset in DESCENDING slot order
+    /// therefore makes the next insertions pop exactly that subset back in
+    /// ASCENDING slot order — the n most recently pushed slots pop first,
+    /// smallest first, before any older free-list residue from earlier
+    /// deletions. [`Sketch::restore_edges`] leans on precisely that: it
+    /// re-creates the doomed vertices in recorded ascending-original-slot
+    /// order (each pops its own slot back), then replays the edge rows in
+    /// recorded ascending-original-edge-slot order (each welds both
+    /// endpoints and so consumes exactly one edge slot — its own).
+    ///
+    /// The two recorded orders are deliberately independent. Ascending
+    /// slot-id order is NOT creation order once any slot has ever been
+    /// freed and reused (an eraser deletion or an earlier consumption
+    /// followed by new drawing puts a newer edge in an older slot), so no
+    /// single row-replay order can satisfy both the edge and the vertex
+    /// correspondence at once; [`RemovedScaffolding`] records each side in
+    /// its own slot order instead ([`Sketch::scaffolding_removal`]).
+    ///
+    /// This holds for PARTIAL consumption too: the doomed ids are a
+    /// non-contiguous subset, but the LIFO argument above is about the
+    /// freed subset alone, regardless of what surviving (never-freed) ids
+    /// are interleaved between them. A restored row's endpoint that welds
+    /// to a SURVIVING vertex consumes no free slot, but it also was never
+    /// freed — it is simply unaffected, on either side. (A restore that
+    /// instead welds to a vertex created by DIFFERENT geometry drawn after
+    /// the extrusion — not a survivor of this same consumption — is the
+    /// pre-existing merge behavior of `restore_edges`; slot exactness is
+    /// out of scope there, since the sketch's contents already differ.)
     pub(crate) fn remove_edges(&mut self, edges: &std::collections::BTreeSet<SketchEdgeId>) {
         let old_regions: Vec<(SketchRegionId, SketchRegion)> =
             self.regions.iter().map(|(id, r)| (id, r.clone())).collect();
         let mut touched: std::collections::BTreeSet<SketchVertexId> =
             std::collections::BTreeSet::new();
-        for &eid in edges {
+        for &eid in edges.iter().rev() {
             if let Some(e) = self.edges.remove(eid) {
                 touched.insert(e.from);
                 touched.insert(e.to);
             }
         }
-        for vid in touched {
+        for vid in touched.into_iter().rev() {
             if !self.vertex_has_edges(vid) {
                 self.vertices.remove(vid);
             }

@@ -20,6 +20,7 @@ mod geom2d;
 mod validate;
 
 pub mod annotation;
+pub mod attr;
 pub mod axes;
 pub mod camera;
 pub mod document;
@@ -39,10 +40,12 @@ pub mod topo;
 pub mod transform;
 
 pub use annotation::{Anchor, Annotation, CapturedCurve, RadialKind};
+pub use attr::{AttrDict, AttrValue, AttrValueError};
 pub use axes::{AxesFrame, AxesFrameError};
 pub use camera::{CameraProjection, CameraState};
 pub use document::{
-    DocChange, Document, DocumentError, FollowMePath, MaterialScope, NodeId, PendingActionKind,
+    AttrTarget, CompoundMeta, DocChange, DocTransaction, Document, DocumentError, EntityRef,
+    FollowMePath, HistoryOrigin, MaterialScope, NodeId, PendingActionKind,
 };
 pub use error::TopologyError;
 pub use guide::Guide;
