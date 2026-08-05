@@ -1,15 +1,19 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/api",
+    "crates/softrender",
     "crates/kernel",
     "crates/inference",
     "crates/tessellate",
     "crates/wasm-api",
     "crates/mesh-heal",
+    "crates/mesh-export",
     "crates/dae-import",
     "crates/gltf-import",
     "crates/skp-import",
     "crates/stl-import",
+    "crates/hew-cli",
 ]
 # The Tauri host crate is deliberately NOT a workspace member: it drags
 # desktop-only dependencies into `cargo test --workspace` and would slow the
@@ -31,10 +35,13 @@ edition = "2024"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
+api = { path = "crates/api" }
+softrender = { path = "crates/softrender" }
 kernel = { path = "crates/kernel" }
 inference = { path = "crates/inference" }
 tessellate = { path = "crates/tessellate" }
 mesh-heal = { path = "crates/mesh-heal" }
+mesh-export = { path = "crates/mesh-export" }
 dae-import = { path = "crates/dae-import" }
 gltf-import = { path = "crates/gltf-import" }
 skp-import = { path = "crates/skp-import" }

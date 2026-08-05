@@ -106,6 +106,9 @@ wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
 
 | Document | What it covers |
 | --- | --- |
+| [docs/API_GUIDE.md](docs/API_GUIDE.md) | Driving Hew from a program or an AI agent — start here |
+| [docs/API_REFERENCE.gen.md](docs/API_REFERENCE.gen.md) | Every API command: parameters, results, refusals |
+| [docs/HEW_API.md](docs/HEW_API.md) | The API protocol specification |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Data model, kernel design, crate topology |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Contributor guide: setup, rules, testing |
 | [docs/HEW_FILE_FORMAT.md](docs/HEW_FILE_FORMAT.md) | The open `.hew` file format specification |

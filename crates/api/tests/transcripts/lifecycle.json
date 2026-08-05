@@ -1,0 +1,188 @@
+{
+  "profile": "core",
+  "frames": [
+    {
+      "note": "any request before hello is not-ready — except hello itself",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "hew.query.scene",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+          "code": -32004,
+          "message": "hew.meta.hello first"
+        }
+      }
+    },
+    {
+      "note": "a method the registry has never heard of is -32601, even before hello",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "hew.no.such",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+          "code": -32601,
+          "message": "unknown method"
+        }
+      }
+    },
+    {
+      "note": "hello with a protocol we do not speak names the versions we do",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 99
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "error": {
+          "code": -32602,
+          "message": "unsupported protocol version",
+          "data": {
+            "speaks": [
+              1
+            ]
+          }
+        }
+      }
+    },
+    {
+      "note": "the handshake",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1,
+          "client": {
+            "name": "conformance",
+            "version": "0"
+          }
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "result": {
+          "protocol": 1,
+          "app": {
+            "name": "hew",
+            "version": "0.5.0"
+          },
+          "profile": "core",
+          "encoding": "json",
+          "documents": []
+        }
+      }
+    },
+    {
+      "note": "hew.view.snapshot is core-granted specifically (docs/design/headless-snapshot.md's headless render path), so it is no longer turned away at the profile gate — it reaches the same attachment check any other real command does, and this connection has not attached yet",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "hew.view.snapshot",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "error": {
+          "code": -32002,
+          "message": "no document attached"
+        }
+      }
+    },
+    {
+      "note": "a command needing a document while unattached is -32002",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "hew.solid.extrude",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "error": {
+          "code": -32002,
+          "message": "no document attached"
+        }
+      }
+    },
+    {
+      "note": "an attachment-establishing command needs no attachment first (it reaches its command logic — NoHost refuses host_capability_missing, so it stays unattached)",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "hew.doc.new",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "error": {
+          "code": -32000,
+          "message": "refused",
+          "data": {
+            "refusal": "host_capability_missing",
+            "failed_index": 0,
+            "failed_method": "hew.doc.new",
+            "detail": { "capability": "create documents" },
+            "explanation": "This host cannot create documents. Connect through a host that can (hew-cli has file access; the desktop app renders)."
+          }
+        }
+      }
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "result": {}
+      }
+    },
+    {
+      "note": "hew.guide.angular composes Document::add_guide_line client-side (no kernel angular guide exists — api-kernel-map.md §1.11); a model-mutating plain request auto-wraps as a one-command transaction, so the result carries the transaction envelope",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "hew.guide.angular",
+        "params": {
+          "origin": [0.0, 0.0, 0.0],
+          "plane_normal": [0.0, 0.0, 1.0],
+          "base_dir": [1.0, 0.0, 0.0],
+          "angle": 1.5707963267948966
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "result": {
+          "label": "hew.guide.angular",
+          "results": [
+            { "guide": "gde_0" }
+          ]
+        }
+      }
+    }
+  ]
+}

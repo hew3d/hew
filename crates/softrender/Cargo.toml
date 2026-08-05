@@ -1,0 +1,12 @@
+[package]
+name = "softrender"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The headless render device (docs/design/headless-snapshot.md): a pure
+# software rasterizer over tessellate's renderer-agnostic buffers.
+# Bytes in, bytes out — no GPU, no I/O, deterministic.
+[dependencies]
+kernel.workspace = true
+tessellate.workspace = true

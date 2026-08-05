@@ -1,0 +1,109 @@
+{
+  "profile": "core",
+  "frames": [
+    {
+      "note": "the handshake",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "hew.meta.hello",
+        "params": { "protocol": 1 }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "result": {
+          "protocol": 1,
+          "app": { "name": "hew", "version": "0.5.0" },
+          "profile": "core",
+          "encoding": "json",
+          "documents": []
+        }
+      }
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "note": "§6.3: a transaction with an enter and no matching exit is unbalanced — rejected -32602 BEFORE anything runs (the static pass catches this ahead of the kernel bracket, so the referenced grp_1 need not even exist)",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            { "method": "hew.context.enter", "params": { "id": "grp_1" } }
+          ]
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+          "code": -32602,
+          "message": "unbalanced context: 1 enter(s) never exited in this envelope"
+        }
+      }
+    },
+    {
+      "note": "§6.3: context commands are legal only inside a transaction; a bare hew.context.enter plain request auto-wraps as a one-command transaction (§6.1), which is then unbalanced by the same rule above — -32602, never a bare success",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "hew.context.enter",
+        "params": { "id": "grp_1" }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "error": {
+          "code": -32602,
+          "message": "unbalanced context: 1 enter(s) never exited in this envelope"
+        }
+      }
+    },
+    {
+      "note": "§6.2: a $face forward reference — command 0 names label 'leg', which command 1 does not mint until AFTER command 0 runs — is a static defect caught before any command executes, -32602, never a runtime ref_resolution_failed",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "method": "hew.solid.push_pull",
+              "params": {
+                "face": { "$face": "leg#top" },
+                "distance": 0.1
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "as": "leg",
+              "params": { "region": "rgn_deadbeef_1", "distance": 0.1 }
+            }
+          ]
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "error": {
+          "code": -32602,
+          "message": "command 0: $face 'leg#top' names no earlier command label"
+        }
+      }
+    }
+  ]
+}

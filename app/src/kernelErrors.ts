@@ -256,6 +256,28 @@ const DESCRIPTIONS: Record<string, string> = {
   // actual undo or redo, so the copy must not blame one.
   UnexpectedGestureState:
     "Finishing this step needed the drawing it just closed and couldn't find it, so nothing was placed and the model was left unchanged. If this keeps happening, use Report Bug to capture the session.",
+  // Raised only through the API's transaction bracket (never by the UI's
+  // own tools): a connected client's batch tripped a commit-time guard and
+  // was rolled back whole.
+  TransactionHistoryDisturbed:
+    'A connected tool undid history in the middle of its own batch, so the whole batch was discarded and the model was left unchanged.',
+  TransactionSessionUnbalanced:
+    'A connected tool changed which group or component was open for editing without putting it back, so its whole batch was discarded and the model was left unchanged.',
+  TransactionGestureUnbalanced:
+    'A connected tool left a drawing step unfinished at the end of its batch, so the whole batch was discarded and the model was left unchanged.',
+
+  // ------------------------------------------- attribute dictionaries
+  // Reachable only through the API surface (the UI has no attribute
+  // editor yet); phrased for the connected-tool framing regardless.
+  UnknownTag: "That tag doesn't exist in this model. Check the tag name and try again.",
+  InvalidAttrName:
+    'Attribute names need both a namespace and a key. Give the attribute a non-empty name and try again.',
+  NonFiniteAttrValue:
+    "Attribute numbers can't be NaN or infinity. Use a finite number and try again.",
+  AttrValueTooDeep:
+    'This attribute value is nested too deeply to store. Flatten it and try again.',
+  UnknownAttr:
+    "That attribute doesn't exist on this item, so there was nothing to remove.",
 
   // ------------------------------------------------------ file loading
   NotAContainer: "This file isn't a Hew document. Pick a .hew file saved by Hew.",

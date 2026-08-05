@@ -1,0 +1,19 @@
+[package]
+name = "api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The Hew API's logical command bus (docs/HEW_API.md §1, §3): a pure,
+# kernel-class crate — no UI, no I/O, no network (DEVELOPMENT.md rule 1).
+# Transports live in hosts; this crate owns everything contractual.
+[dependencies]
+kernel.workspace = true
+# Slotmap key bits back the compound public ids of sketch sub-entities
+# (docs/HEW_API.md §5.1) — the same crate the kernel's own ids use.
+slotmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

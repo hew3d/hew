@@ -1,0 +1,136 @@
+{
+  "profile": "core",
+  "frames": [
+    {
+      "note": "the handshake",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "hew.meta.hello",
+        "params": { "protocol": 1 }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "result": {
+          "protocol": 1,
+          "app": { "name": "hew", "version": "0.5.0" },
+          "profile": "core",
+          "encoding": "json",
+          "documents": []
+        }
+      }
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "note": "the §6.1 table-leg shape: draw_circle -> extrude via $ref -> rename via $ref, all in one labeled transaction; the success shape is {results: [...], label}, one entry per command in order",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "hew.doc.transact",
+        "params": {
+          "label": "Table leg",
+          "commands": [
+            {
+              "method": "hew.sketch.draw_circle",
+              "as": "profile",
+              "params": {
+                "plane": { "ground": true },
+                "center": [0.1, 0.1, 0.0],
+                "radius": 0.03
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "as": "leg",
+              "params": {
+                "region": { "$ref": "profile#/region_id" },
+                "distance": 0.45
+              }
+            },
+            {
+              "method": "hew.entity.rename",
+              "params": {
+                "id": { "$ref": "leg#/object_id" },
+                "name": "Leg"
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+          "label": "Table leg",
+          "results": [
+            {
+              "sketch": "skt_0",
+              "region_id": "rgn_0_100000001",
+              "region_ids": ["rgn_0_100000001"],
+              "curve_id": "crv_0_100000001"
+            },
+            { "object_id": "obj_1" },
+            {}
+          ]
+        }
+      }
+    },
+    {
+      "note": "a transaction refused at its second command (index 1, distance_too_small): the canonical §4.4 error.data shape, and the document is left exactly as the previous frame committed it (asserted separately by the byte-identity property test, not by this structural replay)",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "method": "hew.sketch.draw_rect",
+              "as": "profile2",
+              "params": {
+                "plane": { "ground": true },
+                "corner_a": [1.0, 1.0, 0.0],
+                "corner_b": [1.2, 1.2, 0.0]
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "region": { "$ref": "profile2#/region_id" },
+                "distance": 0.0
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "error": {
+          "code": -32000,
+          "message": "refused",
+          "data": {
+            "refusal": "distance_too_small",
+            "failed_index": 1,
+            "failed_method": "hew.solid.extrude",
+            "detail": {},
+            "explanation": "That distance is too small to build anything. Drag further, or type an exact length."
+          }
+        }
+      }
+    }
+  ]
+}

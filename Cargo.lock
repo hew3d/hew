@@ -18,6 +18,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
+name = "api"
+version = "0.5.0"
+dependencies = [
+ "kernel",
+ "proptest",
+ "serde",
+ "serde_json",
+ "slotmap",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -315,6 +326,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hew-cli"
+version = "0.5.0"
+dependencies = [
+ "api",
+ "dae-import",
+ "gltf-import",
+ "kernel",
+ "mesh-export",
+ "serde_json",
+ "skp-import",
+ "softrender",
+ "stl-import",
+ "tessellate",
+ "windows-sys",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -436,6 +464,16 @@ name = "memchr"
 version = "2.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
+
+[[package]]
+name = "mesh-export"
+version = "0.5.0"
+dependencies = [
+ "kernel",
+ "serde_json",
+ "tessellate",
+ "zip",
+]
 
 [[package]]
 name = "mesh-heal"
@@ -746,6 +784,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "softrender"
+version = "0.5.0"
+dependencies = [
+ "kernel",
+ "tessellate",
+]
+
+[[package]]
 name = "stl-import"
 version = "0.5.0"
 dependencies = [
@@ -879,11 +925,13 @@ dependencies = [
 name = "wasm-api"
 version = "0.5.0"
 dependencies = [
+ "api",
  "dae-import",
  "gltf-import",
  "inference",
  "js-sys",
  "kernel",
+ "mesh-export",
  "serde",
  "serde_json",
  "skp-import",

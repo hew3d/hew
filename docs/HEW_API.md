@@ -1,8 +1,44 @@
 # Hew — API Specification
 
-> **Status: draft.** This document is under active design review and is not
-> yet implemented. Sections marked *Reserved* describe surface that is
-> designed for but deliberately not built in the first release.
+> **Status: implemented (headless, protocol 1; live transport both sides
+> on all three desktops).** The command surface, transactions, addressing,
+> profiles, and conformance suite of this document are implemented in
+> `crates/api`, with `hew-cli` as the first host (script runner, one-shot
+> dispatch, MCP on stdio). `hew-cli`'s client side of `--live` (§11.2,
+> §12) — discovery, the token-bearing handshake, and envelope forwarding
+> over a Unix socket on macOS/Linux and a named pipe on Windows — is
+> implemented and verified end to end against a running app on macOS and
+> Windows 11. The desktop app's server side is implemented to match:
+> `shells/tauri` binds the per-pid socket or pipe, publishes and sweeps
+> the discovery file, and enforces the first-frame token gate shell-side; `crates/wasm-api` dispatches every
+> forwarded frame against the SAME live `Document` the viewport renders,
+> granted `Profile::App`, with the webview refreshing exactly as it does
+> after any other kernel mutation. `hew.doc.save` and `hew.doc.export`
+> both work live by handing bytes back for the caller to write: neither
+> serializing the document nor writing STL/3MF/GLB (`crates/mesh-export`,
+> shared by `crates/hew-cli`'s headless host and `crates/wasm-api`'s
+> `LiveHost`) needs a disk, only the final write does — `hew-cli --live`
+> does that write for you, so the same command produces the same file
+> headless or live. The rest of the host-implemented commands
+> (`hew.doc.new/open/import`) still refuse typed: document lifecycle stays
+> user-driven, so a remote connection cannot silently replace or overwrite
+> what the user has open. `hew.view.snapshot` likewise refuses live (no
+> viewport handle reaches `crates/api` for it to render through yet), but
+> `hew.view.camera`, `hew.view.zoom_extents`, and `hew.view.units` — which
+> need no bytes back, only an effect — ARE wired end to end: `LiveHost`
+> records the requested effect and answers success, `crates/wasm-api`
+> hands it to the webview's live bridge (`app/src/api/liveBridge.ts`) as a
+> directive read out right after dispatch, and the bridge applies it
+> through the Viewport's existing camera calls or
+> `app/src/settings/units.ts`'s own setter — the same code paths the
+> Camera menu and Settings window already use. So `--live` today is real
+> for the kernel-served command surface (sketch/solid/structure/entity/
+> style/attrs/history — the bulk of the protocol), for `save`/`export`,
+> for these three view/display effects, and honestly refuses the
+> remaining host-effect commands that need filesystem or rendering access
+> this sandbox does not have. Sections marked *Reserved* remain
+> deliberately unbuilt; per-command gaps are declared in the registry and
+> answer typed refusals.
 
 The Hew API is the single public, versioned command surface through which
 any program other than Hew itself reads and edits a Hew document. Its first
@@ -11,6 +47,11 @@ clients are AI agents (through an MCP adapter) and shell scripts (through
 domain overlays described in the roadmap. All of them speak the same
 protocol and differ only in which subset of it — which *profile* — a host
 grants them.
+
+This document is written for implementers of the protocol and of clients
+that must match it exactly. If you are writing a client, start with
+API_GUIDE.md, which covers connecting, the shape of a session, and worked
+examples of every idiom here; come back for the normative rule.
 
 This document is the normative reference for the protocol: the envelope,
 its semantics, addressing, transactions, errors, discovery, and transports.
@@ -308,14 +349,14 @@ keep the derived, identity-stable semantics the kernel maintains for
 them (ARCHITECTURE.md §2.6), stable within an open document session;
 clients re-resolve them after open or attach.
 
-### 5.2 Faces and edges: locators, not identifiers
+### 5.2 Faces and edges: solid geometry by locator, sketch edges by id
 
-Faces and edges of a solid deliberately have **no persistent public
+Faces and edges of a **solid** deliberately have **no persistent public
 identifiers**. Under sticky geometry a face that is split, merged, or
 consumed is not "the same face" in any way the kernel could honestly
 promise across edits, and a heroic face-identity scheme would be a
-permanent tax on every kernel operation. Commands that take a face or edge
-take a **locator** instead — the API's equivalent of pointing:
+permanent tax on every kernel operation. Commands that take a solid face
+or edge take a **locator** instead — the API's equivalent of pointing:
 
 - **By point** — `{"object": "obj_5f3a", "at": [0.1, 0.1, 0.45]}`: the
   face (or edge) of that object containing, or nearest within tolerance
@@ -333,6 +374,43 @@ Additional predicate locators (e.g. "the face with normal +Z of greatest
 area") are *Reserved*: the shapes above are sufficient for the first
 release, and predicates can be added additively.
 
+**Sketch edges are the opposite case, and deliberately so.** A sketch's
+edges are not sticky-geometry byproduct the way a solid's faces are —
+they are the user-authored scaffolding itself: exactly the lines a
+person drew, that a person also trims, extends, and re-draws around,
+often long after the fact (§1's "you'll use constantly" pairing of
+drawing and erasing). A sketch has no analogue of face split/merge/
+consume silently retargeting what an id would have named — an edge
+exists exactly until something explicitly deletes it — so the
+"heroic identity scheme" cost above never applies, and the api-owned
+compound-id treatment already given to a sketch's regions and curve
+chains (§5.1) extends to its edges too: `"edg_<sketch>_<key>"`, minted
+and resolved exactly like a region or curve id. `hew.query.entity` on a
+sketch lists its edges (id, endpoints, owning curve if any) alongside
+its regions and curves, and answers a query on an edge id directly;
+`hew.entity.delete` accepts one to erase exactly that edge — the
+eraser's own tool, one edge, one undo step — leaving whatever the
+kernel's own sticky rules do to the vertices and regions it touches
+(never repaired or second-guessed at the API layer — DEVELOPMENT.md
+rule 4).
+
+A client that has not queried a sketch yet can still name one of its
+edges the way a person clicks it, with the same locator shapes a solid
+edge uses, under a `"sketch"` key instead of `"object"`:
+
+- **By point** — `{"sketch": "skt_2a1", "at": [0.5, 0.0, 0.0]}`: the
+  sketch's edge nearest the point, within tolerance; ambiguity refuses
+  typed exactly like the solid-edge form above.
+- **By endpoints** — `{"sketch": "skt_2a1", "from": [0, 0, 0], "to": [1,
+  0, 0]}`: the edge whose two endpoints coincide with the given points
+  (either order). Sticky rules forbid coincident duplicate edges, so
+  this match is unique by construction — no ambiguity case exists for
+  it.
+
+Wherever this spec says "edge locator" (here and in §5.3), all three
+forms are legal: a solid's `{object, at|ray}`, a sketch edge's own
+public id as a bare string, or a sketch edge's `{sketch, at|from+to}`.
+
 ### 5.3 Derived points
 
 A UI user rarely types coordinates — the inference engine's magnetic
@@ -344,6 +422,11 @@ a **derived-point locator** naming a point of existing geometry:
 - `{"point": "midpoint", "of": {"edge": <edge locator>}}`
 - `{"point": "endpoint", "of": {"edge": <edge locator>}, "nearest": [x, y, z]}`
   — an edge has two endpoints; `nearest` picks one
+  (`<edge locator>` here is §5.2's full grammar — a solid edge's
+  `{object, at|ray}`, or a sketch edge named by its own public id or
+  its `{sketch, at|from+to}` locator: the midpoint of a rectangle a
+  client just drew is exactly as reachable as the midpoint of a
+  push/pull'd solid wall)
 - `{"point": "center", "of": <curve id | face locator>}` — the analytic
   center of a drawn circle or arc, or of a stamped curved wall's cylinder
 - `{"point": "centroid", "of": <face locator>}` — a planar face's area
@@ -372,11 +455,13 @@ between a query and the mutation that uses it. A locator that fails to
 resolve — dangling entity, no such point, ambiguous result — refuses
 typed and aborts its transaction, document untouched.
 
-`hew.query.resolve` resolves any locator (point, face, or edge) to its
-concrete value without mutating, for inspection and debugging.
-Proximity-based snap resolution — "the strongest snap of these kinds near
-this point", the full inference engine as a service — is *Reserved*; the
-derived forms above are deterministic and cover the first release.
+`hew.query.resolve` resolves any locator (point, face, or edge — §5.2's
+full edge grammar, solid or sketch) to its concrete value without
+mutating, for inspection and debugging; a resolved edge's `"kind"` field
+(`"solid"` or `"sketch"`) says which grammar matched. Proximity-based
+snap resolution — "the strongest snap of these kinds near this point",
+the full inference engine as a service — is *Reserved*; the derived
+forms above are deterministic and cover the first release.
 
 ### 5.4 Creation results
 
@@ -433,7 +518,9 @@ and **origin** it implies, which `hew.history.status` reports (origin is
 `user` for UI-authored edits and the connection's identity for API
 envelopes; both are session-scoped state, never serialized into `.hew`)
 — is a rule-8 item and a prerequisite: it lands before the dispatcher
-does. Today's kernel history entries carry neither field.
+does. The kernel provides it as the `begin_transaction` /
+`commit_transaction` / `abort_transaction` bracket on `Document`, whose
+committed compound entry carries exactly this label and origin.
 ARCHITECTURE.md §2.11's per-operation undo granularity then describes
 UI-authored edits; an API envelope is one atom in the same shared
 history.
@@ -509,6 +596,14 @@ The registry classes every command, and the class governs placement:
   structure, materials, tags, guides, attribute writes, context — are the
   transaction's payload, and the only class the one-envelope-one-undo
   accounting applies to.
+
+  Three of these are **registry-state**: `hew.material.create`,
+  `hew.tag.create`, and `hew.tag.set_visible` follow model-mutating
+  placement rules (transaction payload allowed) but record no undo entry.
+  The kernel deliberately keeps palette and registry additions outside the
+  undo log — an unreferenced material is harmless, and a tag's visibility
+  is view state, not a modeled edit. Their registry entries note this in
+  their summaries.
 - **Read-only** commands — `hew.query.*`, `hew.meta.*`, and
   `hew.attr.get` — are legal anywhere: standalone (adding no undo
   entry), or interleaved inside a transaction, where their results are
@@ -549,7 +644,7 @@ for, not shipped.
 | `hew.guide` | `line`, `point`, `angular`, `clear` | Standard |
 | `hew.attr` | `get`, `set`, `delete` (§8) | Required |
 | `hew.history` | `undo`, `redo`, `status` (depth; top entry's label and origin) | Required |
-| `hew.view` | `snapshot` (render the attached document to PNG) | Standard (`app` profile only) |
+| `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format) | Standard (`core` grants `snapshot` specifically; `camera`/`zoom_extents`/`units` stay `app`-only — live-host-only effects) |
 | `hew.annotate` | dimensions, leader text | Reserved |
 | `hew.event` | notifications + `subscribe` | Reserved (§4.5) |
 
@@ -562,6 +657,26 @@ Semantics notes, normative:
   plane within kernel tolerance; off-plane input is refused typed, never
   projected silently. Any point parameter accepts a derived-point locator
   (§5.3) in place of coordinates.
+- `hew.sketch.draw_arc` takes a `close`: `"open"` (default, a bare arc),
+  `"pie"` (closed wedge — two radii to the center), or `"segment"`
+  (closed circular segment — the chord) — the API counterpart of the UI
+  Arc tool's Alt-cycled completion modes. `"pie"`/`"segment"` commit a
+  closed profile exactly like `draw_rect`/`draw_circle`: a region in
+  plane/sketch mode, a `SplitFaceInner` loop imprint in face mode.
+  Refused typed when combined with a full-turn sweep, which is already a
+  closed loop (the circle special case).
+  `"pie"`/`"segment"` additionally need at least 2 chords: a single chord
+  can't form a non-degenerate closed loop (a one-chord `"segment"`'s
+  closing edge would retrace the same chord — no region at all; a
+  one-chord `"pie"` risks a collinear, zero-area wedge at some sweeps,
+  sharpest at a half turn). `segments` below that floor is refused
+  static (`-32602`); the proportional default is floored at 2 as well,
+  so a small sweep never silently falls into the same degenerate case.
+  Face mode additionally validates every loop vertex — including
+  `"pie"`'s caller-supplied center — strictly inside the target face
+  before cutting, refused `loop_not_strictly_inside` otherwise; this is
+  stricter than the bare containment test alone, which is not reliable
+  for a point sitting exactly on the face's own boundary.
 - In headless hosts `hew.doc.new`/`open` establish the working document.
   A live host at 1.0 keeps document lifecycle user-driven — the user
   creates or opens documents and clients `attach`; whether a live host
@@ -601,10 +716,17 @@ Semantics notes, normative:
   decision this spec does not preempt.
 - `hew.view.snapshot` exists so a client can *see* the model rather than
   only query it — for an agent, the difference between knowing what is
-  true and seeing what it built. It renders through the host's live
-  viewport (hence `app`-profile; a headless render path may extend it
-  later) with an explicit camera or a named standard view, returning PNG
-  bytes base64-encoded.
+  true and seeing what it built. A headless host renders it through a
+  deterministic software rasterizer (no GPU, no viewport, bytes in and
+  bytes out); a live host may render through its actual viewport instead
+  — either way the command takes an explicit camera or a named standard
+  view (`camera` and `view` mutually exclusive; giving neither renders the
+  document's saved working camera if it has one, else a fitted isometric
+  view) and returns PNG bytes base64-encoded by default, or writes them
+  to an explicit `path` instead (below). `include_ids: true` also
+  returns a per-pixel id-buffer (`u16` little-endian, 0 = background) and
+  the palette of public ids it indexes, so a caller can ask "what object
+  is at pixel (x, y)" machine-readably.
 - `hew.history.undo`/`redo` act on the shared document history — the
   topmost entry, whoever authored it. Because that is a blunt instrument
   in a `--live` session, `undo` accepts an optional `expected_label`,
@@ -620,12 +742,56 @@ Semantics notes, normative:
 - `hew.doc.export` returns the exported bytes base64 by default; a
   client may instead pass `path`, honored by hosts with filesystem
   access (`hew-cli`, the desktop shell) and refused typed elsewhere.
-  `hew.view.snapshot` always returns PNG bytes base64.
+  `hew.view.snapshot` follows the same posture: PNG bytes base64 by
+  default, or a `path` a filesystem-capable host writes to instead —
+  the inline encoding can exceed a client's tool-result budget at any
+  useful resolution, so a caller that only needs the file on disk
+  should ask for `path`. When `path` is given the result carries `path`
+  in place of `png_base64`; `include_ids`'s id-buffer follows the same
+  split, written to `<path>.ids.bin` (with its path returned as
+  `id_buffer_path`) rather than base64-encoded inline — `id_palette`
+  itself stays inline either way, since it is small.
 - `hew.entity.move` with `copy` over a Sketch selection refuses typed at
   1.0, whatever the count: the UI's sketch copy is tool-layer replay
   through the sticky rules, and the kernel-side sketch duplicate op does
   not exist yet (ROADMAP.md). The refusal is named in `move`'s registry
   inventory rather than silently diverging from this table's claim.
+- `hew.view.camera` and `hew.view.zoom_extents` aim a *live* viewport —
+  the gap `hew.view.snapshot` alone cannot close. Rendering a picture is
+  not the same as putting the model where a human, or an agent watching
+  over someone's shoulder, is actually looking: a 24 cm model on a
+  metre-scale default grid is an invisible speck until something moves
+  the camera to it. `hew.view.camera` takes the identical `camera`/`view`
+  vocabulary `hew.view.snapshot` accepts — one camera spec in the
+  protocol, not two — except exactly one of them is required (there is
+  no document-camera fallback to give neither for, unlike a snapshot's
+  "no camera given" default). `hew.view.zoom_extents` takes no
+  parameters and frames whatever is currently visible, mirroring the
+  app's own View > Zoom Extents; like the live viewport's own
+  implementation, an empty scene is a harmless no-op, not a refusal.
+  Neither command edits the document — both are `mutates_document =
+  false` — so neither is recorded, neither adds an undo entry, and
+  neither triggers the resync a real mutation would. Both are
+  meaningful only where a viewport exists: a headless host (`hew-cli`
+  without `--live`, `NoHost`) refuses both `host_capability_missing`,
+  and a headless client that wants to *see* the model still reaches for
+  `hew.view.snapshot`, passing a camera per call instead of moving a
+  persistent one.
+- `hew.view.units` sets the app's displayed length-unit format —
+  `app/src/settings/units.ts`'s `LengthFormat`
+  (`"m"|"cm"|"mm"|"arch"|"frac_in"|"dec_in"`). This is deliberately an
+  APP-LEVEL DISPLAY PREFERENCE, not document state: it governs how
+  lengths are formatted in dialogs, the VCB, and dimension readouts, the
+  same way a live camera pose governs how the model is framed — neither
+  is modeled data, so neither is recorded, undoable, or serialized into
+  `.hew`. It lives under `hew.view` rather than a new namespace for that
+  same reason: `hew.view.*` is already "how the live app currently
+  presents the model," and a display-unit format is exactly that kind of
+  presentation state, not a sibling concern needing its own top-level
+  area. A live host applies it through that module's own setter (never a
+  direct storage write), so the desktop app's separate Settings window
+  stays in sync via the existing cross-window broadcast; a headless host
+  has no display preference to set and refuses `host_capability_missing`.
 
 ## 8. Attribute dictionaries
 
@@ -637,7 +803,15 @@ round-trips, and never interprets.
 - A dictionary is addressed `(entity, namespace)`; a namespace is a
   reverse-DNS-style string owned by whoever coined it
   (`"com.example.shelving"`). The `hew` prefix (`"hew"`, `"hew.*"`) is
-  reserved for first-party use.
+  reserved for first-party use: `hew.attr.set` and `hew.attr.delete`
+  refuse it `reserved_attr_namespace`, matched exactly and
+  case-sensitively, so a name that merely begins with those letters
+  (`"hewlett.example"`) is a legitimate namespace and goes through.
+  Enforcement sits at the API boundary rather than in the kernel — the
+  reservation exists so first-party code can claim those namespaces, so
+  the kernel and the UI keep writing them freely. Reads are
+  unrestricted; `hew.attr.get` returns first-party dictionaries like any
+  other.
 - Values are arbitrary JSON (finite numbers only), read and written at
   key granularity: `hew.attr.set {target, ns, key, value}`,
   `hew.attr.get {target, ns?}`, `hew.attr.delete {target, ns, key?}`.
@@ -667,9 +841,29 @@ a running host, and the mechanism by which a client discovers what a
 newer or older Hew supports.
 
 The registry in `crates/api` is the single source of truth. From it are
-generated, at build time: the MCP tool definitions `hew-cli` serves, the
-TypeScript SDK used by the app (and later by plugins), and the published
-API reference. None of these are hand-written.
+generated, mechanically, all three artifacts this section promises — none
+of them hand-written, and each traces back to the same `Registry::
+protocol_1()` declarations:
+
+- The MCP tool definitions `hew-cli` serves (`crates/hew-cli/src/
+  mcp.rs`'s `generate_tools`) — computed live, at connection time, from
+  whichever profile the connection was granted; there is no committed
+  file for these, since a fresh registry read on every `tools/list` is
+  the whole point (§13).
+- The TypeScript client SDK used by the app and, later, by plugins
+  (`app/src/api/hewApi.gen.ts`) — a typed `HewApiClient` over a
+  caller-supplied transport, one method and one `Params`/`Result` type
+  pair per command, grouped by namespace.
+- The published API reference (`docs/API_REFERENCE.gen.md`) — one
+  section per namespace, one entry per command: schemas, tier, class,
+  served-by, and its refusal inventory with explanations drawn from the
+  UI's own copy table wherever one exists.
+
+The latter two are committed generated files (`crates/api/src/
+codegen.rs`); `crates/api/tests/generate_artifacts.rs` is their
+REGENERATE harness — regenerate both with `REGENERATE_API_ARTIFACTS=1
+cargo test -p api --test generate_artifacts`, and a plain `cargo test -p
+api` fails on drift between them and the registry (§14).
 
 Evolution is **additive only**, protocol version 1 for as long as
 possible:
@@ -703,11 +897,15 @@ and the entire future of scoped plugin grants depends on it. Protocol 1
 defines two profiles:
 
 - **`core`** — everything headless-safe: the full command surface except
-  `hew.view.*`. This is what `hew-cli` grants its own embedded kernel and
-  the ceiling for what a future plugin's manifest can request.
+  `hew.view.*`, with one deliberate exception — `hew.view.snapshot` has a
+  headless render path (a software rasterizer, no GPU or live viewport
+  required) and is granted here too. This is what `hew-cli` grants its own
+  embedded kernel and the ceiling for what a future plugin's manifest can
+  request.
 - **`app`** — `core` plus the commands that only make sense against a
-  live application session (`hew.view.snapshot`; later, selection and
-  camera). Granted by the desktop app to authenticated local connections.
+  live application session: `hew.view.camera`, `hew.view.zoom_extents`,
+  and `hew.view.units` today (a future `hew.view.*` addition: selection).
+  Granted by the desktop app to authenticated local connections.
 
 A profile is a *maximum* a host may narrow: a live host that keeps
 document lifecycle user-driven simply withholds `hew.doc.new`/`open`
@@ -739,17 +937,54 @@ pipe (Windows), carrying newline-delimited JSON-RPC frames. Discovery: at
 startup the app writes
 `<runtime-dir>/hew/instance-<pid>.json` — socket path, a per-launch
 random 256-bit token, pid, app version — with owner-only permissions,
-and removes it on exit (`<runtime-dir>` is `$XDG_RUNTIME_DIR` on Linux,
+and removes it on exit (`<runtime-dir>` is `$XDG_RUNTIME_DIR` on Linux —
+falling back to a per-uid `/tmp/hew-run-<uid>` where that variable is
+unset, never a shared `/tmp/hew` any local user could claim first —
 `~/Library/Application Support/Hew/run` on macOS, `%LOCALAPPDATA%\Hew\run`
-on Windows). The first request on a connection must be `hello` with the
-token; everything else is dropped. The socket is never a TCP listener:
+on Windows). Both halves verify ownership before trusting the directory:
+a discovery directory, discovery file, or advertised socket belonging to
+another user is ignored, never read from and never deleted. The first
+request on a connection must be `hello` with the token; everything else
+is dropped, and the token is stripped from every frame before it reaches
+the document — the renderer never sees the secret. The socket is never a TCP listener:
 owner-only filesystem permissions plus the token mean nothing off the
-machine, and no other user on it, can drive a document.
+machine, and no other user on it, can drive a document. On Windows the
+same guarantee rests on a different mechanism, not a literal copy of
+0600: the pipe is created with a security descriptor
+(`D:P(A;;GA;;;OW)`) granting only its owner — the user Hew is running
+as — access, since a named pipe is a kernel object with no filesystem
+mode bits of its own, plus `FILE_FLAG_FIRST_PIPE_INSTANCE` on the very
+first instance of the app's per-pid pipe name, so that another local
+process cannot squat on that (predictable, pid-derived) name ahead of
+launch — creation fails loudly instead of the app silently adding an
+instance to the squatter's pipe object. The connecting client caps the
+impersonation level it grants that pipe server to "identify" via
+`CreateFileW`'s SQOS flags, and rejects a discovery file's `socket` field
+outright unless it is the exact local shape `\\.\pipe\<name>` — a remote
+UNC form (`\\<host>\pipe\...`) is never dialed. The discovery file's own
+protection comes from `%LOCALAPPDATA%` already being a per-user directory
+rather than an explicit ACL applied to the file itself; both halves
+additionally confirm the runtime directory resolves (symlinks and
+junctions followed) to somewhere actually under the current user's own
+`%LOCALAPPDATA%` before trusting it, though — unlike unix's uid check —
+neither queries the directory's discretionary ACL directly, so a
+`%LOCALAPPDATA%` an administrator has made writable to other users is not
+caught by this. As with unix's root, a local Administrator or SYSTEM can
+still bypass a Windows DACL with sufficient privilege — neither
+platform's transport tries to defeat that ceiling.
 
 A crashed instance leaves its discovery file behind, so discovery is
 validate-then-use: a connector confirms the pid is alive, connects, and
 completes `hello` before trusting an entry, and deletes stale files it
-encounters; the app sweeps stale siblings at its own startup. Connecting
+encounters; the app sweeps stale siblings at its own startup, following
+an entry's socket path only when it names a file in the discovery
+directory itself. Replies are correlated to requests: a connector
+rejects a reply whose id is not the one it sent, and a host that gives
+up waiting on a slow dispatch closes the connection rather than let a
+late reply answer the next request — on Windows this final reply is
+flushed through the pipe before it disconnects, since disconnecting a
+named pipe (unlike closing a unix domain socket) discards any bytes the
+client has not yet read. Connecting
 to a dead socket is therefore a bug in the connector, not a hazard the
 user meets.
 
@@ -831,12 +1066,15 @@ chunky tools, all generated from the registry:
   summary tuned for reasoning over (names, kinds, bounding boxes,
   watertightness, tree shape).
 - `hew_snapshot` — `hew.view.snapshot`, so the agent can look at what it
-  built, not merely query it.
+  built, not merely query it. Present headless: `hew.view.snapshot` now
+  has a headless render path (a software rasterizer), and `core` grants it
+  specifically, so a headless MCP session lists this tool too.
 
-The tool list is generated from the connection's granted profile: a
-headless MCP session (no `hew.view.*`) simply lacks `hew_snapshot` until
-a headless render path exists, while a `--live` session includes it. An
-agent never sees a tool it cannot call.
+The tool list is generated from the connection's granted profile: every
+profile today grants `hew_snapshot`, since core's one carve-out is exactly
+this command; a future `hew.view.*` addition that stays `app`-only would
+be the next tool a headless session lacks. An agent never sees a tool it
+cannot call.
 
 The intended agent loop is: describe → plan → `hew_transact` → read the
 result or refusal → look → continue. Refusal explanations are the

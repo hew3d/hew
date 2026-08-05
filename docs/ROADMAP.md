@@ -446,7 +446,11 @@ below.
 - **Multi-user collaboration**
 - **A plugin/extension API** — sandboxed by design: plugins are separate
   programs reaching Hew only through a documented API (see "Plugins run
-  sandboxed" in ARCHITECTURE.md §4), never linked in-process
+  sandboxed" in ARCHITECTURE.md §4), never linked in-process. Its
+  foundation exists today: the Hew API (docs/HEW_API.md) is implemented
+  headless in `crates/api`, with `hew-cli` serving it to scripts and to
+  AI agents over MCP; the plugin system adds sandboxed transports and
+  scoped profiles on top of the same bus
 - **SketchUp (`.skp`) export** — import is supported today; writing `.skp`
   is not yet
 - **Signed, notarized installers, auto-update, and a hosted web build**
