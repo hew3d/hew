@@ -21,8 +21,8 @@ import { connect } from 'node:net'
 const here = dirname(fileURLToPath(import.meta.url))
 const srcTauri = resolve(here, '../src-tauri')
 
-// Derive the binary name from Cargo.toml so this survives the planned
-// `hew-desktop` → `hew` rename (and `Hew.app` on macOS) with no edit here.
+// Derive the binary name from Cargo.toml (currently `hew`) so this survives
+// any future rename with no edit here.
 function cargoBinName(): string {
   const toml = readFileSync(resolve(srcTauri, 'Cargo.toml'), 'utf8')
   // Read `name` from the [package] table specifically: split on section headers

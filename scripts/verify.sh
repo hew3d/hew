@@ -58,6 +58,13 @@ pnpm --dir site build
 # ---------------------------------------------------------------------------
 TAURI_MANIFEST="shells/tauri/src-tauri/Cargo.toml"
 
+# tauri.conf.json declares bundle.externalBin (the hew-cli sidecar), which
+# makes tauri-build's build script hard-fail the moment this crate is
+# compiled — not just bundled — if the matching binaries/hew-cli-<host
+# triple> file isn't already on disk. Stage it before the fmt/clippy below.
+echo "=== Stage hew-cli sidecar ==="
+node shells/tauri/scripts/stage-cli-sidecar.mjs
+
 echo "=== cargo fmt --check (tauri shell) ==="
 cargo fmt --check --manifest-path "$TAURI_MANIFEST"
 

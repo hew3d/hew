@@ -23,7 +23,8 @@ Mocha specs in `specs/`.
 The binary under test is a **debug build with the semantic harness compiled in**
 (`VITE_HEW_TEST=1`, so `window.__hew_test` installs in the otherwise-production
 webview — see `app/src/App.tsx`). `wdio.conf.ts` derives the binary name from
-`src-tauri/Cargo.toml`, so it survives the planned `hew-desktop` → `hew` rename.
+`src-tauri/Cargo.toml` (currently `hew`), so it survives any future rename
+with no edit here.
 
 ## One-time host setup (Linux)
 

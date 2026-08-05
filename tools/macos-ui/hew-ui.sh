@@ -28,10 +28,10 @@
 #   hew-ui.sh key    "z" using {command down}   send a keystroke (raw AppleScript)
 #   hew-ui.sh type   "hello"             type literal text
 #
-# Override the target process (default hew-desktop) with HEW_UI_PROC=Name.
+# Override the target process (default hew) with HEW_UI_PROC=Name.
 set -euo pipefail
 
-PROC="${HEW_UI_PROC:-hew-desktop}"
+PROC="${HEW_UI_PROC:-hew}"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$DIR/.bin"
 MOUSE="$BIN/mouse"

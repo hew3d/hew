@@ -5,6 +5,11 @@
 #   Windows    NSIS -setup.exe, x64 + arm64
 #   Linux      AppImage + .deb + .rpm, x64 + arm64 (built on ubuntu-22.04 for
 #              the glibc floor — O3)
+#   hew-cli    bundled as a sidecar (Tauri externalBin) inside every one of
+#              the above — Contents/MacOS/ on macOS, next to hew.exe on
+#              Windows, /usr/bin/hew-cli on Linux .deb/.rpm (on PATH), and
+#              inside the AppImage (not independently runnable there without
+#              --appimage-extract; the .deb/.rpm are what puts it on PATH)
 #   Web        hew-web-vX.Y.Z.tar.gz self-hosting tarball + Cloudflare Pages
 #              deploy of app.hew3d.com (skipped loudly until the Cloudflare
 #              secrets exist)
@@ -231,6 +236,37 @@ jobs:
           else
             echo "::notice::App Store Connect API key not set — skipping notarization."
           fi
+
+      # hew-cli ships as a bundled sidecar (bundle.externalBin in
+      # tauri.conf.json), which tauri-action's `tauri build` below resolves
+      # by looking for binaries/hew-cli-<target-triple>[.exe] on disk — it
+      # doesn't build hew-cli itself. tauri-action invokes the Tauri CLI
+      # directly (tauriScript: pnpm tauri), bypassing package.json's `build`
+      # script and the staging it chains in, so this has to happen here
+      # explicitly rather than relying on that.
+      #
+      # macOS builds --target universal-apple-darwin, and Tauri's sidecar
+      # resolution for a universal build expects one universal-apple-darwin
+      # binary rather than two single-arch ones, so build hew-cli for both
+      # Apple targets and lipo them together the same way the app binary
+      # itself becomes universal. Windows/Linux build for the runner's
+      # native target with no --target flag, so the plain staging script
+      # (host-triple only) is exactly right there.
+      - name: Stage hew-cli sidecar (macOS universal)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cargo build --release -p hew-cli --target x86_64-apple-darwin
+          cargo build --release -p hew-cli --target aarch64-apple-darwin
+          mkdir -p shells/tauri/src-tauri/binaries
+          lipo -create -output shells/tauri/src-tauri/binaries/hew-cli-universal-apple-darwin \
+            target/x86_64-apple-darwin/release/hew-cli \
+            target/aarch64-apple-darwin/release/hew-cli
+
+      - name: Stage hew-cli sidecar
+        if: runner.os != 'macOS'
+        shell: bash
+        run: node shells/tauri/scripts/stage-cli-sidecar.mjs
 
       # tauri-action runs beforeBuildCommand (app build, which builds the
       # WASM kernel via build-wasm.mjs), bundles, and uploads the artifacts

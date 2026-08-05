@@ -19,9 +19,20 @@ when you need the exact rule rather than the working example.
 
 ## Install `hew-cli`
 
-`hew-cli` is the client, and it is not yet published as a binary
-release. Clone this repository and build it. You need the Rust toolchain
-and nothing else — the CLI needs none of the app's Node or Tauri
+`hew-cli` is the client, and it ships with every install of the desktop
+app — installing Hew installs the CLI too. None of these add it to your
+shell's `PATH` automatically except the Linux `.deb`/`.rpm`, so scripts
+and MCP configuration below reference the full path:
+
+| Platform | Where it lands |
+| --- | --- |
+| macOS | Inside the app bundle: `/Applications/Hew.app/Contents/MacOS/hew-cli` |
+| Windows | Next to `hew.exe` in the install directory — by default a per-user install at `%LOCALAPPDATA%\Hew\hew-cli.exe` |
+| Linux, `.deb`/`.rpm` install | On `PATH` as `hew-cli` |
+| Linux, AppImage | Bundled inside the image but not runnable without extracting it first (`./Hew.AppImage --appimage-extract`, then `squashfs-root/usr/bin/hew-cli`) — install the `.deb`/`.rpm` instead if you want `hew-cli` for scripting or MCP |
+
+You can also build it from source. You need the Rust toolchain and
+nothing else — the CLI needs none of the app's Node or Tauri
 prerequisites (see [DEVELOPMENT.md](DEVELOPMENT.md) for the full set).
 
 ```sh
@@ -508,14 +519,45 @@ round-trip through clients, and users, that know nothing about it.
 `hew-cli mcp` serves the Model Context Protocol on stdio. It is a
 standard stdio server block, so it goes wherever your MCP client keeps
 those — a project's `.mcp.json`, Claude Desktop's
-`claude_desktop_config.json`, or the equivalent for your host:
+`claude_desktop_config.json`, or the equivalent for your host. `command`
+is the [`hew-cli` path for your platform](#install-hew-cli):
+
+macOS:
 
 ```json
 {
   "mcpServers": {
     "hew": {
       "type": "stdio",
-      "command": "/path/to/hew-cli",
+      "command": "/Applications/Hew.app/Contents/MacOS/hew-cli",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Windows (substitute your username for `<you>`):
+
+```json
+{
+  "mcpServers": {
+    "hew": {
+      "type": "stdio",
+      "command": "C:\\Users\\<you>\\AppData\\Local\\Hew\\hew-cli.exe",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Linux, installed from a `.deb`/`.rpm` (`hew-cli` is already on `PATH`):
+
+```json
+{
+  "mcpServers": {
+    "hew": {
+      "type": "stdio",
+      "command": "hew-cli",
       "args": ["mcp"]
     }
   }

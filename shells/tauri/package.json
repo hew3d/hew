@@ -1,13 +1,13 @@
 {
-  "name": "hew-desktop",
+  "name": "hew",
   "version": "0.0.0",
   "license": "AGPL-3.0-only",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build",
-    "e2e:build": "cross-env VITE_HEW_TEST=1 tauri build --debug --no-bundle",
+    "dev": "node scripts/stage-cli-sidecar.mjs && tauri dev",
+    "build": "node scripts/stage-cli-sidecar.mjs && tauri build",
+    "e2e:build": "node scripts/stage-cli-sidecar.mjs && cross-env VITE_HEW_TEST=1 tauri build --debug --no-bundle",
     "e2e": "wdio run e2e/wdio.conf.ts",
     "e2e:typecheck": "tsc --noEmit -p e2e/tsconfig.json"
   },

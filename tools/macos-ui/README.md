@@ -50,7 +50,7 @@ window's point dimensions**, so a pixel you see at `(x, y)` in the screenshot is
 exactly the argument to `click x y` — no Retina/backing-scale math. (A 1280×800
 window → a 1280×800 PNG even on a 2× Retina display.)
 
-Override the target process with `HEW_UI_PROC=Name` (default `hew-desktop`).
+Override the target process with `HEW_UI_PROC=Name` (default `hew`).
 
 ## How it works / why each piece
 
