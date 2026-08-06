@@ -245,13 +245,24 @@ jobs:
       # script and the staging it chains in, so this has to happen here
       # explicitly rather than relying on that.
       #
-      # macOS builds --target universal-apple-darwin, and Tauri's sidecar
-      # resolution for a universal build expects one universal-apple-darwin
-      # binary rather than two single-arch ones, so build hew-cli for both
-      # Apple targets and lipo them together the same way the app binary
-      # itself becomes universal. Windows/Linux build for the runner's
-      # native target with no --target flag, so the plain staging script
-      # (host-triple only) is exactly right there.
+      # macOS builds --target universal-apple-darwin, which tauri-cli
+      # implements as TWO separate single-arch `cargo build` passes (each
+      # with its own build.rs run, resolving externalBin against ITS OWN
+      # triple) followed by `lipo` on the app's own main binary only —
+      # tauri-cli never lipos externalBin sidecars for you. So three files
+      # are needed simultaneously: the two single-arch binaries (each
+      # single-arch build.rs invocation looks for its own) and a
+      # pre-lipo'd universal one (what the final bundling pass actually
+      # reads for the sidecar, per crates/tauri-bundler's own separate,
+      # non-arch-specific resolution against the literal target string
+      # "universal-apple-darwin"). Source-verified against tauri-cli
+      # 2.11.2: crates/tauri-cli/src/interface/rust/desktop.rs's universal
+      # build path lipos only `bin_name` (the main binary); the sidecar
+      # path is resolved independently in crates/tauri-bundler's
+      # SettingsBuilder against the un-split "universal-apple-darwin"
+      # target string, with no merge step of its own. Windows/Linux build
+      # for the runner's native target with no --target flag, so the
+      # plain staging script (host-triple only) is exactly right there.
       - name: Stage hew-cli sidecar (macOS universal)
         if: runner.os == 'macOS'
         shell: bash
@@ -259,6 +270,8 @@ jobs:
           cargo build --release -p hew-cli --target x86_64-apple-darwin
           cargo build --release -p hew-cli --target aarch64-apple-darwin
           mkdir -p shells/tauri/src-tauri/binaries
+          cp target/x86_64-apple-darwin/release/hew-cli shells/tauri/src-tauri/binaries/hew-cli-x86_64-apple-darwin
+          cp target/aarch64-apple-darwin/release/hew-cli shells/tauri/src-tauri/binaries/hew-cli-aarch64-apple-darwin
           lipo -create -output shells/tauri/src-tauri/binaries/hew-cli-universal-apple-darwin \
             target/x86_64-apple-darwin/release/hew-cli \
             target/aarch64-apple-darwin/release/hew-cli
