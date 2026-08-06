@@ -826,7 +826,33 @@ This is the extension point future plugins and overlays persist through —
 a wall's BIM type, a plugin's per-object state — and it ships in 1.0
 precisely because it is a native-file-format change (a manifest schema
 addition), and format decisions are vastly cheaper before the 1.0 format
-freezes than after. The wire-level `.hew` encoding is specified in
+freezes than after.
+
+### 8.1 First-party namespace: `hew.library`
+
+The Library feature is the first first-party claimant of the reserved
+prefix. Two dictionary sites, both ordinary attribute dictionaries with
+the semantics above (round-tripped verbatim, readable by any client,
+writable only by first-party code):
+
+- **On a library item file's DOCUMENT dictionary** — the item's own
+  metadata, written when the item is saved and edited by the library's
+  manage flows: `id` (the item's stable library identity, a UUID string),
+  `name`, `category` (`"component"` | `"material"` | `"model"`),
+  `keywords` (list of strings), `collection`, `saved_at` /
+  `sourceDoc`-style bookkeeping keys. The library browser derives
+  everything it lists from this dictionary plus the manifest — there is
+  deliberately no side database.
+- **On entities a library insert creates** — provenance stamped by the
+  kernel's insert (`Document::insert_document`) on created definitions
+  and root nodes: `source_id` (the item's `id`), `content_hash` (a
+  fingerprint of the item file's bytes), and on definitions `def_sid`
+  (the definition's stable id in the item file). This is what makes
+  re-inserting the same item version reuse the in-document definition
+  instead of copying it again, and what "in this model" queries count.
+
+Clients may read these dictionaries freely; external writes through
+`hew.attr.set` remain refused like every `hew.*` namespace. The wire-level `.hew` encoding is specified in
 HEW_FILE_FORMAT.md in the change that implements it (per that document's
 same-commit rule and DEVELOPMENT.md rule 8); this section is the
 semantic contract.

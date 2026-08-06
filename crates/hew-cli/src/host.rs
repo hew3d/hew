@@ -8,7 +8,7 @@
 use api::{
     Host, Refusal, SnapshotCamera, SnapshotParams, SnapshotProjection, SnapshotResult, StandardView,
 };
-use kernel::{Document, EntityRef, Point3, Transform};
+use kernel::{Document, EntityRef, Point3};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -136,89 +136,16 @@ fn export_refusal(e: mesh_export::ExportError) -> Refusal {
 
 // --------------------------------------------------------------- snapshot
 
-/// One scene item, owning its own tessellated mesh — [`softrender::RenderItem`]
-/// only borrows one, so this is what actually lives long enough to build
-/// the render list from (docs/design/headless-snapshot.md).
-struct SceneItem {
-    mesh: tessellate::RenderMesh,
-    pose: Transform,
-    sid: u64,
-}
-
 /// Renders `doc` headlessly through `crates/softrender`
-/// (docs/design/headless-snapshot.md): every visible world object plus
-/// every placed instance's definition members become render items (world
-/// objects at identity pose; instance members at the instance's own pose,
-/// tagged with the INSTANCE's stable id so pixels report the instance, not
-/// the shared definition) — mirroring `mesh_export::export_stl`'s own
-/// traversal, but tagging pixels by identity instead of baking triangles.
-/// An object that
-/// fails to tessellate is skipped, not fatal, so one bad object cannot
-/// blank the whole render; if nothing renders at all, refuses typed
-/// rather than returning a background-only image.
-/// Whether a node, or any group above it, is user-hidden (SketchUp
-/// "Hide" — view state the snapshot must respect, both for pixels and
-/// for view fitting).
-fn node_or_ancestor_hidden(doc: &Document, node: kernel::NodeId) -> bool {
-    if doc.node_user_hidden(node) {
-        return true;
-    }
-    let mut cursor = doc.node_parent(node);
-    while let Some(group) = cursor {
-        if doc.node_user_hidden(kernel::NodeId::Group(group)) {
-            return true;
-        }
-        cursor = doc.node_parent(kernel::NodeId::Group(group));
-    }
-    false
-}
-
+/// (docs/design/headless-snapshot.md): the shared
+/// [`softrender::document_items`] traversal builds the scene (world objects
+/// at identity pose; instance members at the instance's own pose, tagged
+/// with the INSTANCE's stable id so pixels report the instance, not the
+/// shared definition; user-hidden nodes skipped; an object that fails to
+/// tessellate skipped, not fatal). If nothing renders at all, refuses
+/// typed rather than returning a background-only image.
 fn render_snapshot(doc: &Document, params: &SnapshotParams) -> Result<SnapshotResult, Refusal> {
-    let mut items: Vec<SceneItem> = Vec::new();
-
-    for id in doc.visible_object_ids() {
-        if node_or_ancestor_hidden(doc, kernel::NodeId::Object(id)) {
-            continue;
-        }
-        let Some(obj) = doc.object(id) else { continue };
-        let Ok(mesh) = tessellate::tessellate(obj, doc.materials()) else {
-            continue;
-        };
-        let Some(sid) = doc.sid_of(&EntityRef::Object(id)) else {
-            continue;
-        };
-        items.push(SceneItem {
-            mesh,
-            pose: Transform::IDENTITY,
-            sid,
-        });
-    }
-    for instance in doc.instance_ids() {
-        if node_or_ancestor_hidden(doc, kernel::NodeId::Instance(instance)) {
-            continue;
-        }
-        let Some(def) = doc.instance_def(instance) else {
-            continue;
-        };
-        let Some(pose) = doc.instance_pose(instance) else {
-            continue;
-        };
-        let Some(members) = doc.def_members(def) else {
-            continue;
-        };
-        let Some(sid) = doc.sid_of(&EntityRef::Instance(instance)) else {
-            continue;
-        };
-        for member in members {
-            let Some(obj) = doc.object(member) else {
-                continue;
-            };
-            let Ok(mesh) = tessellate::tessellate(obj, doc.materials()) else {
-                continue;
-            };
-            items.push(SceneItem { mesh, pose, sid });
-        }
-    }
+    let items = softrender::document_items(doc);
 
     if items.is_empty() {
         return Err(Refusal::api(
@@ -342,46 +269,7 @@ fn to_softrender_view(view: StandardView) -> softrender::StandardView {
 /// degenerate case (unreachable in practice: `render_snapshot` already
 /// refuses `nothing_to_render` before this is called with no geometry).
 fn fitted_bbox(doc: &Document) -> (Point3, Point3) {
-    let mut acc: Option<(Point3, Point3)> = None;
-    let mut extend = |p: Point3| {
-        acc = Some(match acc {
-            None => (p, p),
-            Some((min, max)) => (
-                Point3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z)),
-                Point3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z)),
-            ),
-        });
-    };
-    for id in doc.visible_object_ids() {
-        if node_or_ancestor_hidden(doc, kernel::NodeId::Object(id)) {
-            continue;
-        }
-        if let Some(obj) = doc.object(id) {
-            for v in obj.vertices().values() {
-                extend(v.position);
-            }
-        }
-    }
-    for instance in doc.instance_ids() {
-        if node_or_ancestor_hidden(doc, kernel::NodeId::Instance(instance)) {
-            continue;
-        }
-        let (Some(def), Some(pose)) = (doc.instance_def(instance), doc.instance_pose(instance))
-        else {
-            continue;
-        };
-        let Some(members) = doc.def_members(def) else {
-            continue;
-        };
-        for member in members {
-            if let Some(obj) = doc.object(member) {
-                for v in obj.vertices().values() {
-                    extend(pose.apply_point(v.position));
-                }
-            }
-        }
-    }
-    acc.unwrap_or((Point3::new(-0.5, -0.5, -0.5), Point3::new(0.5, 0.5, 0.5)))
+    softrender::document_bbox(doc)
 }
 
 // -------------------------------------------------------- import unit scale

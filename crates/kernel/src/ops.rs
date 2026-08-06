@@ -44,7 +44,7 @@ use crate::geom2d::{
     boundaries_contact, interior_point_of_loops, point_inside_polygon, point_near_segment,
     polygon_is_simple, segments_intersect, signed_area_on_plane,
 };
-use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, VertexId};
+use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, MaterialId, VertexId};
 use crate::math::{Plane, Point3, Vec3};
 use crate::sketch::Profile;
 use crate::tol;
@@ -691,6 +691,20 @@ impl Object {
         }
         self.check_invariants();
         Ok(())
+    }
+
+    /// Rewrites every material reference — each face's own and the
+    /// object-level base — through `f`, in place. This is the palette remap
+    /// of a cross-document copy (a library insert/extract,
+    /// `Document::insert_document` / `Document::extract_item`): the palette
+    /// the copy lands in hands out different [`MaterialId`]s than the one it
+    /// came from, and a stale generational id from a foreign slotmap must
+    /// never survive into this document. Topology and geometry are untouched.
+    pub(crate) fn remap_materials(&mut self, f: &dyn Fn(MaterialId) -> MaterialId) {
+        for face in self.faces.values_mut() {
+            face.material = face.material.map(f);
+        }
+        self.default_material = self.default_material.map(f);
     }
 
     /// The birth of every solid: sweeps a closed [`Profile`] by `distance`

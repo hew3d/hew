@@ -33,7 +33,7 @@ export interface CommandPaletteProps {
   gates?: Partial<Record<PaletteGate, boolean>>
 }
 
-const GROUP_ORDER: PaletteGroup[] = ['Tools', 'Actions', 'Model']
+const GROUP_ORDER: PaletteGroup[] = ['Tools', 'Actions', 'Model', 'Library']
 
 function RowIcon({ entry }: { entry: PaletteEntry }) {
   const raw = entry.group === 'Tools' ? TOOL_ICON_SVG[entry.label as keyof typeof TOOL_ICON_SVG] : boltSvg

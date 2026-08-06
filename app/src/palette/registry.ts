@@ -31,8 +31,13 @@ import { TOOL_REGISTRY, shortcutFor, type ToolName } from '../tools/toolRegistry
 
 /** 'Model' entries are dynamic (built per-document by App.tsx from the
  * scene's object/group/component/tag names) and passed to the palette as
- * `extraEntries` — this module only defines the static Tools/Actions sets. */
-export type PaletteGroup = 'Tools' | 'Actions' | 'Model'
+ * `extraEntries` — this module only defines the static Tools/Actions sets.
+ * 'Library' entries are also dynamic (App.tsx's `libraryIndex`, desktop
+ * only) — the static `open-library` action below is the one entry this
+ * module registers for that group; the per-item `insert-library:<file>`
+ * entries live entirely in App.tsx, the same way `jump-node:`/`jump-tag:`
+ * do for 'Model'. */
+export type PaletteGroup = 'Tools' | 'Actions' | 'Model' | 'Library'
 
 /** The selection-gated enablement flags App.tsx computes (`menuGates` — the
  * same flags that grey out the Edit menu items and drive the native menu's
@@ -211,6 +216,8 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'toggle-tags', label: 'Toggle Tags', description: 'Show or hide the Tags panel.', group: 'Actions' },
   { id: 'toggle-object-info', label: 'Toggle Object Info', description: 'Show or hide the Object Info panel.', group: 'Actions' },
   { id: 'toggle-debug-log', label: 'Toggle Debug Log', description: 'Show or hide the debug log panel.', group: 'Actions' },
+  { id: 'open-library', label: 'Library', description: 'Browse and insert saved components, materials, and models', group: 'Actions', synonyms: ['library', 'components', 'insert'] },
+  { id: 'save-to-library-doc', label: 'Save to Library…', description: 'Save the whole document as a library item.', group: 'Actions', synonyms: ['library', 'component', 'model'] },
   { id: 'open-settings', label: 'Settings…', description: 'Open Hew Settings.', group: 'Actions', synonyms: ['preferences'] },
   { id: 'report-bug', label: 'Report Bug…', description: 'Assemble and save a bug-report bundle.', group: 'Actions' },
 ]
@@ -229,6 +236,8 @@ export const PALETTE_EXCLUDED_ACTION_IDS: Record<string, string> = {
   'ungroup': 'contextual-dock alias of edit-ungroup',
   'make-unique': 'contextual-dock alias of edit-make-unique',
   'explode-instance': 'contextual-dock alias of edit-explode',
+  'save-to-library': 'contextual-dock only — needs a single selected object/group/instance, not a bare trigger (the whole-document save is separately registered as save-to-library-doc)',
+  'toggle-library': 'keyboard/native-menu/dock-icon toggle alias of open-library — the palette exposes the single "open" verb, not a checkbox toggle',
 }
 
 /** The full palette registry — tools first (spec ranks Tools above Actions

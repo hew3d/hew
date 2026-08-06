@@ -15,6 +15,7 @@ import { useState } from 'react'
 import { TOOL_ICON_SVG } from '../tools/toolIcons'
 import { RAIL_GROUPS, toolsInGroup, shortcutFor, type ToolName } from '../tools/toolRegistry'
 import { isMac } from '../platform'
+import libraryBooksSvg from '@material-symbols/svg-400/outlined/library_books.svg?raw'
 
 export interface ToolRailProps {
   activeTool: ToolName
@@ -29,6 +30,14 @@ export interface ToolRailProps {
   /** Shortcut label shown in the field's kbd chip (e.g. '⌘/' on macOS
    * desktop, 'Ctrl K' on Windows/Linux/Web). */
   paletteKbd?: string
+  /** When set, a LIBRARY section is drawn at the bottom of the rail with one
+   * "Library" row — desktop only (`libraryStore().available()`), so this is
+   * omitted entirely on the web build rather than shown disabled. */
+  onOpenLibrary?: () => void
+  /** Whether the Library dialog is currently open — drives the row's
+   * `aria-pressed`/highlight, same posture as a tool's active state even
+   * though this isn't a tool (no ToolName of its own). */
+  libraryOpen?: boolean
 }
 
 /** Resting command-palette field for the top of the rail (all platforms —
@@ -162,7 +171,56 @@ function ToolRow({
   )
 }
 
-export function ToolRail({ activeTool, onSelectTool, onOpenPalette, paletteKbd }: ToolRailProps) {
+/** The rail's one non-tool row (LIBRARY section): same layout/styling as
+ * `ToolRow`, but keyed on `active`/`onSelect` directly rather than a
+ * `ToolName` — the Library dialog is a viewport-level modal, not a
+ * registry-driven tool, so it can't reuse `ToolRow`'s `TOOL_ICON_SVG` lookup
+ * or `shortcutFor`. */
+function LibraryRow({ active, onSelect }: { active: boolean; onSelect: () => void }) {
+  const [hovered, setHovered] = useState(false)
+  const svg = libraryBooksSvg
+    .replace(/\swidth="[^"]*"/, '')
+    .replace(/\sheight="[^"]*"/, '')
+    .replace('<svg ', '<svg fill="currentColor" width="16" height="16" ')
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      aria-label="Library"
+      title="Library (⇧L)"
+      onClick={onSelect}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 'var(--space-4)',
+        padding: '6px var(--space-4)',
+        borderRadius: 'var(--radius-control)',
+        border: 'none',
+        width: '100%',
+        textAlign: 'left',
+        cursor: 'pointer',
+        fontFamily: 'var(--font-family-ui)',
+        fontSize: 'var(--font-size-tool-row)',
+        fontWeight: active ? 600 : 400,
+        color: active ? 'var(--accent-text-on-tint)' : 'var(--text-secondary)',
+        background: active ? 'var(--accent-tint-15)' : hovered ? 'rgba(255,255,255,0.04)' : 'transparent',
+        boxShadow: active ? 'inset 2px 0 0 var(--accent-base)' : 'none',
+      }}
+    >
+      <span
+        aria-hidden="true"
+        style={{ width: '16px', height: '16px', display: 'block', overflow: 'hidden', flexShrink: 0 }}
+        dangerouslySetInnerHTML={{ __html: svg }}
+      />
+      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Library</span>
+      <KbdChip shortcut="⇧L" active={active} />
+    </button>
+  )
+}
+
+export function ToolRail({ activeTool, onSelectTool, onOpenPalette, paletteKbd, onOpenLibrary, libraryOpen = false }: ToolRailProps) {
   return (
     <div
       role="radiogroup"
@@ -207,6 +265,24 @@ export function ToolRail({ activeTool, onSelectTool, onOpenPalette, paletteKbd }
           ))}
         </div>
       ))}
+      {onOpenLibrary !== undefined && (
+        <div>
+          <div
+            style={{
+              fontFamily: 'var(--font-family-mono)',
+              fontSize: 'var(--font-size-section-header)',
+              fontWeight: 600,
+              textTransform: 'uppercase',
+              letterSpacing: '0.12em',
+              color: 'var(--text-section)',
+              padding: '12px var(--space-4) 6px',
+            }}
+          >
+            Library
+          </div>
+          <LibraryRow active={libraryOpen} onSelect={onOpenLibrary} />
+        </div>
+      )}
     </div>
   )
 }

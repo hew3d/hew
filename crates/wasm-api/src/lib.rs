@@ -293,6 +293,72 @@ fn import_report_to_js(report: &kernel::ImportReport, warnings: &[String]) -> Js
     js_report.into()
 }
 
+/// Serialize a kernel [`kernel::InsertReport`] to the plain JS object the
+/// library-insert UI consumes. Root handles cross as DECIMAL STRINGS (the
+/// harness convention — `u64` inside a plain JS object would silently lose
+/// precision as a float).
+fn insert_report_to_js(report: &kernel::InsertReport) -> JsValue {
+    let js = JsObject::new();
+    let set_num = |key: &str, v: usize| {
+        Reflect::set(&js, &JsValue::from_str(key), &JsValue::from_f64(v as f64)).unwrap();
+    };
+    let kinds_arr = js_sys::Array::new();
+    let ids_arr = js_sys::Array::new();
+    for root in &report.roots {
+        let (k, id) = match root {
+            NodeId::Object(id) => (0u8, id.data().as_ffi()),
+            NodeId::Group(id) => (1u8, id.data().as_ffi()),
+            NodeId::Instance(id) => (2u8, id.data().as_ffi()),
+        };
+        kinds_arr.push(&JsValue::from_f64(k as f64));
+        ids_arr.push(&JsValue::from_str(&id.to_string()));
+    }
+    Reflect::set(&js, &JsValue::from_str("rootKinds"), &kinds_arr).unwrap();
+    Reflect::set(&js, &JsValue::from_str("rootIds"), &ids_arr).unwrap();
+    set_num("definitionsAdded", report.definitions_added);
+    set_num("definitionsReused", report.definitions_reused);
+    set_num("materialsAdded", report.materials_added);
+    set_num("materialsReused", report.materials_reused);
+    set_num("objectsAdded", report.objects_added);
+    set_num("guidesAdded", report.guides_added);
+    set_num("worldSketchesSkipped", report.world_sketches_skipped);
+    set_num("annotationsSkipped", report.annotations_skipped);
+    js.into()
+}
+
+/// Writes a library item's metadata — a JSON object of key → value — into
+/// `item`'s DOCUMENT attribute dictionary under the `hew.library`
+/// namespace, one key at a time through the validating
+/// [`kernel::Document::attr_set`]. A malformed JSON string or a
+/// non-representable value (non-finite number, over-deep nesting) is a
+/// typed error, never partially applied silently — though keys already
+/// written before a failing one do remain on this fresh item document,
+/// which the caller then discards.
+fn apply_library_meta(item: &mut Document, meta_json: Option<&str>) -> Result<(), ApiError> {
+    let Some(raw) = meta_json.filter(|m| !m.trim().is_empty()) else {
+        return Ok(());
+    };
+    let parsed: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|e| ApiError(format!("BadLibraryMeta: not a JSON object: {e}")))?;
+    let serde_json::Value::Object(map) = parsed else {
+        return Err(ApiError(
+            "BadLibraryMeta: metadata must be a JSON object".to_string(),
+        ));
+    };
+    for (key, value) in map {
+        let attr_value = kernel::AttrValue::from_json(&value)
+            .map_err(|e| ApiError(format!("BadLibraryMeta: {key}: {e:?}")))?;
+        item.attr_set(
+            kernel::AttrTarget::Document,
+            "hew.library",
+            &key,
+            attr_value,
+        )
+        .map_err(doc_err)?;
+    }
+    Ok(())
+}
+
 /// Converts a `u64` handle to a [`MaterialId`], or `None` if the sentinel
 /// value `u64::MAX` is given (meaning "default / unpaint").
 fn material_id_opt(handle: u64) -> Option<MaterialId> {
@@ -457,6 +523,172 @@ fn triple(v: &[f64], name: &str) -> Result<[f64; 3], ApiError> {
         [x, y, z] => Ok([x, y, z]),
         _ => Err(ApiError(format!("BadVector: {name} must be an xyz triple"))),
     }
+}
+
+// ----------------------------------------------------------- library items
+// Free functions: they read ITEM FILE BYTES, independent of any live Scene,
+// so the library browser can list, badge, and thumbnail a folder of `.hew`
+// files without touching the open document.
+
+/// A manifest-only summary of `.hew` item bytes as a JSON string
+/// ([`kernel::read_item_summary`] — entity counts, `hew.library` document
+/// attrs, material swatch rows; never opens geometry buffers). Throws the
+/// typed load error (`NotAContainer` / `UnsupportedVersion` /
+/// `MalformedManifest`) for a file the browser must show as invalid.
+#[wasm_bindgen]
+pub fn read_item_summary_json(bytes: &[u8]) -> Result<String, JsError> {
+    let summary = kernel::read_item_summary(bytes).map_err(|e| JsError::new(&api_err(&e, &e).0))?;
+    serde_json::to_string(&summary).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// One named zip entry of `.hew` item bytes, verbatim
+/// ([`kernel::read_item_asset`]) — the on-demand fetch for a summary's
+/// `texture_asset` paths (a material item's swatch image).
+#[wasm_bindgen]
+pub fn read_item_asset(bytes: &[u8], path: &str) -> Result<Vec<u8>, JsError> {
+    kernel::read_item_asset(bytes, path).map_err(|e| JsError::new(&api_err(&e, &e).0))
+}
+
+/// Renders `.hew` item bytes to a square PNG thumbnail from a fitted
+/// isometric view ([`softrender::render_document_thumbnail`] — the same
+/// deterministic rasterizer behind `hew.view.snapshot`). `undefined` when
+/// the item has nothing visible to render (an honest "no thumbnail", e.g. a
+/// material item); throws on bytes that don't load as a document.
+#[wasm_bindgen]
+pub fn render_item_thumbnail(bytes: &[u8], size: u32) -> Result<Option<Vec<u8>>, JsError> {
+    let doc = Document::load(bytes).map_err(|e| JsError::new(&api_err(&e, &e).0))?;
+    let size = size.clamp(16, 2048);
+    Ok(softrender::render_document_thumbnail(&doc, size))
+}
+
+/// Rewrites a library item's `hew.library` metadata — the manage flows'
+/// rename / re-keyword / collection edits. `meta_json` is a JSON object;
+/// each key is written into the item's document attrs under `hew.library`
+/// (a `null` value deletes that key), and a non-empty `"name"` also renames
+/// the item's own display name (its single definition's, else its single
+/// root's) so the file agrees with itself. Returns the item's full new
+/// bytes; the input is untouched.
+#[wasm_bindgen]
+pub fn update_item_meta(bytes: &[u8], meta_json: &str) -> Result<Vec<u8>, JsError> {
+    let mut item = Document::load(bytes).map_err(|e| JsError::new(&api_err(&e, &e).0))?;
+
+    let parsed: serde_json::Value = serde_json::from_str(meta_json)
+        .map_err(|e| JsError::new(&format!("BadLibraryMeta: not a JSON object: {e}")))?;
+    let serde_json::Value::Object(map) = parsed else {
+        return Err(JsError::new(
+            "BadLibraryMeta: metadata must be a JSON object",
+        ));
+    };
+    for (key, value) in &map {
+        if value.is_null() {
+            // Deleting a key that was never set is not an error the UI can
+            // act on — tolerate it.
+            let _ = item.attr_delete(kernel::AttrTarget::Document, "hew.library", Some(key));
+            continue;
+        }
+        let attr_value = kernel::AttrValue::from_json(value)
+            .map_err(|e| JsError::new(&format!("BadLibraryMeta: {key}: {e:?}")))?;
+        item.attr_set(kernel::AttrTarget::Document, "hew.library", key, attr_value)
+            .map_err(|e| JsError::new(&doc_err(e).0))?;
+    }
+    if let Some(serde_json::Value::String(name)) = map.get("name")
+        && !name.trim().is_empty()
+    {
+        let cids = item.component_ids();
+        if cids.len() == 1 {
+            let _ = item.set_component_name(cids[0], Some(name.clone()));
+        } else if let Some(&root) = item.top_level_nodes().first() {
+            let _ = item.set_node_name(root, Some(name.clone()));
+        }
+    }
+    Ok(item.save())
+}
+
+/// One flattened ghost mesh of a whole library item — every visible world
+/// object and every instance placement baked into item coordinates. The
+/// cursor-placement preview's raw material: one geometry, one draw call,
+/// origin at the item's own origin.
+#[wasm_bindgen]
+pub struct GhostMeshJs {
+    positions: Vec<f32>,
+    normals: Vec<f32>,
+    indices: Vec<u32>,
+    edge_positions: Vec<f32>,
+    bbox: [f64; 6],
+}
+
+#[wasm_bindgen]
+impl GhostMeshJs {
+    pub fn positions(&self) -> Vec<f32> {
+        self.positions.clone()
+    }
+    pub fn normals(&self) -> Vec<f32> {
+        self.normals.clone()
+    }
+    pub fn indices(&self) -> Vec<u32> {
+        self.indices.clone()
+    }
+    /// HARD edge segment endpoints (soft curved-wall seams excluded), for
+    /// the ghost's stroke.
+    pub fn edge_positions(&self) -> Vec<f32> {
+        self.edge_positions.clone()
+    }
+    /// `[min_x, min_y, min_z, max_x, max_y, max_z]` in item coordinates.
+    pub fn bbox(&self) -> Vec<f64> {
+        self.bbox.to_vec()
+    }
+}
+
+/// Tessellates `.hew` item bytes into one [`GhostMeshJs`] — a FREE function
+/// on purpose: it never constructs a `Scene`, so it cannot leak scratch
+/// mutations into the global session recording (`recording::record` is
+/// process-global; a scratch `Scene::load` would corrupt an active
+/// reproducer stream). Instance poses are baked; normals ride the pose's
+/// linear part (renormalized — preview fidelity, not analytic truth).
+#[wasm_bindgen]
+pub fn item_ghost_mesh(bytes: &[u8]) -> Result<GhostMeshJs, JsError> {
+    let doc = Document::load(bytes).map_err(|e| JsError::new(&api_err(&e, &e).0))?;
+    let items = softrender::document_items(&doc);
+    let mut positions: Vec<f32> = Vec::new();
+    let mut normals: Vec<f32> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut edge_positions: Vec<f32> = Vec::new();
+    for it in &items {
+        let base = (positions.len() / 3) as u32;
+        let m = &it.mesh;
+        for i in (0..m.positions.len()).step_by(3) {
+            let p = it.pose.apply_point(kernel::Point3::new(
+                m.positions[i] as f64,
+                m.positions[i + 1] as f64,
+                m.positions[i + 2] as f64,
+            ));
+            positions.extend_from_slice(&[p.x as f32, p.y as f32, p.z as f32]);
+            let n = it.pose.apply_vector(kernel::Vec3::new(
+                m.normals[i] as f64,
+                m.normals[i + 1] as f64,
+                m.normals[i + 2] as f64,
+            ));
+            let n = n.normalized().unwrap_or(kernel::Vec3::new(0.0, 0.0, 1.0));
+            normals.extend_from_slice(&[n.x as f32, n.y as f32, n.z as f32]);
+        }
+        indices.extend(m.indices.iter().map(|&ix| ix + base));
+        for i in (0..m.edge_positions.len()).step_by(3) {
+            let p = it.pose.apply_point(kernel::Point3::new(
+                m.edge_positions[i] as f64,
+                m.edge_positions[i + 1] as f64,
+                m.edge_positions[i + 2] as f64,
+            ));
+            edge_positions.extend_from_slice(&[p.x as f32, p.y as f32, p.z as f32]);
+        }
+    }
+    let (lo, hi) = softrender::document_bbox(&doc);
+    Ok(GhostMeshJs {
+        positions,
+        normals,
+        indices,
+        edge_positions,
+        bbox: [lo.x, lo.y, lo.z, hi.x, hi.y, hi.z],
+    })
 }
 
 // ------------------------------------------------------------------- nodes
@@ -7196,6 +7428,302 @@ impl Scene {
         self.doc.save_for_persistence()
     }
 
+    // ------------------------------------------------------------- library
+
+    /// Extracts a selection (`kinds`/`ids` parallel arrays, kind `0` =
+    /// object, `1` = group, `2` = instance — [`Scene::make_component`]'s
+    /// convention) into standalone `.hew` library-item bytes
+    /// ([`kernel::Document::extract_item`]). Read-only on this document.
+    ///
+    /// `wrap_as_component` wraps a single bare object as a definition plus
+    /// an identity instance (the component-item shape). A non-empty `name`
+    /// becomes the item's own display name — the single definition's, else
+    /// the single root node's. `meta_json`, when given, is a JSON object
+    /// written verbatim into the item's document attrs under the
+    /// `hew.library` namespace (id, category, keywords, collection, …).
+    pub fn extract_item(
+        &self,
+        kinds: &[u8],
+        ids: &[u64],
+        wrap_as_component: bool,
+        name: Option<String>,
+        meta_json: Option<String>,
+    ) -> Result<Vec<u8>, ApiError> {
+        if kinds.len() != ids.len() {
+            return Err(ApiError(
+                "BadNodeList: kinds and ids must be the same length".to_string(),
+            ));
+        }
+        let nodes = kinds
+            .iter()
+            .zip(ids)
+            .map(|(&k, &i)| node_id(k, i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut item = self
+            .doc
+            .extract_item(&nodes, wrap_as_component)
+            .map_err(doc_err)?;
+        if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
+            let cids = item.component_ids();
+            if cids.len() == 1 {
+                let _ = item.set_component_name(cids[0], Some(n));
+            } else if let Some(&root) = item.top_level_nodes().first() {
+                let _ = item.set_node_name(root, Some(n));
+            }
+        }
+        apply_library_meta(&mut item, meta_json.as_deref())?;
+        Ok(item.save())
+    }
+
+    /// The whole document as a library "model item": a plain save (open
+    /// sessions transparently closed, exactly like [`Scene::save`]) with
+    /// `meta_json` stamped into the `hew.library` document attrs.
+    pub fn extract_document_item(&self, meta_json: Option<String>) -> Result<Vec<u8>, ApiError> {
+        let mut item = Document::load(&self.doc.save_for_persistence())
+            .map_err(|e: LoadError| api_err(&e, &e))?;
+        apply_library_meta(&mut item, meta_json.as_deref())?;
+        Ok(item.save())
+    }
+
+    /// One palette material as a library "material item": a `.hew` with an
+    /// empty scene and a one-entry palette (texture bytes ride along in the
+    /// container as always), with `meta_json` stamped like every item.
+    pub fn extract_material_item(
+        &self,
+        material: u64,
+        meta_json: Option<String>,
+    ) -> Result<Vec<u8>, ApiError> {
+        let mid = material_id_opt(material).ok_or_else(|| {
+            ApiError("UnknownMaterial: the default material is not an entry".into())
+        })?;
+        let mat = self
+            .doc
+            .material(mid)
+            .ok_or_else(|| ApiError("UnknownMaterial: no such palette entry".into()))?
+            .clone();
+        let mut item = Document::new();
+        item.add_material(mat);
+        apply_library_meta(&mut item, meta_json.as_deref())?;
+        Ok(item.save())
+    }
+
+    /// Inserts `.hew` item bytes into the current document at `affine`
+    /// (row-major 3×4) — [`kernel::Document::insert_document`]: lossless,
+    /// one undo step, materials content-deduplicated. `source_id` +
+    /// `content_hash` (both or neither) are the item's library provenance:
+    /// with them, a definition this document already carries from the same
+    /// item version is REUSED (idempotent re-insert), and created
+    /// definitions/roots are stamped for future matches and for
+    /// [`Scene::library_placements_json`].
+    ///
+    /// Returns `{ rootKinds: number[], rootIds: string[] (decimal u64),
+    /// definitionsAdded, definitionsReused, materialsAdded, materialsReused,
+    /// objectsAdded, guidesAdded, worldSketchesSkipped, annotationsSkipped }`.
+    pub fn insert_item(
+        &mut self,
+        bytes: &[u8],
+        affine: &[f64],
+        source_id: Option<String>,
+        content_hash: Option<String>,
+    ) -> Result<JsValue, JsError> {
+        let report = self
+            .insert_item_core(bytes, affine, source_id, content_hash)
+            .map_err(|e| JsError::new(&e.0))?;
+        Ok(insert_report_to_js(&report))
+    }
+
+    /// [`Scene::insert_item`] minus the JS-value plumbing: load, insert
+    /// (additive), reconcile, and record. The replay arm re-issues inserts
+    /// through this (no `JsValue`, so it also runs in native tests).
+    fn insert_item_core(
+        &mut self,
+        bytes: &[u8],
+        affine: &[f64],
+        source_id: Option<String>,
+        content_hash: Option<String>,
+    ) -> Result<kernel::InsertReport, ApiError> {
+        let item = Document::load(bytes).map_err(|e: LoadError| api_err(&e, &e))?;
+        let pose = affine_transform(affine)?;
+        let provenance = match (&source_id, &content_hash) {
+            (Some(s), Some(h)) => Some(kernel::LibraryProvenance {
+                source_id: s.clone(),
+                content_hash: h.clone(),
+            }),
+            _ => None,
+        };
+        let (report, change) = self
+            .doc
+            .insert_document(&item, &kernel::InsertOptions { pose, provenance })
+            .map_err(doc_err)?;
+        // Reconcile caches (additive — do NOT clear like `load`).
+        self.reconcile(&change);
+        // affine_transform validated the length, so this cannot fail.
+        let mut rec_affine = [0.0f64; 12];
+        rec_affine.copy_from_slice(affine);
+        recording::record(recording::RecordedCall::InsertItem {
+            bytes: bytes.to_vec(),
+            affine: rec_affine,
+            source_id,
+            content_hash,
+        });
+        Ok(report)
+    }
+
+    /// Copies a material item's palette into the document's, content-
+    /// deduplicated ([`kernel::Document::insert_palette`]) — the "Add to
+    /// palette" / "Paint with this" action. Returns the resolved material
+    /// handles in the item's palette order (existing entries when
+    /// content-equal, fresh ones otherwise). Not undoable on its own,
+    /// matching [`Scene::add_material`].
+    pub fn insert_item_palette(&mut self, bytes: &[u8]) -> Result<Vec<u64>, ApiError> {
+        self.insert_item_palette_core(bytes)
+    }
+
+    /// [`Scene::insert_item_palette`] minus nothing — split so the replay
+    /// arm names the same core path the import cores use.
+    fn insert_item_palette_core(&mut self, bytes: &[u8]) -> Result<Vec<u64>, ApiError> {
+        let item = Document::load(bytes).map_err(|e: LoadError| api_err(&e, &e))?;
+        let ids = self.doc.insert_palette(&item);
+        recording::record(recording::RecordedCall::InsertItemPalette {
+            bytes: bytes.to_vec(),
+        });
+        Ok(ids.iter().map(|m| m.data().as_ffi()).collect())
+    }
+
+    /// For each material in an item's palette, the handle of a content-equal
+    /// entry already in THIS document's palette — the browser's "in palette"
+    /// badge. JSON array, item palette order: decimal handle strings, `null`
+    /// where nothing matches. Read-only.
+    pub fn palette_matches_json(&self, bytes: &[u8]) -> Result<String, ApiError> {
+        let item = Document::load(bytes).map_err(|e: LoadError| api_err(&e, &e))?;
+        let matches = self.doc.palette_matches(&item);
+        let rows: Vec<serde_json::Value> = matches
+            .iter()
+            .map(|m| match m {
+                Some(id) => serde_json::Value::String(id.data().as_ffi().to_string()),
+                None => serde_json::Value::Null,
+            })
+            .collect();
+        Ok(serde_json::Value::Array(rows).to_string())
+    }
+
+    /// Marks the SOURCE of a just-saved library item
+    /// ([`kernel::Document::stamp_library_source`]): the saved selection —
+    /// and, for an instance, its definition (`def_sid` = the definition's
+    /// stable id in the item file, decimal) — gets the item's `hew.library`
+    /// provenance, so "in this model" counts it immediately and a later
+    /// insert of the item reuses the definition it was saved from. Not an
+    /// undo step (bookkeeping, not a model edit), but it IS a recorded,
+    /// serialized mutation.
+    pub fn stamp_library_source(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        source_id: &str,
+        content_hash: &str,
+        def_sid: Option<String>,
+    ) -> Result<(), ApiError> {
+        self.stamp_library_source_core(kinds, ids, source_id, content_hash, def_sid)
+    }
+
+    /// [`Scene::stamp_library_source`]'s body — the replay arm re-issues
+    /// stamps through this.
+    fn stamp_library_source_core(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        source_id: &str,
+        content_hash: &str,
+        def_sid: Option<String>,
+    ) -> Result<(), ApiError> {
+        if kinds.len() != ids.len() {
+            return Err(ApiError(
+                "BadNodeList: kinds and ids must be the same length".to_string(),
+            ));
+        }
+        let nodes = kinds
+            .iter()
+            .zip(ids)
+            .map(|(&k, &i)| node_id(k, i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let prov = kernel::LibraryProvenance {
+            source_id: source_id.to_string(),
+            content_hash: content_hash.to_string(),
+        };
+        let def_sid_num =
+            match def_sid.as_deref() {
+                None => None,
+                Some(raw) => Some(raw.parse::<u64>().map_err(|_| {
+                    ApiError(format!("BadLibraryMeta: def_sid is not a u64: {raw:?}"))
+                })?),
+            };
+        self.doc.stamp_library_source(&nodes, &prov, def_sid_num);
+        recording::record(recording::RecordedCall::StampLibrarySource {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            source_id: source_id.to_string(),
+            content_hash: content_hash.to_string(),
+            def_sid,
+        });
+        Ok(())
+    }
+
+    /// Every live palette entry's content hash
+    /// ([`kernel::material_content_hash`]) as a JSON array of decimal
+    /// strings — pushed to the Library window so its "in palette" badge can
+    /// compare against item summaries without a live palette handle.
+    pub fn palette_content_hashes_json(&self) -> String {
+        let hashes: Vec<serde_json::Value> = self
+            .doc
+            .materials()
+            .values()
+            .map(|m| serde_json::Value::String(kernel::material_content_hash(m).to_string()))
+            .collect();
+        serde_json::Value::Array(hashes).to_string()
+    }
+
+    /// How many live placements of each library item this document holds —
+    /// the browser's "in this model" badge and scope filter. JSON object,
+    /// `source_id` → count. A placement is: a live instance whose own
+    /// `hew.library` stamp or whose definition's stamp names the source,
+    /// or a live stamped group/object (each counted once, instances first).
+    pub fn library_placements_json(&self) -> String {
+        let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+        let source_of = |target: &kernel::AttrTarget| -> Option<String> {
+            let dict = self.doc.attr_get(target).ok().flatten()?;
+            match dict.get("hew.library")?.get("source_id")? {
+                kernel::AttrValue::Text(s) => Some(s.clone()),
+                _ => None,
+            }
+        };
+        for iid in self.doc.instance_ids() {
+            let own = source_of(&kernel::AttrTarget::Entity(kernel::EntityRef::Instance(
+                iid,
+            )));
+            let via_def = own.or_else(|| {
+                let def = self.doc.instance_def(iid)?;
+                source_of(&kernel::AttrTarget::Entity(kernel::EntityRef::Component(
+                    def,
+                )))
+            });
+            if let Some(s) = via_def {
+                *counts.entry(s).or_default() += 1;
+            }
+        }
+        for gid in self.doc.group_ids() {
+            if let Some(s) = source_of(&kernel::AttrTarget::Entity(kernel::EntityRef::Group(gid))) {
+                *counts.entry(s).or_default() += 1;
+            }
+        }
+        for oid in self.doc.visible_object_ids() {
+            if let Some(s) = source_of(&kernel::AttrTarget::Entity(kernel::EntityRef::Object(oid)))
+            {
+                *counts.entry(s).or_default() += 1;
+            }
+        }
+        serde_json::to_string(&counts).expect("string→usize map is always JSON")
+    }
+
     /// Exports the document to `format` (`"stl" | "3mf" | "glb" | "gltf"`)
     /// via `crates/mesh-export` — the same writers `hew-cli` and the
     /// `hew.doc.export` live-API command use, now the desktop app's own
@@ -7931,6 +8459,32 @@ impl Scene {
                     }
                     DeleteAnnotation { id } => {
                         self.delete_annotation(id)?;
+                    }
+                    InsertItem {
+                        bytes,
+                        affine,
+                        source_id,
+                        content_hash,
+                    } => {
+                        self.insert_item_core(&bytes, &affine, source_id, content_hash)?;
+                    }
+                    InsertItemPalette { bytes } => {
+                        self.insert_item_palette_core(&bytes)?;
+                    }
+                    StampLibrarySource {
+                        kinds,
+                        ids,
+                        source_id,
+                        content_hash,
+                        def_sid,
+                    } => {
+                        self.stamp_library_source_core(
+                            &kinds,
+                            &ids,
+                            &source_id,
+                            &content_hash,
+                            def_sid,
+                        )?;
                     }
                     ImportDae { bytes, images } => {
                         let mut image_map: ImageMap = ImageMap::new();
@@ -9256,6 +9810,71 @@ mod tests {
         );
         // Replaying must not itself record.
         assert!(!replayed.is_recording());
+    }
+
+    /// A library insert is a committed document mutation: it must be
+    /// captured with the item bytes, pose, and provenance embedded, so a
+    /// recorded session replays self-contained and reproduces the same
+    /// definition reuse-vs-copy decision — plus a later undo against the
+    /// same stack shape. Also pins the extract half: extracting is
+    /// read-only and records nothing.
+    #[test]
+    fn library_insert_records_and_replays() {
+        recording::reset();
+
+        // Author an item in a scratch scene: one box, wrapped as a
+        // component item.
+        let mut author = Scene::new();
+        let (s, r) = ground_unit_square(&mut author);
+        let obj = author.extrude_region(s, r, 1.0).unwrap();
+        let item_bytes = author
+            .extract_item(
+                &[0u8],
+                &[obj],
+                true,
+                Some("Chair".to_string()),
+                Some(r#"{"id":"lib-1","category":"component"}"#.to_string()),
+            )
+            .unwrap();
+
+        // Record a session that inserts the item twice with the same
+        // provenance (idempotent path exercised), then undoes once.
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let shifted = [1.0, 0.0, 0.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let first = scene
+            .insert_item_core(
+                &item_bytes,
+                &identity,
+                Some("lib-1".into()),
+                Some("hash-1".into()),
+            )
+            .unwrap();
+        assert_eq!(first.definitions_added, 1);
+        let second = scene
+            .insert_item_core(
+                &item_bytes,
+                &shifted,
+                Some("lib-1".into()),
+                Some("hash-1".into()),
+            )
+            .unwrap();
+        assert_eq!(second.definitions_reused, 1, "same item version → reuse");
+        scene.scene_undo().unwrap();
+        scene.stop_recording();
+
+        // Placement counts see the one remaining placement.
+        let counts: serde_json::Value =
+            serde_json::from_str(&scene.library_placements_json()).unwrap();
+        assert_eq!(counts["lib-1"], serde_json::json!(1));
+
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(final_hash, golden, "insert+undo replays to the golden hash");
+        assert_eq!(replayed.save(), scene.save());
     }
 
     /// The UI routes EVERY boolean through `boolean_nodes` — plain

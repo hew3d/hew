@@ -5,13 +5,23 @@ import './index.css'
 import App from './App.tsx'
 import { ErrorBoundary } from './ErrorBoundary.tsx'
 import { SettingsWindow } from './settings/SettingsWindow.tsx'
+
+// Lazy: LibraryWindow statically imports @tauri-apps/api modules; loading
+// it eagerly would drag them into the WEB bundle's entry chunk for a
+// window variant the web build can never render (adversarial review S5).
+const LibraryWindow = React.lazy(() =>
+  import('./panels/LibraryWindow.tsx').then((m) => ({ default: m.LibraryWindow })),
+)
 import { isTauri } from './io/fileHost'
 import { initThemeSync } from './theme/applyTheme'
 
 // The Settings window (Tauri: a separate webview; web: unused — the modal
 // fallback renders inline in App) loads this same entry with a `#settings`
-// hash so it gets its own render root without a second HTML file.
+// hash so it gets its own render root without a second HTML file. The
+// Library window (Tauri only — the web build keeps its in-app modal) does
+// the same with `#library`.
 const isSettingsWindow = window.location.hash.startsWith('#settings')
+const isLibraryWindow = window.location.hash.startsWith('#library')
 
 // Set the initial `data-theme` attribute before first paint, and keep it in
 // sync thereafter. Runs unconditionally so both the main app window and the
@@ -44,7 +54,7 @@ try {
 // for the main app window.
 // Guarded off under Tauri (isTauri) so the desktop shell never registers a SW,
 // and excluded from dev (import.meta.env.PROD) so hot-reload is unaffected.
-if (!isSettingsWindow && !isTauri && import.meta.env.PROD && 'serviceWorker' in navigator) {
+if (!isSettingsWindow && !isLibraryWindow && !isTauri && import.meta.env.PROD && 'serviceWorker' in navigator) {
   import('virtual:pwa-register').then(({ registerSW }) =>
     registerSW({ immediate: true }),
   )
@@ -64,7 +74,15 @@ if (!isSettingsWindow && !isTauri && import.meta.env.PROD && 'serviceWorker' in 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary>
-      {isSettingsWindow ? <SettingsWindow /> : <App />}
+      {isSettingsWindow ? (
+        <SettingsWindow />
+      ) : isLibraryWindow ? (
+        <React.Suspense fallback={null}>
+          <LibraryWindow />
+        </React.Suspense>
+      ) : (
+        <App />
+      )}
     </ErrorBoundary>
   </React.StrictMode>,
 )

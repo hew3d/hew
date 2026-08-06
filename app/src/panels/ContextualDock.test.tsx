@@ -129,6 +129,34 @@ describe('ContextualDock', () => {
     expect(onRun).toHaveBeenCalledWith('edit-delete')
   })
 
+  // --- Save to Library (Library effort) ---
+
+  it('hides Save to Library when gates are given but canSaveToLibrary is omitted/false', () => {
+    render(
+      <ContextualDock
+        selectedIds={[obj(1n)]}
+        selectedGuide={null}
+        onRun={vi.fn()}
+        gates={{ canGroup: false, canMakeComponent: false }}
+      />,
+    )
+    expect(screen.queryByText('Save to Library')).not.toBeInTheDocument()
+  })
+
+  it('shows and dispatches Save to Library when canSaveToLibrary is true', () => {
+    const onRun = vi.fn()
+    render(
+      <ContextualDock
+        selectedIds={[obj(1n)]}
+        selectedGuide={null}
+        onRun={onRun}
+        gates={{ canGroup: false, canMakeComponent: false, canSaveToLibrary: true }}
+      />,
+    )
+    fireEvent.click(screen.getByText('Save to Library'))
+    expect(onRun).toHaveBeenCalledWith('save-to-library')
+  })
+
   // --- Active-tool highlight  ---
 
   it('does NOT highlight the first (primary) verb when it is not the active tool', () => {

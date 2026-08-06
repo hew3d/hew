@@ -24,7 +24,7 @@ import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
 import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, collectLeafIds as collectLeafIdsShared, pruneDeadSelection, type NodeRef } from './panels/treeModel'
+import { nextSelection, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, collectLeafIds as collectLeafIdsShared, pruneDeadSelection, structuralSelection, type NodeRef } from './panels/treeModel'
 import { tagPathKey, isPathUnder } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
@@ -39,14 +39,14 @@ import {
   documentName,
   saveStateLabel,
   afterMutation,
-  afterSave,
+  afterSave, applyWriteThroughSave,
   afterOpen,
   afterImport,
   type DocSessionState,
 } from './io/documentSession'
 import { makeRecoveryStore, shouldPromptRecovery, type RecoveryListing, type RecoverySnapshot, type RecoveryMeta } from './io/recoveryStore'
 import { ImportReportDialog } from './panels/ImportReportDialog'
-import { ImportingOverlay } from './panels/ImportingOverlay'
+import { ImportingOverlay, ensureSpinnerKeyframes } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
 import { WelcomeScreen, type SampleEntry } from './panels/WelcomeScreen'
 import { getShowWelcome, setShowWelcome } from './settings/welcomeScreen'
@@ -59,10 +59,19 @@ import { ExportDialog, type ExportFormat } from './panels/ExportDialog'
 import { TextDialog, type TextDialogResult } from './panels/TextDialog'
 import { layoutGlyphRun } from './text/glyphRun'
 import { collectNonSolidObjects } from './io/solidGating'
-import { friendlyErrorText, isErrorLevelCode, kernelErrorMessage } from './kernelErrors'
+import { friendlyErrorText, isErrorLevelCode, kernelErrorMessage, parseKernelErrorCode } from './kernelErrors'
 import { CommandPalette } from './palette/CommandPalette'
 import { toolHint, toolActionId, type PaletteEntry } from './palette/registry'
 import type { TagReveal } from './panels/TagsPanel'
+import { LibraryDialog } from './panels/LibraryDialog'
+import { SaveToLibraryPopover } from './panels/SaveToLibraryPopover'
+import { libraryStore } from './io/libraryStore'
+import { buildItemGhost } from './library/ghostBuilder'
+import { readItemSummary, renderItemThumbnail, sha256Hex } from './library/itemFiles'
+import { buildLibraryItem } from './library/libraryModel'
+import { itemFileName } from './library/fileNaming'
+import type { LibraryCategory, LibraryItem } from './library/types'
+import type { LibraryPlacement } from './tools/LibraryPlaceTool'
 import { SettingsWindow } from './settings/SettingsWindow'
 import { FluentSettingsPage } from './settings/FluentSettingsPage'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
@@ -97,6 +106,14 @@ interface Toast {
   /** Error-level (red bubble, error log) vs warning — classified ONCE at
    * creation via kernelErrors' isErrorLevelCode, the single source. */
   isError: boolean
+  /** Library save's thumbnail-render toast: 'pending' shows a spinner,
+   * 'done' a checkmark. Undefined for every ordinary toast (no icon). */
+  state?: 'pending' | 'done'
+  /** True while the toast should stay up regardless of the normal 4s
+   * auto-dismiss — the thumbnail-render toast's "still working" phase.
+   * `updateToast` schedules its own short auto-dismiss once a patch turns
+   * this back to false. */
+  sticky?: boolean
 }
 
 let toastCounter = 0
@@ -327,6 +344,12 @@ export default function App() {
   const [showObjectInfo, setShowObjectInfo] = useState(() => getTrayLayout().objectInfo)
   /** Debug Log panel visibility (default hidden — opt-in via Window menu only). */
   const [showDebugLog, setShowDebugLog] = useState(false)
+  /** Library browser dialog visibility (Window ▸ Library, ⇧⌘L / bare ⇧L,
+   * the tool rail's Library row, and the command palette's "Library" entry
+   * all toggle/open this — see the `toggle-library`/`open-library`
+   * menuActionRef cases). Not part of trayLayout — it's a modal, not a
+   * docked pane. */
+  const [showLibrary, setShowLibrary] = useState(false)
   /** View ▸ Axes / Grid / Guides visibility. Default all shown. */
   const [showAxes, setShowAxes] = useState(true)
   const [showGrid, setShowGrid] = useState(true)
@@ -666,7 +689,14 @@ export default function App() {
   }, [docSession.dirty])
 
   const handleStatusChange = useCallback((name: string, kind: string | null) => {
-    setToolName(name)
+    // LibraryPlaceTool (viewport-level one-shot, armed imperatively via
+    // armLibraryPlacement rather than the rail's switchToolRef path) reports
+    // its real internal name here on every pointer move — 'LibraryPlace' is
+    // not a `ToolName` and would otherwise leak into the status bar
+    // literally. The "Inserting <name>…" pill already names what's
+    // happening; the tool-name label falls back to Select, matching the
+    // rail's own `activeTool` state, which armLibraryPlacement never changes.
+    setToolName(name === 'LibraryPlace' ? 'Select' : name)
     setSnapKind(kind)
   }, [])
 
@@ -1147,6 +1177,26 @@ export default function App() {
 
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id))
+  }, [])
+
+  // A sticky, updatable toast — the Library save flow's "Rendering
+  // thumbnail…" → "Saved" progression. Bypasses handleToast's LogStore/
+  // isPanicError/auto-dismiss machinery (none of that applies to a status
+  // toast with no kernel error code) and starts with no auto-dismiss timer
+  // at all; updateToast arms one once the caller flips `sticky` back off.
+  const pushStickyToast = useCallback((message: string): number => {
+    const id = ++toastCounter
+    setToasts((prev) => [...prev, { id, message, isError: false, state: 'pending', sticky: true }])
+    return id
+  }, [])
+
+  const updateToast = useCallback((id: number, patch: Partial<Toast>) => {
+    setToasts((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)))
+    if (patch.sticky === false) {
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id))
+      }, 2400)
+    }
   }, [])
 
   const handleRescaleArmed = useCallback((info: RescaleConfirmInfo) => {
@@ -2023,6 +2073,31 @@ export default function App() {
   // an older shell) proceeds to replace in place; the discard prompt is
   // reachable ONLY from that fallback, never from an ordinary new-window open
   // (nothing is discarded when a new window opens).
+  /** Opens `path`'s BYTES as an import-shaped copy named `name` — the
+   * library Open-as-Document contract in a fresh window (see the pristine
+   * route in `onLibraryOpenAsDocument`): Save prompts, no recents entry,
+   * no path binding. */
+  const openLibraryCopy = useCallback(
+    async (path: string, name: string | null) => {
+      const scene = sceneRef.current
+      if (scene === null) return
+      try {
+        const { invoke } = await import('@tauri-apps/api/core')
+        const buf = await invoke<ArrayBuffer>('read_file', { path })
+        const bytes = new Uint8Array(buf)
+        const ok = applyLoadedBytes(bytes)
+        if (ok) setDocSession(afterImport(name ?? 'Library Item', Date.now()))
+      } catch (err) {
+        handleToast(
+          `Couldn't open the library item: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    },
+    [applyLoadedBytes, handleToast],
+  )
+  const openLibraryCopyRef = useRef(openLibraryCopy)
+  useEffect(() => { openLibraryCopyRef.current = openLibraryCopy }, [openLibraryCopy])
+
   const openPath = useCallback(async (path: string) => {
     const scene = sceneRef.current
     if (scene === null) return
@@ -2382,6 +2457,504 @@ export default function App() {
     })
   }, [handleToast])
 
+  // -------------------------------------------------------------------- Library
+  // The Library dialog (`LibraryDialog.tsx`) only reports intent — every
+  // action that actually touches the open document or the storage seam is
+  // wired here (the "later integration wave" its own doc comment names).
+
+  /** "Inserting <name>…" pill (frame 1c) shown while a one-shot placement is
+   * armed; cleared by the arm callback on both cancel and commit. */
+  const [insertingItem, setInsertingItem] = useState<string | null>(null)
+  // Arming a NEW placement cancels the previous tool, whose onDone fires
+  // during the takeover — a generation stamp keeps that late callback from
+  // clearing the pill the new placement just set (adversarial review S13).
+  const insertingGenRef = useRef(0)
+
+  /** What the SaveToLibraryPopover is currently prompting for — a single
+   * structural selection (ContextualDock's `save-to-library` verb) or the
+   * whole document (File ▸ Save to Library…). `null` = popover closed. */
+  const [saveToLibraryTarget, setSaveToLibraryTarget] = useState<
+    | { kind: 'selection'; nodeKinds: Uint8Array; nodeIds: BigUint64Array; defaultName: string }
+    | { kind: 'document'; defaultName: string }
+    | null
+  >(null)
+
+  /** Lightweight per-item summary for the command palette's dynamic 'Library'
+   * group (frame 1e) — NOT the full `LibraryItem` the dialog builds (no
+   * thumbnail, no content hash): the palette only ever needs a label, a
+   * category, and enough provenance to show "N in this model". */
+  interface LibraryIndexEntry {
+    fileName: string
+    displayName: string
+    category: LibraryCategory
+    sourceId: string | null
+    keywords: string[]
+  }
+  const [libraryIndex, setLibraryIndex] = useState<LibraryIndexEntry[]>([])
+  const libraryIndexLoadedRef = useRef(false)
+
+  const loadLibraryIndex = useCallback(async () => {
+    const store = libraryStore()
+    if (!store.available()) return
+    try {
+      const files = await store.list()
+      const built: LibraryIndexEntry[] = []
+      for (const file of files) {
+        try {
+          const bytes = await store.read(file.fileName)
+          const summary = await readItemSummary(bytes)
+          // contentHash is unused by the palette (only the dialog's
+          // materialInPalette/placement-count lookups need it) — '' avoids
+          // an unnecessary SHA-256 pass over every item on every reload.
+          const item = buildLibraryItem(file, summary, '')
+          built.push({
+            fileName: file.fileName,
+            displayName: item.displayName,
+            category: item.category,
+            sourceId: item.meta.id ?? null,
+            keywords: item.meta.keywords ?? [],
+          })
+        } catch {
+          // Unparsable file — a browser-detail-pane concern (it shows an
+          // error tile); the palette just omits it.
+        }
+      }
+      setLibraryIndex(built)
+    } catch {
+      // best effort — a listing failure just leaves the palette's Library
+      // group empty, same as an empty library folder.
+    }
+  }, [])
+
+  // Loaded lazily (first palette or dialog open), then kept fresh via the
+  // store's own change subscription (a save/rename/delete from this window
+  // OR another one — cross-window Library edits are real on desktop).
+  useEffect(() => {
+    if (!isTauri) return
+    return libraryStore().subscribe(() => {
+      void loadLibraryIndex()
+    })
+  }, [loadLibraryIndex])
+  useEffect(() => {
+    if (!paletteOpen && !showLibrary) return
+    if (libraryIndexLoadedRef.current) return
+    libraryIndexLoadedRef.current = true
+    void loadLibraryIndex()
+  }, [paletteOpen, showLibrary, loadLibraryIndex])
+
+  // `hew.library` source_id -> live placement count in the open document,
+  // for the dialog's "In this model" scope AND the palette's "N in this
+  // model" description line. Re-read on every docRev (an insert/undo/redo
+  // changes this) rather than incrementally tracked — the wasm call is a
+  // cheap document-registry walk, not a re-tessellation.
+  // Every "open the Library" entry point (menu, rail, palette, ⇧L). On the
+  // desktop shell this opens/focuses the REAL native Library window (the
+  // Settings-window pattern, resizable); the web build keeps its in-app
+  // modal.
+  const openLibraryEntry = useCallback(() => {
+    if (isTauri) {
+      void import('@tauri-apps/api/core').then(({ invoke }) => invoke('open_library_window'))
+    } else {
+      setShowLibrary((v) => !v)
+    }
+  }, [])
+
+  const libraryPlacements = useMemo((): Record<string, number> => {
+    const scene = state?.scene
+    if (scene == null) return {}
+    try {
+      return JSON.parse(scene.library_placements_json()) as Record<string, number>
+    } catch {
+      return {}
+    }
+    // docRev: an insert/undo/redo changes placement counts without changing
+    // scene identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, docRev])
+
+  const paletteLibraryEntries = useMemo((): PaletteEntry[] => {
+    return libraryIndex.map((entry): PaletteEntry => {
+      const inModel = entry.sourceId !== null ? (libraryPlacements[entry.sourceId] ?? 0) : 0
+      const isMaterial = entry.category === 'material'
+      const descParts: string[] = [entry.category]
+      if (entry.keywords.length > 0) descParts.push(entry.keywords.join(', '))
+      if (inModel > 0) descParts.push(`${inModel} in this model`)
+      return {
+        id: `insert-library:${entry.fileName}`,
+        label: isMaterial ? `Add "${entry.displayName}" to palette` : `Insert "${entry.displayName}"`,
+        description: descParts.join(' — '),
+        group: 'Library',
+        synonyms: entry.keywords,
+      }
+    })
+  }, [libraryIndex, libraryPlacements])
+
+  const paletteExtraEntries = useMemo(
+    () => [...paletteModelEntries, ...paletteLibraryEntries],
+    [paletteModelEntries, paletteLibraryEntries],
+  )
+
+  /** The display name a freshly-opened SaveToLibraryPopover should pre-fill
+   * for a single structural selection — mirrors the Outliner/palette's own
+   * `resolveLabel` fallbacks (`paletteModelEntries` above does the identical
+   * walk per-node across the whole document; this is the same lookup for
+   * one already-known node). */
+  const librarySelectionDisplayName = useCallback(
+    (node: NodeRef): string => {
+      const scene = state?.scene
+      if (scene == null) return 'Item'
+      const treeIndex = buildTreeIndexMap(
+        scene.top_level_nodes().map(nodeRefFromJs),
+        (groupId) => scene.group_members(groupId).map(nodeRefFromJs),
+      )
+      const index = treeIndex.get(nodeKey(node)) ?? 0
+      if (node.kind === 'object') return resolveLabel(scene.object_name(node.id), undefined, 'object', index)
+      if (node.kind === 'group') return resolveLabel(scene.group_name(node.id), undefined, 'group', index)
+      if (node.kind === 'instance') {
+        const def = scene.instance_def(node.id)
+        const defName = def !== undefined ? scene.component_name(def) : undefined
+        return resolveLabel(scene.instance_name(node.id), defName, 'instance', index)
+      }
+      return 'Item'
+    },
+    [state],
+  )
+
+  /** Fire-and-forget thumbnail render + write, resolving `toastId` from a
+   * "Rendering…" spinner to a "Saved" checkmark either way — a thumbnail
+   * that fails to render is an honest no-thumbnail item (see
+   * `renderItemThumbnail`'s doc comment), not a failed save. */
+  const renderAndWriteThumbnail = useCallback((toastId: number, name: string, bytes: Uint8Array) => {
+    void (async () => {
+      try {
+        const hash = await sha256Hex(bytes)
+        const png = await renderItemThumbnail(bytes, 256)
+        if (png !== null) await libraryStore().writeThumbnail(hash, png)
+      } catch {
+        // Best effort — the item itself already saved successfully.
+      } finally {
+        updateToast(toastId, { message: `Saved "${name}" to library`, state: 'done', sticky: false })
+      }
+    })()
+  }, [updateToast])
+
+  /** Commits the SaveToLibraryPopover's chosen name: extracts the selection
+   * or whole document as item bytes, writes it under a collision-proofed
+   * file name, and (selection/document items only — materials render their
+   * own swatch, see `handleSaveMaterialToLibrary`) kicks off the thumbnail
+   * toast. Kernel refusals (an open component session, …) route through
+   * kernelErrors.ts like every other call site. */
+  const handleSaveToLibraryCommit = useCallback(
+    (name: string) => {
+      const target = saveToLibraryTarget
+      setSaveToLibraryTarget(null)
+      const scene = sceneRef.current
+      if (scene === null || target === null) return
+      const id = crypto.randomUUID()
+      const meta = {
+        id,
+        name,
+        category: target.kind === 'document' ? 'model' : 'component',
+        savedAt: new Date().toISOString(),
+        sourceDoc: documentName(docSessionRef.current),
+      }
+      let bytes: Uint8Array
+      try {
+        bytes =
+          target.kind === 'document'
+            ? scene.extract_document_item(JSON.stringify(meta))
+            : scene.extract_item(target.nodeKinds, target.nodeIds, true, name, JSON.stringify(meta))
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return
+      }
+      const fileName = itemFileName(name, id, target.kind === 'document' ? 'model' : 'component')
+      // The stamp below runs after an await — if the user replaced the
+      // document meanwhile (File ▸ New/Open), the captured node handles
+      // could resolve against RECYCLED slots in the new document and stamp
+      // the wrong entities (adversarial review). The session object's
+      // identity changes exactly on document replacement, so capture it
+      // now and bail if it moved.
+      const sessionAtSave = docSessionRef.current
+      void (async () => {
+        try {
+          await libraryStore().write(fileName, bytes)
+        } catch (err) {
+          handleToast(`Save to Library failed: ${err instanceof Error ? err.message : String(err)}`)
+          return
+        }
+        // Mark the SOURCE: the model an item was saved FROM contains it, by
+        // definition — the selection (and its definition, for instances)
+        // gets the item's provenance so "In this model" counts it
+        // immediately and a re-insert reuses the existing definition
+        // (playtest finding). Selection items only: a whole-document model
+        // item has no meaningful in-model selection to mark.
+        if (target.kind !== 'document' && docSessionRef.current === sessionAtSave) {
+          let stamped = false
+          try {
+            // Capture cleanliness BEFORE the stamp dirties the session.
+            const wasClean = !docSessionRef.current.dirty
+            const ref = docSessionRef.current.currentRef
+            const hash = await sha256Hex(bytes)
+            const summary = await readItemSummary(bytes)
+            scene.stamp_library_source(
+              target.nodeKinds,
+              target.nodeIds,
+              id,
+              hash,
+              summary.first_component_sid ?? undefined,
+            )
+            stamped = true
+            // The stamp is the "in this model" association — if it only
+            // lives in memory, closing without a save silently severs it
+            // (and the stamp-only "unsaved changes?" prompt reads as
+            // spurious — playtest round 3). When the document was CLEAN
+            // and bound to a REAL FILESYSTEM PATH (Tauri, string handle),
+            // write the stamped bytes straight back to that file and stay
+            // clean: the sole delta is the bookkeeping this very action
+            // created. Anywhere else — web (an FSAA save can pop a
+            // permission prompt or Save-As picker and rebind the
+            // document), a handle-less session — stay on the ordinary
+            // path: mark dirty, the user's next save carries the stamp.
+            const writeThrough =
+              wasClean &&
+              isTauri &&
+              typeof ref?.handle === 'string' &&
+              docSessionRef.current === sessionAtSave
+            if (writeThrough) {
+              // Camera-state parity with every other save path.
+              pushCameraStateToScene(scene)
+              const docBytes = new Uint8Array(scene.save())
+              const newRef = await fileHostRef.current.save(docBytes, ref)
+              if (newRef !== null) {
+                // An edit may have landed DURING the save — its dirty
+                // state must never be clobbered clean (that would be
+                // silent, autosave-suppressed data loss: the written
+                // bytes predate the edit). Apply afterSave only when the
+                // session is still exactly the one this flow captured.
+                setDocSession((prev) => applyWriteThroughSave(prev, sessionAtSave, newRef, Date.now()))
+                setDocRev((r) => r + 1)
+              } else {
+                reconcileRef.current()
+                setDocRev((r) => r + 1)
+              }
+            } else {
+              reconcileRef.current()
+              setDocRev((r) => r + 1)
+            }
+          } catch (err) {
+            if (stamped) {
+              // The DOCUMENT changed (the stamp landed) but the
+              // write-through failed — surface it like any save failure
+              // and leave the session honestly dirty so nothing is lost
+              // silently.
+              reconcileRef.current()
+              setDocRev((r) => r + 1)
+              handleToast(`Save failed: ${friendlyErrorText(err)}`)
+            }
+            // A failed stamp itself only costs the badge.
+          }
+        }
+        const toastId = pushStickyToast(`Rendering thumbnail for "${name}"…`)
+        renderAndWriteThumbnail(toastId, name, bytes)
+      })()
+    },
+    [saveToLibraryTarget, handleToast, pushStickyToast, renderAndWriteThumbnail, pushCameraStateToScene],
+  )
+
+  /** MaterialPalette's "Save to Library" button — no thumbnail render (a
+   * pure-material item has nothing to render; `renderItemThumbnail` would
+   * honestly return null), so this just writes and shows a plain toast. */
+  const handleSaveMaterialToLibrary = useCallback(
+    (materialId: bigint) => {
+      const scene = sceneRef.current
+      if (scene === null) return
+      const info = scene.material_info(materialId)
+      const name = info?.name() ?? 'Material'
+      const id = crypto.randomUUID()
+      const meta = {
+        id,
+        name,
+        category: 'material',
+        savedAt: new Date().toISOString(),
+        sourceDoc: documentName(docSessionRef.current),
+      }
+      let bytes: Uint8Array
+      try {
+        bytes = scene.extract_material_item(materialId, JSON.stringify(meta))
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return
+      }
+      const fileName = itemFileName(name, id, 'material')
+      void (async () => {
+        try {
+          await libraryStore().write(fileName, bytes)
+        } catch (err) {
+          handleToast(`Save to Library failed: ${err instanceof Error ? err.message : String(err)}`)
+          return
+        }
+        handleToast(`Saved "${name}" to library.`)
+      })()
+    },
+    [handleToast],
+  )
+
+  const onLibraryInsert = useCallback(
+    (item: LibraryItem, bytes: Uint8Array) => {
+      setShowLibrary(false)
+      void (async () => {
+        let ghost: Awaited<ReturnType<typeof buildItemGhost>>
+        try {
+          ghost = await buildItemGhost(bytes)
+        } catch (err) {
+          handleToast(`Couldn't preview "${item.displayName}": ${err instanceof Error ? err.message : String(err)}`)
+          return
+        }
+        const gen = ++insertingGenRef.current
+        setInsertingItem(item.displayName)
+        viewportApi.current?.armLibraryPlacement(
+          {
+            bytes,
+            sourceId: item.meta.id ?? null,
+            contentHash: item.contentHash,
+            displayName: item.displayName,
+            ghost: ghost.group,
+            bboxMin: ghost.bboxMin,
+            bboxMax: ghost.bboxMax,
+          },
+          () => {
+            if (insertingGenRef.current === gen) setInsertingItem(null)
+          },
+        )
+      })()
+    },
+    [handleToast],
+  )
+
+  // Open as Document: reuses THIS window only when it's pristine (same rule
+  // as File ▸ Open — see `isPristineDocument`/`openDocument`). A non-pristine
+  // window never gets silently replaced; the library folder's absolute path
+  // (`itemPath`, built server-side from the SAME `resolved_library_dir` join
+  // every other `library_*` command uses — main.rs's `library_item_path`)
+  // lets this route through the exact `open_in_new_window` command File ▸
+  // Open already uses for its own non-pristine case. A store/shell without
+  // that path (web, or an older shell) falls back to an honest toast rather
+  // than silently discarding the current document.
+  const onLibraryOpenAsDocument = useCallback(
+    (item: LibraryItem, bytes: Uint8Array) => {
+      setShowLibrary(false)
+      void (async () => {
+        const scene = sceneRef.current
+        if (scene === null) return
+        const pristine = isPristineDocument(docSessionRef.current, scene)
+        if (pristine) {
+          const ok = applyLoadedBytes(bytes)
+          if (ok) setDocSession(afterImport(item.displayName, Date.now()))
+          return
+        }
+        const cantRoute = () =>
+          handleToast('Open the Library from an empty window to open this item as its own document.')
+        if (!isTauri) {
+          cantRoute()
+          return
+        }
+        const path = await libraryStore().itemPath(item.file.fileName)
+        if (path === null) {
+          cantRoute()
+          return
+        }
+        try {
+          const { invoke } = await import('@tauri-apps/api/core')
+          await invoke('open_in_new_window', {
+            path,
+            asCopy: true,
+            name: item.displayName,
+          })
+        } catch {
+          cantRoute()
+        }
+      })()
+    },
+    [applyLoadedBytes, handleToast],
+  )
+
+  const onLibraryPaintWith = useCallback(
+    (_item: LibraryItem, bytes: Uint8Array) => {
+      const scene = sceneRef.current
+      if (scene === null) return
+      let ids: BigUint64Array
+      try {
+        ids = scene.insert_item_palette(bytes)
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return
+      }
+      // Palette entries serialize into the document — mark it dirty like
+      // any other committed mutation (adversarial review S10), or a
+      // close/quit after "Paint with this" silently drops the material.
+      handleDocumentChanged()
+      setDocRev((r) => r + 1)
+      if (ids.length === 0) return
+      setCurrentMaterialId(ids[0])
+      setActiveTool('Paint')
+      setShowLibrary(false)
+    },
+    [handleToast, handleDocumentChanged],
+  )
+
+  const onLibraryAddToPalette = useCallback(
+    (item: LibraryItem, bytes: Uint8Array) => {
+      const scene = sceneRef.current
+      if (scene === null) return
+      let ids: BigUint64Array
+      try {
+        ids = scene.insert_item_palette(bytes)
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return
+      }
+      // Dirty for the same reason as Paint-with-this (adversarial review
+      // S10): the palette rides the document.
+      handleDocumentChanged()
+      setDocRev((r) => r + 1)
+      if (ids.length > 0) handleToast(`Added "${item.displayName}" to palette.`)
+    },
+    [handleToast, handleDocumentChanged],
+  )
+
+  const libraryMaterialInPalette = useCallback(
+    async (bytes: Uint8Array): Promise<boolean> => {
+      const scene = sceneRef.current
+      if (scene === null) return false
+      try {
+        const matches = JSON.parse(scene.palette_matches_json(bytes)) as (string | null)[]
+        return matches.length > 0 && matches.every((v) => v !== null)
+      } catch {
+        return false
+      }
+    },
+    // `docRev` (not `[]`): LibraryDialog's "in palette" effect keys off THIS
+    // callback's identity to know when to re-check (see its
+    // `[open, items, materialInPalette]` deps) — a permanently-stable
+    // identity meant "Add to palette" (or an undo/redo that adds/removes a
+    // palette entry) never refreshed the modal's blue dot, "In this model"
+    // line, or in-model scope filter until the dialog was closed and
+    // reopened. `docRev` bumps on every palette mutation and on every
+    // undo/redo (see `handleDocumentChanged`/`onLibraryAddToPalette`), so a
+    // new identity here is exactly the live-refresh signal the window
+    // variant already gets for free from its own inline-lambda prop.
+    [docRev],
+  )
+
   const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number) => {
     setExportDialogOpen(false)
     if (format === 'glb') {
@@ -2504,6 +3077,70 @@ export default function App() {
       }, 2000)
       return
     }
+    // Command palette's dynamic 'Library' group (frame 1e): Enter goes
+    // straight to cursor placement (materials: straight into the palette) —
+    // the Library modal never opens for this path, unlike a tile click in
+    // the dialog itself.
+    if (payload.startsWith('insert-library:')) {
+      const fileName = payload.slice('insert-library:'.length)
+      const entry = libraryIndex.find((e) => e.fileName === fileName)
+      void (async () => {
+        const store = libraryStore()
+        if (!store.available()) return
+        let bytes: Uint8Array
+        try {
+          bytes = await store.read(fileName)
+        } catch (err) {
+          handleToast(`Couldn't read library item: ${err instanceof Error ? err.message : String(err)}`)
+          return
+        }
+        if (entry?.category === 'material') {
+          const scene = sceneRef.current
+          if (scene === null) return
+          let ids: BigUint64Array
+          try {
+            ids = scene.insert_item_palette(bytes)
+          } catch (err) {
+            const code = parseKernelErrorCode(err)
+            const rawMsg = err instanceof Error ? err.message : String(err)
+            handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+            return
+          }
+          // Palette entries serialize into the document (adversarial
+          // review S10) — same dirty-marking as the dialog's flows.
+          reconcileRef.current()
+          setDocRev((r) => r + 1)
+          if (ids.length > 0) handleToast(`Added "${entry.displayName}" to palette.`)
+          return
+        }
+        const displayName = entry?.displayName ?? fileName
+        let ghost: Awaited<ReturnType<typeof buildItemGhost>>
+        try {
+          ghost = await buildItemGhost(bytes)
+        } catch (err) {
+          handleToast(`Couldn't preview "${displayName}": ${err instanceof Error ? err.message : String(err)}`)
+          return
+        }
+        const contentHash = await sha256Hex(bytes)
+        const gen = ++insertingGenRef.current
+        setInsertingItem(displayName)
+        viewportApi.current?.armLibraryPlacement(
+          {
+            bytes,
+            sourceId: entry?.sourceId ?? null,
+            contentHash,
+            displayName,
+            ghost: ghost.group,
+            bboxMin: ghost.bboxMin,
+            bboxMax: ghost.bboxMax,
+          },
+          () => {
+            if (insertingGenRef.current === gen) setInsertingItem(null)
+          },
+        )
+      })()
+      return
+    }
     switch (payload) {
       case 'new':      newDocumentRef.current(); break
       case 'open':     openDocumentRef.current(); break
@@ -2576,6 +3213,30 @@ export default function App() {
       case 'view-iso':            viewportApi.current?.setStandardView('iso'); break
       case 'open-settings':       openSettingsRef.current(); break
       case 'report-bug': handleReportBug(); break
+      case 'open-library':   openLibraryEntry(); break
+      case 'toggle-library': openLibraryEntry(); break
+      // Contextual dock only (needs a single selected object/group/instance)
+      // — same posture as 'enter-context' above: excused from the palette
+      // in registry.ts rather than registered, since it needs a picked node.
+      case 'save-to-library': {
+        if (selectedIds.length !== 1) break
+        const node = selectedIds[0]
+        const sel = structuralSelection([node])
+        if (sel === null) {
+          handleToast(kernelErrorMessage('InvalidSelection', ''), 'InvalidSelection')
+          break
+        }
+        setSaveToLibraryTarget({
+          kind: 'selection',
+          nodeKinds: sel.kinds,
+          nodeIds: sel.ids,
+          defaultName: librarySelectionDisplayName(node),
+        })
+        break
+      }
+      case 'save-to-library-doc':
+        setSaveToLibraryTarget({ kind: 'document', defaultName: documentName(docSession) })
+        break
       case 'open-palette':        setPaletteOpen(true); break
       // Contextual dock only — these need the current selection, not
       // just a bare trigger, so unlike every case above they aren't also
@@ -2631,6 +3292,117 @@ export default function App() {
     }).then((fn) => { if (cancelled) fn(); else unlisten = fn }).catch(() => { /* ignore if not in Tauri */ })
     return () => { cancelled = true; unlisten?.() }
   }, [])
+
+  // ---------------------------------------------------------------- library-window bridge (Tauri only)
+  // The native Library window owns no document; its actions arrive here —
+  // at the ACTIVE document window — via `library_dispatch` (main.rs), the
+  // same routing as native menu actions. The item is re-resolved from the
+  // shared store by name, then handed to the exact handlers the web
+  // build's in-app modal uses, so the two hostings cannot drift.
+  const libraryBridgeRef = useRef({
+    onLibraryInsert,
+    onLibraryOpenAsDocument,
+    onLibraryPaintWith,
+    onLibraryAddToPalette,
+    handleToast,
+  })
+  libraryBridgeRef.current = {
+    onLibraryInsert,
+    onLibraryOpenAsDocument,
+    onLibraryPaintWith,
+    onLibraryAddToPalette,
+    handleToast,
+  }
+  useEffect(() => {
+    if (!isTauri) return
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    import('@tauri-apps/api/webviewWindow').then(({ getCurrentWebviewWindow }) => {
+      return getCurrentWebviewWindow().listen<string>('library-action', (event) => {
+        void (async () => {
+          const bridge = libraryBridgeRef.current
+          let payload: { action?: string; fileName?: string }
+          try {
+            payload = JSON.parse(event.payload) as { action?: string; fileName?: string }
+          } catch {
+            return
+          }
+          const fileName = payload.fileName
+          if (fileName === undefined) return
+          const store = libraryStore()
+          if (!store.available()) return
+          try {
+            const bytes = await store.read(fileName)
+            const hash = await sha256Hex(bytes)
+            const summary = await readItemSummary(bytes)
+            const entries = await store.list()
+            const file = entries.find((e) => e.fileName === fileName) ?? {
+              fileName,
+              size: bytes.length,
+              mtimeMs: 0,
+            }
+            const item = buildLibraryItem(file, summary, hash)
+            // if/else rather than switch: the palette drift-guard test
+            // scrapes `case '…':` labels out of this file as menu action
+            // ids, and these are library-window verbs, not palette actions.
+            const action = payload.action
+            if (action === 'insert') bridge.onLibraryInsert(item, bytes)
+            else if (action === 'open') bridge.onLibraryOpenAsDocument(item, bytes)
+            else if (action === 'paint') bridge.onLibraryPaintWith(item, bytes)
+            else if (action === 'add-palette') bridge.onLibraryAddToPalette(item, bytes)
+          } catch (err) {
+            bridge.handleToast(
+              `Couldn't read library item: ${err instanceof Error ? err.message : String(err)}`,
+            )
+          }
+        })()
+      })
+    }).then((fn) => { if (cancelled) fn(); else unlisten = fn }).catch(() => { /* ignore if not in Tauri */ })
+    return () => { cancelled = true; unlisten?.() }
+  }, [])
+
+  // Push this document's placements to the Library window: on every change,
+  // on that window's mount-time request, and when THIS window gains focus
+  // (multi-window: the focused document's counts are the ones the Library
+  // shows).
+  useEffect(() => {
+    if (!isTauri) return
+    let cancelled = false
+    const unlisteners: Array<() => void> = []
+    void import('@tauri-apps/api/event').then(async ({ listen }) => {
+      const push = (): void => {
+        let paletteHashes: string[] = []
+        try {
+          const scene = sceneRef.current
+          if (scene !== null) {
+            paletteHashes = JSON.parse(scene.palette_content_hashes_json()) as string[]
+          }
+        } catch {
+          /* hashes are a badge nicety — never block the placements push */
+        }
+        // Routed through the SHELL, which forwards only the ACTIVE document
+        // window's push — a background window's data can never race the
+        // active one's into the Library (adversarial review).
+        void import('@tauri-apps/api/core').then(({ invoke }) =>
+          invoke('library_push_placements', {
+            payload: JSON.stringify({ placements: libraryPlacements, paletteHashes }),
+          }),
+        ).catch(() => { /* the Library window may simply not exist */ })
+      }
+      push()
+      const u1 = await listen('library-placements-request', push)
+      if (cancelled) { u1(); return }
+      unlisteners.push(u1)
+      const { getCurrentWebviewWindow } = await import('@tauri-apps/api/webviewWindow')
+      const u2 = await getCurrentWebviewWindow().listen('tauri://focus', push)
+      if (cancelled) { u2(); return }
+      unlisteners.push(u2)
+    }).catch(() => { /* ignore if not in Tauri */ })
+    return () => {
+      cancelled = true
+      unlisteners.forEach((u) => u())
+    }
+  }, [libraryPlacements])
 
   // ---------------------------------------------------------------- menu-open-path listener (Tauri only)
   // Emitted by Rust when a recent-file menu item is clicked, or when a file
@@ -2745,10 +3517,14 @@ export default function App() {
           await openListenerReadyRef.current?.promise
           const { invoke } = await import('@tauri-apps/api/core')
           const slot = await invoke<string | null>('take_pending_recovery')
-          const windowOpenPath =
-            slot == null ? await invoke<string | null>('take_pending_window_open') : null
+          const windowOpen =
+            slot == null
+              ? await invoke<{ path: string; as_copy: boolean; name: string | null } | null>(
+                  'take_pending_window_open',
+                )
+              : null
           const path =
-            slot == null && windowOpenPath == null
+            slot == null && windowOpen == null
               ? await invoke<string | null>('take_pending_open')
               : null
           invoke('frontend_ready').catch(() => { /* older shell — ignore */ })
@@ -2757,8 +3533,18 @@ export default function App() {
             if (snapshot !== null) adoptSnapshotRef.current(snapshot)
             return
           }
-          if (windowOpenPath != null) {
-            await openPathRef.current(windowOpenPath)
+          if (windowOpen != null) {
+            if (windowOpen.as_copy) {
+              // Library "Open as Document": COPY semantics, matching the
+              // pristine route exactly — the document is import-shaped
+              // (Save always prompts), never path-bound to the library
+              // item, and the library path never enters recents (whose
+              // launch-time seeding grants WRITE approval — the round-3
+              // review's silent-overwrite path).
+              await openLibraryCopyRef.current(windowOpen.path, windowOpen.name)
+            } else {
+              await openPathRef.current(windowOpen.path)
+            }
             return
           }
           if (path != null) {
@@ -2897,7 +3683,16 @@ export default function App() {
         // Ctrl-combo shortcuts below instead — the design spec doesn't cover
         // bare letters for them.
         const key = ev.key.toLowerCase()
-        if (key === 'l') { ev.preventDefault(); setActiveTool('Line'); return }
+        // Bare ⇧L opens the Library (the design mock's own binding) — safe
+        // here specifically because this whole block is already gated on
+        // `!isTyping` (a focused input/textarea never reaches it), unlike a
+        // native accelerator, which would fire regardless of focus (see
+        // main.rs's win-library comment for why the NATIVE menu instead
+        // advertises ⇧⌘L). Checked before the bare 'l' -> Line binding below,
+        // since Shift capitalizes `ev.key` the same way either binding's
+        // lowercase comparison would match.
+        if (key === 'l' && ev.shiftKey) { ev.preventDefault(); openLibraryEntry(); return }
+        if (key === 'l' && !ev.shiftKey) { ev.preventDefault(); setActiveTool('Line'); return }
         if (key === 'r') { ev.preventDefault(); setActiveTool('Rectangle'); return }
         if (key === 'c') { ev.preventDefault(); setActiveTool('Circle'); return }
         if (key === 'a') { ev.preventDefault(); setActiveTool('Arc'); return }
@@ -2975,6 +3770,11 @@ export default function App() {
       if (ev.key.toLowerCase() === 'o' && ev.shiftKey) {
         ev.preventDefault()
         setShowObjectInfo((v) => !v)
+        return
+      }
+      if (ev.key.toLowerCase() === 'l' && ev.shiftKey) {
+        ev.preventDefault()
+        openLibraryEntry()
         return
       }
       if (ev.key === ',') {
@@ -3095,6 +3895,7 @@ export default function App() {
       'win-tags': showTags,
       'win-object-info': showObjectInfo,
       'win-debug-log': showDebugLog,
+      'win-library': showLibrary,
       'cam-parallel-projection': parallelProjection,
     }
     for (const [tool, id] of Object.entries(TOOL_MENU_IDS)) {
@@ -3133,6 +3934,7 @@ export default function App() {
     showTags,
     showObjectInfo,
     showDebugLog,
+    showLibrary,
     selectedIds,
     selectedGuide,
     selectedAnnotation,
@@ -3492,6 +4294,8 @@ export default function App() {
         onSaveAs={saveAsDocument}
         onImport={importDocument}
         onExport={() => setExportDialogOpen(true)}
+        onSaveToLibrary={() => menuActionRef.current('save-to-library-doc')}
+        saveToLibraryDisabled={!libraryStore().available()}
         onDrawText={openTextDialog}
         onClose={
           isTauri && !isMac
@@ -3532,11 +4336,13 @@ export default function App() {
         showTags={showTags}
         showObjectInfo={showObjectInfo}
         showDebugLog={showDebugLog}
+        showLibrary={showLibrary}
         onToggleModelInfo={() => setShowModelInfo((v) => !v)}
         onToggleMaterials={() => setShowMaterials((v) => !v)}
         onToggleTags={() => setShowTags((v) => !v)}
         onToggleObjectInfo={() => setShowObjectInfo((v) => !v)}
         onToggleDebugLog={() => setShowDebugLog((v) => !v)}
+        onToggleLibrary={() => setShowLibrary((v) => !v)}
         showAxes={showAxes}
         showGrid={showGrid}
         showGuides={showGuides}
@@ -3625,6 +4431,12 @@ export default function App() {
           // (metaKey ⌘K on mac web) via the global keydown handler above.
           onOpenPalette={() => setPaletteOpen(true)}
           paletteKbd={isTauri && isMac ? '⌘/' : isMac ? '⌘K' : 'Ctrl K'}
+          // The BROWSE entry point stays visible on every platform — the
+          // dialog itself reports the web build's storage honestly
+          // unavailable (matching Settings ▸ Folders' posture); only the
+          // SAVE affordances hide where no store exists.
+          onOpenLibrary={openLibraryEntry}
+          libraryOpen={showLibrary}
         />
         <div
           style={{ flex: 1, minWidth: 0, position: 'relative' }}
@@ -3736,6 +4548,57 @@ export default function App() {
             </div>
           )}
 
+          {/* Library placement pill (frame 1c): shown for the one-shot
+              cursor-placement gesture LibraryPlaceTool drives — a
+              viewport-level tool, not a rail selection, so the status bar's
+              usual "active tool" chrome doesn't name it (see App.tsx's
+              LibraryPlaceTool status-hint note). Cleared by the arm
+              callback on both cancel and commit. Offset below the session
+              pill when both are showing (editing inside an open group/
+              component while placing a library item) rather than overlap it. */}
+          {insertingItem !== null && (
+            <div
+              style={{
+                position: 'absolute',
+                top: sessionStack.length > 0 ? '54px' : '14px',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '6px 12px',
+                background: 'var(--surface-overlay)',
+                border: '1px solid var(--border-strong)',
+                borderRadius: '7px',
+                fontFamily: 'var(--font-family-ui)',
+                fontSize: '11.5px',
+                color: 'var(--text-secondary)',
+                whiteSpace: 'nowrap',
+                zIndex: 20,
+                pointerEvents: 'none',
+              }}
+            >
+              <span>
+                Inserting <b style={{ color: 'var(--text-primary)' }}>{insertingItem}</b>
+              </span>
+              <span
+                style={{
+                  fontFamily: 'var(--font-family-mono)',
+                  fontSize: 'var(--font-size-kbd)',
+                  fontWeight: 600,
+                  padding: '1.5px 5px',
+                  borderRadius: 'var(--radius-kbd)',
+                  background: 'var(--kbd-bg)',
+                  border: '1px solid var(--kbd-border)',
+                  color: 'var(--kbd-text)',
+                }}
+              >
+                Esc
+              </span>
+              <span style={{ color: 'var(--text-faint)' }}>cancel</span>
+            </div>
+          )}
+
           {/* Contextual dock — bottom-center, self-hides only when
               there's no curated verb set for the current selection (a
               construction guide — a selected sketch gets its own 'sketch'
@@ -3755,7 +4618,7 @@ export default function App() {
               hidden={cameraDragging}
               activeToolId={toolActionId(activeTool)}
               hoveringSketchRegion={hoveringSketchRegion}
-              gates={{ canGroup: canGroupNow, canMakeComponent: canMakeComp }}
+              gates={{ canGroup: canGroupNow, canMakeComponent: canMakeComp, canSaveToLibrary: libraryStore().available() }}
               onRun={(id) => menuActionRef.current(id)}
             />
           </div>
@@ -3774,30 +4637,60 @@ export default function App() {
               zIndex: 100,
             }}
           >
-            {toasts.map((toast) => (
-              <div
-                key={toast.id}
-                onClick={() => dismissToast(toast.id)}
-                style={{
-                  padding: '8px 16px',
-                  background: toast.isError ? '#cc3322' : '#333',
-                  color: '#fff',
-                  borderRadius: '4px',
-                  fontFamily: 'monospace',
-                  fontSize: '13px',
-                  cursor: 'pointer',
-                  pointerEvents: 'auto',
-                  boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
-                  maxWidth: '400px',
-                  textAlign: 'center',
-                }}
-              >
-                {toast.code !== undefined && (
-                  <strong style={{ marginRight: '6px', opacity: 0.8 }}>[{toast.code}]</strong>
-                )}
-                {toast.message}
-              </div>
-            ))}
+            {toasts.map((toast) => {
+              if (toast.state === 'pending') ensureSpinnerKeyframes()
+              return (
+                <div
+                  key={toast.id}
+                  onClick={() => dismissToast(toast.id)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    padding: '8px 16px',
+                    // Tokenized (Library effort): error stays the saturated
+                    // status-leaky fill (white text reads fine on it in both
+                    // themes); an ordinary toast now follows the surface-
+                    // overlay/text-primary pair instead of a hardcoded dark
+                    // chip, so it's no longer illegible against the light
+                    // theme's own light canvas.
+                    background: toast.isError ? 'var(--status-leaky-bg)' : 'var(--surface-overlay)',
+                    color: toast.isError ? '#fff' : 'var(--text-primary)',
+                    border: toast.isError ? 'none' : '1px solid var(--border-strong)',
+                    borderRadius: '4px',
+                    fontFamily: 'monospace',
+                    fontSize: '13px',
+                    cursor: 'pointer',
+                    pointerEvents: 'auto',
+                    boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+                    maxWidth: '400px',
+                    textAlign: 'center',
+                  }}
+                >
+                  {toast.state === 'pending' && (
+                    <span
+                      aria-hidden="true"
+                      style={{
+                        width: '12px',
+                        height: '12px',
+                        flexShrink: 0,
+                        border: '2px solid var(--border-strong)',
+                        borderTopColor: 'var(--accent-base)',
+                        borderRadius: '50%',
+                        animation: 'hew-spin 0.8s linear infinite',
+                      }}
+                    />
+                  )}
+                  {toast.state === 'done' && (
+                    <span aria-hidden="true" style={{ color: 'var(--status-solid)', flexShrink: 0 }}>✓</span>
+                  )}
+                  {toast.code !== undefined && (
+                    <strong style={{ marginRight: '6px', opacity: 0.8 }}>[{toast.code}]</strong>
+                  )}
+                  {toast.message}
+                </div>
+              )
+            })}
           </div>
         </div>
 
@@ -3909,6 +4802,7 @@ export default function App() {
               onMaterialCreated={setCurrentMaterialId}
               onDocumentChanged={handleDocumentChanged}
               onAlphaCommitted={() => viewportApi.current?.syncMaterialOpacity()}
+              onSaveToLibrary={handleSaveMaterialToLibrary}
             />
           </TraySection>
           <TraySection title="Tags" collapsed={!showTags} onToggle={() => setShowTags((v) => !v)}>
@@ -4173,7 +5067,7 @@ export default function App() {
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
         onRun={(id) => menuActionRef.current(id)}
-        extraEntries={paletteModelEntries}
+        extraEntries={paletteExtraEntries}
         gates={{
           selection: selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
           canGroup: menuGates?.canGroup ?? false,
@@ -4246,6 +5140,35 @@ export default function App() {
           see openSettings). Rendered last so it overlays every panel. */}
       {showFluentSettings && (
         <FluentSettingsPage onBack={() => setShowFluentSettings(false)} />
+      )}
+
+      {/* Library browser (Window ▸ Library, ⇧⌘L / bare ⇧L, the tool rail's
+          Library row, and the command palette's "Library" entry all open
+          this). The dialog only reports intent — every action that touches
+          the live document or the storage seam is wired here (see the
+          onLibraryInsert / onLibraryOpenAsDocument / onLibraryPaintWith /
+          onLibraryAddToPalette / handleSaveToLibraryCommit callbacks above). */}
+      <LibraryDialog
+        open={showLibrary}
+        onClose={() => setShowLibrary(false)}
+        placements={libraryPlacements}
+        onInsert={onLibraryInsert}
+        onOpenAsDocument={onLibraryOpenAsDocument}
+        onPaintWith={onLibraryPaintWith}
+        onAddToPalette={onLibraryAddToPalette}
+        materialInPalette={libraryMaterialInPalette}
+      />
+
+      {/* Save to Library name prompt (frame 1d) — the ContextualDock's
+          save-to-library verb (dock-anchored) and File ▸ Save to Library…
+          (centered, whole document) share this one popover. */}
+      {saveToLibraryTarget !== null && (
+        <SaveToLibraryPopover
+          defaultName={saveToLibraryTarget.defaultName}
+          variant={saveToLibraryTarget.kind === 'document' ? 'modal' : 'dock'}
+          onSave={handleSaveToLibraryCommit}
+          onClose={() => setSaveToLibraryTarget(null)}
+        />
       )}
     </main>
   )

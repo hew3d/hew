@@ -320,6 +320,7 @@ const DESCRIPTIONS: Record<string, string> = {
   BadAffine: `Hew's own request to the model kernel carried a malformed move, rotate, or scale. ${internalRequest}`,
   BadOp: `Hew's own request to the model kernel asked for a combine style it doesn't recognize. ${internalRequest}`,
   BadNodeList: `Hew's own request to the model kernel carried a malformed selection list. ${internalRequest}`,
+  BadLibraryMeta: `Hew's own request to the model kernel carried malformed library-item metadata. ${internalRequest}`,
   BadSelection: `Hew's own request to the model kernel carried a malformed selection. ${internalRequest}`,
   BadCount: `Hew's own request to the model kernel asked for an invalid copy count. ${internalRequest}`,
   BadCurve: `Hew's own request to the model kernel carried a malformed circle. ${internalRequest}`,

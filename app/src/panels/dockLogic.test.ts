@@ -68,19 +68,22 @@ describe('dockVerbsFor', () => {
   // Deliberate contract change (selection-UX overhaul): the Object and Group
   // rows gained Make Component and the Multi row gained Group, so the two
   // structural commands are one click from the selection that enables them.
-  it('object: primary Push/Pull, then Move, Paint, Position Texture, Make Component, Erase', () => {
+  // Library effort: Save to Library rides along, ungated, when no `gates`
+  // arg is passed at all (see dockVerbsFor's early return) — the gates
+  // test below covers the hidden-when-unavailable case.
+  it('object: primary Push/Pull, then Move, Paint, Position Texture, Make Component, Save to Library, Erase', () => {
     const verbs = dockVerbsFor('object')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'tool-position-texture', 'edit-make-component', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'tool-position-texture', 'edit-make-component', 'save-to-library', 'edit-delete'])
   })
 
-  it('group: primary Edit, then Move, Scale, Make Component, Ungroup, Erase', () => {
+  it('group: primary Edit, then Move, Scale, Make Component, Ungroup, Save to Library, Erase', () => {
     const verbs = dockVerbsFor('group')
-    expect(verbs.map((v) => v.id)).toEqual(['enter-context', 'tool-move', 'tool-scale', 'edit-make-component', 'ungroup', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(['enter-context', 'tool-move', 'tool-scale', 'edit-make-component', 'ungroup', 'save-to-library', 'edit-delete'])
   })
 
-  it('instance: primary Edit, then Move, Scale, Make Unique, Explode (spec Component row)', () => {
+  it('instance: primary Edit, then Move, Scale, Make Unique, Explode, Save to Library (spec Component row)', () => {
     const verbs = dockVerbsFor('instance')
-    expect(verbs.map((v) => v.id)).toEqual(['enter-context', 'tool-move', 'tool-scale', 'make-unique', 'explode-instance'])
+    expect(verbs.map((v) => v.id)).toEqual(['enter-context', 'tool-move', 'tool-scale', 'make-unique', 'explode-instance', 'save-to-library'])
   })
 
   it('multi: primary Move, then Group, Erase', () => {
@@ -109,6 +112,24 @@ describe('dockVerbsFor', () => {
     ).toContain('edit-make-component')
   })
 
+  it('Save to Library is hidden when canSaveToLibrary is omitted or false, shown when true', () => {
+    for (const ctx of ['object', 'group', 'instance'] as const) {
+      expect(
+        dockVerbsFor(ctx, { canGroup: true, canMakeComponent: true }).map((v) => v.id),
+      ).not.toContain('save-to-library')
+      expect(
+        dockVerbsFor(ctx, { canGroup: true, canMakeComponent: true, canSaveToLibrary: false }).map((v) => v.id),
+      ).not.toContain('save-to-library')
+      expect(
+        dockVerbsFor(ctx, { canGroup: true, canMakeComponent: true, canSaveToLibrary: true }).map((v) => v.id),
+      ).toContain('save-to-library')
+    }
+    // Multi/empty/sketch never had the verb in their arrays to begin with.
+    expect(
+      dockVerbsFor('multi', { canGroup: true, canMakeComponent: true, canSaveToLibrary: true }).map((v) => v.id),
+    ).not.toContain('save-to-library')
+  })
+
   it('sketch: primary Push/Pull, then Move, Rotate, Scale, Erase', () => {
     const verbs = dockVerbsFor('sketch')
     expect(verbs.map((v) => v.id)).toEqual([
@@ -131,9 +152,9 @@ describe('dockVerbsFor', () => {
     expect(groupIds.has('tool-scale')).toBe(true)
   })
 
-  it('every context stays within the spec cap ("4-6 items max, curated")', () => {
+  it('every context stays within the spec cap (originally "4-6 items max, curated"; the Library effort added one more selection-only verb to Object/Group, deliberately raising the ungated ceiling to 7 — gated call sites still cap out at 6 when the library is unavailable)', () => {
     for (const ctx of ['empty', 'object', 'group', 'instance', 'multi', 'sketch'] as const) {
-      expect(dockVerbsFor(ctx).length).toBeLessThanOrEqual(6)
+      expect(dockVerbsFor(ctx).length).toBeLessThanOrEqual(7)
       expect(dockVerbsFor(ctx).length).toBeGreaterThan(0)
     }
   })

@@ -32,7 +32,7 @@ describe('SettingsWindow', () => {
   it('shows the toolbar tab strip with one tab per pane', () => {
     render(<SettingsWindow />)
     const tabs = screen.getAllByRole('tab')
-    expect(tabs.map((t) => t.textContent)).toEqual(['Units', 'Theme', 'Debug'])
+    expect(tabs.map((t) => t.textContent)).toEqual(['Units', 'Theme', 'Folders', 'Debug'])
   })
 
   it('shows the Units pane by default (Units tab selected)', () => {
@@ -67,6 +67,14 @@ describe('SettingsWindow', () => {
     expect(screen.getByRole('tab', { name: 'Theme' })).toHaveAttribute('aria-selected', 'true')
     // Theme pane content: the Appearance selector.
     expect(screen.getByLabelText('Appearance')).toBeInTheDocument()
+  })
+
+  it('switches to the Folders pane when the Folders tab is clicked', () => {
+    render(<SettingsWindow />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Folders' }))
+    expect(screen.getByRole('tab', { name: 'Folders' })).toHaveAttribute('aria-selected', 'true')
+    // Folders pane content: the Library folder row label.
+    expect(screen.getByText('Library folder:')).toBeInTheDocument()
   })
 
   it('highlights the active tab with the accent-tint rounded rect (theme tokens, no hardcoded colors)', () => {

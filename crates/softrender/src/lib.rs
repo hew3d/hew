@@ -429,6 +429,159 @@ fn draw_line(
     }
 }
 
+// ------------------------------------------------------------ document scenes
+
+/// One document scene item, OWNING its tessellated mesh —
+/// [`RenderItem`] only borrows one, so this is what lives long enough to
+/// build a render list from. Shared by every headless caller that renders a
+/// whole [`kernel::Document`] (`hew-cli`'s snapshot host, the library
+/// thumbnail path) so the traversal cannot drift between them.
+pub struct DocumentItem {
+    pub mesh: tessellate::RenderMesh,
+    pub pose: Transform,
+    pub sid: u64,
+}
+
+/// Whether a node, or any group above it, is user-hidden (SketchUp "Hide" —
+/// view state a headless render must respect, both for pixels and for view
+/// fitting).
+fn node_or_ancestor_hidden(doc: &kernel::Document, node: kernel::NodeId) -> bool {
+    if doc.node_user_hidden(node) {
+        return true;
+    }
+    let mut cursor = doc.node_parent(node);
+    while let Some(group) = cursor {
+        if doc.node_user_hidden(kernel::NodeId::Group(group)) {
+            return true;
+        }
+        cursor = doc.node_parent(kernel::NodeId::Group(group));
+    }
+    false
+}
+
+/// Tessellates every visible scene item of `doc`: each visible world object
+/// at identity pose, and each placed instance's definition members at the
+/// instance's own pose — tagged with the INSTANCE's stable id, so pixels
+/// report the instance, not the shared definition. User-hidden nodes (and
+/// nodes under user-hidden groups) are skipped; an object that fails to
+/// tessellate is skipped, not fatal, so one bad object cannot blank a whole
+/// render.
+pub fn document_items(doc: &kernel::Document) -> Vec<DocumentItem> {
+    let mut items: Vec<DocumentItem> = Vec::new();
+    for id in doc.visible_object_ids() {
+        if node_or_ancestor_hidden(doc, kernel::NodeId::Object(id)) {
+            continue;
+        }
+        let Some(obj) = doc.object(id) else { continue };
+        let Ok(mesh) = tessellate::tessellate(obj, doc.materials()) else {
+            continue;
+        };
+        let Some(sid) = doc.sid_of(&kernel::EntityRef::Object(id)) else {
+            continue;
+        };
+        items.push(DocumentItem {
+            mesh,
+            pose: Transform::IDENTITY,
+            sid,
+        });
+    }
+    for instance in doc.instance_ids() {
+        if node_or_ancestor_hidden(doc, kernel::NodeId::Instance(instance)) {
+            continue;
+        }
+        let (Some(def), Some(pose)) = (doc.instance_def(instance), doc.instance_pose(instance))
+        else {
+            continue;
+        };
+        let Some(members) = doc.def_members(def) else {
+            continue;
+        };
+        let Some(sid) = doc.sid_of(&kernel::EntityRef::Instance(instance)) else {
+            continue;
+        };
+        for member in members {
+            let Some(obj) = doc.object(member) else {
+                continue;
+            };
+            let Ok(mesh) = tessellate::tessellate(obj, doc.materials()) else {
+                continue;
+            };
+            items.push(DocumentItem { mesh, pose, sid });
+        }
+    }
+    items
+}
+
+/// The axis-aligned bounds of everything [`document_items`] would render
+/// (exact object vertices, not tessellation output — cheaper, same box).
+/// Falls back to a unit box about the origin for an empty scene, so view
+/// fitting always has something to frame.
+pub fn document_bbox(doc: &kernel::Document) -> (Point3, Point3) {
+    let mut acc: Option<(Point3, Point3)> = None;
+    let mut extend = |p: Point3| {
+        acc = Some(match acc {
+            None => (p, p),
+            Some((min, max)) => (
+                Point3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z)),
+                Point3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z)),
+            ),
+        });
+    };
+    for id in doc.visible_object_ids() {
+        if node_or_ancestor_hidden(doc, kernel::NodeId::Object(id)) {
+            continue;
+        }
+        if let Some(obj) = doc.object(id) {
+            for v in obj.vertices().values() {
+                extend(v.position);
+            }
+        }
+    }
+    for instance in doc.instance_ids() {
+        if node_or_ancestor_hidden(doc, kernel::NodeId::Instance(instance)) {
+            continue;
+        }
+        let (Some(def), Some(pose)) = (doc.instance_def(instance), doc.instance_pose(instance))
+        else {
+            continue;
+        };
+        let Some(members) = doc.def_members(def) else {
+            continue;
+        };
+        for member in members {
+            if let Some(obj) = doc.object(member) {
+                for v in obj.vertices().values() {
+                    extend(pose.apply_point(v.position));
+                }
+            }
+        }
+    }
+    acc.unwrap_or((Point3::new(-0.5, -0.5, -0.5), Point3::new(0.5, 0.5, 0.5)))
+}
+
+/// Renders `doc` to a square PNG thumbnail from a fitted isometric view —
+/// the library's offline thumbnail recipe. `None` when the document has
+/// nothing visible to render (an honest "no thumbnail", never a
+/// background-only image passed off as one) or when the scene exceeds the
+/// renderer's item budget.
+pub fn render_document_thumbnail(doc: &kernel::Document, size: u32) -> Option<Vec<u8>> {
+    let items = document_items(doc);
+    if items.is_empty() {
+        return None;
+    }
+    let render_items: Vec<RenderItem> = items
+        .iter()
+        .map(|it| RenderItem {
+            mesh: &it.mesh,
+            pose: it.pose,
+            sid: it.sid,
+        })
+        .collect();
+    let camera = Camera::standard_view(StandardView::Iso, document_bbox(doc));
+    let rendered = render(&render_items, &camera, size, size).ok()?;
+    Some(png::encode(&rendered.rgba, rendered.width, rendered.height))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

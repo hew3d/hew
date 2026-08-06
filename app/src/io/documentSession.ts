@@ -91,6 +91,22 @@ export function afterMutation(state: DocSessionState, now: number): DocSessionSt
  * Return the state after a successful save.
  * `ref` is the FileRef returned by the host (may be a new ref for Save As).
  */
+/** The library save's WRITE-THROUGH commit: apply `afterSave` only when
+ * the session is still exactly the state the flow captured before its
+ * awaits AND nothing dirtied it meanwhile — an edit landing during the
+ * async file write must keep its dirty state (the written bytes predate
+ * it; marking it clean would be silent, autosave-suppressed data loss).
+ * Anything else returns `prev` unchanged. */
+export function applyWriteThroughSave(
+  prev: DocSessionState,
+  capturedSession: DocSessionState,
+  ref: FileRef,
+  now: number,
+): DocSessionState {
+  if (prev !== capturedSession || prev.dirty) return prev
+  return afterSave(ref, now)
+}
+
 export function afterSave(ref: FileRef, now: number): DocSessionState {
   return { currentRef: ref, dirty: false, lastEditAt: null, lastSavedAt: now }
 }

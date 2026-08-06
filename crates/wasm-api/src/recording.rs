@@ -609,6 +609,36 @@ pub enum RecordedCall {
     /// `delete_annotation(id)`. Additive variant, same posture as
     /// [`RecordedCall::AddLinearDimension`].
     DeleteAnnotation { id: u64 },
+    /// `insert_item(bytes, affine, source_id, content_hash)` — a library
+    /// insert: embeds the item file, the placement pose, and the provenance
+    /// that drives idempotent definition reuse, so a session with an insert
+    /// replays self-contained AND reproduces the same reuse-vs-copy
+    /// decision. Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
+    /// replay unchanged; one that inserts a library item fails to parse on
+    /// older builds — loudly, never silently divergent.
+    InsertItem {
+        bytes: Vec<u8>,
+        affine: [f64; 12],
+        source_id: Option<String>,
+        content_hash: Option<String>,
+    },
+    /// `insert_item_palette(bytes)` — a material item's Add-to-palette:
+    /// embeds the item file. Additive variant, same posture as
+    /// [`RecordedCall::InsertItem`].
+    InsertItemPalette { bytes: Vec<u8> },
+    /// `stamp_library_source(kinds, ids, source_id, content_hash, def_sid)`
+    /// — marks a saved item's source selection. Serialized document state
+    /// changes (attribute dictionaries), so replay must re-issue it or the
+    /// state hash diverges. Additive variant, same posture as
+    /// [`RecordedCall::InsertItem`].
+    StampLibrarySource {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        source_id: String,
+        content_hash: String,
+        def_sid: Option<String>,
+    },
     /// `import_dae(bytes, images)` — embeds the COLLADA file and its image
     /// map, so a session with an import replays self-contained.
     ImportDae {

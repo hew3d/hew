@@ -3905,6 +3905,206 @@ impl<'a> ByteReader<'a> {
     }
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// Manifest-only item summary (the library browser's listing read)
+
+/// One material's summary row in an [`ItemSummary`]: what a library browser
+/// needs to paint a swatch and its sub-line without decoding anything. The
+/// texture image itself is NOT included — fetch it on demand with
+/// [`read_item_asset`].
+#[derive(Debug, Clone, Serialize)]
+pub struct MaterialSummary {
+    pub name: String,
+    /// RGBA, 0–255 (alpha is the material's opacity).
+    pub color: [u8; 4],
+    /// The zip path of the verbatim texture image bytes, when textured.
+    pub texture_asset: Option<String>,
+    /// `"png"` or `"jpg"`, when textured.
+    pub texture_format: Option<String>,
+    /// Meters per image tile `[w, h]`, when textured.
+    pub texture_world_size: Option<[f64; 2]>,
+    /// [`crate::material_content_hash`] of the material, as a DECIMAL
+    /// string (u64 loses precision as a JS number) — the cross-window
+    /// "in palette" comparison key. Computing it for a textured material
+    /// reads that texture's image entry (small, verbatim bytes; geometry
+    /// buffers stay untouched — the summary's contract). `None` when the
+    /// texture entry is missing/unreadable or its declared format is one
+    /// the loader would refuse — the summary itself still succeeds (a
+    /// listing must not die on one bad swatch); the honest failure
+    /// surfaces at open/insert.
+    pub content_hash: Option<String>,
+}
+
+/// A cheap, manifest-only summary of a `.hew` file: entity counts, the
+/// document's attribute dictionaries (where `hew.library` item metadata
+/// lives), and material swatch data. Parses `manifest.json` alone — a
+/// library folder scan MUST be able to list hundreds of items without
+/// opening a single geometry buffer or texture asset, and this is the read
+/// that guarantees it.
+///
+/// This is a summary, not a load: no cross-reference validation runs, so a
+/// file this accepts can still fail [`Document::load`] — the browser shows
+/// the typed load error at open/insert time (reject-not-repair, reported at
+/// the moment it matters).
+#[derive(Debug, Clone, Serialize)]
+pub struct ItemSummary {
+    pub format_version: u32,
+    pub objects: usize,
+    pub materials: usize,
+    pub components: usize,
+    pub instances: usize,
+    pub groups: usize,
+    /// World-owned (loose) sketches — the content a library insert reports
+    /// as skipped.
+    pub world_sketches: usize,
+    pub annotations: usize,
+    pub guides: usize,
+    /// The first component definition's name, if any — the natural display
+    /// name of a component item, and the fallback title for a file whose
+    /// `hew.library` metadata has none.
+    pub first_component_name: Option<String>,
+    /// The first component definition's STABLE id, as a decimal string —
+    /// what `Document::stamp_library_source` needs as `def_sid` to mark a
+    /// saved item's source definition for later idempotent re-insert.
+    pub first_component_sid: Option<String>,
+    /// The first root node's display name, if any — the title fallback for
+    /// group- and model-shaped items.
+    pub first_root_name: Option<String>,
+    /// The document's own attribute dictionaries, verbatim as JSON.
+    /// `hew.library` metadata (id, name, category, keywords, collection)
+    /// lives under its namespace here.
+    pub doc_attrs: serde_json::Value,
+    /// Per-material swatch rows, in manifest (dense-id) order.
+    pub material_entries: Vec<MaterialSummary>,
+}
+
+/// Reads an [`ItemSummary`] from `.hew` bytes — `manifest.json` only, never
+/// geometry buffers or textures. Applies the same container and version
+/// gates as a full load ([`LoadError::NotAContainer`] /
+/// [`LoadError::UnsupportedVersion`] / [`LoadError::MalformedManifest`]).
+pub fn read_item_summary(bytes: &[u8]) -> Result<ItemSummary, LoadError> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| LoadError::NotAContainer)?;
+    let manifest_bytes = zip_read_entry(&mut zip, "manifest.json")?;
+    let manifest: Manifest =
+        serde_json::from_slice(&manifest_bytes).map_err(|e| LoadError::MalformedManifest {
+            what: e.to_string(),
+        })?;
+    if manifest.format_version == 0 || manifest.format_version > MANIFEST_FORMAT_VERSION {
+        return Err(LoadError::UnsupportedVersion {
+            found: manifest.format_version,
+        });
+    }
+
+    let first_root_name = manifest.roots.first().and_then(|r| match r.kind.as_str() {
+        "object" => manifest
+            .objects
+            .get(r.id as usize)
+            .and_then(|o| o.name.clone()),
+        "group" => manifest
+            .groups
+            .get(r.id as usize)
+            .and_then(|g| g.name.clone()),
+        "instance" => {
+            let inst = manifest.instances.get(r.id as usize)?;
+            inst.name.clone().or_else(|| {
+                manifest
+                    .components
+                    .get(inst.def as usize)
+                    .and_then(|c| c.name.clone())
+            })
+        }
+        _ => None,
+    });
+
+    // Per-material swatch rows. The content hash rebuilds each material's
+    // full identity — image bytes included, read verbatim from the
+    // container — so it agrees exactly with `material_content_hash` over a
+    // live palette entry. Format mapping MIRRORS the loader's (jpg/jpeg →
+    // Jpeg, png → Png, anything else refuses at load) — a divergent
+    // mapping here would hash the same material differently on the two
+    // sides. A material whose texture entry cannot be read (or whose
+    // format the loader would refuse) degrades to `content_hash: None`
+    // rather than failing the WHOLE summary: the listing keeps working,
+    // only that material's "in palette" badge goes dark, and the full
+    // load reports the real error at open/insert time.
+    let material_entries: Vec<MaterialSummary> = manifest
+        .materials
+        .iter()
+        .map(|m| {
+            let texture: Result<Option<crate::material::Texture>, ()> = match &m.texture {
+                None => Ok(None),
+                Some(t) => {
+                    let format = match t.format.as_str() {
+                        "png" => Ok(crate::material::ImageFormat::Png),
+                        "jpg" | "jpeg" => Ok(crate::material::ImageFormat::Jpeg),
+                        _ => Err(()),
+                    };
+                    match (format, zip_read_entry(&mut zip, &t.asset)) {
+                        (Ok(format), Ok(image)) => Ok(Some(crate::material::Texture {
+                            image,
+                            format,
+                            world_size: t.world_size,
+                        })),
+                        _ => Err(()),
+                    }
+                }
+            };
+            let content_hash = texture.ok().map(|texture| {
+                let mat = crate::material::Material {
+                    name: m.name.clone(),
+                    color: crate::material::Rgba8::rgba(
+                        m.color[0], m.color[1], m.color[2], m.color[3],
+                    ),
+                    texture,
+                };
+                crate::material::material_content_hash(&mat).to_string()
+            });
+            MaterialSummary {
+                name: m.name.clone(),
+                color: m.color,
+                texture_asset: m.texture.as_ref().map(|t| t.asset.clone()),
+                texture_format: m.texture.as_ref().map(|t| t.format.clone()),
+                texture_world_size: m.texture.as_ref().map(|t| t.world_size),
+                content_hash,
+            }
+        })
+        .collect();
+
+    Ok(ItemSummary {
+        format_version: manifest.format_version,
+        objects: manifest.objects.len(),
+        materials: manifest.materials.len(),
+        components: manifest.components.len(),
+        instances: manifest.instances.len(),
+        groups: manifest.groups.len(),
+        world_sketches: manifest
+            .sketches
+            .iter()
+            .filter(|s| s.owner.is_none())
+            .count(),
+        annotations: manifest.annotations.len(),
+        guides: manifest.guides.len(),
+        first_component_name: manifest.components.first().and_then(|c| c.name.clone()),
+        first_component_sid: manifest
+            .components
+            .first()
+            .and_then(|c| c.sid)
+            .map(|sid| sid.to_string()),
+        first_root_name,
+        doc_attrs: serde_json::to_value(&manifest.attrs)
+            .expect("attribute dictionaries are JSON by construction"),
+        material_entries,
+    })
+}
+
+/// Reads one named zip entry from `.hew` bytes verbatim — the on-demand
+/// fetch for an [`ItemSummary`]'s `texture_asset` paths (a material item's
+/// swatch image), with the same size cap every container read applies.
+pub fn read_item_asset(bytes: &[u8], path: &str) -> Result<Vec<u8>, LoadError> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| LoadError::NotAContainer)?;
+    zip_read_entry(&mut zip, path)
+}
+
 #[cfg(test)]
 mod name_compat_tests {
     use super::{ComponentDto, GroupDto, InstanceDto, ObjectDto};

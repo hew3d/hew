@@ -77,7 +77,10 @@ const HINT_STYLE: React.CSSProperties = {
 // Inject the keyframes once into the document head.
 // Using a <style> tag rather than a CSS file to keep this component self-contained
 // and consistent with the rest of the app's inline-style conventions.
-function ensureSpinnerKeyframes(): void {
+// Exported: App.tsx's Library save toast reuses the same `hew-spin`
+// keyframes for its own inline thumbnail-rendering spinner rather than
+// re-declaring an identical `<style>` injector.
+export function ensureSpinnerKeyframes(): void {
   if (document.getElementById('hew-spin-keyframes') !== null) return
   const style = document.createElement('style')
   style.id = 'hew-spin-keyframes'

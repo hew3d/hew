@@ -5,6 +5,7 @@ import {
   documentName,
   saveStateLabel,
   afterMutation,
+  applyWriteThroughSave,
   afterSave,
   afterOpen,
   afterImport,
@@ -199,5 +200,32 @@ describe('documentSession', () => {
       // Ensures INITIAL_SESSION / afterOpen(null, now) still works correctly
       expect(deriveTitle({ currentRef: null, dirty: false, lastEditAt: null, lastSavedAt: null })).toBe('Untitled — Hew')
     })
+  })
+})
+
+describe('applyWriteThroughSave (library stamp write-through)', () => {
+  const ref = { name: 'model.hew', handle: '/tmp/model.hew' }
+
+  it('applies afterSave when the session is untouched since capture', () => {
+    const captured = afterSave(ref, 1000)
+    const next = applyWriteThroughSave(captured, captured, ref, 2000)
+    expect(next.dirty).toBe(false)
+    expect(next).not.toBe(captured)
+  })
+
+  it('keeps an edit made during the async save dirty (never clobbers)', () => {
+    const captured = afterSave(ref, 1000)
+    const edited = afterMutation(captured, 1500)
+    expect(edited.dirty).toBe(true)
+    const next = applyWriteThroughSave(edited, captured, ref, 2000)
+    expect(next).toBe(edited)
+    expect(next.dirty).toBe(true)
+  })
+
+  it('keeps a replaced session (new/open during the save) untouched', () => {
+    const captured = afterSave(ref, 1000)
+    const replaced = afterImport('Other', 1500)
+    const next = applyWriteThroughSave(replaced, captured, ref, 2000)
+    expect(next).toBe(replaced)
   })
 })

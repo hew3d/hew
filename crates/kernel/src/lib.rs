@@ -45,7 +45,8 @@ pub use axes::{AxesFrame, AxesFrameError};
 pub use camera::{CameraProjection, CameraState};
 pub use document::{
     AttrTarget, CompoundMeta, DocChange, DocTransaction, Document, DocumentError, EntityRef,
-    FollowMePath, HistoryOrigin, MaterialScope, NodeId, PendingActionKind,
+    FollowMePath, HistoryOrigin, InsertOptions, InsertReport, LibraryProvenance, MaterialScope,
+    NodeId, PendingActionKind,
 };
 pub use error::TopologyError;
 pub use guide::Guide;
@@ -58,7 +59,10 @@ pub use import::{
     DefRecipe, ImportGuide, ImportNode, ImportReport, ImportScene, ImportTag, MeshRecipe,
     SkippedMesh,
 };
-pub use material::{FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture, UvFrame};
+pub use material::{
+    FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture, UvFrame,
+    material_content_hash,
+};
 pub use math::{MathError, Plane, Point3, Vec3};
 pub use offset::{
     FaceOffsetError, OffsetError, OffsetLoop, ProfileOffset, offset_face_boundary, offset_profile,
@@ -69,7 +73,8 @@ pub use ops::{
     Operand, PushPullError, PushPullReport, SliceError, StickyError,
 };
 pub use serialize::{
-    DecodeError, GEOMETRY_FORMAT_VERSION, LoadError, MANIFEST_FORMAT_VERSION, NO_MATERIAL,
+    DecodeError, GEOMETRY_FORMAT_VERSION, ItemSummary, LoadError, MANIFEST_FORMAT_VERSION,
+    MaterialSummary, NO_MATERIAL, read_item_asset, read_item_summary,
 };
 pub use sketch::{
     CurveAnalytic, CurveGeom, CurveRefaceted, EdgeRemoved, MAX_CIRCLE_SEGMENTS,

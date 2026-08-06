@@ -18,6 +18,7 @@ kernel.workspace = true
 inference.workspace = true
 tessellate.workspace = true
 mesh-export.workspace = true
+softrender.workspace = true
 dae-import.workspace = true
 gltf-import.workspace = true
 skp-import.workspace = true

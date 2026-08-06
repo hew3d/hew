@@ -80,6 +80,11 @@ const OBJECT_VERBS: DockVerb[] = [
   // hiding/disabling the verb.
   { id: 'tool-position-texture', label: 'Position Texture' },
   { id: 'edit-make-component', label: 'Make Component' },
+  // Library effort: saves the selection as a reusable `.hew` item (gated by
+  // DockGates.canSaveToLibrary — hidden outright on a platform with no
+  // library backend). Sits ahead of Erase, matching the destructive-verb-
+  // last convention every other row already follows.
+  { id: 'save-to-library', label: 'Save to Library' },
   { id: 'edit-delete', label: 'Erase' },
 ]
 
@@ -94,17 +99,23 @@ const GROUP_VERBS: DockVerb[] = [
   { id: 'tool-scale', label: 'Scale' },
   { id: 'edit-make-component', label: 'Make Component' },
   { id: 'ungroup', label: 'Ungroup' },
+  // See OBJECT_VERBS's comment — same Library effort addition, same
+  // destructive-verb-last placement.
+  { id: 'save-to-library', label: 'Save to Library' },
   { id: 'edit-delete', label: 'Erase' },
 ]
 
 /** Spec's Component row verbatim — every verb already exists in Hew
- * (enter-context / Move / Scale / runMakeUnique / runExplodeInstance). */
+ * (enter-context / Move / Scale / runMakeUnique / runExplodeInstance), plus
+ * Save to Library (Library effort — appended, since this row has no Erase
+ * verb to sit ahead of). */
 const INSTANCE_VERBS: DockVerb[] = [
   { id: 'enter-context', label: 'Edit' },
   { id: 'tool-move', label: 'Move' },
   { id: 'tool-scale', label: 'Scale' },
   { id: 'make-unique', label: 'Make Unique' },
   { id: 'explode-instance', label: 'Explode' },
+  { id: 'save-to-library', label: 'Save to Library' },
 ]
 
 /** Group (gated by `DockGates.canGroup`) is the natural next step after
@@ -154,6 +165,12 @@ export interface DockGates {
   canGroup: boolean
   /** ≥1 sibling object/group, no instances, top level (Edit ▸ Make Component). */
   canMakeComponent: boolean
+  /** Whether the platform has a working library backend
+   * (`libraryStore().available()`) — hides Save to Library when false.
+   * Optional (unlike the two gates above) so call sites that predate the
+   * Library effort keep compiling unchanged; omitted is treated as false
+   * (hidden), matching the dock's "an inapplicable verb is noise" rule. */
+  canSaveToLibrary?: boolean
 }
 
 /** The curated, ordered verb list for a context — first item is primary.
@@ -174,6 +191,7 @@ export function dockVerbsFor(context: DockContext, gates?: DockGates): DockVerb[
   return verbs.filter((v) => {
     if (v.id === 'edit-group') return gates.canGroup
     if (v.id === 'edit-make-component') return gates.canMakeComponent
+    if (v.id === 'save-to-library') return gates.canSaveToLibrary ?? false
     return true
   })
 }

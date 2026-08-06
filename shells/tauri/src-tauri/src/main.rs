@@ -424,7 +424,18 @@ struct WindowCounter(u32);
 /// window: `new label -> path`. Claimed once, at mount, via
 /// `take_pending_window_open` — the same one-shot shape as
 /// [`PendingRecovery`], just for a plain open instead of a recovery slot.
-struct PendingWindowOpen(HashMap<String, String>);
+struct PendingWindowOpen(HashMap<String, PendingWindowOpenEntry>);
+
+/// One queued open for a freshly created window: the path, whether the
+/// window should treat it as a COPY (library "Open as Document" — import
+/// semantics, Save always prompts) rather than a path-bound open, and the
+/// display name a copy adopts.
+#[derive(Clone, serde::Serialize)]
+struct PendingWindowOpenEntry {
+    path: String,
+    as_copy: bool,
+    name: Option<String>,
+}
 
 /// One entry in the Window menu's "open windows" tail, and in the
 /// `window-list` event the in-app React menu bar (Windows/Linux) renders it
@@ -721,7 +732,7 @@ fn window_list_impl(app: &tauri::AppHandle, retitled: Option<Retitled>) -> Vec<W
     let mut list: Vec<WindowInfo> = app
         .webview_windows()
         .values()
-        .filter(|w| w.label() != "settings")
+        .filter(|w| is_document_window_label(w.label()))
         .map(|w| {
             let os_title = w.title().unwrap_or_default();
             let title = resolved_window_title(w.label(), &os_title, retitled);
@@ -1008,6 +1019,8 @@ async fn open_in_new_window(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     path: String,
+    as_copy: Option<bool>,
+    name: Option<String>,
 ) -> Result<(), String> {
     let label = create_document_window(&app, &window, None).await?;
     // Propagate a lock failure (matches the sibling recover_slot insert in
@@ -1017,7 +1030,14 @@ async fn open_in_new_window(
     // deliver, and the caller would have no idea the open never happened.
     let state = app.state::<Mutex<PendingWindowOpen>>();
     let mut guard = state.lock().map_err(|e| e.to_string())?;
-    guard.0.insert(label, path);
+    guard.0.insert(
+        label,
+        PendingWindowOpenEntry {
+            path,
+            as_copy: as_copy.unwrap_or(false),
+            name,
+        },
+    );
     Ok(())
 }
 
@@ -1027,7 +1047,10 @@ async fn open_in_new_window(
 /// (the initial `main` window, a File ▸ New window, a recovery window) never
 /// has an entry and this is a no-op `None`.
 #[tauri::command]
-fn take_pending_window_open(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Option<String> {
+fn take_pending_window_open(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Option<PendingWindowOpenEntry> {
     app.state::<Mutex<PendingWindowOpen>>()
         .lock()
         .ok()
@@ -1055,7 +1078,7 @@ fn sync_menu_state(
         let any_doc_focused = app
             .webview_windows()
             .into_values()
-            .any(|w| w.label() != "settings" && w.is_focused().unwrap_or(false));
+            .any(|w| is_document_window_label(w.label()) && w.is_focused().unwrap_or(false));
         // With no document window focused, accept only the window menu
         // events would be routed to (the last-focused one) — otherwise any
         // background window's async state change repaints the shared menu
@@ -1726,6 +1749,14 @@ fn frontend_ready(app: tauri::AppHandle, window: tauri::WebviewWindow) {
         ready.0.insert(window.label().to_string());
     }
 }
+/// Whether a window label names a DOCUMENT window — the windows that hold a
+/// model and can receive menu actions, file opens, and library actions.
+/// The settings window and the library browser window are auxiliary: they
+/// must never be the "active document" target, never appear in the Window
+/// menu's focus list, and never absorb a routed open.
+fn is_document_window_label(label: &str) -> bool {
+    label != "settings" && label != "library"
+}
 
 /// The document window menu/open events should land in: the focused
 /// non-settings window, else the most recently focused one that still
@@ -1734,7 +1765,7 @@ fn active_document_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow
     let windows = app.webview_windows();
     if let Some(w) = windows
         .values()
-        .find(|w| w.label() != "settings" && w.is_focused().unwrap_or(false))
+        .find(|w| is_document_window_label(w.label()) && w.is_focused().unwrap_or(false))
     {
         return Some(w.clone());
     }
@@ -1745,10 +1776,12 @@ fn active_document_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow
             }
         }
     }
-    windows
-        .get("main")
-        .cloned()
-        .or_else(|| windows.values().find(|w| w.label() != "settings").cloned())
+    windows.get("main").cloned().or_else(|| {
+        windows
+            .values()
+            .find(|w| is_document_window_label(w.label()))
+            .cloned()
+    })
 }
 
 /// Emit an event to exactly one document window (see
@@ -1816,6 +1849,141 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
 
 /// Prepend `path` to the recents list (dedup, cap RECENTS_MAX), persist, and
 /// rebuild the "Open Recent" submenu.
+/// Opens (or focuses) the Library browser as a real native window — the
+/// Settings-window pattern, but resizable: the Library is a working
+/// surface, not a fixed-form preferences pane.
+#[tauri::command]
+async fn open_library_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window("library") {
+        return existing.set_focus().map_err(|e| e.to_string());
+    }
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        "library",
+        tauri::WebviewUrl::App("index.html#library".into()),
+    )
+    .title("Library")
+    .inner_size(920.0, 632.0)
+    .min_inner_size(640.0, 420.0)
+    .resizable(true)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Routes a Library-window action (insert / open-as-document / paint /
+/// add-to-palette) to the ACTIVE DOCUMENT window — the same delivery the
+/// native menus use (`emit_to_active`), which is exactly why clicking in
+/// the focused Library window still reaches the right model: the library
+/// label is excluded from active-document tracking, so the last document
+/// window the user worked in stays the target. `focus_target` pulls that
+/// window forward (an insert continues with cursor placement there).
+/// Forwards a document window's placements/palette push to the Library
+/// window — ONLY when the sender is the active document window, so the
+/// Library's badges always describe the same document its actions target
+/// (`library_dispatch` routes through the same `active_document_window`).
+/// A background window's docRev churn or a stale request answer is
+/// silently discarded here rather than racing the active window's data.
+#[tauri::command]
+fn library_push_placements(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    payload: String,
+) -> Result<(), String> {
+    let is_active =
+        active_document_window(&app).is_some_and(|active| active.label() == window.label());
+    if is_active {
+        let _ = app.emit_to("library", "library-placements-json", payload);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn library_dispatch(
+    app: tauri::AppHandle,
+    payload: String,
+    focus_target: bool,
+) -> Result<bool, String> {
+    let Some(target) = active_document_window(&app) else {
+        // No document window exists (all closed) — report honestly so the
+        // Library window can tell the user instead of silently no-oping.
+        return Ok(false);
+    };
+    if focus_target {
+        let _ = target.set_focus();
+    }
+    let _ = app.emit_to(target.label(), "library-action", payload);
+    Ok(true)
+}
+
+/// One row of a native library context menu (`library_popup_menu`).
+#[derive(serde::Deserialize)]
+struct LibraryMenuEntry {
+    id: String,
+    label: String,
+    #[serde(default)]
+    disabled: bool,
+    #[serde(default)]
+    separator: bool,
+}
+
+/// Pops a NATIVE context menu on the Library window (the item tiles' `⋯`
+/// and right-click menu — stock menus, not hand-drawn DOM). Selection is
+/// delivered asynchronously through the app's menu-event handler, which
+/// forwards any `libmenu:`-prefixed id back to the library window as a
+/// `library-menu` event; dismissal delivers nothing, exactly like every
+/// native menu.
+#[tauri::command]
+fn library_popup_menu(
+    window: tauri::WebviewWindow,
+    entries: Vec<LibraryMenuEntry>,
+) -> Result<(), String> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+    let app = window.app_handle().clone();
+    let win = window.clone();
+    window
+        .run_on_main_thread(move || {
+            let mut builder = MenuBuilder::new(&app);
+            for e in &entries {
+                if e.separator {
+                    if let Ok(sep) = PredefinedMenuItem::separator(&app) {
+                        builder = builder.item(&sep);
+                    }
+                    continue;
+                }
+                let item = MenuItemBuilder::new(&e.label)
+                    .id(format!("libmenu:{}", e.id))
+                    .enabled(!e.disabled)
+                    .build(&app);
+                if let Ok(item) = item {
+                    builder = builder.item(&item);
+                }
+            }
+            if let Ok(menu) = builder.build() {
+                let _ = win.popup_menu(&menu);
+            }
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// A native confirmation dialog on the Library window (the destructive
+/// delete's stock confirm — OK is `action_label`, cancel is Cancel).
+#[tauri::command]
+async fn library_confirm(
+    window: tauri::WebviewWindow,
+    title: String,
+    message: String,
+    action_label: String,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let dialog = window.dialog().message(message).title(title).buttons(
+        MessageDialogButtons::OkCancelCustom(action_label, "Cancel".to_string()),
+    );
+    tauri::async_runtime::spawn_blocking(move || dialog.blocking_show())
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn push_recent(path: String, app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<Mutex<RecentState>>();
@@ -1846,6 +2014,349 @@ fn clear_recent(app: tauri::AppHandle) -> Result<(), String> {
     guard.paths.clear();
     save_recents(&app, &[]);
     rebuild_recent_submenu(&guard.submenu, &app, &[])
+}
+
+// ---------------------------------------------------------------------------
+// Library — a folder of `.hew` files (default `$HOME/Hew Library`) organized
+// by type into `Components/`, `Materials/`, `Models/` subfolders (legacy
+// flat items directly in the folder still work), plus a thumbnail cache in
+// `<folder>/.thumbnails/`. The configured folder is stored as JSON in the
+// app config dir (`library.json`, `{"dir": "..."}`), mirroring
+// `recents.json` above. Every command below resolves `name`/`key` against
+// that ONE folder and validates it first — at most one `/`-separated
+// subfolder segment (and only one of the three category names), no `..`,
+// item names must end `.hew`, thumbnail keys must be lowercase hex — which
+// is what makes these commands safe without the `ApprovedPaths` registry
+// `read_file`/`write_file` use: they can never address a path outside the
+// configured folder.
+// ---------------------------------------------------------------------------
+
+/// The category subfolders an item name's first segment may name.
+const LIBRARY_CATEGORY_DIRS: [&str; 3] = ["Components", "Materials", "Models"];
+
+/// Reject a name that could escape the library folder (path separators
+/// beyond one, `..`) or that isn't a Hew document — the only kind of file
+/// `library_read` / `library_write` / `library_delete` / `library_reveal`
+/// ever address. A valid name is 1 or 2 `/`-separated segments: each
+/// segment non-empty, with no `\`, no `..`, no `:`, and no leading `.`; the
+/// last segment must end `.hew`; when there are 2 segments, the first must
+/// be exactly one of `LIBRARY_CATEGORY_DIRS` — this is what lets
+/// `Path::join` of a validated name stay safely inside the library folder
+/// (no other subfolder nesting is ever accepted).
+fn valid_library_item_name(name: &str) -> bool {
+    let segments: Vec<&str> = name.split('/').collect();
+    if segments.is_empty() || segments.len() > 2 {
+        return false;
+    }
+    for segment in &segments {
+        if segment.is_empty()
+            || segment.contains('\\')
+            || segment.contains("..")
+            // Windows drive-relative segments ("C:foo.hew") resolve OUTSIDE
+            // the joined directory — `Path::join` replaces rather than
+            // appends for any component with a drive prefix. A colon has no
+            // business in an item file name on any platform (adversarial
+            // review S7).
+            || segment.contains(':')
+            || segment.starts_with('.')
+        {
+            return false;
+        }
+    }
+    let last = segments[segments.len() - 1];
+    if !last.to_ascii_lowercase().ends_with(".hew") {
+        return false;
+    }
+    if segments.len() == 2 {
+        LIBRARY_CATEGORY_DIRS.contains(&segments[0])
+    } else {
+        true
+    }
+}
+
+/// Reject a thumbnail key that isn't lowercase hex. Keys are content-hash
+/// (or hash-prefix) strings, never arbitrary text, so this rules out path
+/// separators and `..` as a side effect of the character class alone.
+fn valid_thumb_key(key: &str) -> bool {
+    (8..=64).contains(&key.len())
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LibraryConfig {
+    dir: String,
+}
+
+fn library_config_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("library.json"))
+}
+
+/// The configured library folder, or `None` if never set (the caller falls
+/// back to the default `$HOME/Hew Library`). Does not create the folder.
+fn load_library_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(library_config_path(app)?).ok()?;
+    let config: LibraryConfig = serde_json::from_str(&text).ok()?;
+    if config.dir.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(config.dir))
+}
+
+/// Persist the configured library folder.
+fn save_library_dir(app: &tauri::AppHandle, dir: &Path) -> Result<(), String> {
+    let Some(config_dir) = app.path().app_config_dir().ok() else {
+        return Err("could not resolve app config dir".into());
+    };
+    std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
+    let Some(path) = library_config_path(app) else {
+        return Err("could not resolve app config dir".into());
+    };
+    let config = LibraryConfig {
+        dir: dir.to_string_lossy().into_owned(),
+    };
+    let text = serde_json::to_string(&config).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| e.to_string())
+}
+
+/// The effective library folder: the configured one, else `$HOME/Hew
+/// Library`. Never creates it — `library_list` treats a missing folder as
+/// empty, and `library_write`/`library_thumb_write` create it on first use.
+fn resolved_library_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    if let Some(dir) = load_library_dir(app) {
+        return Ok(dir);
+    }
+    let home = app.path().home_dir().map_err(|e| e.to_string())?;
+    Ok(home.join("Hew Library"))
+}
+
+/// The configured (or default) library folder as a display path.
+#[tauri::command]
+fn library_get_dir(app: tauri::AppHandle) -> Result<String, String> {
+    resolved_library_dir(&app).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Show a native folder picker; on a pick, persist it as the library folder
+/// and broadcast `settings-changed` (`{"key": "libraryFolder"}`) to every
+/// window, so the browser and any other open Settings window pick it up
+/// without polling. Returns `None` on cancel — not an error.
+#[tauri::command]
+async fn library_choose_dir(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let current = resolved_library_dir(&app).ok();
+    let mut dialog = app.dialog().file().set_title("Choose Library Folder");
+    if let Some(dir) = &current {
+        dialog = dialog.set_directory(dir);
+    }
+    let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_folder())
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    save_library_dir(&app, &path)?;
+    let _ = app.emit(
+        "settings-changed",
+        serde_json::json!({ "key": "libraryFolder" }),
+    );
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+/// One `.hew` file in the library folder, as `library_list` reports it.
+#[derive(serde::Serialize)]
+struct LibraryEntry {
+    name: String,
+    size: u64,
+    mtime_ms: u64,
+}
+
+/// List one directory's direct-child `.hew` files (regular files only) into
+/// `result`, naming each entry `name` (root scan) or `"<prefix>/name"`
+/// (category scan) — always joined with a literal `/`, never
+/// `PathBuf`/`Path::join`, so the reported name is forward-slash on every
+/// platform including Windows, matching what `valid_library_item_name` (and
+/// every other `library_*` command) expects to receive back. A missing
+/// directory — nothing saved there yet — contributes nothing, not an error.
+fn list_library_files_into(dir: &Path, prefix: Option<&str>, result: &mut Vec<LibraryEntry>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let Some(file_name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let name = match prefix {
+            Some(prefix) => format!("{prefix}/{file_name}"),
+            None => file_name,
+        };
+        if !valid_library_item_name(&name) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let mtime_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        result.push(LibraryEntry {
+            name,
+            size: metadata.len(),
+            mtime_ms,
+        });
+    }
+}
+
+/// List every `.hew` item in the library folder: legacy flat files directly
+/// in the folder (kept working) plus each of the three category subfolders
+/// (`Components/`, `Materials/`, `Models/`), reported as `"Category/
+/// name.hew"`. A missing folder — nothing saved to the library yet — lists
+/// as empty, not an error.
+#[tauri::command]
+fn library_list(app: tauri::AppHandle) -> Result<Vec<LibraryEntry>, String> {
+    let dir = resolved_library_dir(&app)?;
+    let mut result = Vec::new();
+    list_library_files_into(&dir, None, &mut result);
+    for category in LIBRARY_CATEGORY_DIRS {
+        list_library_files_into(&dir.join(category), Some(category), &mut result);
+    }
+    Ok(result)
+}
+
+/// Read a library item's raw bytes. Same `tauri::ipc::Response` shape as
+/// `read_file` — no JSON round-trip for multi-megabyte models.
+#[tauri::command]
+fn library_read(app: tauri::AppHandle, name: String) -> Result<tauri::ipc::Response, String> {
+    if !valid_library_item_name(&name) {
+        return Err(format!("library_read: invalid item name {name:?}"));
+    }
+    let dir = resolved_library_dir(&app)?;
+    let bytes = std::fs::read(dir.join(&name))
+        .map_err(|e| format!("library_read failed for {name:?}: {e}"))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Write a library item, creating the library folder — and, for a
+/// two-segment name, its category subfolder — on first use. `Path::join` of
+/// a validated relative name places the file at most one level under `dir`
+/// (`valid_library_item_name` already pinned that first segment to one of
+/// `LIBRARY_CATEGORY_DIRS`), so creating `path`'s immediate parent is always
+/// safe and never reaches outside the library folder. Atomic: temp file in
+/// the same directory + rename, mirroring `recovery_write`.
+#[tauri::command]
+fn library_write(app: tauri::AppHandle, name: String, contents: Vec<u8>) -> Result<(), String> {
+    if !valid_library_item_name(&name) {
+        return Err(format!("library_write: invalid item name {name:?}"));
+    }
+    let dir = resolved_library_dir(&app)?;
+    let path = dir.join(&name);
+    let parent = path.parent().unwrap_or(&dir);
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    write_atomic(&path, &contents).map_err(|e| e.to_string())?;
+    // Content changed: every window's listing (an open Library window, the
+    // command palette's index in other document windows) refreshes off this.
+    let _ = app.emit("library-changed", ());
+    Ok(())
+}
+
+/// Delete a library item. Deleting an already-absent file is not an error —
+/// the caller's goal ("this name is gone") is already satisfied.
+#[tauri::command]
+fn library_delete(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    if !valid_library_item_name(&name) {
+        return Err(format!("library_delete: invalid item name {name:?}"));
+    }
+    let dir = resolved_library_dir(&app)?;
+    match std::fs::remove_file(dir.join(&name)) {
+        Ok(()) => {
+            let _ = app.emit("library-changed", ());
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Reveal a library item in the OS file manager (Finder/Explorer/etc).
+#[tauri::command]
+fn library_reveal(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    if !valid_library_item_name(&name) {
+        return Err(format!("library_reveal: invalid item name {name:?}"));
+    }
+    let dir = resolved_library_dir(&app)?;
+    tauri_plugin_opener::reveal_item_in_dir(dir.join(&name)).map_err(|e| e.to_string())
+}
+
+/// Resolve a library item's absolute filesystem path — the Library ▸ Open
+/// as Document flow's non-pristine-window case needs a real path to hand
+/// `open_in_new_window` (`LibraryStore` otherwise only deals in bare names,
+/// deliberately: everywhere else a path would be an unvalidated escape
+/// hatch). Same name validation as every other `library_*` command; the
+/// path is never checked to exist — the caller (`open_in_new_window`'s
+/// eventual read) reports that failure.
+#[tauri::command]
+fn library_item_path(app: tauri::AppHandle, name: String) -> Result<String, String> {
+    if !valid_library_item_name(&name) {
+        return Err(format!("library_item_path: invalid item name {name:?}"));
+    }
+    let dir = resolved_library_dir(&app)?;
+    let path = dir.join(&name);
+    // The caller's next step is handing this path to the ORDINARY open
+    // machinery (`open_in_new_window` → the new window's `read_file`),
+    // which enforces the approved-paths registry the `library_*` commands
+    // themselves bypass. The request is the user's own click on a library
+    // item — approve it like any picked/OS-delivered open (`deliver_open`'s
+    // rationale), or the fresh window refuses the read and strands as an
+    // Untitled document (playtest round 2).
+    approve_file(&app, &path, false);
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Read a cached thumbnail PNG by content-hash key. Errs with the literal
+/// string `"not_found"` when absent (vs. any other message on a real I/O
+/// failure) — the one signal `tauriLibraryStore.ts` treats as "no thumbnail
+/// yet" and maps to `null`, rather than surfacing a Vec<u8>-empty-means-
+/// missing convention that a genuinely empty (0-byte) cached PNG could
+/// collide with.
+#[tauri::command]
+fn library_thumb_read(app: tauri::AppHandle, key: String) -> Result<tauri::ipc::Response, String> {
+    if !valid_thumb_key(&key) {
+        return Err(format!("library_thumb_read: invalid key {key:?}"));
+    }
+    let dir = resolved_library_dir(&app)?;
+    let path = dir.join(".thumbnails").join(format!("{key}.png"));
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(tauri::ipc::Response::new(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err("not_found".to_string()),
+        Err(e) => Err(format!("library_thumb_read failed for {key:?}: {e}")),
+    }
+}
+
+/// Write a cached thumbnail PNG, creating `.thumbnails/` on first use.
+/// Atomic, same as `library_write`.
+#[tauri::command]
+fn library_thumb_write(
+    app: tauri::AppHandle,
+    key: String,
+    contents: Vec<u8>,
+) -> Result<(), String> {
+    if !valid_thumb_key(&key) {
+        return Err(format!("library_thumb_write: invalid key {key:?}"));
+    }
+    let dir = resolved_library_dir(&app)?;
+    let thumbs_dir = dir.join(".thumbnails");
+    std::fs::create_dir_all(&thumbs_dir).map_err(|e| e.to_string())?;
+    write_atomic(&thumbs_dir.join(format!("{key}.png")), &contents).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1954,10 +2465,25 @@ fn main() {
             focus_window,
             set_window_title,
             open_settings_window,
+            open_library_window,
+            library_dispatch,
+            library_push_placements,
+            library_popup_menu,
+            library_confirm,
             sync_menu_state,
             push_recent,
             get_recents,
             clear_recent,
+            library_get_dir,
+            library_choose_dir,
+            library_list,
+            library_read,
+            library_write,
+            library_delete,
+            library_reveal,
+            library_item_path,
+            library_thumb_read,
+            library_thumb_write,
             recovery_write,
             recovery_list,
             recovery_claim,
@@ -2046,6 +2572,15 @@ fn main() {
             let file_save_as = MenuItemBuilder::with_id("file-save-as", "Save As…")
                 .accelerator("Shift+CmdOrCtrl+S")
                 .build(handle)?;
+            // Prompts for a name (SaveToLibraryPopover's centered "modal"
+            // variant) then writes the whole document as a library item —
+            // always enabled here (macOS has no equivalent of the web
+            // MenuBar's `disabled` prop); the frontend no-ops with a toast on
+            // a platform without a library backend, same posture as every
+            // other native item that has no web-gated counterpart.
+            let file_save_to_library =
+                MenuItemBuilder::with_id("file-save-to-library", "Save to Library…")
+                    .build(handle)?;
             let file_close = MenuItemBuilder::with_id("file-close", "Close")
                 .accelerator("CmdOrCtrl+W")
                 .build(handle)?;
@@ -2060,6 +2595,7 @@ fn main() {
                 .separator()
                 .item(&file_save)
                 .item(&file_save_as)
+                .item(&file_save_to_library)
                 .separator()
                 .item(&file_close)
                 .build()?;
@@ -2593,6 +3129,18 @@ fn main() {
                 Some("Shift+CmdOrCtrl+O"),
                 Some("Shift+CmdOrCtrl+O"),
             )?;
+            // Bare Shift+L (the in-app bare-letter shortcut) can't be a safe
+            // native accelerator — it would fire while typing in any native
+            // text field — so the menu advertises the same modifier chord
+            // the other pane toggles use instead.
+            let win_library = check_item(
+                handle,
+                &mut checks,
+                "win-library",
+                "Library",
+                Some("Shift+CmdOrCtrl+L"),
+                Some("Shift+CmdOrCtrl+L"),
+            )?;
 
             let window_menu = SubmenuBuilder::new(handle, "Window")
                 // Standard macOS window management first (HIG: the Window
@@ -2604,6 +3152,7 @@ fn main() {
                 .item(&win_materials)
                 .item(&win_tags)
                 .item(&win_object_info)
+                .item(&win_library)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -2772,7 +3321,7 @@ fn main() {
         .on_window_event(|window, event| {
             let app = window.app_handle();
             match event {
-                tauri::WindowEvent::Focused(true) if window.label() != "settings" => {
+                tauri::WindowEvent::Focused(true) if is_document_window_label(window.label()) => {
                     if let Ok(mut active) = app.state::<Mutex<ActiveWindow>>().lock() {
                         active.0 = Some(window.label().to_string());
                     }
@@ -2793,6 +3342,32 @@ fn main() {
                     if let Ok(mut active) = app.state::<Mutex<ActiveWindow>>().lock() {
                         if active.0.as_deref() == Some(window.label()) {
                             active.0 = None;
+                        }
+                    }
+                    // The Library window may be holding the destroyed
+                    // document's placements — ask the surviving active
+                    // window to re-push (the gate in
+                    // `library_push_placements` picks the right one).
+                    if is_document_window_label(window.label()) {
+                        let _ = app.emit("library-placements-request", ());
+                        // An auxiliary browser must not outlive the last
+                        // document window (playtest round 2: quitting the
+                        // documents left a live Library window keeping the
+                        // app running) — its whole purpose is acting on a
+                        // document.
+                        let docs_remaining = app
+                            .webview_windows()
+                            .values()
+                            .any(|w| is_document_window_label(w.label()));
+                        if !docs_remaining {
+                            if let Some(lib) = app.get_webview_window("library") {
+                                let _ = lib.close();
+                            }
+                            // Settings is declared equally auxiliary by
+                            // is_document_window_label — same rule.
+                            if let Some(settings) = app.get_webview_window("settings") {
+                                let _ = settings.close();
+                            }
                         }
                     }
                     // A recovery window that dies before claiming leaves its
@@ -2830,6 +3405,42 @@ fn main() {
         // a broadcast would run Undo/Delete/Open in every open document).
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
+            // Library context-menu picks route back to the library window
+            // (the only place that pops `libmenu:` menus).
+            if let Some(action) = id.strip_prefix("libmenu:") {
+                let _ = app.emit_to("library", "library-menu", action);
+                return;
+            }
+            // macOS's menu bar is APP-wide: its accelerators fire whichever
+            // window is key. With an AUXILIARY window focused (Library,
+            // Settings), document-directed actions must not reach the
+            // hidden document window — Cmd+W there would close a window
+            // the user isn't looking at (adversarial review). The
+            // Mac-correct split: Close closes the FOCUSED auxiliary
+            // window; window-management/new-window actions pass through;
+            // every document-mutating action is dropped.
+            if let Some(focused) = app
+                .webview_windows()
+                .into_values()
+                .find(|w| w.is_focused().unwrap_or(false))
+            {
+                if !is_document_window_label(focused.label()) {
+                    match id {
+                        "file-close" => {
+                            let _ = focused.close();
+                            return;
+                        }
+                        // Window management and new-window creation behave
+                        // sensibly from anywhere.
+                        "file-new" | "file-open" | "app-settings" | "win-library"
+                        | "app-check-updates" => {}
+                        _ if id.starts_with("win-focus:") || id.starts_with("recent:") => {}
+                        // Anything else would mutate or reframe a document
+                        // the user cannot see — drop it.
+                        _ => return,
+                    }
+                }
+            }
             if let Some(path) = id.strip_prefix("recent:") {
                 emit_to_active(app, "menu-open-path", path);
                 return;
@@ -2859,6 +3470,7 @@ fn main() {
                 "file-export" => "export",
                 "file-save" => "save",
                 "file-save-as" => "save-as",
+                "file-save-to-library" => "save-to-library-doc",
                 "file-close" => "close",
                 "edit-undo" => "undo",
                 "edit-redo" => "redo",
@@ -2923,6 +3535,7 @@ fn main() {
                 "win-materials" => "toggle-materials",
                 "win-tags" => "toggle-tags",
                 "win-object-info" => "toggle-object-info",
+                "win-library" => "toggle-library",
                 "win-debug-log" => "toggle-debug-log",
                 "help-report-bug" => "report-bug",
                 _ => return,
@@ -2957,19 +3570,30 @@ fn main() {
             // is inactive lands in one window instead of broadcasting.
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Opened { urls } = &event {
-                for url in urls {
-                    if url.scheme() != "file" {
-                        continue;
+                // This arm runs INSIDE tao's `application:openURLs:` objc
+                // callback — an `extern "C"` frame a Rust panic cannot
+                // unwind through, so any panic here aborts the whole app
+                // (observed in the wild as a SIGABRT double-clicking a
+                // `.hew` at cold launch). Opening a file must never be
+                // able to take the app down: contain and log instead.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    for url in urls {
+                        if url.scheme() != "file" {
+                            continue;
+                        }
+                        // Convert file:// URL to filesystem path (percent-decode).
+                        let Ok(path) = url.to_file_path() else {
+                            continue;
+                        };
+                        let path_str = path.to_string_lossy().to_string();
+                        if !path_str.to_lowercase().ends_with(".hew") {
+                            continue;
+                        }
+                        deliver_open(app, &path_str);
                     }
-                    // Convert file:// URL to filesystem path (percent-decode).
-                    let Ok(path) = url.to_file_path() else {
-                        continue;
-                    };
-                    let path_str = path.to_string_lossy().to_string();
-                    if !path_str.to_lowercase().ends_with(".hew") {
-                        continue;
-                    }
-                    deliver_open(app, &path_str);
+                }));
+                if result.is_err() {
+                    eprintln!("open-urls delivery panicked; the open was dropped");
                 }
             }
         });
@@ -3134,5 +3758,48 @@ mod tests {
         );
         let via_os = resolved_window_title("main", "x.hew — Hew", None);
         assert_eq!(via_override, via_os);
+    }
+
+    #[test]
+    fn valid_library_item_name_accepts_legacy_flat_names() {
+        assert!(valid_library_item_name("chair.hew"));
+        assert!(valid_library_item_name("theater-chair-3f2a.hew"));
+        assert!(valid_library_item_name("UPPER.HEW"));
+    }
+
+    #[test]
+    fn valid_library_item_name_accepts_the_three_category_subfolders() {
+        assert!(valid_library_item_name("Components/theater-chair-3f2a.hew"));
+        assert!(valid_library_item_name("Materials/oak.hew"));
+        assert!(valid_library_item_name("Models/house.hew"));
+    }
+
+    #[test]
+    fn valid_library_item_name_rejects_any_other_first_segment() {
+        assert!(!valid_library_item_name("components/chair.hew")); // wrong case
+        assert!(!valid_library_item_name("Textures/chair.hew"));
+        assert!(!valid_library_item_name(".thumbnails/x.hew"));
+    }
+
+    #[test]
+    fn valid_library_item_name_rejects_more_than_one_subfolder_segment() {
+        assert!(!valid_library_item_name("Components/sub/chair.hew"));
+    }
+
+    #[test]
+    fn valid_library_item_name_rejects_traversal_and_escapes() {
+        assert!(!valid_library_item_name(""));
+        assert!(!valid_library_item_name("../chair.hew"));
+        assert!(!valid_library_item_name("Components/../chair.hew"));
+        assert!(!valid_library_item_name("Components/..hew"));
+        assert!(!valid_library_item_name("a\\b.hew"));
+        assert!(!valid_library_item_name("Components/a\\b.hew"));
+        assert!(!valid_library_item_name("C:foo.hew"));
+        assert!(!valid_library_item_name("Components/C:foo.hew"));
+        assert!(!valid_library_item_name(".hidden.hew"));
+        assert!(!valid_library_item_name("Components/.hidden.hew"));
+        assert!(!valid_library_item_name("Components/"));
+        assert!(!valid_library_item_name("chair.txt"));
+        assert!(!valid_library_item_name("Components//chair.hew"));
     }
 }

@@ -99,6 +99,38 @@ pub struct Material {
     pub texture: Option<Texture>,
 }
 
+/// A stable content fingerprint of a material — FNV-1a/64 over exactly the
+/// identity [`Material`]'s own `PartialEq` compares (name, color, texture
+/// format, tile size bits, verbatim image bytes), so two materials hash
+/// equal iff `insert_palette`/`palette_matches` would deduplicate them.
+/// Used by the library browser's "in palette" badge across the document /
+/// Library-window boundary, where the two sides can only exchange hashes,
+/// never live palette handles.
+pub fn material_content_hash(m: &Material) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = FNV_OFFSET;
+    let mut eat = |bytes: &[u8]| {
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(FNV_PRIME);
+        }
+    };
+    eat(m.name.as_bytes());
+    eat(&[0xff]); // field separator: a name ending in color bytes can't alias
+    eat(&[m.color.r, m.color.g, m.color.b, m.color.a]);
+    match &m.texture {
+        None => eat(&[0]),
+        Some(t) => {
+            eat(&[1, if t.format == ImageFormat::Jpeg { 1 } else { 0 }]);
+            eat(&t.world_size[0].to_bits().to_le_bytes());
+            eat(&t.world_size[1].to_bits().to_le_bytes());
+            eat(&t.image);
+        }
+    }
+    h
+}
+
 impl Material {
     /// A flat-color material.
     pub fn solid(name: impl Into<String>, color: Rgba8) -> Material {

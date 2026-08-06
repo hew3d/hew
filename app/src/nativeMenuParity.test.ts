@@ -193,3 +193,53 @@ describe('native menu parity — non-tool commands', () => {
     expect(missing, 'menu items built but never attached to a SubmenuBuilder chain').toEqual([])
   })
 })
+
+/**
+ * Library effort: Window ▸ Library (a CHECKABLE item — the dialog's open/
+ * closed state, like the other panes on that menu) and File ▸ Save to
+ * Library… (a plain item) — two different binding shapes, so this gets its
+ * own block rather than folding into `NON_TOOL_MENU_ACTIONS` above (which
+ * hardcodes the plain-`MenuItemBuilder` shape and would false-negative on
+ * win-library's `check_item` binding).
+ */
+describe('Library menu items parity (Window ▸ Library, File ▸ Save to Library…)', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+
+  it('win-library is built via check_item, attached to a submenu, and dispatches to toggle-library', () => {
+    const binding = new RegExp(`let\\s+(\\w+)\\s*=\\s*check_item\\([^;]*?"win-library"`, 's').exec(source)
+    expect(binding, 'no check_item binding found for win-library').not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(
+      source.includes(`.item(&${variable})`),
+      'win-library is built but never attached to a SubmenuBuilder chain',
+    ).toBe(true)
+    expect(
+      /"win-library"\s*=>\s*"toggle-library"/.test(source),
+      'win-library has no dispatch arm to toggle-library',
+    ).toBe(true)
+  })
+
+  it('file-save-to-library is built as a plain item, attached to a submenu, and dispatches to save-to-library-doc', () => {
+    const binding = new RegExp(
+      `let\\s+(\\w+)\\s*=\\s*MenuItemBuilder::with_id\\(\\s*"file-save-to-library"`,
+      's',
+    ).exec(source)
+    expect(binding, 'no MenuItemBuilder binding found for file-save-to-library').not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(
+      source.includes(`.item(&${variable})`),
+      'file-save-to-library is built but never attached to a SubmenuBuilder chain',
+    ).toBe(true)
+    expect(
+      /"file-save-to-library"\s*=>\s*"save-to-library-doc"/.test(source),
+      'file-save-to-library has no dispatch arm to save-to-library-doc',
+    ).toBe(true)
+  })
+
+  it('is offered from the web MenuBar (File ▸ Save to Library…, Window ▸ Library)', () => {
+    expect(menuBarSource.includes('Save to Library…')).toBe(true)
+    expect(menuBarSource.includes('onSaveToLibrary')).toBe(true)
+    expect(menuBarSource.includes('onToggleLibrary')).toBe(true)
+  })
+})

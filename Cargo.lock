@@ -936,6 +936,7 @@ dependencies = [
  "serde_json",
  "skp-import",
  "slotmap",
+ "softrender",
  "stl-import",
  "tessellate",
  "tracing",

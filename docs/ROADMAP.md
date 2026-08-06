@@ -292,6 +292,46 @@ below.
 - A searchable material palette, with the add-color and add-texture panels
   collapsed until needed
 
+### Library
+
+- A personal library of reusable items — Components, Materials, and whole
+  Models — where **every item is an ordinary `.hew` file** in a
+  user-relocatable folder (Settings ▸ Folders; default `~/Hew Library`),
+  so a library syncs and shares as plain files and any item opens as a
+  document in its own right. Item metadata (name, keywords, collection,
+  provenance) lives in the file's own v14 attribute dictionaries under the
+  first-party `hew.library` namespace — no side database
+- A modal browser (Window ▸ Library, the tool rail, ⇧L, or the command
+  palette): category sidebar with counts, name/keyword search, scope
+  filters (all / in this model / recently saved), user collections,
+  thumbnail grid, and a detail pane that reads each file's manifest only —
+  listing a large library never decodes geometry. Manage in place: rename,
+  keywords, collections, re-render thumbnail, reveal on disk, delete
+- Save to Library from the action dock (any solid, group, or component
+  instance — asked for a name and nothing else), from File ▸ Save to
+  Library for whole-document Model items, and from the Materials panel for
+  single materials. A selection saves wrapped as a component definition
+  plus identity instance; the item's insertion origin is the document's
+  current drawing-axes origin. Thumbnails render in the background through
+  the same deterministic headless rasterizer as `hew.view.snapshot`,
+  cached by content hash
+- Insert with cursor placement: the item's real geometry ghosts under the
+  cursor with full inference snapping (Move parity), a marker shows the
+  saved origin, one click commits, Esc cancels — one undo step. Inserts
+  are **lossless kernel grafts** (analytic curve surfaces, per-edge circle
+  claims, soft edges, materials, tags, guides, and definition-owned
+  sketches all carry; a model item's loose sketches and annotations are
+  reported as skipped, never silently dropped) and **copies, never
+  links**. Re-inserting the same item version reuses the definition
+  already in the document — never a "Chair (2)" — and palette materials
+  deduplicate by content, at insert and at Paint-with-this/Add-to-palette
+  alike
+- Command-palette quick insert: typing an item's name offers *Insert
+  "…"* straight into cursor placement, without opening the browser
+- Desktop-first: the browser build reports the library honestly
+  unavailable until an origin-private storage backend lands (the storage
+  seam is already platform-abstracted)
+
 ### Annotations
 
 - Linear and radial dimensions and leader text, anchored to the geometry

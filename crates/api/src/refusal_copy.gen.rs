@@ -370,6 +370,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "BadNodeList" => {
             "Hew's own request to the model kernel carried a malformed selection list. If this keeps happening, use Report Bug."
         }
+        "BadLibraryMeta" => {
+            "Hew's own request to the model kernel carried malformed library-item metadata. If this keeps happening, use Report Bug."
+        }
         "BadSelection" => {
             "Hew's own request to the model kernel carried a malformed selection. If this keeps happening, use Report Bug."
         }

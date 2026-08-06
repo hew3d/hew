@@ -18,8 +18,9 @@ import { useState, type CSSProperties, type ReactElement } from 'react'
 import { UnitsPane } from './UnitsPane'
 import { ThemePane } from './ThemePane'
 import { DebugPane } from './DebugPane'
+import { FoldersPane } from './FoldersPane'
 
-type Category = 'units' | 'theme' | 'debug'
+type Category = 'units' | 'theme' | 'folders' | 'debug'
 
 const iconProps = {
   width: 22,
@@ -64,9 +65,19 @@ function DebugIcon() {
   )
 }
 
+/** Folder — Folders. */
+function FoldersIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M3 7.5a1.5 1.5 0 0 1 1.5-1.5h4.4l1.8 2h8.8a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 16.5z" />
+    </svg>
+  )
+}
+
 const TABS: { id: Category; label: string; icon: ReactElement }[] = [
   { id: 'units', label: 'Units', icon: <UnitsIcon /> },
   { id: 'theme', label: 'Theme', icon: <ThemeIcon /> },
+  { id: 'folders', label: 'Folders', icon: <FoldersIcon /> },
   { id: 'debug', label: 'Debug', icon: <DebugIcon /> },
 ]
 
@@ -158,6 +169,7 @@ export function SettingsWindow() {
       >
         {active === 'units' && <UnitsPane />}
         {active === 'theme' && <ThemePane />}
+        {active === 'folders' && <FoldersPane />}
         {active === 'debug' && <DebugPane />}
       </div>
     </div>

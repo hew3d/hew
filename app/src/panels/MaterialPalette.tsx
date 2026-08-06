@@ -25,6 +25,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { MATERIAL_SENTINEL } from '../tools/PaintTool'
+import { libraryStore } from '../io/libraryStore'
 
 interface Props {
   scene: WasmScene
@@ -37,6 +38,13 @@ interface Props {
   onMaterialCreated: (id: bigint) => void
   onDocumentChanged: () => void
   onAlphaCommitted: () => void
+  /** Save the selected material as a library item (App.tsx owns
+   * `extract_material_item` + the write/toast flow — see its doc comment).
+   * Omitted entirely on a platform with no library backend, same posture as
+   * the ContextualDock's Save to Library verb; this component additionally
+   * gates the button on `libraryStore().available()` itself since it has no
+   * other signal of platform capability. */
+  onSaveToLibrary?: (materialId: bigint) => void
 }
 
 const PANEL_STYLE: React.CSSProperties = {
@@ -142,6 +150,7 @@ export function MaterialPalette({
   onSelectMaterial,
   onMaterialCreated,
   onDocumentChanged,
+  onSaveToLibrary,
   onAlphaCommitted,
 }: Props) {
   // Suppress the docRev-triggers-re-render lint — we intentionally use it to
@@ -495,6 +504,13 @@ export function MaterialPalette({
           {alphaToDisplayPercent(draggingAlpha ?? selectedMaterialInfo?.a() ?? 255)}%
         </span>
       </div>
+
+      {/* Save to Library — real (non-sentinel) material only, desktop only. */}
+      {selectedMaterialInfo !== undefined && onSaveToLibrary !== undefined && libraryStore().available() && (
+        <button style={BTN_STYLE} onClick={() => onSaveToLibrary(currentMaterialId)}>
+          Save to Library
+        </button>
+      )}
 
       {/* Divider */}
       <div style={{ borderTop: '1px solid var(--border-hairline, #444)', margin: '2px 0' }} />

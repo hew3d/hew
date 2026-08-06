@@ -55,6 +55,7 @@ import { SliceTool } from '../tools/SliceTool'
 import { SectionPlaneTool } from '../tools/SectionPlaneTool'
 import { EditVertexTool } from '../tools/EditVertexTool'
 import { TextPlaceTool, type TextPlacement } from '../tools/TextPlaceTool'
+import { LibraryPlaceTool, type LibraryPlacement } from '../tools/LibraryPlaceTool'
 import { PositionCameraTool } from '../tools/PositionCameraTool'
 import { LookAroundTool } from '../tools/LookAroundTool'
 import { WalkTool } from '../tools/WalkTool'
@@ -563,6 +564,19 @@ export interface ViewportApi {
    * component fold) as one undo step.
    */
   armTextPlacement: (placement: TextPlacement) => void
+  /**
+   * Arms the one-shot library-item placement tool: the item's pre-built
+   * ghost rides the inference snap (Move parity) with its origin pinned to
+   * the snap point; a click commits ONE `insert_item` (lossless graft, one
+   * undo step) and the tool retires back to Select with the created roots
+   * selected. `onDone` fires exactly once — placed, user-cancelled (Esc),
+   * or displaced by another tool — so the caller can clear its
+   * "Inserting…" chrome.
+   */
+  armLibraryPlacement: (
+    placement: LibraryPlacement,
+    onDone?: (placed: boolean) => void,
+  ) => void
   /**
    * Call after a `scene.load()` to rebuild all viewport-side caches and
    * propagate the new watertight state / docRev to the parent.  Mirrors the
@@ -4735,6 +4749,54 @@ export default function Viewport({
       // handoff) rather than through the named-tool `switchToolRef` switch,
       // since 3D Text has no rail slot (design doc: Draw menu + palette
       // only).
+      function armLibraryPlacement(
+        placement: LibraryPlacement,
+        onDone?: (placed: boolean) => void,
+      ): void {
+        const tool = new LibraryPlaceTool(
+          wasmScene,
+          previewGroup,
+          placement,
+          (result) => {
+            handleSceneRefresh()
+            const refs: NodeRef[] = result.rootKinds.map((k, i) => ({
+              kind: k === 0 ? 'object' : k === 1 ? 'group' : 'instance',
+              id: result.rootIds[i],
+            }))
+            if (refs.length === 1) onSelectRef.current?.(refs[0], false)
+            else if (refs.length > 1) onSelectManyRef.current?.(refs, false)
+            // v1 scope, reported honestly: loose sketches/annotations in a
+            // model item are not carried by the insert.
+            const skipped = result.worldSketchesSkipped + result.annotationsSkipped
+            if (skipped > 0) {
+              handleToast(
+                `Inserted without ${skipped} loose sketch/annotation element${skipped === 1 ? '' : 's'} — library inserts carry solids, components, and guides.`,
+              )
+            }
+          },
+          (placed, byUser) => {
+            // A ToolController takeover means another tool is already
+            // arriving — restoring Select then would clobber it (see
+            // LibraryPlaceTool's OnDone doc).
+            if (byUser) {
+              toolController.resetToSelect()
+              renderer.domElement.style.cursor = 'default'
+              // Sync the APP's tool state too (the Zoom Window one-shot
+              // contract): without this, a placement armed while a rail
+              // tool was active leaves the rail highlighting a tool the
+              // controller no longer runs — and clicking that same rail
+              // row again would no-op (adversarial review S12).
+              onToolRevertedRef.current?.()
+            }
+            onDone?.(placed)
+          },
+          handleToast,
+        )
+        toolController.setTool(tool)
+        renderer.domElement.style.cursor = cursorFor('Move')
+        scheduleRender()
+      }
+
       function armTextPlacement(placement: TextPlacement): void {
         const tool = new TextPlaceTool(
           wasmScene,
@@ -4758,7 +4820,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -7289,7 +7351,10 @@ export default function Viewport({
         if (ev.key === 'r' || ev.key === 'R') { switchToolRef.current?.('Rectangle'); return }
         if (ev.key === 'c' || ev.key === 'C') { switchToolRef.current?.('Circle'); return }
         if (ev.key === 'a' || ev.key === 'A') { switchToolRef.current?.('Arc'); return }
-        if (ev.key === 'l' || ev.key === 'L') { switchToolRef.current?.('Line'); return }
+        // ⇧L belongs to the Library dialog (App's global handler) — only an
+        // UNSHIFTED l/L reaches Line here. The other shifted letters keep
+        // their historical tool-switch tolerance.
+        if ((ev.key === 'l' || ev.key === 'L') && !ev.shiftKey) { switchToolRef.current?.('Line'); return }
         if (ev.key === 'p' || ev.key === 'P') { switchToolRef.current?.('Push/Pull'); return }
         if (ev.key === 'f' || ev.key === 'F') { switchToolRef.current?.('Offset'); return }
         if (ev.key === 'm' || ev.key === 'M') { switchToolRef.current?.('Move'); return }

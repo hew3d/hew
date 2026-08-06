@@ -1296,6 +1296,15 @@ enum DocAction {
         /// (with their hidden flags). Undo unregisters exactly these; tags
         /// that already existed before the import are untouched.
         tags: Vec<(Vec<String>, bool)>,
+        /// Created `SketchId`s — definition-owned drafting surfaces a
+        /// library insert ([`Document::insert_document`]) carried in with
+        /// their definitions. Always empty for a format import (`ingest`):
+        /// `ImportScene` has no sketch channel. Undo moves these into
+        /// `hidden_sketches` (redo removes them again) — without that, a
+        /// tombstoned definition's live sketch would serialize with an
+        /// `owner` pointing at a definition the save excludes, a dangling
+        /// reference no conforming reader accepts.
+        sketches: Vec<SketchId>,
     },
     /// `delete_def_member` hid one object from a component definition —
     /// component-edit-parity.md phase K1. Unlike [`DocAction::Deleted`] on a
@@ -2288,6 +2297,68 @@ pub enum MaterialScope {
     Document,
     /// Confined to one object's own faces and base material.
     Object(ObjectId),
+}
+
+/// The identity of the library item a [`Document::insert_document`] came
+/// from: the `hew.library` provenance stamped on every definition and root
+/// node the insert creates, and the key the idempotent re-insert match reads
+/// back (inserting "Chair" twice reuses the in-document definition instead
+/// of minting a second one). The kernel never mints these — the caller
+/// derives `source_id` from the item's own metadata and `content_hash` from
+/// the item's bytes — so an edited library file (same id, new hash) inserts
+/// as a fresh definition instead of silently reusing stale geometry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryProvenance {
+    /// The item's stable library identity (its `hew.library` `id`).
+    pub source_id: String,
+    /// A caller-computed content fingerprint of the item file (any stable
+    /// scheme — the kernel only ever compares it for equality).
+    pub content_hash: String,
+}
+
+/// Options for [`Document::insert_document`].
+#[derive(Debug, Clone)]
+pub struct InsertOptions {
+    /// The placement transform applied to the item's world roots: baked into
+    /// copied world objects ([`Object::apply_transform`] — so it must be
+    /// invertible and orientation-preserving) and composed onto copied
+    /// instance poses. [`Transform::IDENTITY`] inserts the item exactly
+    /// where its own coordinates put it.
+    pub pose: Transform,
+    /// When present, definitions and root nodes the insert creates are
+    /// stamped with `hew.library` provenance attributes, and a definition
+    /// whose stamped provenance already matches a live definition in this
+    /// document is REUSED (a new instance of the existing definition)
+    /// rather than copied again.
+    pub provenance: Option<LibraryProvenance>,
+}
+
+/// What [`Document::insert_document`] did — the caller's selection set plus
+/// the user-facing accounting ("4 solids · 2 materials · 1 definition
+/// reused").
+#[derive(Debug, Clone, Default)]
+pub struct InsertReport {
+    /// The created top-level nodes, in the item's own root order.
+    pub roots: Vec<NodeId>,
+    /// Definitions copied in.
+    pub definitions_added: usize,
+    /// Definitions NOT copied because a live definition's stamped
+    /// provenance matched (idempotent re-insert).
+    pub definitions_reused: usize,
+    /// Palette entries copied in.
+    pub materials_added: usize,
+    /// Item materials resolved to a content-equal entry already in the
+    /// palette instead of being copied.
+    pub materials_reused: usize,
+    /// Objects copied in — world objects and definition members alike.
+    pub objects_added: usize,
+    /// Construction guides carried in.
+    pub guides_added: usize,
+    /// World-owned sketches the insert did NOT carry (v1 scope: an item's
+    /// loose drafting geometry is dropped and reported, never repaired).
+    pub world_sketches_skipped: usize,
+    /// Annotations the insert did NOT carry (v1 scope).
+    pub annotations_skipped: usize,
 }
 
 /// The authoritative model: the tree of Sketches and solid Objects plus the
@@ -3607,6 +3678,9 @@ impl Document {
             groups: all_groups.clone(),
             guides: all_guides.clone(),
             tags: tags_added,
+            // `ImportScene` has no sketch channel; only a library insert
+            // ([`Document::insert_document`]) populates this.
+            sketches: Vec::new(),
         });
         self.redo.clear();
         self.debug_validate();
@@ -3629,6 +3703,643 @@ impl Document {
         };
 
         Ok((report, change))
+    }
+
+    // ---------------------------------------------------------------- library
+
+    /// Merges a copy of `item`'s content into this document — the library
+    /// insert. The additive counterpart of [`Document::load`]: where `load`
+    /// replaces the whole document, this grafts another document's palette,
+    /// definitions, and world tree into the current one, losslessly — unlike
+    /// [`Document::ingest`]'s mesh recipes, copied [`Object`]s keep their
+    /// analytic surfaces, per-edge circle claims, and soft edges, so an
+    /// item's true circles stay true.
+    ///
+    /// Everything lands as ONE undo step (the same [`DocAction::Imported`]
+    /// shape as a format import): undo hides every created entity, redo
+    /// unhides; added palette materials are not individually undone
+    /// (matching `add_material`). Materials are deduplicated against the
+    /// existing palette by content equality (first live match in
+    /// deterministic palette order). With [`InsertOptions::provenance`]
+    /// given, a definition whose stamped provenance matches a live
+    /// definition here is reused outright — the idempotent re-insert — and
+    /// created definitions and roots are stamped for future matches and for
+    /// "in this model" queries.
+    ///
+    /// v1 scope, reported and never repaired: the item's world-owned
+    /// sketches and its annotations are not carried
+    /// ([`InsertReport::world_sketches_skipped`] /
+    /// [`InsertReport::annotations_skipped`]). Definition-owned sketches DO
+    /// carry with their definitions.
+    ///
+    /// # Errors
+    /// - [`DocumentError::ExplodeSessionScope`] — a component session is
+    ///   open (same refusal as [`Document::ingest`]; a mid-GROUP-session
+    ///   insert is fine and folds into the open group at close, exactly like
+    ///   an import).
+    /// - [`DocumentError::Transform`] — `options.pose` is singular
+    ///   ([`TransformError::Singular`]) or orientation-flipping
+    ///   ([`TransformError::Reflection`]). Refused before anything mutates
+    ///   (the strong guarantee): a reflection cannot bake into world
+    ///   objects.
+    pub fn insert_document(
+        &mut self,
+        item: &Document,
+        options: &InsertOptions,
+    ) -> Result<(InsertReport, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "insert_document");
+        self.refuse_during_component_session()?;
+        options.pose.inverse().map_err(DocumentError::Transform)?;
+        if options.pose.determinant() < 0.0 {
+            return Err(DocumentError::Transform(TransformError::Reflection));
+        }
+
+        let mut ctx = LibraryCopy::new(options.provenance.clone());
+
+        // ── 1. Definitions: provenance-reuse or lossless copy ─────────────
+        // Slotmap (dense) order — deterministic for a loaded item. Copied
+        // eagerly rather than on first instance reference: an item's
+        // uninstanced definitions are part of its content, mirroring
+        // `ingest`'s posture of carrying every definition the source
+        // declares.
+        let item_defs: Vec<ComponentId> = item
+            .components
+            .iter()
+            .filter(|(_, d)| !d.hidden)
+            .map(|(id, _)| id)
+            .collect();
+        for cid in item_defs {
+            if let Some(prov) = options.provenance.as_ref()
+                && let Some(existing) =
+                    self.find_library_definition(prov, item.sid_of(&EntityRef::Component(cid)))
+            {
+                ctx.def_map.insert(cid, existing);
+                ctx.report.definitions_reused += 1;
+                continue;
+            }
+            let new_cid = library_copy_def(self, item, cid, &mut ctx);
+            ctx.def_map.insert(cid, new_cid);
+            ctx.report.definitions_added += 1;
+        }
+
+        // ── 2. World tree, placed through the pose ────────────────────────
+        for root in item.top_level_nodes() {
+            let nid = library_copy_node(self, item, root, None, &options.pose, &mut ctx);
+            // Stamp the created root so "in this model" queries can count
+            // every placement of this item, group-shaped items included.
+            if let Some(prov) = options.provenance.clone() {
+                self.stamp_library_provenance(entity_ref_of_node(nid), &prov, None);
+            }
+            ctx.report.roots.push(nid);
+        }
+
+        // ── 3. Construction guides, carried through the pose ──────────────
+        let live_guides: Vec<Guide> = item
+            .guides
+            .iter()
+            .filter(|(_, r)| !r.hidden)
+            .map(|(_, r)| r.guide)
+            .collect();
+        for g in live_guides {
+            let guide = match g {
+                Guide::Line { origin, direction } => {
+                    // An invertible pose cannot map a unit direction to
+                    // ZERO, but an extreme anisotropic scale can shrink it
+                    // below the normalization tolerance — skip such a guide
+                    // (one omitted alignment helper) rather than panic
+                    // mid-mutation (adversarial review S2; the strong
+                    // guarantee forbids a half-inserted document).
+                    let Ok(dir) = options.pose.apply_vector(direction).normalized() else {
+                        continue;
+                    };
+                    Guide::Line {
+                        origin: options.pose.apply_point(origin),
+                        direction: dir,
+                    }
+                }
+                Guide::Point { position } => Guide::Point {
+                    position: options.pose.apply_point(position),
+                },
+            };
+            ctx.all_guides.push(self.insert_guide_record(GuideRecord {
+                guide,
+                hidden: false,
+            }));
+        }
+        ctx.report.guides_added = ctx.all_guides.len();
+
+        // ── 4. Tag registry ───────────────────────────────────────────────
+        // Mirrors `ingest`: only NEWLY registered paths are recorded (and
+        // undone); an existing tag keeps the visibility the user chose.
+        let mut tags_added: Vec<(Vec<String>, bool)> = Vec::new();
+        for (path, &hidden) in item.tag_meta.iter() {
+            if !path.is_empty() && !self.tag_meta.contains_key(path) {
+                self.register_tag(path.clone(), hidden);
+                tags_added.push((path.clone(), hidden));
+            }
+        }
+
+        // ── 5. v1-scope skips, counted honestly ───────────────────────────
+        ctx.report.world_sketches_skipped = item.sketch_ids().len();
+        ctx.report.annotations_skipped = item.annotations.iter().filter(|(_, r)| !r.hidden).count();
+
+        // ── 6. One undo step ──────────────────────────────────────────────
+        self.undo.push(DocAction::Imported {
+            roots: ctx.report.roots.clone(),
+            objects: ctx.all_objects.clone(),
+            components: ctx.all_components.clone(),
+            instances: ctx.all_instances.clone(),
+            groups: ctx.all_groups.clone(),
+            guides: ctx.all_guides.clone(),
+            tags: tags_added,
+            sketches: ctx.all_sketches.clone(),
+        });
+        self.redo.clear();
+        self.debug_validate();
+
+        ctx.report.objects_added = ctx.all_objects.len();
+        let change = DocChange {
+            objects_touched: ctx.all_objects,
+            sketches_touched: ctx.all_sketches,
+            groups_touched: ctx.all_groups,
+            instances_touched: ctx.all_instances,
+            components_touched: ctx.all_components,
+            guides_touched: ctx.all_guides,
+        };
+        Ok((ctx.report, change))
+    }
+
+    /// Copies `item`'s material palette into this document's, content-
+    /// deduplicated: an incoming material content-equal to a live palette
+    /// entry resolves to that entry instead of duplicating it. Returns the
+    /// resolved [`MaterialId`]s in the item's palette order (each either an
+    /// existing id or a fresh one) — a "material item"'s Add-to-palette /
+    /// Paint-with-this action. Like [`Document::add_material`], additions
+    /// are **not** undoable on their own: an unreferenced palette entry is
+    /// harmless, and undoing paint applications is the paint ops' job.
+    pub fn insert_palette(&mut self, item: &Document) -> Vec<MaterialId> {
+        info!(target: "kernel::op", op = "insert_palette");
+        let incoming: Vec<(MaterialId, Material)> = item
+            .materials
+            .iter()
+            .map(|(id, m)| (id, m.clone()))
+            .collect();
+        incoming
+            .into_iter()
+            .map(|(item_mid, mat)| {
+                let existing = self
+                    .materials
+                    .iter()
+                    .find(|(_, m)| **m == mat)
+                    .map(|(id, _)| id);
+                existing.unwrap_or_else(|| {
+                    let id = self.insert_material_record(mat);
+                    // Attribute dictionaries travel with the material,
+                    // exactly as `insert_document`'s material copies do
+                    // (adversarial review S5).
+                    library_copy_entity_attrs(
+                        self,
+                        item,
+                        &EntityRef::Material(item_mid),
+                        EntityRef::Material(id),
+                    );
+                    id
+                })
+            })
+            .collect()
+    }
+
+    /// For each material in `item`'s palette (item palette order), the
+    /// content-equal live entry already in THIS document's palette, if any —
+    /// the read-only sibling of [`Document::insert_palette`], and exactly
+    /// the match it would resolve to (first live match in deterministic
+    /// slotmap order).
+    pub fn palette_matches(&self, item: &Document) -> Vec<Option<MaterialId>> {
+        item.materials
+            .values()
+            .map(|mat| {
+                self.materials
+                    .iter()
+                    .find(|(_, m)| *m == mat)
+                    .map(|(id, _)| id)
+            })
+            .collect()
+    }
+
+    /// Copies `roots` — live world nodes: objects, groups, or component
+    /// instances, nested or top-level — into a NEW standalone document: the
+    /// "save to library" extraction. Read-only on `self`; the extracted
+    /// document is a fresh, fully valid [`Document`] with its own ids and
+    /// stable ids, an empty undo log, and a palette holding exactly the
+    /// materials the copied content references.
+    ///
+    /// Coordinates: the copy is re-expressed in this document's DRAWING-AXES
+    /// frame — the axes origin becomes the item's origin and the axes
+    /// directions its axes ("insertion point = current axes origin").
+    /// Definition-local geometry copies verbatim; instance poses conjugate
+    /// through the frame. The frame is rigid by construction
+    /// ([`AxesFrame`]), so baking its inverse cannot be refused.
+    ///
+    /// `wrap_as_component`: when `roots` is a single world OBJECT, the copy
+    /// is wrapped as a component definition (named after the object, which
+    /// also hands its tags to the placement — [`Document::make_component`]'s
+    /// posture) plus one identity-posed instance: the shape a library
+    /// "component item" file has, and what makes a later insert idempotent.
+    /// A single INSTANCE selection always produces that shape (its
+    /// definition rides along, poses conjugated). The flag is ignored for
+    /// groups and multi-node selections, which copy structurally — a group
+    /// item inserts back as a deep-copied group; definitions cannot nest
+    /// yet (ROADMAP: "Nested component definitions").
+    ///
+    /// Node tags carry, with their registry entries (hidden flags included);
+    /// per-entity attribute dictionaries carry. World guides, annotations,
+    /// camera, and axes do NOT: an extracted item is a part, not a workspace
+    /// snapshot (a whole-document "model item" is a plain save of the
+    /// document itself).
+    ///
+    /// # Errors
+    /// - [`DocumentError::ExplodeSessionScope`] — a component session is
+    ///   open (the world tree holds transient session geometry).
+    /// - [`DocumentError::EmptyComponent`] — `roots` is empty: nothing to
+    ///   extract (the same "select something first" refusal an empty
+    ///   [`Document::make_component`] selection gets).
+    /// - [`DocumentError::DuplicateMember`] — a node listed twice.
+    /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
+    ///   [`DocumentError::UnknownInstance`] — a root is stale, hidden, or
+    ///   (for an object) a definition member rather than a world solid.
+    pub fn extract_item(
+        &self,
+        roots: &[NodeId],
+        wrap_as_component: bool,
+    ) -> Result<Document, DocumentError> {
+        info!(target: "kernel::op", op = "extract_item");
+        self.refuse_during_component_session()?;
+        if roots.is_empty() {
+            return Err(DocumentError::EmptyComponent);
+        }
+        for (i, &node) in roots.iter().enumerate() {
+            if roots[..i].contains(&node) {
+                return Err(DocumentError::DuplicateMember);
+            }
+            match node {
+                NodeId::Object(id) => {
+                    if !self
+                        .objects
+                        .get(id)
+                        .is_some_and(|r| !r.hidden && r.is_world())
+                    {
+                        return Err(DocumentError::UnknownObject);
+                    }
+                }
+                NodeId::Group(id) => {
+                    if self.groups.get(id).is_none_or(|r| r.hidden) {
+                        return Err(DocumentError::UnknownGroup);
+                    }
+                }
+                NodeId::Instance(id) => {
+                    if self.instances.get(id).is_none_or(|r| r.hidden) {
+                        return Err(DocumentError::UnknownInstance);
+                    }
+                }
+            }
+            // A root nested under another root would copy TWICE — once via
+            // its ancestor's recursion, once as its own root (adversarial
+            // review S3). The same refusal as listing a node twice.
+            let mut cursor = self.node_parent(node);
+            while let Some(group) = cursor {
+                if roots.contains(&NodeId::Group(group)) {
+                    return Err(DocumentError::DuplicateMember);
+                }
+                cursor = self.node_parent(NodeId::Group(group));
+            }
+        }
+
+        // world → item: the inverse of the drawing-axes frame. The frame is
+        // orthonormal right-handed (AxesFrame's constructors enforce it), so
+        // the inverse's rows are simply the basis directions.
+        let axes = self.axes();
+        let (o, x, y, z) = (axes.origin, axes.x, axes.y, axes.z());
+        let frame = Transform::from_affine(&[
+            x.x,
+            x.y,
+            x.z,
+            -(x.x * o.x + x.y * o.y + x.z * o.z),
+            y.x,
+            y.y,
+            y.z,
+            -(y.x * o.x + y.y * o.y + y.z * o.z),
+            z.x,
+            z.y,
+            z.z,
+            -(z.x * o.x + z.y * o.y + z.z * o.z),
+        ]);
+
+        let mut item = Document::new();
+        let mut ctx = LibraryCopy::new(None);
+
+        match *roots {
+            // A single instance: its definition rides along, its pose
+            // conjugates into the item frame — the component-item shape.
+            [NodeId::Instance(iid)] => {
+                let src = &self.instances[iid];
+                let new_cid = library_copy_def(&mut item, self, src.def, &mut ctx);
+                let pose_item = src.pose.then(&frame);
+                let new_iid = item.insert_instance_record(InstanceRecord {
+                    def: new_cid,
+                    pose: pose_item,
+                    parent: None,
+                    hidden: false,
+                    name: src.name.clone(),
+                    tags: src.tags.clone(),
+                });
+                library_copy_entity_attrs(
+                    &mut item,
+                    self,
+                    &EntityRef::Instance(iid),
+                    EntityRef::Instance(new_iid),
+                );
+            }
+            // A single bare object, wrapped: definition + identity
+            // instance. The definition takes the object's name and the
+            // instance its tags (make_component's split); the member copy
+            // keeps neither, so nothing double-reports.
+            [NodeId::Object(oid)] if wrap_as_component => {
+                let src_name = self.objects[oid].name.clone();
+                let src_tags = self.objects[oid].tags.clone();
+                let new_cid = item.insert_component_record(ComponentDef {
+                    members: Vec::new(),
+                    hidden: false,
+                    name: src_name,
+                });
+                let new_oid = library_copy_object(
+                    &mut item,
+                    self,
+                    oid,
+                    ObjectOwner::Definition(new_cid),
+                    Some(&frame),
+                    &mut ctx,
+                );
+                item.objects[new_oid].name = None;
+                item.objects[new_oid].tags = Vec::new();
+                item.components[new_cid].members = vec![new_oid];
+                item.insert_instance_record(InstanceRecord {
+                    def: new_cid,
+                    pose: Transform::IDENTITY,
+                    parent: None,
+                    hidden: false,
+                    name: None,
+                    tags: src_tags,
+                });
+            }
+            // Groups and multi-node selections copy structurally.
+            _ => {
+                for &root in roots {
+                    library_copy_node(&mut item, self, root, None, &frame, &mut ctx);
+                }
+            }
+        }
+
+        // A user-hidden ROOT would make the whole item invisible — saved
+        // from the outliner while hidden, it would later insert as nothing
+        // (adversarial review S4). The item's top level is always visible;
+        // hide state on NESTED content is a real part of the copied
+        // structure and stays.
+        for root in item.top_level_nodes() {
+            match root {
+                NodeId::Object(id) => {
+                    item.user_hidden_objects.remove(&id);
+                }
+                NodeId::Group(id) => {
+                    item.user_hidden_groups.remove(&id);
+                }
+                NodeId::Instance(id) => {
+                    item.user_hidden_instances.remove(&id);
+                }
+            }
+        }
+
+        // Re-origin (playtest round 2): with the drawing axes UNMOVED — the
+        // overwhelmingly common case — "insert at the axes origin" means
+        // "insert wherever this happened to sit in world space", which put
+        // an item meters from the cursor. An unmoved frame carries no
+        // intent, so the item instead re-origins to its content's BOTTOM
+        // CENTER (the natural grab point for placing something on ground
+        // or a face). A deliberately placed axes frame still wins — that
+        // placement IS the user choosing the insertion point.
+        if self.axes() == AxesFrame::IDENTITY {
+            let mut lo = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            let mut hi = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+            let mut extend = |p: Point3| {
+                lo = Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+                hi = Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+            };
+            // Anchor on what the user SEES: user-hidden nested content
+            // (carried into the item deliberately) is excluded from the
+            // ghost, the thumbnail, and the viewport alike — an anchor
+            // derived from invisible geometry would float the visible part
+            // off the cursor (round-3 review).
+            let visibly_hidden = |item: &Document, node: NodeId| -> bool {
+                if item.node_user_hidden(node) {
+                    return true;
+                }
+                let mut cursor = item.node_parent(node);
+                while let Some(group) = cursor {
+                    if item.node_user_hidden(NodeId::Group(group)) {
+                        return true;
+                    }
+                    cursor = item.node_parent(NodeId::Group(group));
+                }
+                false
+            };
+            for (oid, rec) in item.objects.iter().filter(|(_, r)| !r.hidden) {
+                if matches!(rec.owner, ObjectOwner::World { .. })
+                    && !visibly_hidden(&item, NodeId::Object(oid))
+                {
+                    for v in rec.object.vertices().values() {
+                        extend(v.position);
+                    }
+                }
+            }
+            let instances: Vec<(InstanceId, Transform, ComponentId)> = item
+                .instances
+                .iter()
+                .filter(|(id, r)| !r.hidden && !visibly_hidden(&item, NodeId::Instance(*id)))
+                .map(|(id, r)| (id, r.pose, r.def))
+                .collect();
+            for (_, pose, def) in &instances {
+                for &m in &item.components[*def].members {
+                    if item.objects[m].hidden {
+                        continue;
+                    }
+                    for v in item.objects[m].object.vertices().values() {
+                        extend(pose.apply_point(v.position));
+                    }
+                }
+            }
+            if lo.x.is_finite() {
+                let anchor = Point3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, lo.z);
+                let shift = Transform::translation(Vec3::new(-anchor.x, -anchor.y, -anchor.z));
+                let world_objects: Vec<ObjectId> = item
+                    .objects
+                    .iter()
+                    .filter(|(_, r)| !r.hidden && matches!(r.owner, ObjectOwner::World { .. }))
+                    .map(|(id, _)| id)
+                    .collect();
+                for oid in world_objects {
+                    item.objects[oid]
+                        .object
+                        .apply_transform(&shift)
+                        .expect("a pure translation cannot be refused");
+                }
+                for (iid, pose, _) in instances {
+                    item.instances[iid].pose = pose.then(&shift);
+                }
+            }
+        }
+
+        // Register every carried tag path with this document's hidden flag.
+        let mut paths: Vec<Vec<String>> = Vec::new();
+        for (_, r) in item.objects.iter() {
+            paths.extend(r.tags.iter().cloned());
+        }
+        for (_, r) in item.groups.iter() {
+            paths.extend(r.tags.iter().cloned());
+        }
+        for (_, r) in item.instances.iter() {
+            paths.extend(r.tags.iter().cloned());
+        }
+        for path in paths {
+            if !path.is_empty() && !item.tag_meta.contains_key(&path) {
+                let hidden = self.tag_meta.get(&path).copied().unwrap_or(false);
+                item.register_tag(path, hidden);
+            }
+        }
+
+        item.debug_validate();
+        Ok(item)
+    }
+
+    /// The live definition whose stamped `hew.library` provenance matches
+    /// (`source_id`, `content_hash`, `def_sid`) — the idempotent re-insert
+    /// lookup. `def_sid` is the definition's stable id IN THE ITEM FILE,
+    /// distinguishing multiple definitions carried by one item. First match
+    /// in deterministic slotmap order.
+    fn find_library_definition(
+        &self,
+        prov: &LibraryProvenance,
+        def_sid: Option<u64>,
+    ) -> Option<ComponentId> {
+        use crate::attr::AttrValue;
+        let want_sid = def_sid.map(|s| s.to_string());
+        self.components.iter().find_map(|(cid, def)| {
+            if def.hidden {
+                return None;
+            }
+            let ns = self
+                .attrs
+                .get(&AttrTarget::Entity(EntityRef::Component(cid)))?
+                .get(LIBRARY_ATTR_NS)?;
+            let text = |key: &str| match ns.get(key) {
+                Some(AttrValue::Text(s)) => Some(s.as_str()),
+                _ => None,
+            };
+            (text("source_id") == Some(prov.source_id.as_str())
+                && text("content_hash") == Some(prov.content_hash.as_str())
+                && text("def_sid") == want_sid.as_deref())
+            .then_some(cid)
+        })
+    }
+
+    /// Writes the `hew.library` provenance namespace onto `entity`'s
+    /// attribute dictionary directly — no undo entry of its own, because the
+    /// stamping belongs to the insert's single `Imported` step. On undo the
+    /// entity is tombstoned and its dictionary harmlessly rides along, the
+    /// same posture `sids`/`attrs` take for every tombstoned record.
+    fn stamp_library_provenance(
+        &mut self,
+        entity: EntityRef,
+        prov: &LibraryProvenance,
+        def_sid: Option<u64>,
+    ) {
+        use crate::attr::AttrValue;
+        let dict = self.attrs.entry(AttrTarget::Entity(entity)).or_default();
+        let ns = dict.entry(LIBRARY_ATTR_NS.to_string()).or_default();
+        ns.insert(
+            "source_id".to_string(),
+            AttrValue::Text(prov.source_id.clone()),
+        );
+        ns.insert(
+            "content_hash".to_string(),
+            AttrValue::Text(prov.content_hash.clone()),
+        );
+        match def_sid {
+            Some(sid) => {
+                ns.insert("def_sid".to_string(), AttrValue::Text(sid.to_string()));
+            }
+            // A re-stamp without a definition sid must not leave a STALE
+            // one behind from an earlier stamp — a mixed composite would
+            // match/miss unpredictably (adversarial review S10).
+            None => {
+                ns.remove("def_sid");
+            }
+        }
+    }
+
+    /// Marks the SOURCE of a just-saved library item: stamps `hew.library`
+    /// provenance on the selection the user saved — and, for a component
+    /// instance, on its DEFINITION (with `def_sid`, the definition's stable
+    /// id in the item file) — so the model the item came FROM immediately
+    /// counts as containing it. Without this, "Save to Library" followed by
+    /// the browser's "In this model" filter would deny the very component
+    /// the user just saved out of this model (playtest finding), and
+    /// re-inserting the item would mint a second definition instead of
+    /// reusing the one it was saved from.
+    ///
+    /// NOT an undo step: like the tag-visibility registry and the palette's
+    /// additions, the stamp is bookkeeping the user never authored as a
+    /// geometry edit — it serializes with the document, but undoing model
+    /// work should never un-label a library source. Stale/hidden nodes are
+    /// skipped silently (the selection was validated by the extraction one
+    /// call earlier).
+    ///
+    /// LAST WRITE WINS, deliberately: a definition (or node) can be the
+    /// source of only ONE library item — saving the same selection again
+    /// re-associates it with the newest item, which is what "I just saved
+    /// this" means. The superseded item stays fully usable from the
+    /// library; only the in-model source link moves.
+    pub fn stamp_library_source(
+        &mut self,
+        nodes: &[NodeId],
+        prov: &LibraryProvenance,
+        def_sid: Option<u64>,
+    ) {
+        info!(target: "kernel::op", op = "stamp_library_source");
+        for &node in nodes {
+            match node {
+                NodeId::Object(id) => {
+                    if self.objects.get(id).is_some_and(|r| !r.hidden) {
+                        self.stamp_library_provenance(EntityRef::Object(id), prov, None);
+                    }
+                }
+                NodeId::Group(id) => {
+                    if self.groups.get(id).is_some_and(|r| !r.hidden) {
+                        self.stamp_library_provenance(EntityRef::Group(id), prov, None);
+                    }
+                }
+                NodeId::Instance(id) => {
+                    let Some(rec) = self.instances.get(id).filter(|r| !r.hidden) else {
+                        continue;
+                    };
+                    let def = rec.def;
+                    self.stamp_library_provenance(EntityRef::Instance(id), prov, None);
+                    // The definition carries the reuse-matching identity, so
+                    // every sibling instance counts and a later insert of
+                    // this item resolves to THIS definition.
+                    self.stamp_library_provenance(EntityRef::Component(def), prov, def_sid);
+                }
+            }
+        }
+        self.debug_validate();
     }
 
     // --------------------------------------------------------------- sketches
@@ -9808,6 +10519,20 @@ impl Document {
             &EntityRef::Component(prev_def),
             EntityRef::Component(new_def),
         );
+        // The `hew.library` provenance stamp must NOT survive onto the
+        // private copy: it is an identity assertion ("this definition IS
+        // library item X at content hash Y") that `insert_document`'s
+        // idempotent-reuse match trusts, and make_unique's entire purpose
+        // is divergence. A copied stamp would let a later insert of the
+        // pristine item silently reuse the user's edited private geometry
+        // (adversarial review S1). Client namespaces still deep-copy per
+        // docs/HEW_API.md §8.
+        if let Some(dict) = self
+            .attrs
+            .get_mut(&AttrTarget::Entity(EntityRef::Component(new_def)))
+        {
+            dict.remove(LIBRARY_ATTR_NS);
+        }
         let mut new_members: Vec<ObjectId> = Vec::with_capacity(members.len());
         for m in members {
             let object = self.objects[m].object.clone();
@@ -13262,6 +13987,7 @@ impl Document {
                 groups,
                 guides,
                 tags,
+                sketches,
                 ..
             } => {
                 // Undo import: hide every created entity (ids stay stable).
@@ -13295,9 +14021,16 @@ impl Document {
                         rec.hidden = true;
                     }
                 }
+                // Definition-owned sketches a library insert carried in:
+                // tombstone them with their definitions, or a later save
+                // would write a sketch whose `owner` names a definition the
+                // save excludes (see the field's doc on `DocAction::Imported`).
+                for &sid in sketches.iter() {
+                    self.hidden_sketches.insert(sid);
+                }
                 DocChange {
                     objects_touched: objects.clone(),
-                    sketches_touched: Vec::new(),
+                    sketches_touched: sketches.clone(),
                     groups_touched: groups.clone(),
                     instances_touched: instances.clone(),
                     components_touched: components.clone(),
@@ -14382,6 +15115,7 @@ impl Document {
                 groups,
                 guides,
                 tags,
+                sketches,
                 ..
             } => {
                 // Redo import: unhide every created entity; re-register the
@@ -14415,9 +15149,14 @@ impl Document {
                         rec.hidden = false;
                     }
                 }
+                // Un-tombstone the library insert's definition-owned
+                // sketches (the exact set undo hid).
+                for &sid in sketches.iter() {
+                    self.hidden_sketches.remove(&sid);
+                }
                 DocChange {
                     objects_touched: objects.clone(),
-                    sketches_touched: Vec::new(),
+                    sketches_touched: sketches.clone(),
                     groups_touched: groups.clone(),
                     instances_touched: instances.clone(),
                     components_touched: components.clone(),
@@ -14764,6 +15503,333 @@ fn ingest_build_node(
             }
             doc.groups[gid].members = members;
             Some(NodeId::Group(gid))
+        }
+    }
+}
+
+/// The attribute namespace of first-party library metadata and provenance
+/// (`hew.*` is reserved for first-party use at the API boundary —
+/// docs/HEW_API.md §8 — which is exactly what lets the kernel write it here
+/// while no external client can).
+const LIBRARY_ATTR_NS: &str = "hew.library";
+
+/// The [`EntityRef`] a tree node's attribute dictionary hangs on.
+fn entity_ref_of_node(node: NodeId) -> EntityRef {
+    match node {
+        NodeId::Object(id) => EntityRef::Object(id),
+        NodeId::Group(id) => EntityRef::Group(id),
+        NodeId::Instance(id) => EntityRef::Instance(id),
+    }
+}
+
+/// The shared bookkeeping of the library copy engine, threaded through
+/// [`library_copy_node`]/[`library_copy_def`]/[`library_copy_object`] by both
+/// directions of the copy: [`Document::insert_document`] (item → live
+/// document) and [`Document::extract_item`] (live document → fresh item).
+struct LibraryCopy {
+    /// source `MaterialId` → destination `MaterialId`, memoized. Filled on
+    /// first reference; destination side deduplicates by content equality.
+    mat_map: BTreeMap<MaterialId, MaterialId>,
+    /// source `ComponentId` → destination `ComponentId` (reused or copied).
+    /// Pre-seeded by the insert's eager definition pass; filled lazily on
+    /// first reference by the extract path.
+    def_map: BTreeMap<ComponentId, ComponentId>,
+    /// Provenance to stamp on copied definitions (insert only; `None` when
+    /// extracting).
+    provenance: Option<LibraryProvenance>,
+    report: InsertReport,
+    all_objects: Vec<ObjectId>,
+    all_components: Vec<ComponentId>,
+    all_instances: Vec<InstanceId>,
+    all_groups: Vec<GroupId>,
+    all_sketches: Vec<SketchId>,
+    all_guides: Vec<GuideId>,
+}
+
+impl LibraryCopy {
+    fn new(provenance: Option<LibraryProvenance>) -> LibraryCopy {
+        LibraryCopy {
+            mat_map: BTreeMap::new(),
+            def_map: BTreeMap::new(),
+            provenance,
+            report: InsertReport::default(),
+            all_objects: Vec::new(),
+            all_components: Vec::new(),
+            all_instances: Vec::new(),
+            all_groups: Vec::new(),
+            all_sketches: Vec::new(),
+            all_guides: Vec::new(),
+        }
+    }
+}
+
+/// Copies `entity`'s attribute dictionary from `src` into `dst` under the
+/// copy's own handle — the cross-document sibling of [`Document::copy_attrs`].
+/// Client data (part numbers, plugin state) travels with the geometry it
+/// annotates.
+fn library_copy_entity_attrs(dst: &mut Document, src: &Document, from: &EntityRef, to: EntityRef) {
+    if let Some(dict) = src.attrs.get(&AttrTarget::Entity(from.clone()))
+        && !dict.is_empty()
+    {
+        let mut dict = dict.clone();
+        // The `hew.library` provenance namespace is an identity assertion
+        // written ONLY by `stamp_library_provenance` at insert time — a
+        // blind cross-document copy would carry a stale stamp onto content
+        // it no longer describes (adversarial review S1). The insert path
+        // re-stamps what deserves a stamp; everything else must arrive
+        // clean. Client namespaces copy verbatim (docs/HEW_API.md §8).
+        dict.remove(LIBRARY_ATTR_NS);
+        if !dict.is_empty() {
+            dst.attrs.insert(AttrTarget::Entity(to), dict);
+        }
+    }
+}
+
+/// Copies one solid across documents: a lossless [`Object`] clone with its
+/// material references remapped into `dst`'s palette (content-deduplicated),
+/// optionally baking `bake` into the copy's geometry (validated by the
+/// caller — [`Object::apply_transform`] would refuse a singular or
+/// reflecting transform, so a pre-validated bake cannot fail). The copy gets
+/// a fresh empty history ([`Document::make_unique`]'s posture), carries
+/// name, tags, attrs, and the user-hidden flag, and is recorded in `ctx`.
+fn library_copy_object(
+    dst: &mut Document,
+    src: &Document,
+    oid: ObjectId,
+    owner: ObjectOwner,
+    bake: Option<&Transform>,
+    ctx: &mut LibraryCopy,
+) -> ObjectId {
+    let rec = &src.objects[oid];
+    let mut obj = rec.object.clone();
+
+    // Resolve every referenced material into dst's palette (memoized;
+    // content-equal palette entries are reused, first live match in
+    // deterministic slotmap order — repeated inserts never grow the palette
+    // with duplicates).
+    let mut referenced: Vec<MaterialId> = obj.faces().values().filter_map(|f| f.material).collect();
+    if let Some(m) = obj.default_material() {
+        referenced.push(m);
+    }
+    for mid in referenced {
+        if ctx.mat_map.contains_key(&mid) {
+            continue;
+        }
+        let mat = src.materials[mid].clone();
+        let existing = dst
+            .materials
+            .iter()
+            .find(|(_, m)| **m == mat)
+            .map(|(id, _)| id);
+        let new_mid = match existing {
+            Some(id) => {
+                ctx.report.materials_reused += 1;
+                id
+            }
+            None => {
+                ctx.report.materials_added += 1;
+                let id = dst.insert_material_record(mat);
+                library_copy_entity_attrs(
+                    dst,
+                    src,
+                    &EntityRef::Material(mid),
+                    EntityRef::Material(id),
+                );
+                id
+            }
+        };
+        ctx.mat_map.insert(mid, new_mid);
+    }
+    let map = ctx.mat_map.clone();
+    obj.remap_materials(&|m| {
+        *map.get(&m)
+            .expect("every referenced material was resolved above")
+    });
+    if let Some(t) = bake {
+        obj.apply_transform(t)
+            .expect("library bake transform validated before any mutation");
+    }
+
+    let new_oid = dst.insert_object_record(ObjectRecord {
+        object: obj,
+        history: History::new(),
+        hidden: false,
+        owner,
+        name: rec.name.clone(),
+        tags: rec.tags.clone(),
+    });
+    library_copy_entity_attrs(
+        dst,
+        src,
+        &EntityRef::Object(oid),
+        EntityRef::Object(new_oid),
+    );
+    if src.user_hidden_objects.contains(&oid) {
+        dst.user_hidden_objects.insert(new_oid);
+    }
+    ctx.all_objects.push(new_oid);
+    new_oid
+}
+
+/// Copies one component definition across documents: member objects
+/// (definition-local, never baked), LIVE definition-owned sketches
+/// ([`Document::make_unique`]'s deep-copy posture — a hidden husk is
+/// skipped), name, attrs — and, on the insert path, the `hew.library`
+/// provenance stamp that makes the next insert of the same item reuse this
+/// definition instead of copying again.
+fn library_copy_def(
+    dst: &mut Document,
+    src: &Document,
+    cid: ComponentId,
+    ctx: &mut LibraryCopy,
+) -> ComponentId {
+    let def = &src.components[cid];
+    let new_cid = dst.insert_component_record(ComponentDef {
+        members: Vec::new(),
+        hidden: false,
+        name: def.name.clone(),
+    });
+    let src_members = def.members.clone();
+    let mut members: Vec<ObjectId> = Vec::with_capacity(src_members.len());
+    for m in src_members {
+        // A tombstoned member (an undone in-definition birth) is not part
+        // of the definition's content — save excludes it too.
+        if src.objects[m].hidden {
+            continue;
+        }
+        members.push(library_copy_object(
+            dst,
+            src,
+            m,
+            ObjectOwner::Definition(new_cid),
+            None,
+            ctx,
+        ));
+    }
+    dst.components[new_cid].members = members;
+
+    // LIVE definition-owned sketches ride along (deterministic BTreeMap
+    // order).
+    let def_sketches: Vec<SketchId> = src
+        .def_sketches
+        .iter()
+        .filter(|&(s, &c)| c == cid && !src.hidden_sketches.contains(s))
+        .map(|(&s, _)| s)
+        .collect();
+    for s in def_sketches {
+        let new_s = dst.insert_sketch_record(src.sketches[s].clone());
+        library_copy_entity_attrs(dst, src, &EntityRef::Sketch(s), EntityRef::Sketch(new_s));
+        dst.def_sketches.insert(new_s, new_cid);
+        ctx.all_sketches.push(new_s);
+    }
+
+    library_copy_entity_attrs(
+        dst,
+        src,
+        &EntityRef::Component(cid),
+        EntityRef::Component(new_cid),
+    );
+    if let Some(prov) = ctx.provenance.clone() {
+        dst.stamp_library_provenance(
+            EntityRef::Component(new_cid),
+            &prov,
+            src.sid_of(&EntityRef::Component(cid)),
+        );
+    }
+    ctx.all_components.push(new_cid);
+    new_cid
+}
+
+/// Recursively copies one world-tree node across documents: world objects
+/// get `pose` baked in, instance poses compose with it, groups recurse in
+/// member order. Names, tags, attrs, and user-hidden flags carry.
+fn library_copy_node(
+    dst: &mut Document,
+    src: &Document,
+    node: NodeId,
+    parent: Option<GroupId>,
+    pose: &Transform,
+    ctx: &mut LibraryCopy,
+) -> NodeId {
+    match node {
+        NodeId::Object(oid) => {
+            let new_oid = library_copy_object(
+                dst,
+                src,
+                oid,
+                ObjectOwner::World { parent },
+                Some(pose),
+                ctx,
+            );
+            NodeId::Object(new_oid)
+        }
+        NodeId::Instance(iid) => {
+            let rec = &src.instances[iid];
+            let new_def = match ctx.def_map.get(&rec.def) {
+                Some(&d) => d,
+                // The extract path reaches definitions lazily, on first
+                // reference; the insert path pre-seeded the map.
+                None => {
+                    let d = library_copy_def(dst, src, rec.def, ctx);
+                    ctx.def_map.insert(rec.def, d);
+                    d
+                }
+            };
+            let new_pose = rec.pose.then(pose);
+            let (name, tags) = (rec.name.clone(), rec.tags.clone());
+            let new_iid = dst.insert_instance_record(InstanceRecord {
+                def: new_def,
+                pose: new_pose,
+                parent,
+                hidden: false,
+                name,
+                tags,
+            });
+            library_copy_entity_attrs(
+                dst,
+                src,
+                &EntityRef::Instance(iid),
+                EntityRef::Instance(new_iid),
+            );
+            if src.user_hidden_instances.contains(&iid) {
+                dst.user_hidden_instances.insert(new_iid);
+            }
+            ctx.all_instances.push(new_iid);
+            NodeId::Instance(new_iid)
+        }
+        NodeId::Group(gid) => {
+            let (name, tags, src_members) = {
+                let rec = &src.groups[gid];
+                (rec.name.clone(), rec.tags.clone(), rec.members.clone())
+            };
+            let new_gid = dst.insert_group_record(GroupRecord {
+                members: Vec::new(),
+                parent,
+                hidden: false,
+                name,
+                tags,
+            });
+            library_copy_entity_attrs(dst, src, &EntityRef::Group(gid), EntityRef::Group(new_gid));
+            if src.user_hidden_groups.contains(&gid) {
+                dst.user_hidden_groups.insert(new_gid);
+            }
+            ctx.all_groups.push(new_gid);
+            let mut members: Vec<NodeId> = Vec::with_capacity(src_members.len());
+            for child in src_members {
+                // A tombstoned member (an undone creation) is not part of
+                // the group's content.
+                let live = match child {
+                    NodeId::Object(id) => src.objects.get(id).is_some_and(|r| !r.hidden),
+                    NodeId::Group(id) => src.groups.get(id).is_some_and(|r| !r.hidden),
+                    NodeId::Instance(id) => src.instances.get(id).is_some_and(|r| !r.hidden),
+                };
+                if !live {
+                    continue;
+                }
+                members.push(library_copy_node(dst, src, child, Some(new_gid), pose, ctx));
+            }
+            dst.groups[new_gid].members = members;
+            NodeId::Group(new_gid)
         }
     }
 }

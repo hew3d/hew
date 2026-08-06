@@ -42,6 +42,15 @@ export interface MenuBarProps {
   onImport: () => void
   /** Open the unified Export dialog (format — glTF/GLB or STL — chosen there). */
   onExport: () => void
+  /** File ▸ Save to Library… — prompts for a name, then saves the whole
+   *  document as a library item. Omitted/no-op-guarded the same way the
+   *  other optional handlers are; `saveToLibraryDisabled` greys the item out
+   *  on a platform with no library backend (the web build). */
+  onSaveToLibrary?: () => void
+  /** True on a platform with no library backend (web) — disables File ▸ Save
+   *  to Library… rather than hiding it, matching Import…'s session-gating
+   *  posture. */
+  saveToLibraryDisabled?: boolean
   /** Close the current window (desktop shells only — omitted on web, where
    *  the browser owns the window). */
   onClose?: () => void
@@ -72,6 +81,8 @@ export interface MenuBarProps {
   showObjectInfo?: boolean
   /** Whether the Debug Log panel is visible. */
   showDebugLog?: boolean
+  /** Whether the Library browser dialog is open. */
+  showLibrary?: boolean
   /** Toggle the Model info pane. */
   onToggleModelInfo?: () => void
   /** Toggle the Materials pane. */
@@ -82,6 +93,8 @@ export interface MenuBarProps {
   onToggleObjectInfo?: () => void
   /** Toggle the Debug Log panel. */
   onToggleDebugLog?: () => void
+  /** Toggle the Library browser dialog (Window ▸ Library, ⇧⌘L). */
+  onToggleLibrary?: () => void
   /** Whether the world axes are shown (View ▸ Axes). */
   showAxes?: boolean
   /** Whether the ground grid is shown (View ▸ Grid). */
@@ -450,6 +463,8 @@ export function MenuBar({
   onSaveAs,
   onImport,
   onExport,
+  onSaveToLibrary,
+  saveToLibraryDisabled = false,
   onClose,
   onExit,
   recentFiles,
@@ -466,11 +481,13 @@ export function MenuBar({
   showTags = false,
   showObjectInfo = false,
   showDebugLog = false,
+  showLibrary = false,
   onToggleModelInfo,
   onToggleMaterials,
   onToggleTags,
   onToggleObjectInfo,
   onToggleDebugLog,
+  onToggleLibrary,
   showAxes = true,
   showGrid = true,
   showGuides = true,
@@ -592,6 +609,13 @@ export function MenuBar({
             <div style={SEPARATOR_STYLE} />
             <MenuItem label="Save" shortcut={`${mod}S`} onClick={withClose(onSave)} />
             <MenuItem label="Save As…" shortcut={`${mod}⇧S`} onClick={withClose(onSaveAs)} />
+            {onSaveToLibrary !== undefined && (
+              <MenuItem
+                label="Save to Library…"
+                disabled={saveToLibraryDisabled}
+                onClick={withClose(onSaveToLibrary)}
+              />
+            )}
             {(onClose !== undefined || onExit !== undefined) && (
               <div style={SEPARATOR_STYLE} />
             )}
@@ -980,6 +1004,12 @@ export function MenuBar({
               shortcut={`⇧${mod}O`}
               checked={showObjectInfo}
               onClick={withClose(() => onToggleObjectInfo?.())}
+            />
+            <CheckMenuItem
+              label="Library"
+              shortcut={`⇧${mod}L`}
+              checked={showLibrary}
+              onClick={withClose(() => onToggleLibrary?.())}
             />
             {windowList !== undefined && windowList.length > 0 && (
               <>

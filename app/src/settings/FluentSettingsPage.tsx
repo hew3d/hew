@@ -37,6 +37,7 @@ import {
   type ThemeSetting,
 } from './theme'
 import { getDebugMode, setDebugMode, subscribe as subscribeDebug } from './debugMode'
+import { libraryStore } from '../io/libraryStore'
 
 // Windows 11 app type ramp (Segoe UI Variable falls back to Segoe UI in
 // webviews that don't expose the variable face).
@@ -153,6 +154,36 @@ const optionStyle: CSSProperties = {
   color: 'var(--text-primary, #eee)',
 }
 
+function fluentButtonStyle(disabled: boolean): CSSProperties {
+  return {
+    padding: '5px 14px',
+    fontSize: '14px',
+    fontFamily: FONT,
+    background: 'var(--surface-input, #2a2a2a)',
+    color: disabled ? 'var(--text-faint, #666)' : 'var(--text-primary, #eee)',
+    border: '1px solid var(--border-strong, #444)',
+    borderRadius: '4px',
+    cursor: disabled ? 'default' : 'pointer',
+    flexShrink: 0,
+  }
+}
+
+/** Library folder path: a read-only text input holding the real absolute
+ * path exactly as the backend reports it — no truncation trick that could
+ * visually corrupt it (an RTL-flip ellipsis, tried earlier, silently
+ * dropped the leading `/` of an absolute path in some renderers). */
+const libraryPathInputStyle: CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  padding: '5px 10px',
+  fontFamily: 'var(--font-family-mono, ui-monospace, SFMono-Regular, monospace)',
+  fontSize: '12px',
+  background: 'var(--surface-input, #2a2a2a)',
+  color: 'var(--text-primary, #eee)',
+  border: '1px solid var(--border-strong, #444)',
+  borderRadius: '4px',
+}
+
 /** One Fluent settings card: title + optional description left, control right. */
 function SettingsCard({
   title,
@@ -250,10 +281,47 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
   const [format, setFormat] = useState<LengthFormat>(() => getLengthUnit())
   const [theme, setTheme] = useState<ThemeSetting>(() => getThemeSetting())
   const [debug, setDebug] = useState<boolean>(() => getDebugMode())
+  const libStore = libraryStore()
+  const libraryAvailable = libStore.available()
+  const [libraryPath, setLibraryPath] = useState<string | null>(null)
 
   useEffect(() => subscribeUnits(setFormat), [])
   useEffect(() => subscribeTheme(setTheme), [])
   useEffect(() => subscribeDebug(setDebug), [])
+
+  useEffect(() => {
+    if (!libraryAvailable) return
+    let cancelled = false
+    const refresh = (): void => {
+      libStore
+        .folderInfo()
+        .then(({ path }) => {
+          if (!cancelled) setLibraryPath(path)
+        })
+        .catch(() => {
+          /* best-effort — leave the last known path displayed */
+        })
+    }
+    refresh()
+    const unsubscribe = libStore.subscribe(refresh)
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+    // `libStore` is the module-level singleton libraryStore() always
+    // returns — its identity is stable, so it's deliberately not a dep.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [libraryAvailable])
+
+  async function handleChooseLibraryFolder(): Promise<void> {
+    if (!libraryAvailable) return
+    try {
+      const next = await libStore.chooseFolder()
+      if (next !== null) setLibraryPath(next)
+    } catch {
+      /* cancelled or unsupported — leave the current path displayed */
+    }
+  }
 
   // Esc returns to the document — captured before the app's global keydown
   // handlers so an open settings page can't also cancel a tool underneath.
@@ -358,6 +426,30 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
               ))}
             </select>
           </SettingsCard>
+
+          <div style={sectionHeaderStyle}>Library</div>
+          <div style={cardStyle}>
+            <label htmlFor="fluent-library-folder-path" style={{ ...cardTitleStyle, flexShrink: 0 }}>
+              Library folder:
+            </label>
+            <input
+              id="fluent-library-folder-path"
+              type="text"
+              readOnly
+              value={libraryAvailable ? (libraryPath ?? '') : ''}
+              placeholder={libraryAvailable ? 'Loading…' : 'Not available in the browser build yet.'}
+              title={libraryPath ?? undefined}
+              style={libraryPathInputStyle}
+            />
+            <button
+              type="button"
+              onClick={handleChooseLibraryFolder}
+              disabled={!libraryAvailable}
+              style={fluentButtonStyle(!libraryAvailable)}
+            >
+              Change…
+            </button>
+          </div>
 
           <div style={sectionHeaderStyle}>Debug</div>
           <SettingsCard

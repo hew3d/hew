@@ -1297,14 +1297,18 @@ describe('App — toast severity', () => {
     // by the log level AND the bubble color alike.
     act(() => latestOnToast()('not solid', 'BooleanOperandNotSolid'))
     const bubble = screen.getByText(/not solid/).closest('div')!
-    expect(bubble.style.background).toBe('rgb(204, 51, 34)')
+    // Tokenized (Library effort — jsdom doesn't resolve custom properties on
+    // inline styles, so the literal var(...) reference is what's observable
+    // here; the resolved value is themed via tokens.css's
+    // --status-leaky-bg, unit-tested visually by the app's own theme specs).
+    expect(bubble.style.background).toBe('var(--status-leaky-bg)')
   })
 
   it('renders warning-level refusals as neutral bubbles', async () => {
     await renderAndLoad()
     act(() => latestOnToast()('nothing to undo', 'NothingToUndo'))
     const bubble = screen.getByText(/nothing to undo/).closest('div')!
-    expect(bubble.style.background).toBe('rgb(51, 51, 51)')
+    expect(bubble.style.background).toBe('var(--surface-overlay)')
   })
 })
 

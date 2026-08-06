@@ -1,7 +1,7 @@
 ---
 title: "Import and export"
 description: "Hew reads SketchUp, COLLADA, glTF, and STL, and writes manifold STL and 3MF for printing plus glTF for everything else."
-order: 17
+order: 18
 ---
 
 | Format | Import | Export |
