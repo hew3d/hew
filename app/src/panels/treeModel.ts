@@ -305,8 +305,9 @@ export function structuralSelection(
 
 /**
  * Whether a selection can be folded into a component.
- * Rules: one or more distinct objects/groups only — no instances (nested defs
- * are deferred) and no sketch-scoped nodes (they have no kernel NodeId; see
+ * Rules: one or more distinct objects, groups, or instances — a selected
+ * instance becomes a nested member of the new definition — and no
+ * sketch-scoped nodes (they have no kernel NodeId; see
  * `structuralSelection`). A single object is the common case; multiple must
  * be siblings (share a parent), like canGroup but without its ≥2 requirement.
  */
@@ -314,9 +315,12 @@ export function canMakeComponent(
   selected: NodeRef[],
   parentOf: (n: NodeRef) => bigint | undefined,
 ): boolean {
-  // Objects and groups only: instances are deferred (nested defs), and a
-  // sketch-kind node must never reach the kernel's node-id space.
-  if (selected.some((n) => n.kind !== 'object' && n.kind !== 'group')) return false
+  // Objects, groups, and instances: a selected instance becomes a NESTED
+  // member of the new definition (the kernel keeps groups whole and folds
+  // instances in). A sketch-kind node must never reach the kernel's
+  // node-id space.
+  if (selected.some((n) => n.kind !== 'object' && n.kind !== 'group' && n.kind !== 'instance'))
+    return false
 
   // Deduplicate by kind+id.
   const seen = new Set<string>()

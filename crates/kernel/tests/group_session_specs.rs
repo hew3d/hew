@@ -316,8 +316,10 @@ fn component_frames_stack_innermost_and_rescale_refuses_throughout() {
     );
     assert_eq!(
         doc.open_group_session(other_group).unwrap_err(),
-        DocumentError::ExplodeSessionOpen,
-        "nothing opens inside a component frame"
+        DocumentError::ExplodeSessionScope,
+        "a group from OUTSIDE the open component frame is out of scope \
+         (a group INSIDE one — a surfaced member group — opens: see \
+         nested_component_specs::group_sessions_open_inside_a_component)"
     );
     assert_eq!(
         doc.rescale_document(2.0).unwrap_err(),

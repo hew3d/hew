@@ -136,12 +136,19 @@ export function buildInstanceMemberPreviewClone(
   posed.matrixAutoUpdate = false
   posed.matrix.copy(instanceGroup.matrix)
   posed.matrixWorldNeedsUpdate = true
-  const wanted = new Set([
-    `InstanceFace_${instanceId}_${memberId}`,
-    `InstanceEdge_${instanceId}_${memberId}`,
-  ])
+  // SceneRenderer names a materialized placement's meshes
+  // `InstanceFace_${instanceId}_${memberId}_${placementIndex}` /
+  // `InstanceEdge_${instanceId}_${memberId}_${placementIndex}` (the index
+  // suffix disambiguates a nested definition placing the same member more
+  // than once) — match by PREFIX rather than the exact pre-index name. K1/K2
+  // in-context member editing (this function's only caller) is refused on a
+  // nested definition (Viewport's `component_has_nested_members` gate), so
+  // `activeInstance`'s definition here is always flat and `memberId` has
+  // exactly one placement — but matching by prefix, rather than hard-coding
+  // `_0`, keeps this correct even if that invariant ever loosens.
+  const wantedPrefixes = [`InstanceFace_${instanceId}_${memberId}_`, `InstanceEdge_${instanceId}_${memberId}_`]
   for (const child of instanceGroup.children) {
-    if (!wanted.has(child.name)) continue
+    if (!wantedPrefixes.some((prefix) => child.name.startsWith(prefix))) continue
     const clone = child.clone(true)
     clone.traverse((descendant) => {
       if (descendant instanceof THREE.Mesh) {

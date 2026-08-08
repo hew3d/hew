@@ -92,10 +92,14 @@ fn public_of_or_internal(ctx: &Ctx, entity: &EntityRef) -> Result<String, CmdErr
 /// `ComponentDef.members` (hide-not-delete), and such a member
 /// contributes nothing to what the instance renders.
 fn instance_watertight(ctx: &Ctx, def: Option<kernel::ComponentId>) -> Option<bool> {
-    let members = def.and_then(|d| ctx.doc.def_members(d))?;
-    let visible: Vec<_> = members
-        .iter()
-        .copied()
+    let def = def?;
+    ctx.doc.def_member_nodes(def)?;
+    // Nested members included: every leaf placement's object counts.
+    let visible: Vec<_> = ctx
+        .doc
+        .expanded_def_placements(def)
+        .into_iter()
+        .map(|(m, _)| m)
         .filter(|&m| ctx.doc.object(m).is_some())
         .collect();
     if visible.is_empty() {
@@ -785,15 +789,15 @@ fn raycast(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         let Some(pose) = ctx.doc.instance_pose(instance) else {
             continue;
         };
-        let Some(members) = ctx.doc.def_members(def) else {
-            continue;
-        };
-        let Ok(inv) = pose.inverse() else {
-            continue;
-        };
-        let local_origin = inv.apply_point(origin);
-        let local_dir = inv.apply_vector(dir);
-        for member in members {
+        // Nested members included: the ray maps through each leaf
+        // placement's fully composed inverse pose.
+        for (member, local) in ctx.doc.expanded_def_placements(def) {
+            let composed = local.then(&pose);
+            let Ok(inv) = composed.inverse() else {
+                continue;
+            };
+            let local_origin = inv.apply_point(origin);
+            let local_dir = inv.apply_vector(dir);
             let Some(obj) = ctx.doc.object(member) else {
                 continue;
             };
@@ -811,14 +815,14 @@ fn raycast(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 if !geom::face_contains(&outer, &holes, f.plane.normal(), hit_local) {
                     continue;
                 }
-                let hit_world = pose.apply_point(hit_local);
+                let hit_world = composed.apply_point(hit_local);
                 // World-space distance, NOT the definition-space `t`
                 // above (§ comment on `dir_n`): (hit - origin)·dir_n.
                 let distance = (hit_world - origin).dot(dir_n);
-                // `pose` is already known invertible (checked above), and
-                // `apply_plane` is singular under exactly the same
+                // `composed` is already known invertible (checked above),
+                // and `apply_plane` is singular under exactly the same
                 // determinant gate `inverse` is — so this cannot fail.
-                let normal_world = pose
+                let normal_world = composed
                     .apply_plane(&f.plane)
                     .expect("pose invertible implies its plane map is too")
                     .normal();

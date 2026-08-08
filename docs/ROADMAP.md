@@ -68,9 +68,18 @@ below.
   every instance shows the definition's name (a renamed instance reads
   "Instance Name (Definition Name)"), and Object Info counts a selected
   instance's siblings — click the count to select them all
+- Nested components: a definition contains other components and groups,
+  not just objects. Make Component folds a selected instance in as a
+  nested member and keeps a selected group whole; editing drills down
+  (double-click a nested instance inside an open component to edit it in
+  place, Escape steps back one level at a time), and placing a component
+  while editing another folds it in when you step out. The definition
+  graph stays acyclic and bounded — a component cannot contain itself,
+  and nesting past 64 levels or a million rendered parts is refused
 - Make Unique (detach an instance into its own copy, named "<definition>
   Copy" — or after the instance's own name if it has one) and Explode
-  (bake an instance back into ordinary geometry)
+  (bake an instance back into ordinary geometry; a nested member
+  surfaces as an ordinary instance, its geometry still shared)
 - Slice: cut a solid along a plane into two independent watertight solids
 - Push/pull on any planar face of a solid, not just faces with
   perpendicular neighbors: it follows classic SketchUp translate-and-build —
@@ -477,8 +486,6 @@ below.
   analytic behavior for pipes and lathe rings
 - **STEP/IGES import and export**, for precise CAD interchange with
   engineering tools (via OpenCASCADE)
-- **Nested component definitions** (a component containing other
-  components)
 - **Layers and saved Scenes** (named camera bookmarks)
 - **A WebGPU rendering path**, as a progressive enhancement over the
   current WebGL2 baseline

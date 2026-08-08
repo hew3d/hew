@@ -163,7 +163,7 @@ export function isDockVerbEnabled(verb: DockVerb, hoverPreviewOnly: boolean): bo
 export interface DockGates {
   /** ≥2 distinct sibling nodes, no sketch sub-entities (Edit ▸ Group). */
   canGroup: boolean
-  /** ≥1 sibling object/group, no instances, top level (Edit ▸ Make Component). */
+  /** ≥1 sibling object/group/instance, top level (Edit ▸ Make Component). */
   canMakeComponent: boolean
   /** Whether the platform has a working library backend
    * (`libraryStore().available()`) — hides Save to Library when false.

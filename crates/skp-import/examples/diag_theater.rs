@@ -39,7 +39,7 @@ fn flatten(scene: &ImportScene) -> (usize, [f64; 3], [f64; 3]) {
             match n {
                 ImportNode::Mesh(m) => take(m, &Transform::IDENTITY, faces, lo, hi),
                 ImportNode::Instance { def, pose, .. } => {
-                    for m in &scene.defs[*def].meshes {
+                    for m in scene.defs[*def].mesh_recipes() {
                         take(m, pose, faces, lo, hi);
                     }
                 }
@@ -79,7 +79,7 @@ fn collect_tags(scene: &ImportScene, out: &mut BTreeSet<String>) {
         node_tags(n, out);
     }
     for d in &scene.defs {
-        for m in &d.meshes {
+        for m in d.mesh_recipes() {
             for t in &m.tags {
                 out.insert(t.join("/"));
             }

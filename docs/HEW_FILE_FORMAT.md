@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `14`**, and **geometry buffer format version `6`**. Both are covered
+version `15`**, and **geometry buffer format version `6`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -86,7 +86,10 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "tags": [["Architecture"]] }
   ],
   "components": [
-    { "id": 0, "sid": 5, "members": [2, 3], "name": "MyComponent" }
+    { "id": 0, "sid": 5, "name": "MyComponent",
+      "members": [ {"kind":"object","id":2}, {"kind":"object","id":3},
+                   {"kind":"instance","id":1} ] }  // NodeRefs at v15+; bare
+                                                   // object ids at v14-
   ],
   "instances": [
     { "id": 0, "sid": 6, "def": 0,
@@ -145,7 +148,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `14`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `15`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `6`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -249,6 +252,7 @@ of the manifest:
 | `annotations` (top-level array) | 13 | empty list (no dimensions/leader text) |
 | `sid` on `materials[]`/`objects[]`/`groups[]`/`components[]`/`instances[]`/`sketches[]`/`guides[]`/`tags[]` | 14 | pre-v14 upgrade: the loader mints fresh stable ids in dense order (deterministic). At v14+ absence is a fatal, typed error, not a default |
 | `attrs` on the same entity kinds, and top-level `attrs` | 14 | empty (no dictionaries) |
+| `components[].members` as `NodeRef`s, and `groups[].owner` / `instances[].owner` | 15 | pre-v15: members are bare object dense ids (the only member kind that existed) and every node is world-owned |
 
 Four fields land in the same v13 bump (four efforts in flight at once) and
 are version-gated the same way the retired fields below are (just in the
@@ -589,13 +593,41 @@ recompute face-plane orientation from winding alone ().
 - **Groups** (`groups[]`) are a plain, ordered membership list of
   `NodeRef`s — objects or other groups, nesting unrestricted — plus an
   optional name and tags. A group has no geometry or transform of its own.
-- **Component definitions** (`components[]`) are an ordered, flat list of
-  member object dense ids (`members`), plus an optional name. A definition
-  is never placed directly, carries no transform/tags/position, and exists
-  purely to be instanced. Its shared geometry may also include not-yet-
-  extruded sketches — those are found by scanning `sketches[].owner` (§4.6,
-  v13+) for this definition's dense id, not listed on the `components[]`
-  entry itself.
+- **Component definitions** (`components[]`) are an ordered list of member
+  `NodeRef`s (v15+; pre-v15 files carry bare object dense ids, the only
+  member kind that existed), plus an optional name. Members may be
+  objects, groups, or **instances of other definitions** — nesting. The
+  definition graph MUST be acyclic, depth-bounded, and width-bounded: a
+  reader rejects a file whose definitions reach themselves, nest beyond
+  64 levels, or whose expansion exceeds 1,000,000 leaf placements (per
+  definition, and summed over the world instances) — all with typed
+  malformed-manifest errors. The width bound exists because a DAG
+  multiplies: twenty levels of two instances each is a million
+  placements. Writers cannot produce such a file through the ops (the
+  same bound refuses growth at every op), so the reader bound only ever
+  rejects hand-crafted input. A definition is never placed
+  directly, carries no transform/tags/position, and exists purely to be
+  instanced. Its shared geometry may also include not-yet-extruded
+  sketches — those are found by scanning `sketches[].owner` (§4.6, v13+)
+  for this definition's dense id, not listed on the `components[]` entry
+  itself.
+
+  **Definition-owned nodes (v15+).** A group or instance that is part of a
+  definition's subtree carries an `owner` field naming that definition's
+  dense id — on DIRECT members and on every group/instance nested beneath
+  a member group alike. Ownership is redundant with tree position by
+  design (cheap tamper detection, like the watertight byte): a reader MUST
+  derive ownership from the member lists and reject any entry whose
+  declared `owner` disagrees with the derivation — including an
+  owner-declaring node no definition's subtree reaches, a member whose
+  `owner` is absent, and a node reachable from two definitions. A
+  definition-owned node never appears in `roots` and is reached only
+  through its definition's instances; its coordinates (an instance
+  member's `pose` included) are in the OWNING definition's local frame.
+  Version-gated both directions: a pre-v15 file carrying a `NodeRef`
+  member or any `owner` field is malformed for its declared version, and a
+  v15+ file carrying a bare-integer member is a nonconforming writer's
+  output — both rejected, never guessed at.
 - **Instances** (`instances[]`) place one component definition (`def`, a
   dense component id) at a **pose**: a row-major 3×4 affine matrix
   `[m00,m01,m02,tx, m10,m11,m12,ty, m20,m21,m22,tz]`, read as `world_point =

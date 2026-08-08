@@ -568,7 +568,7 @@ describe('RotateTool — setEditContext aborts an armed gesture on a genuine cha
     const member = 9n
     const group = new THREE.Group()
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1))
-    mesh.name = `InstanceFace_${instance}_${member}`
+    mesh.name = `InstanceFace_${instance}_${member}_0`
     group.add(mesh)
     const { tool, preview, wasmScene } = makeTool({
       selection: [{ kind: 'object', id: member }],

@@ -129,7 +129,39 @@ fn build_representative_doc() -> Document {
         0.0, 1.0, 0.0, 0.0, //
         0.0, 0.0, 1.0, 0.0,
     ]);
-    doc.place_instance(comp, mirror).unwrap();
+    let (mirror_inst, _) = doc.place_instance(comp, mirror).unwrap();
+
+    // ── NESTED definition (manifest v15's headline byte surface) ─────────
+    // A grouped second solid + the mirrored placement fold into an OUTER
+    // definition, so the golden pins the NodeRef member kinds, the
+    // group/instance `owner` fields, and a def-owned group subtree.
+    let plane_n = Plane::from_polygon(&[
+        Point3::new(30.0, 0.0, 0.0),
+        Point3::new(31.0, 0.0, 0.0),
+        Point3::new(30.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let sn = doc.add_sketch(plane_n);
+    {
+        let sk = doc.sketch_mut(sn).unwrap();
+        for (a, b) in [
+            (Point3::new(30.0, 0.0, 0.0), Point3::new(31.0, 0.0, 0.0)),
+            (Point3::new(31.0, 0.0, 0.0), Point3::new(31.0, 1.0, 0.0)),
+            (Point3::new(31.0, 1.0, 0.0), Point3::new(30.0, 1.0, 0.0)),
+            (Point3::new(30.0, 1.0, 0.0), Point3::new(30.0, 0.0, 0.0)),
+        ] {
+            sk.add_segment(a, b).unwrap();
+        }
+    }
+    let rn = doc.extrudable_regions(sn).unwrap()[0];
+    let (obj_n, _) = doc.extrude_region(sn, rn, 0.75).unwrap();
+    let (nested_grp, _) = doc
+        .group_nodes(&[NodeId::Object(obj_n)])
+        .expect("wrap the nested solid in a group");
+    doc.set_node_name(NodeId::Group(nested_grp), Some("Nested Group".into()))
+        .unwrap();
+    doc.make_component(&[NodeId::Group(nested_grp), NodeId::Instance(mirror_inst)])
+        .expect("fold a group and an instance into a nested definition");
 
     // ── Sketch with a consumed region ────────────────────────────────────
     let ground = Plane::from_polygon(&[
@@ -288,9 +320,27 @@ fn golden_file_save_load_and_determinism() {
         "group has 2 members"
     );
 
-    // Components: one component + 2 instances.
-    assert_eq!(loaded.component_ids().len(), 1, "one component round-trips");
-    assert_eq!(loaded.instance_ids().len(), 2, "two instances round-trip");
+    // Components: the flat def + the nested outer def; the mirrored
+    // placement folded INTO the outer def, so 2 world instances remain
+    // (the flat def's first placement + the outer def's own) and the
+    // nesting genuinely round-trips.
+    assert_eq!(
+        loaded.component_ids().len(),
+        2,
+        "both components round-trip"
+    );
+    assert_eq!(
+        loaded.instance_ids().len(),
+        2,
+        "two world instances round-trip"
+    );
+    let max_depth = loaded
+        .component_ids()
+        .iter()
+        .map(|&c| loaded.def_depth(c))
+        .max()
+        .unwrap();
+    assert_eq!(max_depth, 2, "the nested definition survives the file");
 
     // Sketch: the representative doc stores 4 sketches (sa, sb, sc, sd) and all
     // 4 round-trip in the file, but `sketch_ids` lists only the ones that still

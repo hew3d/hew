@@ -524,7 +524,7 @@ fn countertop_meshes_are_outward_oriented() {
 
     let mut checked = 0;
     for def in &scene.defs {
-        for mesh in &def.meshes {
+        for mesh in def.mesh_recipes() {
             let v = signed_vol6(&mesh.positions, &mesh.faces);
             assert!(
                 v > 0.0,
@@ -554,7 +554,7 @@ fn countertop_triangles_merge_into_real_faces() {
         scene
             .defs
             .iter()
-            .flat_map(|d| &d.meshes)
+            .flat_map(|d| d.mesh_recipes())
             .find(|m| m.name == name)
             .unwrap_or_else(|| panic!("mesh {name} not found"))
     };
@@ -604,7 +604,7 @@ fn countertop_uv_frames_populated_for_textured_faces() {
     // Collect all face_uv_frames from all def meshes.
     let mut all_frames: Vec<Option<UvFrame>> = Vec::new();
     for def in &scene.defs {
-        for mesh in &def.meshes {
+        for mesh in def.mesh_recipes() {
             assert_eq!(
                 mesh.face_uv_frames.len(),
                 mesh.faces.len(),
@@ -653,7 +653,7 @@ fn countertop_uv_frames_populated_for_textured_faces() {
     // Some(frame) has residual ≤ UV_AFFINE_RESIDUAL_TOL.
     let _ = UV_AFFINE_RESIDUAL_TOL; // named tol referenced explicitly
     for def in &scene.defs {
-        for mesh in &def.meshes {
+        for mesh in def.mesh_recipes() {
             for (fi, frame_opt) in mesh.face_uv_frames.iter().enumerate() {
                 if let Some(frame) = frame_opt {
                     for &vi in &mesh.faces[fi] {

@@ -6,9 +6,12 @@
 //!   the placing instance's paint — Hew expresses that as the def mesh's
 //!   `base_material`);
 //! - the composed instance tree ([`openskp::Model::scene`]) becomes
-//!   [`ImportNode::Instance`]s (leaves) and [`ImportNode::Group`]s (placements
-//!   whose definition itself places children), with **absolute world poses**
-//!   exactly like `dae-import`;
+//!   [`ImportNode::Instance`]s — a definition's in-definition child
+//!   placements are NESTED member instances of its [`DefRecipe`] (poses
+//!   rebased to the definition's local frame), so a SketchUp assembly's
+//!   sharing survives: N placements stay N instances of one definition.
+//!   Pure containers without geometry runs become [`ImportNode::Group`]s
+//!   with **absolute world poses** exactly like `dae-import`;
 //! - the **root run** (loose model geometry) becomes a world
 //!   [`ImportNode::Mesh`];
 //! - layers map to tags — the FULL layer list (empty and hidden layers
@@ -58,6 +61,7 @@ pub(crate) fn convert(model: &openskp::Model) -> Output {
         model,
         mats,
         def_variants: BTreeMap::new(),
+        degraded_variants: BTreeMap::new(),
         defs: Vec::new(),
         warnings: Vec::new(),
     };
@@ -168,6 +172,12 @@ struct Converter<'a> {
     /// (geometry-run index, inherited material slot) -> def index in `defs`
     /// (`None` = the run has no importable faces at that variant).
     def_variants: BTreeMap<(usize, u16), Option<usize>>,
+    /// Variants whose nested children were DROPPED because the first
+    /// placement's world matrix was singular (uninvertible — the def-local
+    /// rebase is impossible from that placement). A later placement with an
+    /// invertible matrix upgrades the cached recipe in place, so one
+    /// zero-scaled placement can't permanently strip a shared definition.
+    degraded_variants: BTreeMap<(usize, u16), usize>,
     defs: Vec<DefRecipe>,
     /// User-visible conversion warnings (non-manifold splits — rule 4:
     /// decomposition happens loudly, never silently).
@@ -193,59 +203,125 @@ impl Converter<'_> {
         let pose = pose_of(&node.world);
         let tags = self.layer_tags(node.layer);
 
-        // The placement's own geometry (a def variant keyed by the inherited
-        //q material, so default-painted faces pick up the instance paint).
-        let own_instance = node
-            .run
-            .and_then(|ri| self.def_variant(ri, node.material))
-            .map(|def| ImportNode::Instance {
-                def,
-                pose,
-                name: own_name.clone(),
-                tags: tags.clone(),
-                hidden,
-            });
-
-        // Children (in-definition placements), expanded per placement site
-        // with their absolute world poses.
-        let children: Vec<ImportNode> = node
-            .children
-            .iter()
-            .filter_map(|c| self.convert_node(c, None))
-            .collect();
-
-        match (own_instance, children.is_empty()) {
-            (own, false) => {
+        match node.run {
+            // A placement of a definition — with or without in-definition
+            // child placements. The whole subtree is ONE nested definition
+            // (children become member instances with def-local poses), so
+            // N placements of a SketchUp assembly stay N instances of one
+            // shared definition — the nested-component parity fix.
+            Some(ri) => {
+                let def = self.assembly_variant(ri, node.material, node)?;
+                Some(ImportNode::Instance {
+                    def,
+                    pose,
+                    name: own_name,
+                    tags,
+                    hidden,
+                })
+            }
+            // A pure container with no geometry run of its own: a world
+            // group wrapping its converted children (world poses).
+            None => {
+                let children: Vec<ImportNode> = node
+                    .children
+                    .iter()
+                    .filter_map(|c| self.convert_node(c, None))
+                    .collect();
+                if children.is_empty() {
+                    return None;
+                }
                 let name = own_name
                     .or_else(|| node.definition.clone())
                     .unwrap_or_default();
                 Some(ImportNode::Group {
                     name,
-                    children: own.into_iter().chain(children).collect(),
+                    children,
                     tags,
                     hidden,
                 })
             }
-            (own, true) => own,
         }
     }
 
     /// Def index for `(run, inherited material)`, building the `DefRecipe`
-    /// variant on first use. A non-manifold run splits into several meshes
-    /// under ONE definition, so every placement keeps all its pieces.
-    fn def_variant(&mut self, run_idx: usize, eff_slot: u16) -> Option<usize> {
+    /// on first use — its own (possibly split non-manifold) meshes PLUS its
+    /// in-definition child placements as nested member instances, rebased
+    /// from the composed tree's absolute poses into the definition's local
+    /// frame. Every placement of the definition shares the one recipe.
+    ///
+    /// A `None` placeholder is cached before recursing so a (malformed,
+    /// impossible-in-SketchUp) self-referential subtree drops the cyclic
+    /// child instead of recursing forever; `ingest` would refuse the cycle
+    /// typed anyway.
+    fn assembly_variant(
+        &mut self,
+        run_idx: usize,
+        eff_slot: u16,
+        node: &openskp::Node,
+    ) -> Option<usize> {
         if let Some(&cached) = self.def_variants.get(&(run_idx, eff_slot)) {
+            // A degraded recipe (children dropped — singular first
+            // placement) upgrades from the first placement that CAN rebase.
+            if let Some(&di) = self.degraded_variants.get(&(run_idx, eff_slot))
+                && !node.children.is_empty()
+                && let Ok(inv) = pose_of(&node.world).inverse()
+            {
+                let children: Vec<ImportNode> = node
+                    .children
+                    .iter()
+                    .filter_map(|c| self.convert_node(c, None))
+                    .map(|mut n| {
+                        rebase_to_local(&mut n, &inv);
+                        n
+                    })
+                    .collect();
+                if !children.is_empty() {
+                    self.defs[di].children.extend(children);
+                    self.degraded_variants.remove(&(run_idx, eff_slot));
+                }
+            }
             return cached;
         }
+        self.def_variants.insert((run_idx, eff_slot), None);
         let name = self.def_name(run_idx);
         let meshes = self.mesh_recipes(run_idx, name.clone().unwrap_or_default(), eff_slot);
-        let built = if meshes.is_empty() {
+        let mut children: Vec<ImportNode> = meshes.into_iter().map(ImportNode::Mesh).collect();
+        let mut degraded = false;
+        // Child placements rebase to the definition's local frame:
+        // local = world_def⁻¹ ∘ world_child. A singular world pose cannot
+        // be rebased — its children are dropped loudly, never guessed at.
+        match pose_of(&node.world).inverse() {
+            Ok(inv) => {
+                for c in &node.children {
+                    if let Some(mut n) = self.convert_node(c, None) {
+                        rebase_to_local(&mut n, &inv);
+                        children.push(n);
+                    }
+                }
+            }
+            Err(_) => {
+                if !node.children.is_empty() {
+                    degraded = true;
+                    self.warnings.push(format!(
+                        "'{}' has a singular placement matrix; its {} nested \
+                         placement(s) were dropped (restored if another \
+                         placement can express them)",
+                        name.as_deref().unwrap_or("unnamed component"),
+                        node.children.len(),
+                    ));
+                }
+            }
+        }
+        let built = if children.is_empty() {
             None
         } else {
-            self.defs.push(DefRecipe { name, meshes });
+            self.defs.push(DefRecipe { name, children });
             Some(self.defs.len() - 1)
         };
         self.def_variants.insert((run_idx, eff_slot), built);
+        if degraded && let Some(di) = built {
+            self.degraded_variants.insert((run_idx, eff_slot), di);
+        }
         built
     }
 
@@ -476,4 +552,20 @@ fn recipe_from_arrays(
 fn pose_of(world: &[f64; 16]) -> Transform {
     let rows: [f64; 12] = world[0..12].try_into().expect("4x4 has 12 affine entries");
     Transform::from_affine(&rows)
+}
+
+/// Rebase a converted subtree's ABSOLUTE poses into a definition's local
+/// frame (`inv` = the definition placement's inverse world pose). Instances
+/// compose; groups carry no transform, so they recurse; meshes never appear
+/// here (a definition's own meshes are already def-local).
+fn rebase_to_local(node: &mut ImportNode, inv: &Transform) {
+    match node {
+        ImportNode::Instance { pose, .. } => *pose = pose.then(inv),
+        ImportNode::Group { children, .. } => {
+            for c in children {
+                rebase_to_local(c, inv);
+            }
+        }
+        ImportNode::Mesh(_) => {}
+    }
 }

@@ -1729,21 +1729,32 @@ impl Scene {
     /// and registering N instances of one definition extracts its geometry
     /// exactly once.
     fn register_instance(&mut self, iid: InstanceId) {
+        // A definition-owned member instance never registers directly: its
+        // pose is def-local, not world — its geometry reaches inference
+        // through the OUTER world instances' expanded placements below.
+        // Touch lists from definition edits legitimately include member
+        // instances, so this is a skip, not a bug.
+        if !self.doc.instance_is_world(iid) {
+            return;
+        }
         let (Some(def), Some(pose)) = (self.doc.instance_def(iid), self.doc.instance_pose(iid))
         else {
             return;
         };
-        let Some(members) = self.doc.def_members(def) else {
-            return;
-        };
-        for m in members {
+        // Nested definitions register every leaf placement at its fully
+        // composed pose, all owned by the OUTERMOST instance (so a pick
+        // still reports the world instance, and `remove_instance(iid)`
+        // still drops the whole family at once). Deterministic expansion
+        // order — placement order participates in candidate ranking
+        // tie-breaks.
+        for (m, local) in self.doc.expanded_def_placements(def) {
             if !self.inference.has_def_member(m) {
                 let Some(object) = self.doc.object(m) else {
                     continue;
                 };
                 self.inference.set_def_member(m, object);
             }
-            self.inference.add_placement(iid, m, &pose);
+            self.inference.add_placement(iid, m, &local.then(&pose));
         }
     }
 
@@ -4338,6 +4349,52 @@ impl Scene {
         self.doc
             .instance_pose(instance_id(instance))
             .map(|t| t.to_affine().to_vec())
+    }
+
+    /// The EXPANDED leaf-object placements of an instance's definition —
+    /// nested member instances composed, member groups descended — as
+    /// parallel arrays: this returns the leaf object handle per placement
+    /// (repeats are real: two nested placements of one leaf are two
+    /// entries), [`Scene::instance_expanded_local_poses`] returns each
+    /// placement's DEF-LOCAL pose. The renderer draws each entry at
+    /// `instance_pose × local_pose`. For a flat definition this is exactly
+    /// [`Scene::component_member_objects`] with identity local poses.
+    pub fn instance_expanded_members(&self, instance: u64) -> Vec<u64> {
+        let Some(def) = self.doc.instance_def(instance_id(instance)) else {
+            return Vec::new();
+        };
+        self.doc
+            .expanded_def_placements(def)
+            .iter()
+            .map(|(o, _)| o.data().as_ffi())
+            .collect()
+    }
+
+    /// The def-local composed pose of each expanded placement, 12 floats
+    /// (row-major 3×4) per entry, parallel to
+    /// [`Scene::instance_expanded_members`].
+    pub fn instance_expanded_local_poses(&self, instance: u64) -> Vec<f64> {
+        let Some(def) = self.doc.instance_def(instance_id(instance)) else {
+            return Vec::new();
+        };
+        self.doc
+            .expanded_def_placements(def)
+            .iter()
+            .flat_map(|(_, local)| local.to_affine().to_vec())
+            .collect()
+    }
+
+    /// Whether a definition has NESTED members (member groups or member
+    /// instances). The app gates the in-context editing entry on this —
+    /// the flat editing surfaces refuse nested definitions typed.
+    pub fn component_has_nested_members(&self, component: u64) -> bool {
+        self.doc
+            .def_member_nodes(component_id(component))
+            .is_some_and(|members| {
+                members
+                    .iter()
+                    .any(|m| !matches!(m, kernel::NodeId::Object(_)))
+            })
     }
 
     /// A visible object's display name, or `undefined` if unnamed/stale. The UI

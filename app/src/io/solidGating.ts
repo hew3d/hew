@@ -16,8 +16,11 @@
 export interface SolidQueryScene {
   object_ids(): BigUint64Array
   instance_ids(): BigUint64Array
-  instance_def(instance: bigint): bigint | undefined
-  component_member_objects(component: bigint): BigUint64Array
+  /** The EXPANDED leaf-object placements of an instance's definition —
+   * nested member instances composed, member groups descended (the same
+   * expansion the renderer draws and `crates/mesh-export`'s writers walk).
+   * For a flat definition this is exactly `component_member_objects`. */
+  instance_expanded_members(instance: bigint): BigUint64Array
   object_solid(id: bigint): boolean
   object_name(object: bigint): string | undefined
 }
@@ -48,9 +51,7 @@ export function collectNonSolidObjects(scene: SolidQueryScene): NonSolidObject[]
 
   for (const id of scene.object_ids()) check(id)
   for (const instanceId of scene.instance_ids()) {
-    const def = scene.instance_def(instanceId)
-    if (def === undefined) continue
-    for (const memberId of scene.component_member_objects(def)) check(memberId)
+    for (const memberId of scene.instance_expanded_members(instanceId)) check(memberId)
   }
 
   return out

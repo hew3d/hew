@@ -22,7 +22,7 @@ fn main() {
     let mut with_mat = 0usize;
     let mut faces = 0usize;
     for d in &out.scene.defs {
-        for m in &d.meshes {
+        for m in d.mesh_recipes() {
             for &fm in &m.face_materials {
                 faces += 1;
                 if fm != kernel::NO_MATERIAL {

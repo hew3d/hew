@@ -35,17 +35,33 @@ function boxCorners(hx: number, hy: number, hz: number): Float32Array {
   return new Float32Array(pts)
 }
 
+/** Identity local pose (row-major 3×4) — every FLAT definition member's
+ * def-local pose (module doc: identity local poses for a flat definition). */
+const IDENTITY_LOCAL_POSE = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
+
+/** One expanded placement — see `SceneRenderer.test.ts`'s `MockPlacement`
+ * (same shape, duplicated locally to keep this file dependency-free). */
+interface MockPlacement {
+  memberId: bigint
+  localPose: number[]
+}
+
 /** Minimal mock WasmScene — only the accessors `worldBoundsForSelection`
- * touches, matching `panels/scenePanels.test.tsx`'s plain-object style. */
+ * touches, matching `panels/scenePanels.test.tsx`'s plain-object style.
+ * `placements` is optional per instance — omitted, `memberIds` are used as
+ * flat placements at the identity local pose (flat-definition parity);
+ * provide it to test a nested definition's non-identity/repeated
+ * placements. */
 function makeScene(opts: {
   objectMeshes?: Record<string, Float32Array>
   groups?: Record<string, NodeRef[]>
-  instances?: Record<string, { def: bigint; pose: number[]; memberIds: bigint[] }>
-  componentMembers?: Record<string, bigint[]>
+  instances?: Record<string, { def: bigint; pose: number[]; memberIds: bigint[]; placements?: MockPlacement[] }>
 }): WasmScene {
   const objectMeshes = opts.objectMeshes ?? {}
   const groups = opts.groups ?? {}
   const instances = opts.instances ?? {}
+  const placementsOf = (inst: { memberIds: bigint[]; placements?: MockPlacement[] }): MockPlacement[] =>
+    inst.placements ?? inst.memberIds.map((memberId) => ({ memberId, localPose: IDENTITY_LOCAL_POSE }))
   return {
     object_mesh: (id: bigint) => {
       const positions = objectMeshes[id.toString()]
@@ -58,8 +74,14 @@ function makeScene(opts: {
       return inst !== undefined ? Float64Array.from(inst.pose) : undefined
     },
     instance_def: (id: bigint) => instances[id.toString()]?.def,
-    component_member_objects: (componentId: bigint) =>
-      BigUint64Array.from(opts.componentMembers?.[componentId.toString()] ?? []),
+    instance_expanded_members: (id: bigint) => {
+      const inst = instances[id.toString()]
+      return inst === undefined ? new BigUint64Array() : BigUint64Array.from(placementsOf(inst).map((p) => p.memberId))
+    },
+    instance_expanded_local_poses: (id: bigint) => {
+      const inst = instances[id.toString()]
+      return inst === undefined ? new Float64Array() : Float64Array.from(placementsOf(inst).flatMap((p) => p.localPose))
+    },
   } as unknown as WasmScene
 }
 
@@ -160,15 +182,38 @@ describe('worldBoundsForSelection', () => {
       objectMeshes: {
         '100': boxCorners(0.5, 0.5, 0.5),
       },
-      componentMembers: {
-        '5': [100n],
-      },
       instances: {
         '1': { def: 5n, pose: [1, 0, 0, 10, 0, 1, 0, 20, 0, 0, 1, 30], memberIds: [100n] },
       },
     })
     const bounds = worldBoundsForSelection(scene, [{ kind: 'instance', id: 1n }])
     expect(bounds).toEqual({ min: [9.5, 19.5, 29.5], max: [10.5, 20.5, 30.5] })
+  })
+
+  it("poses a NESTED definition's repeated member mesh by instancePose × placement's local pose", () => {
+    // Definition-local member: unit cube at the origin (half-extent 0.5),
+    // placed TWICE by the nested definition at two different def-local
+    // translations — a table def placing the same leg leaf object twice.
+    const scene = makeScene({
+      objectMeshes: {
+        '100': boxCorners(0.5, 0.5, 0.5),
+      },
+      instances: {
+        '1': {
+          def: 5n,
+          pose: [1, 0, 0, 100, 0, 1, 0, 200, 0, 0, 1, 300],
+          memberIds: [100n, 100n],
+          placements: [
+            { memberId: 100n, localPose: [1, 0, 0, -1, 0, 1, 0, 0, 0, 0, 1, 0] },
+            { memberId: 100n, localPose: [1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0] },
+          ],
+        },
+      },
+    })
+    const bounds = worldBoundsForSelection(scene, [{ kind: 'instance', id: 1n }])
+    // World X spans both placements: [100-1-0.5, 100+1+0.5] = [98.5, 101.5].
+    // Y/Z are untouched by either placement's local translation.
+    expect(bounds).toEqual({ min: [98.5, 199.5, 299.5], max: [101.5, 200.5, 300.5] })
   })
 
   it('returns null for a stale instance (no pose)', () => {

@@ -493,20 +493,24 @@ pub fn document_items(doc: &kernel::Document) -> Vec<DocumentItem> {
         else {
             continue;
         };
-        let Some(members) = doc.def_members(def) else {
-            continue;
-        };
         let Some(sid) = doc.sid_of(&kernel::EntityRef::Instance(instance)) else {
             continue;
         };
-        for member in members {
+        // Nested definitions expand recursively: every leaf placement
+        // composes its def-local pose with this instance's own — still
+        // tagged with the OUTERMOST instance's sid.
+        for (member, local) in doc.expanded_def_placements(def) {
             let Some(obj) = doc.object(member) else {
                 continue;
             };
             let Ok(mesh) = tessellate::tessellate(obj, doc.materials()) else {
                 continue;
             };
-            items.push(DocumentItem { mesh, pose, sid });
+            items.push(DocumentItem {
+                mesh,
+                pose: local.then(&pose),
+                sid,
+            });
         }
     }
     items
@@ -545,13 +549,11 @@ pub fn document_bbox(doc: &kernel::Document) -> (Point3, Point3) {
         else {
             continue;
         };
-        let Some(members) = doc.def_members(def) else {
-            continue;
-        };
-        for member in members {
+        for (member, local) in doc.expanded_def_placements(def) {
+            let composed = local.then(&pose);
             if let Some(obj) = doc.object(member) {
                 for v in obj.vertices().values() {
-                    extend(pose.apply_point(v.position));
+                    extend(composed.apply_point(v.position));
                 }
             }
         }

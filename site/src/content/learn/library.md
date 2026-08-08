@@ -51,3 +51,4 @@ Items remember which model they were saved from. If you're sharing an item and w
 - A model item's loose sketches and dimension annotations aren't carried along by an insert (its solids, components, materials, tags, and guides are). Hew tells you when it skips them.
 - The library is a desktop feature for now; the browser build will grow its own storage later.
 - Inserting is refused, with an explanation, while a component is open for editing — close the session first.
+- Inserting is refused if it would multiply a document's rendered component parts past one million. That's a guard against runaway or hostile files, not a ceiling a real model approaches — a full theater model expands to a few thousand parts.

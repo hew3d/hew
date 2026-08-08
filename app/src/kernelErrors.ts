@@ -205,8 +205,12 @@ const DESCRIPTIONS: Record<string, string> = {
   EmptySelection:
     'The selection has nothing visible to transform — everything in it is hidden or empty. Unhide its contents, or select something visible.',
   EmptyComponent: 'Select at least one object to turn into a component.',
-  NestedComponentUnsupported:
-    "A component can't contain another component yet. Explode the inner instance first, then try again.",
+  ComponentCycle:
+    "Placing that instance here would make a component contain itself, directly or through another component. Pick a different definition, or explode/make unique the instance that closes the loop.",
+  ComponentDepthExceeded:
+    "That would nest components deeper than Hew supports. Flatten one of the levels — explode an instance, or make it unique — before placing this one.",
+  ComponentExpansionExceeded:
+    "That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.",
   CannotExplodeReflected:
     "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead.",
   CannotExplodeNonUniformScale:
@@ -232,7 +236,7 @@ const DESCRIPTIONS: Record<string, string> = {
 
   // ---------------------------------------------------------- explode session
   ExplodeSessionOpen:
-    "Another component is already open for editing. Close it (Escape, or double-click outside) before opening another, or before saving.",
+    "This component is already open for editing further out. Step back out to it (Escape) instead of opening it again — and close the editor before saving.",
   ExplodeSessionNotOpen: "No component is currently open for editing.",
   ExplodeSessionPoseUnsupported:
     "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first.",
@@ -242,6 +246,14 @@ const DESCRIPTIONS: Record<string, string> = {
     'A placement of this component sits inside a group, so it opens in the in-context editing mode instead.',
   ExplodeSessionNestedGroup:
     "This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one.",
+  // App-side refusal (not a kernel code, like InvalidSelection above): a
+  // double-click on a component instance whose definition has nested
+  // members (member groups/instances) — the viewport gates BOTH the explode
+  // session and its in-context-edit (K1/K2) fallback on this, before ever
+  // asking the kernel, since a pose/grouped-instance refusal on the SAME
+  // instance would otherwise fall back to K1 silently.
+  NestedComponentInContext:
+    "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts.",
 
   // ---------------------------------------------------------- history
   NothingToUndo: 'Nothing to undo.',

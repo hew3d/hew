@@ -143,12 +143,28 @@ fn two_instances_share_one_definition() {
 fn nested_components_keep_hierarchy_and_share_the_leaf_def() {
     // nested-3-deep: the model places the outer component; the chain bottoms
     // out in ONE geometric definition placed 4 times (2 × 2 in the middle
-    // tier). Hierarchy comes through as groups, geometry stays shared.
+    // tier). Hierarchy comes through as NESTED definitions (manifest v15) —
+    // one world instance, a 3-deep definition chain, geometry stays shared.
     let (report, doc) = ingest("nested-3-deep.skp");
     assert_eq!(report.objects_created, 1, "one shared leaf def");
     assert_eq!(report.watertight, 1);
-    assert_eq!(doc.instance_ids().len(), 4);
-    assert_eq!(doc.group_ids().len(), 3);
+    assert_eq!(doc.instance_ids().len(), 1, "one world placement");
+    assert_eq!(doc.group_ids().len(), 0, "no flattened wrapper groups");
+    assert_eq!(doc.component_ids().len(), 3, "the full definition chain");
+    assert_eq!(
+        doc.component_ids()
+            .iter()
+            .map(|&c| doc.def_depth(c))
+            .max()
+            .unwrap(),
+        3,
+        "the chain genuinely nests 3 deep"
+    );
+    assert_eq!(
+        doc.expanded_placements().len(),
+        4,
+        "the shared leaf renders 4 times through the nesting"
+    );
 }
 
 #[test]
@@ -160,8 +176,12 @@ fn groups_and_mixed_definitions_import_structurally() {
     let (report, doc) = ingest("mixed-definition.skp");
     assert_eq!(report.objects_created, 2);
     assert_eq!(report.watertight, 2);
-    assert_eq!(doc.instance_ids().len(), 2);
-    assert_eq!(doc.group_ids().len(), 1);
+    // The mixed definition (own geometry + a child placement) is ONE
+    // nested definition placed once — its child is a member instance.
+    assert_eq!(doc.instance_ids().len(), 1);
+    assert_eq!(doc.group_ids().len(), 0);
+    assert_eq!(doc.component_ids().len(), 2);
+    assert_eq!(doc.expanded_placements().len(), 2);
 }
 
 // ── Native names (no __HEWMETA__ hex dance — the joy of M25) ────────────────
@@ -210,8 +230,23 @@ fn house_ingests_with_shared_defs_and_loud_skips() {
     assert_eq!(report.objects_created, 35);
     assert_eq!(report.watertight, 32);
     assert_eq!(report.leaky, 3);
-    assert_eq!(doc.instance_ids().len(), 61);
-    assert_eq!(doc.group_ids().len(), 17);
+    // Nested definitions (manifest v15): the old flattened 61 instances +
+    // 17 wrapper groups are now 11 world instances over 47 shared
+    // definitions nesting 4 deep — and the expansion still renders
+    // exactly the same 61 leaf placements (conservation, validated
+    // against house.dae world-space totals in the differential suite).
+    assert_eq!(doc.instance_ids().len(), 11);
+    assert_eq!(doc.group_ids().len(), 0);
+    assert_eq!(doc.component_ids().len(), 47);
+    assert_eq!(doc.expanded_placements().len(), 61);
+    assert_eq!(
+        doc.component_ids()
+            .iter()
+            .map(|&c| doc.def_depth(c))
+            .max()
+            .unwrap(),
+        4
+    );
     assert_eq!(report.skipped.len(), 0);
     // Nothing missing: the one material without inline image bytes
     // ("[Wood Floor Light]1") is a shared-texture record whose back-ref

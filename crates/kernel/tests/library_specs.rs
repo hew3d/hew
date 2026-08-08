@@ -979,3 +979,80 @@ fn report_shape(r: &InsertReport) -> usize {
         + r.world_sketches_skipped
         + r.annotations_skipped
 }
+
+// ------------------------------------------- nested definitions (v15 graft)
+
+/// A nested assembly (a definition whose member is an instance of another
+/// definition) extracts to an item and grafts back whole: the definition
+/// DAG copies once per definition, nested placements compose, and the item
+/// file round-trips byte-stable.
+#[test]
+fn nested_assembly_extracts_and_inserts_whole() {
+    let mut src = Document::new();
+    let a = extrude_box(&mut src, 0.0, 0.0, 1.0, 1.0, 1.0);
+    let b = extrude_box(&mut src, 3.0, 0.0, 4.0, 1.0, 1.0);
+    let (_, inner_inst, _) = src.make_component(&[NodeId::Object(a)]).unwrap();
+    let (_, outer_inst, _) = src
+        .make_component(&[NodeId::Object(b), NodeId::Instance(inner_inst)])
+        .unwrap();
+
+    let item = src
+        .extract_item(&[NodeId::Instance(outer_inst)], true)
+        .unwrap();
+    let item = Document::load(&item.save()).expect("nested item file round-trips");
+    assert_eq!(item.save(), Document::load(&item.save()).unwrap().save());
+
+    let mut dst = Document::new();
+    let (report, _) = dst
+        .insert_document(&item, &insert_at_identity(provenance("lib-n", "hash-n")))
+        .unwrap();
+    // Both definitions grafted (outer + nested inner), one world placement,
+    // both leaves render through it.
+    assert_eq!(report.definitions_added, 2);
+    assert_eq!(report.definitions_reused, 0);
+    assert_eq!(dst.instance_ids().len(), 1);
+    assert_eq!(dst.expanded_placements().len(), 2);
+    let max_depth = dst
+        .component_ids()
+        .iter()
+        .map(|&c| dst.def_depth(c))
+        .max()
+        .unwrap();
+    assert_eq!(max_depth, 2, "the nesting grafted, not flattened");
+}
+
+/// Re-inserting the same nested item reuses EVERY definition in the DAG —
+/// per-definition provenance, not just the outermost.
+#[test]
+fn nested_insert_is_idempotent_per_definition() {
+    let mut src = Document::new();
+    let a = extrude_box(&mut src, 0.0, 0.0, 1.0, 1.0, 1.0);
+    let b = extrude_box(&mut src, 3.0, 0.0, 4.0, 1.0, 1.0);
+    let (_, inner_inst, _) = src.make_component(&[NodeId::Object(a)]).unwrap();
+    let (_, outer_inst, _) = src
+        .make_component(&[NodeId::Object(b), NodeId::Instance(inner_inst)])
+        .unwrap();
+    let item = src
+        .extract_item(&[NodeId::Instance(outer_inst)], true)
+        .unwrap();
+
+    let mut dst = Document::new();
+    let prov = provenance("lib-n", "hash-n");
+    dst.insert_document(&item, &insert_at_identity(prov.clone()))
+        .unwrap();
+    let (second, _) = dst
+        .insert_document(
+            &item,
+            &InsertOptions {
+                pose: Transform::translation(Vec3::new(5.0, 0.0, 0.0)),
+                provenance: prov,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(second.definitions_reused, 2, "outer AND nested inner");
+    assert_eq!(second.definitions_added, 0);
+    assert_eq!(second.objects_added, 0, "no geometry copied twice");
+    assert_eq!(dst.instance_ids().len(), 2, "two world placements");
+    assert_eq!(dst.expanded_placements().len(), 4);
+}

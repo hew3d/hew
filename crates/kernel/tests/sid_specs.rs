@@ -176,6 +176,30 @@ fn pre_v14_file_mints_dense_order_sids() {
     let old = patch_manifest(&bytes, |m| {
         m["format_version"] = serde_json::json!(13);
         strip_sids(m);
+        // A genuine pre-v14 writer also wrote component members as bare
+        // object dense ids and no owner fields (both introduced at v15) —
+        // downgrade those shapes too or the forged file is malformed for
+        // its own declared version (correctly rejected).
+        if let Some(comps) = m["components"].as_array_mut() {
+            for c in comps.iter_mut() {
+                if let Some(members) = c["members"].as_array_mut() {
+                    for member in members.iter_mut() {
+                        if let Some(id) = member.get("id").and_then(|v| v.as_u64()) {
+                            *member = serde_json::json!(id);
+                        }
+                    }
+                }
+            }
+        }
+        for key in ["groups", "instances"] {
+            if let Some(arr) = m[key].as_array_mut() {
+                for entry in arr.iter_mut() {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.remove("owner");
+                    }
+                }
+            }
+        }
     });
     let upgraded = Document::load(&old).expect("pre-v14 file loads");
     assert!(upgraded.sids().count() >= 8, "every entity got a fresh sid");

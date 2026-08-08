@@ -465,10 +465,10 @@ fn leaky_instance_doc() -> Document {
     let mut doc = Document::new();
     let scene = kernel::ImportScene {
         materials: Vec::new(),
-        defs: vec![kernel::DefRecipe {
-            name: Some("LeakyDef".to_string()),
-            meshes: vec![leaky_box_mesh("Leaky")],
-        }],
+        defs: vec![kernel::DefRecipe::from_meshes(
+            Some("LeakyDef".to_string()),
+            vec![leaky_box_mesh("Leaky")],
+        )],
         roots: vec![kernel::ImportNode::Instance {
             def: 0,
             pose: kernel::Transform::IDENTITY,

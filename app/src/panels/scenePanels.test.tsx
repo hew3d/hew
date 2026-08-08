@@ -2079,6 +2079,153 @@ describe('DocumentTree', () => {
       // The breadcrumb reflects both frames, outermost first.
       expect(screen.getByText('Model')).toBeInTheDocument()
     })
+
+    // -----------------------------------------------------------------------
+    // Scroll-follow (playtest: entering a component re-roots the tree, but
+    // the scroll position stays where the old row was, stranding the user
+    // far from the re-rooted content). The Outliner must scroll the row for
+    // whatever just became relevant into view: the new frame's header on
+    // open (including drilling one level deeper), the closed node's restored
+    // row on close.
+    // -----------------------------------------------------------------------
+
+    it('scrolls the newly-opened frame\'s header row into view when a session opens', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [{ kind: 'object', id: 1n }, { kind: 'group', id: 20n }],
+        object_ids: () => new BigUint64Array([1n]),
+        group_ids: () => new BigUint64Array([20n]),
+        group_members: (id: bigint) => (id === 20n ? [{ kind: 'object', id: 2n }] : []),
+      })
+      const { rerender } = render(
+        <DocumentTree {...docTreeBase} scene={scene} watertightMap={new Map([[1n, true]])} />,
+      )
+      ;(Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+
+      // Double-click "Group 1" to open its session — the frame header row
+      // (the "editing" row, always mounted even before its member list
+      // settles) should be scrolled into view.
+      rerender(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true]])}
+          sessionStack={[{ node: { kind: 'group', id: 20n }, label: 'Group 1' }]}
+          sessionMembers={[{ kind: 'object', id: 2n }]}
+        />,
+      )
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    })
+
+    it('drilling one level deeper (a second stacked frame) also scrolls to the new frame\'s header', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [{ kind: 'object', id: 1n }],
+        object_ids: () => new BigUint64Array([1n]),
+      })
+      const { rerender } = render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true]])}
+          sessionStack={[{ node: { kind: 'group', id: 20n }, label: 'Outer Group' }]}
+          sessionMembers={[{ kind: 'object', id: 1n }]}
+        />,
+      )
+      ;(Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+
+      // A nested group inside the outer session opens its own frame — the
+      // stack grows by one, same shape as opening the first frame.
+      rerender(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true]])}
+          sessionStack={[
+            { node: { kind: 'group', id: 20n }, label: 'Outer Group' },
+            { node: { kind: 'group', id: 21n }, label: 'Inner Group' },
+          ]}
+          sessionMembers={[{ kind: 'object', id: 1n }]}
+        />,
+      )
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    })
+
+    it('scrolls the closed node\'s row back into view once a session closes', () => {
+      // The scene models the kernel's session-hide/reveal posture: while the
+      // session is open, "Group 1" is hidden and its member is a bare
+      // top-level row; once closed, the group reappears at top level holding
+      // that member.
+      let sessionOpen = true
+      const scene = makeScene({
+        top_level_nodes: () =>
+          sessionOpen ? [{ kind: 'object', id: 1n }] : [{ kind: 'group', id: 20n }],
+        group_members: (id: bigint) => (id === 20n ? [{ kind: 'object', id: 1n }] : []),
+        object_ids: () => new BigUint64Array([1n]),
+        group_ids: () => new BigUint64Array([20n]),
+      })
+      const { rerender } = render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true]])}
+          sessionStack={[{ node: { kind: 'group', id: 20n }, label: 'Group 1' }]}
+          sessionMembers={[{ kind: 'object', id: 1n }]}
+        />,
+      )
+      ;(Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+
+      sessionOpen = false
+      rerender(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          // `topNodes` memoizes on `[scene, docRev]` — bump docRev so the
+          // (same-identity) `scene`'s `top_level_nodes()` is re-queried and
+          // picks up `sessionOpen` flipping, mirroring how a real close
+          // arrives bundled with a docRev bump from App.tsx.
+          docRev={1}
+          watertightMap={new Map([[1n, true]])}
+          sessionStack={[]}
+          sessionMembers={null}
+        />,
+      )
+      // "Group 1" is back as a single ordinary row (no more breadcrumb crumb
+      // duplicate) at its original position, and got scrolled into view.
+      expect(screen.getAllByText('Group 1')).toHaveLength(1)
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    })
+
+    it('does not re-trigger the session-reveal scroll on a re-render where the stack did not change', () => {
+      const scene = makeScene({
+        top_level_nodes: () => [{ kind: 'object', id: 1n }],
+        object_ids: () => new BigUint64Array([1n]),
+      })
+      const { rerender } = render(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          watertightMap={new Map([[1n, true]])}
+          sessionStack={[{ node: { kind: 'group', id: 20n }, label: 'Group 1' }]}
+          sessionMembers={[{ kind: 'object', id: 1n }]}
+        />,
+      )
+      ;(Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
+
+      // An unrelated re-render (docRev bump) with a FRESH array carrying the
+      // same session-stack contents — App.tsx hands down a new array
+      // reference on every render, so this must be compared by content, not
+      // identity — must not yank the scroll position.
+      rerender(
+        <DocumentTree
+          {...docTreeBase}
+          scene={scene}
+          docRev={1}
+          watertightMap={new Map([[1n, true]])}
+          sessionStack={[{ node: { kind: 'group', id: 20n }, label: 'Group 1' }]}
+          sessionMembers={[{ kind: 'object', id: 1n }]}
+        />,
+      )
+      expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled()
+    })
   })
 })
 

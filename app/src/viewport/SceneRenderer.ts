@@ -13,6 +13,18 @@
  * transform preview) is handled by MATERIALIZING the affected placement out of
  * its batch into the classic per-instance Group path — see `_syncMaterialized`.
  *
+ * A definition's members can themselves be instances/groups (nested
+ * components): each instance's `instance_expanded_members`/
+ * `instance_expanded_local_poses` give the fully EXPANDED leaf-object
+ * placements — nested member instances composed, member groups descended —
+ * with a def-local pose per placement (identity for a flat definition, so
+ * every code path below is pixel-identical to before nesting existed). A
+ * leaf member can appear more than once per instance (a nested definition
+ * placing the same leaf N times), so one instance can own several batch
+ * slots for the SAME member — see `InstanceRecord.placements`. A
+ * placement's world matrix is always `instancePoseMatrix ×
+ * placementLocalMatrix`.
+ *
  * Also manages sketch geometry for every document sketch (refreshAllSketches).
  */
 
@@ -256,17 +268,21 @@ interface ObjectMeshGroup {
 }
 
 /**
- * One MATERIALIZED instance: a THREE.Group holding per-instance meshes for
- * each member object at the instance pose. Only placements that need
- * per-instance state (selection color, isolation lighting, transform preview)
- * are materialized; everything else renders through `MemberBatch`.
+ * One MATERIALIZED instance: a THREE.Group holding per-PLACEMENT meshes
+ * (child transform = the placement's def-local pose; the group itself
+ * carries the instance's own pose), at the instance pose. Only placements
+ * that need per-instance state (selection color, isolation lighting,
+ * transform preview) are materialized; everything else renders through
+ * `MemberBatch`.
  */
 interface InstanceMeshGroup {
   instanceId: bigint
-  /** Set of definition member object ids rendered inside this group */
+  /** Member object id per placement, parallel to facesMeshes/edgesLines
+   * (repeats included — a nested definition can place the same member more
+   * than once). */
   memberIds: bigint[]
   group: THREE.Group
-  /** Face meshes, one per member, in the same order as memberIds */
+  /** Face meshes, one per placement, in the same order as memberIds */
   facesMeshes: THREE.Mesh[]
   edgesLines: THREE.LineSegments[]
 }
@@ -351,34 +367,73 @@ interface MemberBatch {
   edges: THREE.LineSegments
   /** Per-instance pose rows for the edge shader, one vec4 per row. */
   edgeRows: [THREE.InstancedBufferAttribute, THREE.InstancedBufferAttribute, THREE.InstancedBufferAttribute]
-  /** Slot ownership: slot i belongs to instance slots[i]. A hidden or
-   * materialized instance keeps its slot (written degenerate — zero linear
-   * part draws nothing) so restoring it is a matrix write, not a rebuild. */
-  slots: bigint[]
-  slotOf: Map<bigint, number>
+  /** Slot ownership: slot i belongs to instance `slots[i].instanceId`'s
+   * `placementIndex`-th entry in that instance's `InstanceRecord.placements`
+   * (a nested definition can place the same member object more than once
+   * under one instance, so an instance may own several slots in the SAME
+   * batch — one per placement). A hidden or materialized instance keeps
+   * every slot it owns (written degenerate — zero linear part draws
+   * nothing) so restoring it is a matrix write, not a rebuild. */
+  slots: { instanceId: bigint; placementIndex: number }[]
+  /** instanceId → the slot indices it owns in this batch, in the same order
+   * as that placement's occurrences in `InstanceRecord.placements` (i.e. the
+   * order `_rebuildMemberBatches` encountered them) — a repeated member maps
+   * positionally, k-th occurrence → `slotOf.get(id)[k]`. */
+  slotOf: Map<bigint, number[]>
   /** Slots currently written degenerate (hidden/materialized). Bounds
    * computation skips these — a suppressed placement must not contribute
    * even its translation point to zoom-extents or culling volumes. */
   suppressedSlots: Set<number>
 }
 
+/** One definition member placed by an instance: which member object, its
+ * DEF-LOCAL pose (identity for a flat definition; a nested definition's own
+ * internal placement otherwise), and the two bucket flags of its EFFECTIVE
+ * (composed) pose. The placement's world matrix is `InstanceRecord.matrix ×
+ * localMatrix` (module doc), and `reflected`/`similar` are derived from that
+ * SAME composed matrix, not from either factor alone — a nested definition's
+ * local pose can independently mirror or shear a placement even when the
+ * outer instance pose is a plain identity/translation, so bucketing by the
+ * outer pose alone would land a mirrored nested member in the wrong
+ * (non-BackSide) bucket and render it inside-out (review finding). */
+interface Placement {
+  memberId: bigint
+  localMatrix: THREE.Matrix4
+  /** det(linear part of the COMPOSED pose) < 0 — reflected placements land
+   * in the 'B' bucket (see `BucketTag`). */
+  reflected: boolean
+  /** The COMPOSED pose's linear part is a similarity (orthogonal columns of
+   * equal norm) — only these poses may render smooth per-vertex normals in
+   * a batch (see `BucketTag`). */
+  similar: boolean
+}
+
 /** Renderer-side book-keeping for one placement, batched or materialized. */
 interface InstanceRecord {
   instanceId: bigint
   componentId: bigint
+  /** Every expanded leaf placement of this instance's definition, in the
+   * kernel's `instance_expanded_members`/`instance_expanded_local_poses`
+   * order — repeats are real (see `Placement`). Bucket flags
+   * (`reflected`/`similar`) live PER PLACEMENT, not here — a repeated member
+   * can straddle two different buckets under one instance (module doc). */
+  placements: Placement[]
+  /** Distinct member object ids across `placements`, for call sites that
+   * only care about batch/geometry membership (cache invalidation, "does
+   * this instance draw member X at all") and not per-placement pose. */
   memberIds: bigint[]
-  /** Full 4×4 pose built from the kernel's row-major 3×4. */
+  /** Full 4×4 pose built from the kernel's row-major 3×4 — the OUTER
+   * instance pose only, before composing with any placement's local pose. */
   matrix: THREE.Matrix4
-  /** det(linear part) < 0 — reflected placements land in the 'B' bucket. */
-  reflected: boolean
-  /** Linear part is a similarity (orthogonal columns of equal norm) — only
-   * these poses may render smooth per-vertex normals in a batch (see
-   * `BucketTag`). */
-  similar: boolean
 }
 
 /** Scratch matrix for slot writes (module-level to avoid per-write alloc). */
 const _slotMatrix = new THREE.Matrix4()
+/** Scratch matrix for composing outer × local poses when deriving a fresh
+ * placement's bucket flags (`_composeRowMajorPose`) — kept separate from
+ * `_slotMatrix` so the pull path (record construction) and the write path
+ * (slot matrix writes) never alias the same scratch object. */
+const _composeScratch = new THREE.Matrix4()
 /** Scratch bounds for the live-slots-only batch bounds computation. */
 const _boundsBox = new THREE.Box3()
 const _boundsSphere = new THREE.Sphere()
@@ -748,24 +803,63 @@ export class SceneRenderer {
         this._removeInstance(iid)
         continue
       }
-      const sameMembers =
+      // Compare the FULL placement sequence (member id per index, repeats
+      // included), not just the deduplicated member set: a nested
+      // definition can gain/lose a placement of a member it already had
+      // (e.g. an array count edit) with the deduplicated set unchanged —
+      // that still resizes the batch and must take the slow path. Local
+      // pose is deliberately NOT part of this comparison: a nested def edit
+      // that only moves a placement (member set/count unchanged) is exactly
+      // what the fast path below is for, since it always re-composes
+      // `rec.matrix × placement.localMatrix` from the FRESH placement.
+      const samePlacements =
         next.componentId === prev.componentId &&
-        next.memberIds.length === prev.memberIds.length &&
-        next.memberIds.every((m, i) => m === prev.memberIds[i])
-      if (!sameMembers || next.reflected !== prev.reflected || next.similar !== prev.similar) {
-        // Bucket membership changed — the slow (rebuild) path.
+        next.placements.length === prev.placements.length &&
+        next.placements.every((p, i) => p.memberId === prev.placements[i].memberId)
+      if (!samePlacements) {
+        // Batch membership changed (a placement gained/lost/swapped) — the
+        // slow (rebuild) path.
         for (const m of prev.memberIds) membersToRebuild.add(m)
         for (const m of next.memberIds) membersToRebuild.add(m)
         continue
       }
-      // Fast path: same buckets, new pose — write the slot matrices in place.
-      for (const m of next.memberIds) {
+      // A pose-only change can still flip an individual PLACEMENT's own
+      // bucket: `reflected`/`similar` are derived from the COMPOSED pose
+      // (outer × local — module doc on `Placement`), so a nested
+      // definition's local pose can independently mirror a member even when
+      // the outer instance pose only translates. Detect any placement whose
+      // bucket tag changed and route just that member through the slow
+      // (rebuild) path below; OTHER placements/members of this same
+      // instance, whose bucket did not change, still take the fast in-place
+      // write below.
+      for (let i = 0; i < next.placements.length; i++) {
+        const nextPlacement = next.placements[i]
+        const prevPlacement = prev.placements[i]
+        const prevKey = this._batchKeyFor(nextPlacement.memberId, prevPlacement)
+        const nextKey = this._batchKeyFor(nextPlacement.memberId, nextPlacement)
+        if (prevKey !== nextKey) membersToRebuild.add(nextPlacement.memberId)
+      }
+      // Fast path: write the slot matrix of every placement whose member is
+      // NOT being rebuilt this pass. `occurrence` tracks each (member,
+      // bucket) BATCH KEY's ordinal within `next.placements` — not just the
+      // member id — so a repeated member maps positionally onto `slotOf`'s
+      // per-instance slot list (built in the same encounter order by
+      // `_rebuildMemberBatches`/`_buildBatch`) even when its placements now
+      // land in DIFFERENT buckets and so belong to independent slot
+      // sequences (`samePlacements` above guarantees the member SEQUENCE
+      // still matches; it says nothing about each placement's bucket).
+      const occurrence = new Map<string, number>()
+      for (const placement of next.placements) {
+        const m = placement.memberId
+        const key = this._batchKeyFor(m, placement)
+        if (key === undefined) continue // member geometry not cached — no batch to write into either way
+        const occ = occurrence.get(key) ?? 0
+        occurrence.set(key, occ + 1)
         if (membersToRebuild.has(m)) continue // rebuilt below anyway
-        const key = this._batchKeyFor(m, next)
-        const batch = key !== undefined ? this.batches.get(key) : undefined
-        const slot = batch?.slotOf.get(iid)
+        const batch = this.batches.get(key)
+        const slot = batch?.slotOf.get(iid)?.[occ]
         if (batch !== undefined && slot !== undefined) {
-          this._writeSlot(batch, slot, next)
+          this._writeSlot(batch, slot, next, placement)
         }
       }
       // A materialized placement follows the new pose too.
@@ -916,6 +1010,25 @@ export class SceneRenderer {
     return true
   }
 
+  /**
+   * Compose two poses (each already a THREE.Matrix4 built from a row-major
+   * 3×4) and return the result as a row-major 3×4 Float64Array — the same
+   * layout `instance_pose` hands back, so the composed EFFECTIVE pose can
+   * reuse `_poseDet`/`_poseIsSimilarity` verbatim instead of duplicating
+   * that math against THREE's column-major `Matrix4.elements` layout. Used
+   * by `_pullInstanceRecord` to derive each placement's `reflected`/
+   * `similar` from `outer × local`, not from either factor alone.
+   */
+  private _composeRowMajorPose(outer: THREE.Matrix4, local: THREE.Matrix4): Float64Array {
+    _composeScratch.multiplyMatrices(outer, local)
+    const e = _composeScratch.elements // column-major
+    return Float64Array.of(
+      e[0], e[4], e[8], e[12],
+      e[1], e[5], e[9], e[13],
+      e[2], e[6], e[10], e[14],
+    )
+  }
+
   /** Pull one placement's def/pose/members into its InstanceRecord (creating
    * or overwriting it). Returns undefined (and leaves no record) when the
    * kernel no longer knows the instance. */
@@ -924,23 +1037,52 @@ export class SceneRenderer {
     if (componentId === undefined) return undefined
     const pose = this.wasmScene.instance_pose(instanceId)
     if (pose === undefined) return undefined
-    const memberIds = Array.from(this.wasmScene.component_member_objects(componentId))
-    // THREE Matrix4 is column-major; set() takes row-major.
+    // THREE Matrix4 is column-major; set() takes row-major. Built BEFORE the
+    // placements loop below — each placement's bucket flags are derived from
+    // this OUTER matrix composed with its own local pose (see `Placement`).
     const matrix = new THREE.Matrix4().set(
       pose[0], pose[1], pose[2],  pose[3],
       pose[4], pose[5], pose[6],  pose[7],
       pose[8], pose[9], pose[10], pose[11],
       0,       0,       0,        1,
     )
+    // Expanded leaf placements: nested member instances composed, member
+    // groups descended (for a flat definition this is exactly
+    // `component_member_objects` with identity local poses — the module
+    // doc's flat/nested parity guarantee). `local` is parallel, 12 floats
+    // (row-major 3×4) per entry.
+    const expandedMembers = this.wasmScene.instance_expanded_members(instanceId)
+    const expandedLocalPoses = this.wasmScene.instance_expanded_local_poses(instanceId)
+    const placements: Placement[] = []
+    for (let i = 0; i < expandedMembers.length; i++) {
+      const base = i * 12
+      // THREE Matrix4 is column-major; set() takes row-major.
+      const localMatrix = new THREE.Matrix4().set(
+        expandedLocalPoses[base],     expandedLocalPoses[base + 1],  expandedLocalPoses[base + 2],  expandedLocalPoses[base + 3],
+        expandedLocalPoses[base + 4], expandedLocalPoses[base + 5],  expandedLocalPoses[base + 6],  expandedLocalPoses[base + 7],
+        expandedLocalPoses[base + 8], expandedLocalPoses[base + 9],  expandedLocalPoses[base + 10], expandedLocalPoses[base + 11],
+        0,                             0,                             0,                              1,
+      )
+      // Bucket by the EFFECTIVE (composed) pose, not the outer instance pose
+      // alone (review finding): a nested definition's local pose can mirror
+      // or shear a placement independently of the outer pose.
+      const composed = this._composeRowMajorPose(matrix, localMatrix)
+      placements.push({
+        memberId: expandedMembers[i],
+        localMatrix,
+        // Reflected pose: flips face winding (watertight members only — an
+        // open shell renders double-sided regardless of reflection).
+        reflected: this._poseDet(composed) < 0,
+        similar: this._poseIsSimilarity(composed),
+      })
+    }
+    const memberIds = [...new Set(placements.map((p) => p.memberId))]
     const rec: InstanceRecord = {
       instanceId,
       componentId,
+      placements,
       memberIds,
       matrix,
-      // Reflected pose: flips face winding (watertight members only — an open
-      // shell renders double-sided regardless of reflection).
-      reflected: this._poseDet(pose) < 0,
-      similar: this._poseIsSimilarity(pose),
     }
     this.instanceRecords.set(instanceId, rec)
     return rec
@@ -983,42 +1125,58 @@ export class SceneRenderer {
     return similar ? 'F' : 'G'
   }
 
-  /** Batch key for one member as rendered by one placement, or undefined when
-   * the member's geometry has not been pulled (no batch can exist either). */
-  private _batchKeyFor(memberId: bigint, rec: InstanceRecord): string | undefined {
+  /** Batch key for one member as rendered by one specific placement of it, or
+   * undefined when the member's geometry has not been pulled (no batch can
+   * exist either). The bucket is a property of the PLACEMENT (its composed
+   * pose — see `Placement`), not of the owning instance as a whole: a
+   * repeated member can straddle two different buckets under one instance. */
+  private _batchKeyFor(memberId: bigint, placement: Placement): string | undefined {
     const cached = this.memberGeometryCache.get(memberId)
     if (cached === undefined) return undefined
-    return `${memberId}|${this._bucketTag(cached.watertight, rec.reflected, rec.similar)}`
+    return `${memberId}|${this._bucketTag(cached.watertight, placement.reflected, placement.similar)}`
   }
 
   /** Dispose and rebuild every batch of one definition member from the current
-   * instance records (grouped by side bucket). */
+   * instance records (grouped by side bucket). A member can be placed more
+   * than once by the same instance (a nested definition placing the same
+   * leaf N times), so this collects every (instanceRecord, placementIndex)
+   * pair whose placement's memberId matches — not just every instance that
+   * places the member at all — and each pair gets its own batch slot. */
   private _rebuildMemberBatches(memberId: bigint): void {
     for (const [key, batch] of [...this.batches]) {
       if (batch.memberId === memberId) this._disposeBatch(key)
     }
-    const placements: InstanceRecord[] = []
+    const entries: { rec: InstanceRecord; placementIndex: number }[] = []
     for (const rec of this.instanceRecords.values()) {
-      if (rec.memberIds.includes(memberId)) placements.push(rec)
+      rec.placements.forEach((p, placementIndex) => {
+        if (p.memberId === memberId) entries.push({ rec, placementIndex })
+      })
     }
-    if (placements.length === 0) return
+    if (entries.length === 0) return
 
     const cached = this._getMemberGeometry(memberId)
-    const byTag = new Map<BucketTag, InstanceRecord[]>()
-    for (const rec of placements) {
-      const tag = this._bucketTag(cached.watertight, rec.reflected, rec.similar)
+    const byTag = new Map<BucketTag, { rec: InstanceRecord; placementIndex: number }[]>()
+    for (const e of entries) {
+      const placement = e.rec.placements[e.placementIndex]
+      const tag = this._bucketTag(cached.watertight, placement.reflected, placement.similar)
       const list = byTag.get(tag)
-      if (list === undefined) byTag.set(tag, [rec])
-      else list.push(rec)
+      if (list === undefined) byTag.set(tag, [e])
+      else list.push(e)
     }
-    for (const [tag, recs] of byTag) {
-      this._buildBatch(memberId, tag, recs, cached)
+    for (const [tag, es] of byTag) {
+      this._buildBatch(memberId, tag, es, cached)
     }
   }
 
   /** Build one (member, bucket) batch: an InstancedMesh for faces and an
-   * instanced-edge LineSegments, with one slot per placement. */
-  private _buildBatch(memberId: bigint, tag: BucketTag, recs: InstanceRecord[], cached: MemberGeometry): void {
+   * instanced-edge LineSegments, with one slot per (instance, placement)
+   * entry — `entries[i]` is slot `i`. */
+  private _buildBatch(
+    memberId: bigint,
+    tag: BucketTag,
+    entries: { rec: InstanceRecord; placementIndex: number }[],
+    cached: MemberGeometry,
+  ): void {
     const side =
       tag === 'F' || tag === 'G' ? THREE.FrontSide : tag === 'B' ? THREE.BackSide : THREE.DoubleSide
     // Only the 'F' bucket may consume the tessellator's per-vertex normals;
@@ -1044,15 +1202,15 @@ export class SceneRenderer {
       side,
       flatShading,
     )
-    const mesh = new THREE.InstancedMesh(faceGeo, materials, recs.length)
+    const mesh = new THREE.InstancedMesh(faceGeo, materials, entries.length)
     mesh.name = `InstanceBatch_${memberId}_${tag}`
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
 
     const edgeGeo = new THREE.InstancedBufferGeometry()
     edgeGeo.setAttribute('position', new THREE.BufferAttribute(cached.edgePositions, 3))
-    edgeGeo.instanceCount = recs.length
+    edgeGeo.instanceCount = entries.length
     const mkRow = () => {
-      const attr = new THREE.InstancedBufferAttribute(new Float32Array(recs.length * 4), 4)
+      const attr = new THREE.InstancedBufferAttribute(new Float32Array(entries.length * 4), 4)
       attr.setUsage(THREE.DynamicDrawUsage)
       return attr
     }
@@ -1089,14 +1247,20 @@ export class SceneRenderer {
       )
     }
 
+    const slotOf = new Map<bigint, number[]>()
+    entries.forEach((e, i) => {
+      const arr = slotOf.get(e.rec.instanceId)
+      if (arr === undefined) slotOf.set(e.rec.instanceId, [i])
+      else arr.push(i)
+    })
     const batch: MemberBatch = {
       memberId,
       side,
       mesh,
       edges,
       edgeRows,
-      slots: recs.map((r) => r.instanceId),
-      slotOf: new Map(recs.map((r, i) => [r.instanceId, i])),
+      slots: entries.map((e) => ({ instanceId: e.rec.instanceId, placementIndex: e.placementIndex })),
+      slotOf,
       suppressedSlots: new Set(),
     }
     // Instance-aware bounds over LIVE slots only. three's stock
@@ -1133,7 +1297,7 @@ export class SceneRenderer {
         sphere.union(_boundsSphere.copy(geoBounds.sphere).applyMatrix4(_slotMatrix))
       }
     }
-    recs.forEach((rec, i) => this._writeSlot(batch, i, rec))
+    entries.forEach((e, i) => this._writeSlot(batch, i, e.rec, e.rec.placements[e.placementIndex]))
 
     this.instancesGroup.add(mesh)
     this.instancesGroup.add(edges)
@@ -1165,19 +1329,21 @@ export class SceneRenderer {
   }
 
   /**
-   * Write one batch slot from the instance's current state: the live pose when
-   * the placement draws batched, or a degenerate matrix (linear part zeroed,
-   * translation kept) when hidden or materialized. Zero scale collapses every
-   * primitive to a point, which rasterizes nothing; bounds skip suppressed
-   * slots entirely (see the overrides in `_buildBatch`), so the kept
-   * translation never leaks into zoom-extents or culling volumes.
+   * Write one batch slot from the placement's current state: the live
+   * composed pose (`rec.matrix × placement.localMatrix` — module doc) when
+   * the placement draws batched, or a degenerate matrix (linear part
+   * zeroed, translation kept) when hidden or materialized. Zero scale
+   * collapses every primitive to a point, which rasterizes nothing; bounds
+   * skip suppressed slots entirely (see the overrides in `_buildBatch`), so
+   * the kept translation never leaks into zoom-extents or culling volumes.
    */
-  private _writeSlot(batch: MemberBatch, slot: number, rec: InstanceRecord): void {
+  private _writeSlot(batch: MemberBatch, slot: number, rec: InstanceRecord, placement: Placement): void {
     const suppressed =
       this.hiddenInstanceIds.has(rec.instanceId) || this.instanceGroups.has(rec.instanceId)
-    const e = rec.matrix.elements
+    _slotMatrix.multiplyMatrices(rec.matrix, placement.localMatrix)
     if (suppressed) {
       batch.suppressedSlots.add(slot)
+      const e = _slotMatrix.elements
       _slotMatrix.set(
         0, 0, 0, e[12],
         0, 0, 0, e[13],
@@ -1186,7 +1352,6 @@ export class SceneRenderer {
       )
     } else {
       batch.suppressedSlots.delete(slot)
-      _slotMatrix.copy(rec.matrix)
     }
     batch.mesh.setMatrixAt(slot, _slotMatrix)
     const s = _slotMatrix.elements
@@ -1205,18 +1370,34 @@ export class SceneRenderer {
     batch.edges.geometry.boundingSphere = null
   }
 
-  /** Re-write every batch slot owned by one placement (visibility change,
-   * materialize/restore). No-op for slots whose batch is gone (rebuild will
-   * re-seed them). */
+  /** Re-write every batch slot owned by one instance — every placement of
+   * every member it draws (visibility change, materialize/restore). No-op
+   * for slots whose batch is gone (rebuild will re-seed them). A batch is
+   * per-(member, bucket), so `slotOf.get(instanceId)` within one such batch
+   * holds exactly that instance's placements landing in that bucket, in the
+   * same order they appear (with repeats) in `rec.placements` — the k-th
+   * occurrence of a given batch key maps positionally onto the k-th slot.
+   * Grouped by the full batch key (not just member id): a repeated member
+   * can straddle two different buckets under one instance (`Placement`'s
+   * `reflected`/`similar` are per placement), so its placements belong to
+   * INDEPENDENT slot sequences, one per bucket. */
   private _refreshSlots(instanceId: bigint): void {
     const rec = this.instanceRecords.get(instanceId)
     if (rec === undefined) return
-    for (const memberId of rec.memberIds) {
-      const key = this._batchKeyFor(memberId, rec)
-      const batch = key !== undefined ? this.batches.get(key) : undefined
-      const slot = batch?.slotOf.get(instanceId)
-      if (batch !== undefined && slot !== undefined) {
-        this._writeSlot(batch, slot, rec)
+    const placementsByKey = new Map<string, Placement[]>()
+    for (const p of rec.placements) {
+      const key = this._batchKeyFor(p.memberId, p)
+      if (key === undefined) continue
+      const list = placementsByKey.get(key)
+      if (list === undefined) placementsByKey.set(key, [p])
+      else list.push(p)
+    }
+    for (const [key, placements] of placementsByKey) {
+      const batch = this.batches.get(key)
+      const slots = batch?.slotOf.get(instanceId)
+      if (batch === undefined || slots === undefined) continue
+      for (let i = 0; i < slots.length && i < placements.length; i++) {
+        this._writeSlot(batch, slots[i], rec, placements[i])
       }
     }
   }
@@ -1289,14 +1470,17 @@ export class SceneRenderer {
 
     const facesMeshes: THREE.Mesh[] = []
     const edgesLinesList: THREE.LineSegments[] = []
-    for (const memberId of rec.memberIds) {
+    const placementMemberIds: bigint[] = []
+    rec.placements.forEach((placement, pi) => {
+      const memberId = placement.memberId
       const cached = this._getMemberGeometry(memberId)
       // Open (non-watertight) shells have inward-wound faces on some
       // triangles, so a single-sided material renders them invisible from the
       // "wrong" side; render those double-sided.
       //
       // Watertight members stay FrontSide EVEN FOR A REFLECTED POSE: here the
-      // pose rides on `group.matrix`, and WebGLRenderer already reverses the
+      // pose rides on `group.matrix` (composed with the placement's own
+      // `localMatrix` below), and WebGLRenderer already reverses the
       // front-face winding for any Mesh whose world matrix has a negative
       // determinant. Adding BackSide on top double-flips and renders the
       // solid inside-out (per-face paint vanishes behind the culled faces).
@@ -1322,23 +1506,30 @@ export class SceneRenderer {
         side,
       )
       const facesMesh = new THREE.Mesh(faceGeo, faceMaterials)
-      facesMesh.name = `InstanceFace_${instanceId}_${memberId}`
+      facesMesh.name = `InstanceFace_${instanceId}_${memberId}_${pi}`
+      facesMesh.matrixAutoUpdate = false
+      facesMesh.matrix.copy(placement.localMatrix)
+      facesMesh.matrixWorldNeedsUpdate = true
       group.add(facesMesh)
       facesMeshes.push(facesMesh)
+      placementMemberIds.push(memberId)
 
       const edgeGeo = new THREE.BufferGeometry()
       edgeGeo.setAttribute('position', new THREE.BufferAttribute(cached.edgePositions, 3))
       const edgeMat = new THREE.LineBasicMaterial({ color: EDGE_COLOR })
       const edgesLines = new THREE.LineSegments(edgeGeo, edgeMat)
-      edgesLines.name = `InstanceEdge_${instanceId}_${memberId}`
+      edgesLines.name = `InstanceEdge_${instanceId}_${memberId}_${pi}`
+      edgesLines.matrixAutoUpdate = false
+      edgesLines.matrix.copy(placement.localMatrix)
+      edgesLines.matrixWorldNeedsUpdate = true
       group.add(edgesLines)
       edgesLinesList.push(edgesLines)
-    }
+    })
 
     this.instancesGroup.add(group)
     this.instanceGroups.set(instanceId, {
       instanceId,
-      memberIds: rec.memberIds,
+      memberIds: placementMemberIds,
       group,
       facesMeshes,
       edgesLines: edgesLinesList,
@@ -2907,14 +3098,21 @@ export class SceneRenderer {
       node.matrixAutoUpdate = false
       node.matrix.copy(rec.matrix)
       node.matrixWorldNeedsUpdate = true
-      for (const memberId of rec.memberIds) {
-        const key = this._batchKeyFor(memberId, rec)
+      // One child per PLACEMENT (a nested definition can place the same
+      // member more than once) — its own transform is the placement's
+      // def-local pose; this node already carries the instance's own pose.
+      rec.placements.forEach((placement, pi) => {
+        const memberId = placement.memberId
+        const key = this._batchKeyFor(memberId, placement)
         const batch = key !== undefined ? this.batches.get(key) : undefined
-        if (batch === undefined) continue
-        const mesh = exportMesh(batch.mesh, `Instance_${id}_member_${memberId}`)
+        if (batch === undefined) return
+        const mesh = exportMesh(batch.mesh, `Instance_${id}_member_${memberId}_${pi}`)
         mesh.userData.hewObjectId = memberId.toString()
+        mesh.matrixAutoUpdate = false
+        mesh.matrix.copy(placement.localMatrix)
+        mesh.matrixWorldNeedsUpdate = true
         node.add(mesh)
-      }
+      })
       root.add(node)
     }
 
@@ -3262,8 +3460,11 @@ export class SceneRenderer {
     if (mg !== undefined) return this._materialClipCount(mg.facesMeshes[0]?.material)
     const rec = this.instanceRecords.get(id)
     if (rec === undefined) return -1
-    for (const m of rec.memberIds) {
-      const key = this._batchKeyFor(m, rec)
+    // Per PLACEMENT, not per distinct member id: a repeated member's
+    // placements can land in different buckets (different batches), so the
+    // batch key must be computed from each placement's own bucket flags.
+    for (const placement of rec.placements) {
+      const key = this._batchKeyFor(placement.memberId, placement)
       const batch = key !== undefined ? this.batches.get(key) : undefined
       if (batch?.slotOf.has(id)) return this._materialClipCount(batch.mesh.material)
     }
@@ -3694,10 +3895,13 @@ export class SceneRenderer {
       if (attr !== undefined) attr.needsUpdate = true
     }
     for (const g of this.instanceGroups.values()) {
-      const idx = g.memberIds.indexOf(objectId)
-      if (idx === -1) continue
-      const attr = g.facesMeshes[idx].geometry.getAttribute('uv') as THREE.BufferAttribute | undefined
-      if (attr !== undefined) attr.needsUpdate = true
+      // A nested definition can place the same member more than once — patch
+      // EVERY matching placement's face mesh, not just the first.
+      g.memberIds.forEach((mid, idx) => {
+        if (mid !== objectId) return
+        const attr = g.facesMeshes[idx].geometry.getAttribute('uv') as THREE.BufferAttribute | undefined
+        if (attr !== undefined) attr.needsUpdate = true
+      })
     }
   }
 

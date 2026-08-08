@@ -5,17 +5,20 @@
  *
  * Client-side, surface-free: reuses the exact accessors `SceneRenderer`
  * already calls to draw the scene (`object_mesh`, `instance_pose`,
- * `component_member_objects`), and `treeModel.collectLeafIds` to walk a
- * selection down to its leaf Objects/Instances — no new wasm-api method.
+ * `instance_expanded_members`/`instance_expanded_local_poses`), and
+ * `treeModel.collectLeafIds` to walk a selection down to its leaf
+ * Objects/Instances — no new wasm-api method.
  *
  * A Group has no geometry or pose of its own; moving one bakes the transform
  * into every leaf Object beneath it (ARCHITECTURE.md §2.7), so a leaf
  * Object's mesh — whether top-level or nested in a Group — is already in
  * world space. A Component instance is the one place a persistent pose
  * exists: its definition owns geometry once, in definition-local space, and
- * each instance poses it only at render/tessellation time, so an instance's
- * member meshes must be transformed by its own affine before they're in
- * world space.
+ * each EXPANDED leaf placement (nested member instances composed, member
+ * groups descended) must be transformed by `instance_pose × that
+ * placement's own def-local pose` before it's in world space — for a flat
+ * definition every local pose is identity, so this reduces to exactly the
+ * instance's own affine, unchanged from before nesting existed.
  */
 
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -133,20 +136,48 @@ function objectMeshBounds(
 }
 
 /**
- * World AABB of one Component instance: the union of every definition
- * member's (definition-local) mesh, posed by the instance's own affine — see
- * module doc. Null if the instance is stale (no pose), its definition is
- * stale, the definition has no members, or every member's mesh is stale.
+ * Compose two row-major 3×4 affines (the format `instance_pose`/
+ * `instance_expanded_local_poses` return): a point transforms by `inner`
+ * first, then `outer` — matching the module doc's "world matrix of a
+ * placement = instancePoseMatrix × localPoseMatrix" (SceneRenderer.ts's
+ * module doc uses the same formula, via `THREE.Matrix4.multiplyMatrices`;
+ * this file stays three.js-free, so the composition is inlined instead).
+ */
+function composeWorldPose(outer: ArrayLike<number>, inner: ArrayLike<number>): number[] {
+  const result = new Array<number>(12)
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 4; c++) {
+      result[r * 4 + c] =
+        outer[r * 4 + 0] * inner[0 * 4 + c] +
+        outer[r * 4 + 1] * inner[1 * 4 + c] +
+        outer[r * 4 + 2] * inner[2 * 4 + c] +
+        outer[r * 4 + 3] * (c === 3 ? 1 : 0)
+    }
+  }
+  return result
+}
+
+/**
+ * World AABB of one Component instance: the union of every EXPANDED leaf
+ * placement's (nested member instances composed, member groups descended —
+ * same expansion the renderer draws) definition-local mesh, posed by
+ * `instance_pose × placement's local pose` (module doc). For a flat
+ * definition every local pose is identity, so this is exactly the instance's
+ * own pose, unchanged from before nesting existed. Null if the instance is
+ * stale (no pose), its definition has no members, or every member's mesh is
+ * stale.
  */
 function instanceWorldBounds(scene: WasmScene, instanceId: bigint): Bounds | null {
   const pose = scene.instance_pose(instanceId)
   if (pose === undefined) return null
-  const componentId = scene.instance_def(instanceId)
-  if (componentId === undefined) return null
+
+  const memberIds = scene.instance_expanded_members(instanceId)
+  const localPoses = scene.instance_expanded_local_poses(instanceId)
 
   let bounds: Bounds | null = null
-  for (const memberId of scene.component_member_objects(componentId)) {
-    bounds = unionBounds(bounds, objectMeshBounds(scene, memberId, pose))
+  for (let i = 0; i < memberIds.length; i++) {
+    const local = localPoses.subarray(i * 12, i * 12 + 12)
+    bounds = unionBounds(bounds, objectMeshBounds(scene, memberIds[i], composeWorldPose(pose, local)))
   }
   return bounds
 }

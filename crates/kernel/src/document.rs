@@ -114,7 +114,14 @@ enum ObjectOwner {
     /// at the top level.
     World { parent: Option<GroupId> },
     /// A member of a component definition (definition-local coordinates).
-    Definition(ComponentId),
+    /// `parent` is the containing group WITHIN the definition's own
+    /// subtree (nested components), or `None` for a direct member — the
+    /// exact analogue of `World::parent`, so the group-tree invariants
+    /// hold uniformly inside definitions.
+    Definition {
+        def: ComponentId,
+        parent: Option<GroupId>,
+    },
 }
 
 /// A solid Object plus its undo history, visibility, and owner.
@@ -137,13 +144,42 @@ struct ObjectRecord {
     tags: Vec<Vec<String>>,
 }
 
+impl ComponentDef {
+    /// The definition's direct member OBJECTS, in member order — the flat
+    /// view every geometry consumer (tessellation, export, def-op
+    /// targeting) uses. Member groups/instances (nested components) are
+    /// not yielded here; consumers that need the full tree walk
+    /// `members` directly.
+    fn object_members(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.members.iter().filter_map(|m| match m {
+            NodeId::Object(id) => Some(*id),
+            _ => None,
+        })
+    }
+}
+
+/// Maximum definition-nesting depth (nested-components design): a
+/// validator- and placement-enforced bound so a hostile file can never
+/// stack-overflow the recursive walks. Mirrors the attribute-value depth
+/// bound's posture.
+pub const MAX_COMPONENT_DEPTH: usize = 64;
+
+/// Maximum total leaf-object placements a document's expansion may
+/// produce (nested-components hardening): the definition graph is a DAG,
+/// so a file 20 levels deep with two instances per level would expand to
+/// 2^20 placements — width explodes where depth cannot. Enforced at
+/// load, at ingest, and at every op that adds placements, so a document
+/// that saves always reopens. One million is ~700× the largest imported
+/// production model observed (a full theater expands to ~1,500).
+pub const MAX_EXPANDED_PLACEMENTS: usize = 1_000_000;
+
 impl ObjectRecord {
     /// The containing merge group, or `None` (top level, or a definition member
     /// — which has no tree parent).
     fn group_parent(&self) -> Option<GroupId> {
         match self.owner {
             ObjectOwner::World { parent } => parent,
-            ObjectOwner::Definition(_) => None,
+            ObjectOwner::Definition { parent, .. } => parent,
         }
     }
 
@@ -165,6 +201,13 @@ impl ObjectRecord {
 struct GroupRecord {
     members: Vec<NodeId>,
     parent: Option<GroupId>,
+    /// The definition whose subtree owns this group (nested-components
+    /// design), or `None` for an ordinary world group — the group/instance
+    /// analogue of [`ObjectOwner::Definition`]. Definition-owned nodes are
+    /// excluded from the world tree and reach the scene only through their
+    /// definition's instances. `parent` stays meaningful WITHIN the owning
+    /// definition's own subtree.
+    owner_def: Option<ComponentId>,
     hidden: bool,
     /// Optional display name (e.g. carried in from an import). `None` falls back
     /// to a positional label in the UI.
@@ -185,7 +228,12 @@ struct GroupRecord {
 /// [`ObjectOwner::Definition`] pointing back here.
 #[derive(Debug, Clone)]
 struct ComponentDef {
-    members: Vec<ObjectId>,
+    /// Ordered member NODES (nested-components design): leaf objects, and —
+    /// once the creation ops allow them — member groups and member
+    /// instances, all in definition-local coordinates. Flat-object
+    /// consumers go through [`Document::def_members`], which filters to
+    /// the object refs.
+    members: Vec<NodeId>,
     hidden: bool,
     /// Optional definition name (e.g. a SketchUp component name), used as the
     /// display name for this definition's instances. `None` falls back to a
@@ -208,6 +256,11 @@ struct InstanceRecord {
     def: ComponentId,
     pose: Transform,
     parent: Option<GroupId>,
+    /// See [`GroupRecord::owner_def`]: the definition whose subtree owns
+    /// this instance (an instance INSIDE a definition — the nested-
+    /// components edge), or `None` for a world placement. A def-owned
+    /// instance's `pose` is in its OWNING definition's local frame.
+    owner_def: Option<ComponentId>,
     hidden: bool,
     /// Optional per-instance display name. `None` falls back to the def's name,
     /// then to a positional label, in the UI.
@@ -333,6 +386,19 @@ struct ExplodeSession {
     /// `pose` then `pose_inv`).
     pristine_objects: BTreeMap<ObjectId, Object>,
     pristine_sketches: BTreeMap<SketchId, Sketch>,
+    /// Definition-owned member GROUPS surfaced world-side for the session
+    /// (owner_def cleared, parent links untouched), in subtree DFS order.
+    /// Their leaf objects ride in `members`/`pristine_objects` like direct
+    /// members (parents preserved through the bake).
+    surfaced_groups: Vec<GroupId>,
+    /// Definition-owned member INSTANCES surfaced as ordinary world
+    /// instances for the session (owner_def cleared, pose composed with
+    /// the session pose), in subtree DFS order.
+    surfaced_instances: Vec<InstanceId>,
+    /// Def-local pose snapshot of each surfaced instance, taken BEFORE
+    /// composing — the pose analog of `pristine_objects`, with the same
+    /// drift-free restore rule at close.
+    pristine_instance_poses: BTreeMap<InstanceId, Transform>,
     /// `self.undo.actions.len()` immediately after `SessionOpened` was
     /// pushed. Everything pushed from this index onward happened DURING the
     /// session — the dirty-tracking boundary [`Document::close_explode_session`]
@@ -368,10 +434,11 @@ struct GroupSession {
 }
 
 /// One open editing frame on [`Document::sessions`] — the session stack
-/// (docs/design/group-session.md). Frames open and close strictly LIFO,
-/// and a `Component` frame is always innermost: definitions are flat, so
-/// nothing inside one can host a further frame, and
-/// [`Document::open_explode_session`] refuses while one is already open.
+/// (docs/design/group-session.md). Frames open and close strictly LIFO.
+/// Frames STACK for nested drill-down: a component session surfaces its
+/// definition's member groups and instances as ordinary world nodes, and
+/// entering one of those pushes the next frame — group or component,
+/// either kind, in any order the model's nesting takes.
 #[derive(Debug, Clone)]
 enum SessionFrame {
     /// A component explode session — a transient *explode* of an instance
@@ -868,12 +935,20 @@ enum DocAction {
         /// The merge group the new instance was inserted into, or `None` at the
         /// top level.
         parent: Option<GroupId>,
-        /// Each def-member object paired with the world parent it had before
-        /// being folded in, so undo can return it to the world tree.
+        /// Each folded object (directly selected or nested beneath a selected
+        /// group) paired with the group parent it had before the fold, so undo
+        /// can return it to the world side. The parent LINK survives the fold
+        /// (a nested object keeps its group); only the World/Definition side
+        /// flips — a directly-selected object's definition parent is `None`.
         member_prior_parents: Vec<(ObjectId, Option<GroupId>)>,
-        /// Groups consumed (hidden) by the fold — every group node in the
-        /// selected subtrees — to reappear on undo.
-        consumed_groups: Vec<GroupId>,
+        /// Groups folded in (directly selected members and every group nested
+        /// beneath one) — re-owned into the definition, never hidden. Undo
+        /// clears `owner_def`; a directly-selected one also gets its parent
+        /// restored to the selection's shared `parent`.
+        folded_groups: Vec<GroupId>,
+        /// Instances folded in (directly selected or nested), re-owned
+        /// exactly like `folded_groups` — the nested-component fold.
+        folded_instances: Vec<InstanceId>,
         /// The shared parent's member list immediately before, for exact undo
         /// (mirrors [`DocAction::Grouped::prev_parent_members`]); `None` at the
         /// top level.
@@ -881,8 +956,8 @@ enum DocAction {
         /// The exact before/after `detached` snapshot of every annotation
         /// [`Document::reevaluate_liveness_recorded`] changed for the fold:
         /// every world object in `leaves` stops being a world node (it
-        /// becomes a definition member) and every group in `consumed_groups`
-        /// is hidden. Anchor REMAP onto the new instance is future work —
+        /// becomes a definition member) and every folded group/instance
+        /// goes definition-owned. Anchor REMAP onto the new instance is future work —
         /// today this only detaches; undo/redo restore it verbatim,
         /// mirroring [`DocAction::Deleted::reanchored`].
         reanchored: Vec<AnnotationReanchor>,
@@ -991,7 +1066,18 @@ enum DocAction {
     /// COPIES shared content into independent geometry, it never moves it.
     Exploded {
         instance: InstanceId,
+        /// Every baked world object — direct member bakes and objects inside
+        /// copied member-group subtrees alike.
         created: Vec<ObjectId>,
+        /// Every world group created by copying member-group subtrees.
+        created_groups: Vec<GroupId>,
+        /// Every world instance created from the definition's member
+        /// instances (nested components surface as ordinary instances with
+        /// the composed pose — geometry stays shared with their defs).
+        created_instances: Vec<InstanceId>,
+        /// The top-level created nodes, in member order — the exact set
+        /// spliced into the exploded instance's parent in its place.
+        created_roots: Vec<NodeId>,
         created_sketches: Vec<SketchId>,
         /// The exact before/after `detached` snapshot of every annotation
         /// [`Document::reevaluate_liveness_recorded`] changed for the hidden
@@ -1034,6 +1120,12 @@ enum DocAction {
         hidden_instances: Vec<InstanceId>,
         pristine_objects: Vec<(ObjectId, Object)>,
         pristine_sketches: Vec<(SketchId, Sketch)>,
+        /// Definition-owned member groups the open surfaced world-side
+        /// (nested components) — undo re-owns them back verbatim.
+        surfaced_groups: Vec<GroupId>,
+        /// Definition-owned member instances the open surfaced, each with
+        /// its pristine DEF-LOCAL pose — undo restores both verbatim.
+        surfaced_instances: Vec<(InstanceId, Transform)>,
     },
     /// `close_explode_session` folded a session's live members/sketches back
     /// into `component` (unbaking touched ones via `pose`'s inverse and
@@ -1065,9 +1157,14 @@ enum DocAction {
         component: ComponentId,
         pose: Transform,
         undo_len_at_open: usize,
-        prev_members: Vec<ObjectId>,
+        prev_members: Vec<NodeId>,
         folded_objects: Vec<ObjectId>,
         folded_sketches: Vec<SketchId>,
+        /// Groups created mid-session and folded in as definition content.
+        folded_groups: Vec<GroupId>,
+        /// Instances PLACED mid-session and folded in as nested members —
+        /// the interactive route to nesting.
+        folded_instances: Vec<InstanceId>,
         /// The ORIGINAL session's member/sketch/instance lists, carried so
         /// undo reconstructs the session over exactly the set the open
         /// recorded — NOT re-derived by filtering what happens to be live at
@@ -1079,6 +1176,11 @@ enum DocAction {
         members: Vec<ObjectId>,
         sketches: Vec<SketchId>,
         hidden_instances: Vec<InstanceId>,
+        /// The ORIGINAL session's surfaced member groups/instances (with
+        /// pristine def-local poses) — carried for the same
+        /// no-re-derivation reason as `members` above.
+        surfaced_groups: Vec<GroupId>,
+        surfaced_instances: Vec<(InstanceId, Transform)>,
         /// True when the close found the definition EMPTIED (every member
         /// deleted mid-session, nothing folded in): the definition and its
         /// instances were deleted outright (hidden, ids stable), matching
@@ -1675,7 +1777,17 @@ impl DocAction {
             DocAction::Sliced { a, b, .. } => vec![NodeId::Object(*a), NodeId::Object(*b)],
             DocAction::PushThrough { results, .. } => objects_only(results),
             DocAction::FollowMeFace { result, .. } => vec![NodeId::Object(*result)],
-            DocAction::Exploded { created, .. } => objects_only(created),
+            DocAction::Exploded {
+                created,
+                created_groups,
+                created_instances,
+                ..
+            } => {
+                let mut nodes = objects_only(created);
+                nodes.extend(created_groups.iter().map(|&g| NodeId::Group(g)));
+                nodes.extend(created_instances.iter().map(|&i| NodeId::Instance(i)));
+                nodes
+            }
             DocAction::Grouped { group, .. } => vec![NodeId::Group(*group)],
             DocAction::MadeComponent { instance, .. } => vec![NodeId::Instance(*instance)],
             DocAction::PlacedInstance { instance } => vec![NodeId::Instance(*instance)],
@@ -1829,6 +1941,20 @@ pub enum DocumentError {
     /// The component-definition handle is stale, hidden, or from another
     /// Document.
     UnknownComponent,
+    /// Placing this instance would make a definition (transitively) contain
+    /// itself (nested-components design) — the definition graph must stay a
+    /// DAG. Refused, never repaired.
+    ComponentCycle,
+    /// The definition graph nests deeper than the supported bound
+    /// (nested-components design) — refused rather than risking unbounded
+    /// recursion on a hostile file.
+    ComponentDepthExceeded,
+    /// The operation would push the document's total expanded placement
+    /// count past [`MAX_EXPANDED_PLACEMENTS`] (nested-components
+    /// hardening): a definition graph's WIDTH multiplies — two instances
+    /// per level for twenty levels is a million placements — so growth is
+    /// refused at the op, and a document that saves always reopens.
+    ComponentExpansionExceeded,
     /// The instance handle is stale, hidden, or from another Document.
     UnknownInstance,
     /// The guide handle is stale, hidden, or from another Document.
@@ -1861,10 +1987,6 @@ pub enum DocumentError {
     EmptySelection,
     /// `make_component` was called with no nodes selected.
     EmptyComponent,
-    /// `make_component` was given a selection containing a component instance.
-    /// Nesting a component inside a definition is deferred; the v1
-    /// definition is a flat set of world objects.
-    NestedComponentUnsupported,
     /// `explode_instance` was called on an instance whose pose mirrors
     /// (determinant < 0): baking a reflection into a solid would invert its
     /// winding, which `Object::apply_transform` refuses. Use
@@ -2014,12 +2136,14 @@ pub enum DocumentError {
     /// (near-)zero-length gradient, or (near-)parallel `s`/`t` gradients —
     /// see [`UvFrame::is_valid`]. Nothing is silently repaired or clamped.
     DegenerateUvFrame,
-    /// `open_explode_session`/[`Document::save_guarded`] refused because a
-    /// session is already open — one at a time
-    /// (docs/design/explode-session-prototype.md). The same condition backs
-    /// both refusals: a session bakes definition members into world-owned
-    /// objects for its duration, a state the file format never represents,
-    /// so saving mid-session is refused exactly like opening a second one.
+    /// A session refused to open, or [`Document::save_guarded`] refused to
+    /// save, because of an open session
+    /// (docs/design/explode-session-prototype.md). Component frames stack
+    /// for nested drill-down, so this covers: re-entering a definition
+    /// ALREADY on loan to an open frame (its members are world-baked —
+    /// baking them twice is meaningless), opening a GROUP session inside a
+    /// component frame, and saving mid-session (a session's baked state is
+    /// one the file format never represents).
     ExplodeSessionOpen,
     /// `close_explode_session` was called with no session open.
     ExplodeSessionNotOpen,
@@ -2075,6 +2199,19 @@ impl std::fmt::Display for DocumentError {
             DocumentError::UnknownComponent => {
                 write!(f, "no such component definition in this document")
             }
+            DocumentError::ComponentCycle => write!(
+                f,
+                "a component cannot contain itself, directly or through other components"
+            ),
+            DocumentError::ComponentDepthExceeded => {
+                write!(f, "components are nested too deeply to place this instance")
+            }
+            DocumentError::ComponentExpansionExceeded => {
+                write!(
+                    f,
+                    "this would multiply past {MAX_EXPANDED_PLACEMENTS} rendered component parts"
+                )
+            }
             DocumentError::UnknownInstance => write!(f, "no such instance in this document"),
             DocumentError::UnknownGuide => write!(f, "no such guide in this document"),
             DocumentError::UnknownAnnotation => write!(f, "no such annotation in this document"),
@@ -2102,12 +2239,6 @@ impl std::fmt::Display for DocumentError {
             }
             DocumentError::EmptyComponent => {
                 write!(f, "cannot make a component from an empty selection")
-            }
-            DocumentError::NestedComponentUnsupported => {
-                write!(
-                    f,
-                    "cannot nest a component instance inside a new definition"
-                )
             }
             DocumentError::CannotExplodeReflected => {
                 write!(
@@ -2905,7 +3036,7 @@ impl Document {
             .iter()
             .filter(|(_, rec)| !rec.hidden && !rec.is_world())
             .filter_map(|(id, rec)| {
-                if let ObjectOwner::Definition(cid) = rec.owner {
+                if let ObjectOwner::Definition { def: cid, .. } = rec.owner {
                     Some((id, rec.object.clone(), cid))
                 } else {
                     None
@@ -2934,7 +3065,15 @@ impl Document {
             .groups
             .iter()
             .filter(|(_, rec)| !rec.hidden)
-            .map(|(id, rec)| (id, rec.members.clone(), rec.name.clone(), rec.tags.clone()))
+            .map(|(id, rec)| {
+                (
+                    id,
+                    rec.members.clone(),
+                    rec.name.clone(),
+                    rec.tags.clone(),
+                    rec.owner_def,
+                )
+            })
             .collect();
 
         // ── Collect live components (in slotmap key order) ─────────────────
@@ -2948,16 +3087,20 @@ impl Document {
         // matching every other entity), so hidden members are filtered out
         // here — otherwise a stale id would reach `encode_document` with no
         // corresponding live geometry buffer to resolve against.
-        let components: Vec<(ComponentId, Vec<ObjectId>, Option<String>)> = self
+        let components: Vec<(ComponentId, Vec<NodeId>, Option<String>)> = self
             .components
             .iter()
             .filter(|(_, c)| !c.hidden)
             .map(|(id, c)| {
-                let live_members: Vec<ObjectId> = c
+                let live_members: Vec<NodeId> = c
                     .members
                     .iter()
                     .copied()
-                    .filter(|&o| self.objects.get(o).is_some_and(|r| !r.hidden))
+                    .filter(|m| match m {
+                        NodeId::Object(o) => self.objects.get(*o).is_some_and(|r| !r.hidden),
+                        NodeId::Group(g) => self.groups.get(*g).is_some_and(|r| !r.hidden),
+                        NodeId::Instance(i) => self.instances.get(*i).is_some_and(|r| !r.hidden),
+                    })
                     .collect();
                 (id, live_members, c.name.clone())
             })
@@ -2968,7 +3111,16 @@ impl Document {
             .instances
             .iter()
             .filter(|(_, rec)| !rec.hidden)
-            .map(|(id, rec)| (id, rec.def, rec.pose, rec.name.clone(), rec.tags.clone()))
+            .map(|(id, rec)| {
+                (
+                    id,
+                    rec.def,
+                    rec.pose,
+                    rec.name.clone(),
+                    rec.tags.clone(),
+                    rec.owner_def,
+                )
+            })
             .collect();
 
         // ── Collect live sketches (in slotmap key order) ───────────────────
@@ -3110,16 +3262,10 @@ impl Document {
                 .flatten()
                 .and_then(dense_to_mat);
 
-            // Determine ownership: is this a definition member?
-            let owner = if let Some(comp_dense) = raw.def_membership.get(i).copied().flatten() {
-                // We don't have the ComponentId yet — we'll patch it after
-                // inserting components. Use a placeholder World owner for now.
-                // We'll re-assign below.
-                let _ = comp_dense;
-                ObjectOwner::World { parent: None }
-            } else {
-                ObjectOwner::World { parent: None }
-            };
+            // Ownership starts World; the definition-subtree pass below
+            // (6b) re-owns every def-subtree node from the member lists —
+            // objects get real owners there, not here.
+            let owner = ObjectOwner::World { parent: None };
 
             let oid = doc.objects.insert(ObjectRecord {
                 object: obj,
@@ -3151,29 +3297,17 @@ impl Document {
         }
 
         // ── 4. Insert components → build dense→ComponentId map ────────────
-        // Each component's members are dense object ids → now live ObjectIds.
+        // Member lists reference groups/instances that don't exist yet
+        // (nested components, v15) — inserted empty here, resolved and
+        // ownership-wired in pass 6b below, after every node kind is live.
         let mut comp_ids: Vec<ComponentId> = Vec::with_capacity(raw.components.len());
-        for (ci, member_dense_ids) in raw.components.iter().enumerate() {
-            let members: Vec<ObjectId> = member_dense_ids
-                .iter()
-                .map(|&di| {
-                    dense_obj_ids.get(di as usize).copied().ok_or_else(|| {
-                        LoadError::DanglingReference {
-                            what: format!("component member object dense id {di} out of range"),
-                        }
-                    })
-                })
-                .collect::<Result<_, _>>()?;
+        for ci in 0..raw.components.len() {
             let cid = doc.components.insert(ComponentDef {
-                members: members.clone(),
+                members: Vec::new(),
                 hidden: false,
                 name: raw.component_names.get(ci).cloned().flatten(),
             });
             comp_ids.push(cid);
-            // Re-assign ownership for these objects.
-            for oid in members {
-                doc.objects[oid].owner = ObjectOwner::Definition(cid);
-            }
         }
 
         // ── 4b. `SketchOwner` (manifest v13+): now that `comp_ids` exists,
@@ -3204,6 +3338,7 @@ impl Document {
                 def: cid,
                 pose: *pose,
                 parent: None,
+                owner_def: None,
                 hidden: false,
                 name: raw.instance_names.get(ii).cloned().flatten(),
                 tags: raw.instance_tags.get(ii).cloned().unwrap_or_default(),
@@ -3219,6 +3354,7 @@ impl Document {
             let gid = doc.groups.insert(GroupRecord {
                 members: Vec::new(),
                 parent: None,
+                owner_def: None,
                 hidden: false,
                 name: raw.group_names.get(gi).cloned().flatten(),
                 tags: raw.group_tags.get(gi).cloned().unwrap_or_default(),
@@ -3273,7 +3409,7 @@ impl Document {
                     NodeId::Object(oid) => {
                         doc.objects[*oid].owner = match doc.objects[*oid].owner {
                             ObjectOwner::World { .. } => ObjectOwner::World { parent: Some(gid) },
-                            def @ ObjectOwner::Definition(_) => def,
+                            def @ ObjectOwner::Definition { def: _, .. } => def,
                         };
                     }
                     NodeId::Group(child_gid) => {
@@ -3283,6 +3419,206 @@ impl Document {
                         doc.instances[*iid].parent = Some(gid);
                     }
                 }
+            }
+        }
+
+        // ── 6b. Definition membership + transitive ownership (nested
+        // components, v15). Now that every node kind is live: resolve each
+        // definition's full member list, then derive definition ownership
+        // DOWN the member subtrees (a group member's entire subtree belongs
+        // to the definition), validating the file's own declared `owner`
+        // fields against the derivation — reject-not-repair on any
+        // disagreement, double-membership, cycle, or over-deep nesting.
+        {
+            let grp_dense: BTreeMap<GroupId, usize> =
+                grp_ids.iter().enumerate().map(|(i, &g)| (g, i)).collect();
+            let inst_dense: BTreeMap<InstanceId, usize> =
+                inst_ids.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+            let mut derived_group_owner: Vec<Option<u32>> = vec![None; grp_ids.len()];
+            let mut derived_inst_owner: Vec<Option<u32>> = vec![None; inst_ids.len()];
+            for (ci, member_dtos) in raw.components.iter().enumerate() {
+                let cid = comp_ids[ci];
+                let members: Vec<NodeId> = member_dtos
+                    .iter()
+                    .map(&resolve_node)
+                    .collect::<Result<_, _>>()?;
+                doc.components[cid].members = members.clone();
+                // DFS the member subtrees, wiring ownership. Every node's
+                // CURRENT parent pointer (patched from the group member
+                // lists in the pass above) must equal the parent its DFS
+                // position derives — a mismatch means some OTHER group
+                // (world-side, or a different def subtree) also lists it,
+                // which the pass-above patching would otherwise mask.
+                let mut stack: Vec<(NodeId, Option<GroupId>)> =
+                    members.iter().map(|&m| (m, None)).collect();
+                let mut steps = 0usize;
+                while let Some((node, parent)) = stack.pop() {
+                    steps += 1;
+                    if steps > 1_000_000 {
+                        return Err(LoadError::MalformedManifest {
+                            what: "definition subtree walk did not terminate".to_string(),
+                        });
+                    }
+                    match node {
+                        NodeId::Object(oid) => {
+                            if !matches!(doc.objects[oid].owner, ObjectOwner::World { .. }) {
+                                return Err(LoadError::MalformedManifest {
+                                    what: format!(
+                                        "object dense id {} belongs to more than one definition subtree",
+                                        raw_dense_of_object(&dense_obj_ids, oid)
+                                    ),
+                                });
+                            }
+                            if doc.objects[oid].group_parent() != parent {
+                                return Err(LoadError::MalformedManifest {
+                                    what: format!(
+                                        "object dense id {} is listed in a group outside its definition subtree",
+                                        raw_dense_of_object(&dense_obj_ids, oid)
+                                    ),
+                                });
+                            }
+                            doc.objects[oid].owner = ObjectOwner::Definition { def: cid, parent };
+                        }
+                        NodeId::Group(gid) => {
+                            let Some(&gi) = grp_dense.get(&gid) else {
+                                continue;
+                            };
+                            if derived_group_owner[gi].is_some() {
+                                return Err(LoadError::MalformedManifest {
+                                    what: format!(
+                                        "group dense id {gi} belongs to more than one definition subtree"
+                                    ),
+                                });
+                            }
+                            if doc.groups[gid].parent != parent {
+                                return Err(LoadError::MalformedManifest {
+                                    what: format!(
+                                        "group dense id {gi} is listed in a group outside its definition subtree"
+                                    ),
+                                });
+                            }
+                            derived_group_owner[gi] = Some(ci as u32);
+                            doc.groups[gid].owner_def = Some(cid);
+                            for &child in doc.groups[gid].members.clone().iter() {
+                                stack.push((child, Some(gid)));
+                            }
+                        }
+                        NodeId::Instance(iid) => {
+                            let Some(&ii) = inst_dense.get(&iid) else {
+                                continue;
+                            };
+                            if derived_inst_owner[ii].is_some() {
+                                return Err(LoadError::MalformedManifest {
+                                    what: format!(
+                                        "instance dense id {ii} belongs to more than one definition subtree"
+                                    ),
+                                });
+                            }
+                            if doc.instances[iid].parent != parent {
+                                return Err(LoadError::MalformedManifest {
+                                    what: format!(
+                                        "instance dense id {ii} is listed in a group outside its definition subtree"
+                                    ),
+                                });
+                            }
+                            derived_inst_owner[ii] = Some(ci as u32);
+                            doc.instances[iid].owner_def = Some(cid);
+                        }
+                    }
+                }
+            }
+            // Declared owners must EQUAL the derivation, both directions.
+            for (gi, declared) in raw.group_owners.iter().enumerate() {
+                if *declared != derived_group_owner[gi] {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!(
+                            "group dense id {gi} declares owner {:?} but its tree position derives {:?}",
+                            declared, derived_group_owner[gi]
+                        ),
+                    });
+                }
+            }
+            for (ii, declared) in raw.instance_owners.iter().enumerate() {
+                if *declared != derived_inst_owner[ii] {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!(
+                            "instance dense id {ii} declares owner {:?} but its tree position derives {:?}",
+                            declared, derived_inst_owner[ii]
+                        ),
+                    });
+                }
+            }
+            // Definition subtrees and the world tree are DISJOINT: no
+            // world-side group may list a definition-owned node (the DFS
+            // parent check above catches the listing that WON the parent
+            // patch; this sweep catches the one that lost it).
+            for (gid, grec) in doc.groups.iter() {
+                if grec.owner_def.is_some() {
+                    continue;
+                }
+                for &m in &grec.members {
+                    let def_owned = match m {
+                        NodeId::Object(o) => {
+                            matches!(doc.objects[o].owner, ObjectOwner::Definition { .. })
+                        }
+                        NodeId::Group(g) => doc.groups[g].owner_def.is_some(),
+                        NodeId::Instance(i) => doc.instances[i].owner_def.is_some(),
+                    };
+                    if def_owned {
+                        return Err(LoadError::MalformedManifest {
+                            what: format!(
+                                "group dense id {} lists a definition-owned node",
+                                grp_dense.get(&gid).copied().unwrap_or(usize::MAX)
+                            ),
+                        });
+                    }
+                }
+            }
+            // The definition graph must be a DAG: a def-owned instance
+            // whose definition reaches back to its owner is a cycle.
+            for (ii, owner) in derived_inst_owner.iter().enumerate() {
+                if let Some(ci) = owner {
+                    let owner_cid = comp_ids[*ci as usize];
+                    let inner_def = doc.instances[inst_ids[ii]].def;
+                    if inner_def == owner_cid || doc.def_reaches(inner_def, owner_cid) {
+                        return Err(LoadError::MalformedManifest {
+                            what: format!("instance dense id {ii} creates a component cycle"),
+                        });
+                    }
+                }
+            }
+            // ... and depth-bounded EXACTLY as the format doc promises: a
+            // definition nesting beyond MAX_COMPONENT_DEPTH levels is
+            // refused, matching the live `make_component` gate — an
+            // accepted file must never silently truncate its own render.
+            for &cid in comp_ids.iter() {
+                if doc.def_depth(cid) > MAX_COMPONENT_DEPTH {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!("definitions nest beyond {MAX_COMPONENT_DEPTH} levels"),
+                    });
+                }
+            }
+            // ... and width-bounded: the graph is a DAG, so WIDTH is what
+            // multiplies (two instances per level for twenty levels is a
+            // million placements). One shared memo keeps the sweep linear.
+            {
+                let mut memo = BTreeMap::new();
+                for &cid in comp_ids.iter() {
+                    if doc.def_placement_count_memo(cid, &mut memo) > MAX_EXPANDED_PLACEMENTS {
+                        return Err(LoadError::MalformedManifest {
+                            what: format!(
+                                "definitions expand beyond {MAX_EXPANDED_PLACEMENTS} placements"
+                            ),
+                        });
+                    }
+                }
+            }
+            if doc.expanded_total() > MAX_EXPANDED_PLACEMENTS {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "the document expands beyond {MAX_EXPANDED_PLACEMENTS} placements"
+                    ),
+                });
             }
         }
 
@@ -3532,6 +3868,17 @@ impl Document {
         self.refuse_during_component_session()?;
         use crate::serialize::NO_MATERIAL;
 
+        // ── 0. Validate the recipe's definition graph ─────────────────────
+        // Definitions may nest (an `Instance` member referencing another
+        // def), so contents must build referenced-first, and a cyclic or
+        // over-deep recipe is refused with a typed error BEFORE the document
+        // is touched — never repaired (DEVELOPMENT.md rule 4). `depth[d]`
+        // is the longest reference chain rooted at d; building in ascending
+        // depth order guarantees every referenced definition's fate
+        // (built/removed-empty) is known first.
+        let def_build_order = ingest_def_build_order(&scene.defs)?;
+        ingest_refuse_expansion(&scene, &def_build_order)?;
+
         // ── 1. Insert materials → build dense→MaterialId map ──────────────
         let mat_ids: Vec<MaterialId> = scene
             .materials
@@ -3558,46 +3905,61 @@ impl Document {
         let mut skipped: Vec<SkippedMesh> = Vec::new();
 
         // ── 2. Build component definitions ────────────────────────────────
-        // Map dae-import def index → ComponentId (or None if all meshes failed)
+        // Placeholders allocate in RECIPE order (ComponentId/dense order
+        // matches the source), contents build in dependency order so a
+        // nested `Instance` member always resolves its target's fate.
         let mut def_cid: Vec<Option<ComponentId>> = Vec::with_capacity(scene.defs.len());
+        let mut def_children: Vec<Option<Vec<crate::import::ImportNode>>> =
+            Vec::with_capacity(scene.defs.len());
         for def_recipe in scene.defs {
-            // Pre-allocate the component so members can reference it.
             let cid = self.insert_component_record(ComponentDef {
                 members: Vec::new(),
                 hidden: false,
                 name: def_recipe.name,
             });
-            let mut def_members: Vec<ObjectId> = Vec::new();
-            for mesh in def_recipe.meshes {
-                if let Some(oid) = ingest_build_mesh(
+            def_cid.push(Some(cid));
+            def_children.push(Some(def_recipe.children));
+        }
+        for &di in &def_build_order {
+            let cid = def_cid[di].expect("placeholder allocated above");
+            let children = def_children[di].take().expect("built exactly once");
+            let mut def_members: Vec<NodeId> = Vec::new();
+            for child in children {
+                if let Some(nid) = ingest_build_node(
                     self,
-                    mesh,
-                    ObjectOwner::Definition(cid),
+                    child,
+                    None,
+                    Some(cid),
+                    &def_cid,
                     &mut all_objects,
+                    &mut all_instances,
+                    &mut all_groups,
                     &mut watertight_count,
                     &mut leaky_count,
                     &mut skipped,
                     &dense_to_mat,
                 ) {
-                    def_members.push(oid);
+                    def_members.push(nid);
                 }
             }
             if def_members.is_empty() {
-                // All meshes rejected → remove the placeholder def.
+                // Every member rejected → remove the placeholder def; later
+                // instances referencing it (nested or world) skip likewise.
                 self.components.remove(cid);
-                def_cid.push(None);
+                def_cid[di] = None;
             } else {
                 self.components[cid].members = def_members;
-                all_components.push(cid);
-                def_cid.push(Some(cid));
             }
         }
+        // Surviving definitions, back in recipe order.
+        all_components.extend(def_cid.iter().flatten().copied());
 
         // ── 3. Recursively build the scene tree ───────────────────────────
         for root_node in scene.roots {
             if let Some(nid) = ingest_build_node(
                 self,
                 root_node,
+                None,
                 None,
                 &def_cid,
                 &mut all_objects,
@@ -3705,6 +4067,456 @@ impl Document {
         Ok((report, change))
     }
 
+    // ---------------------------------------------------- definition graph
+
+    /// Whether definition `from` (transitively) places definition `target`
+    /// through member instances — direct members and instances nested
+    /// under member groups alike. Iterative BFS over the definition graph
+    /// with a visited set: exact reachability, terminating on ANY graph
+    /// (a cyclic in-diagnosis graph included), no recursion (a hostile
+    /// file must not be able to overflow the stack through deep chains —
+    /// nested-components review).
+    pub fn def_reaches(&self, from: ComponentId, target: ComponentId) -> bool {
+        let mut visited: BTreeSet<ComponentId> = BTreeSet::new();
+        let mut queue: Vec<ComponentId> = vec![from];
+        while let Some(d) = queue.pop() {
+            if !visited.insert(d) {
+                continue;
+            }
+            for child in self.def_child_defs(d) {
+                if child == target {
+                    return true;
+                }
+                queue.push(child);
+            }
+        }
+        false
+    }
+
+    /// The definitions directly placed by `def`'s OWN subtree: one entry
+    /// per live member instance, direct members and instances nested under
+    /// member groups alike (duplicates are real — two member instances of
+    /// one inner definition are two edges). Iterative; step-capped as
+    /// insurance against a malformed in-memory group graph.
+    fn def_child_defs(&self, def: ComponentId) -> Vec<ComponentId> {
+        let mut out = Vec::new();
+        let Some(d) = self.components.get(def).filter(|c| !c.hidden) else {
+            return out;
+        };
+        let mut stack: Vec<NodeId> = d.members.iter().rev().copied().collect();
+        let mut steps = 0usize;
+        while let Some(node) = stack.pop() {
+            steps += 1;
+            if steps > 1_000_000 {
+                break;
+            }
+            match node {
+                NodeId::Object(_) => {}
+                NodeId::Group(g) => {
+                    if let Some(rec) = self.groups.get(g).filter(|r| !r.hidden) {
+                        stack.extend(rec.members.iter().rev().copied());
+                    }
+                }
+                NodeId::Instance(i) => {
+                    if let Some(rec) = self.instances.get(i).filter(|r| !r.hidden) {
+                        out.push(rec.def);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The longest definition chain below `def`: a flat definition is 1,
+    /// a definition whose deepest member instance places a flat definition
+    /// is 2, and so on. Memoized iterative DP over the definition DAG —
+    /// linear in graph size even for diamond-heavy graphs, no recursion.
+    /// Saturates at [`MAX_COMPONENT_DEPTH`] `+ 1` (a cycle reached
+    /// mid-diagnosis saturates too), so callers comparing against the
+    /// bound still refuse correctly.
+    pub fn def_depth(&self, def: ComponentId) -> usize {
+        const SATURATED: usize = MAX_COMPONENT_DEPTH + 1;
+        enum Frame {
+            Enter(ComponentId),
+            Exit(ComponentId),
+        }
+        let mut memo: BTreeMap<ComponentId, usize> = BTreeMap::new();
+        let mut on_path: BTreeSet<ComponentId> = BTreeSet::new();
+        let mut stack = vec![Frame::Enter(def)];
+        while let Some(f) = stack.pop() {
+            match f {
+                Frame::Enter(d) => {
+                    if memo.contains_key(&d) || !on_path.insert(d) {
+                        continue;
+                    }
+                    stack.push(Frame::Exit(d));
+                    for c in self.def_child_defs(d) {
+                        if on_path.contains(&c) {
+                            // A cycle (impossible in a validated document,
+                            // reachable mid-diagnosis): saturate.
+                            memo.insert(c, SATURATED);
+                        } else if !memo.contains_key(&c) {
+                            stack.push(Frame::Enter(c));
+                        }
+                    }
+                }
+                Frame::Exit(d) => {
+                    on_path.remove(&d);
+                    let deepest = self
+                        .def_child_defs(d)
+                        .iter()
+                        .map(|c| memo.get(c).copied().unwrap_or(0))
+                        .max()
+                        .unwrap_or(0);
+                    let depth = (1 + deepest).min(SATURATED);
+                    // `max` with any earlier saturation so a cycle mark is
+                    // never overwritten by the DP value.
+                    let prior = memo.get(&d).copied().unwrap_or(0);
+                    memo.insert(d, depth.max(prior));
+                }
+            }
+        }
+        memo.get(&def).copied().unwrap_or(1)
+    }
+
+    /// The longest definition chain ABOVE `def`: 0 when nothing nests it,
+    /// else 1 + the deepest ancestry among the definitions directly
+    /// placing it. The fold-depth complement of [`Document::def_depth`]:
+    /// `ancestry + def_depth` bounds the longest chain THROUGH `def`.
+    /// Iterative over the reverse graph; a mid-diagnosis cycle saturates.
+    fn def_ancestry_depth(&self, def: ComponentId) -> usize {
+        const SATURATED: usize = MAX_COMPONENT_DEPTH + 1;
+        // Reverse edges: def → the definitions directly placing it.
+        let mut parents: BTreeMap<ComponentId, Vec<ComponentId>> = BTreeMap::new();
+        for (cid, c) in self.components.iter() {
+            if c.hidden {
+                continue;
+            }
+            for child in self.def_child_defs(cid) {
+                parents.entry(child).or_default().push(cid);
+            }
+        }
+        enum Frame {
+            Enter(ComponentId),
+            Exit(ComponentId),
+        }
+        let mut memo: BTreeMap<ComponentId, usize> = BTreeMap::new();
+        let mut on_path: BTreeSet<ComponentId> = BTreeSet::new();
+        let mut stack = vec![Frame::Enter(def)];
+        while let Some(f) = stack.pop() {
+            match f {
+                Frame::Enter(d) => {
+                    if memo.contains_key(&d) || !on_path.insert(d) {
+                        continue;
+                    }
+                    stack.push(Frame::Exit(d));
+                    for &p in parents.get(&d).map(|v| v.as_slice()).unwrap_or(&[]) {
+                        if on_path.contains(&p) {
+                            memo.insert(p, SATURATED);
+                        } else if !memo.contains_key(&p) {
+                            stack.push(Frame::Enter(p));
+                        }
+                    }
+                }
+                Frame::Exit(d) => {
+                    on_path.remove(&d);
+                    let deepest = parents
+                        .get(&d)
+                        .map(|v| {
+                            v.iter()
+                                .map(|p| memo.get(p).copied().unwrap_or(0).saturating_add(1))
+                                .max()
+                                .unwrap_or(0)
+                        })
+                        .unwrap_or(0);
+                    let prior = memo.get(&d).copied().unwrap_or(0);
+                    memo.insert(d, deepest.min(SATURATED).max(prior));
+                }
+            }
+        }
+        memo.get(&def).copied().unwrap_or(0)
+    }
+
+    /// The number of leaf-object placements `def`'s expansion produces —
+    /// its own live objects (member groups descended) plus each member
+    /// instance's inner count. Memoized iterative DP over the definition
+    /// DAG (linear even on diamond-heavy graphs), saturating at
+    /// [`MAX_EXPANDED_PLACEMENTS`] `+ 1` so callers comparing against the
+    /// bound refuse correctly.
+    pub fn def_placement_count(&self, def: ComponentId) -> usize {
+        self.def_placement_count_memo(def, &mut BTreeMap::new())
+    }
+
+    /// [`Document::def_placement_count`] with a caller-owned memo, so a
+    /// sweep over every definition (the load validator, the op gates'
+    /// world total) stays linear overall.
+    fn def_placement_count_memo(
+        &self,
+        def: ComponentId,
+        memo: &mut BTreeMap<ComponentId, usize>,
+    ) -> usize {
+        const SATURATED: usize = MAX_EXPANDED_PLACEMENTS + 1;
+        enum Frame {
+            Enter(ComponentId),
+            Exit(ComponentId),
+        }
+        let mut on_path: BTreeSet<ComponentId> = BTreeSet::new();
+        let mut stack = vec![Frame::Enter(def)];
+        while let Some(f) = stack.pop() {
+            match f {
+                Frame::Enter(d) => {
+                    if memo.contains_key(&d) || !on_path.insert(d) {
+                        continue;
+                    }
+                    stack.push(Frame::Exit(d));
+                    for c in self.def_child_defs(d) {
+                        if on_path.contains(&c) {
+                            // A cycle (impossible in a validated document,
+                            // reachable mid-diagnosis): saturate.
+                            memo.insert(c, SATURATED);
+                        } else if !memo.contains_key(&c) {
+                            stack.push(Frame::Enter(c));
+                        }
+                    }
+                }
+                Frame::Exit(d) => {
+                    on_path.remove(&d);
+                    let mut count = self.def_own_leaf_count(d);
+                    for c in self.def_child_defs(d) {
+                        count = count.saturating_add(memo.get(&c).copied().unwrap_or(0));
+                    }
+                    let count = count.min(SATURATED);
+                    let prior = memo.get(&d).copied().unwrap_or(0);
+                    memo.insert(d, count.max(prior));
+                }
+            }
+        }
+        memo.get(&def).copied().unwrap_or(0)
+    }
+
+    /// `def`'s OWN live leaf objects (member groups descended, member
+    /// instances NOT followed) — the per-definition term of the placement
+    /// count. Iterative, step-capped like [`Document::def_child_defs`].
+    fn def_own_leaf_count(&self, def: ComponentId) -> usize {
+        let Some(d) = self.components.get(def).filter(|c| !c.hidden) else {
+            return 0;
+        };
+        let mut count = 0usize;
+        let mut stack: Vec<NodeId> = d.members.to_vec();
+        let mut steps = 0usize;
+        while let Some(node) = stack.pop() {
+            steps += 1;
+            if steps > 1_000_000 {
+                break;
+            }
+            match node {
+                NodeId::Object(o) => {
+                    if self.objects.get(o).is_some_and(|r| !r.hidden) {
+                        count += 1;
+                    }
+                }
+                NodeId::Group(g) => {
+                    if let Some(rec) = self.groups.get(g).filter(|r| !r.hidden) {
+                        stack.extend(rec.members.iter().copied());
+                    }
+                }
+                NodeId::Instance(_) => {}
+            }
+        }
+        count
+    }
+
+    /// The expansion cost currently ON LOAN to open component frames:
+    /// each frame's definition renders as world geometry for the session's
+    /// duration and its placements are hidden, so
+    /// [`Document::expanded_total`] cannot see that content. The width
+    /// gates add this back, or a mid-session op would be measured against
+    /// an artificially small document.
+    fn expanded_on_loan(&self) -> usize {
+        let mut memo = BTreeMap::new();
+        let mut total = 0usize;
+        for frame in &self.sessions {
+            if let SessionFrame::Component(sess) = frame {
+                let per = self.def_placement_count_memo(sess.component, &mut memo);
+                let placements = sess
+                    .hidden_instances
+                    .iter()
+                    .filter(|&&i| self.instances.contains_key(i))
+                    .count();
+                total = total.saturating_add(per.saturating_mul(placements.max(1)));
+            }
+        }
+        total.min(MAX_EXPANDED_PLACEMENTS + 1)
+    }
+
+    /// How many times content folded into the INNERMOST open component
+    /// frame will end up rendered once every frame closes: the product of
+    /// each open frame's placement count (a frame's definition renders
+    /// once per placement, and a stacked frame's definition renders inside
+    /// its parent's). 1 when nothing is open — the plain world case.
+    fn session_fold_multiplier(&self) -> usize {
+        self.sessions
+            .iter()
+            .filter_map(|f| match f {
+                SessionFrame::Component(sess) => Some(
+                    sess.hidden_instances
+                        .iter()
+                        .filter(|&&i| self.instances.contains_key(i))
+                        .count()
+                        .max(1),
+                ),
+                SessionFrame::Group(_) => None,
+            })
+            .fold(1usize, |acc, n| acc.saturating_mul(n))
+    }
+
+    /// The document's TOTAL expanded placement count — the sum over every
+    /// live world instance of its definition's placement count, saturating
+    /// past the bound. The op gates compare `expanded_total() + delta`
+    /// against [`MAX_EXPANDED_PLACEMENTS`] before adding placements.
+    pub fn expanded_total(&self) -> usize {
+        let mut memo = BTreeMap::new();
+        let mut total = 0usize;
+        for iid in self.instance_ids() {
+            let def = self.instances[iid].def;
+            total = total.saturating_add(self.def_placement_count_memo(def, &mut memo));
+            if total > MAX_EXPANDED_PLACEMENTS {
+                return total.min(MAX_EXPANDED_PLACEMENTS + 1);
+            }
+        }
+        total
+    }
+
+    /// The op-side width gate: refuses when duplicating `roots` `copies`
+    /// times would push the document past [`MAX_EXPANDED_PLACEMENTS`]
+    /// (each copied instance re-renders its definition's full expansion).
+    /// Zero-delta selections (no instances anywhere below) never refuse.
+    fn refuse_expansion_growth(
+        &self,
+        roots: &[NodeId],
+        copies: usize,
+    ) -> Result<(), DocumentError> {
+        let mut memo = BTreeMap::new();
+        let mut delta = 0usize;
+        for &r in roots {
+            for iid in self.leaf_instances_under(r) {
+                let def = self.instances[iid].def;
+                delta = delta.saturating_add(self.def_placement_count_memo(def, &mut memo));
+            }
+        }
+        if delta == 0 {
+            return Ok(());
+        }
+        let delta = delta
+            .saturating_mul(copies)
+            .saturating_mul(self.session_fold_multiplier());
+        if self
+            .expanded_total()
+            .saturating_add(self.expanded_on_loan())
+            .saturating_add(delta)
+            > MAX_EXPANDED_PLACEMENTS
+        {
+            return Err(DocumentError::ComponentExpansionExceeded);
+        }
+        Ok(())
+    }
+
+    /// Every world placement the definition DAG produces: one entry per
+    /// (leaf member object, fully composed pose), tagged with the
+    /// OUTERMOST instance that placed it — the identity pixels and picks
+    /// report. For flat definitions this is exactly the classic two-level
+    /// walk; nested member instances compose recursively. Hidden
+    /// instances (tombstoned or under user-hidden ancestors is the
+    /// CALLER's concern — this reports structural placements of live
+    /// records only). Iterative — a deep subtree cannot overflow the
+    /// stack.
+    pub fn expanded_placements(&self) -> Vec<(ObjectId, Transform, InstanceId)> {
+        let mut out = Vec::new();
+        let mut tmp = Vec::new();
+        for iid in self.instance_ids() {
+            let rec = &self.instances[iid];
+            tmp.clear();
+            self.expand_def_core(rec.def, &rec.pose, &mut tmp);
+            out.extend(tmp.iter().map(|&(o, p)| (o, p, iid)));
+        }
+        out
+    }
+
+    /// Every leaf-object placement of ONE definition, in the DEFINITION's
+    /// local frame: nested member instances compose their poses, member
+    /// groups descend, hidden records skip. For a flat definition this is
+    /// its live member objects at identity. The per-instance building block
+    /// of [`Document::expanded_placements`] — a renderer composes each
+    /// entry's pose with the placing instance's own pose. Deterministic
+    /// member order; same-object repeats are real (two nested placements
+    /// of one leaf are two entries).
+    pub fn expanded_def_placements(&self, def: ComponentId) -> Vec<(ObjectId, Transform)> {
+        let mut out = Vec::new();
+        self.expand_def_core(def, &Transform::IDENTITY, &mut out);
+        out
+    }
+
+    /// The shared iterative expansion: pre-order over `def`'s subtree with
+    /// `base` composed in, instance edges depth-bounded (the loader
+    /// enforces the bound, so nothing legitimate is ever truncated), group
+    /// edges free (explicit stack — no recursion to overflow).
+    fn expand_def_core(
+        &self,
+        def: ComponentId,
+        base: &Transform,
+        out: &mut Vec<(ObjectId, Transform)>,
+    ) {
+        enum Item {
+            Def(ComponentId, Transform, usize),
+            Node(NodeId, Transform, usize),
+        }
+        let mut stack = vec![Item::Def(def, *base, 0)];
+        while let Some(item) = stack.pop() {
+            match item {
+                Item::Def(d, pose, depth) => {
+                    if depth > MAX_COMPONENT_DEPTH {
+                        continue;
+                    }
+                    // A definition ON LOAN to an open session renders as
+                    // world geometry through the session itself; expanding
+                    // it here (a def-owned placement inside ANOTHER
+                    // definition) would draw its baked world coordinates at
+                    // a second, wrong frame. Its content simply doesn't
+                    // render there for the session's duration.
+                    if self.defs_on_loan().contains(&d) {
+                        continue;
+                    }
+                    let Some(c) = self.components.get(d).filter(|c| !c.hidden) else {
+                        continue;
+                    };
+                    for &m in c.members.iter().rev() {
+                        stack.push(Item::Node(m, pose, depth));
+                    }
+                }
+                Item::Node(node, pose, depth) => match node {
+                    NodeId::Object(oid) => {
+                        if self.objects.get(oid).is_some_and(|r| !r.hidden) {
+                            out.push((oid, pose));
+                        }
+                    }
+                    NodeId::Group(gid) => {
+                        if let Some(g) = self.groups.get(gid).filter(|r| !r.hidden) {
+                            for &child in g.members.iter().rev() {
+                                stack.push(Item::Node(child, pose, depth));
+                            }
+                        }
+                    }
+                    NodeId::Instance(iid) => {
+                        if let Some(rec) = self.instances.get(iid).filter(|r| !r.hidden) {
+                            let composed = rec.pose.then(&pose);
+                            stack.push(Item::Def(rec.def, composed, depth + 1));
+                        }
+                    }
+                },
+            }
+        }
+    }
+
     // ---------------------------------------------------------------- library
 
     /// Merges a copy of `item`'s content into this document — the library
@@ -3753,6 +4565,11 @@ impl Document {
         if options.pose.determinant() < 0.0 {
             return Err(DocumentError::Transform(TransformError::Reflection));
         }
+        // The width bound, before anything mutates: the graft adds the
+        // item's whole expansion to this document's.
+        if self.expanded_total().saturating_add(item.expanded_total()) > MAX_EXPANDED_PLACEMENTS {
+            return Err(DocumentError::ComponentExpansionExceeded);
+        }
 
         let mut ctx = LibraryCopy::new(options.provenance.clone());
 
@@ -3769,17 +4586,9 @@ impl Document {
             .map(|(id, _)| id)
             .collect();
         for cid in item_defs {
-            if let Some(prov) = options.provenance.as_ref()
-                && let Some(existing) =
-                    self.find_library_definition(prov, item.sid_of(&EntityRef::Component(cid)))
-            {
-                ctx.def_map.insert(cid, existing);
-                ctx.report.definitions_reused += 1;
-                continue;
-            }
-            let new_cid = library_copy_def(self, item, cid, &mut ctx);
-            ctx.def_map.insert(cid, new_cid);
-            ctx.report.definitions_added += 1;
+            // The resolver memoizes: a definition already grafted as
+            // another definition's nested member is not copied twice.
+            library_resolve_def(self, item, cid, &mut ctx);
         }
 
         // ── 2. World tree, placed through the pose ────────────────────────
@@ -3992,12 +4801,16 @@ impl Document {
                     }
                 }
                 NodeId::Group(id) => {
-                    if self.groups.get(id).is_none_or(|r| r.hidden) {
+                    if !self.group_is_live(id) {
                         return Err(DocumentError::UnknownGroup);
                     }
                 }
                 NodeId::Instance(id) => {
-                    if self.instances.get(id).is_none_or(|r| r.hidden) {
+                    if self
+                        .instances
+                        .get(id)
+                        .is_none_or(|r| r.hidden || r.owner_def.is_some())
+                    {
                         return Err(DocumentError::UnknownInstance);
                     }
                 }
@@ -4048,6 +4861,7 @@ impl Document {
                     def: new_cid,
                     pose: pose_item,
                     parent: None,
+                    owner_def: None,
                     hidden: false,
                     name: src.name.clone(),
                     tags: src.tags.clone(),
@@ -4075,17 +4889,21 @@ impl Document {
                     &mut item,
                     self,
                     oid,
-                    ObjectOwner::Definition(new_cid),
+                    ObjectOwner::Definition {
+                        def: new_cid,
+                        parent: None,
+                    },
                     Some(&frame),
                     &mut ctx,
                 );
                 item.objects[new_oid].name = None;
                 item.objects[new_oid].tags = Vec::new();
-                item.components[new_cid].members = vec![new_oid];
+                item.components[new_cid].members = vec![NodeId::Object(new_oid)];
                 item.insert_instance_record(InstanceRecord {
                     def: new_cid,
                     pose: Transform::IDENTITY,
                     parent: None,
+                    owner_def: None,
                     hidden: false,
                     name: None,
                     tags: src_tags,
@@ -4160,19 +4978,26 @@ impl Document {
                     }
                 }
             }
+            // WORLD instances only: a definition-owned member instance's
+            // pose is in its owning definition's local frame — anchoring on
+            // it (or shifting it below) would corrupt the shared
+            // definition. Nested content contributes through the expanded
+            // placements of the world instances that render it.
             let instances: Vec<(InstanceId, Transform, ComponentId)> = item
                 .instances
                 .iter()
-                .filter(|(id, r)| !r.hidden && !visibly_hidden(&item, NodeId::Instance(*id)))
+                .filter(|(id, r)| {
+                    !r.hidden
+                        && r.owner_def.is_none()
+                        && !visibly_hidden(&item, NodeId::Instance(*id))
+                })
                 .map(|(id, r)| (id, r.pose, r.def))
                 .collect();
             for (_, pose, def) in &instances {
-                for &m in &item.components[*def].members {
-                    if item.objects[m].hidden {
-                        continue;
-                    }
+                for (m, local) in item.expanded_def_placements(*def) {
+                    let composed = local.then(pose);
                     for v in item.objects[m].object.vertices().values() {
-                        extend(pose.apply_point(v.position));
+                        extend(composed.apply_point(v.position));
                     }
                 }
             }
@@ -4565,7 +5390,7 @@ impl Document {
     /// [`Document::is_world_object`].
     pub fn object_owner_component(&self, id: ObjectId) -> Option<ComponentId> {
         match self.objects.get(id)?.owner {
-            ObjectOwner::Definition(c) => Some(c),
+            ObjectOwner::Definition { def: c, .. } => Some(c),
             ObjectOwner::World { .. } => None,
         }
     }
@@ -5051,10 +5876,10 @@ impl Document {
     /// repaint is seen through all of them (shared geometry).
     fn paint_change(&self, object: ObjectId) -> DocChange {
         match self.objects.get(object).map(|r| r.owner) {
-            Some(ObjectOwner::Definition(component)) => DocChange {
+            Some(ObjectOwner::Definition { def: component, .. }) => DocChange {
                 objects_touched: vec![object],
                 components_touched: vec![component],
-                instances_touched: self.instances_of(component),
+                instances_touched: self.placing_instances(component),
                 ..Default::default()
             },
             _ => DocChange {
@@ -6065,7 +6890,7 @@ impl Document {
     pub fn group_ids(&self) -> Vec<GroupId> {
         self.groups
             .iter()
-            .filter(|(_, rec)| !rec.hidden)
+            .filter(|(_, rec)| !rec.hidden && rec.owner_def.is_none())
             .map(|(id, _)| id)
             .collect()
     }
@@ -6102,12 +6927,12 @@ impl Document {
         let groups = self
             .groups
             .iter()
-            .filter(|(_, r)| !r.hidden && r.parent.is_none())
+            .filter(|(_, r)| !r.hidden && r.parent.is_none() && r.owner_def.is_none())
             .map(|(id, _)| NodeId::Group(id));
         let instances = self
             .instances
             .iter()
-            .filter(|(_, r)| !r.hidden && r.parent.is_none())
+            .filter(|(_, r)| !r.hidden && r.parent.is_none() && r.owner_def.is_none())
             .map(|(id, _)| NodeId::Instance(id));
         objects.chain(groups).chain(instances).collect()
     }
@@ -6219,7 +7044,7 @@ impl Document {
     pub fn instance_ids(&self) -> Vec<InstanceId> {
         self.instances
             .iter()
-            .filter(|(_, r)| !r.hidden)
+            .filter(|(_, r)| !r.hidden && r.owner_def.is_none())
             .map(|(id, _)| id)
             .collect()
     }
@@ -6330,7 +7155,7 @@ impl Document {
     fn component_change(&self, component: ComponentId) -> DocChange {
         DocChange {
             components_touched: vec![component],
-            instances_touched: self.instances_of(component),
+            instances_touched: self.placing_instances(component),
             ..Default::default()
         }
     }
@@ -6393,10 +7218,53 @@ impl Document {
             .collect()
     }
 
-    /// The member objects of a live definition, in definition order, or `None`
-    /// if the component is stale or hidden. Each is fetched for tessellation via
-    /// [`Document::object`]; they are in definition-local coordinates.
+    /// Every WORLD instance whose placement renders `component`'s content:
+    /// direct world placements plus world instances of any definition that
+    /// transitively NESTS `component`. This is the set a definition edit
+    /// must report as touched — a nested definition's content renders (and
+    /// registers with inference) through its outermost placements, so
+    /// touching only [`Document::instances_of`] would leave every outer
+    /// placement stale (nested-components review).
+    pub fn placing_instances(&self, component: ComponentId) -> Vec<InstanceId> {
+        if self.components.get(component).is_none_or(|c| c.hidden) {
+            return Vec::new();
+        }
+        self.instances
+            .iter()
+            .filter(|(_, r)| !r.hidden && r.owner_def.is_none())
+            .filter(|(_, r)| r.def == component || self.def_reaches(r.def, component))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Whether an instance handle is a live WORLD instance (not stale, not
+    /// hidden, not owned by a definition) — the render/inference layers'
+    /// registration guard: a definition-owned member instance's pose is in
+    /// its owning definition's local frame and must never register as a
+    /// world transform.
+    pub fn instance_is_world(&self, instance: InstanceId) -> bool {
+        self.instances
+            .get(instance)
+            .is_some_and(|r| !r.hidden && r.owner_def.is_none())
+    }
+
+    /// The member OBJECTS of a live definition, in definition order, or
+    /// `None` if the component is stale or hidden. Each is fetched for
+    /// tessellation via [`Document::object`]; they are in definition-local
+    /// coordinates. Member groups/instances (nested components) are not
+    /// listed here — this is the flat geometry view.
     pub fn def_members(&self, component: ComponentId) -> Option<Vec<ObjectId>> {
+        self.components
+            .get(component)
+            .filter(|c| !c.hidden)
+            .map(|c| c.object_members().collect())
+    }
+
+    /// The FULL member list of a live definition — objects, member groups,
+    /// and member instances (nested components) — in definition order, or
+    /// `None` if the component is stale or hidden. The structural
+    /// complement of [`Document::def_members`]'s flat geometry view.
+    pub fn def_member_nodes(&self, component: ComponentId) -> Option<Vec<NodeId>> {
         self.components
             .get(component)
             .filter(|c| !c.hidden)
@@ -6413,10 +7281,15 @@ impl Document {
         &self,
         instance: InstanceId,
     ) -> Result<(ComponentId, Transform), DocumentError> {
+        // A definition-owned member instance is not a world operand: its
+        // pose is in the OWNING definition's local frame, and every caller
+        // of this helper is a world-path op (K2 surfaces, explode/session
+        // entry, transforms). Same refusal a stale handle gets — the id is
+        // simply not a world instance (nested-components review).
         let rec = self
             .instances
             .get(instance)
-            .filter(|r| !r.hidden)
+            .filter(|r| !r.hidden && r.owner_def.is_none())
             .ok_or(DocumentError::UnknownInstance)?;
         Ok((rec.def, rec.pose))
     }
@@ -6478,8 +7351,8 @@ impl Document {
     /// for a def-owned birth.
     fn def_owner_change(&self, id: ObjectId) -> (Vec<ComponentId>, Vec<InstanceId>) {
         match self.objects.get(id).map(|r| r.owner) {
-            Some(ObjectOwner::Definition(component)) => {
-                (vec![component], self.instances_of(component))
+            Some(ObjectOwner::Definition { def: component, .. }) => {
+                (vec![component], self.placing_instances(component))
             }
             _ => (Vec::new(), Vec::new()),
         }
@@ -6488,7 +7361,7 @@ impl Document {
     /// Component/instance touch set for a definition-owned sketch.
     fn def_sketch_owner_change(&self, id: SketchId) -> (Vec<ComponentId>, Vec<InstanceId>) {
         match self.sketch_owner_component(id) {
-            Some(component) => (vec![component], self.instances_of(component)),
+            Some(component) => (vec![component], self.placing_instances(component)),
             None => (Vec::new(), Vec::new()),
         }
     }
@@ -6503,13 +7376,22 @@ impl Document {
                 .get(id)
                 .is_some_and(|r| !r.hidden && r.is_world()),
             NodeId::Group(id) => self.group_is_live(id),
-            NodeId::Instance(id) => self.instances.get(id).is_some_and(|r| !r.hidden),
+            // A definition-owned instance is not a world node — like a
+            // definition member object, it is reachable only through its
+            // definition's placements, never a direct operand.
+            NodeId::Instance(id) => self
+                .instances
+                .get(id)
+                .is_some_and(|r| !r.hidden && r.owner_def.is_none()),
         }
     }
 
-    /// Whether a group handle is live and visible (not stale, not hidden).
+    /// Whether a group handle is a live, visible WORLD group (not stale,
+    /// not hidden, not owned by a definition).
     fn group_is_live(&self, group: GroupId) -> bool {
-        self.groups.get(group).is_some_and(|r| !r.hidden)
+        self.groups
+            .get(group)
+            .is_some_and(|r| !r.hidden && r.owner_def.is_none())
     }
 
     /// Set a node's parent pointer (the half of the parent/members relation
@@ -7068,7 +7950,10 @@ impl Document {
         let base_rec = self
             .objects
             .get(base_id)
-            .filter(|r| !r.hidden && r.owner == ObjectOwner::Definition(component))
+            .filter(|r| {
+                !r.hidden
+                    && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component)
+            })
             .ok_or(DocumentError::UnknownObject)?;
         let base = &base_rec.object;
         let op = match Object::boolean(BooleanOp::Intersect, base, &swept, &Transform::IDENTITY) {
@@ -7122,7 +8007,10 @@ impl Document {
         let rec = self
             .objects
             .get(object)
-            .filter(|r| !r.hidden && r.owner == ObjectOwner::Definition(component))
+            .filter(|r| {
+                !r.hidden
+                    && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component)
+            })
             .ok_or(DocumentError::UnknownObject)?;
         let profile = rec
             .object
@@ -7141,11 +8029,14 @@ impl Document {
                 object: swept,
                 history: History::new(),
                 hidden: false,
-                owner: ObjectOwner::Definition(component),
+                owner: ObjectOwner::Definition {
+                    def: component,
+                    parent: None,
+                },
                 name: None,
                 tags: Vec::new(),
             });
-            self.components[component].members.push(id);
+            self.components[component].members.push(NodeId::Object(id));
             self.undo.push(DocAction::FollowMeFace {
                 result: id,
                 merged_base: None,
@@ -7153,7 +8044,7 @@ impl Document {
             });
             self.redo.clear();
             self.debug_validate();
-            let instances_touched = self.instances_of(component);
+            let instances_touched = self.placing_instances(component);
             let change = DocChange {
                 objects_touched: vec![id],
                 components_touched: vec![component],
@@ -7180,12 +8071,15 @@ impl Document {
             object: result,
             history: History::new(),
             hidden: false,
-            owner: ObjectOwner::Definition(component),
+            owner: ObjectOwner::Definition {
+                def: component,
+                parent: None,
+            },
             name: None,
             tags: Vec::new(),
         });
         self.objects[object].hidden = true;
-        self.components[component].members.push(id);
+        self.components[component].members.push(NodeId::Object(id));
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
         self.undo.push(DocAction::FollowMeFace {
             result: id,
@@ -7194,7 +8088,7 @@ impl Document {
         });
         self.redo.clear();
         self.debug_validate();
-        let instances_touched = self.instances_of(component);
+        let instances_touched = self.placing_instances(component);
         let change = DocChange {
             objects_touched: vec![object, id],
             components_touched: vec![component],
@@ -7401,7 +8295,7 @@ impl Document {
                 let rec = self
                     .objects
                     .get(*object)
-                    .filter(|r| !r.hidden && r.owner == ObjectOwner::Definition(component))
+                    .filter(|r| !r.hidden && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component))
                     .ok_or(DocumentError::UnknownObject)?;
                 let f = rec
                     .object
@@ -7493,7 +8387,10 @@ impl Document {
         }
 
         let owner = match def_owner {
-            Some(component) => ObjectOwner::Definition(component),
+            Some(component) => ObjectOwner::Definition {
+                def: component,
+                parent: None,
+            },
             None => ObjectOwner::World {
                 parent: parent_group,
             },
@@ -7513,9 +8410,9 @@ impl Document {
             // Shared-geometry birth (component-edit-parity.md phase K1):
             // membership is structural, like a world birth inside a group;
             // every instance of the definition sees the new member.
-            self.components[component].members.push(id);
+            self.components[component].members.push(NodeId::Object(id));
             components_touched.push(component);
-            instances_touched = self.instances_of(component);
+            instances_touched = self.placing_instances(component);
         } else if let Some(gid) = parent_group {
             // Birth INSIDE the group the user is editing (design §2f):
             // membership is structural; undo's hide-not-delete leaves the
@@ -7715,12 +8612,18 @@ impl Document {
         let rec_a = self
             .objects
             .get(a)
-            .filter(|r| !r.hidden && r.owner == ObjectOwner::Definition(component))
+            .filter(|r| {
+                !r.hidden
+                    && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component)
+            })
             .ok_or(DocumentError::UnknownObject)?;
         let rec_b = self
             .objects
             .get(b)
-            .filter(|r| !r.hidden && r.owner == ObjectOwner::Definition(component))
+            .filter(|r| {
+                !r.hidden
+                    && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component)
+            })
             .ok_or(DocumentError::UnknownObject)?;
 
         let mut result = Object::boolean(op, &rec_a.object, &rec_b.object, &Transform::IDENTITY)
@@ -7741,7 +8644,10 @@ impl Document {
             object: result,
             history: History::new(),
             hidden: false,
-            owner: ObjectOwner::Definition(component),
+            owner: ObjectOwner::Definition {
+                def: component,
+                parent: None,
+            },
             name: None,
             tags: Vec::new(),
         });
@@ -7750,7 +8656,7 @@ impl Document {
         // Shared-geometry birth (component-edit-parity.md phase K2):
         // membership is structural; a hidden operand stays listed exactly
         // like `delete_def_member`'s tombstone (see `DocAction::DeletedDefMember`).
-        self.components[component].members.push(id);
+        self.components[component].members.push(NodeId::Object(id));
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(a), NodeId::Object(b)]);
         self.undo.push(DocAction::Boolean {
             result: id,
@@ -7761,7 +8667,7 @@ impl Document {
         self.redo.clear();
         self.debug_validate();
 
-        let instances_touched = self.instances_of(component);
+        let instances_touched = self.placing_instances(component);
         let change = DocChange {
             objects_touched: vec![a, b, id],
             components_touched: vec![component],
@@ -7904,6 +8810,7 @@ impl Document {
             self.insert_group_record(GroupRecord {
                 members: Vec::new(),
                 parent: None,
+                owner_def: None,
                 hidden: false,
                 name: Some(name),
                 tags: Vec::new(),
@@ -8124,7 +9031,10 @@ impl Document {
         let rec = self
             .objects
             .get(object)
-            .filter(|r| !r.hidden && r.owner == ObjectOwner::Definition(component))
+            .filter(|r| {
+                !r.hidden
+                    && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component)
+            })
             .ok_or(DocumentError::UnknownObject)?;
         let (positive, negative) = rec
             .object
@@ -8135,7 +9045,10 @@ impl Document {
             object: positive,
             history: History::new(),
             hidden: false,
-            owner: ObjectOwner::Definition(component),
+            owner: ObjectOwner::Definition {
+                def: component,
+                parent: None,
+            },
             name: None,
             tags: Vec::new(),
         });
@@ -8143,15 +9056,18 @@ impl Document {
             object: negative,
             history: History::new(),
             hidden: false,
-            owner: ObjectOwner::Definition(component),
+            owner: ObjectOwner::Definition {
+                def: component,
+                parent: None,
+            },
             name: None,
             tags: Vec::new(),
         });
         self.objects[object].hidden = true;
         // Shared-geometry birth (component-edit-parity.md phase K2): see
         // `boolean_in_component`'s matching comment.
-        self.components[component].members.push(a);
-        self.components[component].members.push(b);
+        self.components[component].members.push(NodeId::Object(a));
+        self.components[component].members.push(NodeId::Object(b));
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
         self.undo.push(DocAction::Sliced {
             source: object,
@@ -8162,7 +9078,7 @@ impl Document {
         self.redo.clear();
         self.debug_validate();
 
-        let instances_touched = self.instances_of(component);
+        let instances_touched = self.placing_instances(component);
         let change = DocChange {
             objects_touched: vec![object, a, b],
             components_touched: vec![component],
@@ -8274,7 +9190,10 @@ impl Document {
         let rec = self
             .objects
             .get(object)
-            .filter(|r| !r.hidden && r.owner == ObjectOwner::Definition(component))
+            .filter(|r| {
+                !r.hidden
+                    && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component)
+            })
             .ok_or(DocumentError::UnknownObject)?;
         let result = rec
             .object
@@ -8288,11 +9207,14 @@ impl Document {
                 object: piece,
                 history: History::new(),
                 hidden: false,
-                owner: ObjectOwner::Definition(component),
+                owner: ObjectOwner::Definition {
+                    def: component,
+                    parent: None,
+                },
                 name: None,
                 tags: Vec::new(),
             });
-            self.components[component].members.push(id);
+            self.components[component].members.push(NodeId::Object(id));
             results.push(id);
         }
         self.objects[object].hidden = true;
@@ -8312,7 +9234,7 @@ impl Document {
             DocChange {
                 objects_touched,
                 components_touched: vec![component],
-                instances_touched: self.instances_of(component),
+                instances_touched: self.placing_instances(component),
                 ..Default::default()
             },
         ))
@@ -8415,7 +9337,12 @@ impl Document {
         // the inverse itself is not stored.
         local_t.inverse().map_err(DocumentError::Transform)?;
         let rec = match self.objects.get_mut(object) {
-            Some(rec) if !rec.hidden && rec.owner == ObjectOwner::Definition(component) => rec,
+            Some(rec)
+                if !rec.hidden
+                    && matches!(rec.owner, ObjectOwner::Definition { def, .. } if def == component) =>
+            {
+                rec
+            }
             _ => return Err(DocumentError::UnknownObject),
         };
         // Snapshot the PRE-transform state before mutating anything.
@@ -8432,7 +9359,7 @@ impl Document {
         self.redo.clear();
         self.debug_validate();
 
-        let instances_touched = self.instances_of(component);
+        let instances_touched = self.placing_instances(component);
         Ok(DocChange {
             objects_touched: vec![object],
             components_touched: vec![component],
@@ -8457,7 +9384,7 @@ impl Document {
         let local_t = pose.then(t).then(&pose_inv);
         let mut change = self.transform_sketch(sketch, &local_t)?;
         change.components_touched = vec![component];
-        change.instances_touched = self.instances_of(component);
+        change.instances_touched = self.placing_instances(component);
         Ok(change)
     }
 
@@ -8478,7 +9405,7 @@ impl Document {
         let local_t = pose.then(t).then(&pose_inv);
         let mut change = self.transform_sketch_island(sketch, island, &local_t)?;
         change.components_touched = vec![component];
-        change.instances_touched = self.instances_of(component);
+        change.instances_touched = self.placing_instances(component);
         Ok(change)
     }
 
@@ -8955,6 +9882,7 @@ impl Document {
         let group = self.insert_group_record(GroupRecord {
             members: members.to_vec(),
             parent,
+            owner_def: None,
             hidden: false,
             name: None,
             tags: Vec::new(),
@@ -9220,7 +10148,11 @@ impl Document {
                     }
                 }
                 NodeId::Instance(id) => {
-                    if self.instances.get(id).is_none_or(|r| r.hidden) {
+                    if self
+                        .instances
+                        .get(id)
+                        .is_none_or(|r| r.hidden || r.owner_def.is_some())
+                    {
                         return Err(DocumentError::UnknownInstance);
                     }
                 }
@@ -9782,22 +10714,45 @@ impl Document {
                     NodeId::Instance(_) => DocumentError::UnknownInstance,
                 });
             }
-            // Nesting a component inside a definition is deferred — and that
-            // covers instances anywhere in a member's subtree, not just
-            // direct ones: consuming a group while an instance inside it
-            // still names the group as its parent would strand the
-            // instance's parent link.
-            if matches!(m, NodeId::Instance(_)) || !self.leaf_instances_under(m).is_empty() {
-                return Err(DocumentError::NestedComponentUnsupported);
-            }
         }
         let parent = self.node_parent(members[0]);
         if members[1..].iter().any(|&m| self.node_parent(m) != parent) {
             return Err(DocumentError::MixedParents);
         }
 
-        // Flatten the selection to its leaf world objects. Instances were
-        // refused above, so every world solid in the selection is covered.
+        // A selected instance (direct, or nested under a selected group)
+        // nests its definition inside the new one. The new definition
+        // cannot be cyclic — nothing references it yet — but its nesting
+        // depth is bounded like everything else: refuse, don't truncate.
+        for &m in members {
+            for iid in self.leaf_instances_under(m) {
+                if self.def_depth(self.instances[iid].def) + 1 > MAX_COMPONENT_DEPTH {
+                    return Err(DocumentError::ComponentDepthExceeded);
+                }
+            }
+        }
+        // ... and the WIDTH bound: the new definition's expansion is the
+        // selection's leaf objects plus every selected instance's inner
+        // count — refuse before any mutation.
+        {
+            let mut memo = BTreeMap::new();
+            let mut count = 0usize;
+            for &m in members {
+                count = count.saturating_add(self.leaf_objects_under(m).len());
+                for iid in self.leaf_instances_under(m) {
+                    let def = self.instances[iid].def;
+                    count = count.saturating_add(self.def_placement_count_memo(def, &mut memo));
+                }
+            }
+            if count > MAX_EXPANDED_PLACEMENTS {
+                return Err(DocumentError::ComponentExpansionExceeded);
+            }
+        }
+
+        // The fold takes the selected subtrees WHOLE: selected objects,
+        // groups, and instances become the definition's direct members;
+        // everything beneath a selected group is re-owned in place (parent
+        // links inside the subtree survive untouched).
         let mut leaves: Vec<ObjectId> = Vec::new();
         for &m in members {
             for o in self.leaf_objects_under(m) {
@@ -9806,7 +10761,11 @@ impl Document {
                 }
             }
         }
-        if leaves.is_empty() {
+        let mut folded_instances: Vec<InstanceId> = Vec::new();
+        for &m in members {
+            self.collect_instances(m, &mut folded_instances);
+        }
+        if leaves.is_empty() && folded_instances.is_empty() {
             return Err(DocumentError::EmptyComponent);
         }
 
@@ -9815,9 +10774,9 @@ impl Document {
             .iter()
             .map(|&o| (o, self.objects[o].group_parent()))
             .collect();
-        let mut consumed_groups: Vec<GroupId> = Vec::new();
+        let mut folded_groups: Vec<GroupId> = Vec::new();
         for &m in members {
-            self.collect_groups(m, &mut consumed_groups);
+            self.collect_groups(m, &mut folded_groups);
         }
         let prev_parent_members = parent.map(|pg| self.groups[pg].members.clone());
 
@@ -9831,33 +10790,59 @@ impl Document {
         };
         let def_name = inherited_name.unwrap_or_else(|| self.generated_component_name());
 
-        // Build the definition + its single identity-posed instance. No geometry
-        // moves: the definition-local frame is the world frame at creation.
+        // Capture the full folded node set for the liveness pass BEFORE
+        // re-owning (collect_subtree walks live nodes only).
+        let mut folded: Vec<NodeId> = Vec::new();
+        for &m in members {
+            self.collect_subtree(m, &mut folded);
+        }
+
+        // Build the definition + its single identity-posed instance. No
+        // geometry moves: the definition-local frame is the world frame at
+        // creation. The selection folds in WHOLE — selected nodes become
+        // the definition's direct members (parent cleared: they are
+        // def-local roots now), and every node beneath a selected group is
+        // re-owned in place with its parent link untouched.
         let component = self.insert_component_record(ComponentDef {
-            members: leaves.clone(),
+            members: members.to_vec(),
             hidden: false,
             name: Some(def_name),
         });
-        for &o in &leaves {
-            self.objects[o].owner = ObjectOwner::Definition(component);
+        for &(o, prior) in &member_prior_parents {
+            self.objects[o].owner = ObjectOwner::Definition {
+                def: component,
+                parent: if members.contains(&NodeId::Object(o)) {
+                    None
+                } else {
+                    prior
+                },
+            };
         }
-        for &g in &consumed_groups {
-            self.groups[g].hidden = true;
+        for &g in &folded_groups {
+            self.groups[g].owner_def = Some(component);
+            if members.contains(&NodeId::Group(g)) {
+                self.groups[g].parent = None;
+            }
+        }
+        for &i in &folded_instances {
+            self.instances[i].owner_def = Some(component);
+            if members.contains(&NodeId::Instance(i)) {
+                self.instances[i].parent = None;
+            }
         }
 
-        // The fold just killed liveness for every leaf (world -> definition
-        // member) and every consumed group (hidden) in one step — run the
-        // same recorded liveness pass the delete/boolean family runs, so an
-        // annotation anchored to any of them detaches visibly right here,
-        // not silently until the next transform or the save-time backstop.
-        let mut folded: Vec<NodeId> = leaves.iter().map(|&o| NodeId::Object(o)).collect();
-        folded.extend(consumed_groups.iter().map(|&g| NodeId::Group(g)));
+        // The fold just killed liveness for the whole selected subtree
+        // (world → definition-owned) in one step — run the same recorded
+        // liveness pass the delete/boolean family runs, so an annotation
+        // anchored to any of it detaches visibly right here, not silently
+        // until the next transform or the save-time backstop.
         let reanchored = self.reevaluate_liveness_recorded(&folded);
 
         let instance = self.insert_instance_record(InstanceRecord {
             def: component,
             pose: Transform::IDENTITY,
             parent,
+            owner_def: None,
             hidden: false,
             name: None,
             tags: inherited_tags,
@@ -9872,14 +10857,22 @@ impl Document {
             selected: members.to_vec(),
             parent,
             member_prior_parents,
-            consumed_groups: consumed_groups.clone(),
+            folded_groups: folded_groups.clone(),
+            folded_instances: folded_instances.clone(),
             prev_parent_members,
             reanchored,
         });
         self.redo.clear();
         self.debug_validate();
 
-        let change = made_component_change(component, instance, parent, &leaves, &consumed_groups);
+        let change = made_component_change(
+            component,
+            instance,
+            parent,
+            &leaves,
+            &folded_groups,
+            &folded_instances,
+        );
         Ok((component, instance, change))
     }
 
@@ -9899,20 +10892,56 @@ impl Document {
         component: ComponentId,
         pose: Transform,
     ) -> Result<(InstanceId, DocChange), DocumentError> {
-        // A new placement mid-session would be a live instance whose
-        // definition's geometry is on loan to the session (out-of-date
-        // render) or a nested placement the close cannot fold.
-        self.refuse_during_component_session()?;
         if self.components.get(component).is_none_or(|c| c.hidden) {
             return Err(DocumentError::UnknownComponent);
         }
+        // Mid-session placement is the interactive route to NESTING: the
+        // close folds it into the open definition. Two gates keep the fold
+        // a bounded DAG: placing a definition that is (or transitively
+        // contains) any open session's definition would close a cycle at
+        // fold time; and the fold must not push the innermost definition's
+        // chain past the depth bound anywhere it is already nested.
+        if self.component_session().is_some() {
+            for d in self.defs_on_loan() {
+                if component == d || self.def_reaches(component, d) {
+                    return Err(DocumentError::ComponentCycle);
+                }
+            }
+            let fold_target = self
+                .component_session()
+                .map(|sess| sess.component)
+                .expect("checked above");
+            if self.def_ancestry_depth(fold_target) + 1 + self.def_depth(component)
+                > MAX_COMPONENT_DEPTH
+            {
+                return Err(DocumentError::ComponentDepthExceeded);
+            }
+        }
         // Reject a singular pose; reflection and non-uniform scale are fine.
         pose.inverse().map_err(DocumentError::Transform)?;
+        // The width bound: every placement adds the definition's full
+        // expansion to what the document renders — and a MID-SESSION
+        // placement folds into the open definition at close, so it will
+        // render once per placement of every open frame (the product), not
+        // once. Measure against the on-loan content too, which
+        // `expanded_total` cannot see while the session holds it.
+        let delta = self
+            .def_placement_count(component)
+            .saturating_mul(self.session_fold_multiplier());
+        if self
+            .expanded_total()
+            .saturating_add(self.expanded_on_loan())
+            .saturating_add(delta)
+            > MAX_EXPANDED_PLACEMENTS
+        {
+            return Err(DocumentError::ComponentExpansionExceeded);
+        }
 
         let instance = self.insert_instance_record(InstanceRecord {
             def: component,
             pose,
             parent: None,
+            owner_def: None,
             hidden: false,
             name: None,
             tags: Vec::new(),
@@ -10131,8 +11160,11 @@ impl Document {
     ) -> Result<DocChange, DocumentError> {
         // Reject a singular `t`; reflection and non-uniform scale are fine.
         t.inverse().map_err(DocumentError::Transform)?;
+        // A def-owned member instance is not a world operand — composing
+        // into its def-local pose would edit the shared definition through
+        // the world path (nested-components review).
         let rec = match self.instances.get_mut(instance) {
-            Some(rec) if !rec.hidden => rec,
+            Some(rec) if !rec.hidden && rec.owner_def.is_none() => rec,
             _ => return Err(DocumentError::UnknownInstance),
         };
         let prev = rec.pose;
@@ -10179,7 +11211,7 @@ impl Document {
     ) -> Result<(KernelOpReport, DocChange), DocumentError> {
         match self.components.get(component) {
             Some(c) if !c.hidden => {
-                if !c.members.contains(&object) {
+                if !c.members.contains(&NodeId::Object(object)) {
                     return Err(DocumentError::UnknownObject);
                 }
             }
@@ -10204,7 +11236,7 @@ impl Document {
         self.debug_validate();
 
         // A shared-geometry edit is seen by every instance of the definition.
-        let instances_touched = self.instances_of(component);
+        let instances_touched = self.placing_instances(component);
         Ok((
             report,
             DocChange {
@@ -10249,16 +11281,15 @@ impl Document {
             Some(c) if !c.hidden => c,
             _ => return Err(DocumentError::UnknownComponent),
         };
-        if !comp.members.contains(&object) {
+        if !comp.members.contains(&NodeId::Object(object)) {
             return Err(DocumentError::UnknownObject);
         }
         if self.objects.get(object).is_none_or(|r| r.hidden) {
             return Err(DocumentError::UnknownObject);
         }
         let live_members = comp
-            .members
-            .iter()
-            .filter(|&&o| self.objects.get(o).is_some_and(|r| !r.hidden))
+            .object_members()
+            .filter(|&o| self.objects.get(o).is_some_and(|r| !r.hidden))
             .count();
         if live_members <= 1 {
             return Err(DocumentError::LastDefinitionMember);
@@ -10274,7 +11305,7 @@ impl Document {
         Ok(DocChange {
             objects_touched: vec![object],
             components_touched: vec![component],
-            instances_touched: self.instances_of(component),
+            instances_touched: self.placing_instances(component),
             ..Default::default()
         })
     }
@@ -10335,24 +11366,39 @@ impl Document {
         // every placement of any def is either hidden or outside the
         // session by construction, so the op refuses outright there).
         self.explode_scope_node(NodeId::Instance(instance))?;
+        // A def-owned member instance cannot explode from the world path:
+        // hiding it would strip content from EVERY placement of its owning
+        // definition, and its pose is def-local, not world
+        // (nested-components review).
         let (def, pose, parent) = match self.instances.get(instance) {
-            Some(rec) if !rec.hidden => (rec.def, rec.pose, rec.parent),
+            Some(rec) if !rec.hidden && rec.owner_def.is_none() => (rec.def, rec.pose, rec.parent),
             _ => return Err(DocumentError::UnknownInstance),
         };
         // Baking a reflection would invert winding: refuse before mutating.
         if pose.determinant() < 0.0 {
             return Err(DocumentError::CannotExplodeReflected);
         }
-        let members: Vec<ObjectId> = match self.components.get(def) {
+        let member_nodes: Vec<NodeId> = match self.components.get(def) {
             Some(c) if !c.hidden => c
                 .members
                 .iter()
                 .copied()
-                .filter(|&m| self.objects.get(m).is_some_and(|r| !r.hidden))
+                .filter(|&m| match m {
+                    NodeId::Object(o) => self.objects.get(o).is_some_and(|r| !r.hidden),
+                    NodeId::Group(g) => self.groups.get(g).is_some_and(|r| !r.hidden),
+                    NodeId::Instance(i) => self.instances.get(i).is_some_and(|r| !r.hidden),
+                })
                 .collect(),
             // The instance held a live def by invariant; treat otherwise as a bug.
             _ => return Err(DocumentError::UnknownComponent),
         };
+        let members: Vec<ObjectId> = member_nodes
+            .iter()
+            .filter_map(|&m| match m {
+                NodeId::Object(o) => Some(o),
+                _ => None,
+            })
+            .collect();
         // Live def-owned sketches to copy alongside the members (a hidden/
         // consumed husk has nothing left to show and is left with the
         // definition, exactly like `make_unique`'s clone skips it).
@@ -10381,31 +11427,59 @@ impl Document {
         // member's own pre-fold name (see the doc comment).
         let instance_name = self.instances[instance].name.clone();
         let def_name = self.components[def].name.clone();
-        let single_member = members.len() == 1;
+        let single_member = member_nodes.len() == 1 && members.len() == 1;
         let mut created: Vec<ObjectId> = Vec::with_capacity(members.len());
-        for m in members {
-            let mut object = self.objects[m].object.clone();
-            object
-                .apply_transform(&pose)
-                .map_err(DocumentError::Transform)?;
-            let name = if single_member {
-                instance_name
-                    .clone()
-                    .or_else(|| def_name.clone())
-                    .or_else(|| self.objects[m].name.clone())
-            } else {
-                self.objects[m].name.clone()
-            };
-            let id = self.insert_object_record(ObjectRecord {
-                object,
-                history: History::new(),
-                hidden: false,
-                owner: ObjectOwner::World { parent },
-                name,
-                tags: self.objects[m].tags.clone(),
-            });
-            self.copy_attrs(&EntityRef::Object(m), EntityRef::Object(id));
-            created.push(id);
+        let mut created_groups: Vec<GroupId> = Vec::new();
+        let mut created_instances: Vec<InstanceId> = Vec::new();
+        let mut created_roots: Vec<NodeId> = Vec::with_capacity(member_nodes.len());
+        for m in member_nodes {
+            match m {
+                NodeId::Object(o) => {
+                    let mut object = self.objects[o].object.clone();
+                    object
+                        .apply_transform(&pose)
+                        .map_err(DocumentError::Transform)?;
+                    let name = if single_member {
+                        instance_name
+                            .clone()
+                            .or_else(|| def_name.clone())
+                            .or_else(|| self.objects[o].name.clone())
+                    } else {
+                        self.objects[o].name.clone()
+                    };
+                    let id = self.insert_object_record(ObjectRecord {
+                        object,
+                        history: History::new(),
+                        hidden: false,
+                        owner: ObjectOwner::World { parent },
+                        name,
+                        tags: self.objects[o].tags.clone(),
+                    });
+                    self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
+                    created.push(id);
+                    created_roots.push(NodeId::Object(id));
+                }
+                NodeId::Group(g) => {
+                    // A member group's subtree copies out world-side: objects
+                    // bake the pose, nested instances surface as ordinary
+                    // world instances with the composed pose (geometry stays
+                    // shared with their definitions).
+                    let gid = self.explode_copy_group(
+                        g,
+                        &pose,
+                        parent,
+                        &mut created,
+                        &mut created_groups,
+                        &mut created_instances,
+                    )?;
+                    created_roots.push(NodeId::Group(gid));
+                }
+                NodeId::Instance(i) => {
+                    let iid = self.explode_copy_instance(i, &pose, parent);
+                    created_instances.push(iid);
+                    created_roots.push(NodeId::Instance(iid));
+                }
+            }
         }
 
         // Copy each live def-owned sketch into an independent WORLD sketch,
@@ -10428,8 +11502,7 @@ impl Document {
 
         self.instances[instance].hidden = true;
         if let Some(pg) = parent {
-            let nodes: Vec<NodeId> = created.iter().map(|&o| NodeId::Object(o)).collect();
-            self.splice_out_parent(pg, NodeId::Instance(instance), &nodes);
+            self.splice_out_parent(pg, NodeId::Instance(instance), &created_roots);
         }
         // The instance node just went non-live — run the same recorded
         // liveness pass the delete/boolean family runs, so an annotation
@@ -10439,6 +11512,9 @@ impl Document {
         self.undo.push(DocAction::Exploded {
             instance,
             created: created.clone(),
+            created_groups: created_groups.clone(),
+            created_instances: created_instances.clone(),
+            created_roots,
             created_sketches: created_sketches.clone(),
             reanchored,
         });
@@ -10449,10 +11525,260 @@ impl Document {
             objects_touched: created.clone(),
             sketches_touched: created_sketches,
             instances_touched: vec![instance],
+            groups_touched: created_groups,
             ..Default::default()
         };
+        change.instances_touched.extend(created_instances);
         change.groups_touched.extend(parent);
         Ok((created, change))
+    }
+
+    /// Copy one def-owned member instance into `new_def` for
+    /// [`Document::make_unique`]: same inner definition (shared — unique is
+    /// one level deep), same def-local pose, owned by the private copy.
+    fn unique_copy_instance(
+        &mut self,
+        src: InstanceId,
+        new_def: ComponentId,
+        parent: Option<GroupId>,
+    ) -> InstanceId {
+        let rec = &self.instances[src];
+        let (def, pose, name, tags) = (rec.def, rec.pose, rec.name.clone(), rec.tags.clone());
+        let iid = self.insert_instance_record(InstanceRecord {
+            def,
+            pose,
+            parent,
+            owner_def: Some(new_def),
+            hidden: false,
+            name,
+            tags,
+        });
+        self.copy_attrs(&EntityRef::Instance(src), EntityRef::Instance(iid));
+        if self.user_hidden_instances.contains(&src) {
+            self.user_hidden_instances.insert(iid);
+        }
+        iid
+    }
+
+    /// Deep-copy one def-owned member group's subtree into `new_def` for
+    /// [`Document::make_unique`]: def-local coordinates copy verbatim,
+    /// nested instances copy via [`Document::unique_copy_instance`].
+    fn unique_copy_group(
+        &mut self,
+        src: GroupId,
+        new_def: ComponentId,
+        parent: Option<GroupId>,
+    ) -> GroupId {
+        let (name, tags, src_members) = {
+            let rec = &self.groups[src];
+            (rec.name.clone(), rec.tags.clone(), rec.members.clone())
+        };
+        let gid = self.insert_group_record(GroupRecord {
+            members: Vec::new(),
+            parent,
+            owner_def: Some(new_def),
+            hidden: false,
+            name,
+            tags,
+        });
+        self.copy_attrs(&EntityRef::Group(src), EntityRef::Group(gid));
+        if self.user_hidden_groups.contains(&src) {
+            self.user_hidden_groups.insert(gid);
+        }
+        let mut members: Vec<NodeId> = Vec::with_capacity(src_members.len());
+        for m in src_members {
+            match m {
+                NodeId::Object(o) => {
+                    let Some(rec) = self.objects.get(o).filter(|r| !r.hidden) else {
+                        continue;
+                    };
+                    let (object, name, tags) =
+                        (rec.object.clone(), rec.name.clone(), rec.tags.clone());
+                    let id = self.insert_object_record(ObjectRecord {
+                        object,
+                        history: History::new(),
+                        hidden: false,
+                        owner: ObjectOwner::Definition {
+                            def: new_def,
+                            parent: Some(gid),
+                        },
+                        name,
+                        tags,
+                    });
+                    self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
+                    members.push(NodeId::Object(id));
+                }
+                NodeId::Group(g) => {
+                    if self.groups.get(g).is_none_or(|r| r.hidden) {
+                        continue;
+                    }
+                    let child = self.unique_copy_group(g, new_def, Some(gid));
+                    members.push(NodeId::Group(child));
+                }
+                NodeId::Instance(i) => {
+                    if self.instances.get(i).is_none_or(|r| r.hidden) {
+                        continue;
+                    }
+                    let child = self.unique_copy_instance(i, new_def, Some(gid));
+                    members.push(NodeId::Instance(child));
+                }
+            }
+        }
+        self.groups[gid].members = members;
+        gid
+    }
+
+    /// Hide or reveal every node in `def`'s OWN subtree (members, and
+    /// everything beneath member groups) — [`DocAction::MadeUnique`]'s
+    /// undo/redo bookkeeping for a nested private copy. Member instances'
+    /// records are toggled; their shared inner definitions are never
+    /// touched.
+    fn set_def_subtree_hidden(&mut self, def: ComponentId, hidden: bool) {
+        fn walk(doc: &mut Document, node: NodeId, hidden: bool) {
+            match node {
+                NodeId::Object(o) => {
+                    if let Some(rec) = doc.objects.get_mut(o) {
+                        rec.hidden = hidden;
+                    }
+                }
+                NodeId::Instance(i) => {
+                    if let Some(rec) = doc.instances.get_mut(i) {
+                        rec.hidden = hidden;
+                    }
+                }
+                NodeId::Group(g) => {
+                    let members = match doc.groups.get_mut(g) {
+                        Some(rec) => {
+                            rec.hidden = hidden;
+                            rec.members.clone()
+                        }
+                        None => return,
+                    };
+                    for m in members {
+                        walk(doc, m, hidden);
+                    }
+                }
+            }
+        }
+        let members = self.components[def].members.clone();
+        for m in members {
+            walk(self, m, hidden);
+        }
+    }
+
+    /// Copy one def-owned member instance out to the world side for
+    /// [`Document::explode_instance`]: a fresh world instance of the SAME
+    /// inner definition with the composed pose (`inner.then(outer)`) —
+    /// geometry stays shared. Name/tags/attrs and the user-hidden flag copy.
+    fn explode_copy_instance(
+        &mut self,
+        src: InstanceId,
+        outer: &Transform,
+        parent: Option<GroupId>,
+    ) -> InstanceId {
+        let rec = &self.instances[src];
+        let (inner_def, composed, name, tags) = (
+            rec.def,
+            rec.pose.then(outer),
+            rec.name.clone(),
+            rec.tags.clone(),
+        );
+        let iid = self.insert_instance_record(InstanceRecord {
+            def: inner_def,
+            pose: composed,
+            parent,
+            owner_def: None,
+            hidden: false,
+            name,
+            tags,
+        });
+        self.copy_attrs(&EntityRef::Instance(src), EntityRef::Instance(iid));
+        if self.user_hidden_instances.contains(&src) {
+            self.user_hidden_instances.insert(iid);
+        }
+        iid
+    }
+
+    /// Deep-copy one def-owned member group's subtree out to the world side
+    /// for [`Document::explode_instance`]: objects bake `outer` into fresh
+    /// world copies, nested groups recurse, nested instances copy via
+    /// [`Document::explode_copy_instance`]. Returns the copied group.
+    fn explode_copy_group(
+        &mut self,
+        src: GroupId,
+        outer: &Transform,
+        parent: Option<GroupId>,
+        created: &mut Vec<ObjectId>,
+        created_groups: &mut Vec<GroupId>,
+        created_instances: &mut Vec<InstanceId>,
+    ) -> Result<GroupId, DocumentError> {
+        let (name, tags, src_members) = {
+            let rec = &self.groups[src];
+            (rec.name.clone(), rec.tags.clone(), rec.members.clone())
+        };
+        let gid = self.insert_group_record(GroupRecord {
+            members: Vec::new(),
+            parent,
+            owner_def: None,
+            hidden: false,
+            name,
+            tags,
+        });
+        self.copy_attrs(&EntityRef::Group(src), EntityRef::Group(gid));
+        if self.user_hidden_groups.contains(&src) {
+            self.user_hidden_groups.insert(gid);
+        }
+        created_groups.push(gid);
+        let mut members: Vec<NodeId> = Vec::with_capacity(src_members.len());
+        for m in src_members {
+            match m {
+                NodeId::Object(o) => {
+                    let Some(rec) = self.objects.get(o).filter(|r| !r.hidden) else {
+                        continue;
+                    };
+                    let mut object = rec.object.clone();
+                    let (name, tags) = (rec.name.clone(), rec.tags.clone());
+                    object
+                        .apply_transform(outer)
+                        .map_err(DocumentError::Transform)?;
+                    let id = self.insert_object_record(ObjectRecord {
+                        object,
+                        history: History::new(),
+                        hidden: false,
+                        owner: ObjectOwner::World { parent: Some(gid) },
+                        name,
+                        tags,
+                    });
+                    self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
+                    created.push(id);
+                    members.push(NodeId::Object(id));
+                }
+                NodeId::Group(g) => {
+                    if self.groups.get(g).is_none_or(|r| r.hidden) {
+                        continue;
+                    }
+                    let child = self.explode_copy_group(
+                        g,
+                        outer,
+                        Some(gid),
+                        created,
+                        created_groups,
+                        created_instances,
+                    )?;
+                    members.push(NodeId::Group(child));
+                }
+                NodeId::Instance(i) => {
+                    if self.instances.get(i).is_none_or(|r| r.hidden) {
+                        continue;
+                    }
+                    let child = self.explode_copy_instance(i, outer, Some(gid));
+                    created_instances.push(child);
+                    members.push(NodeId::Instance(child));
+                }
+            }
+        }
+        self.groups[gid].members = members;
+        Ok(gid)
     }
 
     /// Detach one instance onto its **own private copy** of the definition
@@ -10479,16 +11805,23 @@ impl Document {
         &mut self,
         instance: InstanceId,
     ) -> Result<(ComponentId, DocChange), DocumentError> {
+        // A def-owned member instance is not a world operand — repointing
+        // it would silently edit the OUTER definition's shared content
+        // (nested-components review).
         let prev_def = match self.instances.get(instance) {
-            Some(rec) if !rec.hidden => rec.def,
+            Some(rec) if !rec.hidden && rec.owner_def.is_none() => rec.def,
             _ => return Err(DocumentError::UnknownInstance),
         };
-        let members: Vec<ObjectId> = match self.components.get(prev_def) {
+        let members: Vec<NodeId> = match self.components.get(prev_def) {
             Some(c) if !c.hidden => c
                 .members
                 .iter()
                 .copied()
-                .filter(|&m| self.objects.get(m).is_some_and(|r| !r.hidden))
+                .filter(|&m| match m {
+                    NodeId::Object(o) => self.objects.get(o).is_some_and(|r| !r.hidden),
+                    NodeId::Group(g) => self.groups.get(g).is_some_and(|r| !r.hidden),
+                    NodeId::Instance(i) => self.instances.get(i).is_some_and(|r| !r.hidden),
+                })
                 .collect(),
             _ => return Err(DocumentError::UnknownComponent),
         };
@@ -10533,19 +11866,37 @@ impl Document {
         {
             dict.remove(LIBRARY_ATTR_NS);
         }
-        let mut new_members: Vec<ObjectId> = Vec::with_capacity(members.len());
+        // One-level-deep semantics, exactly SketchUp's: objects and group
+        // subtrees copy, but a member instance's copy still SHARES its own
+        // inner definition — making the outer unique never forks the inner.
+        let mut new_members: Vec<NodeId> = Vec::with_capacity(members.len());
         for m in members {
-            let object = self.objects[m].object.clone();
-            let id = self.insert_object_record(ObjectRecord {
-                object,
-                history: History::new(),
-                hidden: false,
-                owner: ObjectOwner::Definition(new_def),
-                name: None,
-                tags: Vec::new(),
-            });
-            self.copy_attrs(&EntityRef::Object(m), EntityRef::Object(id));
-            new_members.push(id);
+            match m {
+                NodeId::Object(o) => {
+                    let object = self.objects[o].object.clone();
+                    let id = self.insert_object_record(ObjectRecord {
+                        object,
+                        history: History::new(),
+                        hidden: false,
+                        owner: ObjectOwner::Definition {
+                            def: new_def,
+                            parent: None,
+                        },
+                        name: None,
+                        tags: Vec::new(),
+                    });
+                    self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
+                    new_members.push(NodeId::Object(id));
+                }
+                NodeId::Group(g) => {
+                    let gid = self.unique_copy_group(g, new_def, None);
+                    new_members.push(NodeId::Group(gid));
+                }
+                NodeId::Instance(i) => {
+                    let iid = self.unique_copy_instance(i, new_def, None);
+                    new_members.push(NodeId::Instance(iid));
+                }
+            }
         }
         self.components[new_def].members = new_members;
 
@@ -10618,9 +11969,24 @@ impl Document {
         self.component_session().map(|s| s.instance)
     }
 
-    /// The open component explode session, if the innermost frame is one.
-    /// A `Component` frame is always innermost (see [`SessionFrame`]), so
-    /// this is the only place a component session can sit on the stack.
+    /// Every definition currently ON LOAN to an open session frame — the
+    /// expansion walks skip these (their geometry is world-baked, so a
+    /// def-owned placement elsewhere would render it at the wrong frame),
+    /// and re-entering one refuses.
+    fn defs_on_loan(&self) -> Vec<ComponentId> {
+        self.sessions
+            .iter()
+            .filter_map(|f| match f {
+                SessionFrame::Component(sess) => Some(sess.component),
+                SessionFrame::Group(_) => None,
+            })
+            .collect()
+    }
+
+    /// The INNERMOST component explode session, if the innermost frame is
+    /// one — the frame every scope gate, edit, and close operates on.
+    /// Component frames stack (nested drill-down), so outer frames may sit
+    /// below it; [`Document::defs_on_loan`] sees the whole stack.
     fn component_session(&self) -> Option<&ExplodeSession> {
         match self.sessions.last() {
             Some(SessionFrame::Component(s)) => Some(s),
@@ -10666,6 +12032,7 @@ impl Document {
     ///
     /// Does not touch `self.sessions`, `self.undo`, or `self.redo` —
     /// callers own recording the action and installing the returned session.
+    #[allow(clippy::too_many_arguments)]
     fn bake_explode_session(
         &mut self,
         instance: InstanceId,
@@ -10674,6 +12041,8 @@ impl Document {
         members: Vec<ObjectId>,
         sketches: Vec<SketchId>,
         hidden_instances: Vec<InstanceId>,
+        surfaced_groups: Vec<GroupId>,
+        surfaced_instances: Vec<InstanceId>,
     ) -> ExplodeSession {
         let pose_inv = pose
             .inverse()
@@ -10681,6 +12050,7 @@ impl Document {
 
         let mut pristine_objects: BTreeMap<ObjectId, Object> = BTreeMap::new();
         let mut pristine_sketches: BTreeMap<SketchId, Sketch> = BTreeMap::new();
+        let mut pristine_instance_poses: BTreeMap<InstanceId, Transform> = BTreeMap::new();
 
         for &m in &members {
             if self.objects[m].hidden {
@@ -10691,7 +12061,11 @@ impl Document {
                 .object
                 .apply_transform(&pose)
                 .expect("explode session pose validated a similarity at open");
-            self.objects[m].owner = ObjectOwner::World { parent: None };
+            // A group-nested member keeps its parent link across the flip —
+            // the surfaced group is a world group for the session's
+            // duration, and this object stays inside it.
+            let parent = self.objects[m].group_parent();
+            self.objects[m].owner = ObjectOwner::World { parent };
         }
         for &s in &sketches {
             if self.hidden_sketches.contains(&s) {
@@ -10702,6 +12076,29 @@ impl Document {
                 .apply_transform(&pose)
                 .expect("explode session pose validated a similarity at open");
             self.def_sketches.remove(&s);
+        }
+        // Surfaced member groups become ordinary world groups (parents
+        // untouched — direct members were def-local roots, so they arrive
+        // top-level). A listed group that is HIDDEN now (a replay over a
+        // mid-session deletion) is kept listed but untouched, exactly like
+        // a hidden member object.
+        for &g in &surfaced_groups {
+            if self.groups[g].hidden {
+                continue;
+            }
+            self.groups[g].owner_def = None;
+        }
+        // Surfaced member instances become ordinary world instances at the
+        // composed pose; the def-local pose snapshots for the drift-free
+        // close. Same hidden-skip replay rule.
+        for &i in &surfaced_instances {
+            if self.instances[i].hidden {
+                continue;
+            }
+            pristine_instance_poses.insert(i, self.instances[i].pose);
+            let composed = self.instances[i].pose.then(&pose);
+            self.instances[i].pose = composed;
+            self.instances[i].owner_def = None;
         }
         for &i in &hidden_instances {
             self.instances[i].hidden = true;
@@ -10717,6 +12114,9 @@ impl Document {
             hidden_instances,
             pristine_objects,
             pristine_sketches,
+            surfaced_groups,
+            surfaced_instances,
+            pristine_instance_poses,
             // Set correctly by the caller once `SessionOpened` (a fresh open
             // or a replay) has been pushed onto `self.undo`; `0` is a
             // placeholder that never survives past this constructor.
@@ -10731,8 +12131,11 @@ impl Document {
     ///
     /// # Errors
     /// - [`DocumentError::UnknownInstance`] — the instance is stale/hidden.
-    /// - [`DocumentError::ExplodeSessionOpen`] — a session is already open
-    ///   (one at a time).
+    /// - [`DocumentError::ExplodeSessionScope`] — a session is open and
+    ///   `instance` is not session geometry (only a surfaced member
+    ///   instance, or one placed mid-session, can be drilled into).
+    /// - [`DocumentError::ExplodeSessionOpen`] — the instance's definition
+    ///   is already on loan to an open frame.
     /// - [`DocumentError::ExplodeSessionPoseUnsupported`] — the instance's
     ///   pose is not a similarity with positive determinant (see the pose
     ///   gate rationale on that error variant).
@@ -10742,10 +12145,20 @@ impl Document {
         &mut self,
         instance: InstanceId,
     ) -> Result<DocChange, DocumentError> {
+        // Component frames STACK (nested components drill-down): under an
+        // open session, only a SESSION-SCOPE instance may be entered — a
+        // surfaced member instance is an ordinary world instance now, and
+        // opening it pushes the next LIFO frame. An outside instance still
+        // refuses.
         if self.component_session().is_some() {
-            return Err(DocumentError::ExplodeSessionOpen);
+            self.explode_scope_node(NodeId::Instance(instance))?;
         }
         let (component, pose) = self.instance_component(instance)?;
+        // Re-entering a definition already on loan to an OUTER frame would
+        // bake the same records twice.
+        if self.defs_on_loan().contains(&component) {
+            return Err(DocumentError::ExplodeSessionOpen);
+        }
         if pose.similarity_scale().is_none() || pose.determinant() <= 0.0 {
             return Err(DocumentError::ExplodeSessionPoseUnsupported);
         }
@@ -10766,23 +12179,60 @@ impl Document {
         {
             return Err(DocumentError::ExplodeSessionGroupedInstance);
         }
-
         // Derive the session's lists from the definition's CURRENT state —
         // only a fresh open does this; replay arms reuse the recorded lists
-        // (see `bake_explode_session`'s doc for why).
-        let members: Vec<ObjectId> = self.components[component]
-            .members
-            .iter()
-            .copied()
-            .filter(|&m| self.objects.get(m).is_some_and(|r| !r.hidden))
-            .collect();
+        // (see `bake_explode_session`'s doc for why). The whole subtree
+        // surfaces: leaf objects (member groups descended) bake like direct
+        // members, member groups and instances flip to world ownership.
+        let mut members: Vec<ObjectId> = Vec::new();
+        let mut surfaced_groups: Vec<GroupId> = Vec::new();
+        let mut surfaced_instances: Vec<InstanceId> = Vec::new();
+        {
+            let mut stack: Vec<NodeId> = self.components[component]
+                .members
+                .iter()
+                .rev()
+                .copied()
+                .collect();
+            while let Some(node) = stack.pop() {
+                match node {
+                    NodeId::Object(o) => {
+                        if self.objects.get(o).is_some_and(|r| !r.hidden) {
+                            members.push(o);
+                        }
+                    }
+                    NodeId::Group(g) => {
+                        if let Some(rec) = self.groups.get(g).filter(|r| !r.hidden) {
+                            surfaced_groups.push(g);
+                            stack.extend(rec.members.iter().rev().copied());
+                        }
+                    }
+                    NodeId::Instance(i) => {
+                        if self.instances.get(i).is_some_and(|r| !r.hidden) {
+                            surfaced_instances.push(i);
+                        }
+                    }
+                }
+            }
+        }
         let sketches: Vec<SketchId> = self
             .def_sketches
             .iter()
             .filter(|&(sid, &c)| c == component && !self.hidden_sketches.contains(sid))
             .map(|(&sid, _)| sid)
             .collect();
-        let hidden_instances = self.instances_of(component);
+        // Only WORLD placements hide: a def-owned placement of this
+        // definition inside ANOTHER definition stays live — the expansion
+        // walks skip on-loan definitions instead, so its content simply
+        // doesn't render for the session's duration and returns at close.
+        let hidden_instances: Vec<InstanceId> = self
+            .instances_of(component)
+            .into_iter()
+            .filter(|&i| self.instances[i].owner_def.is_none())
+            .collect();
+        // Outer placements that render this definition's content THROUGH
+        // other definitions need refreshing at both open and close.
+        let outer_placements = self.placing_instances(component);
 
         let mut session = self.bake_explode_session(
             instance,
@@ -10791,6 +12241,8 @@ impl Document {
             members,
             sketches,
             hidden_instances,
+            surfaced_groups,
+            surfaced_instances,
         );
 
         self.undo.push(DocAction::SessionOpened {
@@ -10810,17 +12262,28 @@ impl Document {
                 .iter()
                 .map(|(&k, v)| (k, v.clone()))
                 .collect(),
+            surfaced_groups: session.surfaced_groups.clone(),
+            surfaced_instances: session
+                .surfaced_instances
+                .iter()
+                .map(|&i| (i, session.pristine_instance_poses[&i]))
+                .collect(),
         });
         self.redo.clear();
         session.undo_len_at_open = self.undo.actions.len();
 
-        let change = DocChange {
+        let mut change = DocChange {
             objects_touched: session.members.clone(),
             sketches_touched: session.sketches.clone(),
             instances_touched: session.hidden_instances.clone(),
+            groups_touched: session.surfaced_groups.clone(),
             components_touched: vec![component],
             ..Default::default()
         };
+        change
+            .instances_touched
+            .extend(session.surfaced_instances.iter().copied());
+        change.instances_touched.extend(outer_placements);
         self.sessions
             .push(SessionFrame::Component(Box::new(session)));
         self.debug_validate();
@@ -10853,12 +12316,21 @@ impl Document {
         let mut dirty_sketches: BTreeSet<SketchId> = BTreeSet::new();
         let mut created_objects: Vec<ObjectId> = Vec::new();
         let mut created_sketches: Vec<SketchId> = Vec::new();
+        let mut created_groups: Vec<GroupId> = Vec::new();
+        let mut created_instances: Vec<InstanceId> = Vec::new();
         for action in &self.undo.actions[session.undo_len_at_open..] {
             dirty_objects.extend(action.touched_objects());
             dirty_sketches.extend(action.touched_sketches());
             let (co, cs) = action.created_objects_and_sketches();
             created_objects.extend(co);
             created_sketches.extend(cs);
+            for node in action.created_nodes() {
+                match node {
+                    NodeId::Group(g) => created_groups.push(g),
+                    NodeId::Instance(i) => created_instances.push(i),
+                    NodeId::Object(_) => {}
+                }
+            }
         }
 
         let prev_members = self.components[session.component].members.clone();
@@ -10888,7 +12360,41 @@ impl Document {
             } else {
                 self.objects[m].object = session.pristine_objects[&m].clone();
             }
-            self.objects[m].owner = ObjectOwner::Definition(session.component);
+            // The CURRENT parent link carries back — a member re-homed into
+            // a (surfaced or created) group mid-session folds with it.
+            let parent = self.objects[m].group_parent();
+            self.objects[m].owner = ObjectOwner::Definition {
+                def: session.component,
+                parent,
+            };
+        }
+        // Surfaced member groups return to definition ownership; one
+        // deleted mid-session stays a world tombstone and is dropped from
+        // membership below, exactly like a deleted member object.
+        for &g in &session.surfaced_groups {
+            if self.groups[g].hidden {
+                continue;
+            }
+            self.groups[g].owner_def = Some(session.component);
+        }
+        // Surfaced member instances: drift-free restore-or-unbake, the
+        // object rule expressed on poses — an untouched pose (still exactly
+        // the composed-at-bake product) restores the pristine def-local
+        // pose verbatim; a moved one unbakes through the inverse.
+        for &i in &session.surfaced_instances {
+            if self.instances[i].hidden {
+                continue;
+            }
+            match session.pristine_instance_poses.get(&i) {
+                Some(&pristine) if self.instances[i].pose == pristine.then(&session.pose) => {
+                    self.instances[i].pose = pristine;
+                }
+                _ => {
+                    let unbaked = self.instances[i].pose.then(&session.pose_inv);
+                    self.instances[i].pose = unbaked;
+                }
+            }
+            self.instances[i].owner_def = Some(session.component);
         }
         // Membership rewrite: drop ONLY session members deleted DURING the
         // session. The list may also hold members tombstoned BEFORE the
@@ -10901,9 +12407,25 @@ impl Document {
             .copied()
             .filter(|&m| self.objects[m].hidden)
             .collect();
+        let dropped_groups: BTreeSet<GroupId> = session
+            .surfaced_groups
+            .iter()
+            .copied()
+            .filter(|&g| self.groups[g].hidden)
+            .collect();
+        let dropped_instances: BTreeSet<InstanceId> = session
+            .surfaced_instances
+            .iter()
+            .copied()
+            .filter(|&i| self.instances[i].hidden)
+            .collect();
         self.components[session.component]
             .members
-            .retain(|m| !dropped.contains(m));
+            .retain(|m| match m {
+                NodeId::Object(o) => !dropped.contains(o),
+                NodeId::Group(g) => !dropped_groups.contains(g),
+                NodeId::Instance(i) => !dropped_instances.contains(i),
+            });
 
         // Original def-owned sketches: same restore-or-unbake choice. A
         // sketch has no `hidden`-tombstone-vs-membership-list split the way
@@ -10941,8 +12463,18 @@ impl Document {
                 .object
                 .apply_transform(&session.pose_inv)
                 .expect("session pose is invertible by construction");
-            self.objects[o].owner = ObjectOwner::Definition(session.component);
-            self.components[session.component].members.push(o);
+            let parent = self.objects[o].group_parent();
+            self.objects[o].owner = ObjectOwner::Definition {
+                def: session.component,
+                parent,
+            };
+            // Only a TOP-LEVEL creation becomes a direct member; one born
+            // inside a (surfaced or created) group belongs through it.
+            if parent.is_none() {
+                self.components[session.component]
+                    .members
+                    .push(NodeId::Object(o));
+            }
             folded_objects.push(o);
         }
         for s in created_sketches {
@@ -10956,6 +12488,48 @@ impl Document {
                 .expect("session pose is invertible by construction");
             self.def_sketches.insert(s, session.component);
             folded_sketches.push(s);
+        }
+
+        // Groups made and instances PLACED during the session nest into the
+        // definition — SketchUp's "what you build while editing goes into
+        // the component", now including component placements (the
+        // interactive route to nesting; `place_instance`'s mid-session
+        // cycle/depth gates guarantee the fold stays a bounded DAG).
+        let mut folded_groups: Vec<GroupId> = Vec::new();
+        let mut folded_instances: Vec<InstanceId> = Vec::new();
+        for g in created_groups {
+            let live_world = self
+                .groups
+                .get(g)
+                .is_some_and(|r| !r.hidden && r.owner_def.is_none());
+            if !live_world {
+                continue;
+            }
+            self.groups[g].owner_def = Some(session.component);
+            if self.groups[g].parent.is_none() {
+                self.components[session.component]
+                    .members
+                    .push(NodeId::Group(g));
+            }
+            folded_groups.push(g);
+        }
+        for i in created_instances {
+            let live_world = self
+                .instances
+                .get(i)
+                .is_some_and(|r| !r.hidden && r.owner_def.is_none());
+            if !live_world {
+                continue;
+            }
+            let unbaked = self.instances[i].pose.then(&session.pose_inv);
+            self.instances[i].pose = unbaked;
+            self.instances[i].owner_def = Some(session.component);
+            if self.instances[i].parent.is_none() {
+                self.components[session.component]
+                    .members
+                    .push(NodeId::Instance(i));
+            }
+            folded_instances.push(i);
         }
 
         // An EMPTIED definition (every member deleted mid-session, nothing
@@ -10976,7 +12550,7 @@ impl Document {
             }
         }
 
-        let change = DocChange {
+        let mut change = DocChange {
             objects_touched: session
                 .members
                 .iter()
@@ -10990,9 +12564,26 @@ impl Document {
                 .chain(folded_sketches.iter().copied())
                 .collect(),
             instances_touched: session.hidden_instances.clone(),
+            groups_touched: session
+                .surfaced_groups
+                .iter()
+                .copied()
+                .chain(folded_groups.iter().copied())
+                .collect(),
             components_touched: vec![session.component],
             ..Default::default()
         };
+        change.instances_touched.extend(
+            session
+                .surfaced_instances
+                .iter()
+                .copied()
+                .chain(folded_instances.iter().copied()),
+        );
+        // Outer placements re-render the returned content.
+        change
+            .instances_touched
+            .extend(self.placing_instances(session.component));
 
         let action = DocAction::SessionClosed {
             instance: session.instance,
@@ -11002,9 +12593,33 @@ impl Document {
             prev_members,
             folded_objects,
             folded_sketches,
+            folded_groups,
+            folded_instances,
             members: session.members,
             sketches: session.sketches,
             hidden_instances: session.hidden_instances,
+            surfaced_groups: session.surfaced_groups,
+            surfaced_instances: session
+                .surfaced_instances
+                .iter()
+                .map(|&i| {
+                    (
+                        i,
+                        session
+                            .pristine_instance_poses
+                            .get(&i)
+                            .copied()
+                            .unwrap_or_else(|| {
+                                // A surfaced instance hidden at (re)bake had
+                                // no snapshot; its recorded pristine is its
+                                // CURRENT def-local pose (it was restored by
+                                // the unbake arm above if live, or is a
+                                // tombstone whose pose no longer matters).
+                                self.instances[i].pose
+                            }),
+                    )
+                })
+                .collect(),
             emptied,
         };
 
@@ -11048,8 +12663,46 @@ impl Document {
     /// # Errors
     /// - [`DocumentError::ExplodeSessionNotOpen`] — no session is open.
     pub fn close_explode_session(&mut self) -> Result<DocChange, DocumentError> {
-        if self.component_session().is_none() {
+        let Some(sess) = self.component_session() else {
             return Err(DocumentError::ExplodeSessionNotOpen);
+        };
+        // The width bound's BACKSTOP. Every op that ADDS placements is
+        // gated fold-aware, but plain geometry creation is not (a drawn
+        // solid is one leaf, gated nowhere) — and inside a definition
+        // placed many times, enough of those still multiply past the
+        // bound. The fold is the moment that multiplication becomes real,
+        // so it is checked here: refused typed, session left open so the
+        // user can remove what does not fit. Without this, a document
+        // built entirely from legal ops could save and then refuse to
+        // reopen (adversarial review).
+        {
+            let mut memo = BTreeMap::new();
+            let mut leaves = self.explode_session_objects().unwrap_or_default().len();
+            let inner_cost =
+                |doc: &Document, i: InstanceId, memo: &mut BTreeMap<ComponentId, usize>| match doc
+                    .instances
+                    .get(i)
+                    .filter(|r| !r.hidden)
+                {
+                    Some(rec) => doc.def_placement_count_memo(rec.def, memo),
+                    None => 0,
+                };
+            for &i in &sess.surfaced_instances {
+                leaves = leaves.saturating_add(inner_cost(self, i, &mut memo));
+            }
+            for action in &self.undo.actions[sess.undo_len_at_open..] {
+                for n in action.created_nodes() {
+                    if let NodeId::Instance(i) = n {
+                        leaves = leaves.saturating_add(inner_cost(self, i, &mut memo));
+                    }
+                }
+            }
+            let projected = self
+                .expanded_total()
+                .saturating_add(leaves.saturating_mul(self.session_fold_multiplier()));
+            if projected > MAX_EXPANDED_PLACEMENTS {
+                return Err(DocumentError::ComponentExpansionExceeded);
+            }
         }
         let (change, action) = self.exit_explode_session();
         self.undo.push(action);
@@ -11090,18 +12743,22 @@ impl Document {
     ///
     /// # Errors
     /// - [`DocumentError::UnknownGroup`] — the group is stale/hidden.
-    /// - [`DocumentError::ExplodeSessionOpen`] — a component session is
-    ///   open (a `Component` frame is always innermost; nothing opens
-    ///   inside it).
+    /// - [`DocumentError::ExplodeSessionScope`] — a session is open and
+    ///   the group is not session geometry (only a surfaced member group,
+    ///   or one made mid-session, can be entered from inside a frame).
     /// - [`DocumentError::ExplodeSessionNestedGroup`] — the group is
     ///   nested inside another group (enter the outer group first).
     ///
     /// On `Err` the document is untouched.
     pub fn open_group_session(&mut self, group: GroupId) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "open_group_session");
-        if self.component_session().is_some() {
-            return Err(DocumentError::ExplodeSessionOpen);
-        }
+        // A group inside an open COMPONENT frame is session geometry — a
+        // definition's member group, surfaced world-side for the session's
+        // duration — so entering it stacks the next frame, exactly like
+        // drilling into a member instance. Only a group from OUTSIDE the
+        // open frame refuses (the scope check); grouping levels below the
+        // definition were unreachable before this (playtest).
+        self.explode_scope_node(NodeId::Group(group))?;
         if !self.group_is_live(group) {
             return Err(DocumentError::UnknownGroup);
         }
@@ -11251,12 +12908,39 @@ impl Document {
     /// correct across undo/redo re-entry into any earlier session bracket.
     pub fn session_direct_members(&self) -> Option<Vec<NodeId>> {
         match self.sessions.last()? {
-            SessionFrame::Component(_) => Some(
-                self.explode_session_objects()?
-                    .into_iter()
-                    .map(NodeId::Object)
-                    .collect(),
-            ),
+            SessionFrame::Component(sess) => {
+                // Every kind of session node, filtered to what is live and
+                // TOP-LEVEL right now — the same shape the group arm
+                // returns. Surfaced member groups and instances (nested
+                // components) belong here or the app cannot select them,
+                // let alone drill into one; objects nested inside a
+                // surfaced group belong to it, not to the frame directly.
+                let mut out: Vec<NodeId> = Vec::new();
+                let push = |doc: &Document, n: NodeId, out: &mut Vec<NodeId>| {
+                    if doc.node_is_top_level_world(n) && !out.contains(&n) {
+                        out.push(n);
+                    }
+                };
+                for o in self.explode_session_objects()? {
+                    push(self, NodeId::Object(o), &mut out);
+                }
+                for &g in &sess.surfaced_groups {
+                    push(self, NodeId::Group(g), &mut out);
+                }
+                for &i in &sess.surfaced_instances {
+                    push(self, NodeId::Instance(i), &mut out);
+                }
+                // Groups made and instances placed mid-session are session
+                // content too (they fold in at close).
+                for action in &self.undo.actions[sess.undo_len_at_open..] {
+                    for n in action.created_nodes() {
+                        if !matches!(n, NodeId::Object(_)) {
+                            push(self, n, &mut out);
+                        }
+                    }
+                }
+                Some(out)
+            }
             SessionFrame::Group(_) => {
                 let scope = self
                     .group_session_scope()
@@ -11336,7 +13020,12 @@ impl Document {
     /// # Errors
     /// - [`DocumentError::ExplodeSessionScope`] — a component session is open.
     fn refuse_during_component_session(&self) -> Result<(), DocumentError> {
-        if self.component_session().is_some() {
+        // The WHOLE stack, not just the innermost frame: a group frame can
+        // now sit on top of a component frame (drilling into a member
+        // group), and these ops stay refused for the component frame
+        // beneath it — `component_session()` alone would answer `None`
+        // there and silently unlock them.
+        if !self.defs_on_loan().is_empty() {
             return Err(DocumentError::ExplodeSessionScope);
         }
         Ok(())
@@ -11466,9 +13155,34 @@ impl Document {
                     Err(DocumentError::ExplodeSessionScope)
                 }
             }
-            Some(SessionFrame::Component(_)) => match node {
+            Some(SessionFrame::Component(sess)) => match node {
                 NodeId::Object(id) => self.explode_scope_object(id),
-                _ => Err(DocumentError::ExplodeSessionScope),
+                // Surfaced member groups/instances ARE session geometry
+                // (nested components), and so is anything minted since the
+                // open — a mid-session placement, a group made of session
+                // members, or a duplicate of either.
+                NodeId::Group(g) => {
+                    let minted = self.undo.actions[sess.undo_len_at_open..]
+                        .iter()
+                        .flat_map(|a| a.created_nodes())
+                        .any(|n| n == node);
+                    if sess.surfaced_groups.contains(&g) || minted {
+                        Ok(())
+                    } else {
+                        Err(DocumentError::ExplodeSessionScope)
+                    }
+                }
+                NodeId::Instance(i) => {
+                    let minted = self.undo.actions[sess.undo_len_at_open..]
+                        .iter()
+                        .flat_map(|a| a.created_nodes())
+                        .any(|n| n == node);
+                    if sess.surfaced_instances.contains(&i) || minted {
+                        Ok(())
+                    } else {
+                        Err(DocumentError::ExplodeSessionScope)
+                    }
+                }
             },
         }
     }
@@ -11589,6 +13303,7 @@ impl Document {
                 NodeId::Instance(_) => DocumentError::UnknownInstance,
             });
         }
+        self.refuse_expansion_growth(&[node], 1)?;
         // Validate invertibility up front; a reflecting `placement` is re-rejected
         // by `apply_transform` per object leaf during the clone.
         placement.inverse().map_err(DocumentError::Transform)?;
@@ -11719,6 +13434,7 @@ impl Document {
         // Validate invertibility up front; a reflecting placement is
         // re-rejected by `apply_transform` per object leaf during the clone.
         step.inverse().map_err(DocumentError::Transform)?;
+        self.refuse_expansion_growth(nodes, count.get() as usize)?;
 
         let mut created = CreatedClone::default();
         let mut roots: Vec<(NodeId, Option<GroupId>)> = Vec::new();
@@ -11836,6 +13552,7 @@ impl Document {
                     def,
                     pose,
                     parent: new_parent,
+                    owner_def: None,
                     hidden: false,
                     name,
                     tags,
@@ -11851,6 +13568,7 @@ impl Document {
                 let new_gid = self.insert_group_record(GroupRecord {
                     members: Vec::new(),
                     parent: new_parent,
+                    owner_def: None,
                     hidden: false,
                     name,
                     tags,
@@ -12191,8 +13909,8 @@ impl Document {
         // own undo already reports — every instance of the definition needs
         // to re-resolve, not just the one drawn through.
         let (components_touched, instances_touched) = match self.objects.get(id).map(|r| r.owner) {
-            Some(ObjectOwner::Definition(component)) => {
-                (vec![component], self.instances_of(component))
+            Some(ObjectOwner::Definition { def: component, .. }) => {
+                (vec![component], self.placing_instances(component))
             }
             _ => (Vec::new(), Vec::new()),
         };
@@ -12289,8 +14007,8 @@ impl Document {
         // re-resolve it too, exactly like `DeletedDefMember`'s redo already
         // reports.
         let (components_touched, instances_touched) = match self.objects.get(id).map(|r| r.owner) {
-            Some(ObjectOwner::Definition(component)) => {
-                (vec![component], self.instances_of(component))
+            Some(ObjectOwner::Definition { def: component, .. }) => {
+                (vec![component], self.placing_instances(component))
             }
             _ => (Vec::new(), Vec::new()),
         };
@@ -12539,9 +14257,11 @@ impl Document {
                 DocAction::MadeComponent {
                     component,
                     instance,
+                    selected,
                     parent,
                     member_prior_parents,
-                    consumed_groups,
+                    folded_groups,
+                    folded_instances,
                     prev_parent_members,
                     ..
                 } => {
@@ -12549,8 +14269,20 @@ impl Document {
                     for &(o, prior) in member_prior_parents {
                         self.objects[o].owner = ObjectOwner::World { parent: prior };
                     }
-                    for &g in consumed_groups {
-                        self.groups[g].hidden = false;
+                    // place_text folds a single created object, so these are
+                    // always empty today — handled for exactness anyway,
+                    // mirroring the standalone `MadeComponent` undo.
+                    for &g in folded_groups {
+                        self.groups[g].owner_def = None;
+                        if selected.contains(&NodeId::Group(g)) {
+                            self.groups[g].parent = parent;
+                        }
+                    }
+                    for &i in folded_instances {
+                        self.instances[i].owner_def = None;
+                        if selected.contains(&NodeId::Instance(i)) {
+                            self.instances[i].parent = parent;
+                        }
                     }
                     if let (Some(pg), Some(prev)) = (parent, prev_parent_members) {
                         self.groups[pg].members = prev.clone();
@@ -12589,7 +14321,8 @@ impl Document {
                         instance,
                         parent,
                         &leaves,
-                        consumed_groups,
+                        folded_groups,
+                        folded_instances,
                     );
                     c.sketches_touched = orphaned;
                     (c, inner.clone())
@@ -12686,15 +14419,34 @@ impl Document {
                     selected,
                     parent,
                     member_prior_parents,
-                    consumed_groups,
+                    folded_groups,
+                    folded_instances,
                     ..
                 } => {
                     let (component, instance, parent) = (*component, *instance, *parent);
-                    for &(o, _) in member_prior_parents {
-                        self.objects[o].owner = ObjectOwner::Definition(component);
+                    for &(o, prior) in member_prior_parents {
+                        self.objects[o].owner = ObjectOwner::Definition {
+                            def: component,
+                            parent: if selected.contains(&NodeId::Object(o)) {
+                                None
+                            } else {
+                                prior
+                            },
+                        };
                     }
-                    for &g in consumed_groups {
-                        self.groups[g].hidden = true;
+                    // Empty for place_text today — mirrored for exactness
+                    // (see the undo arm above).
+                    for &g in folded_groups {
+                        self.groups[g].owner_def = Some(component);
+                        if selected.contains(&NodeId::Group(g)) {
+                            self.groups[g].parent = None;
+                        }
+                    }
+                    for &i in folded_instances {
+                        self.instances[i].owner_def = Some(component);
+                        if selected.contains(&NodeId::Instance(i)) {
+                            self.instances[i].parent = None;
+                        }
                     }
                     // Un-hide any sketch this definition owned when the
                     // placement was undone — the matching undo arm's
@@ -12723,7 +14475,8 @@ impl Document {
                         instance,
                         parent,
                         &leaves,
-                        consumed_groups,
+                        folded_groups,
+                        folded_instances,
                     );
                     c.sketches_touched = restored;
                     (c, inner.clone())
@@ -13353,29 +15106,41 @@ impl Document {
                 DocChange {
                     objects_touched: vec![object],
                     components_touched: vec![component],
-                    instances_touched: self.instances_of(component),
+                    instances_touched: self.placing_instances(component),
                     ..Default::default()
                 }
             }
             DocAction::MadeComponent {
                 component,
                 instance,
+                selected,
                 parent,
                 member_prior_parents,
-                consumed_groups,
+                folded_groups,
+                folded_instances,
                 prev_parent_members,
                 reanchored,
-                ..
             } => {
-                // Dissolve: return each def member to its prior world parent,
-                // reveal the consumed groups, restore the parent's order, and
+                // Dissolve: return each folded node to the world side (a
+                // directly-selected group/instance also gets its parent
+                // restored to the selection's shared parent — nested ones
+                // never changed theirs), restore the parent's order, and
                 // hide the now-empty definition + its instance.
                 let (component, instance, parent) = (*component, *instance, *parent);
                 for &(o, prior) in member_prior_parents {
                     self.objects[o].owner = ObjectOwner::World { parent: prior };
                 }
-                for &g in consumed_groups {
-                    self.groups[g].hidden = false;
+                for &g in folded_groups {
+                    self.groups[g].owner_def = None;
+                    if selected.contains(&NodeId::Group(g)) {
+                        self.groups[g].parent = parent;
+                    }
+                }
+                for &i in folded_instances {
+                    self.instances[i].owner_def = None;
+                    if selected.contains(&NodeId::Instance(i)) {
+                        self.instances[i].parent = parent;
+                    }
                 }
                 if let (Some(pg), Some(prev)) = (parent, prev_parent_members) {
                     self.groups[pg].members = prev.clone();
@@ -13407,8 +15172,14 @@ impl Document {
                     self.annotations[r.annotation].detached = r.before_detached;
                 }
                 let leaves: Vec<ObjectId> = member_prior_parents.iter().map(|&(o, _)| o).collect();
-                let mut change =
-                    made_component_change(component, instance, parent, &leaves, consumed_groups);
+                let mut change = made_component_change(
+                    component,
+                    instance,
+                    parent,
+                    &leaves,
+                    folded_groups,
+                    folded_instances,
+                );
                 change.sketches_touched = sketches_touched;
                 change
             }
@@ -13583,7 +15354,7 @@ impl Document {
                     self.undo.push(action);
                     return Err(map_history_err(e));
                 }
-                let instances_touched = self.instances_of(component);
+                let instances_touched = self.placing_instances(component);
                 DocChange {
                     objects_touched: vec![object],
                     components_touched: vec![component],
@@ -13594,15 +15365,24 @@ impl Document {
             DocAction::Exploded {
                 instance,
                 created,
+                created_groups,
+                created_instances,
+                created_roots,
                 created_sketches,
                 reanchored,
             } => {
-                // Hide the baked world objects and sketches, bring the
-                // instance back, and re-splice it into its parent in their
-                // place.
+                // Hide every created entity (baked objects, copied groups
+                // and instances, sketches), bring the instance back, and
+                // re-splice it into its parent in the roots' place.
                 let instance = *instance;
                 for &o in created {
                     self.objects[o].hidden = true;
+                }
+                for &g in created_groups {
+                    self.groups[g].hidden = true;
+                }
+                for &i in created_instances {
+                    self.instances[i].hidden = true;
                 }
                 for &sid in created_sketches {
                     self.hidden_sketches.insert(sid);
@@ -13610,8 +15390,7 @@ impl Document {
                 self.instances[instance].hidden = false;
                 let parent = self.instances[instance].parent;
                 if let Some(pg) = parent {
-                    let nodes: Vec<NodeId> = created.iter().map(|&o| NodeId::Object(o)).collect();
-                    self.splice_in_parent(pg, &nodes, NodeId::Instance(instance));
+                    self.splice_in_parent(pg, created_roots, NodeId::Instance(instance));
                 }
                 // Verbatim restore, not a re-derived liveness check — see
                 // `Document::reevaluate_liveness_recorded`'s doc comment.
@@ -13623,8 +15402,10 @@ impl Document {
                     objects_touched: created.clone(),
                     sketches_touched: created_sketches.clone(),
                     instances_touched: vec![instance],
+                    groups_touched: created_groups.clone(),
                     ..Default::default()
                 };
+                change.instances_touched.extend(created_instances);
                 change.groups_touched.extend(parent);
                 change
             }
@@ -13639,10 +15420,7 @@ impl Document {
                 // Restore the instance name a promotion cleared (a no-op for
                 // an instance that was unnamed at the op).
                 self.instances[instance].name = prev_instance_name.clone();
-                let new_members = self.components[new_def].members.clone();
-                for o in new_members {
-                    self.objects[o].hidden = true;
-                }
+                self.set_def_subtree_hidden(new_def, true);
                 // Any sketch drawn INTO the private copy (component-edit-
                 // parity.md phase K1) has no home once `new_def` is hidden —
                 // hide it too, exactly like `MadeComponent`'s undo does for
@@ -13671,21 +15449,38 @@ impl Document {
                 hidden_instances,
                 pristine_objects,
                 pristine_sketches,
+                surfaced_groups,
+                surfaced_instances,
                 ..
             } => {
                 // EXACT undo — no inverse-transform (docs/design/explode-
                 // session-prototype.md): restore each member/sketch's
                 // recorded pre-bake snapshot verbatim and retarget to
                 // `Definition`, independent of whatever `self.sessions`
-                // (if anything) currently holds innermost.
+                // (if anything) currently holds innermost. Parent links
+                // never changed across the bake (LIFO: every mid-session
+                // action is already undone), so the CURRENT link restores.
                 let component = *component;
                 for (id, obj) in pristine_objects {
                     self.objects[*id].object = obj.clone();
-                    self.objects[*id].owner = ObjectOwner::Definition(component);
+                    let parent = self.objects[*id].group_parent();
+                    self.objects[*id].owner = ObjectOwner::Definition {
+                        def: component,
+                        parent,
+                    };
                 }
                 for (id, sk) in pristine_sketches {
                     self.sketches[*id] = sk.clone();
                     self.def_sketches.insert(*id, component);
+                }
+                // Surfaced member groups/instances return to definition
+                // ownership with their recorded pristine poses, verbatim.
+                for &g in surfaced_groups {
+                    self.groups[g].owner_def = Some(component);
+                }
+                for &(i, pristine) in surfaced_instances {
+                    self.instances[i].pose = pristine;
+                    self.instances[i].owner_def = Some(component);
                 }
                 for &i in hidden_instances {
                     self.instances[i].hidden = false;
@@ -13693,13 +15488,18 @@ impl Document {
                 if matches!(self.sessions.last(), Some(SessionFrame::Component(_))) {
                     self.sessions.pop();
                 }
-                DocChange {
+                let mut change = DocChange {
                     objects_touched: members.clone(),
                     sketches_touched: sketches.clone(),
                     instances_touched: hidden_instances.clone(),
+                    groups_touched: surfaced_groups.clone(),
                     components_touched: vec![component],
                     ..Default::default()
-                }
+                };
+                change
+                    .instances_touched
+                    .extend(surfaced_instances.iter().map(|&(i, _)| i));
+                change
             }
             &DocAction::SessionClosed {
                 instance,
@@ -13709,9 +15509,13 @@ impl Document {
                 ref prev_members,
                 ref folded_objects,
                 ref folded_sketches,
+                ref folded_groups,
+                ref folded_instances,
                 ref members,
                 ref sketches,
                 ref hidden_instances,
+                ref surfaced_groups,
+                ref surfaced_instances,
                 emptied,
             } => {
                 // Re-opens the session (docs/design/explode-session-
@@ -13733,13 +15537,24 @@ impl Document {
                         .object
                         .apply_transform(&pose)
                         .expect("session pose is invertible by construction");
-                    self.objects[o].owner = ObjectOwner::World { parent: None };
+                    let parent = self.objects[o].group_parent();
+                    self.objects[o].owner = ObjectOwner::World { parent };
                 }
                 for &s in folded_sketches {
                     self.sketches[s]
                         .apply_transform(&pose)
                         .expect("session pose is invertible by construction");
                     self.def_sketches.remove(&s);
+                }
+                // Un-fold created groups/instances back to world (the
+                // group/instance mirror of the object loop above).
+                for &g in folded_groups {
+                    self.groups[g].owner_def = None;
+                }
+                for &i in folded_instances {
+                    let rebaked = self.instances[i].pose.then(&pose);
+                    self.instances[i].pose = rebaked;
+                    self.instances[i].owner_def = None;
                 }
                 self.components[component].members = prev_members.clone();
 
@@ -13750,6 +15565,8 @@ impl Document {
                     members.clone(),
                     sketches.clone(),
                     hidden_instances.clone(),
+                    surfaced_groups.clone(),
+                    surfaced_instances.iter().map(|&(i, _)| i).collect(),
                 );
                 session.undo_len_at_open = undo_len_at_open;
                 // The reconstructed session must inherit the ORIGINAL open's
@@ -13765,6 +15582,7 @@ impl Document {
                 if let Some(DocAction::SessionOpened {
                     pristine_objects,
                     pristine_sketches,
+                    surfaced_instances: opened_surfaced,
                     ..
                 }) = undo_len_at_open
                     .checked_sub(1)
@@ -13778,19 +15596,51 @@ impl Document {
                         .iter()
                         .map(|(k, v)| (*k, v.clone()))
                         .collect();
+                    session.pristine_instance_poses = opened_surfaced.iter().copied().collect();
                 } else {
                     debug_assert!(
                         false,
                         "SessionClosed's boundary does not sit on a SessionOpened — kernel bug"
                     );
                 }
-                let change = DocChange {
-                    objects_touched: session.members.clone(),
-                    sketches_touched: session.sketches.clone(),
+                // Report EVERY entity this arm just moved — the fold-outs
+                // and the re-baked surfaced nodes included. `DocChange` is
+                // the only signal the render/inference layers get, so a
+                // short list leaves stale meshes and snap candidates after
+                // an undo of a close (adversarial review).
+                let mut change = DocChange {
+                    objects_touched: session
+                        .members
+                        .iter()
+                        .copied()
+                        .chain(folded_objects.iter().copied())
+                        .collect(),
+                    sketches_touched: session
+                        .sketches
+                        .iter()
+                        .copied()
+                        .chain(folded_sketches.iter().copied())
+                        .collect(),
                     instances_touched: session.hidden_instances.clone(),
+                    groups_touched: session
+                        .surfaced_groups
+                        .iter()
+                        .copied()
+                        .chain(folded_groups.iter().copied())
+                        .collect(),
                     components_touched: vec![component],
                     ..Default::default()
                 };
+                change.instances_touched.extend(
+                    session
+                        .surfaced_instances
+                        .iter()
+                        .copied()
+                        .chain(folded_instances.iter().copied()),
+                );
+                change
+                    .instances_touched
+                    .extend(self.placing_instances(component));
                 self.sessions
                     .push(SessionFrame::Component(Box::new(session)));
                 change
@@ -14631,7 +16481,7 @@ impl Document {
                 DocChange {
                     objects_touched: vec![object],
                     components_touched: vec![component],
-                    instances_touched: self.instances_of(component),
+                    instances_touched: self.placing_instances(component),
                     ..Default::default()
                 }
             }
@@ -14641,19 +16491,38 @@ impl Document {
                 selected,
                 parent,
                 member_prior_parents,
-                consumed_groups,
+                folded_groups,
+                folded_instances,
                 reanchored,
                 ..
             } => {
-                // Re-fold: re-own members as definition members, re-hide the
-                // consumed groups, reveal the def + instance, and re-splice the
-                // instance into the parent in the selection's place.
+                // Re-fold: re-own the whole selected subtree as definition
+                // content (directly-selected nodes are def-local roots,
+                // nested ones keep their parent links), reveal the def +
+                // instance, and re-splice the instance into the parent in
+                // the selection's place.
                 let (component, instance, parent) = (*component, *instance, *parent);
-                for &(o, _) in member_prior_parents {
-                    self.objects[o].owner = ObjectOwner::Definition(component);
+                for &(o, prior) in member_prior_parents {
+                    self.objects[o].owner = ObjectOwner::Definition {
+                        def: component,
+                        parent: if selected.contains(&NodeId::Object(o)) {
+                            None
+                        } else {
+                            prior
+                        },
+                    };
                 }
-                for &g in consumed_groups {
-                    self.groups[g].hidden = true;
+                for &g in folded_groups {
+                    self.groups[g].owner_def = Some(component);
+                    if selected.contains(&NodeId::Group(g)) {
+                        self.groups[g].parent = None;
+                    }
+                }
+                for &i in folded_instances {
+                    self.instances[i].owner_def = Some(component);
+                    if selected.contains(&NodeId::Instance(i)) {
+                        self.instances[i].parent = None;
+                    }
                 }
                 // Un-hide any sketch this definition owned when it was
                 // dissolved (the matching undo's counterpart above).
@@ -14678,8 +16547,14 @@ impl Document {
                     self.annotations[r.annotation].detached = r.after_detached;
                 }
                 let leaves: Vec<ObjectId> = member_prior_parents.iter().map(|&(o, _)| o).collect();
-                let mut change =
-                    made_component_change(component, instance, parent, &leaves, consumed_groups);
+                let mut change = made_component_change(
+                    component,
+                    instance,
+                    parent,
+                    &leaves,
+                    folded_groups,
+                    folded_instances,
+                );
                 change.sketches_touched = sketches_touched;
                 change
             }
@@ -14850,7 +16725,7 @@ impl Document {
                     self.redo.push(action);
                     return Err(map_history_err(e));
                 }
-                let instances_touched = self.instances_of(component);
+                let instances_touched = self.placing_instances(component);
                 DocChange {
                     objects_touched: vec![object],
                     components_touched: vec![component],
@@ -14861,6 +16736,9 @@ impl Document {
             DocAction::Exploded {
                 instance,
                 created,
+                created_groups,
+                created_instances,
+                created_roots,
                 created_sketches,
                 reanchored,
             } => {
@@ -14869,13 +16747,18 @@ impl Document {
                 for &o in created {
                     self.objects[o].hidden = false;
                 }
+                for &g in created_groups {
+                    self.groups[g].hidden = false;
+                }
+                for &i in created_instances {
+                    self.instances[i].hidden = false;
+                }
                 for &sid in created_sketches {
                     self.hidden_sketches.remove(&sid);
                 }
                 let parent = self.instances[instance].parent;
                 if let Some(pg) = parent {
-                    let nodes: Vec<NodeId> = created.iter().map(|&o| NodeId::Object(o)).collect();
-                    self.splice_out_parent(pg, NodeId::Instance(instance), &nodes);
+                    self.splice_out_parent(pg, NodeId::Instance(instance), created_roots);
                 }
                 // Verbatim replay — see the undo arm above and
                 // `Document::reevaluate_liveness_recorded`'s doc comment.
@@ -14887,8 +16770,10 @@ impl Document {
                     objects_touched: created.clone(),
                     sketches_touched: created_sketches.clone(),
                     instances_touched: vec![instance],
+                    groups_touched: created_groups.clone(),
                     ..Default::default()
                 };
+                change.instances_touched.extend(created_instances);
                 change.groups_touched.extend(parent);
                 change
             }
@@ -14899,10 +16784,7 @@ impl Document {
                 ..
             } => {
                 self.components[new_def].hidden = false;
-                let new_members = self.components[new_def].members.clone();
-                for o in new_members {
-                    self.objects[o].hidden = false;
-                }
+                self.set_def_subtree_hidden(new_def, false);
                 // Un-hide any sketch `new_def` owned when it was dissolved
                 // (the matching undo's counterpart above).
                 let sketches_touched: Vec<SketchId> = self
@@ -14934,6 +16816,8 @@ impl Document {
                 members,
                 sketches,
                 hidden_instances,
+                surfaced_groups,
+                surfaced_instances,
                 ..
             } => {
                 // Re-bakes via the same core `open` uses, over the lists the
@@ -14948,15 +16832,21 @@ impl Document {
                     members.clone(),
                     sketches.clone(),
                     hidden_instances.clone(),
+                    surfaced_groups.clone(),
+                    surfaced_instances.iter().map(|&(i, _)| i).collect(),
                 );
                 session.undo_len_at_open = self.undo.actions.len() + 1; // the push below
-                let change = DocChange {
+                let mut change = DocChange {
                     objects_touched: session.members.clone(),
                     sketches_touched: session.sketches.clone(),
                     instances_touched: session.hidden_instances.clone(),
+                    groups_touched: session.surfaced_groups.clone(),
                     components_touched: vec![*component],
                     ..Default::default()
                 };
+                change
+                    .instances_touched
+                    .extend(session.surfaced_instances.iter().copied());
                 self.sessions
                     .push(SessionFrame::Component(Box::new(session)));
                 change
@@ -15259,8 +17149,31 @@ impl Document {
                     !grec.members[i + 1..].contains(&m),
                     "a group lists a member twice — kernel bug"
                 );
+                // A world group lists world-live members; a definition-owned
+                // group's subtree is owned by the SAME definition throughout
+                // (the invariant the loader derives and validates at v15).
+                let member_ok = match grec.owner_def {
+                    None => self.node_is_live(m),
+                    Some(cid) => match m {
+                        NodeId::Object(o) => self.objects.get(o).is_some_and(|r| {
+                            !r.hidden
+                                && matches!(
+                                    r.owner,
+                                    ObjectOwner::Definition { def, .. } if def == cid
+                                )
+                        }),
+                        NodeId::Group(g) => self
+                            .groups
+                            .get(g)
+                            .is_some_and(|r| !r.hidden && r.owner_def == Some(cid)),
+                        NodeId::Instance(i2) => self
+                            .instances
+                            .get(i2)
+                            .is_some_and(|r| !r.hidden && r.owner_def == Some(cid)),
+                    },
+                };
                 debug_assert!(
-                    self.node_is_live(m),
+                    member_ok,
                     "a group lists a stale/hidden member — kernel bug"
                 );
                 debug_assert_eq!(
@@ -15308,21 +17221,35 @@ impl Document {
         // narrowly keyed on THIS component rather than reshuffling
         // membership to keep the invariant honest for every other
         // definition).
-        let session_component = self.component_session().map(|s| s.component);
+        let session_components = self.defs_on_loan();
         for (cid, def) in self.components.iter().filter(|(_, c)| !c.hidden) {
             for (i, &m) in def.members.iter().enumerate() {
                 debug_assert!(
                     !def.members[i + 1..].contains(&m),
                     "a definition lists a member twice — kernel bug"
                 );
-                if session_component == Some(cid) {
+                if session_components.contains(&cid) {
                     continue;
                 }
-                debug_assert_eq!(
-                    self.objects.get(m).map(|r| r.owner),
-                    Some(ObjectOwner::Definition(cid)),
-                    "a definition member's owner disagrees with its definition — kernel bug"
-                );
+                match m {
+                    NodeId::Object(o) => debug_assert!(
+                        matches!(
+                            self.objects.get(o).map(|r| r.owner),
+                            Some(ObjectOwner::Definition { def, .. }) if def == cid
+                        ),
+                        "a definition member's owner disagrees with its definition — kernel bug"
+                    ),
+                    NodeId::Group(g) => debug_assert_eq!(
+                        self.groups.get(g).map(|r| r.owner_def),
+                        Some(Some(cid)),
+                        "a definition member group's owner disagrees — kernel bug"
+                    ),
+                    NodeId::Instance(i2) => debug_assert_eq!(
+                        self.instances.get(i2).map(|r| r.owner_def),
+                        Some(Some(cid)),
+                        "a definition member instance's owner disagrees — kernel bug"
+                    ),
+                }
             }
         }
         for (id, rec) in self.groups.iter().filter(|(_, r)| !r.hidden) {
@@ -15348,6 +17275,129 @@ impl Document {
 }
 
 // ─────────────────────────────────────── ingest helpers (module-level) ──────
+
+/// The order definitions' contents must build in so every nested `Instance`
+/// member's target definition is built (or removed-empty) first: ascending
+/// longest-reference-chain depth, recipe order among equals. Refuses a
+/// recipe whose definition graph is cyclic or nests beyond
+/// [`MAX_COMPONENT_DEPTH`] — typed, before any document mutation.
+/// The recipe-side width gate ([`MAX_EXPANDED_PLACEMENTS`]): counts each
+/// recipe definition's expansion in dependency order (children first, so
+/// one linear pass suffices — `order` is ascending-depth), then the world
+/// roots' total, refusing BEFORE any document mutation. Mesh counts are
+/// upper bounds (a mesh that later fails to build only shrinks the real
+/// number).
+fn ingest_refuse_expansion(
+    scene: &crate::import::ImportScene,
+    order: &[usize],
+) -> Result<(), DocumentError> {
+    const SATURATED: usize = MAX_EXPANDED_PLACEMENTS + 1;
+    fn node_count(node: &crate::import::ImportNode, counts: &[usize]) -> usize {
+        match node {
+            crate::import::ImportNode::Mesh(_) => 1,
+            crate::import::ImportNode::Group { children, .. } => children
+                .iter()
+                .fold(0usize, |acc, c| acc.saturating_add(node_count(c, counts))),
+            crate::import::ImportNode::Instance { def, .. } => {
+                counts.get(*def).copied().unwrap_or(0)
+            }
+        }
+    }
+    let mut counts = vec![0usize; scene.defs.len()];
+    for &di in order {
+        let c = scene.defs[di]
+            .children
+            .iter()
+            .fold(0usize, |acc, ch| {
+                acc.saturating_add(node_count(ch, &counts))
+            })
+            .min(SATURATED);
+        if c > MAX_EXPANDED_PLACEMENTS {
+            return Err(DocumentError::ComponentExpansionExceeded);
+        }
+        counts[di] = c;
+    }
+    let total = scene
+        .roots
+        .iter()
+        .fold(0usize, |acc, r| acc.saturating_add(node_count(r, &counts)));
+    if total > MAX_EXPANDED_PLACEMENTS {
+        return Err(DocumentError::ComponentExpansionExceeded);
+    }
+    Ok(())
+}
+
+fn ingest_def_build_order(defs: &[crate::import::DefRecipe]) -> Result<Vec<usize>, DocumentError> {
+    fn collect_refs(children: &[crate::import::ImportNode], n: usize, out: &mut Vec<usize>) {
+        for c in children {
+            match c {
+                crate::import::ImportNode::Instance { def, .. } => {
+                    // Out-of-range refs skip at build time (same posture as
+                    // world instances referencing a failed def) — they are
+                    // not graph edges.
+                    if *def < n {
+                        out.push(*def);
+                    }
+                }
+                crate::import::ImportNode::Group { children, .. } => {
+                    collect_refs(children, n, out);
+                }
+                crate::import::ImportNode::Mesh(_) => {}
+            }
+        }
+    }
+    let n = defs.len();
+    let refs: Vec<Vec<usize>> = defs
+        .iter()
+        .map(|d| {
+            let mut r = Vec::new();
+            collect_refs(&d.children, n, &mut r);
+            r.sort_unstable();
+            r.dedup();
+            r
+        })
+        .collect();
+
+    // Longest-chain depth by DFS with tricolor cycle detection.
+    const UNVISITED: u8 = 0;
+    const IN_PROGRESS: u8 = 1;
+    const DONE: u8 = 2;
+    let mut state = vec![UNVISITED; n];
+    let mut depth = vec![0usize; n];
+    // Explicit stack: a hostile recipe must not overflow the real one.
+    for start in 0..n {
+        if state[start] == DONE {
+            continue;
+        }
+        let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
+        state[start] = IN_PROGRESS;
+        while let Some(&mut (d, ref mut next)) = stack.last_mut() {
+            if *next < refs[d].len() {
+                let r = refs[d][*next];
+                *next += 1;
+                match state[r] {
+                    IN_PROGRESS => return Err(DocumentError::ComponentCycle),
+                    UNVISITED => {
+                        state[r] = IN_PROGRESS;
+                        stack.push((r, 0));
+                    }
+                    _ => {}
+                }
+            } else {
+                depth[d] = 1 + refs[d].iter().map(|&r| depth[r]).max().unwrap_or(0);
+                if depth[d] > MAX_COMPONENT_DEPTH {
+                    return Err(DocumentError::ComponentDepthExceeded);
+                }
+                state[d] = DONE;
+                stack.pop();
+            }
+        }
+    }
+
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&d| (depth[d], d));
+    Ok(order)
+}
 
 /// Build one `MeshRecipe` into an `Object`, insert it, and tally stats.
 /// Returns the `ObjectId` on success, or `None` + pushes `SkippedMesh` on
@@ -15413,11 +17463,17 @@ fn ingest_build_mesh(
 /// groups, and instances into their respective slotmaps. Returns the created
 /// `NodeId`, or `None` if the node was entirely skipped (all meshes failed, or
 /// an `Instance` referencing a failed def).
+///
+/// `owner` is the definition whose subtree is being built (`None` = the
+/// world tree): objects become `ObjectOwner::Definition`, groups/instances
+/// carry `owner_def`, exactly the invariants the loader derives from tree
+/// position.
 #[allow(clippy::too_many_arguments)]
 fn ingest_build_node(
     doc: &mut Document,
     node: crate::import::ImportNode,
     parent: Option<GroupId>,
+    owner: Option<ComponentId>,
     def_cid: &[Option<ComponentId>],
     all_objects: &mut Vec<ObjectId>,
     all_instances: &mut Vec<InstanceId>,
@@ -15429,11 +17485,14 @@ fn ingest_build_node(
 ) -> Option<NodeId> {
     match node {
         crate::import::ImportNode::Mesh(recipe) => {
-            let owner = ObjectOwner::World { parent };
+            let obj_owner = match owner {
+                Some(def) => ObjectOwner::Definition { def, parent },
+                None => ObjectOwner::World { parent },
+            };
             let oid = ingest_build_mesh(
                 doc,
                 recipe,
-                owner,
+                obj_owner,
                 all_objects,
                 watertight_count,
                 leaky_count,
@@ -15454,6 +17513,7 @@ fn ingest_build_node(
                 def: cid,
                 pose,
                 parent,
+                owner_def: owner,
                 hidden: false,
                 // The placement's own name when the source carries one;
                 // None resolves to the def's name (set on ComponentDef).
@@ -15475,6 +17535,7 @@ fn ingest_build_node(
             let gid = doc.insert_group_record(GroupRecord {
                 members: Vec::new(),
                 parent,
+                owner_def: owner,
                 hidden: false,
                 name: if name.is_empty() { None } else { Some(name) },
                 tags,
@@ -15489,6 +17550,7 @@ fn ingest_build_node(
                     doc,
                     child,
                     Some(gid),
+                    owner,
                     def_cid,
                     all_objects,
                     all_instances,
@@ -15512,6 +17574,11 @@ fn ingest_build_node(
 /// docs/HEW_API.md §8 — which is exactly what lets the kernel write it here
 /// while no external client can).
 const LIBRARY_ATTR_NS: &str = "hew.library";
+
+/// Dense id of `oid` in the load-time dense table — error-message aid only.
+fn raw_dense_of_object(dense: &[ObjectId], oid: ObjectId) -> usize {
+    dense.iter().position(|&o| o == oid).unwrap_or(usize::MAX)
+}
 
 /// The [`EntityRef`] a tree node's attribute dictionary hangs on.
 fn entity_ref_of_node(node: NodeId) -> EntityRef {
@@ -15690,21 +17757,48 @@ fn library_copy_def(
         name: def.name.clone(),
     });
     let src_members = def.members.clone();
-    let mut members: Vec<ObjectId> = Vec::with_capacity(src_members.len());
+    let mut members: Vec<NodeId> = Vec::with_capacity(src_members.len());
     for m in src_members {
         // A tombstoned member (an undone in-definition birth) is not part
         // of the definition's content — save excludes it too.
-        if src.objects[m].hidden {
-            continue;
+        match m {
+            NodeId::Object(o) => {
+                if src.objects[o].hidden {
+                    continue;
+                }
+                members.push(NodeId::Object(library_copy_object(
+                    dst,
+                    src,
+                    o,
+                    ObjectOwner::Definition {
+                        def: new_cid,
+                        parent: None,
+                    },
+                    None,
+                    ctx,
+                )));
+            }
+            NodeId::Group(g) => {
+                if src.groups[g].hidden {
+                    continue;
+                }
+                members.push(NodeId::Group(library_copy_def_group(
+                    dst, src, g, new_cid, None, ctx,
+                )));
+            }
+            NodeId::Instance(i) => {
+                if src.instances[i].hidden {
+                    continue;
+                }
+                // The nested-definition graft: the member instance's own
+                // definition resolves (reuse or copy) FIRST — the source
+                // graph is a DAG by load-time validation, so this
+                // terminates.
+                members.push(NodeId::Instance(library_copy_def_instance(
+                    dst, src, i, new_cid, None, ctx,
+                )));
+            }
         }
-        members.push(library_copy_object(
-            dst,
-            src,
-            m,
-            ObjectOwner::Definition(new_cid),
-            None,
-            ctx,
-        ));
     }
     dst.components[new_cid].members = members;
 
@@ -15740,6 +17834,153 @@ fn library_copy_def(
     new_cid
 }
 
+/// Resolves a source definition into `dst`: the memoized `def_map` entry,
+/// a provenance-matched live definition (insert only), or a fresh
+/// [`library_copy_def`] — in that order. Every cross-document definition
+/// reference (world instances, nested member instances, the insert's eager
+/// definition pass) goes through here, so one source definition grafts
+/// exactly once however many paths reach it.
+fn library_resolve_def(
+    dst: &mut Document,
+    src: &Document,
+    cid: ComponentId,
+    ctx: &mut LibraryCopy,
+) -> ComponentId {
+    if let Some(&d) = ctx.def_map.get(&cid) {
+        return d;
+    }
+    if let Some(prov) = ctx.provenance.clone()
+        && let Some(existing) =
+            dst.find_library_definition(&prov, src.sid_of(&EntityRef::Component(cid)))
+    {
+        ctx.def_map.insert(cid, existing);
+        ctx.report.definitions_reused += 1;
+        return existing;
+    }
+    let new_cid = library_copy_def(dst, src, cid, ctx);
+    ctx.def_map.insert(cid, new_cid);
+    ctx.report.definitions_added += 1;
+    new_cid
+}
+
+/// Copies one definition-owned member instance into `owner`'s subtree in
+/// `dst`: the inner definition resolves through [`library_resolve_def`]
+/// (recursion over the source's definition DAG), the def-local pose copies
+/// verbatim — never baked. Name, tags, attrs, and the user-hidden flag
+/// carry.
+fn library_copy_def_instance(
+    dst: &mut Document,
+    src: &Document,
+    iid: InstanceId,
+    owner: ComponentId,
+    parent: Option<GroupId>,
+    ctx: &mut LibraryCopy,
+) -> InstanceId {
+    let inner = library_resolve_def(dst, src, src.instances[iid].def, ctx);
+    let rec = &src.instances[iid];
+    let (pose, name, tags) = (rec.pose, rec.name.clone(), rec.tags.clone());
+    let new_iid = dst.insert_instance_record(InstanceRecord {
+        def: inner,
+        pose,
+        parent,
+        owner_def: Some(owner),
+        hidden: false,
+        name,
+        tags,
+    });
+    library_copy_entity_attrs(
+        dst,
+        src,
+        &EntityRef::Instance(iid),
+        EntityRef::Instance(new_iid),
+    );
+    if src.user_hidden_instances.contains(&iid) {
+        dst.user_hidden_instances.insert(new_iid);
+    }
+    ctx.all_instances.push(new_iid);
+    new_iid
+}
+
+/// Deep-copies one definition-owned member group's subtree into `owner`'s
+/// subtree in `dst` — def-local coordinates verbatim, nested member
+/// instances through [`library_copy_def_instance`]. Tombstoned members are
+/// skipped, exactly like the world-tree copy.
+fn library_copy_def_group(
+    dst: &mut Document,
+    src: &Document,
+    gid: GroupId,
+    owner: ComponentId,
+    parent: Option<GroupId>,
+    ctx: &mut LibraryCopy,
+) -> GroupId {
+    let (name, tags, src_members) = {
+        let rec = &src.groups[gid];
+        (rec.name.clone(), rec.tags.clone(), rec.members.clone())
+    };
+    let new_gid = dst.insert_group_record(GroupRecord {
+        members: Vec::new(),
+        parent,
+        owner_def: Some(owner),
+        hidden: false,
+        name,
+        tags,
+    });
+    library_copy_entity_attrs(dst, src, &EntityRef::Group(gid), EntityRef::Group(new_gid));
+    if src.user_hidden_groups.contains(&gid) {
+        dst.user_hidden_groups.insert(new_gid);
+    }
+    ctx.all_groups.push(new_gid);
+    let mut members: Vec<NodeId> = Vec::with_capacity(src_members.len());
+    for child in src_members {
+        match child {
+            NodeId::Object(o) => {
+                if src.objects.get(o).is_none_or(|r| r.hidden) {
+                    continue;
+                }
+                members.push(NodeId::Object(library_copy_object(
+                    dst,
+                    src,
+                    o,
+                    ObjectOwner::Definition {
+                        def: owner,
+                        parent: Some(new_gid),
+                    },
+                    None,
+                    ctx,
+                )));
+            }
+            NodeId::Group(g) => {
+                if src.groups.get(g).is_none_or(|r| r.hidden) {
+                    continue;
+                }
+                members.push(NodeId::Group(library_copy_def_group(
+                    dst,
+                    src,
+                    g,
+                    owner,
+                    Some(new_gid),
+                    ctx,
+                )));
+            }
+            NodeId::Instance(i) => {
+                if src.instances.get(i).is_none_or(|r| r.hidden) {
+                    continue;
+                }
+                members.push(NodeId::Instance(library_copy_def_instance(
+                    dst,
+                    src,
+                    i,
+                    owner,
+                    Some(new_gid),
+                    ctx,
+                )));
+            }
+        }
+    }
+    dst.groups[new_gid].members = members;
+    new_gid
+}
+
 /// Recursively copies one world-tree node across documents: world objects
 /// get `pose` baked in, instance poses compose with it, groups recurse in
 /// member order. Names, tags, attrs, and user-hidden flags carry.
@@ -15764,23 +18005,18 @@ fn library_copy_node(
             NodeId::Object(new_oid)
         }
         NodeId::Instance(iid) => {
+            // Memoized: the insert path pre-seeded the map, the extract
+            // path resolves lazily on first reference — either way nested
+            // definitions graft through the same resolver.
+            let new_def = library_resolve_def(dst, src, src.instances[iid].def, ctx);
             let rec = &src.instances[iid];
-            let new_def = match ctx.def_map.get(&rec.def) {
-                Some(&d) => d,
-                // The extract path reaches definitions lazily, on first
-                // reference; the insert path pre-seeded the map.
-                None => {
-                    let d = library_copy_def(dst, src, rec.def, ctx);
-                    ctx.def_map.insert(rec.def, d);
-                    d
-                }
-            };
             let new_pose = rec.pose.then(pose);
             let (name, tags) = (rec.name.clone(), rec.tags.clone());
             let new_iid = dst.insert_instance_record(InstanceRecord {
                 def: new_def,
                 pose: new_pose,
                 parent,
+                owner_def: None,
                 hidden: false,
                 name,
                 tags,
@@ -15805,6 +18041,7 @@ fn library_copy_node(
             let new_gid = dst.insert_group_record(GroupRecord {
                 members: Vec::new(),
                 parent,
+                owner_def: None,
                 hidden: false,
                 name,
                 tags,
@@ -15982,15 +18219,18 @@ fn made_component_change(
     instance: InstanceId,
     parent: Option<GroupId>,
     leaves: &[ObjectId],
-    consumed_groups: &[GroupId],
+    folded_groups: &[GroupId],
+    folded_instances: &[InstanceId],
 ) -> DocChange {
-    let mut groups_touched = consumed_groups.to_vec();
+    let mut groups_touched = folded_groups.to_vec();
     groups_touched.extend(parent);
+    let mut instances_touched = folded_instances.to_vec();
+    instances_touched.push(instance);
     DocChange {
         objects_touched: leaves.to_vec(),
         sketches_touched: Vec::new(),
         groups_touched,
-        instances_touched: vec![instance],
+        instances_touched,
         components_touched: vec![component],
         guides_touched: Vec::new(),
     }

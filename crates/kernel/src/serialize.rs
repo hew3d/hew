@@ -191,7 +191,7 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// mint counter is deliberately NOT serialized — loaders resume at
 /// max(sid)+1. Geometry buffer unchanged (`GEOMETRY_FORMAT_VERSION`
 /// stays 6).
-pub const MANIFEST_FORMAT_VERSION: u32 = 14;
+pub const MANIFEST_FORMAT_VERSION: u32 = 15;
 
 /// The manifest version at which per-entity stable ids (`sid`) were
 /// introduced (docs/HEW_API.md §5.1). Version-gated both ways: a file
@@ -201,6 +201,16 @@ pub const MANIFEST_FORMAT_VERSION: u32 = 14;
 /// carry a distinct `sid` on every entity — absence or duplication is
 /// [`LoadError::MalformedManifest`], never silently re-minted.
 pub(crate) const SID_MIN_VERSION: u32 = 14;
+
+/// Manifest v15 (nested-components design): `components[].members` becomes
+/// a list of `NodeRef`s (objects, groups, instances) instead of bare object
+/// dense ids, and `groups[]`/`instances[]` entries gain an optional `owner`
+/// naming the definition whose subtree owns them (the
+/// [`SKETCH_OWNER_MIN_VERSION`] posture applied to tree nodes). Gated in
+/// BOTH directions: a pre-v15 file carrying either new shape is malformed
+/// for its declared version, and a v15+ file carrying a bare-int member is
+/// a nonconforming writer's output — rejected, never guessed at.
+pub(crate) const NESTED_MEMBERS_MIN_VERSION: u32 = 15;
 
 /// The manifest version at which attribute dictionaries (`attrs` — on
 /// entities and at the manifest top level; docs/HEW_API.md §8) were
@@ -1774,6 +1784,12 @@ pub(crate) struct GroupDto {
     /// USER-hidden view state (manifest v6+). Absent in v1-v5 → visible.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// v15+ (nested components): the dense `components[]` id of the
+    /// definition whose subtree owns this node — absent means world-owned,
+    /// the only possibility before v15. Presence in a pre-v15 file is a
+    /// smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<u32>,
 }
 
 /// A component definition.
@@ -1792,8 +1808,13 @@ pub(crate) struct ComponentDto {
     /// file is a smuggled field and rejected.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attrs: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
-    /// Dense object ids belonging to this definition.
-    pub members: Vec<u32>,
+    /// The definition's members. v15+: `NodeRef`s (`{"kind","id"}`), the
+    /// same vocabulary as `groups[].members`. v14 and older: bare object
+    /// dense ids — [`MemberDto::Legacy`], the only member kind that
+    /// existed. Which shapes are legal is decided by the DECLARED
+    /// `format_version` ([`NESTED_MEMBERS_MIN_VERSION`]), never by what
+    /// happens to parse.
+    pub members: Vec<MemberDto>,
     /// Optional definition name (manifest v2+). Absent in v1 files → `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -1827,6 +1848,12 @@ pub(crate) struct InstanceDto {
     /// USER-hidden view state (manifest v6+). Absent in v1-v5 → visible.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// v15+ (nested components): the dense `components[]` id of the
+    /// definition whose subtree owns this node — absent means world-owned,
+    /// the only possibility before v15. Presence in a pre-v15 file is a
+    /// smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<u32>,
 }
 
 /// A first-class sketch.
@@ -1923,6 +1950,18 @@ pub(crate) struct NodeRefDto {
     pub id: u32,
 }
 
+/// One `components[].members` entry across the v15 shape change: a full
+/// `NodeRef` (v15+) or a bare object dense id (v14 and older). `untagged`
+/// tries the object shape first, so a NodeRef can never mis-parse as a
+/// number; version legality is enforced AFTER parse against the declared
+/// format version.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum MemberDto {
+    Node(NodeRefDto),
+    Legacy(u32),
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Zip container helpers (HEW_FILE_FORMAT.md)
 // ════════════════════════════════════════════════════════════════════════════
@@ -1982,21 +2021,25 @@ fn zip_read_entry(
 // Called from document.rs which owns the private fields.
 // ════════════════════════════════════════════════════════════════════════════
 
-/// Serialization row for a merge group: (id, members, name, tags).
+/// Serialization row for a merge group:
+/// (id, members, name, tags, owner definition — v15 nested components).
 pub(crate) type GroupSaveRow = (
     GroupId,
     Vec<crate::document::NodeId>,
     Option<String>,
     Vec<Vec<String>>,
+    Option<ComponentId>,
 );
 
-/// Serialization row for an instance: (id, def, pose, name, tags).
+/// Serialization row for an instance:
+/// (id, def, pose, name, tags, owner definition — v15 nested components).
 pub(crate) type InstanceSaveRow = (
     InstanceId,
     ComponentId,
     Transform,
     Option<String>,
     Vec<Vec<String>>,
+    Option<ComponentId>,
 );
 
 /// Data that document.rs extracts from its private fields and hands off to
@@ -2006,7 +2049,7 @@ pub(crate) struct DocSaveData {
     pub world_objects: Vec<(ObjectId, Object)>,
     pub def_objects: Vec<(ObjectId, Object, ComponentId)>,
     pub groups: Vec<GroupSaveRow>,
-    pub components: Vec<(ComponentId, Vec<ObjectId>, Option<String>)>,
+    pub components: Vec<(ComponentId, Vec<crate::document::NodeId>, Option<String>)>,
     pub instances: Vec<InstanceSaveRow>,
     pub sketches: Vec<(SketchId, Sketch)>,
     /// The `SketchOwner` of each DEFINITION-owned sketch in `sketches`
@@ -2195,7 +2238,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .groups
         .iter()
         .enumerate()
-        .map(|(i, (gid, members, name, tags))| GroupDto {
+        .map(|(i, (gid, members, name, tags, owner_def))| GroupDto {
             id: i as u32,
             sid: sid_for(crate::document::EntityRef::Group(*gid)),
             attrs: attrs_for(crate::document::EntityRef::Group(*gid)),
@@ -2203,6 +2246,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             name: name.clone(),
             tags: tags.clone(),
             hidden: data.group_hidden.contains(gid),
+            owner: owner_def.as_ref().map(|cid| comp_to_dense[cid]),
         })
         .collect();
 
@@ -2214,7 +2258,12 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             id: i as u32,
             sid: sid_for(crate::document::EntityRef::Component(*cid)),
             attrs: attrs_for(crate::document::EntityRef::Component(*cid)),
-            members: members.iter().map(|oid| obj_to_dense[oid]).collect(),
+            // v15: every member is a full NodeRef — pure-object definitions
+            // included (one shape, no dual encoding).
+            members: members
+                .iter()
+                .map(|m| MemberDto::Node(node_to_dto(m)))
+                .collect(),
             name: name.clone(),
         })
         .collect();
@@ -2223,7 +2272,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .instances
         .iter()
         .enumerate()
-        .map(|(i, (iid, def, pose, name, tags))| InstanceDto {
+        .map(|(i, (iid, def, pose, name, tags, owner_def))| InstanceDto {
             id: i as u32,
             sid: sid_for(crate::document::EntityRef::Instance(*iid)),
             attrs: attrs_for(crate::document::EntityRef::Instance(*iid)),
@@ -2232,6 +2281,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             name: name.clone(),
             tags: tags.clone(),
             hidden: data.instance_hidden.contains(iid),
+            owner: owner_def.as_ref().map(|cid| comp_to_dense[cid]),
         })
         .collect();
 
@@ -2638,8 +2688,17 @@ pub(crate) struct DocLoadRaw {
     /// base_material dense id for each object (None = no base material).
     pub obj_base_materials: Vec<Option<u32>>,
     pub groups: Vec<Vec<NodeRefDto>>,
-    pub components: Vec<Vec<u32>>,
+    /// v15+: full member NodeRefs per definition (validated shapes; a
+    /// pre-v15 file's bare-int members arrive here as object refs — the
+    /// only member kind that existed).
+    pub components: Vec<Vec<NodeRefDto>>,
     pub instances: Vec<(u32, Transform)>,
+    /// v15+ (nested components): per-GROUP owning definition dense id
+    /// (parallel to `groups`), `None` = world.
+    pub group_owners: Vec<Option<u32>>,
+    /// v15+ (nested components): per-INSTANCE owning definition dense id
+    /// (parallel to `instances`), `None` = world.
+    pub instance_owners: Vec<Option<u32>>,
     pub sketches: Vec<Sketch>,
     /// Each sketch's `SketchOwner` (manifest v13+): the dense component id it
     /// belongs to, or `None` for world-owned — parallel to `sketches`, in the
@@ -2656,7 +2715,6 @@ pub(crate) struct DocLoadRaw {
     /// for the loader's one-time retroactive consumption. Empty for v11+.
     pub consumed: Vec<[u32; 2]>,
     /// For each object dense id: is it a definition member? (and which component dense id)
-    pub def_membership: Vec<Option<u32>>,
     /// Optional display name per object/group/component/instance, in dense order
     /// (manifest v2+; all `None` for v1 files).
     pub obj_names: Vec<Option<String>>,
@@ -2820,13 +2878,66 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     // older declared versions by `validate_manifest_references`).
     let camera = manifest.camera.as_ref().map(decode_camera).transpose()?;
 
-    // Build def membership: for each object dense id, which component owns it?
-    let mut def_membership: Vec<Option<u32>> = vec![None; obj_count];
-    for (ci, comp) in manifest.components.iter().enumerate() {
-        for &oid in &comp.members {
-            if (oid as usize) < obj_count {
-                def_membership[oid as usize] = Some(ci as u32);
+    // Normalize member shapes against the DECLARED version (nested-
+    // components, v15): pre-v15 files carry bare object ids (the only
+    // member kind that existed) — a NodeRef there is a smuggled field.
+    // v15+ files carry NodeRefs only — a bare int is a nonconforming
+    // writer's output. Reject-not-repair in both directions.
+    let nested_legal = manifest.format_version >= NESTED_MEMBERS_MIN_VERSION;
+    let mut component_members: Vec<Vec<NodeRefDto>> = Vec::with_capacity(manifest.components.len());
+    for comp in &manifest.components {
+        let mut refs = Vec::with_capacity(comp.members.len());
+        for m in &comp.members {
+            match m {
+                MemberDto::Legacy(oid) => {
+                    if nested_legal {
+                        return Err(LoadError::MalformedManifest {
+                            what: format!(
+                                "component {} carries a bare-integer member at format v{} (v15+ members are NodeRefs)",
+                                comp.id, manifest.format_version
+                            ),
+                        });
+                    }
+                    refs.push(NodeRefDto {
+                        kind: "object".to_string(),
+                        id: *oid,
+                    });
+                }
+                MemberDto::Node(node) => {
+                    if !nested_legal {
+                        return Err(LoadError::MalformedManifest {
+                            what: format!(
+                                "component {} carries a NodeRef member but declares format v{} (introduced at v15)",
+                                comp.id, manifest.format_version
+                            ),
+                        });
+                    }
+                    refs.push(NodeRefDto {
+                        kind: node.kind.clone(),
+                        id: node.id,
+                    });
+                }
             }
+        }
+        component_members.push(refs);
+    }
+    // Owner fields are v15-gated the same way.
+    if !nested_legal {
+        if let Some(g) = manifest.groups.iter().find(|g| g.owner.is_some()) {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "group {} carries an owner field but declares format v{} (introduced at v15)",
+                    g.id, manifest.format_version
+                ),
+            });
+        }
+        if let Some(i) = manifest.instances.iter().find(|i| i.owner.is_some()) {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "instance {} carries an owner field but declares format v{} (introduced at v15)",
+                    i.id, manifest.format_version
+                ),
+            });
         }
     }
 
@@ -2988,22 +3099,19 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         geom_buffers,
         obj_base_materials,
         groups: manifest.groups.iter().map(|g| g.members.clone()).collect(),
-        components: manifest
-            .components
-            .iter()
-            .map(|c| c.members.clone())
-            .collect(),
+        components: component_members,
         instances: manifest
             .instances
             .iter()
             .map(|i| (i.def, Transform::from_affine(&i.pose)))
             .collect(),
+        group_owners: manifest.groups.iter().map(|g| g.owner).collect(),
+        instance_owners: manifest.instances.iter().map(|i| i.owner).collect(),
         sketches,
         sketch_owner,
         guides,
         annotations,
         consumed: manifest.consumed.clone(),
-        def_membership,
         obj_names,
         group_names,
         component_names,
@@ -3086,16 +3194,49 @@ fn validate_manifest_references(
         }
     }
 
-    for comp in &manifest.components {
-        for &m in &comp.members {
-            if m as usize >= obj_count {
+    for (ci, comp) in manifest.components.iter().enumerate() {
+        for m in &comp.members {
+            let (kind, id) = match m {
+                MemberDto::Legacy(oid) => ("object", *oid),
+                MemberDto::Node(n) => (n.kind.as_str(), n.id),
+            };
+            let (bound, what) = match kind {
+                "object" => (obj_count, "object"),
+                "group" => (manifest.groups.len(), "group"),
+                "instance" => (manifest.instances.len(), "instance"),
+                other => {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!("component {} member has unknown kind '{other}'", comp.id),
+                    });
+                }
+            };
+            if id as usize >= bound {
                 return Err(LoadError::DanglingReference {
-                    what: format!("component {} member object id {} out of range", comp.id, m),
+                    what: format!("component {} member {what} id {id} out of range", comp.id),
+                });
+            }
+            // Forward consistency: a DIRECT group/instance member must
+            // declare this very definition as owner. (Nodes nested BELOW a
+            // member group derive their ownership from tree position — the
+            // loader validates those against the declared owners after the
+            // real structures exist.)
+            let declared = match kind {
+                "group" => Some(manifest.groups[id as usize].owner),
+                "instance" => Some(manifest.instances[id as usize].owner),
+                _ => None,
+            };
+            if let Some(owner) = declared
+                && owner != Some(ci as u32)
+            {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "component {} lists member {what} {id} whose owner disagrees",
+                        comp.id
+                    ),
                 });
             }
         }
     }
-
     for inst in &manifest.instances {
         if inst.def as usize >= manifest.components.len() {
             return Err(LoadError::DanglingReference {

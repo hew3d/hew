@@ -9365,26 +9365,17 @@ fn explode_instance_detaches_annotation_anchored_to_the_instance_node() {
     assert_eq!(doc.annotation_detached(id), Some(true));
 }
 
-/// `make_component` folding a GROUP into a definition hides that group
-/// (`consumed_groups`) — a genuinely dead node (a hidden group is a
-/// tombstone, never serialized, per the format spec). This used to be a gap
-/// in forward liveness detection (`make_component` didn't run the same
-/// recorded liveness pass `delete_node` and the boolean/slice/push-through
-/// family do, so the stored `detached` flag lagged reality until the
-/// save-time backstop below caught it); the fold family fix closed it, so
-/// the group-anchored annotation now detaches immediately, at op time, same
-/// as every other consuming op.
+/// `make_component` folding a GROUP into a definition re-owns it into the
+/// definition's subtree (v15 nested members) — it stops being a live WORLD
+/// node, so the group-anchored annotation detaches immediately, at op
+/// time, exactly like the delete/boolean family (the fold runs the same
+/// recorded liveness pass).
 ///
-/// This also still exercises `Document::save`'s own backstop: it never
-/// persists a dead anchor as a healthy-looking free anchor, forcing
-/// `detached: true` on the written entry regardless of the stored flag —
-/// still correct now that the flag is already `true` going in, and kept as
-/// defense-in-depth for any future consuming op that forgets to call the
-/// liveness pass. Note a bare OBJECT folded the same way is NOT such a
-/// case: a component-member object is still serialized (`manifest.objects`
-/// covers world AND definition members alike), so its anchor still resolves
-/// on save — only a node that actually disappears from the file exercises
-/// this backstop.
+/// Across a save/load round trip the anchor NODE persists: a
+/// definition-owned group is serialized at v15 (its `owner` field names
+/// the definition), exactly like a folded member object always has been —
+/// what round-trips is the detached FLAG, never a healthy-looking live
+/// anchor.
 #[test]
 fn make_component_group_fold_detaches_immediately_and_survives_save() {
     let mut doc = Document::new();
@@ -9420,13 +9411,15 @@ fn make_component_group_fold_detaches_immediately_and_survives_save() {
     assert_eq!(
         loaded.annotation_detached(loaded_id),
         Some(true),
-        "save-time backstop: a dead anchor never round-trips as a healthy free anchor"
+        "a dead anchor never round-trips as a healthy free anchor"
     );
     match loaded.annotation(loaded_id).unwrap() {
         Annotation::LeaderText { anchor, .. } => {
-            assert_eq!(
-                anchor.node, None,
-                "the node genuinely does not exist in this file"
+            assert!(
+                anchor.node.is_some(),
+                "the definition-owned group IS serialized at v15, so the \
+                 anchor node persists — with the detached flag, exactly like \
+                 a folded member object's anchor always has"
             )
         }
         other => panic!("expected LeaderText, got {other:?}"),

@@ -718,10 +718,14 @@ fn structural_and_outside_scope_ops_refuse_mid_session() {
         doc.make_component(&[NodeId::Object(member_a)]).unwrap_err(),
         DocumentError::ExplodeSessionScope
     );
+    // Placing the definition BEING EDITED refuses as the cycle it is —
+    // the close would fold the new placement into its own definition.
+    // (Placing an UNRELATED definition mid-session is now allowed and
+    // folds in at close: nested_session_specs.)
     assert_eq!(
         doc.place_instance(component, Transform::IDENTITY)
             .unwrap_err(),
-        DocumentError::ExplodeSessionScope
+        DocumentError::ComponentCycle
     );
 
     // Outside-fed creations refuse; the outside geometry is untouchable.

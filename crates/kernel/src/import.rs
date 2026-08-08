@@ -50,14 +50,48 @@ pub struct MeshRecipe {
     pub tags: Vec<Vec<String>>,
 }
 
-/// A shared definition recipe: a flat set of meshes in definition-local coords.
+/// A shared definition recipe: a subtree in definition-local coords.
 pub struct DefRecipe {
     /// Source name for the definition (e.g. a SketchUp component name), used as
     /// the display name for its instances. `None` falls back to a positional
     /// label in the UI.
     pub name: Option<String>,
-    /// The meshes that make up this component definition.
-    pub meshes: Vec<MeshRecipe>,
+    /// The definition's member subtree. Meshes and groups build
+    /// definition-owned content; an [`ImportNode::Instance`] member nests
+    /// another definition (its `def` index must not reach this definition
+    /// back through the recipe graph — `ingest` refuses cyclic scenes with a
+    /// typed error, never repairs them).
+    pub children: Vec<ImportNode>,
+}
+
+impl DefRecipe {
+    /// A flat, meshes-only definition — the shape every pre-nesting importer
+    /// emits.
+    pub fn from_meshes(name: Option<String>, meshes: Vec<MeshRecipe>) -> Self {
+        DefRecipe {
+            name,
+            children: meshes.into_iter().map(ImportNode::Mesh).collect(),
+        }
+    }
+
+    /// Every mesh recipe in this definition's own subtree, depth-first —
+    /// groups descended, nested `Instance` members NOT followed (their
+    /// meshes belong to the referenced definition). Diagnostics and tests
+    /// inspect definitions through this.
+    pub fn mesh_recipes(&self) -> impl Iterator<Item = &MeshRecipe> {
+        fn walk<'a>(nodes: &'a [ImportNode], out: &mut Vec<&'a MeshRecipe>) {
+            for n in nodes {
+                match n {
+                    ImportNode::Mesh(m) => out.push(m),
+                    ImportNode::Group { children, .. } => walk(children, out),
+                    ImportNode::Instance { .. } => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.children, &mut out);
+        out.into_iter()
+    }
 }
 
 /// A node in the imported scene tree.

@@ -49,8 +49,11 @@ fn flatten(scene: &ImportScene) -> Flat {
         }
     }
 
+    // Walks nested definitions: an Instance composes its pose and descends
+    // into its def's OWN subtree (meshes, groups, nested instances).
     fn walk(
         nodes: &[ImportNode],
+        tf: &Transform,
         scene: &ImportScene,
         faces: &mut usize,
         lo: &mut [f64; 3],
@@ -58,18 +61,24 @@ fn flatten(scene: &ImportScene) -> Flat {
     ) {
         for n in nodes {
             match n {
-                ImportNode::Mesh(m) => take(m, &Transform::IDENTITY, faces, lo, hi),
+                ImportNode::Mesh(m) => take(m, tf, faces, lo, hi),
                 ImportNode::Instance { def, pose, .. } => {
-                    for m in &scene.defs[*def].meshes {
-                        take(m, pose, faces, lo, hi);
-                    }
+                    let composed = pose.then(tf);
+                    walk(&scene.defs[*def].children, &composed, scene, faces, lo, hi);
                 }
-                ImportNode::Group { children, .. } => walk(children, scene, faces, lo, hi),
+                ImportNode::Group { children, .. } => walk(children, tf, scene, faces, lo, hi),
             }
         }
     }
 
-    walk(&scene.roots, scene, &mut faces, &mut lo, &mut hi);
+    walk(
+        &scene.roots,
+        &Transform::IDENTITY,
+        scene,
+        &mut faces,
+        &mut lo,
+        &mut hi,
+    );
     Flat { faces, lo, hi }
 }
 
@@ -185,21 +194,37 @@ fn theater_production_model_end_to_end() {
 
     let mut doc = kernel::Document::new();
     let (report, _) = doc.ingest(out.scene, out.textures_missing).unwrap();
-    // Frozen with hidden-layer-content import + the non-manifold splitter
-    // + per-node hidden import (hidden layers become hidden-by-default
-    // tags whose content IMPORTS, non-manifold meshes decompose into open
-    // shells instead of being rejected, and per-entity-hidden
-    // groups/components import as USER-hidden nodes instead of dropping —
-    // the original 524-object baseline did none of these): 738 objects
-    // (602 watertight), NOTHING skipped, 1319 instances, 118 groups, 26
-    // user-hidden nodes. If an OpenSKP or heal improvement moves these,
-    // update deliberately with the rev bump.
+    // Frozen with NESTED definitions (manifest v15): a SketchUp assembly
+    // imports as ONE definition whose children are member instances, so
+    // the old flattened world tree (1319 instances + 118 wrapper groups)
+    // becomes 962 world instances over 722 shared definitions nesting up
+    // to 5 deep — 1461 expanded leaf placements. The 26 user-hidden nodes
+    // halve to 13: a hidden assembly used to cost a hidden wrapper group
+    // PLUS a hidden inner instance, now it is one hidden placement.
+    // Object totals are untouched (geometry parity holds against the .dae
+    // ground truths above). If an OpenSKP or heal improvement moves
+    // these, update deliberately with the rev bump.
     assert_eq!(report.objects_created, 738);
     assert_eq!(report.watertight, 602);
     assert_eq!(report.skipped.len(), 0);
-    assert_eq!(doc.instance_ids().len(), 1319);
-    assert_eq!(doc.group_ids().len(), 118);
-    assert_eq!(doc.user_hidden_nodes().len(), 26);
+    assert_eq!(doc.instance_ids().len(), 962);
+    assert_eq!(doc.group_ids().len(), 0);
+    assert_eq!(doc.user_hidden_nodes().len(), 13);
+    assert_eq!(doc.component_ids().len(), 722);
+    assert_eq!(doc.expanded_placements().len(), 1461);
+    assert_eq!(
+        doc.component_ids()
+            .iter()
+            .map(|&c| doc.def_depth(c))
+            .max()
+            .unwrap_or(0),
+        5,
+        "the definition graph genuinely nests"
+    );
+    // The nested document survives a byte-stable v15 round trip.
+    let bytes = doc.save();
+    let re = kernel::Document::load(&bytes).expect("theater round-trips");
+    assert_eq!(re.save(), bytes);
     // The full 94-layer list survives as tags: 93 registered (Layer0 maps
     // to "untagged"), 40 of them hidden-by-default.
     let tags: Vec<(&[String], bool)> = doc.tag_meta().collect();

@@ -213,10 +213,7 @@ fn ingest_instance_shares_one_def() {
 
     let scene = ImportScene {
         materials: vec![],
-        defs: vec![DefRecipe {
-            name: None,
-            meshes: vec![box_recipe("def_mesh")],
-        }],
+        defs: vec![DefRecipe::from_meshes(None, vec![box_recipe("def_mesh")])],
         roots: vec![
             ImportNode::Instance {
                 def: 0,
@@ -272,10 +269,10 @@ fn ingest_then_save_load_preserves_names() {
     let mut doc = Document::new();
     let scene = ImportScene {
         materials: vec![],
-        defs: vec![DefRecipe {
-            name: Some("MyComponent".to_string()),
-            meshes: vec![box_recipe("def_box")],
-        }],
+        defs: vec![DefRecipe::from_meshes(
+            Some("MyComponent".to_string()),
+            vec![box_recipe("def_box")],
+        )],
         roots: vec![
             ImportNode::Group {
                 name: "MyGroup".to_string(),
@@ -393,10 +390,10 @@ fn ingest_instance_own_name_wins_over_def_name() {
 
     let scene = ImportScene {
         materials: vec![],
-        defs: vec![DefRecipe {
-            name: Some("Wall".to_string()),
-            meshes: vec![box_recipe("def_mesh")],
-        }],
+        defs: vec![DefRecipe::from_meshes(
+            Some("Wall".to_string()),
+            vec![box_recipe("def_mesh")],
+        )],
         roots: vec![
             ImportNode::Instance {
                 def: 0,
@@ -431,4 +428,182 @@ fn ingest_instance_own_name_wins_over_def_name() {
         names.contains(&None),
         "unnamed instance stays None (UI falls back to the def name); got {names:?}"
     );
+}
+
+// ───────────────────────────── nested definitions (docs/design v15) ──────────
+
+/// A definition whose children include an `Instance` of another definition
+/// builds a real nested def: the inner instance is definition-owned, the
+/// expansion walks through it, and the document round-trips at v15.
+#[test]
+fn ingest_builds_nested_definitions() {
+    let mut doc = Document::new();
+    let scene = ImportScene {
+        materials: vec![],
+        defs: vec![
+            // Outer FIRST in recipe order but referencing def 1 — build
+            // order must not care about recipe order.
+            DefRecipe {
+                name: Some("Outer".to_string()),
+                children: vec![
+                    ImportNode::Mesh(box_recipe("outer_body")),
+                    ImportNode::Instance {
+                        def: 1,
+                        pose: Transform::translation(kernel::Vec3::new(2.0, 0.0, 0.0)),
+                        name: None,
+                        tags: Vec::new(),
+                        hidden: false,
+                    },
+                ],
+            },
+            DefRecipe::from_meshes(Some("Inner".to_string()), vec![box_recipe("inner_body")]),
+        ],
+        roots: vec![ImportNode::Instance {
+            def: 0,
+            pose: Transform::translation(kernel::Vec3::new(10.0, 0.0, 0.0)),
+            name: None,
+            tags: Vec::new(),
+            hidden: false,
+        }],
+        guides: Vec::new(),
+        tags: Vec::new(),
+    };
+    let (report, _change) = doc.ingest(scene, vec![]).unwrap();
+    assert_eq!(report.objects_created, 2);
+    assert!(report.skipped.is_empty());
+
+    // One world instance; the nested one is definition-owned, not a root.
+    assert_eq!(doc.instance_ids().len(), 1);
+    let world = doc.instance_ids()[0];
+    let placements = doc.expanded_placements();
+    assert_eq!(
+        placements.len(),
+        2,
+        "outer body + inner body through nesting"
+    );
+    assert!(placements.iter().all(|(_, _, outer)| *outer == world));
+    // The inner body's composed pose carries both translations.
+    assert!(placements.iter().any(|(_, pose, _)| {
+        pose.apply_point(Point3::ORIGIN)
+            .approx_eq(Point3::new(12.0, 0.0, 0.0), 1e-9)
+    }));
+
+    // Round trip: the first organically-built nested document.
+    let bytes = doc.save();
+    let re = Document::load(&bytes).expect("nested ingest round-trips");
+    assert_eq!(re.save(), bytes);
+    assert_eq!(re.expanded_placements().len(), 2);
+}
+
+/// A cyclic definition recipe is refused typed, before any mutation.
+#[test]
+fn ingest_refuses_cyclic_definition_recipes() {
+    let inst = |def: usize| ImportNode::Instance {
+        def,
+        pose: Transform::IDENTITY,
+        name: None,
+        tags: Vec::new(),
+        hidden: false,
+    };
+    let mut doc = Document::new();
+    let scene = ImportScene {
+        materials: vec![],
+        defs: vec![
+            DefRecipe {
+                name: None,
+                children: vec![ImportNode::Mesh(box_recipe("a")), inst(1)],
+            },
+            DefRecipe {
+                name: None,
+                children: vec![ImportNode::Mesh(box_recipe("b")), inst(0)],
+            },
+        ],
+        roots: vec![],
+        guides: Vec::new(),
+        tags: Vec::new(),
+    };
+    assert!(matches!(
+        doc.ingest(scene, vec![]),
+        Err(kernel::DocumentError::ComponentCycle)
+    ));
+    // Refused before any mutation: the document is untouched.
+    assert!(doc.component_ids().is_empty());
+    assert_eq!(doc.visible_object_ids().len(), 0);
+}
+
+/// A nested instance whose target definition ends up empty (every mesh
+/// rejected) is skipped like a world instance would be — never a dangling
+/// reference.
+#[test]
+fn ingest_skips_nested_instances_of_failed_defs() {
+    let mut doc = Document::new();
+    let scene = ImportScene {
+        materials: vec![],
+        defs: vec![
+            DefRecipe {
+                name: Some("Outer".to_string()),
+                children: vec![
+                    ImportNode::Mesh(box_recipe("outer_body")),
+                    ImportNode::Instance {
+                        def: 1,
+                        pose: Transform::IDENTITY,
+                        name: None,
+                        tags: Vec::new(),
+                        hidden: false,
+                    },
+                ],
+            },
+            DefRecipe::from_meshes(Some("Broken".to_string()), vec![degenerate_recipe("bad")]),
+        ],
+        roots: vec![ImportNode::Instance {
+            def: 0,
+            pose: Transform::IDENTITY,
+            name: None,
+            tags: Vec::new(),
+            hidden: false,
+        }],
+        guides: Vec::new(),
+        tags: Vec::new(),
+    };
+    let (report, _change) = doc.ingest(scene, vec![]).unwrap();
+    assert_eq!(report.skipped.len(), 1);
+    // Only Outer survives, with its one real member.
+    assert_eq!(doc.component_ids().len(), 1);
+    assert_eq!(doc.expanded_placements().len(), 1);
+    let bytes = doc.save();
+    Document::load(&bytes).expect("still a valid document");
+}
+
+/// The width bound at ingest: a recipe DAG that doubles for 21 levels
+/// (2^21 placements) refuses typed BEFORE any document mutation.
+#[test]
+fn ingest_refuses_over_wide_definition_recipes() {
+    let inst = |def: usize| ImportNode::Instance {
+        def,
+        pose: Transform::IDENTITY,
+        name: None,
+        tags: Vec::new(),
+        hidden: false,
+    };
+    // defs[0] is the leaf; defs[k] holds two instances of defs[k-1].
+    let mut defs = vec![DefRecipe::from_meshes(None, vec![box_recipe("leaf")])];
+    for k in 1..=21 {
+        defs.push(DefRecipe {
+            name: None,
+            children: vec![inst(k - 1), inst(k - 1)],
+        });
+    }
+    let scene = ImportScene {
+        materials: vec![],
+        defs,
+        roots: vec![inst(21)],
+        guides: Vec::new(),
+        tags: Vec::new(),
+    };
+    let mut doc = Document::new();
+    assert!(matches!(
+        doc.ingest(scene, vec![]),
+        Err(kernel::DocumentError::ComponentExpansionExceeded)
+    ));
+    assert!(doc.component_ids().is_empty(), "refused before mutation");
 }

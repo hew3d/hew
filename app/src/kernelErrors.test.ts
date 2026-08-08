@@ -322,7 +322,7 @@ describe('kernelErrorMessage — coverage', () => {
     // The app itself emits a few refusals through the same "CODE: copy"
     // toast convention without a kernel enum behind them — enumerate them
     // here so the guard still catches genuinely stale kernel copy.
-    const APP_ERROR_CODES = ['InvalidSelection']
+    const APP_ERROR_CODES = ['InvalidSelection', 'NestedComponentInContext']
     const known = new Set([...DERIVED_KERNEL_ERROR_CODES, ...APP_ERROR_CODES, ...WRAPPER_CODES])
     const orphans = describedErrorCodes().filter((c) => !known.has(c))
     expect(orphans).toEqual([])

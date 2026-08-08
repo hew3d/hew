@@ -57,15 +57,46 @@ function makeMesh(watertight: boolean) {
   }
 }
 
+/** Identity local pose (row-major 3×4) — the def-local pose every FLAT
+ * definition's members carry (nesting-parity.md / module doc: a flat
+ * definition's expanded placements are identical to `component_member_objects`
+ * with identity local poses). Declared ahead of `makeScene` (which needs it
+ * as a default) — `IDENTITY_POSE` below is the same array, kept as a
+ * separately named const so each reads clearly at its own call sites. */
+const IDENTITY_LOCAL_POSE = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
+
+/** One definition member an instance places — `localPose` is the row-major
+ * 3×4 DEF-LOCAL pose (identity for a flat definition's members; a nested
+ * definition's own internal placement otherwise). Repeats are legal: the
+ * same `memberId` can appear more than once (a nested definition placing
+ * one leaf several times). */
+interface MockPlacement {
+  memberId: bigint
+  localPose: number[]
+}
+
 /** Mock WasmScene; only the methods SceneRenderer's `refresh`/instance path
  * touches are provided. `objects`/`instances` map id → watertight (objects)
- * or → { def, pose, memberWatertight } (instances). */
+ * or → { def, pose, memberIds, memberWatertight } (instances). `placements`
+ * is optional — omitted, an instance's expanded placements are exactly
+ * `memberIds` at the identity local pose (flat-definition parity); provide
+ * it explicitly to test a nested definition's non-identity/repeated
+ * placements (`instance_expanded_members`/`instance_expanded_local_poses`,
+ * not just `component_member_objects`). */
 function makeScene(opts: {
   objects?: Record<string, boolean>
-  instances?: Record<string, { def: bigint; pose: number[]; memberIds: bigint[]; memberWatertight: Record<string, boolean> }>
+  instances?: Record<string, {
+    def: bigint
+    pose: number[]
+    memberIds: bigint[]
+    memberWatertight: Record<string, boolean>
+    placements?: MockPlacement[]
+  }>
 }): WasmScene {
   const objects = opts.objects ?? {}
   const instances = opts.instances ?? {}
+  const placementsOf = (inst: { memberIds: bigint[]; placements?: MockPlacement[] }): MockPlacement[] =>
+    inst.placements ?? inst.memberIds.map((memberId) => ({ memberId, localPose: IDENTITY_LOCAL_POSE }))
   return {
     object_ids: () => BigUint64Array.from(Object.keys(objects).map(BigInt)),
     instance_ids: () => BigUint64Array.from(Object.keys(instances).map(BigInt)),
@@ -84,6 +115,16 @@ function makeScene(opts: {
     component_member_objects: (componentId: bigint) => {
       const inst = Object.values(instances).find((i) => i.def === componentId)
       return BigUint64Array.from(inst?.memberIds ?? [])
+    },
+    instance_expanded_members: (id: bigint) => {
+      const inst = instances[id.toString()]
+      if (inst === undefined) return new BigUint64Array()
+      return BigUint64Array.from(placementsOf(inst).map((p) => p.memberId))
+    },
+    instance_expanded_local_poses: (id: bigint) => {
+      const inst = instances[id.toString()]
+      if (inst === undefined) return new Float64Array()
+      return Float64Array.from(placementsOf(inst).flatMap((p) => p.localPose))
     },
     // No def-owned sketches by default — overridden by callers that seed
     // `defSketches` (see `makeSceneWithDefSketches` in the def-sketch
@@ -508,8 +549,8 @@ describe('SceneRenderer — GPU-instanced placements (RR16)', () => {
     renderer.setSelectedInstanceMembers(10n, [2n])
 
     const group = renderer.instancesGroup.getObjectByName('Instance_10') as THREE.Group
-    const first = group.getObjectByName('InstanceEdge_10_1') as THREE.LineSegments
-    const second = group.getObjectByName('InstanceEdge_10_2') as THREE.LineSegments
+    const first = group.getObjectByName('InstanceEdge_10_1_0') as THREE.LineSegments
+    const second = group.getObjectByName('InstanceEdge_10_2_1') as THREE.LineSegments
     expect((first.material as THREE.LineBasicMaterial).color.getHex()).not.toBe(0xffaa00)
     expect((second.material as THREE.LineBasicMaterial).color.getHex()).toBe(0xffaa00)
 
@@ -655,7 +696,7 @@ describe('SceneRenderer — GPU-instanced placements (RR16)', () => {
     expect(node11).toBeDefined()
     // The node carries the pose as a node transform.
     expect(node10.matrix.elements[12]).toBe(3)
-    const member = node10.getObjectByName('Instance_10_member_2') as THREE.Mesh
+    const member = node10.getObjectByName('Instance_10_member_2_0') as THREE.Mesh
     expect(member).toBeDefined()
     // Geometry is shared by reference with the live batch; materials are
     // fresh MeshStandardMaterial.
@@ -684,6 +725,202 @@ describe('SceneRenderer — GPU-instanced placements (RR16)', () => {
     expect(batches[0].count).toBe(2)
     const tx = slotMatrices(batches[0]).map((m) => m.elements[12]).sort()
     expect(tx).toEqual([0, 7])
+  })
+
+  describe('nested definitions — repeated placements of one member', () => {
+    it('one instance whose expanded members list the same member twice with different local poses gets two slots with distinct composed matrices', () => {
+      const scene = makeScene({
+        instances: {
+          '10': {
+            def: 100n,
+            pose: [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0], // instance translated +5 in X
+            memberIds: [1n, 1n], // the SAME member, placed twice
+            memberWatertight: { '1': true },
+            placements: [
+              { memberId: 1n, localPose: [1, 0, 0, -1, 0, 1, 0, 0, 0, 0, 1, 0] }, // def-local -1 in X
+              { memberId: 1n, localPose: [1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0] },  // def-local +1 in X
+            ],
+          },
+        },
+      })
+      const renderer = new SceneRenderer(new THREE.Scene(), scene)
+      renderer.refresh()
+
+      // Still one batch (one member, one bucket) — but with TWO slots.
+      const batches = instancedBatches(renderer.instancesGroup)
+      expect(batches).toHaveLength(1)
+      expect(batches[0].count).toBe(2)
+
+      // World X = instance pose (5) composed with each placement's own
+      // local pose (-1 / +1) — two DISTINCT slot matrices, not one slot
+      // written twice or a slot dropped for the repeat.
+      const tx = slotMatrices(batches[0]).map((m) => m.elements[12]).sort((a, b) => a - b)
+      expect(tx).toEqual([4, 6])
+    })
+
+    it('a placement-only pose change (member sequence unchanged) takes the fast in-place write path, not a rebuild', () => {
+      const instances: Record<string, {
+        def: bigint
+        pose: number[]
+        memberIds: bigint[]
+        memberWatertight: Record<string, boolean>
+        placements?: { memberId: bigint; localPose: number[] }[]
+      }> = {
+        '10': {
+          def: 100n,
+          pose: IDENTITY_POSE,
+          memberIds: [1n, 1n],
+          memberWatertight: { '1': true },
+          placements: [
+            { memberId: 1n, localPose: [1, 0, 0, -1, 0, 1, 0, 0, 0, 0, 1, 0] },
+            { memberId: 1n, localPose: [1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0] },
+          ],
+        },
+      }
+      const scene = makeScene({ instances })
+      const renderer = new SceneRenderer(new THREE.Scene(), scene)
+      renderer.refresh()
+      const batchBefore = instancedBatches(renderer.instancesGroup)[0]
+      meshSpy(scene).mockClear()
+
+      // Only the SECOND placement's local pose moves (1 -> 3); the member
+      // sequence (memberId per index) is unchanged, so this must NOT
+      // rebuild the batch.
+      instances['10'].placements = [
+        { memberId: 1n, localPose: [1, 0, 0, -1, 0, 1, 0, 0, 0, 0, 1, 0] },
+        { memberId: 1n, localPose: [1, 0, 0, 3, 0, 1, 0, 0, 0, 0, 1, 0] },
+      ]
+      renderer.refreshTouched({ instanceIds: [10n] })
+
+      // Member cache intact (a pose-only change never invalidates def
+      // geometry) and the batch is the SAME object — no GPU buffer rebuild.
+      expect(meshSpy(scene)).not.toHaveBeenCalled()
+      const batchAfter = instancedBatches(renderer.instancesGroup)[0]
+      expect(batchAfter).toBe(batchBefore)
+      const tx = slotMatrices(batchAfter).map((m) => m.elements[12]).sort((a, b) => a - b)
+      expect(tx).toEqual([-1, 3])
+    })
+
+    it('_materialize builds one face/edge mesh per placement, each transformed by its own local pose', () => {
+      const scene = makeScene({
+        instances: {
+          '10': {
+            def: 100n,
+            pose: [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0],
+            memberIds: [1n, 1n],
+            memberWatertight: { '1': true },
+            placements: [
+              { memberId: 1n, localPose: [1, 0, 0, -1, 0, 1, 0, 0, 0, 0, 1, 0] },
+              { memberId: 1n, localPose: [1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0] },
+            ],
+          },
+        },
+      })
+      const renderer = new SceneRenderer(new THREE.Scene(), scene)
+      renderer.refresh()
+      renderer.setSelectedInstances([10n]) // force materialization
+
+      const group = renderer.instancesGroup.getObjectByName('Instance_10') as THREE.Group
+      expect(group).toBeDefined()
+      // The group itself carries only the INSTANCE pose (+5 in X).
+      expect(group.matrix.elements[12]).toBe(5)
+
+      const first = group.getObjectByName('InstanceFace_10_1_0') as THREE.Mesh
+      const second = group.getObjectByName('InstanceFace_10_1_1') as THREE.Mesh
+      expect(first).toBeDefined()
+      expect(second).toBeDefined()
+      // Each child mesh carries its OWN placement's def-local pose.
+      expect(first.matrix.elements[12]).toBe(-1)
+      expect(second.matrix.elements[12]).toBe(1)
+    })
+
+    it('buildExportScene emits one child mesh per placement, transformed by its own local pose', () => {
+      const scene = makeScene({
+        instances: {
+          '10': {
+            def: 100n,
+            pose: [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0],
+            memberIds: [1n, 1n],
+            memberWatertight: { '1': true },
+            placements: [
+              { memberId: 1n, localPose: [1, 0, 0, -1, 0, 1, 0, 0, 0, 0, 1, 0] },
+              { memberId: 1n, localPose: [1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0] },
+            ],
+          },
+        },
+      })
+      const renderer = new SceneRenderer(new THREE.Scene(), scene)
+      renderer.refresh()
+
+      const root = renderer.buildExportScene()
+      const node = root.getObjectByName('Instance_10') as THREE.Group
+      expect(node.matrix.elements[12]).toBe(5)
+      const first = node.getObjectByName('Instance_10_member_1_0') as THREE.Mesh
+      const second = node.getObjectByName('Instance_10_member_1_1') as THREE.Mesh
+      expect(first).toBeDefined()
+      expect(second).toBeDefined()
+      expect(first.matrix.elements[12]).toBe(-1)
+      expect(second.matrix.elements[12]).toBe(1)
+
+      renderer.disposeExportScene(root)
+    })
+
+    it('a mirrored LOCAL pose buckets its placement separately even under a plain outer instance pose, and re-batches independently of its sibling placement (review regression guard)', () => {
+      // Outer instance pose is a plain identity — the bug this guards
+      // against bucketed every placement of an instance by the OUTER pose
+      // alone, so a nested member mirrored only in its LOCAL pose rendered
+      // inside-out (batched FrontSide instead of BackSide).
+      const instances: Record<string, {
+        def: bigint
+        pose: number[]
+        memberIds: bigint[]
+        memberWatertight: Record<string, boolean>
+        placements?: { memberId: bigint; localPose: number[] }[]
+      }> = {
+        '10': {
+          def: 100n,
+          pose: IDENTITY_POSE,
+          memberIds: [1n, 1n], // the same member, placed twice
+          memberWatertight: { '1': true },
+          placements: [
+            { memberId: 1n, localPose: [1, 0, 0, -1, 0, 1, 0, 0, 0, 0, 1, 0] }, // plain, tx=-1
+            { memberId: 1n, localPose: [-1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0] }, // mirrored (det<0), tx=1
+          ],
+        },
+      }
+      const scene = makeScene({ instances })
+      const renderer = new SceneRenderer(new THREE.Scene(), scene)
+      renderer.refresh()
+
+      // The two placements of the SAME member land in DIFFERENT buckets —
+      // two batches, one FrontSide (the plain placement) and one BackSide
+      // (the locally-mirrored placement) — not one shared bucket.
+      let batches = instancedBatches(renderer.instancesGroup)
+      expect(batches).toHaveLength(2)
+      expect(batches.map((b) => b.count)).toEqual([1, 1])
+      const bySide = new Map(batches.map((b) => [batchMaterial(b).side, b]))
+      expect([...bySide.keys()].sort()).toEqual([THREE.FrontSide, THREE.BackSide].sort())
+      expect(slotMatrices(bySide.get(THREE.FrontSide)!)[0].elements[12]).toBe(-1)
+      expect(slotMatrices(bySide.get(THREE.BackSide)!)[0].elements[12]).toBe(1)
+
+      // Flip ONLY the second placement's local pose sign back to plain
+      // (mirrored -> unmirrored); the first placement's local pose is
+      // untouched.
+      instances['10'].placements = [
+        { memberId: 1n, localPose: [1, 0, 0, -1, 0, 1, 0, 0, 0, 0, 1, 0] },
+        { memberId: 1n, localPose: [1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0] },
+      ]
+      renderer.refreshTouched({ instanceIds: [10n] })
+
+      // Both placements now share the plain (FrontSide) bucket — the second
+      // placement's bucket moved on its own; the first placement's slot
+      // (tx=-1) survives untouched, and no BackSide batch remains.
+      batches = instancedBatches(renderer.instancesGroup)
+      expect(batches).toHaveLength(1)
+      expect(batchMaterial(batches[0]).side).toBe(THREE.FrontSide)
+      const tx = slotMatrices(batches[0]).map((m) => m.elements[12]).sort((a, b) => a - b)
+      expect(tx).toEqual([-1, 1])
+    })
   })
 })
 

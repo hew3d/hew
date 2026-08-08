@@ -627,14 +627,22 @@ export class ScaleTool implements Tool {
         }
       } else {
         if (activeInstance !== null && activeInstanceGroup !== null) {
-          const face = activeInstanceGroup.getObjectByName(
-            `InstanceFace_${activeInstance}_${node.id}`,
-          )
-          const edges = activeInstanceGroup.getObjectByName(
-            `InstanceEdge_${activeInstance}_${node.id}`,
-          )
-          if (face !== undefined) box.expandByObject(face)
-          if (edges !== undefined) box.expandByObject(edges)
+          // SceneRenderer names a materialized placement's meshes
+          // `InstanceFace_${instanceId}_${memberId}_${placementIndex}` /
+          // `InstanceEdge_${instanceId}_${memberId}_${placementIndex}` — the
+          // index suffix disambiguates a nested definition placing the same
+          // member more than once, so match by PREFIX rather than
+          // `getObjectByName`'s exact match. K1/K2 in-context member editing
+          // (the only way `activeInstance` is set here) is refused on a
+          // nested definition, so `node.id` has exactly one placement in
+          // practice — prefix matching keeps this correct regardless.
+          const facePrefix = `InstanceFace_${activeInstance}_${node.id}_`
+          const edgePrefix = `InstanceEdge_${activeInstance}_${node.id}_`
+          for (const child of activeInstanceGroup.children) {
+            if (child.name.startsWith(facePrefix) || child.name.startsWith(edgePrefix)) {
+              box.expandByObject(child)
+            }
+          }
         } else {
           const objGroup = this.objectsGroup?.getObjectByName(`Object_${node.id}`)
           if (objGroup !== undefined) box.expandByObject(objGroup)

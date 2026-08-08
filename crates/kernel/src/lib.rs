@@ -45,8 +45,8 @@ pub use axes::{AxesFrame, AxesFrameError};
 pub use camera::{CameraProjection, CameraState};
 pub use document::{
     AttrTarget, CompoundMeta, DocChange, DocTransaction, Document, DocumentError, EntityRef,
-    FollowMePath, HistoryOrigin, InsertOptions, InsertReport, LibraryProvenance, MaterialScope,
-    NodeId, PendingActionKind,
+    FollowMePath, HistoryOrigin, InsertOptions, InsertReport, LibraryProvenance,
+    MAX_COMPONENT_DEPTH, MaterialScope, NodeId, PendingActionKind,
 };
 pub use error::TopologyError;
 pub use guide::Guide;

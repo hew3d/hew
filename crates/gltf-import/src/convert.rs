@@ -86,10 +86,7 @@ pub fn build_scene(
         );
         if !recipes.is_empty() {
             mesh_to_def.insert(mesh.index(), defs.len());
-            defs.push(DefRecipe {
-                name: Some(mesh_name(&mesh)),
-                meshes: recipes,
-            });
+            defs.push(DefRecipe::from_meshes(Some(mesh_name(&mesh)), recipes));
         }
     }
 

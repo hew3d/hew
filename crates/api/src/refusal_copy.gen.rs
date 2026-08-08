@@ -237,8 +237,14 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "The selection has nothing visible to transform — everything in it is hidden or empty. Unhide its contents, or select something visible."
         }
         "EmptyComponent" => "Select at least one object to turn into a component.",
-        "NestedComponentUnsupported" => {
-            "A component can't contain another component yet. Explode the inner instance first, then try again."
+        "ComponentCycle" => {
+            "Placing that instance here would make a component contain itself, directly or through another component. Pick a different definition, or explode/make unique the instance that closes the loop."
+        }
+        "ComponentDepthExceeded" => {
+            "That would nest components deeper than Hew supports. Flatten one of the levels — explode an instance, or make it unique — before placing this one."
+        }
+        "ComponentExpansionExceeded" => {
+            "That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again."
         }
         "CannotExplodeReflected" => {
             "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
@@ -269,7 +275,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "This instance is scaled unevenly across its axes, so a single typed distance can't map onto it without ambiguity. Drag to the exact size instead of typing a length."
         }
         "ExplodeSessionOpen" => {
-            "Another component is already open for editing. Close it (Escape, or double-click outside) before opening another, or before saving."
+            "This component is already open for editing further out. Step back out to it (Escape) instead of opening it again — and close the editor before saving."
         }
         "ExplodeSessionNotOpen" => "No component is currently open for editing.",
         "ExplodeSessionPoseUnsupported" => {
@@ -283,6 +289,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "ExplodeSessionNestedGroup" => {
             "This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one."
+        }
+        "NestedComponentInContext" => {
+            "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
         }
         "NothingToUndo" => "Nothing to undo.",
         "NothingToRedo" => "Nothing to redo.",

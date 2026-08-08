@@ -649,7 +649,7 @@ describe('ScaleTool — setEditContext aborts an armed gesture on a genuine chan
     const instanceGroup = new THREE.Group()
     instanceGroup.name = `Instance_${instance}`
     const memberMesh = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 1))
-    memberMesh.name = `InstanceFace_${instance}_${member}`
+    memberMesh.name = `InstanceFace_${instance}_${member}_0`
     memberMesh.position.set(1, 1, 0.5)
     instanceGroup.add(memberMesh)
     const { tool, wasmScene } = makeTool(

@@ -719,12 +719,19 @@ pub fn entity_bbox(ctx: &Ctx, entity: &EntityRef) -> Option<(Point3, Point3)> {
         }
         EntityRef::Instance(id) => instance_bbox(ctx, *id),
         EntityRef::Component(id) => {
-            let members = ctx.doc.def_members(*id)?;
-            let boxes: Vec<(Point3, Point3)> = members
-                .iter()
-                .filter_map(|&o| {
+            // Nested members included: every leaf placement in def-local
+            // space, at its composed local pose.
+            let boxes: Vec<(Point3, Point3)> = ctx
+                .doc
+                .expanded_def_placements(*id)
+                .into_iter()
+                .filter_map(|(o, local)| {
                     let obj = ctx.doc.object(o)?;
-                    geom::bbox(obj.vertices().values().map(|v| v.position))
+                    geom::bbox(
+                        obj.vertices()
+                            .values()
+                            .map(|v| local.apply_point(v.position)),
+                    )
                 })
                 .collect();
             merge_boxes(boxes)
@@ -745,8 +752,11 @@ pub fn node_bbox(ctx: &Ctx, node: kernel::NodeId) -> Option<(Point3, Point3)> {
 fn instance_bbox(ctx: &Ctx, id: kernel::InstanceId) -> Option<(Point3, Point3)> {
     let def = ctx.doc.instance_def(id)?;
     let pose = ctx.doc.instance_pose(id)?;
-    let members = ctx.doc.def_members(def)?;
-    let points = members.iter().flat_map(|&o| {
+    // Nested members included: leaf placements compose their def-local
+    // pose with this instance's own.
+    let placements = ctx.doc.expanded_def_placements(def);
+    let points = placements.into_iter().flat_map(move |(o, local)| {
+        let composed = local.then(&pose);
         ctx.doc
             .object(o)
             .into_iter()
@@ -756,7 +766,7 @@ fn instance_bbox(ctx: &Ctx, id: kernel::InstanceId) -> Option<(Point3, Point3)> 
                     .map(|v| v.position)
                     .collect::<Vec<_>>()
             })
-            .map(move |p| pose.apply_point(p))
+            .map(move |p| composed.apply_point(p))
     });
     geom::bbox(points)
 }

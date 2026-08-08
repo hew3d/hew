@@ -96,7 +96,7 @@ pub fn parse_dae(dae_bytes: &[u8], images: &ImageMap) -> Result<DaeScene, DaeErr
                 .map(decode_meta)
                 .and_then(|m| m.name)
                 .or_else(|| node.id.clone());
-            defs.push(kernel::DefRecipe { name, meshes });
+            defs.push(kernel::DefRecipe::from_meshes(name, meshes));
             lib_node_to_def_idx.insert(node_id.clone(), def_idx);
         }
     }

@@ -179,6 +179,83 @@ export function DocumentTree({
     }
   })
 
+  // Session-stack reveal: scroll the row for the frame that just opened (the
+  // stack grew) or the node that just closed (the stack shrank) into view —
+  // the same "stranded scroll position" bug as the primary-selection case
+  // above, on the session-frame axis instead (playtest: entering a component
+  // re-roots the tree far from wherever the scroll happened to sit; leaving
+  // does the reverse, landing back on rows that no longer show anything
+  // "editing"). This needs its OWN target rather than reusing
+  // `primaryKey`/`selectedRowRef`: App.tsx's `handleSessionChange` clears
+  // `selectedIds` right at a session boundary (opening or closing always
+  // changes which frame is innermost), so by the time `sessionStack` here
+  // reflects the change, `selectedIds` has already gone empty and carries no
+  // information about which row to reveal.
+  //
+  // `sessionRevealKey` names the target row:
+  //   - grow (open — including drilling ONE level deeper while already
+  //     inside a session; same shape, one more frame appended): tagged
+  //     `frame:<nodeKey>` and matched against the just-opened frame's HEADER
+  //     row below (the synthetic "editing" row from `sessionStack.map`), not
+  //     a first-member row. The header always renders immediately, even for
+  //     a frame with no live members yet, and sits directly above its
+  //     members, so revealing it brings the members into view too; a
+  //     first-member target would need special-casing an empty frame.
+  //   - shrink (close): tagged `node:<nodeKey>` and matched against the
+  //     closed frame's own node once it reappears as an ordinary row — a
+  //     `topNodes` entry, or a member of whichever frame is now innermost.
+  //     Either way it renders unconditionally, never behind a COLLAPSED
+  //     plain group's expand toggle: every node a session can be opened on
+  //     got there with its whole ancestor chain already open, either as
+  //     session frames themselves or as members of one (both this
+  //     component's entry convergence and the viewport's own one-level-at-
+  //     a-time double click only ever open a session whose parent chain is
+  //     already open) — so no ancestor auto-expand is needed here the way
+  //     `ancestorGroupKeys` below provides it for selection.
+  // A stack change that is neither a clean grow-by-append nor a clean
+  // shrink-by-truncation (an undo/redo resync can replace the whole stack at
+  // once — see `App.tsx`'s `handleSessionChange`) doesn't name a single row
+  // that "moved" — leave the previous target alone rather than guess wrong.
+  //
+  // Diffed here, during render, against the LAST stack this component
+  // actually rendered (`prevSessionStackKeys` is STATE, not a ref — calling
+  // `setState` conditionally, straight in the render body, is the React-
+  // blessed way to derive state from a prop change: it lets the freshly
+  // computed key take effect in the SAME render pass that first mounts the
+  // target row, rather than one render late).
+  const [prevSessionStackKeys, setPrevSessionStackKeys] = useState<string[]>([])
+  const [sessionRevealKey, setSessionRevealKey] = useState<string | null>(null)
+  const nextSessionStackKeys = sessionStack.map((f) => nodeKey(f.node))
+  const sessionStackUnchanged =
+    nextSessionStackKeys.length === prevSessionStackKeys.length &&
+    nextSessionStackKeys.every((k, i) => k === prevSessionStackKeys[i])
+  if (!sessionStackUnchanged) {
+    const grew = nextSessionStackKeys.length > prevSessionStackKeys.length &&
+      prevSessionStackKeys.every((k, i) => k === nextSessionStackKeys[i])
+    const shrank = nextSessionStackKeys.length < prevSessionStackKeys.length &&
+      nextSessionStackKeys.every((k, i) => k === prevSessionStackKeys[i])
+    setPrevSessionStackKeys(nextSessionStackKeys)
+    if (grew) {
+      setSessionRevealKey(`frame:${nextSessionStackKeys[nextSessionStackKeys.length - 1]}`)
+    } else if (shrank) {
+      setSessionRevealKey(`node:${prevSessionStackKeys[nextSessionStackKeys.length]}`)
+    }
+  }
+  const sessionRevealRowRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (sessionRevealKey === null) return
+    // Same retry-until-mounted shape as the primary-selection effect above,
+    // for the rare case the target row isn't mounted on this exact pass yet.
+    const el = sessionRevealRowRef.current
+    if (el === null) return
+    // Optional call, not a plain invocation: this fires on every session
+    // open/close, including in App-level tests that exercise the session
+    // stack without caring about scroll position and so never polyfill
+    // jsdom's missing `scrollIntoView` the way the panel's own tests do.
+    el.scrollIntoView?.({ block: 'nearest' })
+    setSessionRevealKey(null)
+  })
+
   // Compute the union of group ancestor keys over EVERY selected node so
   // those groups can be auto-expanded when they're collapsed. Walking only
   // the primary's chain would leave the rest of a multi-selection (marquee,
@@ -334,6 +411,7 @@ export function DocumentTree({
             active
             dimmed={false}
             indent={i}
+            rowRef={sessionRevealKey === `frame:${nodeKey(frame.node)}` ? sessionRevealRowRef : undefined}
             onClick={() => {}}
           />
         ))}
@@ -359,6 +437,8 @@ export function DocumentTree({
             isSelected={isSelected}
             primaryKey={primaryKey}
             selectedRowRef={selectedRowRef}
+            sessionRevealKey={sessionRevealKey}
+            sessionRevealRowRef={sessionRevealRowRef}
             ancestorGroupKeys={ancestorGroupKeys}
             hiddenKeys={hiddenKeys}
             onToggleHidden={onToggleHidden}
@@ -388,6 +468,8 @@ export function DocumentTree({
               isSelected={isSelected}
               primaryKey={primaryKey}
               selectedRowRef={selectedRowRef}
+              sessionRevealKey={sessionRevealKey}
+              sessionRevealRowRef={sessionRevealRowRef}
               ancestorGroupKeys={ancestorGroupKeys}
               hiddenKeys={hiddenKeys}
               onToggleHidden={onToggleHidden}
@@ -430,6 +512,8 @@ function NodeRow({
   isSelected,
   primaryKey,
   selectedRowRef,
+  sessionRevealKey,
+  sessionRevealRowRef,
   ancestorGroupKeys,
   hiddenKeys,
   onToggleHidden,
@@ -450,6 +534,12 @@ function NodeRow({
   isSelected: (n: NodeRef) => boolean
   primaryKey: string | null
   selectedRowRef: React.RefObject<HTMLDivElement>
+  /** Session-stack reveal target (see the parent component's comment where
+   *  it's computed) — `` `node:${nodeKey(node)}` `` when THIS row is the
+   *  node a just-closed session frame returned to. `null` when no reveal is
+   *  pending. */
+  sessionRevealKey: string | null
+  sessionRevealRowRef: React.RefObject<HTMLDivElement>
   ancestorGroupKeys: Set<string>
   hiddenKeys: Set<string>
   onToggleHidden: (node: NodeRef) => void
@@ -477,6 +567,14 @@ function NodeRow({
     pathEntry.kind === node.kind && pathEntry.id === node.id
   const dimmed = isTreeRowDimmed(fullPath, node, depth)
   const hidden = hiddenKeys.has(nodeKey(node))
+  // Whether THIS row is the node a just-closed session frame returned to
+  // (see the parent component's `sessionRevealKey` comment) — mutually
+  // exclusive with `isPrimary` in practice (a session boundary always clears
+  // the selection first), but `isPrimary` still wins the `rowRef` slot below
+  // on the off chance both line up, matching how the two mechanisms are
+  // otherwise independent.
+  const isSessionRevealTarget = sessionRevealKey === `node:${nodeKey(node)}`
+  const rowRef = isPrimary ? selectedRowRef : isSessionRevealTarget ? sessionRevealRowRef : undefined
 
   if (node.kind === 'object') {
     const watertight = watertightMap.get(node.id) ?? true
@@ -490,7 +588,7 @@ function NodeRow({
         dimmed={dimmed}
         hidden={hidden}
         indent={depth}
-        rowRef={isPrimary ? selectedRowRef : undefined}
+        rowRef={rowRef}
         onClick={(additive) => onSelect(node, additive)}
         onDoubleClick={() => onEnterContext(node)}
         onToggleHidden={() => onToggleHidden(node)}
@@ -511,7 +609,7 @@ function NodeRow({
         dimmed={dimmed}
         hidden={hidden}
         indent={depth}
-        rowRef={isPrimary ? selectedRowRef : undefined}
+        rowRef={rowRef}
         onClick={(additive) => onSelect(node, additive)}
         onDoubleClick={() => onEnterContext(node)}
         onToggleHidden={() => onToggleHidden(node)}
@@ -541,7 +639,7 @@ function NodeRow({
         isGroup
         expanded={expanded}
         onToggleExpand={() => setExpanded((e) => !e)}
-        rowRef={isPrimary ? selectedRowRef : undefined}
+        rowRef={rowRef}
         onClick={(additive) => onSelect(node, additive)}
         onDoubleClick={() => onEnterContext(node)}
         onToggleHidden={() => onToggleHidden(node)}
@@ -559,6 +657,8 @@ function NodeRow({
           isSelected={isSelected}
           primaryKey={primaryKey}
           selectedRowRef={selectedRowRef}
+          sessionRevealKey={sessionRevealKey}
+          sessionRevealRowRef={sessionRevealRowRef}
           ancestorGroupKeys={ancestorGroupKeys}
           hiddenKeys={hiddenKeys}
           onToggleHidden={onToggleHidden}

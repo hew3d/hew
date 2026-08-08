@@ -26,7 +26,7 @@ Delete everything inside an open group and step out, and the group goes with it 
 
 A component is shared geometry: one **definition**, any number of placed **instances**. Every instance has its own position, rotation, scale, and mirroring, but they all reference the same shape. Model one screw, place it eight times; fix the thread once, all eight update.
 
-- **Create a definition:** select an object or group and choose **Edit ▸ Make Component**, or click **Make Component** on the contextual dock. The selection becomes the definition's geometry, and what you had selected is replaced by the first instance.
+- **Create a definition:** select one or more objects, groups, or component instances and choose **Edit ▸ Make Component**, or click **Make Component** on the contextual dock. The selection becomes the definition's members — a selected group stays whole, and a selected instance nests its definition inside the new one ([Nesting](#nesting)) — and what you had selected is replaced by the first instance.
 - **Place more instances:** select an instance and choose **Edit ▸ Place Copy**; the new instance lands just beside the original, ready to Move into position. Or Move an instance with copy mode on (tap `Option`/`Alt`) to drop copies where you want them — and type `x5` right after a copy to place a whole row ([Move](/learn/moving-and-transforming/)).
 - **Edit the definition:** double-click any instance. Every other placement of the component disappears for the moment — there's only one copy of the shape, and it's yours to edit — while the members themselves behave exactly like ordinary top-level geometry. Every tool works on them, not just Push/Pull and Paint: draw new geometry (on a member's face, or on any plane — press an arrow key to lock it, exactly like drawing at the top level), Push/Pull, Follow Me, Union/Subtract/Intersect between two members, Slice, and Move/Rotate/Scale on an individual member. Anything you draw while you're in there becomes part of the component too. Step out (`Esc`, or double-click outside the component) and every placement reappears showing the change, wherever it's placed, however it's rotated, scaled, or mirrored — there's still only one shape underneath.
 
@@ -60,6 +60,12 @@ Two commands take an instance out of the shared-definition world, both available
 
 Groups appear as folders you can expand; component instances get their own hexagon icon. Double-clicking a row in the Outliner opens every level between the top and that row in one step — group, nested group, instance, whatever the chain is — landing in the same state you'd reach clicking through the viewport one level at a time, with each level on the breadcrumb marked "editing". The breadcrumb at the top of the Outliner shows where you are and offers one-click exits.
 
-## Current limits
+## Nesting
 
-Component definitions can't yet contain other components. That's planned.
+A component definition can contain other components (and groups) as members, the same way it contains objects — place a wheel component inside a car component, and the car definition holds four wheel instances alongside its own geometry. Make Component builds this from a selection that includes instances: a selected group stays whole rather than being flattened, and a selected instance becomes a nested member instead of being refused.
+
+Editing drills down the same way it does for groups. Double-click a component to open it; inside, a nested component instance is an ordinary instance, so double-clicking it opens it too, one more level on the breadcrumb. `Esc` steps back out one level at a time, the same order you drilled in. Placing a new instance while you're editing another — from the Library, or with Make Component on something you just drew — folds that instance into the definition you're editing once you step out. That's the everyday way an assembly gets built: open the car, place a wheel four times, step out.
+
+A definition can't contain itself, directly or through some chain of nested definitions, and nesting is bounded to 64 levels deep — both refused outright rather than silently truncated.
+
+Explode and Make Unique treat nesting differently. Exploding an assembly surfaces its nested components as ordinary instances in the right place, still sharing geometry with their own definitions. Make Unique only copies one level: the copy's own nested instances still share their inner definitions with the original, the same as SketchUp.

@@ -156,8 +156,11 @@ describe('canMakeComponent', () => {
     expect(canMakeComponent([a, g], noParent)).toBe(true)
   })
 
-  it('false when an instance is in the selection', () => {
-    expect(canMakeComponent([a, inst], noParent)).toBe(false)
+  // Nested components: a selected instance folds in as a nested member of
+  // the new definition (the kernel accepts it), so the gate must open —
+  // this used to refuse while nested definitions were unsupported.
+  it('true when an instance is in the selection (it becomes a nested member)', () => {
+    expect(canMakeComponent([a, inst], noParent)).toBe(true)
   })
 
   it('true for a single object (the common case)', () => {
@@ -168,8 +171,8 @@ describe('canMakeComponent', () => {
     expect(canMakeComponent([], noParent)).toBe(false)
   })
 
-  it('false for a single instance', () => {
-    expect(canMakeComponent([inst], noParent)).toBe(false)
+  it('true for a single instance (wrapping one component in another)', () => {
+    expect(canMakeComponent([inst], noParent)).toBe(true)
   })
 
   it('false for nodes with different parents', () => {

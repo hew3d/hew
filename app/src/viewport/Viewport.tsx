@@ -3811,13 +3811,26 @@ export default function Viewport({
      * (`runOpenExplodeSessionOrFallback`) so the entry-convergence helper
      * gets the identical fallback behavior reaching a component frame
      * through the Outliner/dock instead of a direct viewport double-click.
+     *
+     * NESTED definitions open sessions like flat ones (the kernel surfaces
+     * member groups/instances as world nodes for the session's duration —
+     * drill-down stacks LIFO frames). The one remaining nested gate is the
+     * K1/K2 FALLBACK: those in-context tools assume a flat member list, so
+     * when the kernel refuses the session for pose/grouping reasons AND the
+     * definition nests, the fallback would be silently wrong — refuse with
+     * the toast instead of entering it.
      */
     function openExplodeSessionOrFallback(instanceId: bigint, fallback: NodeRef): void {
+      const componentId = wasmScene.instance_def(instanceId)
       try {
         wasmScene.open_explode_session(instanceId)
       } catch (err) {
         const code = parseKernelErrorCode(err)
         if (code === 'ExplodeSessionPoseUnsupported' || code === 'ExplodeSessionGroupedInstance') {
+          if (componentId !== undefined && wasmScene.component_has_nested_members(componentId)) {
+            handleToast(kernelErrorMessage('NestedComponentInContext', ''), 'NestedComponentInContext')
+            return
+          }
           onEnterContextRef.current?.(fallback)
           return
         }

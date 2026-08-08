@@ -307,15 +307,16 @@ pub(crate) fn collect_export_solids(
         let Some(pose) = doc.instance_pose(instance) else {
             continue;
         };
-        let Some(members) = doc.def_members(def) else {
-            continue;
-        };
-        let flip = pose.determinant() < 0.0;
-        let vertex_order: [usize; 3] = if flip { [0, 2, 1] } else { [0, 1, 2] };
+        // Nested definitions expand recursively: one export part per leaf
+        // placement, each at its fully composed pose.
+        let placements = doc.expanded_def_placements(def);
         let inst_name = doc.instance_name(instance).map(str::to_string);
-        let multi_member = members.len() > 1;
+        let multi_member = placements.len() > 1;
 
-        for member in members {
+        for (member, local) in placements {
+            let pose = local.then(&pose);
+            let flip = pose.determinant() < 0.0;
+            let vertex_order: [usize; 3] = if flip { [0, 2, 1] } else { [0, 1, 2] };
             if solids_only && !doc.object_solid(member) {
                 continue;
             }
@@ -425,11 +426,9 @@ pub fn export_stl(
         let Some(pose) = doc.instance_pose(instance) else {
             continue;
         };
-        let Some(members) = doc.def_members(def) else {
-            continue;
-        };
-        let flip = pose.determinant() < 0.0;
-        for member in members {
+        for (member, local) in doc.expanded_def_placements(def) {
+            let pose = local.then(&pose);
+            let flip = pose.determinant() < 0.0;
             if solids_only && !doc.object_solid(member) {
                 continue;
             }
