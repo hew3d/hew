@@ -207,5 +207,23 @@
       automerge: false,
       labels: ['needs-desktop-check'],
     },
+    // The Desktop E2E lane's own Node pin (NODE_VERSION in
+    // desktop-e2e.yml — read that comment for why it exists at all).
+    //
+    // Held to the Node 24 line: WebdriverIO's bundled undici 6 cannot talk to
+    // Node 26.1+'s built-in undici 8.9, so letting this follow the repository's
+    // `.node-version` forward would simply re-break the lane. `matchManagers`
+    // scopes this to the custom manager, so the repository-wide `.node-version`
+    // — read by the `nodenv` manager, and also called "node" — is untouched and
+    // stays free to move. No automerge, for the same reason as everything else
+    // in this block: no pull request ever exercises the lane it affects.
+    {
+      matchManagers: ['custom.regex'],
+      matchPackageNames: ['node'],
+      allowedVersions: '<25',
+      groupName: 'desktop-e2e node',
+      automerge: false,
+      labels: ['needs-desktop-check'],
+    },
   ],
 }

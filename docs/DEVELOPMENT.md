@@ -430,6 +430,7 @@ second place to keep in sync.
 |---|---|
 | Rust toolchain | `rust-toolchain.toml` |
 | Node.js | `.node-version` |
+| Node.js, Desktop E2E lane only | `NODE_VERSION` in `.github/workflows/desktop-e2e.yml` |
 | pnpm | `packageManager` in the root `package.json` |
 | wasm-pack | `scripts/install-wasm-pack.sh` |
 | tauri-driver | `.github/workflows/desktop-e2e.yml` |
@@ -443,6 +444,13 @@ trailing comment. A tag is mutable: `@v4` is whatever its owner last pointed
 it at, which is a supply-chain hole in a workflow that holds release signing
 keys.
 
+There is exactly one deliberate exception to "one version of a thing": the
+Desktop E2E workflow runs an older Node than the rest of the repository,
+because WebdriverIO calls its own bundled undici with objects from Node's
+built-in one and the two have diverged. That file carries the measurements and
+the condition for deleting the exception; nothing else should acquire a second
+pin without the same treatment.
+
 **How they get bumped.** [Renovate](https://docs.renovatebot.com) is
 configured in `.github/renovate.json5`; the file is commented in full, so read
 it rather than this section for the specifics. The shape:
@@ -451,13 +459,14 @@ it rather than this section for the specifics. The shape:
   and merge themselves once CI is green. Majors come one at a time and wait
   for a person.
 - Security advisories ignore the schedule and open immediately.
-- Three groups never automerge, because a green CI run is not evidence they
-  are good: **three.js** and **Playwright**, whose effect on rendering is only
-  visible to the visual-goldens lane, which is non-blocking and specific to
-  the pinned runner GPU; and **Tauri**, because the Desktop E2E workflow runs
-  only on push to `main`, never on a pull request. Run
+- Four groups never automerge, because a green CI run is not evidence they are
+  good. **three.js** and **Playwright**, whose effect on rendering is visible
+  only to the visual-goldens lane — non-blocking, and specific to the pinned
+  runner GPU. **Tauri**, and the **Desktop E2E lane's own Node pin**, because
+  the Desktop E2E workflow runs only on push to `main` and never on a pull
+  request, so no PR can exercise what they affect. Run
   `pnpm --dir app run e2e:visual` (or the Regen Visual Goldens workflow) after
-  a renderer bump, and the Desktop E2E workflow after a Tauri one.
+  a renderer bump, and the Desktop E2E workflow after one of the other two.
 
 That exclusion list is the honest limit of the automation. Everything else in
 it is safe only to the degree the blocking gate is, which is the argument for

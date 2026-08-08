@@ -24,6 +24,31 @@ env:
   # renovate: datasource=crates-io depName=tauri-driver
   TAURI_DRIVER_VERSION: '2.0.6'
 
+  # The ONE place in this repository that does not take its Node from
+  # `.node-version`, and the constraint is upstream's rather than ours.
+  #
+  # WebdriverIO's `webdriver` package imports `fetch` from its own bundled
+  # undici — it pins `^6.27.0`, still true on the current 9.30.1 — but hands
+  # that fetch `Headers` and `AbortSignal` objects built by Node's BUILT-IN
+  # undici. The two copies have diverged far enough that undici 6 no longer
+  # recognises undici 8.9's objects, so the session POST is rejected
+  # client-side with UND_ERR_INVALID_ARG before a byte reaches tauri-driver.
+  # Measured against a stub WebDriver endpoint, so the driver is not involved:
+  #
+  #   Node 24.19.0 (built-in undici 7.29.0)   session created
+  #   Node 26.0.0  (built-in undici 8.0.2)    session created
+  #   Node 26.7.0  (built-in undici 8.9.0)    UND_ERR_INVALID_ARG
+  #
+  # Every other lane — verify, the site build, Cloudflare Pages — passes on
+  # 26.7.0, so pinning the whole repository back to 24 to suit one test
+  # harness would be the tail wagging the dog. Renovate holds this to the 24
+  # line; see the matching rule in .github/renovate.json5.
+  #
+  # DELETE this, and restore `node-version-file: .node-version` below, once
+  # WebdriverIO stops mixing its own undici with Node's.
+  # renovate: datasource=node-version depName=node
+  NODE_VERSION: '24.19.0'
+
 jobs:
   desktop-e2e:
     runs-on: ubuntu-latest
@@ -75,10 +100,11 @@ jobs:
       - name: Install wasm-pack (pinned)
         run: scripts/install-wasm-pack.sh
 
+      # NOT .node-version — see the NODE_VERSION comment at the top of this file.
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version-file: .node-version
+          node-version: ${{ env.NODE_VERSION }}
 
       # pnpm's version comes from `packageManager` in the root package.json.
       - name: Setup pnpm
