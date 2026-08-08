@@ -3409,7 +3409,7 @@ impl Document {
                     NodeId::Object(oid) => {
                         doc.objects[*oid].owner = match doc.objects[*oid].owner {
                             ObjectOwner::World { .. } => ObjectOwner::World { parent: Some(gid) },
-                            def @ ObjectOwner::Definition { def: _, .. } => def,
+                            def @ ObjectOwner::Definition { .. } => def,
                         };
                     }
                     NodeId::Group(child_gid) => {
