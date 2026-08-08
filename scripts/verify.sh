@@ -6,6 +6,26 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # Change to repo root
 cd "$(dirname "$0")/.."
 
+# ---------------------------------------------------------------------------
+# Toolchain drift guard.
+#
+# rustup enforces rust-toolchain.toml by itself, and pnpm enforces the
+# `packageManager` field by itself, but nothing enforces wasm-pack — and it
+# builds the kernel this gate then tests. A local wasm-pack that differs from
+# the pinned one means this gate is not testing what CI will. Offline: a
+# version string comparison, no network.
+# ---------------------------------------------------------------------------
+echo "=== wasm-pack version (pinned) ==="
+WANT_WASM_PACK="$(sed -n 's/^WASM_PACK_VERSION="\(.*\)"$/\1/p' scripts/install-wasm-pack.sh)"
+HAVE_WASM_PACK="$(wasm-pack --version 2>/dev/null | awk '{print $2}' || true)"
+if [ "$HAVE_WASM_PACK" != "$WANT_WASM_PACK" ]; then
+  echo "verify: FAILED — wasm-pack is '${HAVE_WASM_PACK:-not installed}', pinned is '$WANT_WASM_PACK'."
+  echo "A different wasm-pack builds a different kernel than CI will. Fix with:"
+  echo "  scripts/install-wasm-pack.sh"
+  exit 1
+fi
+echo "wasm-pack $HAVE_WASM_PACK"
+
 echo "=== cargo fmt --check ==="
 cargo fmt --check
 

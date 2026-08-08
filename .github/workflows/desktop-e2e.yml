@@ -7,6 +7,11 @@
 # only as a POST-MERGE gate on `main` — not on every PR, which would tax each
 # push with a desktop build — plus manual workflow_dispatch (Actions tab ▸
 # Desktop E2E ▸ Run workflow) to exercise a branch when a change warrants it.
+#
+# Because it does not run on pull requests, a Tauri dependency bump would
+# otherwise automerge on a `verify` run that never launched the desktop
+# binary. Tauri is therefore excluded from Renovate automerge and reviewed by
+# hand (.github/renovate.json5).
 
 name: Desktop E2E
 
@@ -15,12 +20,16 @@ on:
   push:
     branches: [main]
 
+env:
+  # renovate: datasource=crates-io depName=tauri-driver
+  TAURI_DRIVER_VERSION: '2.0.6'
+
 jobs:
   desktop-e2e:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: System libs (Tauri + Xvfb)
         run: |
@@ -41,35 +50,48 @@ jobs:
             || sudo apt-get install -y --no-install-recommends webkit2gtk-driver
           command -v WebKitWebDriver
 
-      # rustup honors rust-toolchain.toml on the first cargo invocation.
+      # rustup honors rust-toolchain.toml — a PINNED version.
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: |
             .
             shells/tauri/src-tauri
 
       # tauri-driver is a cargo-installed binary, which rust-cache does not
-      # cover — cache it separately so warm runs skip the compile.
+      # cover — cache it separately so warm runs skip the compile. The pinned
+      # version is part of the key: without it, a version bump would restore
+      # the previously compiled binary and the `command -v` guard below would
+      # skip the install, silently keeping the old driver forever.
       - name: Cache tauri-driver
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/tauri-driver
-          key: tauri-driver-${{ runner.os }}
+          key: tauri-driver-${{ runner.os }}-${{ env.TAURI_DRIVER_VERSION }}
 
-      - name: Install tauri-driver
-        run: command -v tauri-driver || cargo install tauri-driver --locked
+      - name: Install tauri-driver (pinned)
+        run: command -v tauri-driver || cargo install tauri-driver --version "$TAURI_DRIVER_VERSION" --locked
 
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install wasm-pack (pinned)
+        run: scripts/install-wasm-pack.sh
 
-      - name: Enable pnpm
-        run: corepack enable && corepack prepare pnpm@11.8.0 --activate
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .node-version
+
+      # pnpm's version comes from `packageManager` in the root package.json.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      # Ask pnpm where its store is rather than assuming — see ci.yml.
+      - name: Locate pnpm store
+        run: echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
 
       - name: Cache pnpm store
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.local/share/pnpm/store
+          path: ${{ env.PNPM_STORE }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             pnpm-${{ runner.os }}-

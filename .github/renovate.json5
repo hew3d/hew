@@ -1,0 +1,211 @@
+// Renovate — dependency and toolchain automation for Hew.
+//
+// The problem this solves: Cargo.lock and pnpm-lock.yaml are committed and CI
+// installs with --frozen-lockfile, so every LIBRARY was already pinned and
+// nothing ever bumped it — while the TOOLCHAINS (the Rust channel, the
+// runner's Node, wasm-pack) floated free. That is backwards, and it bit us:
+// rust-toolchain.toml said `channel = "stable"`, CI's stable drifted months
+// ahead of a developer machine's, and a clippy lint that could not fire
+// locally failed CI.
+//
+// The inverse is what's configured here. Everything is pinned explicitly,
+// including the toolchains, and Renovate proposes each bump as its own PR that
+// the full gate proves before it lands. A bad update is one commit to revert.
+//
+// See docs/DEVELOPMENT.md §8 for the human-facing summary.
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+
+  extends: [
+    'config:recommended',
+    ':dependencyDashboard',
+    'helpers:pinGitHubActionDigests',
+  ],
+
+  timezone: 'America/Phoenix',
+  // One batch a week, Monday morning. Security fixes ignore this (below).
+  schedule: ['* 4-9 * * 1'],
+  prConcurrentLimit: 8,
+  prHourlyLimit: 0,
+  rebaseWhen: 'behind-base-branch',
+  configMigration: true,
+
+  // main's history is deliberately linear — never let a merge commit in.
+  automergeStrategy: 'squash',
+
+  // GitHub-native auto-merge requires a protected branch with required status
+  // checks. `main` has neither (deliberately — the maintainer pushes to it
+  // directly), and native auto-merge on an UNPROTECTED branch merges
+  // immediately, before CI has run. Renovate's own automerge polls the
+  // branch's check status and merges only once it is green, which is the
+  // behavior this policy assumes everywhere below. Do not flip this to true
+  // without adding a ruleset that requires the `verify` check.
+  platformAutomerge: false,
+
+  // Longer than pnpm's own minimumReleaseAge (which defaults to 1 day in
+  // pnpm 11 — see pnpm-workspace.yaml), so a PR is never opened against a
+  // release that `pnpm install` would then refuse to fetch. It also means a
+  // hijacked release has a window to be yanked before anything automerges it.
+  minimumReleaseAge: '3 days',
+
+  // CONTRIBUTING.md requires a DCO sign-off trailer on every commit.
+  commitBody: 'Signed-off-by: renovate[bot] <29139614+renovate[bot]@users.noreply.github.com>',
+
+  // Vendored third-party code is deliberately exempt from Hew's clippy bar and
+  // is updated by hand when it is updated at all (see the workspace `exclude`
+  // in Cargo.toml); wasm-pack output is generated, not authored.
+  ignorePaths: [
+    'crates/vendor/**',
+    'app/src/wasm/pkg/**',
+    'tools/replay-runner/pkg-node/**',
+  ],
+
+  // Direct-dependency PRs do not move transitive pins. This refreshes both
+  // Cargo.lock and pnpm-lock.yaml wholesale, which is where the bulk of a
+  // stale lockfile actually lives.
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ['* 4-9 * * 1'],
+    automerge: true,
+  },
+
+  vulnerabilityAlerts: {
+    enabled: true,
+    schedule: ['at any time'], // ignores the weekly window
+    minimumReleaseAge: null, // and ignores the cooldown
+    labels: ['security'],
+    automerge: false,
+  },
+  // GitHub's advisory feed plus OSV, which carries RustSec entries that have
+  // not been mirrored into GitHub's database yet.
+  osvVulnerabilityAlerts: true,
+
+  // wasm-pack, tauri-driver, and binaryen are installed by version-pinned
+  // shell steps rather than by a manager Renovate knows about. The
+  // `# renovate:` comment above each *_VERSION assignment is what makes them
+  // visible to it; `versioning=` is optional and only needed where the
+  // upstream tags are not semver (binaryen ships `version_130`).
+  customManagers: [
+    {
+      customType: 'regex',
+      managerFilePatterns: [
+        '/^\\.github/workflows/[^/]+\\.yml$/',
+        '/^scripts/install-wasm-pack\\.sh$/',
+      ],
+      matchStrings: [
+        '# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\s+\\w+_VERSION[:=]\\s*[\'"]?(?<currentValue>[^\'"\\s]+)[\'"]?',
+      ],
+    },
+  ],
+
+  packageRules: [
+    // ---- grouping: one PR per ecosystem for patch + minor ----
+    {
+      matchManagers: ['cargo'],
+      matchUpdateTypes: ['patch', 'minor'],
+      groupName: 'cargo (patch & minor)',
+    },
+    {
+      matchManagers: ['npm'],
+      matchUpdateTypes: ['patch', 'minor'],
+      groupName: 'npm (patch & minor)',
+    },
+    {
+      matchManagers: ['github-actions'],
+      matchUpdateTypes: ['patch', 'minor', 'pin', 'digest'],
+      groupName: 'github actions',
+    },
+
+    // ---- majors are never automerged, and are ungrouped by default ----
+    // (The three exclusion rules at the bottom re-group their own packages,
+    // majors included: a `three` and an `@types/three` major in the same run
+    // share one PR. That is deliberate — those two have to move together —
+    // but it does mean "one major per PR" is the default, not a guarantee.)
+    {
+      matchUpdateTypes: ['major'],
+      groupName: null,
+      automerge: false,
+      labels: ['major'],
+      minimumReleaseAge: '14 days',
+    },
+
+    // ---- automerge everything the gate can actually prove ----
+    {
+      matchUpdateTypes: ['patch', 'minor', 'pin', 'digest'],
+      automerge: true,
+    },
+
+    // Toolchains get their own PR — they change the gate itself, so they
+    // should not ride in with a pile of library bumps — but they still
+    // automerge on green. A PINNED rust-toolchain.toml is auto-installed by
+    // rustup on the next cargo command, so `main` and every developer machine
+    // move together; that is the whole point. If a new Rust minor ships a
+    // lint that fires, the PR simply goes red and waits for a human.
+    //
+    // One toolchain is deliberately NOT in this lane: tauri-driver is caught
+    // by the `/^tauri/` exclusion at the bottom of this list and lands in the
+    // 'tauri' group instead. That is correct rather than accidental — it
+    // drives the Desktop E2E suite, which never runs on a pull request, so a
+    // green `verify` proves nothing about it.
+    {
+      matchManagers: ['rust-toolchain', 'nodenv'],
+      matchUpdateTypes: ['patch', 'minor'],
+      groupName: null,
+      automerge: true,
+      labels: ['toolchain'],
+    },
+    {
+      matchDepTypes: ['packageManager'],
+      matchUpdateTypes: ['patch', 'minor'],
+      groupName: null,
+      automerge: true,
+      labels: ['toolchain'],
+    },
+    {
+      matchManagers: ['custom.regex'],
+      matchUpdateTypes: ['patch', 'minor'],
+      groupName: null,
+      automerge: true,
+      labels: ['toolchain'],
+    },
+
+    // ---- automerge exclusions (later rules win) ----
+    //
+    // These are the honest limit of what this automation can promise. Each of
+    // them can break something no BLOCKING lane of the gate looks at, so a
+    // green CI run is not evidence the update is good.
+
+    // The visual-goldens lane is continue-on-error (non-blocking) and its
+    // output is specific to the pinned runner GPU, so a renderer regression
+    // would not turn CI red. A three.js bump gets a human eye, every time.
+    {
+      matchPackageNames: ['three', '@types/three'],
+      groupName: 'three.js',
+      automerge: false,
+      labels: ['needs-visual-check'],
+    },
+    // A Playwright bump ships a new pinned Chromium, hence a new bundled
+    // ANGLE-SwiftShader, hence shifted goldens — the same blind spot.
+    {
+      matchPackageNames: ['@playwright/test', 'playwright'],
+      groupName: 'playwright',
+      automerge: false,
+      labels: ['needs-visual-check'],
+    },
+    // The Desktop E2E workflow runs only on push to `main`, never on a pull
+    // request, so a Tauri bump would automerge on a `verify` run that never
+    // launched the desktop binary and only fail AFTER landing.
+    //
+    // `/^tauri/` is a prefix regex and is meant to be read as one: beyond the
+    // `tauri`/`tauri-build`/`tauri-plugin-*` crates it also catches
+    // tauri-apps/tauri-action in the release workflow and tauri-driver from
+    // the custom manager. All of them are invisible to the pull-request gate
+    // for the same reason, so all of them want the same handling.
+    {
+      matchPackageNames: ['/^tauri/', '@tauri-apps/**'],
+      groupName: 'tauri',
+      automerge: false,
+      labels: ['needs-desktop-check'],
+    },
+  ],
+}

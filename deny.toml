@@ -1,0 +1,128 @@
+# cargo-deny — what may enter Hew's Rust dependency chain.
+#
+# Renovate keeps dependencies CURRENT; this file governs whether they are
+# ADMISSIBLE at all. The two are complements: an automated bump that pulls in a
+# GPL-incompatible license, an unvetted git source, or a crate with an open
+# advisory should fail a check rather than ride in on a green build.
+#
+# Run over both cargo workspaces (the root workspace and the deliberately
+# separate Tauri host crate) by .github/workflows/audit.yml, and locally with:
+#
+#   cargo deny check
+#   cargo deny --manifest-path shells/tauri/src-tauri/Cargo.toml check
+#
+# The allow-lists below are the union of what both trees actually resolve to
+# today, not a speculative superset. Adding a license here is a deliberate act.
+
+[graph]
+# Scan the widest graph, so an optional feature cannot smuggle a crate past
+# the checks below. This also makes a bare `cargo deny check` locally identical
+# to what .github/workflows/audit.yml runs, which is the same local/CI parity
+# the toolchain pins exist to guarantee.
+all-features = true
+
+# ---------------------------------------------------------------------------
+# Advisories (RustSec). GitHub's Dependabot alerts and Renovate's
+# vulnerabilityAlerts cover the same ground for crates GitHub has ingested;
+# this lane is the one that does not depend on GitHub having done so.
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+# A yanked release is a maintainer saying "do not use this". Treat it as an
+# error rather than a warning, because lockFileMaintenance can otherwise carry
+# one forward indefinitely.
+yanked = "deny"
+# Vulnerabilities and unsoundness are fatal at any depth (cargo-deny's
+# default). "Unmaintained" is scoped to crates Hew depends on DIRECTLY.
+#
+# The distinction is about who can act. A direct dependency going unmaintained
+# is Hew's problem and should stop the build. The Tauri host tree, by contrast,
+# carries the gtk-rs GTK3 bindings — which upstream has formally stopped
+# maintaining — plus unic-*, ttf-parser, and proc-macro-error: fourteen
+# advisories, none reachable from anything written here and none fixable from
+# this repository short of Tauri moving off GTK3. Failing on those would make
+# the lane red the day it landed, and a permanently red check is one nobody
+# reads when a real finding arrives.
+unmaintained = "workspace"
+# Empty, and it should stay that way. An entry here is an admission that a
+# known vulnerability is shipping; it needs a reason string saying why it
+# cannot be fixed and what would let it be removed.
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Licenses. Hew ships under AGPL-3.0-only with a plugin exception (see LICENSE
+# and LICENSE-EXCEPTION), so the bar is: permissive, or copyleft that AGPLv3
+# can absorb. Anything else — proprietary, non-commercial, "source available",
+# or an unresolvable expression — fails here rather than at publication.
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+confidence-threshold = 0.93
+# One allow-list serves both cargo workspaces, so each run legitimately leaves
+# some entries untouched (the Tauri tree reaches ISC and LGPL; the kernel tree
+# does not). Do not let that report as a finding.
+unused-allowed-license = "allow"
+allow = [
+    # Hew's own crates.
+    "AGPL-3.0-only",
+    # OpenSKP, the clean-room .skp reader (DEVELOPMENT.md rule 7). GPLv3 is
+    # one-way compatible into an AGPLv3 work, which is the direction we need.
+    "GPL-3.0-only",
+    # Permissive, in rough order of how much of the tree they cover.
+    "MIT",
+    "Apache-2.0",
+    # target-lexicon, reached through the Tauri build stack.
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "MIT-0",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    # File-level copyleft: fine to link, and we do not modify these crates.
+    # Reaches the tree through minidom (vendored) and the CSS parsers Tauri's
+    # webview stack pulls in.
+    "MPL-2.0",
+    # r-efi (UEFI bindings, reached transitively through getrandom) offers
+    # LGPL-2.1-or-later alongside MIT/Apache-2.0.
+    "LGPL-2.1-or-later",
+]
+exceptions = []
+
+# ---------------------------------------------------------------------------
+# Bans.
+# ---------------------------------------------------------------------------
+[bans]
+# The Tauri host tree legitimately carries several major versions of the
+# windows-* and toml crates at once; deduplicating them is not ours to do.
+multiple-versions = "allow"
+# A `version = "*"` dependency is an unpinned dependency by another name.
+# Reported rather than fatal: every intra-workspace `kernel.workspace = true`
+# is a path dependency with no version, which this check counts as a wildcard,
+# and cargo-deny's `allow-wildcard-paths` escape hatch only applies to crates
+# marked `publish = false`. Making it fatal would therefore mean deciding
+# publishability for thirteen crates as a side effect of adding a lint.
+wildcards = "warn"
+allow-wildcard-paths = true
+# DEVELOPMENT.md rule 7 (the licensing wall) is an admissibility test about
+# PROVENANCE — whether anything here derives from the SketchUp SDK — and no
+# tool can decide that by inspecting a crate. What is mechanizable is the
+# shape of a violation, and that is handled by [sources] below: nothing may
+# enter this tree from anywhere but crates.io, so SDK-derived code cannot
+# arrive as a git dependency without an explicit, reviewed edit to this file.
+# This list is for named crates once such a name is known.
+deny = []
+
+# ---------------------------------------------------------------------------
+# Sources. The real enforcement point for rule 7: crates.io only, no git
+# dependencies, no alternate registries. Adding one is a deliberate,
+# reviewable change to this file rather than a line in someone's Cargo.toml.
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

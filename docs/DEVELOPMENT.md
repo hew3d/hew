@@ -11,16 +11,29 @@ Hew is a Rust workspace (the kernel and its supporting crates) plus a
 TypeScript/React application that consumes the kernel through a WASM
 binding. Building it end to end needs:
 
-- **Rust**, stable channel. The exact toolchain is pinned in
-  `rust-toolchain.toml` (`stable`, with the `clippy` and `rustfmt`
-  components and the `wasm32-unknown-unknown` target); if you use `rustup`,
-  running any `cargo` command from the repository root installs the right
-  toolchain automatically.
-- **`wasm-pack`**, to compile the kernel to WebAssembly:
+Every toolchain below is pinned to an exact version in a file in this
+repository, and CI installs from those same files. §8 covers why that is
+non-negotiable and how the pins get bumped.
+
+- **Rust.** The exact toolchain is pinned in `rust-toolchain.toml` (a specific
+  release, with the `clippy` and `rustfmt` components and the
+  `wasm32-unknown-unknown` target). If you use `rustup`, running any `cargo`
+  command from the repository root installs it automatically — so you cannot
+  accidentally compile with a different compiler than CI does.
+- **`wasm-pack`**, to compile the kernel to WebAssembly. The pinned version
+  installs with:
   ```sh
-  curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+  scripts/install-wasm-pack.sh
   ```
-- **Node.js** and **pnpm**. The UI is a pnpm workspace (`app/`, `shells/*`).
+- **Node.js**, at the version in `.node-version`. `fnm` reads that file
+  natively, as do GitHub Actions' `setup-node` and Cloudflare Pages. Two
+  common managers do not, and will silently leave you on whatever Node your
+  shell already had: plain `nvm` only looks for `.nvmrc`, so use
+  `nvm use "$(cat .node-version)"`; `asdf` needs `legacy_version_file = yes`
+  in `~/.asdfrc` before it will read it.
+- **pnpm.** The UI is a pnpm workspace (`app/`, `shells/*`). Its version lives
+  in the root `package.json`'s `packageManager` field and pnpm switches itself
+  to it, so how you install pnpm in the first place does not matter.
 - **Tauri's platform prerequisites**, if you're building the desktop shell
   (a system WebView plus the usual native build tools). See the [Tauri
   prerequisites guide](https://tauri.app/start/prerequisites/) for your OS.
@@ -395,4 +408,73 @@ recorded sessions replayable as regression tests: a reported bug's input
 stream, once captured, becomes a permanent, exact reproducer rather than a
 "works on my machine" anecdote. See `docs/DIAGNOSTICS.md` for the full
 determinism, logging, and record/replay architecture.
+
+## 8. Dependencies & toolchains
+
+Everything Hew builds with is pinned to an exact version, and a bot proposes
+each change to those pins as its own pull request.
+
+The pinning is not fussiness. `rust-toolchain.toml` used to say
+`channel = "stable"`, which resolves to a different compiler depending on when
+and where you run it — and a Clippy lint added in a newer stable failed CI on
+a change that was clean on the machine that wrote it. There was no local
+command that could have caught it. Meanwhile the actual libraries were already
+frozen: both `Cargo.lock` and `pnpm-lock.yaml` are committed and CI installs
+with `--frozen-lockfile`, so nothing moved unless someone moved it by hand,
+which nobody did. Floating toolchains and frozen libraries is exactly backwards.
+
+**Where each pin lives.** Change any of these by editing the file; there is no
+second place to keep in sync.
+
+| Pin | File |
+|---|---|
+| Rust toolchain | `rust-toolchain.toml` |
+| Node.js | `.node-version` |
+| pnpm | `packageManager` in the root `package.json` |
+| wasm-pack | `scripts/install-wasm-pack.sh` |
+| tauri-driver | `.github/workflows/desktop-e2e.yml` |
+| binaryen (wasm-opt, Windows-on-ARM only) | `.github/workflows/release.yml` |
+| GitHub Actions | commit SHAs in `.github/workflows/*.yml` |
+| Rust crates | `Cargo.lock`, `shells/tauri/src-tauri/Cargo.lock` |
+| npm packages | `pnpm-lock.yaml` |
+
+Actions are pinned to a commit SHA rather than a tag, with the version in a
+trailing comment. A tag is mutable: `@v4` is whatever its owner last pointed
+it at, which is a supply-chain hole in a workflow that holds release signing
+keys.
+
+**How they get bumped.** [Renovate](https://docs.renovatebot.com) is
+configured in `.github/renovate.json5`; the file is commented in full, so read
+it rather than this section for the specifics. The shape:
+
+- Patch and minor updates arrive weekly, grouped into one PR per ecosystem,
+  and merge themselves once CI is green. Majors come one at a time and wait
+  for a person.
+- Security advisories ignore the schedule and open immediately.
+- Three groups never automerge, because a green CI run is not evidence they
+  are good: **three.js** and **Playwright**, whose effect on rendering is only
+  visible to the visual-goldens lane, which is non-blocking and specific to
+  the pinned runner GPU; and **Tauri**, because the Desktop E2E workflow runs
+  only on push to `main`, never on a pull request. Run
+  `pnpm --dir app run e2e:visual` (or the Regen Visual Goldens workflow) after
+  a renderer bump, and the Desktop E2E workflow after a Tauri one.
+
+That exclusion list is the honest limit of the automation. Everything else in
+it is safe only to the degree the blocking gate is, which is the argument for
+keeping the gate honest.
+
+**Whether a dependency is admissible at all** is a separate question from
+whether it is current, and `deny.toml` answers it: an advisory database check,
+a license allow-list, and a crates.io-only source restriction, run daily over
+both cargo workspaces by `.github/workflows/audit.yml` alongside `pnpm audit`.
+The source restriction is the mechanical half of rule 7 — it makes SDK-derived
+code unable to arrive as a git dependency without a reviewed edit to that file.
+It cannot judge provenance, which is what rule 7 is actually about; that still
+takes a person. Run it yourself with:
+
+```sh
+cargo deny check
+cargo deny --manifest-path shells/tauri/src-tauri/Cargo.toml --config deny.toml check
+pnpm audit --prod
+```
 

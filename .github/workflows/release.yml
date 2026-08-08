@@ -48,6 +48,11 @@ env:
   # generated Tauri --config overlay so the in-tree 0.1.0 stays untouched
   # during the v0.0.x test-tag window.
   TAG: ${{ github.ref_name }}
+  # wasm-opt for the Windows-on-ARM bundle (see the desktop job). binaryen
+  # tags releases `version_NNN`, not semver, so Renovate needs the versioning
+  # override to compare them.
+  # renovate: datasource=github-releases depName=WebAssembly/binaryen versioning=regex:^version_(?<major>\d+)$
+  BINARYEN_VERSION: 'version_130'
 
 jobs:
   create-release:
@@ -102,7 +107,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Same stack ci.yml installs for the Tauri host crate, plus xdg-utils:
       # the AppImage bundler embeds /usr/bin/xdg-open, which the arm64 runner
@@ -118,64 +123,77 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
             xdg-utils squashfs-tools
 
-      # rustup honors rust-toolchain.toml (stable + wasm32-unknown-unknown)
-      # on the first cargo invocation; the universal build additionally needs
-      # both macOS targets present up front.
+      # rustup honors rust-toolchain.toml — a PINNED version, so a release is
+      # built with the same compiler CI verified the commit with. The
+      # universal build additionally needs both macOS targets up front.
       - name: Add macOS universal targets
         if: runner.os == 'macOS'
         run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: |
             .
             shells/tauri/src-tauri
 
-      # Unix: the official prebuilt-binary installer (covers arm64 too).
-      # Windows: cargo install (the npm/installer shims aren't spawnable by
-      # build-wasm.mjs's spawnSync), with the compiled exe cached like
-      # desktop-e2e.yml caches tauri-driver.
+      # scripts/install-wasm-pack.sh owns both the pinned version and the
+      # per-platform choice: prebuilt tarball on Unix, `cargo install` on
+      # Windows (upstream publishes no aarch64-pc-windows-msvc build, and this
+      # matrix has a windows-arm64 leg). That Windows compile is slow, so the
+      # exe is cached the way desktop-e2e.yml caches tauri-driver — keyed on
+      # the installer script's contents, so a version bump invalidates the
+      # cache instead of restoring the old binary past its `command -v` guard.
       - name: Cache wasm-pack (Windows)
         if: runner.os == 'Windows'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/wasm-pack.exe
-          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-wasm-pack.sh') }}
 
-      - name: Install wasm-pack
+      - name: Install wasm-pack (pinned)
         shell: bash
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            command -v wasm-pack || cargo install wasm-pack --locked
-          else
-            curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-          fi
+        run: scripts/install-wasm-pack.sh
 
       # wasm-pack has no prebuilt wasm-opt for Windows-on-ARM and hard-fails
       # there; it looks for wasm-opt on PATH before downloading, so supply
       # binaryen's native arm64 build instead of shipping an unoptimized
       # kernel in that installer.
+      #
+      # binaryen tags releases `version_NNN` rather than semver, hence the
+      # `versioning=` override; the tag string is used verbatim in the URL, the
+      # archive name, and the directory it unpacks to.
       - name: Install wasm-opt (Windows arm64)
         if: matrix.name == 'windows-arm64'
         shell: pwsh
         run: |
           curl.exe -sSL -o "$env:RUNNER_TEMP\binaryen.tar.gz" `
-            https://github.com/WebAssembly/binaryen/releases/download/version_130/binaryen-version_130-arm64-windows.tar.gz
+            "https://github.com/WebAssembly/binaryen/releases/download/${env:BINARYEN_VERSION}/binaryen-${env:BINARYEN_VERSION}-arm64-windows.tar.gz"
           tar -xzf "$env:RUNNER_TEMP\binaryen.tar.gz" -C $env:RUNNER_TEMP
-          Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\binaryen-version_130\bin"
+          Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\binaryen-${env:BINARYEN_VERSION}\bin"
 
-      - name: Enable pnpm
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .node-version
+
+      # pnpm's version comes from `packageManager` in the root package.json —
+      # one source of truth that pnpm itself also honors locally. (Corepack,
+      # which this step used to use, is no longer distributed with Node 25+.)
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      # Ask pnpm where its store is rather than listing one path per OS: the
+      # answer depends on the platform AND on how pnpm was installed, and a
+      # wrong guess yields a cache that silently never hits.
+      - name: Locate pnpm store
         shell: bash
-        run: corepack enable && corepack prepare pnpm@11.8.0 --activate
+        run: echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
 
       - name: Cache pnpm store
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.local/share/pnpm/store
-            ~/Library/pnpm/store
-            ~/AppData/Local/pnpm/store
+          path: ${{ env.PNPM_STORE }}
           key: pnpm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             pnpm-${{ runner.os }}-${{ runner.arch }}-
@@ -286,7 +304,7 @@ jobs:
       # plus their .sig files to the draft release. includeUpdaterJson stays
       # OFF — the updater-manifest job assembles latest.json race-free.
       - name: Build and upload bundles
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -413,21 +431,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install wasm-pack (pinned)
+        run: scripts/install-wasm-pack.sh
 
-      - name: Enable pnpm
-        run: corepack enable && corepack prepare pnpm@11.8.0 --activate
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .node-version
+
+      # pnpm's version comes from `packageManager` in the root package.json.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      # Ask pnpm where its store is rather than assuming — see the desktop job.
+      - name: Locate pnpm store
+        run: echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
 
       - name: Cache pnpm store
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.local/share/pnpm/store
+          path: ${{ env.PNPM_STORE }}
           key: pnpm-${{ runner.os }}-X64-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             pnpm-${{ runner.os }}-X64-

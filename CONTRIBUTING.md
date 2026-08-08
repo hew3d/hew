@@ -90,6 +90,12 @@ and your DCO sign-off certifies it as your own work. Commits carry the
 human contributor as author and committer, with no AI or tool
 attribution — see the commit conventions in [CLAUDE.md](CLAUDE.md).
 
+The one standing exception is Renovate, the dependency bot configured in
+[`.github/renovate.json5`](.github/renovate.json5): its commits are
+authored by `renovate[bot]` and carry a sign-off in its name, because
+they contain no authored code — only a version string and the lockfile
+that follows from it. Every other commit has a person behind it.
+
 ## Reporting bugs
 
 File issues at [github.com/hew3d/hew/issues](https://github.com/hew3d/hew/issues).

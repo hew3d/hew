@@ -3,6 +3,11 @@
 # site build + the Tauri host crate's fmt/clippy), then adds the replay
 # gate, the web-E2E smoke, and the visual goldens, and artifacts the built
 # web app.
+#
+# Every toolchain here is pinned, and every action is pinned to a commit SHA;
+# Renovate proposes the bumps (.github/renovate.json5). Nothing in this file
+# should resolve to "whatever is newest" — that is how a clippy lint reached
+# main that no developer machine could reproduce.
 
 name: CI
 
@@ -16,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The Tauri host crate's clippy pass needs the webkit2gtk/gtk stack;
       # the Playwright/WebGL smoke needs xvfb for the non-headless engines.
@@ -29,25 +34,47 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
             xvfb xauth
 
-      # rustup honors rust-toolchain.toml (stable + rustfmt + clippy +
-      # wasm32-unknown-unknown) on the first cargo invocation.
+      # rustup honors rust-toolchain.toml — a PINNED version, so this runner
+      # compiles with the exact toolchain a developer machine does.
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: |
             .
             shells/tauri/src-tauri
 
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install wasm-pack (pinned)
+        run: scripts/install-wasm-pack.sh
 
-      - name: Enable pnpm
-        run: corepack enable && corepack prepare pnpm@11.8.0 --activate
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .node-version
+
+      # pnpm's version comes from `packageManager` in the root package.json —
+      # one source of truth that pnpm itself also honors locally. (Corepack,
+      # which this step used to use, is no longer distributed with Node 25+.)
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Toolchain versions
+        run: |
+          rustc --version
+          cargo --version
+          wasm-pack --version
+          node --version
+          pnpm --version
+
+      # Ask pnpm where its store is rather than assuming: the path depends on
+      # the OS and on how pnpm was installed, and a wrong guess yields a cache
+      # that silently never hits.
+      - name: Locate pnpm store
+        run: echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
 
       - name: Cache pnpm store
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.local/share/pnpm/store
+          path: ${{ env.PNPM_STORE }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             pnpm-${{ runner.os }}-
@@ -97,6 +124,10 @@ jobs:
       # Non-blocking until a green run confirms the goldens reproduce on
       # GitHub-hosted runners; regenerate once here (`e2e:visual:update`)
       # and commit the PNGs if they diverge, then make this required.
+      #
+      # Because this lane cannot fail the build, three.js and Playwright are
+      # excluded from Renovate automerge — nothing else would catch a
+      # renderer regression before it landed (.github/renovate.json5).
       - name: Web E2E visual goldens [validating — non-blocking]
         continue-on-error: true
         env:
@@ -106,7 +137,7 @@ jobs:
       - name: Upload built web app
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: web-dist
           path: app/dist
@@ -115,7 +146,7 @@ jobs:
       - name: Upload built site
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: site-dist
           path: site/dist
@@ -124,7 +155,7 @@ jobs:
       - name: Upload Playwright report on failure
         if: failure()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: playwright-report
           path: app/playwright-report

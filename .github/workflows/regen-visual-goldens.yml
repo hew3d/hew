@@ -8,6 +8,10 @@
 # committed by the maintainer. Download the `visual-goldens` artifact,
 # unzip it over app/e2e/visual/ (it contains the *.spec.ts-snapshots/
 # directories), inspect the diff, and commit.
+#
+# This is the workflow to run after a three.js or Playwright bump — both are
+# excluded from Renovate automerge precisely because their effect on rendering
+# is invisible to the blocking CI lanes (.github/renovate.json5).
 
 name: Regen Visual Goldens
 
@@ -19,23 +23,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # rustup honors rust-toolchain.toml (stable + wasm32-unknown-unknown)
-      # on the first cargo invocation.
+      # rustup honors rust-toolchain.toml — a PINNED version.
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install wasm-pack (pinned)
+        run: scripts/install-wasm-pack.sh
 
-      - name: Enable pnpm
-        run: corepack enable && corepack prepare pnpm@11.8.0 --activate
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .node-version
+
+      # pnpm's version comes from `packageManager` in the root package.json.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      # Ask pnpm where its store is rather than assuming — see ci.yml.
+      - name: Locate pnpm store
+        run: echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
 
       - name: Cache pnpm store
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.local/share/pnpm/store
+          path: ${{ env.PNPM_STORE }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             pnpm-${{ runner.os }}-
@@ -67,7 +80,7 @@ jobs:
         run: git -C . status --short app/e2e/visual || true
 
       - name: Upload regenerated goldens
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: visual-goldens
           path: app/e2e/visual/*-snapshots

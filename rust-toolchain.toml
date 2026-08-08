@@ -1,4 +1,17 @@
+# Pinned, not floating.
+#
+# This file used to say `channel = "stable"`. That meant CI resolved whatever
+# stable happened to be current on the runner, a developer machine resolved
+# whatever stable it had installed, and the two silently drifted months apart —
+# so a new clippy lint could fail CI with no way to reproduce it locally. An
+# exact version cannot do that: rustup installs it on the first cargo command
+# in this repository, so every machine and every CI lane compile with the same
+# compiler by construction.
+#
+# Renovate proposes each bump as its own PR (.github/renovate.json5). Because
+# the gate runs on that PR, a release that introduces a lint we trip simply
+# turns the PR red instead of turning main red.
 [toolchain]
-channel = "stable"
+channel = "1.97.1"
 components = ["clippy", "rustfmt"]
 targets = ["wasm32-unknown-unknown"]

@@ -1,0 +1,107 @@
+# Audit — is what we depend on still safe to depend on?
+#
+# The CI workflow answers "does it build and pass"; Renovate answers "is it
+# current". Neither notices that a crate we already have, at a version we
+# already pinned, picked up an advisory overnight. That is what this runs
+# daily for.
+#
+# It also enforces admissibility rather than freshness: the license allow-list
+# and the crates.io-only source restriction in deny.toml, which is the
+# mechanical half of DEVELOPMENT.md rule 7 (see that file's comments for what
+# it does and does not prove).
+
+name: Audit
+
+on:
+  schedule:
+    # 13:00 UTC daily — early morning in America/Phoenix, so a finding is
+    # waiting at the start of the day rather than arriving mid-work.
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+  # Also on any change that could alter what we depend on, so a bad dependency
+  # is caught in review rather than the next morning.
+  push:
+    branches: [main]
+    paths:
+      - '**/Cargo.lock'
+      - '**/Cargo.toml'
+      - 'pnpm-lock.yaml'
+      - 'deny.toml'
+      - '.github/workflows/audit.yml'
+  pull_request:
+    paths:
+      - '**/Cargo.lock'
+      - '**/Cargo.toml'
+      - 'pnpm-lock.yaml'
+      - 'deny.toml'
+      - '.github/workflows/audit.yml'
+
+jobs:
+  cargo-deny:
+    name: cargo-deny (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Report on both trees even when one of them fails.
+      fail-fast: false
+      matrix:
+        include:
+          - name: workspace
+            manifest: ./Cargo.toml
+          # The Tauri host crate is deliberately not a workspace member, so
+          # `cargo deny` over the root would never see its dependencies — and
+          # it is the tree with the wider attack surface (an HTTP stack, a
+          # webview, the updater).
+          - name: tauri-shell
+            manifest: ./shells/tauri/src-tauri/Cargo.toml
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Pinning the action pins cargo-deny itself: the tool ships inside this
+      # action's container image rather than being resolved at run time.
+      - name: cargo-deny (advisories, licenses, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: ${{ matrix.manifest }}
+          # One deny.toml at the repository root governs both trees. Naming it
+          # explicitly is belt-and-braces rather than strictly required —
+          # cargo-deny ascends from the manifest's directory through its
+          # ancestors looking for a config, so the Tauri run would find the
+          # root file anyway — but it pins WHICH config each run uses, so a
+          # stray deny.toml appearing in an intermediate directory cannot
+          # quietly take over. `--config` is a top-level flag, hence
+          # `arguments` (which the action places before the subcommand) rather
+          # than `command-arguments` (which it places after).
+          arguments: --all-features --config deny.toml
+          command: check
+
+  js-audit:
+    name: pnpm audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .node-version
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      # BLOCKING: the dependencies that are actually shipped to a user — the
+      # app's runtime tree. This is clean today and must stay clean.
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level moderate
+
+      # REPORTING ONLY, for now. The full tree carries a pile of advisories in
+      # build tooling (vite/postcss, vitest, astro, the WebdriverIO stack) that
+      # are a symptom of those majors being far behind rather than of anything
+      # reaching a user: none of it is in the shipped bundle, and the worst of
+      # them needs a dev server to be listening to matter at all. The catch-up
+      # sweep to Vite 8 / Vitest 4 is what clears them; when it has, delete
+      # `continue-on-error` here and this becomes a real gate.
+      - name: Audit all dependencies [reporting — non-blocking]
+        continue-on-error: true
+        run: pnpm audit --audit-level high
