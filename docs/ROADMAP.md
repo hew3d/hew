@@ -365,7 +365,10 @@ below.
 - Direct SketchUp (`.skp`) import for the 2017 file format, built on
   [OpenSKP](https://github.com/hew3d/openskp), a clean-room reader with no
   Trimble SDK code anywhere in its lineage — names, materials, components,
-  tags, and guides all come across natively
+  tags, and guides all come across natively. Groups arrive as groups and
+  components as shared components, nested assemblies keeping both their
+  hierarchy and their sharing; a group wrapping a single solid becomes
+  just that solid, since Hew needs no wrapper to isolate geometry
 - Binary STL export, scaled for 3D printing; export is gated on every
   object being a solid, so an exported file is guaranteed manifold
 - STL curve resolution: cylinder walls re-facet from their analytic

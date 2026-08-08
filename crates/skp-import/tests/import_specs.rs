@@ -169,10 +169,22 @@ fn nested_components_keep_hierarchy_and_share_the_leaf_def() {
 
 #[test]
 fn groups_and_mixed_definitions_import_structurally() {
+    // box-group.skp: a plain SketchUp GROUP wrapping a single box. A group
+    // is not a shared definition (SketchUp groups are logically unique,
+    // unlike components) — and a group with exactly one resulting mesh and
+    // no children is the "simple solid" special case: SketchUp needs a
+    // wrapper group to isolate geometry, Hew's solids-first model doesn't.
+    // It imports as a bare world object, no instance/group/component at all.
     let (report, doc) = ingest("box-group.skp");
     assert_eq!(report.objects_created, 1);
-    assert_eq!(doc.instance_ids().len(), 1);
+    assert_eq!(report.watertight, 1);
+    assert_eq!(doc.instance_ids().len(), 0);
+    assert_eq!(doc.group_ids().len(), 0);
+    assert_eq!(doc.component_ids().len(), 0);
 
+    // mixed-definition.skp's outer wrapper is a genuine COMPONENT (not a
+    // group) placing another component as a member — unaffected by the
+    // group/component split.
     let (report, doc) = ingest("mixed-definition.skp");
     assert_eq!(report.objects_created, 2);
     assert_eq!(report.watertight, 2);
@@ -187,12 +199,20 @@ fn groups_and_mixed_definitions_import_structurally() {
 // ── Native names (no __HEWMETA__ hex dance — the joy of M25) ────────────────
 
 #[test]
-fn house_carries_native_instance_names_and_layer_tags() {
+fn house_carries_native_group_and_component_names_with_layer_tags() {
+    // "Front Wall" and "Slab" are genuine SketchUp GROUPS (single mesh, no
+    // children each) — exactly the misclassification this mapping fix
+    // corrects: they used to import as Component instances. Their native
+    // name (no __HEWMETA__ hex dance) now lands on the collapsed bare
+    // `Mesh` instead of on a wrapping `Instance`.
     let out = skp_import::import(&fixture("house.skp")).unwrap();
 
     fn walk<'a>(nodes: &'a [ImportNode], hits: &mut Vec<(&'a str, &'a [Vec<String>])>) {
         for n in nodes {
             match n {
+                ImportNode::Mesh(m) if !m.name.is_empty() => {
+                    hits.push((m.name.as_str(), m.tags.as_slice()))
+                }
                 ImportNode::Instance {
                     name: Some(name),
                     tags,
@@ -209,13 +229,56 @@ fn house_carries_native_instance_names_and_layer_tags() {
     let front_wall = named
         .iter()
         .find(|(n, _)| *n == "Front Wall")
-        .expect("'Front Wall' imports as a native instance name");
+        .expect("'Front Wall' carries its native name onto the collapsed mesh");
     assert_eq!(
         front_wall.1,
         &[vec!["Exterior Walls".to_string()]],
-        "the instance's layer arrives as a tag"
+        "the group's own layer arrives as a tag on the collapsed mesh"
     );
     assert!(named.iter().any(|(n, _)| *n == "Slab"));
+}
+
+#[test]
+fn skp_group_containing_a_component_stays_a_group_the_component_stays_shared() {
+    // The headline case this mapping fix is FOR: a SketchUp GROUP holding a
+    // COMPONENT placement alongside its own geometry. house.skp's "Front
+    // Entry Door" component nests both kinds side by side — "Front Entry
+    // Door Frame" is a genuine group (own geometry only, no children) and
+    // "Therma-Tru 36\" Door Slab" is a genuine component, placed inside it.
+    // The group's own meshes land directly as members (no def of its own,
+    // deep-copied — SketchUp groups are logically unique); the component
+    // becomes a member `Instance` referencing ITS OWN shared `DefRecipe`.
+    let out = skp_import::import(&fixture("house.skp")).unwrap();
+    let front_entry_door = out
+        .scene
+        .defs
+        .iter()
+        .find(|d| d.name.as_deref() == Some("Front Entry Door"))
+        .expect("house.skp has a 'Front Entry Door' component");
+
+    let group_frame = front_entry_door.children.iter().find_map(|c| match c {
+        ImportNode::Group { name, children, .. } => Some((name.as_str(), children.len())),
+        _ => None,
+    });
+    assert_eq!(
+        group_frame,
+        Some(("Group#769", 6)),
+        "the door frame group nests as a Group, not a shared def"
+    );
+
+    let slab_def = front_entry_door
+        .children
+        .iter()
+        .find_map(|c| match c {
+            ImportNode::Instance { def, .. } => Some(*def),
+            _ => None,
+        })
+        .expect("the door slab component nests as a member Instance");
+    assert_eq!(
+        out.scene.defs[slab_def].name.as_deref(),
+        Some("Therma-Tru 36\" Door Slab"),
+        "the component stays a shared definition, not inlined geometry"
+    );
 }
 
 #[test]
@@ -224,28 +287,37 @@ fn house_ingests_with_shared_defs_and_loud_skips() {
     // Frozen regression numbers (validated against house.dae, which flattens
     // to 69 baked objects with 34 leaky shells — the .skp path keeps shared
     // definitions and watertight solids instead). house's two genuinely
-    // non-manifold source meshes now DECOMPOSE into open shells (loud split
-    // warnings) instead of being rejected: 32 watertight solids + 3 leaky
+    // non-manifold source meshes DECOMPOSE into open shells (loud split
+    // warnings) instead of being rejected: 49 watertight solids + 3 leaky
     // pieces, nothing skipped.
-    assert_eq!(report.objects_created, 35);
-    assert_eq!(report.watertight, 32);
+    assert_eq!(report.objects_created, 52);
+    assert_eq!(report.watertight, 49);
     assert_eq!(report.leaky, 3);
-    // Nested definitions (manifest v15): the old flattened 61 instances +
-    // 17 wrapper groups are now 11 world instances over 47 shared
-    // definitions nesting 4 deep — and the expansion still renders
-    // exactly the same 61 leaf placements (conservation, validated
-    // against house.dae world-space totals in the differential suite).
-    assert_eq!(doc.instance_ids().len(), 11);
+    // Group/component split (the corrected mapping): most of what the old
+    // (pre-`is_group`) heuristic counted as "shared definitions nesting 4
+    // deep" were actually SketchUp GROUPS (Front Wall, Slab, the window and
+    // door frame internals, ...) — logically unique per placement, not
+    // shared. Only the 6 genuine components remain as DefRecipes (Win-Dor
+    // OXXO Sliding Door, Double Slider Window, Therma-Tru 36" Door Slab,
+    // Front Entry Door, Table Top, "3/4 Birch Plywood"), nesting 2 deep
+    // (Front Entry Door -> its door slab). Groups deep-copy instead of
+    // sharing, so their member geometry counts once PER PLACEMENT — hence
+    // `objects_created` rising even though fewer objects are shared
+    // through defs (conservation still holds: validated against house.dae
+    // world-space totals in the differential suite). No wrapper groups
+    // reach the WORLD level either (every group that isn't a component
+    // ends up owned by a definition, or collapses to a bare mesh).
+    assert_eq!(doc.instance_ids().len(), 6);
     assert_eq!(doc.group_ids().len(), 0);
-    assert_eq!(doc.component_ids().len(), 47);
-    assert_eq!(doc.expanded_placements().len(), 61);
+    assert_eq!(doc.component_ids().len(), 6);
+    assert_eq!(doc.expanded_placements().len(), 56);
     assert_eq!(
         doc.component_ids()
             .iter()
             .map(|&c| doc.def_depth(c))
             .max()
             .unwrap(),
-        4
+        2
     );
     assert_eq!(report.skipped.len(), 0);
     // Nothing missing: the one material without inline image bytes

@@ -21,7 +21,7 @@ After every import, an **Import Complete** report summarizes what happened: how 
 
 ### SketchUp (`.skp`)
 
-Hew reads SketchUp 2017-format files directly; no SketchUp installation required. Names, materials, components, tags, and guides all come across natively. (The reader is [OpenSKP](https://github.com/hew3d/openskp), a clean-room implementation with no Trimble SDK code in its lineage.) If a file has damaged sections, the importer recovers what it can and lists warnings in the import report. Newer `.skp` versions can usually be saved back to the 2017 format from SketchUp itself.
+Hew reads SketchUp 2017-format files directly; no SketchUp installation required. Names, materials, components, tags, and guides all come across natively. A SketchUp group becomes a Hew group and a SketchUp component becomes a shared Hew component, nested assemblies keeping their hierarchy and their sharing intact; a group that exists only to wrap a single solid collapses to that solid, since Hew doesn't need a wrapper to isolate geometry the way SketchUp does. (The reader is [OpenSKP](https://github.com/hew3d/openskp), a clean-room implementation with no Trimble SDK code in its lineage.) If a file has damaged sections, the importer recovers what it can and lists warnings in the import report. Newer `.skp` versions can usually be saved back to the 2017 format from SketchUp itself.
 
 ### COLLADA (`.dae`)
 

@@ -194,24 +194,32 @@ fn theater_production_model_end_to_end() {
 
     let mut doc = kernel::Document::new();
     let (report, _) = doc.ingest(out.scene, out.textures_missing).unwrap();
-    // Frozen with NESTED definitions (manifest v15): a SketchUp assembly
-    // imports as ONE definition whose children are member instances, so
-    // the old flattened world tree (1319 instances + 118 wrapper groups)
-    // becomes 962 world instances over 722 shared definitions nesting up
-    // to 5 deep — 1461 expanded leaf placements. The 26 user-hidden nodes
-    // halve to 13: a hidden assembly used to cost a hidden wrapper group
-    // PLUS a hidden inner instance, now it is one hidden placement.
-    // Object totals are untouched (geometry parity holds against the .dae
-    // ground truths above). If an OpenSKP or heal improvement moves
-    // these, update deliberately with the rev bump.
-    assert_eq!(report.objects_created, 738);
-    assert_eq!(report.watertight, 602);
+    // Frozen with the group/component split (`is_group`): NESTED
+    // definitions (manifest v15) still nest genuine components (e.g. the
+    // "Automatic Door Bottom" family), but SketchUp GROUPS — previously
+    // misclassified as shared definitions by the byte-scan-only heuristic
+    // — are now independent containers, deep-copied per placement instead
+    // of shared. That drops component_ids from 722 to 151 (only the real
+    // components remain) and instance_ids from 962 to 295, while 29 groups
+    // now reach the WORLD level as genuine `Group`s (nested ones live
+    // inside their owning definition and don't count here — see
+    // `group_ids`'s doc). Groups no longer sharing geometry through a def
+    // means their member solids count once PER PLACEMENT, so
+    // `objects_created` RISES (738 -> 979) even as the shared-definition
+    // graph shrinks — conservation still holds (geometry parity against
+    // the .dae ground truths above, unaffected by this change). The
+    // 13 user-hidden nodes are untouched: hidden carries identically for
+    // both node kinds. If an OpenSKP or heal improvement moves these,
+    // update deliberately with the rev bump.
+    assert_eq!(report.objects_created, 979);
+    assert_eq!(report.watertight, 840);
+    assert_eq!(report.leaky, 139);
     assert_eq!(report.skipped.len(), 0);
-    assert_eq!(doc.instance_ids().len(), 962);
-    assert_eq!(doc.group_ids().len(), 0);
+    assert_eq!(doc.instance_ids().len(), 295);
+    assert_eq!(doc.group_ids().len(), 29);
     assert_eq!(doc.user_hidden_nodes().len(), 13);
-    assert_eq!(doc.component_ids().len(), 722);
-    assert_eq!(doc.expanded_placements().len(), 1461);
+    assert_eq!(doc.component_ids().len(), 151);
+    assert_eq!(doc.expanded_placements().len(), 692);
     assert_eq!(
         doc.component_ids()
             .iter()

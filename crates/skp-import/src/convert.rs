@@ -1,16 +1,34 @@
 //! `openskp::Model` -> `kernel::ImportScene`.
 //!
 //! Mapping:
-//! - each **definition geometry run** becomes a [`DefRecipe`] (one variant per
-//!   inherited material, since SketchUp's default-material faces render with
-//!   the placing instance's paint — Hew expresses that as the def mesh's
-//!   `base_material`);
-//! - the composed instance tree ([`openskp::Model::scene`]) becomes
-//!   [`ImportNode::Instance`]s — a definition's in-definition child
-//!   placements are NESTED member instances of its [`DefRecipe`] (poses
-//!   rebased to the definition's local frame), so a SketchUp assembly's
-//!   sharing survives: N placements stay N instances of one definition.
-//!   Pure containers without geometry runs become [`ImportNode::Group`]s
+//! - a node's [`openskp::Node::is_group`] tells apart SketchUp's two
+//!   placement classes, which Hew maps very differently:
+//!   - `Some(false)` (a `CComponentInstance`) OR `None` (the legacy
+//!     byte-scan path, which cannot tell them apart — treated as a
+//!     component for backward compatibility): each **definition geometry
+//!     run** becomes a [`DefRecipe`] (one variant per inherited material,
+//!     since SketchUp's default-material faces render with the placing
+//!     instance's paint — Hew expresses that as the def mesh's
+//!     `base_material`), and the placement becomes an [`ImportNode::Instance`]
+//!     — a definition's in-definition child placements are NESTED member
+//!     instances of its `DefRecipe` (poses rebased to the definition's
+//!     local frame), so a SketchUp assembly's sharing survives: N
+//!     placements stay N instances of one definition;
+//!   - `Some(true)` (a `CGroup`): SketchUp groups are independent
+//!     containers, not shared definitions — Hew has no equivalent of "one
+//!     group definition, many placements" (that IS what a component is).
+//!     Each placement converts (and re-heals) independently: the node's own
+//!     run meshes bake the node's pose into their positions (world pose at
+//!     the world level; rebased into the enclosing definition's local frame
+//!     when nested inside one, since a Hew `ImportNode::Mesh` carries no
+//!     pose of its own) and children convert recursively (components become
+//!     Instances, nested groups become Groups the same way), producing an
+//!     [`ImportNode::Group`]. A group with exactly one resulting mesh and no
+//!     children collapses to a bare [`ImportNode::Mesh`] instead — SketchUp
+//!     needs wrapper groups to isolate geometry; Hew's solids-first model
+//!     doesn't — unless the group itself is hidden (a bare mesh has nowhere
+//!     to carry that).
+//! - pure containers without geometry runs become [`ImportNode::Group`]s
 //!   with **absolute world poses** exactly like `dae-import`;
 //! - the **root run** (loose model geometry) becomes a world
 //!   [`ImportNode::Mesh`];
@@ -74,7 +92,7 @@ pub(crate) fn convert(model: &openskp::Model) -> Output {
         if is_def {
             continue;
         }
-        for recipe in cv.mesh_recipes(ri, "Model".to_string(), 0) {
+        for recipe in cv.mesh_recipes(ri, "Model".to_string(), 0, &Transform::IDENTITY) {
             roots.push(ImportNode::Mesh(recipe));
         }
     }
@@ -204,11 +222,20 @@ impl Converter<'_> {
         let tags = self.layer_tags(node.layer);
 
         match node.run {
+            // A SketchUp GROUP placement (`is_group == Some(true)`): groups
+            // are independent containers, not shared definitions — each
+            // placement converts on its own (deep copy, no shared def).
+            Some(ri) if matches!(node.is_group, Some(true)) => {
+                self.group_node(ri, node, own_name, tags, hidden)
+            }
             // A placement of a definition — with or without in-definition
             // child placements. The whole subtree is ONE nested definition
             // (children become member instances with def-local poses), so
             // N placements of a SketchUp assembly stay N instances of one
             // shared definition — the nested-component parity fix.
+            // `is_group == Some(false)` (component) or `None` (legacy
+            // byte-scan path, which cannot tell components and groups
+            // apart — kept on this path for backward compatibility).
             Some(ri) => {
                 let def = self.assembly_variant(ri, node.material, node)?;
                 Some(ImportNode::Instance {
@@ -241,6 +268,64 @@ impl Converter<'_> {
                 })
             }
         }
+    }
+
+    /// A SketchUp GROUP node with a geometry run: converts to a Hew `Group`
+    /// (own meshes + recursively converted children) or, in the common
+    /// "wrapper around one solid" case, a bare `Mesh` — never a shared
+    /// `DefRecipe`, since SketchUp groups are logically unique (unlike
+    /// components, a group is not "one definition, many placements").
+    ///
+    /// The node's own run bakes `pose_of(&node.world)` into its mesh
+    /// positions (group geometry is def-local in the source; a Hew
+    /// `ImportNode::Mesh` carries no pose). When this group turns up nested
+    /// inside a component definition, `assembly_variant`'s `rebase_to_local`
+    /// composes the definition's inverse pose on top afterward, landing the
+    /// already-world-baked positions in def-local coordinates — the same
+    /// two-step composition `rebase_to_local` already does for `Instance`
+    /// poses.
+    fn group_node(
+        &mut self,
+        run_idx: usize,
+        node: &openskp::Node,
+        own_name: Option<String>,
+        tags: Vec<Vec<String>>,
+        hidden: bool,
+    ) -> Option<ImportNode> {
+        let name = own_name
+            .or_else(|| node.definition.clone())
+            .unwrap_or_default();
+        let bake = pose_of(&node.world);
+        let mut own_meshes = self.mesh_recipes(run_idx, name.clone(), node.material, &bake);
+        let children: Vec<ImportNode> = node
+            .children
+            .iter()
+            .filter_map(|c| self.convert_node(c, None))
+            .collect();
+
+        // The "simple solid" special case: SketchUp needs a wrapper group to
+        // isolate geometry; Hew's solids-first model doesn't. Skipped when
+        // the group itself is hidden — `MeshRecipe` carries no hidden flag
+        // of its own, so collapsing would silently drop the group's
+        // visibility state (rule 4 spirit: never lose it quietly).
+        if children.is_empty() && own_meshes.len() == 1 && !hidden {
+            let mut mesh = own_meshes.pop().expect("len checked above");
+            mesh.tags = tags;
+            return Some(ImportNode::Mesh(mesh));
+        }
+
+        let mut all_children: Vec<ImportNode> =
+            own_meshes.into_iter().map(ImportNode::Mesh).collect();
+        all_children.extend(children);
+        if all_children.is_empty() {
+            return None;
+        }
+        Some(ImportNode::Group {
+            name,
+            children: all_children,
+            tags,
+            hidden,
+        })
     }
 
     /// Def index for `(run, inherited material)`, building the `DefRecipe`
@@ -284,7 +369,12 @@ impl Converter<'_> {
         }
         self.def_variants.insert((run_idx, eff_slot), None);
         let name = self.def_name(run_idx);
-        let meshes = self.mesh_recipes(run_idx, name.clone().unwrap_or_default(), eff_slot);
+        let meshes = self.mesh_recipes(
+            run_idx,
+            name.clone().unwrap_or_default(),
+            eff_slot,
+            &Transform::IDENTITY,
+        );
         let mut children: Vec<ImportNode> = meshes.into_iter().map(ImportNode::Mesh).collect();
         let mut degraded = false;
         // Child placements rebase to the definition's local frame:
@@ -342,11 +432,23 @@ impl Converter<'_> {
     /// `eff_slot` is the placing instance's inherited material (0 = none): it
     /// becomes `base_material`, which default-material faces resolve to.
     ///
+    /// `bake` is baked into the resulting positions (and, transitively, the
+    /// fitted UV frames): `Transform::IDENTITY` for definition-owned and
+    /// loose-world runs (already in the right coordinate space), or a
+    /// SketchUp GROUP's own world pose (`group_node`) — matching how
+    /// `dae-import` bakes world-mesh transforms.
+    ///
     /// Usually one recipe. A NON-MANIFOLD run (which `from_polygons` would
     /// reject whole) is decomposed by [`mesh_heal::split::split_non_manifold`]
     /// into several open-shell recipes — loudly (a warning names the mesh
     /// and the piece count), never silently (rule 4).
-    fn mesh_recipes(&mut self, run_idx: usize, name: String, eff_slot: u16) -> Vec<MeshRecipe> {
+    fn mesh_recipes(
+        &mut self,
+        run_idx: usize,
+        name: String,
+        eff_slot: u16,
+        bake: &Transform,
+    ) -> Vec<MeshRecipe> {
         let mesh = &self.model.geometry[run_idx].mesh;
 
         let positions: Vec<Point3> = mesh
@@ -416,14 +518,8 @@ impl Converter<'_> {
 
         // Native tolerances: `.skp` coordinates are exact f64, like COLLADA
         // text (the glTF f32 relaxation does not apply).
-        let (positions, faces, healed_mats, healed_uvs, healed_holes) = heal_mesh(
-            &positions,
-            &faces,
-            &face_mats,
-            &corner_uvs,
-            &holes,
-            &Transform::IDENTITY,
-        );
+        let (positions, faces, healed_mats, healed_uvs, healed_holes) =
+            heal_mesh(&positions, &faces, &face_mats, &corner_uvs, &holes, bake);
         if faces.is_empty() {
             return Vec::new();
         }
@@ -556,8 +652,12 @@ fn pose_of(world: &[f64; 16]) -> Transform {
 
 /// Rebase a converted subtree's ABSOLUTE poses into a definition's local
 /// frame (`inv` = the definition placement's inverse world pose). Instances
-/// compose; groups carry no transform, so they recurse; meshes never appear
-/// here (a definition's own meshes are already def-local).
+/// compose; groups carry no transform, so they recurse. Meshes are usually
+/// already def-local (a component's own geometry never reaches this
+/// function's `Mesh` arm) — the exception is a SketchUp GROUP's own meshes
+/// (`group_node`), baked to WORLD at conversion time; nested inside a
+/// definition, `inv` composes on top to finish the job, landing them in
+/// def-local coordinates.
 fn rebase_to_local(node: &mut ImportNode, inv: &Transform) {
     match node {
         ImportNode::Instance { pose, .. } => *pose = pose.then(inv),
@@ -566,6 +666,25 @@ fn rebase_to_local(node: &mut ImportNode, inv: &Transform) {
                 rebase_to_local(c, inv);
             }
         }
-        ImportNode::Mesh(_) => {}
+        ImportNode::Mesh(m) => rebase_mesh(m, inv),
     }
+}
+
+/// Apply `inv` to a mesh recipe's positions, refitting each face's UV frame
+/// so the position <-> UV relationship it already renders survives bit-for-
+/// bit: the new corner UVs are read off the OLD frame at the OLD positions
+/// (the frame's actual current prediction, not a re-derivation of SketchUp's
+/// raw values), then `fit_uv_frame` refits against the NEW (rebased)
+/// corners — the same fit `recipe_from_arrays` used to build the frame in
+/// the first place, just re-run in the new coordinate space.
+fn rebase_mesh(m: &mut MeshRecipe, inv: &Transform) {
+    let new_positions: Vec<Point3> = m.positions.iter().map(|&p| inv.apply_point(p)).collect();
+    for (face, frame) in m.faces.iter().zip(m.face_uv_frames.iter_mut()) {
+        if let Some(f) = frame {
+            let uvs: Vec<[f64; 2]> = face.iter().map(|&vi| f.apply(m.positions[vi])).collect();
+            let new_corners: Vec<Point3> = face.iter().map(|&vi| new_positions[vi]).collect();
+            *frame = fit_uv_frame(&new_corners, &uvs);
+        }
+    }
+    m.positions = new_positions;
 }

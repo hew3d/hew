@@ -50,7 +50,7 @@ stl-import = { path = "crates/stl-import" }
 # OpenSKP releases, so CI resolves it like any other dependency. No Trimble
 # SDK material anywhere in its chain (rule 7 admissibility test). Local dev
 # clone: ../openskp.
-openskp = "0.2.0"
+openskp = "0.3.0"
 
 slotmap = "1"
 proptest = "1"

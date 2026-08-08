@@ -507,9 +507,9 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openskp"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa730a3e76fde1ff31c2d7f31c045ac2fe2372aa85a06d77769dcabb3d8144ec"
+checksum = "7ed904b6e9a4c08e08ed1ed605938d5ecf82325c31edbbec9651d07a30df4ac9"
 
 [[package]]
 name = "percent-encoding"

@@ -14,7 +14,7 @@ license.workspace = true
 [dependencies]
 kernel = { workspace = true }
 mesh-heal = { workspace = true }
-openskp = "0.2.0"
+openskp = "0.3.0"
 
 [dev-dependencies]
 proptest.workspace = true
