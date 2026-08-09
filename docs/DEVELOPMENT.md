@@ -72,11 +72,16 @@ Before **pushing**, run the comprehensive gate:
 scripts/verify-full.sh
 ```
 
-It runs `verify.sh` and then the remaining *blocking* CI lanes (the golden
-state-hash replay gate and the chromium E2E smoke), in CI's order, so a green
-run predicts a green CI run. It does not run the non-blocking webkit/visual
-lanes, nor the Desktop E2E workflow (tauri-driver cannot drive the macOS
-WKWebView); see the header of `scripts/verify-full.sh` for the full rationale.
+It runs `verify.sh` and then the blocking CI lanes it is able to run (the
+golden state-hash replay gate and the chromium E2E smoke), in CI's order.
+
+A green run predicts a green CI run with one documented exception: the
+**visual-goldens lane blocks in CI but cannot run here**, because its PNGs are
+rasterized by the SwiftShader inside CI's pinned Chromium and false-fail on any
+other host. If you touched the render path — or bumped three.js or Playwright —
+CI has the last word. It also skips the non-blocking webkit lane and the
+Desktop E2E workflow (tauri-driver cannot drive the macOS WKWebView). The
+header of `scripts/verify-full.sh` carries the full rationale.
 
 ## 2. Repository layout
 
@@ -474,18 +479,21 @@ it rather than this section for the specifics. The shape:
   and merge themselves once CI is green. Majors come one at a time and wait
   for a person.
 - Security advisories ignore the schedule and open immediately.
-- Four groups never automerge, because a green CI run is not evidence they are
-  good. **three.js** and **Playwright**, whose effect on rendering is visible
-  only to the visual-goldens lane — non-blocking, and specific to the pinned
-  runner GPU. **Tauri**, and the **Desktop E2E lane's own Node pin**, because
-  the Desktop E2E workflow runs only on push to `main` and never on a pull
-  request, so no PR can exercise what they affect. Run
-  `pnpm --dir app run e2e:visual` (or the Regen Visual Goldens workflow) after
-  a renderer bump, and the Desktop E2E workflow after one of the other two.
+- Two groups never automerge, because a green CI run is not evidence they are
+  good: **Tauri**, and the **Desktop E2E lane's own Node pin**. That workflow
+  runs only on push to `main`, never on a pull request, so no PR can exercise
+  what either of them affects. Run it by hand after one lands.
+- **three.js and Playwright do automerge**, which they did not at first. They
+  were held back while the visual-goldens lane was advisory; now that the lane
+  blocks, a renderer regression fails the PR instead of slipping past it. A
+  Playwright bump can still move the goldens legitimately, by bringing a new
+  Chromium — that turns its PR red, and the answer is to run Regen Visual
+  Goldens against that branch and commit the PNGs, not to change any code.
 
-That exclusion list is the honest limit of the automation. Everything else in
-it is safe only to the degree the blocking gate is, which is the argument for
-keeping the gate honest.
+That exclusion list is the honest limit of the automation, and it shrinks as
+the gate covers more: two of the four original exclusions existed only because
+a lane could not fail the build. Everything not on it is safe exactly to the
+degree the blocking gate is, which is the argument for keeping the gate honest.
 
 **Whether a dependency is admissible at all** is a separate question from
 whether it is current, and `deny.toml` answers it: an advisory database check,

@@ -169,29 +169,32 @@
       labels: ['toolchain'],
     },
 
-    // ---- automerge exclusions (later rules win) ----
+    // ---- grouping for the renderer pair, which must move together ----
     //
-    // These are the honest limit of what this automation can promise. Each of
-    // them can break something no BLOCKING lane of the gate looks at, so a
-    // green CI run is not evidence the update is good.
-
-    // The visual-goldens lane is continue-on-error (non-blocking) and its
-    // output is specific to the pinned runner GPU, so a renderer regression
-    // would not turn CI red. A three.js bump gets a human eye, every time.
+    // three.js and its types are one decision, not two: a version skew
+    // between them is a typecheck failure waiting to happen, so they share a
+    // PR. They DO automerge — the visual-goldens lane in ci.yml is blocking
+    // now, so a renderer regression turns the PR red before it can land.
+    // That was the whole reason these two used to need a person.
     {
       matchPackageNames: ['three', '@types/three'],
       groupName: 'three.js',
-      automerge: false,
-      labels: ['needs-visual-check'],
     },
-    // A Playwright bump ships a new pinned Chromium, hence a new bundled
-    // ANGLE-SwiftShader, hence shifted goldens — the same blind spot.
+    // Playwright likewise automerges, but keeps its own PR: a bump brings a
+    // new pinned Chromium and therefore a new bundled ANGLE-SwiftShader, so
+    // it is the update most likely to shift the goldens legitimately. When it
+    // does, the PR goes red and wants Regen Visual Goldens run against that
+    // branch — which is much easier to see on a PR that contains nothing else.
     {
       matchPackageNames: ['@playwright/test', 'playwright'],
       groupName: 'playwright',
-      automerge: false,
-      labels: ['needs-visual-check'],
     },
+
+    // ---- automerge exclusions (later rules win) ----
+    //
+    // What is left is the honest limit of what this automation can promise:
+    // an update that can break something no BLOCKING lane of the gate looks
+    // at, so that a green CI run is not evidence the update is good.
     // The Desktop E2E workflow runs only on push to `main`, never on a pull
     // request, so a Tauri bump would automerge on a `verify` run that never
     // launched the desktop binary and only fail AFTER landing.

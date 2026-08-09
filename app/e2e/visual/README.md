@@ -46,13 +46,19 @@ when bumping `@playwright/test` to a Chromium build that rasterizes differently.
 A golden refresh is a reviewable change to a checked-in PNG — never a reflex to
 make CI green.
 
-If CI ever flags a diff that isn't a real regression (e.g. after a Playwright
-bump), regenerate **on the CI runner** so the committed golden matches what CI
-rasterizes. The easy path: trigger the **Regen Visual Goldens** workflow
-(`.GitHub/workflows/regen-visual-goldens.yml`) from the repo's Actions tab —
-it regenerates on the runner, verifies, and (if the PNGs changed) pushes a
-`ci/visual-goldens-refresh` branch for review + merge, plus a
-`visual-goldens` artifact as fallback. Manual equivalent, on the runner:
+This lane **blocks** CI, so a diff it flags stops the build until the goldens
+are either fixed or refreshed. That is the point of it — and it is what lets
+three.js and Playwright automerge at all (`.github/renovate.json5`).
+
+When the diff is not a real regression (most often after a Playwright bump),
+regenerate **on the CI runner**, so the committed golden matches what CI
+rasterizes. Trigger the **Regen Visual Goldens** workflow
+(`.github/workflows/regen-visual-goldens.yml`) from the Actions tab, selecting
+the branch that is red. It regenerates on the runner, proves the fresh PNGs
+pass against themselves, and uploads them as a `visual-goldens` artifact. It
+does **not** commit or push anything: download the artifact, unzip it over
+`app/e2e/visual/`, read the diff, and commit it to that branch yourself.
+Manual equivalent, on the runner:
 
 ```bash
 pnpm --dir app exec playwright test --project=visual --update-snapshots

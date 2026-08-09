@@ -108,9 +108,16 @@ jobs:
 
       # WebKit (WebKitGTK) — the engine closest to the macOS WKWebView.
       # Runs under Xvfb because headless WebKitGTK needs a display + system
-      # GL (llvmpipe) to bring up the WebGL2 viewport. Non-blocking until
-      # validated green on GitHub-hosted runners; then drop
-      # continue-on-error to make it a required gate.
+      # GL (llvmpipe) to bring up the WebGL2 viewport.
+      #
+      # Still non-blocking, deliberately, even though it has been green as
+      # consistently as the visual lane. The visual lane is deterministic by
+      # construction — pinned resolution, pinned DPR, and a software
+      # rasterizer that ships inside Playwright. This one depends on the
+      # runner image's WebKitGTK, its system GL (llvmpipe), and Xvfb, none of
+      # which are pinned by anything in this repository, so a green history
+      # is weaker evidence here than it is there. Promote it when its stack
+      # is pinned, or when a failure it catches justifies the flake risk.
       - name: Web E2E smoke (webkit) [validating — non-blocking]
         continue-on-error: true
         env:
@@ -119,17 +126,23 @@ jobs:
 
       # Visual-regression goldens on the pinned `visual` project (fixed
       # 800×600 / DPR=1 / SwiftShader). The renderer is ANGLE-SwiftShader
-      # bundled with Playwright's pinned Chromium, so output should be
-      # reproducible across hosts on the same @playwright/test version.
-      # Non-blocking until a green run confirms the goldens reproduce on
-      # GitHub-hosted runners; regenerate once here (`e2e:visual:update`)
-      # and commit the PNGs if they diverge, then make this required.
+      # bundled with Playwright's pinned Chromium, so output is reproducible
+      # across hosts on the same @playwright/test version.
       #
-      # Because this lane cannot fail the build, three.js and Playwright are
-      # excluded from Renovate automerge — nothing else would catch a
-      # renderer regression before it landed (.github/renovate.json5).
-      - name: Web E2E visual goldens [validating — non-blocking]
-        continue-on-error: true
+      # BLOCKING. It spent its validation period non-blocking and came back
+      # green on every run that reached it — including the one that carried
+      # three.js 0.184 -> 0.185 and Playwright 1.61 -> 1.62 together, which
+      # replaced both the renderer and the bundled SwiftShader at once. That
+      # is the pair most likely to shift pixels, and it did not.
+      #
+      # Making it required is what lets three.js and Playwright automerge
+      # (.github/renovate.json5): until now nothing could fail a build on a
+      # renderer regression, so those two needed a person. A legitimate shift
+      # — usually a Playwright bump bringing a new Chromium — now turns the
+      # PR red rather than landing unnoticed, and the fix is to regenerate:
+      # Actions ▸ Regen Visual Goldens ▸ Run workflow (it takes a branch),
+      # then commit the PNGs it produces onto that branch.
+      - name: Web E2E visual goldens
         env:
           CI: '1'
         run: pnpm --dir app exec playwright test --project=visual

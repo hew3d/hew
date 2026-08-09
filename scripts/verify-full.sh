@@ -5,19 +5,27 @@
 # runner-heavy checks so it stays quick and cross-platform. That leaves a class
 # of failures (Playwright E2E, the replay gate) that only surface in CI.
 #
-# This script closes that gap: it runs verify.sh AND the remaining *blocking*
-# lanes of the CI `verify` job (.github/workflows/ci.yml), in the same order,
-# so a green run here predicts a green CI run. Run it before pushing.
+# This script closes most of that gap: it runs verify.sh AND the blocking lanes
+# of the CI `verify` job (.github/workflows/ci.yml) that CAN run off the runner,
+# in the same order. Run it before pushing. A green run here predicts a green CI
+# run except for the visual goldens — see below, and take that exception
+# seriously if you touched the render path.
 #
 #   verify.sh            fmt, clippy, cargo test, wasm (web), vitest, builds, tauri
 #   replay gate          node-target wasm + golden state-hash fixtures
-#   web E2E (chromium)   Playwright — the one blocking browser lane
+#   web E2E (chromium)   Playwright — the blocking functional browser lane
 #
 # Deliberately NOT covered (none can fail the push, or none can run here):
-#   - web E2E webkit / visual goldens: CI marks them continue-on-error
-#     (non-blocking), and the visual goldens are runner-GPU-specific — they
-#     would false-fail off CI's pinned runner. Run webkit yourself when
-#     touching the render path:
+#   - web E2E visual goldens: BLOCKING in CI, but genuinely unrunnable here.
+#     The goldens are rendered by the ANGLE-SwiftShader inside CI's pinned
+#     Chromium on CI's runner; off that host they false-fail on antialiasing
+#     alone. This is therefore the one blocking CI lane a green run here does
+#     NOT predict — if you touched the render path, or bumped three.js or
+#     Playwright, expect CI to have the last word, and regenerate through
+#     Actions ▸ Regen Visual Goldens rather than locally.
+#   - web E2E webkit: CI marks it continue-on-error (non-blocking), because
+#     its WebKitGTK/llvmpipe/Xvfb stack is not pinned by this repository. Run
+#     it yourself when touching the render path:
 #       pnpm --dir app exec playwright test --project=webkit
 #   - Desktop E2E (.github/workflows/desktop-e2e.yml): tauri-driver cannot
 #     drive the macOS WKWebView, so this lane cannot run on macOS at all. It

@@ -9,9 +9,13 @@
 # unzip it over app/e2e/visual/ (it contains the *.spec.ts-snapshots/
 # directories), inspect the diff, and commit.
 #
-# This is the workflow to run after a three.js or Playwright bump — both are
-# excluded from Renovate automerge precisely because their effect on rendering
-# is invisible to the blocking CI lanes (.github/renovate.json5).
+# Run this when ci.yml's visual lane goes red on a change that MEANT to alter
+# what the viewport renders — and, most often, on a Playwright bump, which
+# brings a new pinned Chromium and so a new bundled SwiftShader. That lane
+# blocks now, so such a PR waits: run this workflow against its branch, commit
+# the PNGs onto that branch, and the PR goes green. A red visual lane on a
+# change that did NOT intend to alter rendering is a regression, not a regen —
+# read the diff before reaching for this.
 
 name: Regen Visual Goldens
 
