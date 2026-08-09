@@ -444,12 +444,27 @@ trailing comment. A tag is mutable: `@v4` is whatever its owner last pointed
 it at, which is a supply-chain hole in a workflow that holds release signing
 keys.
 
-There is exactly one deliberate exception to "one version of a thing": the
-Desktop E2E workflow runs an older Node than the rest of the repository,
-because WebdriverIO calls its own bundled undici with objects from Node's
-built-in one and the two have diverged. That file carries the measurements and
-the condition for deleting the exception; nothing else should acquire a second
-pin without the same treatment.
+Two deliberate exceptions exist to "one version of a thing", both forced by an
+upstream constraint rather than chosen:
+
+- **The Desktop E2E workflow runs an older Node** than the rest of the
+  repository, because WebdriverIO calls its own bundled undici with objects
+  from Node's built-in one and the two have diverged.
+- **`site/` builds on TypeScript 6** where `app/` and `shells/tauri` use 7,
+  because `@astrojs/check` accepts only `^5 || ^6`.
+
+Each is pinned where it applies, with the reason and the condition for removing
+it written beside the pin. Nothing else should acquire a second version of a
+shared tool without the same treatment.
+
+One dependency is deliberately held back rather than diverged: **`opentype.js`
+stays on the exact version `1.3.4`** — note the absent caret. Version 2 throws
+`substitutionType : 61 lookupType: 6 - substFormat: 1 is not yet supported`
+out of `font.getPaths()` on Space Mono, a font this repository ships, which
+takes out the whole 3D Text path. It also moves the `name` table under a
+platform key while DefinitelyTyped still publishes only v1 types, so
+`font.names.fontFamily` keeps typechecking clean and silently returns
+`undefined`. Revisit when upstream ships v2 typings and a `getPaths` fix.
 
 **How they get bumped.** [Renovate](https://docs.renovatebot.com) is
 configured in `.github/renovate.json5`; the file is commented in full, so read

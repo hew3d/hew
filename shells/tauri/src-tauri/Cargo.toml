@@ -30,7 +30,7 @@ tauri-plugin-opener = "2.5.4"
 # font section) — pure Rust, MIT-licensed, no system font-library linking.
 # Shell-crate-only dependency; kernel crates never gain new dependencies for
 # this (DEVELOPMENT.md rule 1).
-fontdb = "0.23.0"
+fontdb = "0.24.0"
 
 # Windows named-pipe transport for `--live` (docs/HEW_API.md §11.2):
 # CreateNamedPipeW/ConnectNamedPipe/ReadFile/WriteFile, a per-user security

@@ -1976,7 +1976,16 @@ fn zip_add_stored_entry<W: Write + Seek>(
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
         .last_modified_time(zip::DateTime::default())
-        .unix_permissions(0o644);
+        .unix_permissions(0o644)
+        // Stated, not inherited. The zip crate hardcoded Unix here until 7.2;
+        // since then an unset `system` resolves to `cfg!(windows)`, which would
+        // make the container's "version made by" byte depend on which OS built
+        // Hew — the same document saved from the Windows build and the macOS
+        // build would differ by that byte. Nothing in Hew reads the field, but
+        // "the same input produces the same output on every machine" is a
+        // kernel requirement (DEVELOPMENT.md §7), and an invariant that holds
+        // only by a dependency's accident is one bump away from not holding.
+        .system(zip::System::Unix);
     zip.start_file(name, options)?;
     zip.write_all(data)?;
     Ok(())

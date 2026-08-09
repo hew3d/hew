@@ -83,7 +83,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .node-version
 
@@ -95,13 +95,18 @@ jobs:
       - name: Audit production dependencies
         run: pnpm audit --prod --audit-level moderate
 
-      # REPORTING ONLY, for now. The full tree carries a pile of advisories in
-      # build tooling (vite/postcss, vitest, astro, the WebdriverIO stack) that
-      # are a symptom of those majors being far behind rather than of anything
-      # reaching a user: none of it is in the shipped bundle, and the worst of
-      # them needs a dev server to be listening to matter at all. The catch-up
-      # sweep to Vite 8 / Vitest 4 is what clears them; when it has, delete
-      # `continue-on-error` here and this becomes a real gate.
+      # REPORTING ONLY. The catch-up sweep to Vite 8 / Vitest 4 / Astro 7.2
+      # took this tree from 40 advisories (1 critical, 24 high) down to two,
+      # both of them `serialize-javascript` reached through
+      # `@wdio/mocha-framework > mocha`, whose own `^6.0.2` range the patched
+      # 7.x cannot satisfy. They are not stale, then — they are not ours to
+      # fix until WebdriverIO ships a newer mocha.
+      #
+      # Making this lane blocking therefore means either listing those two in
+      # `pnpm.auditConfig.ignoreGhsas` or overriding mocha's dependency out
+      # from under it. Both are defensible; neither belongs in a dependency
+      # sweep, and neither is urgent — this is the desktop E2E harness, never
+      # the shipped bundle, which `--prod` above already gates.
       - name: Audit all dependencies [reporting — non-blocking]
         continue-on-error: true
         run: pnpm audit --audit-level high

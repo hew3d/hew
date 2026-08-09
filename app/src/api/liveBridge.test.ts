@@ -22,7 +22,7 @@
  * the test fire events directly.
  */
 
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, type Mock } from 'vitest'
 
 vi.hoisted(() => {
   Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true })
@@ -79,7 +79,10 @@ describe('installLiveBridge', () => {
     take_pending_view_directive: ReturnType<typeof vi.fn>
   }
   let refreshScene: ReturnType<typeof vi.fn>
-  let reconcile: ReturnType<typeof vi.fn>
+  // Typed concretely rather than as `ReturnType<typeof vi.fn>`: since Vitest 4
+  // a bare `vi.fn()` is `Mock<Constructable | Procedure>`, which does not
+  // satisfy `LiveBridgeDeps.reconcile`'s plain `() => void`.
+  let reconcile: Mock<() => void>
   let viewportApi: {
     refreshScene: ReturnType<typeof vi.fn>
     setCamera: ReturnType<typeof vi.fn>
@@ -120,7 +123,7 @@ describe('installLiveBridge', () => {
       setStandardView: vi.fn(),
       zoomExtents: vi.fn(),
     }
-    reconcile = vi.fn()
+    reconcile = vi.fn<() => void>()
     deps = {
       getScene: () => scene as unknown as Scene,
       getViewportApi: () => viewportApi as unknown as ViewportApi,

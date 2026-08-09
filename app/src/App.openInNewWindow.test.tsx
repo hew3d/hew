@@ -404,6 +404,14 @@ const makeNonPristine = async () => {
     __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void }
   }).__hew_test
   act(() => harness.addNodeTag('object', '1', ['tag']))
+  // Flush passive effects before returning. `App` mirrors its document session
+  // into `docSessionRef` from a `useEffect`, and the menu handlers this helper
+  // sets up for read the REF, not the state — so until that effect has run,
+  // `isPristineDocument` still sees the pristine session this helper just
+  // finished replacing, and a following gesture takes the pristine branch.
+  // React 18 happened to have flushed it by the time `findByText` resolved;
+  // React 19 does not, so ask for it explicitly rather than rely on timing.
+  await act(async () => {})
 }
 
 async function findDragDropHandler(): Promise<(e: { payload: { type: string; paths: string[] } }) => void> {

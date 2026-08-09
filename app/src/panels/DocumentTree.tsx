@@ -533,13 +533,13 @@ function NodeRow({
   fullPath: NodeRef[]
   isSelected: (n: NodeRef) => boolean
   primaryKey: string | null
-  selectedRowRef: React.RefObject<HTMLDivElement>
+  selectedRowRef: React.RefObject<HTMLDivElement | null>
   /** Session-stack reveal target (see the parent component's comment where
    *  it's computed) — `` `node:${nodeKey(node)}` `` when THIS row is the
    *  node a just-closed session frame returned to. `null` when no reveal is
    *  pending. */
   sessionRevealKey: string | null
-  sessionRevealRowRef: React.RefObject<HTMLDivElement>
+  sessionRevealRowRef: React.RefObject<HTMLDivElement | null>
   ancestorGroupKeys: Set<string>
   hiddenKeys: Set<string>
   onToggleHidden: (node: NodeRef) => void

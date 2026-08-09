@@ -36,6 +36,33 @@ function grid(): HTMLElement {
   return screen.queryByRole('listbox') ?? screen.getByRole('grid')
 }
 
+/** The "All" category tab.
+ *
+ *  Matched WITHOUT a trailing `\b`: the tab renders its label and its item
+ *  count as two adjacent `<span>`s, and accessible-name computation
+ *  concatenates inline children with no separator — so the name is "All3",
+ *  not "All 3", and a word boundary after "all" never matches. (jsdom 25
+ *  inserted a space here; jsdom 30 does not.) Still unambiguous: the other
+ *  category tabs are Components/Materials/Models, and the Collections "All"
+ *  button carries no `tab` role. */
+const ALL_TAB = /^all/i
+
+/** Resolve once the dialog's DEFAULT SELECTION has landed and the detail pane
+ *  is showing a real item.
+ *
+ *  `LibraryDialog` picks the first visible tile from an effect that reacts to
+ *  `displayItems`, so the selection necessarily lands a render after the grid
+ *  itself. Waiting on a tile label (`findByText('Theater Chair')`) therefore
+ *  proves the GRID is populated but says nothing about the detail pane, which
+ *  renders `.hwlib__detail--empty` until the selection arrives. Any assertion
+ *  reaching straight into the detail pane has to wait for this instead of
+ *  assuming the two land in the same tick. */
+async function awaitDefaultSelection(): Promise<void> {
+  await waitFor(() =>
+    expect(document.querySelector('.hwlib__detail:not(.hwlib__detail--empty)')).not.toBeNull(),
+  )
+}
+
 // jsdom implements neither — the dialog creates an object URL per thumbnail
 // and per texture preview, so a no-op stub keeps the load effects from
 // throwing without pretending to model real blob semantics.
@@ -308,13 +335,16 @@ describe('LibraryDialog', () => {
     render(<LibraryDialog {...baseProps()} />)
     expect(screen.getByRole('dialog', { name: /library/i })).toBeInTheDocument()
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
   })
 
   it('lists items with per-category counts (errored items count as models)', async () => {
     seedDefault()
     const { container } = render(<LibraryDialog {...baseProps()} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
     await within(grid()).findByText('Door Hinge')
+    await awaitDefaultSelection()
     const counts = Array.from(container.querySelectorAll('.hwlib__cat-count')).map((el) => el.textContent)
     // All: every item = 5. Components: chair, hinge = 2. Materials: oak = 1.
     // Models: house + the errored "broken" fixture (erroredItem defaults to
@@ -326,13 +356,16 @@ describe('LibraryDialog', () => {
     seedDefault()
     render(<LibraryDialog {...baseProps()} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
 
     fireEvent.click(screen.getByRole('tab', { name: /materials/i }))
     await within(grid()).findByText('Oak')
+    await awaitDefaultSelection()
     expect(within(grid()).queryByText('Theater Chair')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('tab', { name: /models/i }))
     await within(grid()).findByText('Little House')
+    await awaitDefaultSelection()
     expect(within(grid()).queryByText('Oak')).not.toBeInTheDocument()
   })
 
@@ -340,7 +373,9 @@ describe('LibraryDialog', () => {
     seedDefault()
     render(<LibraryDialog {...baseProps()} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
     await within(grid()).findByText('Door Hinge')
+    await awaitDefaultSelection()
 
     fireEvent.change(screen.getByPlaceholderText(/search name or keyword/i), { target: { value: 'chair' } })
     expect(within(grid()).getByText('Theater Chair')).toBeInTheDocument()
@@ -351,7 +386,9 @@ describe('LibraryDialog', () => {
     seedDefault()
     render(<LibraryDialog {...baseProps({ placements: { 'src-chair': 3 } })} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
     await within(grid()).findByText('Door Hinge')
+    await awaitDefaultSelection()
 
     fireEvent.click(screen.getByRole('button', { name: /in this model/i }))
     expect(within(grid()).getByText('Theater Chair')).toBeInTheDocument()
@@ -363,6 +400,7 @@ describe('LibraryDialog', () => {
     const onInsert = vi.fn()
     render(<LibraryDialog {...baseProps({ onInsert })} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
 
     fireEvent.click(within(grid()).getByText('Theater Chair'))
     fireEvent.keyDown(document, { key: 'Enter' })
@@ -381,6 +419,7 @@ describe('LibraryDialog', () => {
     const onOpenAsDocument = vi.fn()
     render(<LibraryDialog {...baseProps({ onOpenAsDocument })} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
 
     fireEvent.click(within(grid()).getByText('Theater Chair'))
     fireEvent.keyDown(document, { key: 'Enter', metaKey: true })
@@ -394,6 +433,7 @@ describe('LibraryDialog', () => {
     const onClose = vi.fn()
     render(<LibraryDialog {...baseProps({ onClose })} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(onClose).toHaveBeenCalledOnce()
   })
@@ -402,6 +442,7 @@ describe('LibraryDialog', () => {
     seedDefault()
     render(<LibraryDialog {...baseProps()} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
     expectEscapeStopsPropagationToWindow()
   })
 
@@ -420,6 +461,7 @@ describe('LibraryDialog', () => {
     seedDefault()
     render(<LibraryDialog {...baseProps()} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
     fireEvent.change(screen.getByPlaceholderText(/search name or keyword/i), { target: { value: 'nonexistent-xyz' } })
     await screen.findByText(/no items match your search/i)
   })
@@ -429,6 +471,7 @@ describe('LibraryDialog', () => {
     fx.summaries.set('chair', CHAIR)
     render(<LibraryDialog {...baseProps()} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
 
     fireEvent.click(screen.getByRole('button', { name: /delete from library/i }))
     await screen.findByText(/can.t be undone/i)
@@ -444,6 +487,7 @@ describe('LibraryDialog', () => {
     fx.summaries.set('chair', CHAIR)
     render(<LibraryDialog {...baseProps()} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
 
     fireEvent.click(screen.getByRole('button', { name: /delete from library/i }))
     await screen.findByText(/can.t be undone/i)
@@ -461,6 +505,7 @@ describe('LibraryDialog', () => {
     const onInsert = vi.fn()
     render(<LibraryDialog {...baseProps({ onInsert })} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
 
     fireEvent.click(within(grid()).getByText('Theater Chair'))
     // Arm the delete confirm — its Cancel button is the concrete case S15
@@ -485,6 +530,7 @@ describe('LibraryDialog', () => {
     seedDefault()
     render(<LibraryDialog {...baseProps()} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
 
     const windowKeyDown = vi.fn()
     window.addEventListener('keydown', windowKeyDown)
@@ -503,6 +549,7 @@ describe('LibraryDialog', () => {
     seedDefault()
     render(<LibraryDialog {...baseProps()} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
 
     const windowKeyDown = vi.fn()
     window.addEventListener('keydown', windowKeyDown)
@@ -540,6 +587,7 @@ describe('LibraryDialog', () => {
       gridMeasureFx.columns = 2
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Item 0')
+      await awaitDefaultSelection()
 
       fireEvent.click(within(grid()).getByText('Item 0'))
       fireEvent.keyDown(document, { key: 'ArrowDown' })
@@ -552,6 +600,7 @@ describe('LibraryDialog', () => {
       gridMeasureFx.columns = 2
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Item 0')
+      await awaitDefaultSelection()
 
       fireEvent.click(within(grid()).getByText('Item 4'))
       fireEvent.keyDown(document, { key: 'ArrowUp' })
@@ -564,6 +613,7 @@ describe('LibraryDialog', () => {
       gridMeasureFx.columns = 4
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Item 0')
+      await awaitDefaultSelection()
 
       fireEvent.click(within(grid()).getByText('Item 0'))
       fireEvent.keyDown(document, { key: 'ArrowDown' })
@@ -578,6 +628,7 @@ describe('LibraryDialog', () => {
       gridMeasureFx.columns = 2
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Item 0')
+      await awaitDefaultSelection()
 
       fireEvent.click(within(grid()).getByText('Item 0'))
       fireEvent.keyDown(document, { key: 'ArrowRight' })
@@ -595,6 +646,7 @@ describe('LibraryDialog', () => {
     fx.failWrite = true
     render(<LibraryDialog {...baseProps()} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
 
     // Pin the selection to the chair explicitly (auto-select defaults to the
     // first visible tile, which need not be the chair) and wait for its name
@@ -618,6 +670,7 @@ describe('LibraryDialog', () => {
     fx.failWrite = true
     render(<LibraryDialog {...baseProps()} />)
     await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
 
     // Pin the selection to the chair explicitly (auto-select defaults to the
     // first visible tile, which need not be the chair) and wait for its name
@@ -639,6 +692,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       expect(container.querySelector('.hwlib__grid-inner')).not.toBeNull()
       expect(container.querySelector('.hwlib__list')).toBeNull()
 
@@ -653,6 +707,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { unmount } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('button', { name: /list view/i }))
       expect(localStorage.getItem('hew.library.view')).toBe('list')
       unmount()
@@ -668,6 +723,7 @@ describe('LibraryDialog', () => {
       const onInsert = vi.fn()
       render(<LibraryDialog {...baseProps({ onInsert })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('button', { name: /list view/i }))
 
       fireEvent.doubleClick(within(grid()).getByText('Theater Chair'))
@@ -698,6 +754,7 @@ describe('LibraryDialog', () => {
       seedDefault() // CHAIR has no sourceDoc
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       expect(screen.queryByRole('button', { name: /remove source info/i })).not.toBeInTheDocument()
     })
 
@@ -705,6 +762,7 @@ describe('LibraryDialog', () => {
       seedWithSourceDoc()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Desk Lamp')
+      await awaitDefaultSelection()
       expect(screen.getByText(/from workshop-project\.hew/i)).toBeInTheDocument()
 
       fireEvent.click(screen.getByRole('button', { name: /remove source info/i }))
@@ -722,6 +780,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(within(grid()).getByText('Theater Chair'))
 
       // Selected by its visible option text rather than a hardcoded sentinel
@@ -746,6 +805,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(within(grid()).getByText('Theater Chair'))
 
       // Selected by its visible option text rather than a hardcoded sentinel
@@ -789,6 +849,7 @@ describe('LibraryDialog', () => {
       seedNestedCollections()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Bolt')
+      await awaitDefaultSelection()
       expect(screen.getByRole('button', { name: 'Hardware' })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'Fasteners' })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'Brackets' })).toBeInTheDocument()
@@ -798,6 +859,7 @@ describe('LibraryDialog', () => {
       seedNestedCollections()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Bolt')
+      await awaitDefaultSelection()
 
       fireEvent.click(screen.getByRole('button', { name: 'Hardware' }))
       expect(within(grid()).getByText('Bolt')).toBeInTheDocument()
@@ -809,6 +871,7 @@ describe('LibraryDialog', () => {
       seedNestedCollections()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Bolt')
+      await awaitDefaultSelection()
 
       fireEvent.click(screen.getByRole('button', { name: 'Fasteners' }))
       expect(within(grid()).getByText('Bolt')).toBeInTheDocument()
@@ -823,6 +886,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps({ variant: 'window' })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       expect(container.querySelector('.hwlib__header')).toBeNull()
       expect(container.querySelector('.hwlib__label')).toBeNull()
       expect(screen.queryByRole('button', { name: /^close$/i })).not.toBeInTheDocument()
@@ -832,6 +896,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps({ variant: 'window' })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       const search = screen.getByPlaceholderText(/search name or keyword/i)
       expect(container.querySelector('.hwlib__sidebar-search')?.contains(search)).toBe(true)
     })
@@ -840,6 +905,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       expect(container.querySelector('.hwlib__header .hwlib__label')).not.toBeNull()
       expect(container.querySelector('.hwlib__header .hwlib__search')).not.toBeNull()
       expect(screen.getByRole('button', { name: /^close$/i })).toBeInTheDocument()
@@ -849,6 +915,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       expect(container.querySelector('.hwlib__header .hwlib__scopes')).toBeNull()
       expect(container.querySelector('.hwlib__center-bar .hwlib__scopes')).not.toBeNull()
       expect(container.querySelector('.hwlib__center-bar .hwlib__view-toggle')).not.toBeNull()
@@ -866,6 +933,7 @@ describe('LibraryDialog', () => {
       seedChair()
       const { container } = render(<LibraryDialog {...baseProps({ variant: 'window' })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       expect(container.querySelector('.hwlib__actions .hwlib__btn-primary')).toBeNull()
       expect(container.querySelector('.hwlib__actions .hwlib__native-btn')).not.toBeNull()
       expect(container.querySelector('.hwlib__manage-row .hwlib__btn-danger')).toBeNull()
@@ -876,6 +944,7 @@ describe('LibraryDialog', () => {
       seedChair()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       expect(container.querySelector('.hwlib__actions .hwlib__btn-primary')).not.toBeNull()
       expect(container.querySelector('.hwlib__actions .hwlib__native-btn')).toBeNull()
     })
@@ -884,6 +953,7 @@ describe('LibraryDialog', () => {
       seedChair()
       render(<LibraryDialog {...baseProps({ variant: 'window' })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
 
       fireEvent.click(screen.getByRole('button', { name: /delete from library/i }))
       await waitFor(() => expect(nativeChromeFx.confirmCalls).toHaveLength(1))
@@ -899,6 +969,7 @@ describe('LibraryDialog', () => {
       nativeChromeFx.confirmResult = false
       render(<LibraryDialog {...baseProps({ variant: 'window' })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
 
       fireEvent.click(screen.getByRole('button', { name: /delete from library/i }))
       await waitFor(() => expect(nativeChromeFx.confirmCalls).toHaveLength(1))
@@ -910,6 +981,7 @@ describe('LibraryDialog', () => {
       seedChair()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
 
       fireEvent.click(screen.getByRole('button', { name: /delete from library/i }))
       await screen.findByText(/can.t be undone/i)
@@ -923,6 +995,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('button', { name: /list view/i }))
 
       const headers = screen.getAllByRole('columnheader')
@@ -933,6 +1006,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('button', { name: /list view/i }))
 
       expect(screen.getAllByRole('columnheader', { name: /^name/i })[0]).toHaveAttribute('aria-sort', 'ascending')
@@ -946,6 +1020,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('button', { name: /list view/i }))
 
       fireEvent.click(screen.getByRole('button', { name: /^name/i }))
@@ -961,6 +1036,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('button', { name: /list view/i }))
 
       fireEvent.click(screen.getByRole('button', { name: /^type/i }))
@@ -972,6 +1048,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('button', { name: /list view/i }))
       fireEvent.change(screen.getByPlaceholderText(/search name or keyword/i), { target: { value: 'chair' } })
 
@@ -991,6 +1068,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('button', { name: /list view/i }))
 
       const [nameHeader] = screen.getAllByRole('columnheader', { name: /^name/i })
@@ -1003,6 +1081,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('button', { name: /list view/i }))
 
       expect(screen.getByRole('separator', { name: /resize name column/i })).toBeInTheDocument()
@@ -1024,6 +1103,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { rerender } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('button', { name: /list view/i }))
       const separator = screen.getByRole('separator', { name: /resize name column/i })
 
@@ -1064,6 +1144,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
 
       const sidebar = container.querySelector('.hwlib__sidebar') as HTMLElement
       const detail = container.querySelector('.hwlib__detail') as HTMLElement
@@ -1075,6 +1156,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
 
       const sidebar = container.querySelector('.hwlib__sidebar') as HTMLElement
       const detail = container.querySelector('.hwlib__detail') as HTMLElement
@@ -1086,6 +1168,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
 
       expect(screen.getByRole('separator', { name: /resize sidebar/i })).toBeInTheDocument()
       expect(screen.getByRole('separator', { name: /resize detail pane/i })).toBeInTheDocument()
@@ -1099,6 +1182,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       const sidebar = container.querySelector('.hwlib__sidebar') as HTMLElement
       const separator = screen.getByRole('separator', { name: /resize sidebar/i })
       expect(sidebar.style.width).toBe('168px')
@@ -1114,6 +1198,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       const sidebar = container.querySelector('.hwlib__sidebar') as HTMLElement
       const separator = screen.getByRole('separator', { name: /resize sidebar/i })
 
@@ -1131,6 +1216,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       const detail = container.querySelector('.hwlib__detail') as HTMLElement
       const separator = screen.getByRole('separator', { name: /resize detail pane/i })
       expect(detail.style.width).toBe('236px')
@@ -1146,6 +1232,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       const detail = container.querySelector('.hwlib__detail') as HTMLElement
       const separator = screen.getByRole('separator', { name: /resize detail pane/i })
 
@@ -1163,6 +1250,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       const sidebar = container.querySelector('.hwlib__sidebar') as HTMLElement
       const separator = screen.getByRole('separator', { name: /resize sidebar/i })
 
@@ -1184,6 +1272,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container, rerender } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       const sidebar = container.querySelector('.hwlib__sidebar') as HTMLElement
       const separator = screen.getByRole('separator', { name: /resize sidebar/i })
 
@@ -1274,9 +1363,11 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
 
-      fireEvent.click(screen.getByRole('tab', { name: /^all\b/i }))
+      fireEvent.click(screen.getByRole('tab', { name: ALL_TAB }))
       await within(grid()).findByText('Oak')
+      await awaitDefaultSelection()
       expect(within(grid()).getByText('Door Hinge')).toBeInTheDocument()
       expect(within(grid()).getByText('Little House')).toBeInTheDocument()
 
@@ -1291,8 +1382,10 @@ describe('LibraryDialog', () => {
       const onInsert = vi.fn()
       render(<LibraryDialog {...baseProps({ onPaintWith, onInsert })} />)
       await within(grid()).findByText('Theater Chair')
-      fireEvent.click(screen.getByRole('tab', { name: /^all\b/i }))
+      await awaitDefaultSelection()
+      fireEvent.click(screen.getByRole('tab', { name: ALL_TAB }))
       await within(grid()).findByText('Oak')
+      await awaitDefaultSelection()
 
       fireEvent.click(within(grid()).getByText('Oak'))
       fireEvent.keyDown(document, { key: 'Enter' })
@@ -1308,8 +1401,10 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
-      fireEvent.click(screen.getByRole('tab', { name: /^all\b/i }))
+      await awaitDefaultSelection()
+      fireEvent.click(screen.getByRole('tab', { name: ALL_TAB }))
       await within(grid()).findByText('Oak')
+      await awaitDefaultSelection()
       expect(container.querySelector('.hwlib__grid-inner--all')).not.toBeNull()
     })
   })
@@ -1357,8 +1452,10 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps({ materialInPalette: inPaletteWhenOak })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('tab', { name: /materials/i }))
       await within(grid()).findByText('Oak')
+      await awaitDefaultSelection()
 
       await waitFor(() => expect(container.querySelector('.hwlib__tile-dot')).not.toBeNull())
       expect(container.querySelector('.hwlib__tile-palette-pill')).toBeNull()
@@ -1368,8 +1465,10 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps({ materialInPalette: inPaletteWhenOak })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('tab', { name: /materials/i }))
       await within(grid()).findByText('Oak')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('button', { name: /list view/i }))
 
       await waitFor(() => expect(container.querySelector('.hwlib__row-dot')).not.toBeNull())
@@ -1381,8 +1480,10 @@ describe('LibraryDialog', () => {
       seedSecondMaterialNotInPalette()
       const { container } = render(<LibraryDialog {...baseProps({ materialInPalette: inPaletteWhenOak })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('tab', { name: /materials/i }))
       await within(grid()).findByText('Pine')
+      await awaitDefaultSelection()
 
       // Oak's dot appearing is the signal the async check has settled for
       // every item (one `Promise.all`, one `setInPaletteMap`) — only then
@@ -1400,8 +1501,10 @@ describe('LibraryDialog', () => {
       seedSecondMaterialNotInPalette()
       const { container } = render(<LibraryDialog {...baseProps({ materialInPalette: inPaletteWhenOak })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('tab', { name: /materials/i }))
       await within(grid()).findByText('Pine')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('button', { name: /list view/i }))
 
       const oakRow = container.querySelector('[data-filename="oak.hew"]') as HTMLElement
@@ -1429,8 +1532,10 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container, rerender } = render(<LibraryDialog {...baseProps({ materialInPalette: async () => false })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('tab', { name: /materials/i }))
       await within(grid()).findByText('Oak')
+      await awaitDefaultSelection()
       const oakTile = container.querySelector('[data-filename="oak.hew"]') as HTMLElement
       await waitFor(() => expect(oakTile.querySelector('.hwlib__tile-dot')).toBeNull())
 
@@ -1449,8 +1554,10 @@ describe('LibraryDialog', () => {
       seedDefault()
       render(<LibraryDialog {...baseProps({ materialInPalette: inPaletteWhenOak })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('tab', { name: /materials/i }))
       await within(grid()).findByText('Oak')
+      await awaitDefaultSelection()
 
       fireEvent.click(screen.getByRole('button', { name: /in this model/i }))
       await waitFor(() => expect(within(grid()).getByText('Oak')).toBeInTheDocument())
@@ -1460,8 +1567,10 @@ describe('LibraryDialog', () => {
       seedDefault()
       render(<LibraryDialog {...baseProps({ materialInPalette: async () => false })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('tab', { name: /materials/i }))
       await within(grid()).findByText('Oak')
+      await awaitDefaultSelection()
 
       fireEvent.click(screen.getByRole('button', { name: /in this model/i }))
       await waitFor(() => expect(within(grid()).queryByText('Oak')).not.toBeInTheDocument())
@@ -1471,8 +1580,10 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('tab', { name: /materials/i }))
       await within(grid()).findByText('Oak')
+      await awaitDefaultSelection()
       fireEvent.click(within(grid()).getByText('Oak'))
 
       // Scoped to the detail pane's action row: the grid tile ALSO has its
@@ -1489,8 +1600,10 @@ describe('LibraryDialog', () => {
       seedDefault()
       const { container } = render(<LibraryDialog {...baseProps({ materialInPalette: inPaletteWhenOak })} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(screen.getByRole('tab', { name: /materials/i }))
       await within(grid()).findByText('Oak')
+      await awaitDefaultSelection()
       fireEvent.click(within(grid()).getByText('Oak'))
 
       // `.hwlib__inmodel`, not a bare text query — the "In this model" scope
@@ -1506,6 +1619,7 @@ describe('LibraryDialog', () => {
       seedDefault()
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Theater Chair')
+      await awaitDefaultSelection()
       fireEvent.click(within(grid()).getByText('Theater Chair'))
 
       const select = screen.getByLabelText(/^collection$/i)
@@ -1539,6 +1653,7 @@ describe('LibraryDialog', () => {
       // category, which doesn't list it.
       fireEvent.click(screen.getByRole('tab', { name: /models/i }))
       await within(grid()).findByText('Garden Shed')
+      await awaitDefaultSelection()
       fireEvent.click(within(grid()).getByText('Garden Shed'))
 
       expect(screen.queryByText(/from workshop-project\.hew/i)).not.toBeInTheDocument()
@@ -1550,6 +1665,7 @@ describe('LibraryDialog', () => {
       render(<LibraryDialog {...baseProps()} />)
       fireEvent.click(screen.getByRole('tab', { name: /models/i }))
       await within(grid()).findByText('Garden Shed')
+      await awaitDefaultSelection()
       fireEvent.click(within(grid()).getByRole('button', { name: /garden shed actions/i }))
 
       const menu = screen.getByRole('menu', { name: /garden shed actions/i })
@@ -1566,6 +1682,7 @@ describe('LibraryDialog', () => {
       render(<LibraryDialog {...baseProps({ variant: 'window' })} />)
       fireEvent.click(screen.getByRole('tab', { name: /models/i }))
       await within(grid()).findByText('Garden Shed')
+      await awaitDefaultSelection()
       fireEvent.click(within(grid()).getByRole('button', { name: /garden shed actions/i }))
 
       await waitFor(() => expect(nativeChromeFx.menuEntryCalls).toHaveLength(1))
@@ -1590,6 +1707,7 @@ describe('LibraryDialog', () => {
       )
       render(<LibraryDialog {...baseProps({ variant: 'window' })} />)
       await within(grid()).findByText('Desk Lamp')
+      await awaitDefaultSelection()
       fireEvent.click(within(grid()).getByRole('button', { name: /desk lamp actions/i }))
 
       await waitFor(() => expect(nativeChromeFx.menuEntryCalls).toHaveLength(1))
@@ -1612,6 +1730,7 @@ describe('LibraryDialog', () => {
       fx.summaries.set('lamp', s)
       render(<LibraryDialog {...baseProps()} />)
       await within(grid()).findByText('Desk Lamp')
+      await awaitDefaultSelection()
       expect(screen.getByText(/from workshop-project\.hew/i)).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /remove source info/i })).toBeInTheDocument()
     })

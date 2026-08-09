@@ -758,7 +758,11 @@ fn zip_add_stored_entry<W: std::io::Write + std::io::Seek>(
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
         .last_modified_time(zip::DateTime::default())
-        .unix_permissions(0o644);
+        .unix_permissions(0o644)
+        // Explicit for the same reason as the kernel's copy: an unset `system`
+        // resolves to `cfg!(windows)` from zip 7.2 on, which would make the
+        // exported bytes depend on the OS that built Hew.
+        .system(zip::System::Unix);
     zip.start_file(name, options)?;
     std::io::Write::write_all(zip, data)?;
     Ok(())

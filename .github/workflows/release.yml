@@ -173,7 +173,7 @@ jobs:
           Add-Content $env:GITHUB_PATH "$env:RUNNER_TEMP\binaryen-${env:BINARYEN_VERSION}\bin"
 
       - name: Setup Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .node-version
 
@@ -301,10 +301,18 @@ jobs:
 
       # tauri-action runs beforeBuildCommand (app build, which builds the
       # WASM kernel via build-wasm.mjs), bundles, and uploads the artifacts
-      # plus their .sig files to the draft release. includeUpdaterJson stays
+      # plus their .sig files to the draft release. The updater JSON stays
       # OFF — the updater-manifest job assembles latest.json race-free.
+      #
+      # That input was `includeUpdaterJson` until tauri-action v1 renamed it
+      # to `uploadUpdaterJson`. The rename matters: an unknown input is only a
+      # WARNING to Actions, so carrying the old name across the major would
+      # have left the new one at its default of `true` and put every matrix
+      # job back to uploading its own latest.json — the exact race the
+      # updater-manifest job exists to prevent, and one that would only have
+      # shown up in a real release.
       - name: Build and upload bundles
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -312,7 +320,7 @@ jobs:
         with:
           projectPath: shells/tauri
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          includeUpdaterJson: false
+          uploadUpdaterJson: false
           # Without this, tauri-action falls back to `npm run tauri`, which
           # doesn't exist here — the CLI is a pnpm-managed devDependency.
           tauriScript: pnpm tauri
@@ -440,7 +448,7 @@ jobs:
         run: scripts/install-wasm-pack.sh
 
       - name: Setup Node
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .node-version
 

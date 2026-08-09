@@ -541,7 +541,14 @@ describe('duplicateSketchSelection', () => {
     // second throws. Move+Alt is ONE user action, so the first copy must be
     // retracted too — the caller never receives a stranded copy to reselect.
     const { scene, raw, content, undoDepth } = makeReplayScene()
-    const realImpl = raw.copy_sketch_islands.getMockImplementation()!
+    // Narrowed explicitly: since Vitest 4, `getMockImplementation()` is typed
+    // as a union that includes a constructor signature, so the bare result is
+    // not callable. This mock is only ever a plain function.
+    const realImpl = raw.copy_sketch_islands.getMockImplementation()! as (
+      s: bigint,
+      islands: BigUint64Array,
+      affine: Float64Array,
+    ) => bigint
     let calls = 0
     raw.copy_sketch_islands.mockImplementation((s: bigint, islands: BigUint64Array, a: Float64Array) => {
       calls += 1
