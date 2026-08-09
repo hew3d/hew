@@ -14,7 +14,7 @@
         "id": 0,
         "result": {
           "protocol": 1,
-          "app": { "name": "hew", "version": "0.6.0" },
+          "app": { "name": "hew", "version": "0.7.0" },
           "profile": "core",
           "encoding": "json",
           "documents": []
