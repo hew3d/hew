@@ -3557,6 +3557,124 @@ fn locked_resolve_lands_on_the_gesture_side_for_both_signs_on_all_axes() {
     }
 }
 
+/// The wrong-side gate above judges the SIDE the cursor indicates from
+/// `t_fallback` — the station where the pick ray comes closest to the lock
+/// line. That reading only holds while the cursor is aiming AT the lock
+/// line. Off it, `t_fallback` is set by where the EYE is: the ray's closest
+/// approach to a vertical lock line passes above the anchor for geometry on
+/// the far side of it and below for geometry on the near side, for the very
+/// same vertex, purely from orbiting. Applying the gate there threw away
+/// legitimately-hovered geometry, which is the whole mechanism a projected
+/// snap works by — and made WHICH points survived change with every camera
+/// move (the reported defect: a floating rectangle corner Z-locked back down
+/// to the ground could reach one plate corner from one camera, none from the
+/// next).
+///
+/// The property is camera invariance: hovering a real vertex under a lock
+/// must resolve to that vertex's own station from EVERY camera that can see
+/// it. Swept around the full azimuth, on all three axes, with the vertex on
+/// the NEGATIVE side of the anchor (the direction the defect suppressed).
+#[test]
+fn a_locked_hover_on_geometry_resolves_its_station_from_every_camera() {
+    for axis in [inference::Axis::X, inference::Axis::Y, inference::Axis::Z] {
+        let u = axis.unit();
+        // Two directions perpendicular to the locked axis (cyclic pick).
+        let e1 = Vec3::new(u.z, u.x, u.y);
+        let e2 = Vec3::new(u.y, u.z, u.x);
+
+        // The grabbed point, 1 m up the lock from the origin.
+        let anchor = Point3::ORIGIN + u;
+        // A vertex to drop onto: at station 0 (a metre BELOW the anchor
+        // along the lock) and well off the lock line, exactly as a ground
+        // vertex sits under a floating sketch. Carried by a short edge so
+        // the scene has a real Endpoint candidate.
+        let vertex = Point3::ORIGIN + e1 * 2.0 + e2 * 2.0;
+        let mut scene = InferenceScene::new();
+        scene.add_sketch(
+            staircase_sketch_id(1),
+            &[(SketchEdgeId::default(), vertex, vertex + e1 * 0.5)],
+        );
+
+        // 16 eyes on a ring around the scene, all above it, every one with
+        // the vertex in plain sight. Nothing in the scene moves.
+        let mut tested = 0;
+        for i in 0..16 {
+            let theta = std::f64::consts::TAU * f64::from(i) / 16.0;
+            let eye =
+                Point3::ORIGIN + e1 * (8.0 * theta.cos()) + e2 * (8.0 * theta.sin()) + u * 6.0;
+
+            // Skip the azimuths whose ray to the vertex ALSO passes within
+            // the pick aperture of the lock line itself. There the cursor is
+            // on the drawn guide line as well as on the vertex, and which of
+            // the two the gesture means is the genuinely ambiguous case that
+            // `locked_resolve_lands_on_the_gesture_side_for_both_signs_on_all_axes`
+            // above already adjudicates in the guide line's favour — a
+            // different question from this one. The count assertion after
+            // the loop keeps the exclusion honest: it must stay a handful of
+            // degenerate viewpoints and never quietly grow to swallow the
+            // property under test.
+            //
+            // The aperture is scaled by the distance to the VERTEX, where
+            // the resolve scales by the distance to `fall` — deliberately
+            // approximate, so this stays a plain skew-line distance instead
+            // of a second copy of the production clamp. It is only ever
+            // asked to separate "the ray crosses the lock line" (lateral
+            // exactly 0 here) from "it misses by metres" (> 0.8 here), with
+            // either threshold landing around 0.06–0.1 in between.
+            let to_vertex = vertex - eye;
+            let miss = anchor - eye;
+            let lateral = match to_vertex.cross(u).normalized() {
+                // Distance from the lock line to the ray, along their common
+                // perpendicular — zero exactly when the two lines cross.
+                Ok(n) => miss.dot(n).abs(),
+                // Ray parallel to the lock: no crossing to be ambiguous with.
+                Err(_) => f64::INFINITY,
+            };
+            if lateral < APP_APERTURE * to_vertex.length() {
+                continue;
+            }
+            tested += 1;
+
+            let snap = scene
+                .resolve(&SnapQuery {
+                    aperture_mode: ApertureMode::Cone,
+                    weights: SnapWeights::default(),
+                    ray: PickRay {
+                        origin: eye,
+                        direction: vertex - eye,
+                    },
+                    anchor: Some(anchor),
+                    lock: Some(SnapLock::Axis(axis)),
+                    aperture: APP_APERTURE,
+                    constraint_plane: None,
+                    soft_axis_aperture_scale: None,
+                    off_plane_points: false,
+                })
+                .expect("a lock with an anchor always resolves");
+            assert_eq!(
+                snap.kind,
+                SnapKind::Endpoint,
+                "{axis:?} lock, azimuth {i}/16: the hovered vertex must be the winner, \
+                 not the directional fallback"
+            );
+            // Its station is the vertex's own: a metre back down the lock.
+            assert!(
+                snap.position.approx_eq(Point3::ORIGIN, tol::POINT_MERGE),
+                "{axis:?} lock, azimuth {i}/16: must project the hovered vertex onto the \
+                 lock line at its own station, got {:?}",
+                snap.position
+            );
+            assert_eq!(snap.direction, Some(u));
+        }
+        assert!(
+            tested >= 12,
+            "{axis:?} lock: only {tested}/16 azimuths were unambiguous — the \
+             on-the-guide-line exclusion has grown past the degenerate cases \
+             and this spec is no longer testing camera invariance"
+        );
+    }
+}
+
 /// Hovering the anchor ITSELF under a lock must resolve to the anchor
 /// exactly — zero displacement — not to a noise-signed station. The
 /// reconstructed cursor ray never re-crosses the anchor exactly (pixel

@@ -2669,7 +2669,28 @@ impl InferenceScene {
         //   `t_fallback` — `fall`'s signed station (along `lock_dir`, from
         //   the anchor): where the cursor itself is pointing along the
         //   lock, and therefore which SIDE of the anchor the gesture
-        //   indicates when it is not `on_anchor`.
+        //   indicates — but ONLY while the cursor is aiming at the lock
+        //   line at all (`on_lock_line`) and not at the anchor itself
+        //   (`on_anchor`).
+        //
+        //   `on_lock_line` — the pick ray passes within the query
+        //   `aperture` of `fall`, i.e. at pixel resolution the cursor is
+        //   ON the lock's guide line. This is what makes `t_fallback` a
+        //   statement about the USER's intent rather than about parallax.
+        //   `fall` is the lock line's point nearest the ray whether the
+        //   cursor is a pixel or a screenful away from that line, and off
+        //   the line its station is set by where the eye happens to be —
+        //   swing the camera around a Z-locked gesture and `t_fallback`
+        //   flips sign over ground geometry that never moved. Reading it
+        //   as "the side the user indicated" there is what made most
+        //   projected inference points unsnappable, and made WHICH ones
+        //   snapped change with every orbit: a ground vertex a metre
+        //   below the anchor is squarely under the cursor, but the ray's
+        //   closest approach to the lock line passes ABOVE the anchor
+        //   whenever the vertex is on the far side of it, so the
+        //   wrong-side gate below threw the vertex away. On the line the
+        //   reading is sound (the cursor is literally pointing along the
+        //   lock), which is the case that gate was written for.
         //
         //   `on_anchor` — the pick ray passes within
         //   `LOCK_ON_ANCHOR_APERTURE_FRACTION` of the aperture of the
@@ -2678,11 +2699,12 @@ impl InferenceScene {
         //   fallback's own station is then sub-pixel reconstruction noise
         //   with an arbitrary SIGN, not a direction the user chose (see
         //   that constant's doc for the Move+Alt wrong-way repro this
-        //   closes). Deliberately a fact about the RAY only, consumed only
-        //   by the fallback clamp and the wrong-side gate below — the
-        //   winner cull judges each CANDIDATE by its own position, so real
-        //   geometry keeps winning at its true station wherever the cursor
-        //   is.
+        //   closes). A strictly narrower ring on the same line as
+        //   `on_lock_line`, and like it deliberately a fact about the RAY
+        //   only, consumed only by the fallback clamp and the wrong-side
+        //   gate below — the winner cull judges each CANDIDATE by its own
+        //   position, so real geometry keeps winning at its true station
+        //   wherever the cursor is.
         let lock_ctx = match (locked_dir, query.anchor) {
             (Some(d), Some(anchor)) => {
                 let on_anchor = cone_test(
@@ -2700,7 +2722,15 @@ impl InferenceScene {
                 // this same point (the cull's noise-equality test).
                 let fall = closest_point_on_line_to_ray(anchor, d, Some(anchor), origin, dir);
                 let t_fallback = (fall - anchor).dot(d);
-                Some((d, anchor, on_anchor, t_fallback, fall))
+                let on_lock_line = cone_test(origin, dir, fall, aperture, mode).is_some();
+                Some(LockCtx {
+                    lock_dir: d,
+                    anchor,
+                    on_anchor,
+                    on_lock_line,
+                    t_fallback,
+                    fall,
+                })
             }
             _ => None,
         };
@@ -2781,37 +2811,53 @@ impl InferenceScene {
         //       nanometres along the lock must still resolve at its true
         //       station — see the committable-band spec).
         //
-        //     * When the cursor is not `on_anchor` the gesture indicates a
+        //     * When the cursor is aiming AT the lock line (`on_lock_line`)
+        //       but not at the anchor (`on_anchor`), the gesture indicates a
         //       definite side of the anchor — the sign of `t_fallback` — and
         //       a candidate whose own station lies on the OPPOSITE side is
         //       not a better answer than the directional fallback, it is a
-        //       wrong answer (e.g. a far face the extended pick ray crosses
-        //       BEHIND the anchor while the user drags away from it).
-        //       Skipped the same way; the side test is gated on `on_anchor`
-        //       being false and `t_fallback` being meaningfully nonzero
-        //       (`> POINT_MERGE`), since with the cursor on the anchor, or
-        //       the ray aimed exactly down the anchor's perpendicular, the
-        //       "side" is itself noise. ---
+        //       wrong answer (e.g. a stray vertex the extended pick ray
+        //       reaches BEHIND the station the user is pointing at, which
+        //       outranks everything by sitting dead-on the ray). Skipped the
+        //       same way.
+        //
+        //       `on_lock_line` is what confines this rule to the gesture it
+        //       was written for. OFF the lock line the cursor is pointing at
+        //       GEOMETRY, not at a station, and `t_fallback` is then a fact
+        //       about parallax — where the eye happens to put the ray's
+        //       closest approach to the line — not about intent. Reading it
+        //       as intent there is what made most projected inference points
+        //       unsnappable, with the surviving set changing on every orbit
+        //       (see `lock_ctx`): the whole POINT of a projected snap is to
+        //       name a station by hovering geometry that lies well off the
+        //       lock line, and that geometry is as legitimately below the
+        //       anchor as above it — dropping a floating rectangle back onto
+        //       a ground vertex is the same gesture as lifting it, in the
+        //       other direction. The side test is additionally gated on
+        //       `t_fallback` being meaningfully nonzero (`> POINT_MERGE`),
+        //       since with the ray aimed exactly down the anchor's
+        //       perpendicular the "side" is itself noise. ---
         let winner = candidates.iter().copied().find(|c| {
             if self.is_occluded(origin, c.3, index) {
                 return false;
             }
             match lock_ctx {
-                Some((lock_dir, anchor, on_anchor, t_fallback, fall)) => {
-                    let proj = project_onto_line(anchor, lock_dir, c.3);
-                    if proj.approx_eq(anchor, tol::POINT_MERGE) {
+                Some(lk) => {
+                    let proj = project_onto_line(lk.anchor, lk.lock_dir, c.3);
+                    if proj.approx_eq(lk.anchor, tol::POINT_MERGE) {
                         return false; // collapses onto the anchor: uncommittable
                     }
                     if matches!(
                         c.0,
                         SnapKind::OnEdge | SnapKind::OnFace | SnapKind::OnAxis | SnapKind::OnGuide
-                    ) && c.3.approx_eq(fall, tol::POINT_MERGE)
+                    ) && c.3.approx_eq(lk.fall, tol::POINT_MERGE)
                     {
                         return false; // the candidate IS the fallback point: ray, not geometry
                     }
-                    if !on_anchor
-                        && t_fallback.abs() > tol::POINT_MERGE
-                        && (proj - anchor).dot(lock_dir) * t_fallback < 0.0
+                    if lk.on_lock_line
+                        && !lk.on_anchor
+                        && lk.t_fallback.abs() > tol::POINT_MERGE
+                        && (proj - lk.anchor).dot(lk.lock_dir) * lk.t_fallback < 0.0
                     {
                         return false; // wrong side of the anchor
                     }
@@ -2823,7 +2869,7 @@ impl InferenceScene {
 
         // TRACE only — `resolve` runs on every pointer move, so this is a
         // firehose filtered out by default; raise the capture level to debug a
-        // bad snap (the inference winner + candidate count,  / docs/DEVELOPMENT.md).
+        // bad snap (the inference winner + candidate count — docs/DIAGNOSTICS.md).
         tracing::trace!(
             target: "inference::resolve",
             candidates = candidates.len(),
@@ -2832,7 +2878,9 @@ impl InferenceScene {
 
         // --- Handle locking ---
         match lock_ctx {
-            Some((lock_dir, anchor, on_anchor, _t_fallback, fall)) => {
+            Some(lk) => {
+                let (lock_dir, anchor, on_anchor, fall) =
+                    (lk.lock_dir, lk.anchor, lk.on_anchor, lk.fall);
                 if let Some((kind, _ang, _depth, pos, prov, _cdir)) = winner.as_ref() {
                     // A candidate snapped: project its position onto the locked line.
                     let projected = project_onto_line(anchor, lock_dir, *pos);
@@ -3558,6 +3606,32 @@ fn plane_basis(n: Vec3) -> (Vec3, Vec3) {
         .expect("helper is never parallel to a unit normal");
     let v = n.cross(u);
     (u, v)
+}
+
+/// The facts a locked [`SnapQuery`] contributes to picking and reporting a
+/// winner, resolved once per query before the winner cull runs (see the
+/// `lock_ctx` binding in `resolve_impl`, which documents each field's role
+/// and the defects the two ray-judging booleans close).
+///
+/// A struct rather than a tuple purely for safety: `on_anchor` and
+/// `on_lock_line` are adjacent booleans on the same line, and swapping them
+/// silently would restore the wrong-side over-culling this type exists to
+/// keep confined.
+#[derive(Debug, Clone, Copy)]
+struct LockCtx {
+    /// The lock's unit direction, resolved through the drawing-axes frame.
+    lock_dir: Vec3,
+    /// The gesture's fixed point; the lock line passes through it.
+    anchor: Point3,
+    /// The pick ray is on the anchor itself at pixel resolution.
+    on_anchor: bool,
+    /// The pick ray is on the lock's guide line at pixel resolution — what
+    /// makes `t_fallback` a statement of intent rather than of parallax.
+    on_lock_line: bool,
+    /// `fall`'s signed station along `lock_dir` from `anchor`.
+    t_fallback: f64,
+    /// The lock line's point nearest the ray: the no-winner fallback.
+    fall: Point3,
 }
 
 /// Projects `point` onto the line `anchor + t * dir` (dir must be unit).
