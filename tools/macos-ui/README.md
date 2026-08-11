@@ -52,6 +52,74 @@ window → a 1280×800 PNG even on a 2× Retina display.)
 
 Override the target process with `HEW_UI_PROC=Name` (default `hew`).
 
+## Documentation screenshots (`hew-shot.sh`)
+
+`hew-ui.sh shot` is built for automation, so its output is deliberately 1×.
+For a picture headed for the user guide, use `hew-shot.sh` instead: it resizes
+the window so the app content is exactly 1440×900 points, captures that region
+without the title bar, and normalises the PNG the way
+`app/scripts/capture-docs-screenshots.mjs` does — 8-bit RGB, no alpha, no
+colour profile, deflate optimised. The result is a 2880×1800 file that sits
+alongside the generated shots in `site/public/docs/` without looking out of
+place. (Preview keeps the alpha channel and a Display P3 profile, which is why
+its exports are several times larger.) The window goes back to its original
+size and position afterwards.
+
+```sh
+tools/macos-ui/hew-shot.sh ~/Desktop/push-pull.png
+tools/macos-ui/hew-shot.sh shot.png --titlebar    # include the macOS title bar
+tools/macos-ui/hew-shot.sh shot.png --keep        # stay resized for a series
+tools/macos-ui/hew-shot.sh shot.png --native      # no rescale to 2×
+```
+
+**The 2× only means something on a Retina display.** A 1440×900 region there is
+2880×1800 real pixels; on a display running at its native resolution (a 4K panel
+at 3840×2160, say) the same region is 1440×900 pixels and has to be upsampled to
+reach the standard, which is softer than a generated shot and compresses worse.
+The script prints a note when it upsamples. To get true 2× pixels regardless of
+the display, drive the app in a browser and capture through Chromium instead:
+
+```sh
+pnpm --dir app dev
+pnpm --dir app exec node scripts/capture-live-shot.mjs
+```
+
+That opens the dev app in a real window at 1440×900 with a device pixel ratio of
+2 and waits; model whatever the shot needs, then type a name at the `shot>`
+prompt to write `site/public/docs/<name>.png` at 2880×1800. The pixel ratio is
+the browser's, not the screen's, so the output is identical in kind to the
+generated shots.
+
+It probes both `localhost` and `127.0.0.1` on ports 5173–5175 and 4173, because
+those two names are **not** interchangeable here: `pnpm dev` leaves Vite on its
+default host, which binds `[::1]` only, so `localhost` answers and `127.0.0.1`
+is refused. When more than one server answers — a stale one from another
+worktree is easy to leave running — it lists them and asks which, rather than
+silently shooting the wrong build. `--url` skips all of that.
+
+### Getting the pointer into the shot
+
+A page screenshot renders the document, and the pointer is an OS compositor
+layer, so it is never in one. `--cursor` injects an overlay that mirrors the
+pointer into the page where the capture can see it. It reads the computed
+`cursor` under the pointer, so the viewport's tool cursors — the
+`url(data:image/svg+xml,…)` values `src/tools/toolIcons.ts` builds, copy badge
+included — are drawn from the same image the app is showing, on the same
+hotspot; only the plain CSS keywords are stand-ins.
+
+Pair it with `--delay` to catch a gesture in progress:
+
+```sh
+pnpm --dir app exec node scripts/capture-live-shot.mjs --cursor --delay 4
+```
+
+Type a name, then take the mouse and be part-way through the push/pull drag when
+the shutter goes — the inference chip, the hover highlight and the drag preview
+are all live app state, so they land in the frame too. `<name> <secs>` overrides
+the delay for one shot, and `cursor on|off` / `delay <secs>` change the standing
+settings mid-session. The overlay sits on top of the real pointer, so you see
+double while working; only the drawn one is in the PNG.
+
 ## How it works / why each piece
 
 | Need | Tool | Notes |
