@@ -2744,16 +2744,17 @@ fn main() {
                 None,
                 None,
             )?;
-            // Command palette. `Cmd+K` is already Rectangle's
-            // accelerator (preserved unchanged) — `Cmd+/` is free and is
-            // the same binding Windows/Linux/web reach via the JS keydown
-            // handler's Ctrl+K (that platform's Rectangle moved to a bare
-            // `R` in, freeing Ctrl+K there; macOS keeps Cmd+K on
-            // Rectangle, so the palette needs a different key here).
+            // Command palette — `Cmd/Ctrl+/` on every platform, matching the
+            // JS keydown handler's binding in App.tsx so one shortcut is true
+            // in both shells and the web build. `/` rather than `K` because
+            // `Cmd+K` is Rectangle's classic macOS SketchUp accelerator and
+            // keeps that job; the palette isn't a tool and has no claim on the
+            // SketchUp key scheme. (Ctrl+K still opens the palette off-macOS
+            // as an unadvertised alias — the JS handler keeps it.)
             let view_palette = accel(
                 MenuItemBuilder::with_id("view-palette", "Command Palette…"),
                 Some("CmdOrCtrl+/"),
-                Some("CmdOrCtrl+K"),
+                Some("CmdOrCtrl+/"),
             )
             .build(handle)?;
 

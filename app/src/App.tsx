@@ -375,7 +375,7 @@ export default function App() {
   const [showSettingsModal, setShowSettingsModal] = useState(false)
   // Windows desktop settings surface (Fluent in-app page; see openSettings).
   const [showFluentSettings, setShowFluentSettings] = useState(false)
-  /** Command palette visibility (⌘K / Ctrl-K). */
+  /** Command palette visibility (⌘/ / Ctrl+/). */
   const [paletteOpen, setPaletteOpen] = useState(false)
   /** True while the user is pointer-dragging the camera (orbit/pan/dolly) —
    * fades the contextual dock out of the way. Fed by Viewport's
@@ -3782,10 +3782,21 @@ export default function App() {
         openSettingsRef.current()
         return
       }
-      // Command palette. Ctrl+K on Windows/Linux/web — free to
-      // use here since moved Rectangle off Ctrl+K onto a bare
-      // 'R'. macOS instead binds Cmd+/ via the native menu (see main.rs) —
-      // Cmd+K there is still Rectangle's native accelerator, unchanged.
+      // Command palette — Cmd/Ctrl+`/` on every platform and both shells.
+      // The palette is app chrome, not a tool, so it doesn't answer to the
+      // SketchUp key scheme the tools follow; `/` is the one key free of that
+      // scheme on all of them, which is what lets a single binding be true
+      // everywhere. On the macOS desktop this branch never runs (the native
+      // menu owns mod-combos there) — main.rs binds the same Cmd+`/`.
+      if (ev.key === '/' && !ev.shiftKey) {
+        ev.preventDefault()
+        setPaletteOpen(true)
+        return
+      }
+      // Ctrl+K stays as an unadvertised alias for the muscle memory of
+      // everyone who used it before `/` became the documented key. Not bound
+      // on the macOS desktop, where Cmd+K is Rectangle's classic SketchUp
+      // accelerator and keeps that job.
       if (ev.key.toLowerCase() === 'k' && !ev.shiftKey) {
         ev.preventDefault()
         setPaletteOpen(true)
@@ -4425,12 +4436,11 @@ export default function App() {
           onSelectTool={(name) => activateTool(name)}
           // The resting palette field lives at the top of the rail on every
           // platform ( — macOS forced it here since it has no in-window
-          // menu bar, and the rest follow for consistency). The shortcut on
-          // macOS desktop is Cmd+/ (Cmd+K stays Rectangle's native
-          // accelerator — Refinement); everywhere else Ctrl+K
-          // (metaKey ⌘K on mac web) via the global keydown handler above.
+          // menu bar, and the rest follow for consistency). One shortcut
+          // everywhere now: Cmd/Ctrl+`/`, dispatched by the global keydown
+          // handler above and by the native menu on the macOS desktop.
           onOpenPalette={() => setPaletteOpen(true)}
-          paletteKbd={isTauri && isMac ? '⌘/' : isMac ? '⌘K' : 'Ctrl K'}
+          paletteKbd={isMac ? '⌘/' : 'Ctrl /'}
           // The BROWSE entry point stays visible on every platform — the
           // dialog itself reports the web build's storage honestly
           // unavailable (matching Settings ▸ Folders' posture); only the
@@ -5060,7 +5070,7 @@ export default function App() {
         />
       )}
 
-      {/* Command palette (⌘K / Ctrl-K / Cmd+/ on macOS). Selecting a
+      {/* Command palette (⌘/ / Ctrl+/, one key everywhere). Selecting a
           result reuses the exact same dispatch the native menu and every
           menu click already go through. */}
       <CommandPalette

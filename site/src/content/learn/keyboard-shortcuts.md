@@ -10,17 +10,17 @@ Tool shortcuts are plain letters, the same on every platform, and match SketchUp
 
 | Tool | Key |
 |---|---|
-| Select | `Space` or `1` |
+| Select | `Space` |
 | Line | `L` |
-| Rectangle | `R` or `2` |
+| Rectangle | `R` |
 | Circle | `C` |
 | Polygon | — |
 | Arc | `A` |
-| Push/Pull | `P` or `3` |
+| Push/Pull | `P` |
 | Offset | `F` |
-| Move | `M` or `4` |
-| Rotate | `Q` or `5` |
-| Scale | `S` or `6` |
+| Move | `M` |
+| Rotate | `Q` |
+| Scale | `S` |
 | Tape Measure | `T` |
 | Paint | `B` |
 | Orbit | `O` |
@@ -33,7 +33,7 @@ Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key (
 
 | Command | macOS | Windows / Linux / web |
 |---|---|---|
-| Command palette | `⌘/` (desktop), `⌘K` (browser) | `Ctrl+K` |
+| Command palette | `⌘/` | `Ctrl+/` |
 | New | `⌘N` | `Ctrl+N` |
 | Open | `⌘O` | `Ctrl+O` |
 | Save | `⌘S` | `Ctrl+S` |

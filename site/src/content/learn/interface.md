@@ -26,7 +26,7 @@ Six more tools don't have rail slots: **Protractor**, **Slice**, **Edit Vertex**
 
 ## The command palette
 
-The search field at the top of the tool rail opens the command palette, or press `Ctrl K` (web and Windows/Linux; `⌘K` in a Mac browser, `⌘/` in the macOS desktop app). Type a few letters of anything: every tool, every menu action, and the objects, groups, and tags in your current model are all searchable. Synonyms work too — typing "extrude" finds Push/Pull, "slicer" finds Export.
+The search field at the top of the tool rail opens the command palette, or press `⌘/` on a Mac and `Ctrl+/` everywhere else — the same key in the desktop app and the browser. Type a few letters of anything: every tool, every menu action, and the objects, groups, and tags in your current model are all searchable. Synonyms work too — typing "extrude" finds Push/Pull, "slicer" finds Export.
 
 ![The command palette open with a query, showing a matched tool with its shortcut](/docs/command-palette.png)
 

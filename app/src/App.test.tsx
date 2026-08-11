@@ -475,9 +475,24 @@ describe('App — keyboard shortcuts', () => {
     expect(rectItem?.textContent).not.toContain('✓')
   })
 
-  it('Ctrl+K opens the command palette', async () => {
+  it('Ctrl+/ opens the command palette', async () => {
     await renderAndLoad()
     expect(screen.queryByRole('dialog', { name: /command palette/i })).not.toBeInTheDocument()
+    fireEvent.keyDown(document, { key: '/', ctrlKey: true })
+    expect(screen.getByRole('dialog', { name: /command palette/i })).toBeInTheDocument()
+  })
+
+  it('Cmd+/ opens the command palette (the same key on a Mac)', async () => {
+    await renderAndLoad()
+    fireEvent.keyDown(document, { key: '/', metaKey: true })
+    expect(screen.getByRole('dialog', { name: /command palette/i })).toBeInTheDocument()
+  })
+
+  // Ctrl+K was the documented key before `/` unified the binding across
+  // platforms; it stays wired so the muscle memory (and the e2e specs that
+  // still press it) keep working.
+  it('Ctrl+K still opens the command palette as a legacy alias', async () => {
+    await renderAndLoad()
     fireEvent.keyDown(document, { key: 'k', ctrlKey: true })
     expect(screen.getByRole('dialog', { name: /command palette/i })).toBeInTheDocument()
   })

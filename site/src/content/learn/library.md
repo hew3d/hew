@@ -36,7 +36,7 @@ Inserting never links to the library file — it copies. Editing a library item 
 
 Materials insert differently: **Paint with this** copies the material into the document's palette and arms the Paint tool in one motion; **Add to palette** copies it without leaving the browser. A material that's already in your palette is detected and reused, never duplicated — the browser badges those "in palette".
 
-You can also insert without opening the browser at all: type an item's name into the [command palette](/learn/interface/) (**⌘K** / **Ctrl+K**) and choose *Insert "…"* — it goes straight to cursor placement.
+You can also insert without opening the browser at all: type an item's name into the [command palette](/learn/interface/) (**⌘/** / **Ctrl+/**) and choose *Insert "…"* — it goes straight to cursor placement.
 
 ## Finding things
 
