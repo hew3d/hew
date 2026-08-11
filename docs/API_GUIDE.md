@@ -176,7 +176,7 @@ before it is rejected with `-32004`.
  "params": {"protocol": 1, "client": {"name": "table-demo", "version": "1.0.0"}}}
 
 {"jsonrpc": "2.0", "id": 1, "result":
- {"protocol": 1, "app": {"name": "hew", "version": "0.7.1"},
+ {"protocol": 1, "app": {"name": "hew", "version": "0.7.2"},
   "profile": "core", "encoding": "json", "documents": []}}
 ```
 

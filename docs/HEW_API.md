@@ -219,7 +219,7 @@ The first request on any connection is `hew.meta.hello`:
 
 ```json
 {"jsonrpc": "2.0", "id": 0, "method": "hew.meta.hello",
- "params": {"protocol": 1, "token": "…", "client": {"name": "hew-cli", "version": "0.7.1"},
+ "params": {"protocol": 1, "token": "…", "client": {"name": "hew-cli", "version": "0.7.2"},
             "encodings": ["json"]}}
 ```
 

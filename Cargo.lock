@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "api"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "kernel",
  "proptest",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "dae-import"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "dae-parser",
  "kernel",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "gltf-import"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "gltf",
  "kernel",
@@ -261,7 +261,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hew-cli"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "api",
  "dae-import",
@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "inference"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "kernel",
  "proptest",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "kernel"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "proptest",
  "serde",
@@ -387,7 +387,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mesh-export"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "kernel",
  "serde_json",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-heal"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "kernel",
  "proptest",
@@ -662,7 +662,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "skp-import"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "dae-import",
  "kernel",
@@ -689,7 +689,7 @@ dependencies = [
 
 [[package]]
 name = "softrender"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "kernel",
  "tessellate",
@@ -697,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "stl-import"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "kernel",
  "mesh-heal",
@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "tessellate"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "kernel",
  "proptest",
@@ -809,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "wasm-api"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "api",
  "dae-import",
