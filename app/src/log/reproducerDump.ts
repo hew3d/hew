@@ -186,10 +186,34 @@ export async function dumpReproducer(reason: string): Promise<string | null> {
 }
 
 /**
+ * True for an uncaught error the browser refused to describe: no Error object
+ * and the muted cross-origin placeholder message. The spec calls this a
+ * "muted error"; every engine reports it as some spelling of "Script error",
+ * with `filename`/`lineno`/`colno` zeroed and `error` null.
+ *
+ * These carry no attribution whatsoever, so a bundle built from one names no
+ * failing code and proves nothing about the document — and the error is just
+ * as likely to belong to a browser extension, an injected analytics tag, or
+ * the browser itself as to Hew. iOS Safari raises them spontaneously on pages
+ * that contain no script at all, which made the resulting download (the web
+ * store's only way to deliver a bundle) hijack the user's Add to Home Screen
+ * flow and leave the PWA uninstallable. Record the sighting in the diagnostic
+ * log and dump nothing.
+ */
+function isMutedError(event: ErrorEvent): boolean {
+  if (event.error != null) return false
+  const message = (event.message ?? '').trim()
+  // Chromium/Firefox: "Script error."; WebKit historically omits the period.
+  return message === '' || message === 'Script error' || message === 'Script error.'
+}
+
+/**
  * Install `window.addEventListener('error'/'unhandledrejection', ...)`
  * handlers that auto-dump a reproducer bundle on uncaught errors/rejections
  * (incl. uncaught wasm panics/traps surfaced as JS errors) — without needing
  * an App/ErrorBoundary edit. Idempotent (installs at most once per session).
+ *
+ * Muted cross-origin errors are logged but never dumped — see `isMutedError`.
  */
 export function installFailureHandlers(): void {
   if (failureHandlersInstalled) return
@@ -197,6 +221,16 @@ export function installFailureHandlers(): void {
   failureHandlersInstalled = true
 
   window.addEventListener('error', (event) => {
+    if (isMutedError(event)) {
+      try {
+        diagnosticLog.logUi('reproducer', 'WARN', {
+          message: 'ignored muted cross-origin error (no attribution, nothing to reproduce)',
+        })
+      } catch {
+        // Best-effort — never throw out of the failure handler.
+      }
+      return
+    }
     const message = event.error instanceof Error ? event.error.message : event.message
     void dumpReproducer(`uncaught-error: ${message}`)
   })

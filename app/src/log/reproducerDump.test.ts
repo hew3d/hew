@@ -266,6 +266,70 @@ describe('installFailureHandlers', () => {
     })
   })
 
+  // A muted cross-origin error (spec term) arrives with no Error object and a
+  // placeholder message. iOS Safari raises these unprompted on pages with no
+  // script at all; dumping on one produced a bundle naming no failing code and
+  // fired a download that pre-empted Safari's Add to Home Screen sheet, making
+  // the PWA uninstallable.
+  it.each([['Script error.'], ['Script error'], ['']])(
+    'ignores a muted cross-origin error with message %o',
+    async (message) => {
+      await withFakeWindow(async (fakeWindow) => {
+        installFailureHandlers()
+        registerScene(fakeScene())
+        const store = fakeStore()
+        setStoreForTest(store)
+
+        const errorEvent = Object.assign(new Event('error'), { error: null, message })
+        fakeWindow.dispatchEvent(errorEvent)
+        await new Promise((r) => setTimeout(r, 0))
+
+        expect(store.write).not.toHaveBeenCalled()
+      })
+    },
+  )
+
+  // The muted-error check keys on the ABSENCE of `.error`, never on the message
+  // alone — a real Error that happens to say "Script error." is still ours.
+  it('still dumps when an Error object is present, whatever the message says', async () => {
+    await withFakeWindow(async (fakeWindow) => {
+      installFailureHandlers()
+      registerScene(fakeScene())
+      const store = fakeStore()
+      setStoreForTest(store)
+
+      const errorEvent = Object.assign(new Event('error'), {
+        error: new Error('Script error.'),
+        message: 'Script error.',
+      })
+      fakeWindow.dispatchEvent(errorEvent)
+      await new Promise((r) => setTimeout(r, 0))
+
+      expect(store.write).toHaveBeenCalledOnce()
+    })
+  })
+
+  // An attributable error with no Error object (older engines report cross-origin
+  // -clean failures this way) still carries a usable message, so it still dumps.
+  it('still dumps an attributable error that carries no Error object', async () => {
+    await withFakeWindow(async (fakeWindow) => {
+      installFailureHandlers()
+      registerScene(fakeScene())
+      const store = fakeStore()
+      setStoreForTest(store)
+
+      const errorEvent = Object.assign(new Event('error'), {
+        error: null,
+        message: 'TypeError: undefined is not an object',
+      })
+      fakeWindow.dispatchEvent(errorEvent)
+      await new Promise((r) => setTimeout(r, 0))
+
+      expect(store.write).toHaveBeenCalledOnce()
+      expect(JSON.parse(store.calls[0].json).manifest.reason).toContain('undefined is not an object')
+    })
+  })
+
   it('triggers a dump on an unhandledrejection event', async () => {
     await withFakeWindow(async (fakeWindow) => {
       installFailureHandlers()

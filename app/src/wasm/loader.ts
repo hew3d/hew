@@ -20,7 +20,10 @@ let logDrainInstalled = false
 function getInitPromise(): Promise<void> {
   if (initPromise === null) {
     const wasmUrl = new URL('./pkg/wasm_api_bg.wasm', import.meta.url)
-    initPromise = init(wasmUrl).then(() => undefined)
+    // Single-object form: wasm-bindgen deprecated the bare-URL argument and
+    // warns about it on every boot ("using deprecated parameters for the
+    // initialization function").
+    initPromise = init({ module_or_path: wasmUrl }).then(() => undefined)
   }
   return initPromise
 }

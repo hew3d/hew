@@ -22,3 +22,22 @@ floor for dumb static hosts.
 
 Validated: the built bundle loads in Chromium with the app booting (React mount,
 WASM kernel init, WebGL canvas) and **zero CSP violations**.
+
+**Deploy note — no edge-injected scripts.** `script-src` and `connect-src` admit
+`'self'` only, so any tag a CDN or host injects into the served HTML — an
+analytics beacon, a RUM agent, a tag manager — violates the policy. Such a tag
+is either blocked (collecting nothing, so the feature is a lie) or executing in
+defiance of the policy, and its exceptions reach the page as muted
+cross-origin errors with no attribution. Leave host-side script injection
+switched off for this origin. Note also that a service worker precaches
+`index.html` keyed on the *built* file's revision, so HTML altered at the edge
+is cached by installed clients and never invalidated by a redeploy.
+
+## 404 handling
+
+`404.html` ships in `dist/` so the host returns a real 404 for unknown paths.
+Without it, SPA-style hosts (Cloudflare Pages among them) answer any missing
+path with `index.html` and a `200`, which turns a stale or mistyped
+`/assets/*.js` reference into an HTML document that the browser then tries to
+parse as JavaScript. The app routes on `window.location.hash`, never on the
+path, so nothing depends on a catch-all rewrite.
