@@ -351,7 +351,7 @@ the session had already been closed, without interrupting the edit.
 | `crates/inference` | Snapping/inference engine: endpoint, midpoint, on-edge, on-face, axis, parallel, perpendicular queries over a spatial index | `kernel` |
 | `crates/tessellate` | Kernel topology → render buffers | `kernel` |
 | `crates/mesh-heal` | Shared foreign-mesh healing pipeline (weld, dedup, T-junction stitching, orientation, coplanar merge) used by every importer | `kernel` |
-| `crates/mesh-export` | STL, 3MF, and glTF/GLB writers for `hew.doc.export`, shared by every host that implements it | `kernel`, `tessellate` |
+| `crates/mesh-export` | STL, 3MF, glTF/GLB, and USDZ writers for `hew.doc.export`, shared by every host that implements it | `kernel`, `tessellate` |
 | `crates/dae-import` | COLLADA (`.dae`) → Objects/Instances | `kernel`, `mesh-heal` |
 | `crates/gltf-import` | glTF/GLB → Objects/Instances | `kernel`, `mesh-heal` |
 | `crates/skp-import` | Clean-room SketchUp (`.skp`) → Objects/Instances, built on the `openskp` reader | `kernel`, `mesh-heal`, `openskp` |

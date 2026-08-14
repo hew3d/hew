@@ -7781,8 +7781,8 @@ impl Scene {
         serde_json::to_string(&counts).expect("string→usize map is always JSON")
     }
 
-    /// Exports the document to `format` (`"stl" | "3mf" | "glb" | "gltf"`)
-    /// via `crates/mesh-export` — the same writers `hew-cli` and the
+    /// Exports the document to `format` (`"stl" | "3mf" | "glb" | "gltf" |
+    /// "usdz"`) via `crates/mesh-export` — the same writers `hew-cli` and the
     /// `hew.doc.export` live-API command use, now the desktop app's own
     /// File > Export path too (the app's former TypeScript exporters,
     /// `app/src/io/exporters/{stlExport,threeMfExport,gltfExport}.ts`, are
@@ -8972,6 +8972,16 @@ mod tests {
             bytes, direct,
             "Scene::export matches mesh_export::export(..., solids_only: false) byte for byte"
         );
+
+        // USDZ reaches the same shared writer too — the newest format on
+        // the same dispatch match arm.
+        let usdz_bytes = scene
+            .export("usdz", 0)
+            .expect("a solid box exports to usdz")
+            .expect("bytes come back, not a nothing-to-export null");
+        let usdz_direct = mesh_export::export(&scene.doc, "usdz", 0, false)
+            .expect("the same writer, called directly with the same solids_only");
+        assert_eq!(usdz_bytes, usdz_direct);
 
         // An unrecognized format still refuses, typed.
         let err = scene.export("obj", 0).unwrap_err();

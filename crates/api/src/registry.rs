@@ -210,7 +210,7 @@ impl Registry {
             S,
             Host,
             Req,
-            "Export the attached document (STL/3MF/glTF); bytes base64, or a path on hosts with filesystem access.",
+            "Export the attached document (STL/3MF/glTF/USDZ); bytes base64, or a path on hosts with filesystem access.",
         );
         add(
             "hew.doc.import",
@@ -951,13 +951,13 @@ impl Registry {
         {
             let cmd = commands.get_mut("hew.doc.export").expect("declared above");
             cmd.implemented = true;
-            cmd.summary = "Export the attached document — STL, 3MF, or glTF/GLB — solids only, bytes base64, or a path on hosts with filesystem access.";
+            cmd.summary = "Export the attached document — STL, 3MF, glTF/GLB, or USDZ — solids only, bytes base64, or a path on hosts with filesystem access.";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
                     "format": {
                         "type": "string",
-                        "enum": ["stl", "3mf", "glb", "gltf"],
+                        "enum": ["stl", "3mf", "glb", "gltf", "usdz"],
                         "description": "\"gltf\" is an alias for \"glb\" — every host that implements one implements both"
                     },
                     "path": { "type": "string" },

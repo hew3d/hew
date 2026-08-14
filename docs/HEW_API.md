@@ -631,7 +631,7 @@ for, not shipped.
 | Namespace | Contents | Tier |
 |---|---|---|
 | `hew.meta` | `hello`, `capabilities`, `documents` | Required |
-| `hew.doc` | `attach`, `transact`, `new`, `open`, `save`, `export` (STL/3MF/glTF), `import` (foreign formats) | Required (`import` Standard) |
+| `hew.doc` | `attach`, `transact`, `new`, `open`, `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats) | Required (`import` Standard) |
 | `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack) | Required |
 | `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` | Required |
 | `hew.solid` | `extrude` (region → new Object), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me` | Required (`follow_me` Standard) |

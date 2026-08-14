@@ -1,5 +1,6 @@
-//! STL, 3MF, and GLB writers for `hew.doc.export` (docs/HEW_API.md §7,
-//! `format` "stl" | "3mf" | "glb" (alias "gltf")) — shared by every host
+//! STL, 3MF, GLB, and USDZ writers for `hew.doc.export` (docs/HEW_API.md
+//! §7, `format` "stl" | "3mf" | "glb" (alias "gltf") | "usdz") — shared by
+//! every host
 //! that implements the command (`crates/hew-cli`'s `CliHost`,
 //! `crates/wasm-api`'s `LiveHost`, and `crates/wasm-api`'s interactive
 //! `Scene::export` used directly by the desktop app's File > Export),
@@ -78,7 +79,7 @@
 //! "the same command produces the same file headless or live").
 
 use kernel::{Document, FaceId, MaterialId, MaterialPalette, Object, Point3, Rgba8};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
 // ----------------------------------------------------------------- errors
@@ -127,13 +128,13 @@ impl ExportError {
 
 // -------------------------------------------------------------- dispatch
 
-/// Exports `doc` to `format` (`"stl" | "3mf" | "glb" | "gltf"` — the alias
-/// `hew.doc.export`'s registry entry declares, every writer that
-/// implements one implementing both), routing to the matching writer
-/// below. The one call every host makes; an unrecognized `format` answers
-/// [`ExportError::UnsupportedFormat`], which maps to the same
-/// `host_capability_missing` name the API surface already uses for "this
-/// host can't do that."
+/// Exports `doc` to `format` (`"stl" | "3mf" | "glb" | "gltf"` (alias) |
+/// "usdz"` — `hew.doc.export`'s registry entry declares exactly these,
+/// every writer that implements one implementing both of an alias pair),
+/// routing to the matching writer below. The one call every host makes; an
+/// unrecognized `format` answers [`ExportError::UnsupportedFormat`], which
+/// maps to the same `host_capability_missing` name the API surface already
+/// uses for "this host can't do that."
 /// `solids_only` — see the module doc's "Non-solid inclusion" section:
 /// `true` for `hew.doc.export` (headless/live-API dispatch), `false` for
 /// the desktop app's interactive `Scene::export`.
@@ -147,6 +148,7 @@ pub fn export(
         "stl" => export_stl(doc, segments_per_turn, solids_only),
         "3mf" => export_3mf(doc, segments_per_turn, solids_only),
         "glb" | "gltf" => export_glb(doc, segments_per_turn, solids_only),
+        "usdz" => export_usdz(doc, segments_per_turn, solids_only),
         other => Err(ExportError::UnsupportedFormat(other.to_string())),
     }
 }
@@ -750,10 +752,22 @@ const RELS_XML: &str = concat!(
 /// same recipe as `crates/kernel/src/serialize.rs`'s `zip_add_stored_entry`
 /// (not shared code: that helper is private to the `.hew` container writer),
 /// so the same document exports to the same bytes every time.
+///
+/// `align` pads the local file header's extra field (via the zip crate's
+/// own `with_alignment`, the `DataStreamAlignment` field APPNOTE 4.6.11
+/// defines — a real registered extra-field id, not a vendor-invented one)
+/// so the entry's file DATA begins at an `align`-byte-aligned offset within
+/// the archive. 3MF has no alignment requirement of its own, so its three
+/// call sites pass `1` (the crate default — a complete no-op: `align > 1`
+/// is the only branch that adds anything to the header, so 3MF's bytes are
+/// unchanged from before this parameter existed). USDZ passes `64`: AR
+/// Quick Look, and every USDZ reader downstream, requires it so a reader
+/// can map an entry's bytes directly rather than copying them out.
 fn zip_add_stored_entry<W: std::io::Write + std::io::Seek>(
     zip: &mut zip::ZipWriter<W>,
     name: &str,
     data: &[u8],
+    align: u16,
 ) -> std::io::Result<()> {
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored)
@@ -762,7 +776,8 @@ fn zip_add_stored_entry<W: std::io::Write + std::io::Seek>(
         // Explicit for the same reason as the kernel's copy: an unset `system`
         // resolves to `cfg!(windows)` from zip 7.2 on, which would make the
         // exported bytes depend on the OS that built Hew.
-        .system(zip::System::Unix);
+        .system(zip::System::Unix)
+        .with_alignment(align);
     zip.start_file(name, options)?;
     std::io::Write::write_all(zip, data)?;
     Ok(())
@@ -786,11 +801,12 @@ fn write_3mf(solids: &[ExportSolid]) -> Option<Vec<u8>> {
         &mut zip,
         "[Content_Types].xml",
         CONTENT_TYPES_XML.as_bytes(),
+        1,
     )
     .expect("zip write must not fail");
-    zip_add_stored_entry(&mut zip, "_rels/.rels", RELS_XML.as_bytes())
+    zip_add_stored_entry(&mut zip, "_rels/.rels", RELS_XML.as_bytes(), 1)
         .expect("zip write must not fail");
-    zip_add_stored_entry(&mut zip, "3D/3dmodel.model", model.as_bytes())
+    zip_add_stored_entry(&mut zip, "3D/3dmodel.model", model.as_bytes(), 1)
         .expect("zip write must not fail");
     Some(zip.finish().expect("zip finish must not fail").into_inner())
 }
@@ -1236,6 +1252,422 @@ fn write_glb(solids: &[ExportSolid], palette: &MaterialPalette) -> Option<Vec<u8
     out.extend_from_slice(&bin);
 
     Some(out)
+}
+
+// ------------------------------------------------------------------- USDZ
+
+/// Exports `doc` to USDZ (docs/design/shop-mode.md §5, "USDZ export in the
+/// kernel"): a plain, UNCOMPRESSED zip holding a single ASCII `usda` layer
+/// (`model.usda` — the archive's only, and therefore first, entry), built
+/// over the exact [`collect_export_solids`] traversal 3MF/GLB share (same
+/// parts, same solids-only/visibility semantics). No binary `usdc` writer:
+/// `usda` is plain text, and AR Quick Look accepts usda-in-usdz (three.js's
+/// own `USDZExporter` has shipped exactly that for years) — so this needs
+/// no new dependency. AR Quick Look (and every USDZ reader downstream)
+/// additionally requires the entry's file DATA to start at a
+/// 64-byte-aligned offset within the archive, so a reader can map it
+/// directly rather than copy it out; [`zip_add_stored_entry`]'s `align`
+/// parameter provides that via the zip crate's own `DataStreamAlignment`
+/// extra field.
+///
+/// Stage metadata declares `metersPerUnit = 1` and `upAxis = "Y"`; every
+/// point is rotated Z-up (Hew's frame) → Y-up with the exact `(x, y, z) →
+/// (x, z, −y)` transform [`export_glb`] uses (same proper rotation, so
+/// winding survives untouched). One `Xform` + `Mesh` prim per exported
+/// part: a part using more than one distinct resolved color (module doc,
+/// "Materials") splits its faces into `GeomSubset`s, one per color, each
+/// bound to its own `UsdPreviewSurface` `Material`; a part painted
+/// uniformly — or left entirely unpainted, which resolves to the shared
+/// default gray the same way 3MF/GLB fall back — binds its `Material`
+/// directly on the `Mesh`, no subset needed. Unlike GLB, no texture image
+/// is embedded: a textured face's material exports as its resolved tint
+/// color only, the same simplification 3MF already makes (module doc,
+/// "Materials") and the design doc does not ask USDZ to go beyond.
+///
+/// Refuses [`ExportError::NothingToExport`] when nothing survives, same as
+/// every other writer.
+pub fn export_usdz(
+    doc: &Document,
+    segments_per_turn: u32,
+    solids_only: bool,
+) -> Result<Vec<u8>, ExportError> {
+    let solids = collect_export_solids(doc, segments_per_turn, solids_only)?;
+    write_usdz(&solids).ok_or(ExportError::NothingToExport)
+}
+
+/// One exported USD part: a sanitized-and-uniquified prim identifier (the
+/// `Xform`'s name; its child `Mesh` is `"{xform_name}_Mesh"`) plus the
+/// original display name (carried as `displayName` prim metadata), the
+/// part's own welded point list (Y-up already applied) and triangle fan
+/// (`faceVertexIndices`, 3 per face), and each kept triangle's index into
+/// the document-wide [`ColorPalette`] (module doc, "Materials" — the same
+/// dedup-by-resolved-color 3MF's own palette uses).
+struct UsdPart {
+    xform_name: String,
+    display_name: String,
+    points: Vec<[f32; 3]>,
+    face_vertex_indices: Vec<u32>,
+    face_colors: Vec<u32>,
+}
+
+/// Uniquifies a base identifier against every name handed out so far,
+/// appending `_2`, `_3`, … on collision — the same ordinal-suffix shape
+/// [`ExportSolid`]'s own naming already uses for unnamed objects.
+#[derive(Default)]
+struct UniqueNamer {
+    used: BTreeSet<String>,
+}
+
+impl UniqueNamer {
+    fn unique(&mut self, base: &str) -> String {
+        if self.used.insert(base.to_string()) {
+            return base.to_string();
+        }
+        let mut n = 2u32;
+        loop {
+            let candidate = format!("{base}_{n}");
+            if self.used.insert(candidate.clone()) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+}
+
+/// Sanitizes `name` into a valid USD prim identifier: ASCII
+/// alphanumeric/underscore only (everything else, including any non-ASCII
+/// character, becomes `_`), never starting with a digit (prefixed with an
+/// extra `_` instead), never empty (falls back to `"Part"`). The original
+/// name is never lost — it survives verbatim as the prim's `displayName`
+/// metadata.
+fn sanitize_usd_identifier(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        return "Part".to_string();
+    }
+    if out.starts_with(|c: char| c.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    out
+}
+
+/// Escapes a Rust string for embedding as a double-quoted `usda` string
+/// literal (backslash, double-quote, and the common control characters).
+fn usda_escape_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Format one `f32` component for `usda`: plain decimal (like
+/// [`format_coord`], Rust's `f32` `Display` never emits scientific
+/// notation), `-0` normalized to `0`.
+fn format_usd_float(n: f32) -> String {
+    let n = if n == 0.0 { 0.0 } else { n };
+    format!("{n}")
+}
+
+/// A palette entry's display name into a `Material` prim identifier:
+/// `#RRGGBB`/`#RRGGBBAA` are already valid identifier characters once the
+/// leading `#` is dropped, so no further sanitizing is needed.
+fn material_name(hex: &str) -> String {
+    format!("Color_{}", hex.trim_start_matches('#'))
+}
+
+/// Inverts [`color_hex`] exactly (`#RRGGBB`/`#RRGGBBAA` back to an
+/// [`Rgba8`]), so the `Material` block can render a palette entry's
+/// `diffuseColor` without the USDZ writer keeping a second, parallel color
+/// table alongside [`ColorPalette`]'s hex strings.
+fn parse_color_hex(hex: &str) -> Rgba8 {
+    let h = hex.trim_start_matches('#');
+    let byte = |o: usize| u8::from_str_radix(&h[o..o + 2], 16).unwrap_or(0);
+    let (r, g, b) = (byte(0), byte(2), byte(4));
+    let a = if h.len() >= 8 { byte(6) } else { 255 };
+    Rgba8::rgba(r, g, b, a)
+}
+
+/// Builds one [`UsdPart`] per solid with at least one surviving triangle,
+/// welding its points independently of every other part (bit-identical
+/// positions only, never a tolerance — same rule 3MF's own vertex welding
+/// uses) and dropping a triangle a weld collapsed to fewer than 3 distinct
+/// vertices, exactly like [`build_3mf_objects`]. Also returns the
+/// document-wide [`ColorPalette`] every part's triangles index into.
+///
+/// Welding happens once per whole part rather than once per material
+/// bucket (unlike [`build_glb_meshes`]'s per-primitive welding): USDZ keeps
+/// one `Mesh` per part regardless of how many colors it uses, and
+/// `GeomSubset` binds materials by face index, not by a separate vertex
+/// stream — so there is nothing to gain from welding more narrowly, and
+/// welding once keeps the point list smaller.
+fn build_usdz_parts(solids: &[ExportSolid]) -> (Vec<UsdPart>, ColorPalette) {
+    let mut parts = Vec::new();
+    let mut palette = ColorPalette::default();
+    let mut namer = UniqueNamer::default();
+
+    for solid in solids {
+        let tri_count = solid.triangles.len() / 9;
+        if tri_count == 0 {
+            continue;
+        }
+
+        let mut vertex_index: BTreeMap<(u32, u32, u32), u32> = BTreeMap::new();
+        let mut points: Vec<[f32; 3]> = Vec::new();
+        let mut face_vertex_indices: Vec<u32> = Vec::new();
+        let mut face_colors: Vec<u32> = Vec::new();
+
+        let mut vertex_at = |o: usize| -> u32 {
+            let x = solid.triangles[o] as f32;
+            let y = solid.triangles[o + 1] as f32;
+            let z = solid.triangles[o + 2] as f32;
+            // Z-up (Hew) -> Y-up (USD): (x, y, z) -> (x, z, -y), same as
+            // export_glb's own conversion.
+            let gx = norm_zero(x);
+            let gy = norm_zero(z);
+            let gz = norm_zero(-y);
+            let key = (gx.to_bits(), gy.to_bits(), gz.to_bits());
+            if let Some(&i) = vertex_index.get(&key) {
+                return i;
+            }
+            let i = points.len() as u32;
+            vertex_index.insert(key, i);
+            points.push([gx, gy, gz]);
+            i
+        };
+
+        for t in 0..tri_count {
+            let o = t * 9;
+            let v1 = vertex_at(o);
+            let v2 = vertex_at(o + 3);
+            let v3 = vertex_at(o + 6);
+            if v1 == v2 || v2 == v3 || v1 == v3 {
+                // A collapsed triangle carries no geometry — skipped, never
+                // repaired (rule 4 in spirit), same as 3MF.
+                continue;
+            }
+            face_vertex_indices.push(v1);
+            face_vertex_indices.push(v2);
+            face_vertex_indices.push(v3);
+            face_colors.push(palette.index_of(solid.colors[t]));
+        }
+
+        if face_colors.is_empty() {
+            continue;
+        }
+
+        let base = sanitize_usd_identifier(&solid.name);
+        let xform_name = namer.unique(&base);
+        parts.push(UsdPart {
+            xform_name,
+            display_name: solid.name.clone(),
+            points,
+            face_vertex_indices,
+            face_colors,
+        });
+    }
+
+    (parts, palette)
+}
+
+/// Renders the `usda` text layer: stage metadata, one `Xform`/`Mesh` pair
+/// per part under `def Xform "Root"`, then one `Material`/`Shader` pair per
+/// palette entry under `def Scope "Materials"`. `UsdPreviewSurface`'s color
+/// inputs are linear (OpenUSD's default working color space is Linear
+/// Rec.709), so `diffuseColor` gamma-decodes the resolved sRGB byte color
+/// the same way [`base_color_factor`] does for GLB's `baseColorFactor` —
+/// pure sRGB red/blue (as the module's own tests use) round-trips to exact
+/// `0`/`1` linear values, so this needs no floating-point tolerance to
+/// pin in a test.
+fn render_usda(parts: &[UsdPart], palette: &ColorPalette, version: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("#usda 1.0".to_string());
+    lines.push("(".to_string());
+    lines.push("    defaultPrim = \"Root\"".to_string());
+    lines.push("    upAxis = \"Y\"".to_string());
+    lines.push("    metersPerUnit = 1".to_string());
+    lines.push(format!("    doc = \"Hew {}\"", usda_escape_string(version)));
+    lines.push(")".to_string());
+    lines.push(String::new());
+
+    lines.push("def Xform \"Root\"".to_string());
+    lines.push("{".to_string());
+    for part in parts {
+        lines.push(format!("    def Xform \"{}\" (", part.xform_name));
+        lines.push(format!(
+            "        displayName = \"{}\"",
+            usda_escape_string(&part.display_name)
+        ));
+        lines.push("    )".to_string());
+        lines.push("    {".to_string());
+
+        let mut distinct: Vec<u32> = part.face_colors.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+
+        // A single-color part binds its Material directly on the Mesh, so
+        // the Mesh itself needs `MaterialBindingAPI` applied (the applied
+        // API schema `rel material:binding` belongs to — usdchecker's
+        // `--arkit` pass, the same check AR Quick Look runs, refuses a
+        // binding without it); a multi-color part instead binds per
+        // `GeomSubset` below, each carrying its own `MaterialBindingAPI`.
+        if distinct.len() <= 1 {
+            lines.push(format!("        def Mesh \"{}_Mesh\" (", part.xform_name));
+            lines.push("            prepend apiSchemas = [\"MaterialBindingAPI\"]".to_string());
+            lines.push("        )".to_string());
+        } else {
+            lines.push(format!("        def Mesh \"{}_Mesh\"", part.xform_name));
+        }
+        lines.push("        {".to_string());
+        lines.push("            uniform bool doubleSided = false".to_string());
+        lines.push("            uniform token subdivisionScheme = \"none\"".to_string());
+
+        let face_count = part.face_vertex_indices.len() / 3;
+        let counts = vec!["3"; face_count].join(", ");
+        lines.push(format!("            int[] faceVertexCounts = [{counts}]"));
+
+        let idx: Vec<String> = part
+            .face_vertex_indices
+            .iter()
+            .map(u32::to_string)
+            .collect();
+        lines.push(format!(
+            "            int[] faceVertexIndices = [{}]",
+            idx.join(", ")
+        ));
+
+        let pts: Vec<String> = part
+            .points
+            .iter()
+            .map(|p| {
+                format!(
+                    "({}, {}, {})",
+                    format_usd_float(p[0]),
+                    format_usd_float(p[1]),
+                    format_usd_float(p[2])
+                )
+            })
+            .collect();
+        lines.push(format!(
+            "            point3f[] points = [{}]",
+            pts.join(", ")
+        ));
+
+        if distinct.len() <= 1 {
+            let color_idx = part.face_colors[0];
+            let mname = material_name(&palette.order[color_idx as usize]);
+            lines.push(format!(
+                "            rel material:binding = </Materials/{mname}>"
+            ));
+        } else {
+            lines.push(
+                "            uniform token subsetFamily:materialBind:familyType = \"partition\""
+                    .to_string(),
+            );
+            for &color_idx in &distinct {
+                let mname = material_name(&palette.order[color_idx as usize]);
+                let face_indices: Vec<String> = part
+                    .face_colors
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &c)| c == color_idx)
+                    .map(|(i, _)| i.to_string())
+                    .collect();
+                lines.push(format!("            def GeomSubset \"{mname}_faces\" ("));
+                lines.push(
+                    "                prepend apiSchemas = [\"MaterialBindingAPI\"]".to_string(),
+                );
+                lines.push("            )".to_string());
+                lines.push("            {".to_string());
+                lines.push("                uniform token elementType = \"face\"".to_string());
+                lines.push(
+                    "                uniform token familyName = \"materialBind\"".to_string(),
+                );
+                lines.push(format!(
+                    "                int[] indices = [{}]",
+                    face_indices.join(", ")
+                ));
+                lines.push(format!(
+                    "                rel material:binding = </Materials/{mname}>"
+                ));
+                lines.push("            }".to_string());
+            }
+        }
+
+        lines.push("        }".to_string());
+        lines.push("    }".to_string());
+    }
+    lines.push("}".to_string());
+    lines.push(String::new());
+
+    lines.push("def Scope \"Materials\"".to_string());
+    lines.push("{".to_string());
+    for hex in &palette.order {
+        let color = parse_color_hex(hex);
+        let mname = material_name(hex);
+        lines.push(format!("    def Material \"{mname}\""));
+        lines.push("    {".to_string());
+        lines.push(format!(
+            "        token outputs:surface.connect = </Materials/{mname}/PreviewSurface.outputs:surface>"
+        ));
+        lines.push(String::new());
+        lines.push("        def Shader \"PreviewSurface\"".to_string());
+        lines.push("        {".to_string());
+        lines.push("            uniform token info:id = \"UsdPreviewSurface\"".to_string());
+        lines.push(format!(
+            "            color3f inputs:diffuseColor = ({}, {}, {})",
+            format_usd_float(srgb_channel_to_linear(color.r)),
+            format_usd_float(srgb_channel_to_linear(color.g)),
+            format_usd_float(srgb_channel_to_linear(color.b)),
+        ));
+        lines.push("            float inputs:metallic = 0".to_string());
+        lines.push("            float inputs:roughness = 0.8".to_string());
+        if color.a != 255 {
+            lines.push(format!(
+                "            float inputs:opacity = {}",
+                format_usd_float(f32::from(color.a) / 255.0)
+            ));
+        }
+        lines.push("            token outputs:surface".to_string());
+        lines.push("        }".to_string());
+        lines.push("    }".to_string());
+    }
+    lines.push("}".to_string());
+
+    lines.join("\n") + "\n"
+}
+
+/// Assembles the USDZ container: a single 64-byte-aligned, stored
+/// `model.usda` entry. Returns `None` when no solid contributes a triangle
+/// (every part empty or fully degenerate), matching [`write_3mf`]/
+/// [`write_glb`]'s own "nothing survived" contract.
+fn write_usdz(solids: &[ExportSolid]) -> Option<Vec<u8>> {
+    let (parts, palette) = build_usdz_parts(solids);
+    if parts.is_empty() {
+        return None;
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    let usda = render_usda(&parts, &palette, version);
+
+    let out_cursor = Cursor::new(Vec::<u8>::new());
+    let mut zip = zip::ZipWriter::new(out_cursor);
+    zip_add_stored_entry(&mut zip, "model.usda", usda.as_bytes(), 64)
+        .expect("zip write must not fail");
+    Some(zip.finish().expect("zip finish must not fail").into_inner())
 }
 
 // ------------------------------------------------------------------- tests
@@ -2006,6 +2438,435 @@ mod tests {
         assert!(
             any_has_uv,
             "the textured primitive carries TEXCOORD_0: {json}"
+        );
+    }
+
+    // ---------------------------------------------------------------- USDZ
+
+    /// Reads `model.usda` out of a USDZ archive as a `String` — every USDZ
+    /// test below's first move.
+    fn usda_layer(bytes: Vec<u8>) -> String {
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
+        let mut usda = String::new();
+        std::io::Read::read_to_string(
+            &mut zip.by_name("model.usda").expect("model.usda entry present"),
+            &mut usda,
+        )
+        .unwrap();
+        usda
+    }
+
+    /// Total triangle count a `usda` layer's `faceVertexIndices` arrays
+    /// declare, summed across every `Mesh` — parses each array's bracketed
+    /// integer list by hand rather than pulling in a USD parser, the same
+    /// text-level approach [`glb_chunks`] takes with real JSON.
+    fn usda_total_triangles(usda: &str) -> usize {
+        let mut total_indices = 0usize;
+        for chunk in usda.split("faceVertexIndices = [").skip(1) {
+            let end = chunk.find(']').expect("closing bracket");
+            let list = chunk[..end].trim();
+            if list.is_empty() {
+                continue;
+            }
+            total_indices += list.split(',').count();
+        }
+        assert_eq!(
+            total_indices % 3,
+            0,
+            "faceVertexIndices is triangles: {usda}"
+        );
+        total_indices / 3
+    }
+
+    /// Total point count a `usda` layer's `points` arrays declare, summed
+    /// across every `Mesh` — counts top-level `(x, y, z)` tuples by
+    /// bracket-depth rather than a naive comma count (a tuple's own commas
+    /// would otherwise be double-counted).
+    fn usda_total_points(usda: &str) -> usize {
+        let mut total = 0usize;
+        for chunk in usda.split("point3f[] points = [").skip(1) {
+            let end = chunk.find(']').expect("closing bracket");
+            total += chunk[..end].matches('(').count();
+        }
+        total
+    }
+
+    /// A box exports as one USDZ archive holding exactly one 64-byte-aligned
+    /// stored `model.usda` entry, declaring the required stage metadata,
+    /// one `Mesh` with the box's usual 8 welded points/12 triangles, bound
+    /// directly (single color, no `GeomSubset` needed for an all-default-gray
+    /// box).
+    #[test]
+    fn export_usdz_produces_one_mesh_with_eight_points_and_twelve_triangles() {
+        let doc = box_document();
+        let bytes = export_usdz(&doc, 0, true).expect("a solid box exports to usdz");
+
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).expect("a valid zip");
+        assert_eq!(zip.len(), 1, "a single usda layer entry");
+        let entry = zip.by_index(0).unwrap();
+        assert_eq!(entry.name(), "model.usda");
+        drop(entry);
+
+        let usda = usda_layer(bytes);
+        assert!(usda.starts_with("#usda 1.0"), "{usda}");
+        assert!(usda.contains("upAxis = \"Y\""), "{usda}");
+        assert!(usda.contains("metersPerUnit = 1"), "{usda}");
+        assert_eq!(usda.matches("def Mesh \"").count(), 1, "{usda}");
+        assert_eq!(
+            usda.matches("def GeomSubset \"").count(),
+            0,
+            "one shared color needs no subset: {usda}"
+        );
+        assert!(
+            usda.contains("subdivisionScheme = \"none\""),
+            "a hard-surface mesh must not be smoothed: {usda}"
+        );
+        assert_eq!(usda_total_triangles(&usda), 12, "{usda}");
+        assert_eq!(usda_total_points(&usda), 8, "{usda}");
+    }
+
+    #[test]
+    fn export_usdz_refuses_nothing_to_export_on_an_empty_document() {
+        let doc = Document::new();
+        let err = export_usdz(&doc, 0, true).unwrap_err();
+        assert_eq!(err.name(), "nothing_to_export");
+    }
+
+    #[test]
+    fn export_usdz_is_byte_identical_across_two_exports() {
+        let doc = box_document();
+        let a = export_usdz(&doc, 0, true).unwrap();
+        let b = export_usdz(&doc, 0, true).unwrap();
+        assert_eq!(a, b, "USDZ export must be deterministic");
+    }
+
+    #[test]
+    fn export_dispatches_usdz_format() {
+        let doc = box_document();
+        let direct = export_usdz(&doc, 0, true).unwrap();
+        let dispatched = export(&doc, "usdz", 0, true).unwrap();
+        assert_eq!(direct, dispatched);
+    }
+
+    /// A painted box (module doc's own fixture: face 0 red, face 1 blue,
+    /// faces 2-5 default gray) has 3 distinct colors on one part, so it
+    /// must split into 3 `GeomSubset`s, one per color, each bound to its
+    /// own `UsdPreviewSurface` `Material`. Pure sRGB red/blue are exact in
+    /// linear space too (the same fact [`export_glb_encodes_face_colors_
+    /// as_distinct_materials`] pins for GLB's `baseColorFactor`), so the
+    /// `diffuseColor` values are asserted exactly, no tolerance needed.
+    #[test]
+    fn export_usdz_splits_a_multi_colored_part_into_geom_subsets_bound_to_preview_surface_materials()
+     {
+        let (doc, _red, _blue) = painted_box_document();
+        let bytes = export_usdz(&doc, 0, true).expect("a painted box exports to usdz");
+        let usda = usda_layer(bytes);
+
+        assert_eq!(usda.matches("def GeomSubset \"").count(), 3, "{usda}");
+        assert_eq!(
+            usda.matches("def Material \"").count(),
+            3,
+            "Red + Blue + default gray: {usda}"
+        );
+        assert_eq!(
+            usda.matches("prepend apiSchemas = [\"MaterialBindingAPI\"]")
+                .count(),
+            3,
+            "one per GeomSubset (the Mesh itself binds nothing directly): {usda}"
+        );
+        assert!(
+            usda.contains("uniform token info:id = \"UsdPreviewSurface\""),
+            "{usda}"
+        );
+        assert!(
+            usda.contains("color3f inputs:diffuseColor = (1, 0, 0)"),
+            "pure sRGB red decodes to exact linear (1, 0, 0): {usda}"
+        );
+        assert!(
+            usda.contains("color3f inputs:diffuseColor = (0, 0, 1)"),
+            "pure sRGB blue decodes to exact linear (0, 0, 1): {usda}"
+        );
+        assert_eq!(usda_total_triangles(&usda), 12, "{usda}");
+    }
+
+    /// A textured face has no `UsdPreviewSurface` texture connection here
+    /// (the design doc scopes USDZ to tint colors, matching 3MF's own
+    /// simplification — module doc, "Materials"): it exports as its
+    /// material's resolved tint color only, and no image bytes of any kind
+    /// end up in the archive.
+    #[test]
+    fn export_usdz_renders_a_textured_face_as_its_tint_color_with_no_embedded_image() {
+        let doc = textured_box_document();
+        let bytes = export_usdz(&doc, 0, true).expect("a textured box exports to usdz");
+        let usda = usda_layer(bytes);
+        assert!(
+            usda.contains("color3f inputs:diffuseColor"),
+            "the tint still becomes a diffuseColor: {usda}"
+        );
+        assert!(
+            !usda.to_lowercase().contains("texture") && !usda.to_lowercase().contains("image"),
+            "no texture data of any kind: {usda}"
+        );
+    }
+
+    /// Sanitizing never loses the original name: an object named with
+    /// spaces, XML/USD-hostile punctuation, and a leading digit gets a
+    /// valid, unique `Xform` identifier while its exact original name
+    /// survives verbatim as `displayName` metadata.
+    #[test]
+    fn export_usdz_sanitizes_the_identifier_but_keeps_the_original_display_name() {
+        let mut doc = Document::new();
+        let mesh = unit_box_mesh("3 Legs & \"Stuff\"");
+        let scene = ImportScene {
+            materials: Vec::new(),
+            defs: Vec::new(),
+            roots: vec![ImportNode::Mesh(mesh)],
+            guides: Vec::new(),
+            tags: Vec::new(),
+        };
+        doc.ingest(scene, Vec::new())
+            .expect("ingest an awkwardly named box");
+
+        let bytes = export_usdz(&doc, 0, true).expect("exports despite the name");
+        let usda = usda_layer(bytes);
+
+        let expected_id = sanitize_usd_identifier("3 Legs & \"Stuff\"");
+        assert!(
+            expected_id
+                .chars()
+                .next()
+                .is_some_and(|c| !c.is_ascii_digit()),
+            "a leading digit must be prefixed away: {expected_id}"
+        );
+        assert!(
+            usda.contains(&format!("def Xform \"{expected_id}\" (")),
+            "sanitized identifier {expected_id} present: {usda}"
+        );
+        assert!(
+            usda.contains("displayName = \"3 Legs & \\\"Stuff\\\"\""),
+            "original name escaped verbatim into displayName: {usda}"
+        );
+    }
+
+    /// Two distinctly named objects that sanitize to the same identifier
+    /// (punctuation-only difference) must not collide — [`UniqueNamer`]
+    /// suffixes the second.
+    #[test]
+    fn export_usdz_uniquifies_colliding_sanitized_identifiers() {
+        let mut doc = Document::new();
+        let scene = ImportScene {
+            materials: Vec::new(),
+            defs: Vec::new(),
+            roots: vec![
+                ImportNode::Mesh(unit_box_mesh("Leg#1")),
+                ImportNode::Mesh(unit_box_mesh("Leg 1")),
+            ],
+            guides: Vec::new(),
+            tags: Vec::new(),
+        };
+        doc.ingest(scene, Vec::new())
+            .expect("ingest two colliding-sanitized boxes");
+
+        let bytes = export_usdz(&doc, 0, true).expect("both boxes export");
+        let usda = usda_layer(bytes);
+        assert_eq!(usda.matches("def Xform \"Leg_1\" (").count(), 1, "{usda}");
+        assert_eq!(usda.matches("def Xform \"Leg_1_2\" (").count(), 1, "{usda}");
+    }
+
+    /// Property (a): every zip entry USDZ writes is stored (method 0, never
+    /// compressed — AR Quick Look and every other USDZ reader require an
+    /// uncompressed container) and its file DATA begins at a
+    /// 64-byte-aligned offset within the archive.
+    #[test]
+    fn export_usdz_every_entry_is_stored_and_sixty_four_byte_aligned() {
+        let (doc, _red, _blue) = painted_box_document();
+        let bytes = export_usdz(&doc, 0, true).expect("a painted box exports to usdz");
+
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
+        assert!(!zip.is_empty(), "at least one entry");
+        for i in 0..zip.len() {
+            let file = zip.by_index(i).expect("entry readable");
+            assert_eq!(
+                file.compression(),
+                zip::CompressionMethod::Stored,
+                "entry {} must be stored, not compressed",
+                file.name()
+            );
+            let offset = file
+                .data_start()
+                .expect("data_start known once the entry has been read");
+            assert_eq!(
+                offset % 64,
+                0,
+                "entry {}'s data must start 64-byte aligned, got offset {offset}",
+                file.name()
+            );
+        }
+    }
+
+    /// Property (b): the archive's central directory parses and matches
+    /// every entry's local file header — re-parses the local header by hand
+    /// at the offset the central directory declares (rather than trusting
+    /// the zip crate's own cross-checking), confirming the signature, the
+    /// stored-method byte, and the filename agree, and that the data offset
+    /// this test derives independently matches both the library's own
+    /// [`data_start`](zip::read::ZipFile::data_start) and the 64-byte
+    /// alignment requirement.
+    #[test]
+    fn export_usdz_central_directory_matches_local_headers() {
+        let (doc, _red, _blue) = painted_box_document();
+        let bytes = export_usdz(&doc, 0, true).expect("a painted box exports to usdz");
+
+        let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).expect("a valid zip");
+        assert!(!zip.is_empty());
+        for i in 0..zip.len() {
+            let file = zip.by_index(i).expect("entry readable");
+            let name = file.name().to_string();
+            let header_start = file.header_start() as usize;
+            let data_start = file.data_start().expect("data_start known") as usize;
+            drop(file);
+
+            assert_eq!(
+                &bytes[header_start..header_start + 4],
+                &0x0403_4b50u32.to_le_bytes(),
+                "local file header signature at the central directory's declared offset"
+            );
+            let method = u16::from_le_bytes(
+                bytes[header_start + 8..header_start + 10]
+                    .try_into()
+                    .unwrap(),
+            );
+            assert_eq!(method, 0, "local header compression method must be Stored");
+            let name_len = u16::from_le_bytes(
+                bytes[header_start + 26..header_start + 28]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            let extra_len = u16::from_le_bytes(
+                bytes[header_start + 28..header_start + 30]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            let name_start = header_start + 30;
+            let local_name =
+                std::str::from_utf8(&bytes[name_start..name_start + name_len]).unwrap();
+            assert_eq!(
+                local_name, name,
+                "local header filename matches the central directory"
+            );
+            let computed_data_start = name_start + name_len + extra_len;
+            assert_eq!(
+                computed_data_start, data_start,
+                "the offset this test computes by hand matches the library's own"
+            );
+            assert_eq!(computed_data_start % 64, 0, "data starts 64-byte aligned");
+        }
+    }
+
+    /// Property (c): the `usda` layer contains exactly one `Mesh` per
+    /// expected part, with a total triangle count matching the GLB export
+    /// of the identical document exactly (both writers apply the same
+    /// degenerate-triangle test to the same raw triangles, so the kept
+    /// count cannot differ) — a painted, multi-object, instanced model, the
+    /// same acceptance scenario 3MF/GLB check themselves against (module
+    /// doc). Point counts are NOT asserted equal to GLB's: USDZ welds once
+    /// per whole part while GLB welds once per material-bucket primitive
+    /// (`build_glb_meshes`'s own doc comment), so the two can legitimately
+    /// differ; a sane bound (nonzero, never more than 3 per triangle) is
+    /// asserted instead.
+    #[test]
+    fn export_usdz_usda_layer_has_one_mesh_per_part_with_triangle_counts_matching_glb() {
+        let mut doc = box_document(); // "Box": one object, all faces default.
+        let mut painted_mesh = unit_box_mesh("Painted");
+        painted_mesh.face_materials[0] = 0;
+        let scene = ImportScene {
+            materials: vec![Material::solid("Red", Rgba8::rgb(0xff, 0x00, 0x00))],
+            defs: Vec::new(),
+            roots: vec![ImportNode::Mesh(painted_mesh)],
+            guides: Vec::new(),
+            tags: Vec::new(),
+        };
+        doc.ingest(scene, Vec::new())
+            .expect("ingest a second, painted box");
+
+        let scene = ImportScene {
+            materials: Vec::new(),
+            defs: Vec::new(),
+            roots: vec![ImportNode::Mesh(unit_box_mesh("LegSrc"))],
+            guides: Vec::new(),
+            tags: Vec::new(),
+        };
+        doc.ingest(scene, Vec::new())
+            .expect("ingest the component source box");
+        let leg_src_id = *doc
+            .visible_object_ids()
+            .iter()
+            .find(|&&id| doc.object_name(id) == Some("LegSrc"))
+            .expect("the component source object is present");
+        let (component, _first_instance, _change) = doc
+            .make_component(&[kernel::NodeId::Object(leg_src_id)])
+            .expect("make a component from the plain box");
+        doc.place_instance(
+            component,
+            kernel::Transform::translation(kernel::Vec3::new(4.0, 0.0, 0.0)),
+        )
+        .expect("place a second instance");
+
+        let usda_bytes = export_usdz(&doc, 0, true).expect("the whole scene exports to usdz");
+        let usda = usda_layer(usda_bytes);
+        let glb = export_glb(&doc, 0, true).expect("the whole scene exports to glb too");
+        let (json, _bin) = glb_chunks(&glb);
+
+        let glb_meshes = json["meshes"].as_array().unwrap();
+        assert_eq!(
+            usda.matches("def Mesh \"").count(),
+            glb_meshes.len(),
+            "one Mesh per part, same traversal as GLB: {usda}"
+        );
+
+        let glb_total_triangles: u64 = glb_meshes
+            .iter()
+            .flat_map(|m| m["primitives"].as_array().unwrap())
+            .map(|p| {
+                json["accessors"][p["indices"].as_u64().unwrap() as usize]["count"]
+                    .as_u64()
+                    .unwrap()
+                    / 3
+            })
+            .sum();
+        let usda_triangles = usda_total_triangles(&usda) as u64;
+        assert_eq!(
+            usda_triangles, glb_total_triangles,
+            "usda triangle count must match GLB's exactly: {usda}"
+        );
+
+        let usda_points = usda_total_points(&usda);
+        assert!(
+            usda_points > 0 && usda_points <= usda_triangles as usize * 3,
+            "point count must be sane relative to the triangle count: {usda_points} points, \
+             {usda_triangles} triangles"
+        );
+    }
+
+    /// Property (d): `solids_only` toggles non-solid inclusion for USDZ the
+    /// same way it does for STL/3MF/GLB (module doc, "Non-solid
+    /// inclusion") — extends [`solids_only_toggles_non_solid_inclusion`]'s
+    /// own open-quad fixture rather than duplicating it.
+    #[test]
+    fn export_usdz_solids_only_toggles_non_solid_inclusion() {
+        let doc = open_quad_document();
+        assert!(
+            export_usdz(&doc, 0, true).is_err(),
+            "solids-only drops the open quad"
+        );
+
+        let bytes = export_usdz(&doc, 0, false).expect("permissive mode includes it");
+        let usda = usda_layer(bytes);
+        assert_eq!(usda.matches("def Mesh \"").count(), 1, "{usda}");
+        assert_eq!(
+            usda_total_triangles(&usda),
+            2,
+            "one quad triangulates to 2 triangles: {usda}"
         );
     }
 }

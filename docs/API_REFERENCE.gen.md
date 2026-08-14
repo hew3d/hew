@@ -519,7 +519,7 @@ Bind this connection to one open document.
 - **Class:** solitary
 - **Served:** host
 
-Export the attached document — STL, 3MF, or glTF/GLB — solids only, bytes base64, or a path on hosts with filesystem access.
+Export the attached document — STL, 3MF, glTF/GLB, or USDZ — solids only, bytes base64, or a path on hosts with filesystem access.
 
 **Params schema:**
 
@@ -533,7 +533,8 @@ Export the attached document — STL, 3MF, or glTF/GLB — solids only, bytes ba
         "stl",
         "3mf",
         "glb",
-        "gltf"
+        "gltf",
+        "usdz"
       ],
       "type": "string"
     },

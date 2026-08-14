@@ -376,17 +376,17 @@ fn cli_host_export_refuses_nothing_to_export_on_an_empty_document() {
 }
 
 /// `hew.doc.export` dispatched through the real JSON-RPC envelope (open a
-/// pre-built file, export "3mf"/"glb") returns `bytes_base64` that decodes
-/// to exactly the same bytes a direct `CliHost::export_document` call
-/// produces on the same document — the dispatcher adds nothing but the
+/// pre-built file, export "3mf"/"glb"/"usdz") returns `bytes_base64` that
+/// decodes to exactly the same bytes a direct `CliHost::export_document`
+/// call produces on the same document — the dispatcher adds nothing but the
 /// base64 wrapping (`crates/api/src/commands/doc.rs`'s `export_doc`).
 #[test]
-fn dispatch_export_3mf_and_glb_match_a_direct_export_byte_for_byte() {
+fn dispatch_export_3mf_glb_and_usdz_match_a_direct_export_byte_for_byte() {
     let dir = scratch_dir("dispatch-export");
     let path = dir.join("box.hew");
     std::fs::write(&path, box_document().save()).unwrap();
 
-    for format in ["3mf", "glb"] {
+    for format in ["3mf", "glb", "usdz"] {
         let outcome = hew_cli::run::dispatch_file(
             &path,
             "hew.doc.export",

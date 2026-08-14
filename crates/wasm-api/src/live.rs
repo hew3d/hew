@@ -224,7 +224,7 @@ impl Host for LiveHost {
     }
 
     /// Mirrors [`save_document`](Self::save_document)'s posture exactly:
-    /// the STL/3MF/glTF writers (`crates/mesh-export`, shared with
+    /// the STL/3MF/glTF/USDZ writers (`crates/mesh-export`, shared with
     /// `crates/hew-cli`'s `CliHost`) need no filesystem to produce bytes,
     /// only a `path` would — so a live export produces the bytes and
     /// hands them back for the caller to write, and refuses only that one

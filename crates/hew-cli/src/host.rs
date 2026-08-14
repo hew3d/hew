@@ -275,7 +275,7 @@ fn fitted_bbox(doc: &Document) -> (Point3, Point3) {
 // -------------------------------------------------------- import unit scale
 
 /// meters-per-source-unit, keyed by the `units` param (docs/HEW_API.md §7:
-/// STL carries no units of its own). The STL/3MF/glTF *writers*
+/// STL carries no units of its own). The STL/3MF/glTF/USDZ *writers*
 /// `export_document` calls above live in `crates/mesh-export` now, shared
 /// with `crates/wasm-api`'s `LiveHost`; this scale table is import-only
 /// and stays here.
