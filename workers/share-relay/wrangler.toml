@@ -1,0 +1,29 @@
+name = "share-relay"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+
+# One-shot ciphertext storage: a per-token Durable Object (`ShareDrop`,
+# src/shareDrop.ts) rather than R2 — see README.md's "Storage" section for
+# why. No R2 bucket to create; SQLite-backed Durable Objects are on the
+# Workers FREE plan and every free-tier limit fails closed (the operation
+# errors, nothing bills), which R2's Class-A-writes-bill-past-1M/month
+# never could. `compatibility_date` above already comfortably clears both
+# the 2024-04-03 RPC-method threshold and SQLite-backed DO availability —
+# no bump was needed for this change.
+[[durable_objects.bindings]]
+name = "SHARE_DROP"
+class_name = "ShareDrop"
+
+# Creates the SQLite storage backend for `ShareDrop` on first deploy. Every
+# Durable Object class ever bound needs exactly one `new_sqlite_classes` (or
+# `new_classes`) entry across this file's migration history — this is that
+# entry for `ShareDrop`.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ShareDrop"]
+
+# The public route (README.md's deploy checklist) — requires hew3d.com to
+# already be a Cloudflare-managed zone on the same account.
+[[routes]]
+pattern = "share.hew3d.com/*"
+zone_name = "hew3d.com"
