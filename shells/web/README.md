@@ -2,6 +2,11 @@
 
 This directory packages the Hew app as a static web deployment. Run `pnpm --dir shells/web build` to produce `shells/web/dist/`, which contains the complete web application ready for deployment.
 
+Deploying your own copy (homelab, private network, anywhere other than
+`app.hew3d.com`)? See `docs/SELF_HOSTING.md` — it walks through the same
+headers and 404 handling documented below, packaged as a canonical nginx
+config at `shells/web/deploy/nginx.conf`.
+
 ## Content Security Policy
 
 The build injects a CSP `<meta>` into `dist/index.html` via `inject-csp.mjs`
