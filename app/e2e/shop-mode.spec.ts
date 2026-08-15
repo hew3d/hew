@@ -678,7 +678,11 @@ const HANDOFF_TOKEN = 'a'.repeat(22)
 async function readRecentNames(page: Page): Promise<string[]> {
   return page.evaluate(async () => {
     const db: IDBDatabase = await new Promise((resolveDb, rejectDb) => {
-      const req = indexedDB.open('hew-recents', 1)
+      // No explicit version — the app owns the recents schema version (bumped
+      // to 2 for the content-hash dedupe), and pinning an older number here
+      // races the app's own upgrade and throws VersionError. Opening without a
+      // version attaches to whatever the app created.
+      const req = indexedDB.open('hew-recents')
       req.onsuccess = () => resolveDb(req.result)
       req.onerror = () => rejectDb(req.error)
     })
@@ -1400,19 +1404,26 @@ test.describe('Tape Measure loupe', () => {
     expect(Math.hypot(jittered.x - clean.x, jittered.y - clean.y)).toBeLessThan(1)
   })
 
-  test('a drag that breaks the hold before engaging commits at the press position, same as an un-deferred press always has', async ({ page }) => {
+  test('a drag that breaks the hold before engaging orbits the camera and commits NO point — a drag is a camera gesture in Tape mode', async ({ page }) => {
     const px = await setUpTapeMeasure(page)
+    const cameraBefore = await page.evaluate(() => window.__hew_shop_test!.getCameraPose())
 
     await page.mouse.move(px.x, px.y)
     await page.mouse.down()
     // Well past LOUPE_SLOP_PX (10px), and fast enough that LOUPE_HOLD_MS
-    // (300ms) can't have elapsed first.
+    // (300ms) can't have elapsed first — a real drag, not a hold.
     await page.mouse.move(px.x + 60, px.y + 40, { steps: 10 })
     await page.mouse.up()
     await settleFrame(page)
 
     await expect(page.getByTestId('tape-loupe')).toBeHidden()
-    await expect(page.getByTestId('tape-anchor-marker')).toHaveCount(1)
+    // Shop-mode playtest: a drag is purely a CAMERA gesture in Tape mode — it
+    // orbits and drops NO point. The reject-commit this used to assert (a drag
+    // committing a point at the press position) was removed, since it made the
+    // camera unusable while measuring.
+    await expect(page.getByTestId('tape-anchor-marker')).toHaveCount(0)
+    const cameraAfter = await page.evaluate(() => window.__hew_shop_test!.getCameraPose())
+    expect(cameraAfter).not.toEqual(cameraBefore)
   })
 
   // Adversarial-review finding 4: a second, independent pointer must never
