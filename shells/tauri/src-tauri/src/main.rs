@@ -32,6 +32,13 @@ mod fonts;
 // crates/wasm-api/src/live.rs (the webview-side dispatch half).
 mod live;
 
+// "Open on Phone" QR handoff (docs/design/shop-mode.md §4, workers/
+// share-relay/README.md): the desktop encrypts the document and uploads it
+// to a Cloudflare Worker dead-drop; this module only renders the resulting
+// URL as an SVG QR code (the encryption and upload happen entirely in the
+// webview — see qr.rs's own doc comment).
+mod qr;
+
 // ---------------------------------------------------------------------------
 // In-app auto-updater (compiled in via the `updater` feature — see Cargo.toml).
 //
@@ -2440,7 +2447,12 @@ fn main() {
         // Opener: lets the webview hand a URL (the getting-started guide link on
         // the welcome screen) to the OS default browser instead of trying to
         // navigate the app's own webview.
-        .plugin(tauri_plugin_opener::init());
+        .plugin(tauri_plugin_opener::init())
+        // Native HTTP client for the "Open on Phone" upload/delete
+        // (PhoneShareDialog.tsx) — bypasses the webview's browser `fetch` and
+        // its CORS restrictions entirely. Scoped to the share-relay host
+        // alone in capabilities/default.json.
+        .plugin(tauri_plugin_http::init());
 
     // The updater plugin ships only in updater-enabled builds (the `updater`
     // feature); package-manager builds compile it out.
@@ -2496,6 +2508,7 @@ fn main() {
             updater_available,
             fonts::list_system_fonts,
             fonts::read_font_file,
+            qr::qr_svg,
         ])
         // Build and attach the native menu bar; wire menu-item clicks to
         // `menu-action` events emitted to the webview.
@@ -2566,6 +2579,16 @@ fn main() {
             // item here, but the design calls for format choice handled in-dialog like
             // every other app.
             let file_export = MenuItemBuilder::with_id("file-export", "Export…").build(handle)?;
+            // "Open on Phone…" (qr.rs, workers/share-relay/README.md):
+            // encrypts the document and uploads it to a cloud dead-drop,
+            // showing a QR the phone scans to fetch and decrypt it. Always
+            // enabled here — like Save to Library above, macOS gets no live
+            // disabled-state push for this item; the frontend refuses an
+            // empty document with a toast instead (the web MenuBar's
+            // `openOnPhoneDisabled` gating, App.tsx's "open-on-phone"
+            // action).
+            let file_open_on_phone =
+                MenuItemBuilder::with_id("file-open-on-phone", "Open on Phone…").build(handle)?;
             let file_save = MenuItemBuilder::with_id("file-save", "Save")
                 .accelerator("CmdOrCtrl+S")
                 .build(handle)?;
@@ -2592,6 +2615,7 @@ fn main() {
                 .separator()
                 .item(&file_import)
                 .item(&file_export)
+                .item(&file_open_on_phone)
                 .separator()
                 .item(&file_save)
                 .item(&file_save_as)
@@ -3469,6 +3493,7 @@ fn main() {
                 "file-open" => "open",
                 "file-import" => "import",
                 "file-export" => "export",
+                "file-open-on-phone" => "open-on-phone",
                 "file-save" => "save",
                 "file-save-as" => "save-as",
                 "file-save-to-library" => "save-to-library-doc",

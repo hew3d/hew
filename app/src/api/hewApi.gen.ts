@@ -217,13 +217,13 @@ export interface DocAttachParams {
 export type DocAttachResult = UnspecifiedShape
 
 /**
- * `hew.doc.export` (v1) — Export the attached document — STL, 3MF, or glTF/GLB — solids only, bytes base64, or a path on hosts with filesystem access.
+ * `hew.doc.export` (v1) — Export the attached document — STL, 3MF, glTF/GLB, or USDZ — solids only, bytes base64, or a path on hosts with filesystem access.
  * Tier: Required · Class: solitary · Served: host
  * Refusals: export_failed, host_capability_missing, nothing_to_export, save_failed
  */
 export interface DocExportParams {
   /** "gltf" is an alias for "glb" — every host that implements one implements both */
-  format: "stl" | "3mf" | "glb" | "gltf"
+  format: "stl" | "3mf" | "glb" | "gltf" | "usdz"
   path?: string
   segments_per_turn?: number
 }

@@ -179,7 +179,7 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'new', label: 'New', description: 'Start a new, blank document.', group: 'Actions' },
   { id: 'open', label: 'Open…', description: 'Open a .hew file from disk.', group: 'Actions' },
   { id: 'import', label: 'Import…', description: 'Import a COLLADA (.dae), SketchUp (.skp), glTF, or STL model.', group: 'Actions', gate: 'canImport' },
-  { id: 'export', label: 'Export…', description: 'Export the model as glTF, STL, or 3MF — format chosen in the dialog.', group: 'Actions', synonyms: ['stl', 'glb', 'gltf', '3mf', '3d print', 'print', 'slicer'] },
+  { id: 'export', label: 'Export…', description: 'Export the model as glTF, STL, 3MF, or USDZ — format chosen in the dialog.', group: 'Actions', synonyms: ['stl', 'glb', 'gltf', '3mf', 'usdz', 'usd', 'ar', 'quick look', '3d print', 'print', 'slicer'] },
   { id: 'draw-3d-text', label: '3D Text…', description: 'Place extruded, watertight text on a face or the ground.', group: 'Actions', synonyms: ['text', 'font', 'letters', 'lettering', 'engrave', 'extrude text'], gate: 'canDrawText' },
   { id: 'save', label: 'Save', description: 'Save the current document.', group: 'Actions' },
   { id: 'save-as', label: 'Save As…', description: 'Save the current document under a new name.', group: 'Actions' },
@@ -232,6 +232,8 @@ const ACTION_ENTRIES: PaletteEntry[] = [
 export const PALETTE_EXCLUDED_ACTION_IDS: Record<string, string> = {
   'open-palette': 'self-referential — the palette cannot usefully open itself',
   'close': 'window lifecycle, desktop shells only — not a model action',
+  'open-on-phone':
+    'desktop shells only — the LAN server lives in the Tauri shell and the palette has no platform gate; the web build hides its menu item the same way (App.tsx passes onOpenOnPhone only under isTauri)',
   'enter-context': 'contextual-dock alias; needs a picked node, not a bare trigger',
   'ungroup': 'contextual-dock alias of edit-ungroup',
   'make-unique': 'contextual-dock alias of edit-make-unique',

@@ -25,6 +25,16 @@ const KIND_LABEL: Record<string, string> = {
   plane: 'On Plane',
 }
 
+/** The human-readable label for a snap `kind` (`'on-edge'` → `'On Edge'`,
+ *  an unrecognized kind passed through verbatim) — exported so other
+ *  DOM-owning callers that want the SAME vocabulary without the full
+ *  positioned chip (the Tape Measure loupe overlay, `Viewport.tsx`'s own
+ *  imperative DOM, round-3 playtest finding 4) don't invent a second
+ *  kind→label map to drift out of sync with this one. */
+export function inferenceKindLabel(kind: string): string {
+  return KIND_LABEL[kind] ?? kind
+}
+
 export function InferenceTooltip({ info }: { info: InferenceInfo | null }) {
   if (info === null) return null
 

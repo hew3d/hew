@@ -126,6 +126,21 @@ describe('formatLengthIn — arch', () => {
   it('reduces the fraction to lowest terms', () => {
     expect(formatLengthIn((5 * 12 + 3.5) * 0.0254, 'arch')).toBe('5\' 3-1/2"')
   })
+
+  it('drops the leading "0-" for a standalone sub-inch value (3/4" not 0-3/4")', () => {
+    expect(formatLengthIn(0.75 * 0.0254, 'arch')).toBe('3/4"')
+  })
+
+  it('drops the leading "0-" for a standalone sub-inch value with a negative sign', () => {
+    expect(formatLengthIn(-0.75 * 0.0254, 'arch')).toBe('-3/4"')
+  })
+
+  it('keeps the "0-" inside a composite WITH feet (1\' 0-3/4", not 1\' 3/4")', () => {
+    // 12.75" = 1' + 0.75" — the inch part is a sub-inch fraction, but it's
+    // paired with a nonzero feet part, so the "0" stays: it's the whole
+    // inches count (zero), not a dropped leading digit.
+    expect(formatLengthIn(12.75 * 0.0254, 'arch')).toBe('1\' 0-3/4"')
+  })
 })
 
 describe('metersFromUnit', () => {

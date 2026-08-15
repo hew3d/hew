@@ -91,3 +91,153 @@ textarea,
     transition: none;
   }
 }
+
+/* Shop Mode chrome motion (design_handoff_shop_mode/README.md's "Motion
+ * summary" table) — a handful of small, reusable classes rather than
+ * per-component inline `<style>` blocks, following this file's existing
+ * `.hew-*` precedent above.
+ *
+ *   .shop-press   — dock/chip "pressed" feedback: scale .97 over 80ms.
+ *   .shop-spin    — the AR-busy spinner (icons.tsx's ArSpinner), .9s linear.
+ *   .shop-toast-in  — toast entrance: 180ms ease-out, rise 8px (README §9).
+ *   .shop-toast-out — toast exit: 160ms ease-in fade (paired with a
+ *                     `leaving` state in ShopApp.tsx's toast timer, since a
+ *                     React unmount can't itself be animated).
+ *   .shop-inspect-in/-out — the inspect card's own enter/exit (README §3
+ *                     Motion summary: in 140ms ease-out +6px rise, out
+ *                     100ms ease-in), same `leaving`-prop pattern as the
+ *                     toast above (InspectCard.tsx/ShopApp.tsx). Camera
+ *                     movement instead unmounts the card directly, never
+ *                     applying `-out` at all — the design's "camera
+ *                     movement dismisses instantly" rule.
+ *   .shop-isolate-in  — the isolate banner's own entrance (README §4/
+ *                     Motion summary: "banner drops in 200ms"). No exit
+ *                     counterpart: the banner just unmounts when "Show
+ *                     all"/isolating something else clears it, the same
+ *                     way the pre-redesign HUD chip did — only the ENTRANCE
+ *                     is a spec'd animation.
+ */
+.shop-press {
+  transition: transform 80ms ease-out;
+}
+.shop-press:active {
+  transform: scale(0.97);
+}
+
+@keyframes shop-spin {
+  to { transform: rotate(360deg); }
+}
+.shop-spin {
+  animation: shop-spin 0.9s linear infinite;
+}
+
+@keyframes shop-toast-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+.shop-toast-in {
+  animation: shop-toast-in 180ms ease-out;
+}
+.shop-toast-out {
+  opacity: 0;
+  transition: opacity 160ms ease-in;
+}
+
+@keyframes shop-inspect-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.shop-inspect-in {
+  animation: shop-inspect-in 140ms ease-out;
+}
+.shop-inspect-out {
+  opacity: 0;
+  transition: opacity 100ms ease-in;
+}
+
+@keyframes shop-isolate-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.shop-isolate-in {
+  animation: shop-isolate-in 200ms ease-out;
+}
+
+/* Gesture-discoverability ghost hints (design_handoff_shop_mode's "Gesture
+ * discoverability" section + `Shop Mode Screens.dc.html`'s option 1q spec
+ * detail; the underlying fire/kill state machine is `shop/hints.ts`,
+ * rendered by `shop/HintOverlay.tsx`) — three coach marks, never more than
+ * one on screen, each shown at most once per install.
+ *
+ *   .shop-hint-tap-ring    — hint (a)'s halo ring: 1.6s ease-in-out pulse,
+ *                            EXACTLY 3 iterations (design: "1.6s ease-in-out
+ *                            ×3 then hold") then simply stops animating —
+ *                            the keyframe's own 0%/100% state already IS
+ *                            the resting look, so no `forwards` fill is
+ *                            needed to "hold" after the 3rd pass.
+ *   .shop-hint-orbit-arc   — hint (b)'s dashed arc path: stays static the
+ *                            whole time; only the fingertip below moves.
+ *   .shop-hint-orbit-finger — hint (b)'s ghost fingertip: a single
+ *                            hand-keyed traverse along the arc (matching
+ *                            its quadratic path) with a fade in/out at each
+ *                            end, playing through ONCE (design: "plays
+ *                            once") — `hints.ts`'s `ORBIT_HINT_PLAY_MS`
+ *                            keeps the engine's own auto-dismiss timer in
+ *                            step with this animation's duration.
+ */
+@keyframes shop-hint-tap-ring {
+  0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+  50%      { transform: translate(-50%, -50%) scale(1.35); opacity: 0.45; }
+}
+.shop-hint-tap-ring {
+  animation: shop-hint-tap-ring 1.6s ease-in-out 3;
+}
+
+@keyframes shop-hint-orbit-finger {
+  0%   { left: 10px;  top: 66px; opacity: 0; }
+  10%  { opacity: 1; }
+  25%  { left: 35px;  top: 43px; opacity: 1; }
+  50%  { left: 60px;  top: 35px; opacity: 1; }
+  75%  { left: 85px;  top: 43px; opacity: 1; }
+  90%  { opacity: 1; }
+  100% { left: 110px; top: 66px; opacity: 0; }
+}
+.shop-hint-orbit-finger {
+  animation: shop-hint-orbit-finger 1.8s ease-in-out 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shop-press {
+    transition: none;
+  }
+  .shop-spin {
+    animation-duration: 1.8s;
+  }
+  .shop-toast-in {
+    animation: none;
+  }
+  .shop-toast-out {
+    transition: none;
+  }
+  .shop-inspect-in {
+    animation: none;
+  }
+  .shop-inspect-out {
+    transition: none;
+  }
+  .shop-isolate-in {
+    animation: none;
+  }
+  .shop-hint-tap-ring {
+    animation: none;
+  }
+  .shop-hint-orbit-finger {
+    /* Static, mid-arc (design: "static, no ... arc sweep") — the engine
+     * still auto-dismisses the hint on its own clock regardless of motion
+     * preference; only the SWEEP is suppressed here. */
+    animation: none;
+    left: 60px;
+    top: 35px;
+    opacity: 1;
+  }
+}

@@ -43,8 +43,25 @@
 export const MULTI_CLICK_MS = 400
 
 /** Maximum movement between presses that can still form a multi-click, in CSS
- *  pixels. Comfortably inside the ~5 px the browsers themselves allow. */
+ *  pixels. Comfortably inside the ~5 px the browsers themselves allow. This
+ *  is the MOUSE-tuned value — a real fingertip's second tap lands nowhere
+ *  near this precisely (shop-mode playtest finding 6: Kurt's double-tap
+ *  zoom "works in tests" — synthetic taps land pixel-identical — but not on
+ *  a real phone). See `touchSlopPx` below for the touch-specific value this
+ *  tracker actually uses per-press. */
 export const MULTI_CLICK_SLOP_PX = 4
+
+/**
+ * Same idea as `MULTI_CLICK_SLOP_PX`, but for touch input — a real
+ * fingertip's second tap commonly lands 15-30px from the first even for a
+ * deliberate double-tap on the same visual target (finger roll, screen
+ * curvature, the touch target itself being bigger than a pixel). Picked
+ * per-press from `MultiClickPress.pointerType` (`press`/`release` below),
+ * so a mouse or pen press on the SAME tracker (e.g. the desktop editor run
+ * on a touch-capable device — a rare but real path) keeps the tight
+ * mouse-tuned slop untouched; only `pointerType === 'touch'` widens.
+ */
+export const MULTI_CLICK_TOUCH_SLOP_PX = 24
 
 /** The fields this tracker reads — a structural subset of `PointerEvent`, so
  *  unit tests can drive it without synthesising real events. */
@@ -54,6 +71,14 @@ export interface MultiClickPress {
   clientY: number
   button: number
   pointerType?: string
+}
+
+/** `MULTI_CLICK_TOUCH_SLOP_PX` for a touch press, `MULTI_CLICK_SLOP_PX`
+ *  (unchanged) for everything else — mouse, pen, or an event that never
+ *  reports a `pointerType` at all (e.g. a plain synthesised `MouseEvent`,
+ *  `detail`-only). */
+function slopPxFor(pointerType: string | undefined): number {
+  return pointerType === 'touch' ? MULTI_CLICK_TOUCH_SLOP_PX : MULTI_CLICK_SLOP_PX
 }
 
 export class MultiClickTracker {
@@ -80,6 +105,7 @@ export class MultiClickTracker {
     const dt = prev === null ? Number.POSITIVE_INFINITY : ev.timeStamp - prev.time
     const dx = prev === null ? 0 : ev.clientX - prev.x
     const dy = prev === null ? 0 : ev.clientY - prev.y
+    const slopPx = slopPxFor(ev.pointerType)
     const continues =
       prev !== null &&
       this.count > 0 &&
@@ -90,7 +116,7 @@ export class MultiClickTracker {
       // evidence of a fast second click, so it starts a fresh sequence.
       dt >= 0 &&
       dt <= MULTI_CLICK_MS &&
-      dx * dx + dy * dy <= MULTI_CLICK_SLOP_PX * MULTI_CLICK_SLOP_PX
+      dx * dx + dy * dy <= slopPx * slopPx
 
     this.count = continues ? this.count + 1 : 1
     this.lastButton = ev.button
@@ -125,7 +151,8 @@ export class MultiClickTracker {
     if (down === null) return
     const dx = ev.clientX - down.x
     const dy = ev.clientY - down.y
-    if (dx * dx + dy * dy > MULTI_CLICK_SLOP_PX * MULTI_CLICK_SLOP_PX) {
+    const slopPx = slopPxFor(ev.pointerType)
+    if (dx * dx + dy * dy > slopPx * slopPx) {
       // A drag. It anchors nothing, and it breaks any run it landed in.
       this.lastClick = null
       this.count = 0

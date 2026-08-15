@@ -19,6 +19,7 @@ function makeProps() {
     onOpen: vi.fn(),
     onOpenRecent: vi.fn(),
     onOpenSample: vi.fn(),
+    onOpenWebRecent: vi.fn(),
     showOnStartup: true,
     onShowOnStartupChange: vi.fn(),
     unit: 'm' as const,
@@ -65,6 +66,35 @@ describe('WelcomeScreen', () => {
 
     fireEvent.click(screen.getByText('Enclosure.hew'))
     expect(props.onOpenRecent).toHaveBeenCalledWith('/home/user/models/Enclosure.hew')
+  })
+
+  it('omits the Recents shelf when webRecents is undefined or empty', () => {
+    const props = makeProps()
+    const { rerender } = render(<WelcomeScreen {...props} />)
+    expect(screen.queryByText('Recents')).not.toBeInTheDocument()
+    rerender(<WelcomeScreen {...props} webRecents={[]} />)
+    expect(screen.queryByText('Recents')).not.toBeInTheDocument()
+  })
+
+  it('lists webRecents (name + relative time, capped at 5) and reports a click', () => {
+    const props = makeProps()
+    const now = Date.now()
+    const entries = Array.from({ length: 6 }, (_, i) => ({
+      id: `r${i}`,
+      name: `Doc ${i}.hew`,
+      timestamp: now - i * 60_000,
+      bytes: new Uint8Array([i]),
+      source: 'open' as const,
+    }))
+    render(<WelcomeScreen {...props} webRecents={entries} />)
+    expect(screen.getByText('Recents')).toBeInTheDocument()
+    expect(screen.getByText('Doc 0.hew')).toBeInTheDocument()
+    expect(screen.getByText('Doc 4.hew')).toBeInTheDocument()
+    expect(screen.queryByText('Doc 5.hew')).not.toBeInTheDocument()
+    expect(screen.getByText(/minute ago/i)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText('Doc 2.hew'))
+    expect(props.onOpenWebRecent).toHaveBeenCalledWith(entries[2])
   })
 
   it('Open a file, Start modeling, and Escape all report their callbacks', () => {

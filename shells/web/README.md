@@ -28,9 +28,12 @@ floor for dumb static hosts.
 Validated: the built bundle loads in Chromium with the app booting (React mount,
 WASM kernel init, WebGL canvas) and **zero CSP violations**.
 
-**Deploy note — no edge-injected scripts.** `script-src` and `connect-src` admit
-`'self'` only, so any tag a CDN or host injects into the served HTML — an
-analytics beacon, a RUM agent, a tag manager — violates the policy. Such a tag
+**Deploy note — no edge-injected scripts.** `script-src` admits `'self'` only,
+and `connect-src` admits `'self'` plus the single, narrow exception of
+`https://share.hew3d.com` (the "Open on Phone" E2E-encrypted relay —
+`inject-csp.mjs`'s own comment on that line has the full reasoning), so any
+tag a CDN or host injects into the served HTML — an analytics beacon, a RUM
+agent, a tag manager — still violates the policy. Such a tag
 is either blocked (collecting nothing, so the feature is a lie) or executing in
 defiance of the policy, and its exceptions reach the page as muted
 cross-origin errors with no attribution. Leave host-side script injection

@@ -3,8 +3,11 @@ import ReactDOM from 'react-dom/client'
 import './theme/tokens.css'
 import './index.css'
 import App from './App.tsx'
+import { ShopApp } from './shop/ShopApp.tsx'
 import { ErrorBoundary } from './ErrorBoundary.tsx'
 import { SettingsWindow } from './settings/SettingsWindow.tsx'
+import { resolveShellMode, readShellModeOverride } from './shop/shellMode'
+import { isCoarsePointer } from './platform'
 
 // Lazy: LibraryWindow statically imports @tauri-apps/api modules; loading
 // it eagerly would drag them into the WEB bundle's entry chunk for a
@@ -22,6 +25,24 @@ import { initThemeSync } from './theme/applyTheme'
 // the same with `#library`.
 const isSettingsWindow = window.location.hash.startsWith('#settings')
 const isLibraryWindow = window.location.hash.startsWith('#library')
+
+// Shop Mode (`ShopApp`, `shop/shellMode.ts`): a THIRD render root selected
+// the same hash-branch way as Settings/Library above, but — unlike those
+// two — it is a full, independently-navigable main-window experience (a
+// fullscreen touch viewer/inspector for a phone at the workbench), not a
+// satellite Tauri webview. `resolveShellMode` is pure; this is the one spot
+// that gathers its real inputs (`#shop` forces it — also the E2E hook;
+// `isTauri` — the desktop shell never enters it; the persisted override;
+// live device signals) and asks the one question "which shell renders".
+const isShopWindow =
+  resolveShellMode({
+    hash: window.location.hash,
+    isTauri,
+    override: readShellModeOverride(),
+    coarsePointer: isCoarsePointer(),
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+  }) === 'shop'
 
 // Set the initial `data-theme` attribute before first paint, and keep it in
 // sync thereafter. Runs unconditionally so both the main app window and the
@@ -54,6 +75,11 @@ try {
 // for the main app window.
 // Guarded off under Tauri (isTauri) so the desktop shell never registers a SW,
 // and excluded from dev (import.meta.env.PROD) so hot-reload is unaffected.
+// Shop Mode is DELIBERATELY NOT excluded here alongside Settings/Library: it
+// IS a main app window in the web build (unlike those two satellite/modal
+// windows), and offline availability at the workbench — no wifi, no
+// problem — is the entire point of it existing (`shop/ShopApp.tsx`'s doc
+// comment). Do not add `isShopWindow` to this condition.
 if (!isSettingsWindow && !isLibraryWindow && !isTauri && import.meta.env.PROD && 'serviceWorker' in navigator) {
   import('virtual:pwa-register').then(({ registerSW }) =>
     registerSW({ immediate: true }),
@@ -80,6 +106,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <React.Suspense fallback={null}>
           <LibraryWindow />
         </React.Suspense>
+      ) : isShopWindow ? (
+        <ShopApp />
       ) : (
         <App />
       )}

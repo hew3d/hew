@@ -16,6 +16,13 @@
 //   style-src  'unsafe-inline'     — runtime-injected <style> (ImportingOverlay)
 //   img-src    data: blob:         — SVG cursors (data:) + texture/thumbnail URLs
 //   connect-src/worker-src/media-src blob: — object-URL blobs + service worker
+//   connect-src share.hew3d.com    — SURGICAL addition, connect-src ONLY: the
+//     "Open on Phone" E2E-encrypted relay (workers/share-relay,
+//     app/src/io/shareCrypto.ts's module doc). This shell's CSP is
+//     deliberately 'self'-only otherwise (see the desktop's identical,
+//     equally narrow addition in shells/tauri/src-tauri/tauri.conf.json) —
+//     do not widen this beyond connect-src, and do not add it to any other
+//     directive, without updating this comment.
 //
 // The script fails loudly if the expected anchor is missing, so a future Vite
 // change can't silently ship an un-CSP'd build.
@@ -28,7 +35,7 @@ const CSP = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  "connect-src 'self' blob:",
+  "connect-src 'self' blob: https://share.hew3d.com",
   "worker-src 'self' blob:",
   "manifest-src 'self'",
   "media-src 'self' blob:",

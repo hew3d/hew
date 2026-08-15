@@ -151,8 +151,19 @@ vi.mock('./io/recoveryStore', async (importOriginal) => {
   }
 })
 
+// io/recents — jsdom has no IndexedDB, so the real implementation already
+// silently no-ops there; mocked explicitly (matching io/recoveryStore's
+// precedent just above) so tests can assert App.tsx calls it at the right
+// seam without depending on a real IndexedDB round trip (io/recents.test.ts
+// covers that).
+vi.mock('./io/recents', () => ({
+  listRecents: vi.fn(async () => []),
+  recordRecent: vi.fn(async () => undefined),
+}))
+
 import App from './App'
 import Viewport from './viewport/Viewport'
+import { recordRecent } from './io/recents'
 import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/trayLayout'
 import { setShowWelcome } from './settings/welcomeScreen'
 import { resetStlImportUnitForTest } from './settings/stlImportUnit'
@@ -1113,6 +1124,21 @@ describe('App — unified Open dialog', () => {
     expect(screen.queryByRole('dialog', { name: /stl import units/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('dialog', { name: /import report/i })).not.toBeInTheDocument()
     expect(mockScene.import_stl).not.toHaveBeenCalled()
+  })
+
+  it('records a successful .hew open into the web recents store (io/recents.ts)', async () => {
+    vi.mocked(fakeFileHost.openAny).mockResolvedValue({
+      kind: 'hew',
+      name: 'my-house.hew',
+      bytes: new Uint8Array([7, 7, 7]),
+      handle: null, // web build: no filesystem path/handle
+    })
+
+    await renderAndLoad()
+    triggerOpen()
+
+    await waitFor(() => expect(mockScene.load).toHaveBeenCalledWith(new Uint8Array([7, 7, 7])))
+    expect(vi.mocked(recordRecent)).toHaveBeenCalledWith(new Uint8Array([7, 7, 7]), 'my-house.hew')
   })
 
   it('a picked .stl file routes through the same units chooser as File ▸ Import…', async () => {

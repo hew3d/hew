@@ -73,6 +73,36 @@
   --chrome-mac-minimize: #febc2e;
   --chrome-mac-zoom: #28c840;
   --chrome-win-close-hover: #e53b41;
+
+  /* ---- Shop Mode (phone viewer chrome) ---------------------------------
+   * design_handoff_shop_mode/README.md's "Design Tokens" table, corrected
+   * by an on-device playtest finding: charcoal dock/pill/⋯/empty-state
+   * chrome in BOTH themes read as jarring mixed-mode on a light-OS phone
+   * (the handoff's original "HUD = workbench dock ... in BOTH themes"
+   * decision is overridden for exactly these tokens — everything ELSE in
+   * this block is unaffected). --shop-accent/--shop-on-accent/
+   * --shop-accent-fill stay unthemed — the terracotta working accent (and
+   * cream text ON that terracotta) is deliberately the same in both themes
+   * — but --shop-dock/--shop-dock-text/--shop-dock-text-strong now DO
+   * redefine per theme, same structure as --shop-accent-text/
+   * --surface-sheet/--surface-card/--viewport-bg below: dark keeps the
+   * original charcoal values verbatim (folded into bare :root since dark
+   * is this app's default), light gets a proper elevated warm-light
+   * surface instead. */
+  --shop-accent: #c45d3c; /* terracotta — Shop Mode's working accent (README "Decisions") */
+  --shop-on-accent: #f3ede3; /* cream text/icon on a terracotta fill (unthemed — see above) */
+  /* A darker, hue-preserved terracotta for BACKGROUND use wherever
+   * --shop-on-accent (cream) sits on it as small TEXT — pure --shop-accent
+   * only carries ~3.6:1 against cream, short of WCAG's 4.5:1 text minimum
+   * (an adversarial-review finding). --shop-accent itself is unchanged and
+   * stays in use for the mark, tag dots, leader dot, borders, and
+   * translucent washes — every NON-text use, where 3.6:1 is fine (WCAG's
+   * non-text/UI-component floor is 3:1). Verified ≥4.5:1 against
+   * --shop-on-accent by tokensContrast.test.ts; not themed (same reasoning
+   * as --shop-accent above — both themes share one working accent). */
+  --shop-accent-fill: #b04a2a;
+  --hit-min: 48px; /* minimum touch target — glove-friendly hit areas */
+  --radius-hud: var(--radius-dock); /* README "Design Tokens": "= --radius-dock" */
 }
 
 /* ============================================================ Dark (default) */
@@ -148,6 +178,44 @@
      text as a background, so badges get their own saturated fills. */
   --status-solid-bg: #1a7a3a;
   --status-leaky-bg: #cc3322;
+
+  /* ---- Shop Mode (dark) -------------------------------------------- */
+  --shop-accent-text: #d98a68; /* accent-tinted text/icons on a dark surface */
+  --shop-dock: #1b1a17; /* charcoal dock/top-strip/toast chrome */
+  --shop-dock-text: #cfc8bd; /* muted icon/label color on the charcoal dock */
+  /* Primary (non-muted) text/icon color for content sitting DIRECTLY on
+   * --shop-dock (the top-strip pill's doc name, the toast message, the
+   * isolate banner's "Isolated · <part>" label) — distinct from the muted
+   * --shop-dock-text above. Dark keeps the exact cream value every one of
+   * those call sites used to read straight off the (then-unthemed)
+   * --shop-on-accent before this token existed. */
+  --shop-dock-text-strong: #f3ede3;
+  --surface-sheet: #211f1b; /* Parts sheet body */
+  --surface-card: #262420; /* Inspect card, menu, unit picker */
+  --viewport-bg: linear-gradient(180deg, #17181c, #121317);
+  /* Cutlist/menu/picker body text + dividers, mined from the prototype's own
+   * dark "P" palette object (design_handoff_shop_mode/Shop Mode
+   * Prototype.dc.html) — distinct from this file's general text/border
+   * tokens, which are tuned for the app's blue-accented Studio UI and don't
+   * match the prototype's warm cream/charcoal values in dark mode (they
+   * happen to coincide in light mode; both themes are still spelled out
+   * explicitly here so this block stays a self-contained, auditable
+   * transcription of the prototype's palette). */
+  --shop-text: #f3ede3; /* cutlist/menu/picker primary text */
+  --shop-text-muted: #9a9287; /* section eye-toggle text, theme chip label */
+  /* Warm gray, ≥4.5:1 on both --surface-card (#262420) and --surface-sheet
+   * (#211f1b) — the original #8b8378 fell short (~4.1:1 on --surface-card),
+   * an adversarial-review finding; verified by tokensContrast.test.ts. */
+  --shop-text-faint: #998c80; /* column header letters, footnotes */
+  --shop-text-dim: #c9c2b6; /* metric/imperial dimension values */
+  --shop-hairline: rgba(243, 237, 227, 0.16); /* handle bar, sheet border */
+  --shop-hairline-2: rgba(243, 237, 227, 0.08); /* row/menu-item dividers */
+  --shop-eyebg: rgba(243, 237, 227, 0.08); /* unit chip / eye-toggle fill */
+  --shop-axis-l: #e88a8a; /* L (length) — softer than --axis-red for the sheet */
+  --shop-axis-w: #8ad6a2; /* W (width) — softer than --axis-green */
+  --shop-axis-h: #93b8f0; /* H (height) — softer than --axis-blue */
+  --shop-row-selected-wash: rgba(196, 93, 60, 0.16); /* selected cutlist row */
+  --shop-picker-active-wash: rgba(196, 93, 60, 0.18); /* active unit row */
 }
 
 /* ============================================================ Light (CAD) */
@@ -214,4 +282,45 @@
   /* ---- Shadows (light overrides) ----------------------------------- */
   --shadow-window: 0 34px 90px -28px rgba(40, 60, 90, 0.4);
   --shadow-chip: 0 6px 18px -8px rgba(40, 60, 90, 0.4);
+
+  /* ---- Shop Mode (light) --------------------------------------------- */
+  --shop-accent-text: #a34f2e; /* accent-tinted text/icons on a light surface */
+  /* Elevated warm-light surface (playtest finding: charcoal-in-both-themes
+   * chrome read as jarring mixed-mode on a light phone) — a cream/white
+   * pill/dock, distinct from (slightly lighter/whiter than) --surface-card
+   * so it still reads as a raised object floating over the sheet/canvas.
+   * Paired with --shop-dock-border below for definition, since it sits
+   * close in value to the app's own light canvas/sheet surfaces and needs
+   * more than its box-shadow alone to read as a separate object. */
+  --shop-dock: #fbf7f0;
+  /* Muted icon/label color on --shop-dock — ≥4.5:1 on #fbf7f0 (verified by
+   * tokensContrast.test.ts); NOT --shop-text-muted (#6b7686), which falls
+   * just short (~4.3:1) against this specific lighter background. */
+  --shop-dock-text: #5c6673;
+  /* Primary (non-muted) text/icon on --shop-dock — see the dark block's
+   * doc comment on this token; light reuses --shop-text's own charcoal. */
+  --shop-dock-text-strong: #23272e;
+  --shop-dock-border: rgba(35, 28, 20, 0.12);
+  --surface-sheet: #f7f2e9; /* Parts sheet body */
+  --surface-card: #faf6ee; /* Inspect card, menu, unit picker */
+  --viewport-bg: linear-gradient(180deg, #edeae3 0%, #e2ded5 60%, #d8d3c9 100%);
+  /* See the dark block's comment above — same prototype "P" object, light
+   * variant. */
+  --shop-text: #23272e;
+  --shop-text-muted: #6b7686;
+  /* Warm gray, not the app-wide blue-gray --text-faint this used to
+   * coincide with (see the block comment above): #8a94a3 was only
+   * ~2.75:1 on --surface-card (#faf6ee) — an adversarial-review finding.
+   * ≥4.5:1 on both --surface-card and --surface-sheet (#f7f2e9); verified
+   * by tokensContrast.test.ts. */
+  --shop-text-faint: #726a5f;
+  --shop-text-dim: #3d4756;
+  --shop-hairline: rgba(35, 28, 20, 0.14);
+  --shop-hairline-2: rgba(35, 28, 20, 0.07);
+  --shop-eyebg: rgba(35, 28, 20, 0.06);
+  --shop-axis-l: #d6454b;
+  --shop-axis-w: #28a055;
+  --shop-axis-h: #2d78e1;
+  --shop-row-selected-wash: rgba(196, 93, 60, 0.09);
+  --shop-picker-active-wash: rgba(196, 93, 60, 0.1);
 }

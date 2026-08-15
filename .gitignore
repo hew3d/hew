@@ -27,3 +27,7 @@ crates/skp-import/target/
 
 # Internal design documents — never published
 docs/design/
+
+# wrangler local dev state / secrets (workers/share-relay)
+.wrangler/
+.dev.vars

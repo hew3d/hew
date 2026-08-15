@@ -150,7 +150,7 @@ test('dock: selecting an object swaps the context chip and verb set', async ({ p
 // Unified Export dialog
 // ---------------------------------------------------------------------------
 
-test('export: File ▸ Export… opens ONE dialog with a glTF/STL/3MF format select', async ({ page }) => {
+test('export: File ▸ Export… opens ONE dialog with a glTF/STL/3MF/USDZ format select', async ({ page }) => {
   const menuBar = page.getByTestId('menu-bar')
   await menuBar.getByRole('button', { name: 'File' }).click()
 
@@ -165,10 +165,11 @@ test('export: File ▸ Export… opens ONE dialog with a glTF/STL/3MF format sel
   const select = dialog.locator('#export-format-select')
   await expect(select).toHaveValue('glb')
   const options = select.locator('option')
-  await expect(options).toHaveCount(3)
+  await expect(options).toHaveCount(4)
   await expect(options.nth(0)).toContainText('glTF')
   await expect(options.nth(1)).toContainText('STL')
   await expect(options.nth(2)).toContainText('3MF')
+  await expect(options.nth(3)).toContainText('USDZ')
 
   // Format is switchable.
   await select.selectOption('stl')

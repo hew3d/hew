@@ -11,7 +11,7 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import { fireEvent } from '@testing-library/react'
-import { computeEditContext, computeLitInstances, applyEditContext } from './Viewport'
+import { computeEditContext, computeLitInstances, applyEditContext, isToolSwitchAllowedUnderReadOnly } from './Viewport'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
 import type { EditContext, Tool } from '../tools/types'
@@ -224,6 +224,38 @@ describe('ctrl-tap-clean disarm vs. a dialog stopPropagation-ing Escape', () => 
     } finally {
       document.removeEventListener('keydown', dialogEscapeHandler)
       window.removeEventListener('keydown', model.onCtrlKeyDown)
+    }
+  })
+})
+
+// Shop-mode adversarial review, CRITICAL finding 1: `switchToolRef`'s own
+// top-of-function refusal under `readOnly`. Extracted as a standalone pure
+// predicate specifically so this contract is unit-testable without mounting
+// the whole component/WASM stack — see the E2E "CONTRACT" specs in
+// e2e/shop-mode.spec.ts for the end-to-end proof (a keyboard shortcut can't
+// arm a real drag-to-move; a double-tap can't open a session).
+describe('isToolSwitchAllowedUnderReadOnly (shop-mode adversarial review, CRITICAL finding 1)', () => {
+  it('allows exactly Shop Mode\'s 3-tool registry', () => {
+    expect(isToolSwitchAllowedUnderReadOnly('Select')).toBe(true)
+    expect(isToolSwitchAllowedUnderReadOnly('Orbit')).toBe(true)
+    expect(isToolSwitchAllowedUnderReadOnly('Tape Measure')).toBe(true)
+  })
+
+  it('refuses every editor-only tool, including the ones keyboard shortcuts reach directly', () => {
+    // Rectangle/Push-Pull/Move/Rotate/Scale/Offset/Line/Circle/Arc all have
+    // a bare-letter or number-key shortcut in Viewport.tsx's own onKeyDown
+    // (r/p/m/q/s/f/l/c/a, 1-6) — exactly the paths this allowlist exists to
+    // close off. Pan/Zoom/Zoom Window/Walk/Position Camera/Look Around are
+    // camera tools Shop Mode's own gesture chrome (pinch/drag/two-finger
+    // pan) already covers without a tool switch at all.
+    for (const name of [
+      'Rectangle', 'Circle', 'Polygon', 'Arc', 'Line', 'Push/Pull', 'Follow Me',
+      'Offset', 'Paint', 'Position Texture', 'Move', 'Rotate', 'Scale', 'Dimension',
+      'Text', 'Protractor', 'Slice', 'Section Plane', 'Edit Vertex', 'Axes',
+      'Position Camera', 'Look Around', 'Walk', 'Pan', 'Zoom', 'Zoom Window',
+      '', 'select', 'SELECT', 'Orbitt',
+    ]) {
+      expect(isToolSwitchAllowedUnderReadOnly(name)).toBe(false)
     }
   })
 })

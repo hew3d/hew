@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { MultiClickTracker, MULTI_CLICK_MS, MULTI_CLICK_SLOP_PX } from './multiClick'
+import { MultiClickTracker, MULTI_CLICK_MS, MULTI_CLICK_SLOP_PX, MULTI_CLICK_TOUCH_SLOP_PX } from './multiClick'
 
 /** A press at (x, y) at time t on the primary mouse button. */
 function press(t: number, x = 100, y = 100, button = 0, pointerType = 'mouse') {
@@ -153,5 +153,49 @@ describe('MultiClickTracker', () => {
     // 0 would make the very first press at t=50 look like a second click.
     const tracker = new MultiClickTracker()
     expect(tracker.press(press(50))).toBe(1)
+  })
+
+  // Shop-mode playtest finding 6: a real fingertip's second tap lands
+  // nowhere near the mouse-tuned MULTI_CLICK_SLOP_PX (4px) even for a
+  // deliberate double-tap on the same target — this is why the double-tap
+  // zoom "worked in tests" (synthetic taps land pixel-identical) but not on
+  // Kurt's real phone.
+  describe('touch input uses a wider slop (MULTI_CLICK_TOUCH_SLOP_PX)', () => {
+    it('pairs a touch double-tap that scattered well past the mouse slop but within the touch slop', () => {
+      const tracker = new MultiClickTracker()
+      tracker.press(press(0, 100, 100, 0, 'touch'))
+      tracker.release(press(20, 100, 100, 0, 'touch'))
+      // Comfortably past MULTI_CLICK_SLOP_PX (4) — would fail under the
+      // mouse-tuned slop — but inside MULTI_CLICK_TOUCH_SLOP_PX (24).
+      const scatter = MULTI_CLICK_SLOP_PX + 10
+      expect(tracker.press(press(80, 100 + scatter, 100, 0, 'touch'))).toBe(2)
+    })
+
+    it('still rejects a touch second-tap past the touch slop itself', () => {
+      const tracker = new MultiClickTracker()
+      tracker.press(press(0, 100, 100, 0, 'touch'))
+      tracker.release(press(20, 100, 100, 0, 'touch'))
+      expect(tracker.press(press(80, 100 + MULTI_CLICK_TOUCH_SLOP_PX + 1, 100, 0, 'touch'))).toBe(1)
+    })
+
+    it('the touch slop also governs release\'s own drag-vs-click distinction', () => {
+      const tracker = new MultiClickTracker()
+      tracker.press(press(0, 100, 100, 0, 'touch'))
+      // Travelled past the mouse slop but within the touch slop on RELEASE —
+      // still a click (not a drag), so the run can still pair.
+      const scatter = MULTI_CLICK_SLOP_PX + 10
+      tracker.release(press(20, 100 + scatter, 100, 0, 'touch'))
+      expect(tracker.press(press(80, 100 + scatter, 100, 0, 'touch'))).toBe(2)
+    })
+
+    it('a MOUSE press keeps the tight slop untouched even on the same tracker instance', () => {
+      // A touch-capable desktop (rare, but real) shouldn't get touch's wider
+      // slop for its own mouse input — the widening is keyed off THIS
+      // press's own pointerType, not a sticky tracker-wide mode.
+      const tracker = new MultiClickTracker()
+      tracker.press(press(0, 100, 100, 0, 'mouse'))
+      tracker.release(press(5, 100, 100, 0, 'mouse'))
+      expect(tracker.press(press(50, 100 + MULTI_CLICK_SLOP_PX + 1, 100, 0, 'mouse'))).toBe(1)
+    })
   })
 })

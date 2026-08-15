@@ -215,3 +215,4 @@ You've drawn, measured, pushed, hollowed, locked to alternate planes, subtracted
 - [The Hew interface](/learn/interface/) tours every panel and control.
 - [Drawing](/learn/drawing/) and [Push/Pull](/learn/push-pull/) are the full drawing-and-modeling reference.
 - [Follow Me](/learn/follow-me/) sweeps a profile along a path — pipes, moldings, picture frames, even spheres and goblets
+- [Hew on your phone](/learn/hew-on-your-phone/) covers Shop Mode — a touch viewer for taking a finished model to the bench

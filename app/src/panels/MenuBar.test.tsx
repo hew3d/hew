@@ -97,6 +97,36 @@ describe('MenuBar', () => {
     expect(onOpen).toHaveBeenCalledOnce()
   })
 
+  // --- File menu: Open on Phone… (docs/design/shop-mode.md §4) ---
+
+  it('omits Open on Phone… when onOpenOnPhone is undefined (web / no Tauri)', () => {
+    render(<MenuBar {...defaultProps} />)
+    fireEvent.click(screen.getByRole('button', { name: /file/i }))
+    expect(screen.queryByText('Open on Phone…')).not.toBeInTheDocument()
+  })
+
+  it('shows Open on Phone… when onOpenOnPhone is provided (Tauri)', () => {
+    render(<MenuBar {...defaultProps} onOpenOnPhone={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /file/i }))
+    expect(screen.getByText('Open on Phone…')).toBeInTheDocument()
+  })
+
+  it('calls onOpenOnPhone when File > Open on Phone… is mousedown-clicked', () => {
+    const onOpenOnPhone = vi.fn()
+    render(<MenuBar {...defaultProps} onOpenOnPhone={onOpenOnPhone} />)
+    fireEvent.click(screen.getByRole('button', { name: /file/i }))
+    fireEvent.mouseDown(screen.getByText('Open on Phone…'))
+    expect(onOpenOnPhone).toHaveBeenCalledOnce()
+  })
+
+  it('does NOT call onOpenOnPhone when disabled', () => {
+    const onOpenOnPhone = vi.fn()
+    render(<MenuBar {...defaultProps} onOpenOnPhone={onOpenOnPhone} openOnPhoneDisabled />)
+    fireEvent.click(screen.getByRole('button', { name: /file/i }))
+    fireEvent.mouseDown(screen.getByText('Open on Phone…'))
+    expect(onOpenOnPhone).not.toHaveBeenCalled()
+  })
+
   // --- Edit menu ---
 
   it('shows Undo disabled when canUndo=false', () => {
@@ -255,6 +285,20 @@ describe('MenuBar', () => {
     fireEvent.click(screen.getByRole('button', { name: /window/i }))
     fireEvent.mouseDown(screen.getByText('Materials'))
     expect(onToggleMaterials).toHaveBeenCalledOnce()
+  })
+
+  it('omits Shop Mode from the Window menu when onEnterShopMode is not provided', () => {
+    render(<MenuBar {...defaultProps} />)
+    fireEvent.click(screen.getByRole('button', { name: /window/i }))
+    expect(screen.queryByText('Shop Mode')).toBeNull()
+  })
+
+  it('calls onEnterShopMode when Window > Shop Mode is mousedown-clicked', () => {
+    const onEnterShopMode = vi.fn()
+    render(<MenuBar {...defaultProps} onEnterShopMode={onEnterShopMode} />)
+    fireEvent.click(screen.getByRole('button', { name: /window/i }))
+    fireEvent.mouseDown(screen.getByText('Shop Mode'))
+    expect(onEnterShopMode).toHaveBeenCalledOnce()
   })
 
   // --- Close on outside click ---

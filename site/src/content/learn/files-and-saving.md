@@ -25,9 +25,13 @@ The web app uses your browser's file access support:
 
 The web app also works offline once loaded — it's an installable PWA, so you can add it to your dock or home screen.
 
+On a phone, opening the web app instead lands you in [Shop Mode](/learn/hew-on-your-phone/), a separate touch-first viewer built for taking a finished model to the bench rather than editing it there.
+
 ## On the desktop
 
 The desktop app (macOS, Windows, Linux) uses native open/save dialogs, remembers your last **10 recent files** (File ▸ Open Recent), and registers the `.hew` file type so double-clicking a file opens it. File ▸ New opens additional windows, each with an independent document.
+
+**File ▸ Open on Phone…** hands the open document to a phone on the same wifi network as a QR code — see [Hew on your phone](/learn/hew-on-your-phone/#getting-a-model-onto-your-phone) for the full handoff.
 
 ## Autosave and crash recovery
 

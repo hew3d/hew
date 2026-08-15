@@ -15,9 +15,12 @@
  *    - saveAs() → same anchor-download.
  *
  * The hidden <input> is created once lazily and appended to document.body.
+ * Its `accept` filter is dropped on coarse-pointer (touch) devices — see
+ * isCoarsePointer().
  */
 
 import type { ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
+import { isCoarsePointer } from '../platform'
 
 const HEW_FILE_TYPES: FilePickerAcceptType[] = [
   {
@@ -52,6 +55,17 @@ function hasFSAA(): boolean {
   return typeof window !== 'undefined' && 'showSaveFilePicker' in window
 }
 
+// Why coarse-pointer gates the `accept` filter (see each call site): iOS
+// Files greys out any file whose extension maps to no registered UTI, and
+// `.hew` (like several import formats) maps to none, so an `accept` list
+// there leaves the user staring at their own file, unable to tap it.
+// Desktop pickers merely grey non-matching files without blocking the tap,
+// so fine-pointer environments keep the narrower list. The check itself is
+// platform.ts's shared `isCoarsePointer` — it treats a missing OR throwing
+// `matchMedia` (jsdom, older-Safari private mode) as fine-pointer, which is
+// the safe default here too: worst case is a filtered picker, never a
+// broken one.
+
 /**
  * Ensure readwrite permission on a stored handle.
  *
@@ -68,8 +82,14 @@ async function ensureWritePermission(handle: FileSystemFileHandle): Promise<bool
   return false
 }
 
-/** Trigger an anchor-download of bytes as a .hew file. */
-function anchorDownload(bytes: Uint8Array, name: string): void {
+/** Trigger an anchor-download of bytes as a .hew file. Exported (not just
+ *  used internally by `save`/`saveAs` below) for Shop Mode's "Save a copy
+ *  (.hew)" overflow-menu entry (docs/design/shop-mode.md §4's durable
+ *  "Keep on this phone → Save to Files" path): that flow deliberately wants
+ *  a plain download, never the FSAA save-picker `WebFileHost.saveAs` would
+ *  reach for on a browser that supports it — Shop Mode's whole posture is
+ *  minimal touch chrome, and "Save a copy" is one tap, not a picker. */
+export function anchorDownload(bytes: Uint8Array, name: string): void {
   const blob = new Blob([new Uint8Array(bytes)], { type: 'application/octet-stream' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -98,7 +118,10 @@ export class WebFileHost implements FileHost {
     if (this._input === null) {
       const el = document.createElement('input')
       el.type = 'file'
-      el.accept = '.hew'
+      // Omit `accept` on coarse pointers — see isCoarsePointer().
+      if (!isCoarsePointer()) {
+        el.accept = '.hew'
+      }
       el.style.display = 'none'
       document.body.appendChild(el)
       this._input = el
@@ -275,7 +298,10 @@ export class WebFileHost implements FileHost {
       const result = await new Promise<{ bytes: Uint8Array; name: string } | null>((resolve) => {
         const input = document.createElement('input')
         input.type = 'file'
-        input.accept = '.dae,.skp,.glb,.gltf,.stl'
+        // Omit `accept` on coarse pointers — see isCoarsePointer().
+        if (!isCoarsePointer()) {
+          input.accept = '.dae,.skp,.glb,.gltf,.stl'
+        }
         input.style.display = 'none'
         document.body.appendChild(input)
 
@@ -374,7 +400,10 @@ export class WebFileHost implements FileHost {
       const result = await new Promise<{ bytes: Uint8Array; name: string } | null>((resolve) => {
         const input = document.createElement('input')
         input.type = 'file'
-        input.accept = '.hew,.dae,.skp,.glb,.gltf,.stl'
+        // Omit `accept` on coarse pointers — see isCoarsePointer().
+        if (!isCoarsePointer()) {
+          input.accept = '.hew,.dae,.skp,.glb,.gltf,.stl'
+        }
         input.style.display = 'none'
         document.body.appendChild(input)
 

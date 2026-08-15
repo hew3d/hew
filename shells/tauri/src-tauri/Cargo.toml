@@ -26,11 +26,30 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 tauri-plugin-opener = "2.5.4"
+# Native HTTP client for the "Open on Phone" upload/delete (see the module
+# comment above `mod qr`): the webview's own `fetch` is a browser fetch,
+# which the share-relay Worker's CORS allowlist (workers/share-relay,
+# app.hew3d.com only — the phone's real browser origin) correctly does not
+# admit `tauri dev`'s http://localhost:5173 devUrl. Routing the desktop's
+# PUT/DELETE through this plugin instead sidesteps CORS entirely (it's a
+# native Rust HTTP client, not a browser one), with identical behavior in
+# dev and packaged builds. Scoped tight to the relay host in
+# capabilities/default.json — see that file's comment.
+tauri-plugin-http = "2"
 # System font enumeration for the 3D Text font picker (docs/design/3d-text.md's
 # font section) — pure Rust, MIT-licensed, no system font-library linking.
 # Shell-crate-only dependency; kernel crates never gain new dependencies for
 # this (DEVELOPMENT.md rule 1).
 fontdb = "0.24.0"
+# "Open on Phone" QR handoff (docs/design/shop-mode.md §4, qr.rs,
+# workers/share-relay/README.md) — shell-crate-only, same rule as fontdb
+# above. `qrcode` renders the cloud dead-drop's handoff URL to SVG, with
+# only the `svg` feature on (no `image` raster backend needed). The upload
+# itself, its token, and its encryption key are all handled in the webview
+# (app/src/io/shareCrypto.ts) — this crate no longer needs its own random
+# token generation for this feature, so the `getrandom` direct dependency
+# that used to back it (LAN-server session tokens) is gone too.
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 
 # Windows named-pipe transport for `--live` (docs/HEW_API.md §11.2):
 # CreateNamedPipeW/ConnectNamedPipe/ReadFile/WriteFile, a per-user security

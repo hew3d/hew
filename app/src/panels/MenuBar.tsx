@@ -51,6 +51,17 @@ export interface MenuBarProps {
    *  to Library… rather than hiding it, matching Import…'s session-gating
    *  posture. */
   saveToLibraryDisabled?: boolean
+  /** File ▸ Open on Phone… (docs/design/shop-mode.md §4) — starts the LAN
+   *  QR-handoff dialog. `undefined` — and the item hidden — outside Tauri
+   *  (only the desktop shell can run the LAN server); same optional-prop-
+   *  gates-visibility convention as `onCheckForUpdates`. */
+  onOpenOnPhone?: () => void
+  /** Greys out File ▸ Open on Phone… when the document has nothing worth
+   *  sharing (an empty scene) — mirrors `saveToLibraryDisabled`'s
+   *  disabled-not-hidden posture, since the item's mere presence (not its
+   *  enabled state) is what `onOpenOnPhone`'s own undefined-gates-
+   *  visibility already controls. */
+  openOnPhoneDisabled?: boolean
   /** Close the current window (desktop shells only — omitted on web, where
    *  the browser owns the window). */
   onClose?: () => void
@@ -180,6 +191,15 @@ export interface MenuBarProps {
    *  the item hidden — on the web build and in package-manager desktop builds
    *  that compile the updater out. */
   onCheckForUpdates?: () => void
+  /** Switch to Shop Mode (Window → Shop Mode): the fullscreen touch-first
+   *  viewer/inspector shell (`shop/ShopApp.tsx`) — the mirror of ShopApp's
+   *  own "Use full editor" entry. Omitted — and the item hidden — under
+   *  Tauri (Shop Mode is web-only) and on any device that doesn't report a
+   *  coarse pointer (`platform.isCoarsePointer()`): a touch-capable laptop
+   *  with a mouse-shaped desktop session has no workbench use case for it.
+   *  Same optional-prop-gates-visibility convention as `onCheckForUpdates`
+   *  above. */
+  onEnterShopMode?: () => void
 }
 
 type MenuId = 'file' | 'edit' | 'view' | 'draw' | 'tools' | 'camera' | 'window' | 'help' | null
@@ -510,6 +530,9 @@ export function MenuBar({
   onOpenSettings,
   onReportBug,
   onCheckForUpdates,
+  onOpenOnPhone,
+  openOnPhoneDisabled = false,
+  onEnterShopMode,
   windowList,
   onFocusWindow,
 }: MenuBarProps) {
@@ -615,6 +638,16 @@ export function MenuBar({
                 disabled={saveToLibraryDisabled}
                 onClick={withClose(onSaveToLibrary)}
               />
+            )}
+            {onOpenOnPhone !== undefined && (
+              <>
+                <div style={SEPARATOR_STYLE} />
+                <MenuItem
+                  label="Open on Phone…"
+                  disabled={openOnPhoneDisabled}
+                  onClick={withClose(onOpenOnPhone)}
+                />
+              </>
             )}
             {(onClose !== undefined || onExit !== undefined) && (
               <div style={SEPARATOR_STYLE} />
@@ -1011,6 +1044,12 @@ export function MenuBar({
               checked={showLibrary}
               onClick={withClose(() => onToggleLibrary?.())}
             />
+            {onEnterShopMode !== undefined && (
+              <>
+                <div style={SEPARATOR_STYLE} />
+                <MenuItem label="Shop Mode" onClick={withClose(() => onEnterShopMode())} />
+              </>
+            )}
             {windowList !== undefined && windowList.length > 0 && (
               <>
                 <div style={SEPARATOR_STYLE} />

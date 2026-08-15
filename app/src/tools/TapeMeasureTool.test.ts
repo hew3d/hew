@@ -80,7 +80,10 @@ function makeWasmScene() {
   return { scene: scene as unknown as WasmScene, guideLines, guidePoints }
 }
 
-function makeTool(scene: WasmScene) {
+function makeTool(
+  scene: WasmScene,
+  opts: { measureOnly?: boolean; onGesturePoint?: (points: readonly [number, number, number][]) => void } = {},
+) {
   const onGuideCreated = vi.fn()
   const onToast = vi.fn()
   const onMeasurement = vi.fn()
@@ -94,6 +97,8 @@ function makeTool(scene: WasmScene) {
     onMeasurement,
     onRescaleArmed,
     onRescaleApplied,
+    opts.measureOnly ?? false,
+    opts.onGesturePoint,
   )
   return { tool, onGuideCreated, onToast, onMeasurement, onRescaleArmed, onRescaleApplied }
 }
@@ -1368,5 +1373,272 @@ describe('TapeMeasureTool — retroactive rescale recall', () => {
 
     expect((tool as unknown as { idlePlaneLock: 0 | 1 | 2 | null }).idlePlaneLock).toBe(0)
     expect((tool as unknown as { typed: string }).typed).toBe('')
+  })
+})
+
+// Shop-mode playtest finding 2 (CRITICAL, contract violation): Shop Mode's
+// permanent measure-only mode — distinct from the transient Ctrl/Cmd
+// suppression (`createGuides`/`setGuideCreationSuppressed`) covered
+// elsewhere in this file.
+describe('TapeMeasureTool — measureOnly (shop-mode playtest finding 2)', () => {
+  it('measure mode, empty-space endpoint: readout completes but NO guide point/line commits', () => {
+    const { scene, guidePoints, guideLines } = makeWasmScene()
+    const { tool, onGuideCreated, onMeasurement } = makeTool(scene, { measureOnly: true })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // empty space (kind: 'ground')
+    tool.onPointerMove(makeSnap({ x: 3, y: 0, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), RAY) // commit, still empty space
+
+    expect(guidePoints.length).toBe(0)
+    expect(guideLines.length).toBe(0)
+    expect(onGuideCreated).not.toHaveBeenCalled()
+    // The readout still shows the real distance — measuring works, only the
+    // guide commit is suppressed.
+    expect(onMeasurement).toHaveBeenCalledWith(formatLength(3), false)
+  })
+
+  it('parallel-guide mode (first click on an edge): commits nothing either', () => {
+    const { scene, guideLines } = makeWasmScene()
+    const { tool, onGuideCreated } = makeTool(scene, { measureOnly: true })
+
+    tool.onPointerDown(
+      makeSnap({ x: 1, y: 0, z: 0, kind: 'on-edge', elementKind: 'edge', object: 7n, element: 3n }),
+      RAY,
+    )
+    tool.onPointerMove(makeSnap({ x: 1, y: 0.5, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0.5, z: 0 }), RAY) // commit
+
+    expect(guideLines.length).toBe(0)
+    expect(onGuideCreated).not.toHaveBeenCalled()
+  })
+
+  it('measuring between two REAL points still arms the rescale confirmation (unrelated to guide creation) — ShopApp auto-declines it, never confirms', () => {
+    // Not itself part of the contract (confirmPendingRescale is never
+    // called in Shop Mode — see Viewport.tsx's confirmPendingRescale/
+    // cancelPendingRescale doc), but pins that measureOnly doesn't
+    // interfere with the arm signal ShopApp's auto-decline depends on.
+    const { scene } = makeWasmScene()
+    const { tool, onRescaleArmed } = makeTool(scene, { measureOnly: true })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    typeAndEnter(tool, '3')
+
+    expect(onRescaleArmed).toHaveBeenCalledTimes(1)
+    // Declining it (ShopApp's handleRescaleArmed) falls back to the normal
+    // guide-point commit the typed distance would have produced — still
+    // suppressed by measureOnly.
+    const { scene: scene2, guidePoints } = makeWasmScene()
+    const { tool: tool2 } = makeTool(scene2, { measureOnly: true })
+    tool2.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool2.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    typeAndEnter(tool2, '3')
+    tool2.cancelRescale()
+    expect(guidePoints.length).toBe(0)
+  })
+
+  it('measureOnly false (every editor call site, including the default) keeps creating guides exactly as before', () => {
+    const { scene, guidePoints } = makeWasmScene()
+    const { tool, onGuideCreated } = makeTool(scene) // no opts — measureOnly defaults false
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onPointerMove(makeSnap({ x: 3, y: 0, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), RAY)
+    expect(guidePoints.length).toBe(1)
+    expect(onGuideCreated).toHaveBeenCalledTimes(1)
+  })
+})
+
+// Shop-mode playtest finding 3: the touch anchor-marker seam.
+describe('TapeMeasureTool — onGesturePoint (shop-mode playtest finding 3)', () => {
+  it('fires [p0] on the first click, then [p0, p1] on commit (measure mode)', () => {
+    const { scene } = makeWasmScene()
+    const points: (readonly [number, number, number][])[] = []
+    const onGesturePoint = vi.fn((p: readonly [number, number, number][]) => points.push(p))
+    const { tool } = makeTool(scene, { onGesturePoint })
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 0 }), RAY)
+    expect(onGesturePoint).toHaveBeenCalledTimes(1)
+    expect(points[0]).toEqual([[1, 2, 0]])
+
+    tool.onPointerMove(makeSnap({ x: 4, y: 2, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 4, y: 2, z: 0 }), RAY) // commit
+    expect(onGesturePoint).toHaveBeenCalledTimes(2)
+    expect(points[1]).toEqual([[1, 2, 0], [4, 2, 0]])
+  })
+
+  it('a fresh gesture after a commit clears back to a single point — not appended to the old pair', () => {
+    const { scene } = makeWasmScene()
+    const points: (readonly [number, number, number][])[] = []
+    const onGesturePoint = vi.fn((p: readonly [number, number, number][]) => points.push(p))
+    const { tool } = makeTool(scene, { onGesturePoint })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), RAY) // commit #1: [p0, p1]
+
+    tool.onPointerDown(makeSnap({ x: 9, y: 9, z: 0 }), RAY) // new gesture's first click
+    expect(points.at(-1)).toEqual([[9, 9, 0]])
+  })
+
+  it('fires regardless of measureOnly — purely visual, independent of whether a guide actually commits', () => {
+    const { scene } = makeWasmScene()
+    const onGesturePoint = vi.fn()
+    const { tool } = makeTool(scene, { measureOnly: true, onGesturePoint })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onPointerMove(makeSnap({ x: 3, y: 0, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), RAY)
+
+    expect(onGesturePoint).toHaveBeenCalledTimes(2)
+    expect(onGesturePoint).toHaveBeenLastCalledWith([[0, 0, 0], [3, 0, 0]])
+  })
+
+  it('the edge point for parallel-guide mode is the tapped edge point, and commit reports the offset origin', () => {
+    const { scene } = makeWasmScene()
+    const points: (readonly [number, number, number][])[] = []
+    const onGesturePoint = vi.fn((p: readonly [number, number, number][]) => points.push(p))
+    const { tool } = makeTool(scene, { onGesturePoint })
+
+    tool.onPointerDown(
+      makeSnap({ x: 1, y: 0, z: 0, kind: 'on-edge', elementKind: 'edge', object: 7n, element: 3n }),
+      RAY,
+    )
+    expect(points[0]).toEqual([[1, 0, 0]])
+
+    tool.onPointerMove(makeSnap({ x: 1, y: 0.5, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0.5, z: 0 }), RAY) // commit
+    expect(points[1].length).toBe(2)
+    expect(points[1][0]).toEqual([1, 0, 0])
+  })
+
+  it('defaults to a no-op — every editor call site (which never passes it) is unaffected', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene) // no onGesturePoint
+    expect(() => {
+      tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+      tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 0 }), RAY)
+      tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), RAY)
+    }).not.toThrow()
+  })
+
+  // Adversarial-review finding 3 (MAJOR): `cancel()` — a mid-gesture Esc, or
+  // `onDocumentReset()` (a doc swap while Tape Measure stays the active
+  // tool) — never fired `OnGesturePoint`, leaving the last-armed marker(s)
+  // pointing at world coordinates a swapped/reset document may no longer
+  // mean anything against.
+  it('cancel() clears a mid-gesture single point back to empty', () => {
+    const { scene } = makeWasmScene()
+    const onGesturePoint = vi.fn()
+    const { tool } = makeTool(scene, { onGesturePoint })
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 0 }), RAY) // arms [p0]
+    expect(onGesturePoint).toHaveBeenLastCalledWith([[1, 2, 0]])
+
+    tool.cancel()
+    expect(onGesturePoint).toHaveBeenLastCalledWith([])
+  })
+
+  it('onDocumentReset() (a doc swap while this tool stays active) also clears', () => {
+    const { scene } = makeWasmScene()
+    const onGesturePoint = vi.fn()
+    const { tool } = makeTool(scene, { onGesturePoint })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), RAY) // commit — [p0, p1]
+    onGesturePoint.mockClear()
+
+    tool.onDocumentReset()
+    expect(onGesturePoint).toHaveBeenLastCalledWith([])
+  })
+
+  it('a genuine commit does NOT clear — the markers persist alongside the frozen readout', () => {
+    const { scene } = makeWasmScene()
+    const onGesturePoint = vi.fn()
+    const { tool } = makeTool(scene, { onGesturePoint })
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), RAY) // commit
+
+    // The commit's own [p0, p1] firing is the LAST call — nothing after it
+    // (in particular no trailing `[]`) came from the internal
+    // `_resetToIdle('freeze')` the commit path ends with.
+    expect(onGesturePoint).toHaveBeenLastCalledWith([[0, 0, 0], [1, 0, 0]])
+  })
+})
+
+describe('TapeMeasureTool — Shop Mode (measure-only) parts flow', () => {
+  const edgeSnap = (x: number, y: number, z: number): Snap =>
+    makeSnap({ kind: 'on-edge', x, y, z, object: 5n, element: 9n })
+  const stageKind = (tool: TapeMeasureTool): string =>
+    (tool as unknown as { stage: { kind: string } }).stage.kind
+
+  it('measureOnly forces straight point-to-point measure on an edge tap (no parallel guide)', () => {
+    const { scene, guideLines } = makeWasmScene()
+    const { tool, onMeasurement } = makeTool(scene, { measureOnly: true })
+    // An edge snap WOULD start parallel-guide mode in the editor; measure-only
+    // Shop Mode instead anchors a measurement (shop-mode playtest: parts-only).
+    tool.onPointerDown(edgeSnap(0, 0, 0), RAY)
+    expect(stageKind(tool)).toBe('measure')
+    tool.onPointerDown(edgeSnap(2, 0, 0), RAY)
+    expect(onMeasurement).toHaveBeenCalled()
+    expect(guideLines).toEqual([]) // measure-only never commits a guide
+  })
+
+  it('exposes committed endpoints and re-measures from the other on beginMoveEndpoint', () => {
+    const { scene } = makeWasmScene()
+    const onGesturePoint = vi.fn()
+    const { tool } = makeTool(scene, { measureOnly: true, onGesturePoint })
+
+    expect(tool.getMovableEndpoints()).toBeNull() // nothing to move yet
+
+    tool.onPointerDown(edgeSnap(0, 0, 0), RAY)
+    tool.onPointerDown(edgeSnap(2, 0, 0), RAY)
+
+    const ends = tool.getMovableEndpoints()
+    expect(ends).not.toBeNull()
+    expect(ends!.points[0]).toEqual([0, 0, 0])
+    expect(ends!.points[1]).toEqual([2, 0, 0])
+
+    // Grab endpoint 1 → the measure re-anchors at endpoint 0 (the fixed one).
+    tool.beginMoveEndpoint(1)
+    expect(stageKind(tool)).toBe('measure')
+    expect(onGesturePoint).toHaveBeenLastCalledWith([[0, 0, 0]])
+
+    // Placing the moved endpoint commits a NEW measurement from the fixed one.
+    tool.onPointerDown(edgeSnap(0, 3, 0), RAY)
+    const moved = tool.getMovableEndpoints()
+    expect(moved!.points[0]).toEqual([0, 0, 0])
+    expect(moved!.points[1]).toEqual([0, 3, 0])
+  })
+
+  it('exposes the IN-PROGRESS single point and relocates it (not a second point)', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene, { measureOnly: true })
+    // One point placed → in-progress measurement; the single point is movable.
+    tool.onPointerDown(edgeSnap(0, 0, 0), RAY)
+    const ends = tool.getMovableEndpoints()
+    expect(ends).not.toBeNull()
+    expect(ends!.points.length).toBe(1)
+    expect(ends!.points[0]).toEqual([0, 0, 0])
+    // Grabbing it clears back to idle so the loupe's release RE-PLACES p0
+    // rather than dropping a second point and completing a measurement.
+    tool.beginMoveEndpoint(0)
+    expect(tool.getMovableEndpoints()).toBeNull()
+    tool.onPointerDown(edgeSnap(5, 0, 0), RAY)
+    const relocated = tool.getMovableEndpoints()
+    expect(relocated!.points.length).toBe(1)
+    expect(relocated!.points[0]).toEqual([5, 0, 0])
+  })
+
+  it('cancel() drops the movable endpoints (tap-off clears the measurement)', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene, { measureOnly: true })
+    tool.onPointerDown(edgeSnap(0, 0, 0), RAY)
+    tool.onPointerDown(edgeSnap(2, 0, 0), RAY)
+    expect(tool.getMovableEndpoints()).not.toBeNull()
+    tool.cancel()
+    expect(tool.getMovableEndpoints()).toBeNull()
   })
 })

@@ -57,6 +57,34 @@ export const LENGTH_FORMAT_OPTIONS: LengthFormatOption[] = [
   { value: 'dec_in', label: 'Decimal inches (60.125")' },
 ]
 
+/** Bare display name per format — no parenthetical example, unlike
+ * `LENGTH_FORMAT_OPTIONS`'s `label` (which carries one for the desktop
+ * dropdown, the one place with no live preview column to make the example
+ * redundant). Shop Mode's unit picker and its Settings "Units" row
+ * (design_handoff_shop_mode/README.md §7/§6) show just the name — the
+ * picker already renders a live preview next to it. */
+export const LENGTH_FORMAT_NAME: Record<LengthFormat, string> = {
+  m: 'Meters',
+  cm: 'Centimeters',
+  mm: 'Millimeters',
+  arch: 'Architectural',
+  frac_in: 'Fractional inches',
+  dec_in: 'Decimal inches',
+}
+
+/** Short mono label for a compact chip (Shop Mode's cutlist header unit
+ * chip, design §1 "Sheet header") — the format's own short NAME shown on its
+ * own, distinct from `getLengthUnitSuffix` (the per-VALUE suffix appended
+ * after a number). */
+export const LENGTH_FORMAT_SHORT_LABEL: Record<LengthFormat, string> = {
+  m: 'm',
+  cm: 'cm',
+  mm: 'mm',
+  arch: 'ft-in',
+  frac_in: 'in',
+  dec_in: 'in.d',
+}
+
 /** Which system each format belongs to. The single source of truth for the
  * system × format grouping used by the Settings UI. */
 export const LENGTH_SYSTEM_OF: Record<LengthFormat, LengthSystem> = {
@@ -155,6 +183,25 @@ function notify(): void {
 /** Read the current length format. */
 export function getLengthUnit(): LengthFormat {
   return currentFormat
+}
+
+/**
+ * True if a format was ever persisted to this device (current or legacy
+ * vocabulary) — i.e. `currentFormat` reflects an explicit past choice
+ * rather than `DEFAULT_FORMAT`. Read-only: does NOT migrate/write, unlike
+ * `loadInitial()` (that already ran once at module load). Exists for
+ * one-time-seed callers — Shop Mode's locale-based unit default
+ * (`shop/localeUnits.ts`) needs to tell "nothing chosen yet" apart from "the
+ * user (or a previous seed) explicitly chose Meters" before writing a
+ * locale-implied default, without this module's own default ever changing.
+ */
+export function hasPersistedLengthUnit(): boolean {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    return isLengthFormat(raw) || isLegacyLengthUnit(raw)
+  } catch {
+    return false
+  }
 }
 
 /** Read the system (Metric/Imperial) the current format belongs to. */
@@ -290,7 +337,14 @@ export function formatLengthIn(meters: number, format: LengthFormat): string {
   if (feet > 0 && inches === 0 && num === 0) {
     return `${sign}${feetPart}`
   }
-  const inchesPart = `${inches}${inchFraction}"`
+  // Standalone sub-inch value (no feet AND no whole inches — just a
+  // fraction): drop the leading "0-" so it reads "3/4"" not "0-3/4"" —
+  // matching frac_in's own formatFractionalInches, which already omits it
+  // (its own `whole === 0` branch above). Only the standalone case drops
+  // it: inside a composite WITH feet ("1' 0-3/4""), the "0-3/4" inch part
+  // is left exactly as-is — the zero there is load-bearing (it's the whole
+  // inches count, not a dropped leading digit).
+  const inchesPart = feet === 0 && inches === 0 && num !== 0 ? `${num}/${den}"` : `${inches}${inchFraction}"`
   if (feet === 0) {
     return `${sign}${inchesPart}`
   }

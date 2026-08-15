@@ -20,6 +20,7 @@ import {
   type Ray,
 } from './math'
 import { rayPlaneIntersect } from './geoHelpers'
+import { isCoarsePointer } from '../platform'
 
 /** Pixel radius to *acquire* a snap candidate. */
 export const SNAP_RADIUS_PX = 8
@@ -47,6 +48,20 @@ export const SNAP_BREAK_RADIUS_PX = 16
  * consistent with every other sticky kind's.
  */
 export const SOFT_AXIS_BREAK_APERTURE_SCALE = SNAP_BREAK_RADIUS_PX / SNAP_RADIUS_PX
+
+/**
+ * Multiplier applied to BOTH `SNAP_RADIUS_PX` and `SNAP_BREAK_RADIUS_PX`
+ * under a coarse pointer (`platform.isCoarsePointer`) — a fingertip covers
+ * several times the screen area a mouse cursor's hotspot does, so the
+ * acquire/release radii a mouse-tuned 8px/16px would starve touch input of
+ * any snap at all on real geometry density. Deliberately placed HERE —
+ * every `resolve()` query, the one choke point every tool's snapping goes
+ * through — rather than in an individual tool, so Shop Mode's tap-to-inspect
+ * and the Tape Measure (or any future touch caller) all widen together by
+ * construction; a per-tool radius bump would need to be remembered and
+ * re-applied at every new touch-relevant tool instead.
+ */
+export const COARSE_POINTER_APERTURE_SCALE = 2
 
 /** Snap kinds that are discrete/linear inference targets worth holding onto
  * with hysteresis. Excludes the broad-area 'ground' and 'on-face' snaps, where
@@ -118,6 +133,24 @@ export class SnapService {
 
   constructor(scene: Scene) {
     this.scene = scene
+  }
+
+  /**
+   * Drop the held sticky snap without otherwise touching state (shop-mode
+   * playtest finding 5). The hysteresis this class implements assumes a
+   * CONTINUOUS pointer stream: a mouse hovering away from a point keeps
+   * calling `resolve()` every few ms, so the acquire query naturally
+   * overwrites `lastSnap` the moment it finds anything else. Discrete touch
+   * taps have no such stream — between one tap's resolution and the next,
+   * nothing calls `resolve()` at all — so a held sticky snap can only ever
+   * be cleared by the NEXT tap's own acquire query, which is one query later
+   * than a continuous pointer would need. Harmless for the editor (never
+   * called there), but Shop Mode's tap-to-inspect calls this once a tap has
+   * fully resolved, so the next tap starts from a clean slate rather than
+   * potentially resisting release toward whatever the previous tap held.
+   */
+  clearHold(): void {
+    this.lastSnap = null
   }
 
   /**
@@ -217,6 +250,23 @@ export class SnapService {
     lockAxis?: 0 | 1 | 2,
     constraintPlane?: { point: [number, number, number]; normal: [number, number, number] },
     offPlanePoints?: boolean,
+    /**
+     * Overrides the coarse-pointer widening (`COARSE_POINTER_APERTURE_SCALE`)
+     * for this one query — shop-mode playtest finding 5. Empirically (a
+     * scattered face-tap E2E sweep against a 1m fixture cube), the doubled
+     * acquire radius makes an EDGE win over the FACE it sits on almost
+     * everywhere on the face, not just near its boundary: 5 of 7 taps
+     * comfortably inside the face's silhouette resolved 'edge'. Tape Measure
+     * and every other tool's own inference genuinely need the touch-widened
+     * aperture to acquire thin targets at all on a phone, so this is scoped
+     * to a single caller — Shop Mode's Select-tool tap-to-INSPECT
+     * (`dispatchSelectPick`) passes `1` (the mouse-tuned unscaled radius,
+     * still generous enough for a deliberate near-edge tap) so a casual tap
+     * anywhere on a face reads as the part, not a stray edge measurement.
+     * `undefined` (every other caller) keeps the existing coarse-pointer
+     * behavior byte-identical.
+     */
+    apertureScaleOverride?: number,
   ): { snap: Snap | null; fromKernel: boolean } {
     const anchorArr = anchor !== undefined ? new Float64Array(anchor) : null
     const constraintPlaneArr =
@@ -224,9 +274,12 @@ export class SnapService {
         ? new Float64Array([...constraintPlane.point, ...constraintPlane.normal])
         : null
 
+    // Coarse-pointer (touch) widening — see COARSE_POINTER_APERTURE_SCALE.
+    const apertureScale = apertureScaleOverride ?? (isCoarsePointer() ? COARSE_POINTER_APERTURE_SCALE : 1)
+
     // 1. Acquire at the normal radius.
     const acquired = this.query(
-      ray, SNAP_RADIUS_PX, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
+      ray, SNAP_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
       offPlanePoints ?? false,
     )
     if (acquired !== null && STICKY_KINDS.has(acquired.kind)) {
@@ -242,7 +295,7 @@ export class SnapService {
     //    without this a held on-axis snap would have no hysteresis at all.
     if (this.lastSnap !== null && STICKY_KINDS.has(this.lastSnap.kind)) {
       const held = this.query(
-        ray, SNAP_BREAK_RADIUS_PX, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
+        ray, SNAP_BREAK_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
         offPlanePoints ?? false,
         SOFT_AXIS_BREAK_APERTURE_SCALE,
       )

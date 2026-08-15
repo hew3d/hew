@@ -21,7 +21,7 @@
 
 import { useEffect, useCallback, useState } from 'react'
 
-export type ExportFormat = 'glb' | 'stl' | '3mf'
+export type ExportFormat = 'glb' | 'stl' | '3mf' | 'usdz'
 
 /** STL curve-resolution choices: segments per full turn (0 = stored facets). */
 const STL_RESOLUTIONS: { value: number; label: string }[] = [
@@ -163,6 +163,7 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
           <option value="glb">glTF binary (.glb) — Y-up, meters</option>
           <option value="stl">STL binary (.stl) — Z-up, millimeters, for 3D printing</option>
           <option value="3mf">3MF (.3mf) — Z-up, millimeters, keeps part names and colors</option>
+          <option value="usdz">USDZ (.usdz) — Y-up, meters, for AR Quick Look and USD pipelines</option>
         </select>
 
         {format === 'stl' && (

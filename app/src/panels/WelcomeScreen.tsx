@@ -20,6 +20,8 @@
 
 import { useEffect, useCallback, type MouseEvent } from 'react'
 import { isTauri } from '../io/fileHost'
+import type { RecentEntry } from '../io/recents'
+import { formatRelativeTime } from '../io/relativeTime'
 import { LENGTH_FORMAT_OPTIONS, type LengthFormat } from '../settings/units'
 
 /** One bundled sample: the asset file under `samples/` plus display copy. */
@@ -60,6 +62,15 @@ interface WelcomeScreenProps {
   onOpenRecent: (path: string) => void
   /** Load a bundled sample. */
   onOpenSample: (sample: SampleEntry) => void
+  /** Offline recents (design §"Offline recents") — the web build's
+   *  IndexedDB-backed shelf (`io/recents.ts`), newest first. `undefined` on
+   *  the desktop shell, which has no such store (only the path-based
+   *  `recentFiles` above, from the shell's own recents.json). Distinct from
+   *  `recentFiles`/`onOpenRecent`: those resolve a filesystem PATH the shell
+   *  re-reads; these already carry their bytes (no re-fetch, works offline). */
+  webRecents?: RecentEntry[]
+  /** Open one of `webRecents`. */
+  onOpenWebRecent?: (entry: RecentEntry) => void
   /** Current "show on startup" value. */
   showOnStartup: boolean
   /** Persist a new "show on startup" value. */
@@ -259,8 +270,15 @@ const WELCOME_CSS = `
   overflow: hidden;
 }
 .hw-welcome__recent-name {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.hw-welcome__recent-time {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-faint);
 }
 .hw-welcome__recent svg {
   flex: 0 0 auto;
@@ -372,6 +390,8 @@ export function WelcomeScreen({
   onOpen,
   onOpenRecent,
   onOpenSample,
+  webRecents,
+  onOpenWebRecent,
   showOnStartup,
   onShowOnStartupChange,
   unit,
@@ -466,6 +486,31 @@ export function WelcomeScreen({
                   >
                     <FolderIcon />
                     <span className="hw-welcome__recent-name">{basename(path)}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          {/* Offline recents (web build only) — distinct from the path-based
+              "Recent" section above (which never populates on web, since
+              there's no shell recents.json to read); these already carry
+              their bytes, so the workshop phone can reopen a model with no
+              network at all. Omitted when empty, matching every other
+              shelf's "no boilerplate empty state" convention. */}
+          {webRecents !== undefined && webRecents.length > 0 && (
+            <>
+              <div className="hw-welcome__label">Recents</div>
+              <div className="hw-welcome__cards">
+                {webRecents.slice(0, 5).map((entry) => (
+                  <button
+                    key={entry.id}
+                    className="hw-welcome__card hw-welcome__recent"
+                    onClick={() => onOpenWebRecent?.(entry)}
+                  >
+                    <FolderIcon />
+                    <span className="hw-welcome__recent-name">{entry.name}</span>
+                    <span className="hw-welcome__recent-time">{formatRelativeTime(entry.timestamp, Date.now())}</span>
                   </button>
                 ))}
               </div>

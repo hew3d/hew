@@ -33,6 +33,7 @@ import { SnapService } from './snapService'
 import { SceneRenderer, type RefreshTouched } from './SceneRenderer'
 import { expandByVisibleObject } from './visibleBounds'
 import { SectionManager, rescaleSectionPlane } from './sectionManager'
+import { isVisiblePartSnap, isClearFaceSnap, classifyTapeHold } from './tapePartsGate'
 import * as inputRecorder from '../recording/inputRecorder'
 import { ToolController } from '../tools/ToolController'
 import { RectangleTool } from '../tools/RectangleTool'
@@ -97,6 +98,17 @@ import { collectLeafIds, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structura
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
 import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
 import {
+  loupePress,
+  loupeMove,
+  loupeTick,
+  loupeRelease,
+  loupeCancel,
+  LOUPE_IDLE,
+  LOUPE_HOLD_MS,
+  type LoupeState,
+} from './loupeGesture'
+import { inferenceKindLabel } from './InferenceTooltip'
+import {
   beginZoomWindowDrag as beginZoomWindowDragState,
   updateZoomWindowDrag as updateZoomWindowDragState,
   finishZoomWindowDrag as finishZoomWindowDragRect,
@@ -107,6 +119,7 @@ import { MultiClickTracker } from './multiClick'
 import { resolveSelectableRef, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
 import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme, type ResolvedTheme } from '../settings/theme'
+import { buildShopGradientTextureFromToken } from './shopGradientBackground'
 import { readAppliedTheme } from '../theme/applyTheme'
 import { getLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit } from '../settings/units'
 import { InfiniteGrid } from './InfiniteGrid'
@@ -222,6 +235,61 @@ export interface InferenceInfo {
 interface Props {
   /** WASM Scene — owns inference, sketches, objects */
   wasmScene: WasmScene
+  /**
+   * Viewport canvas background. Omitted (or `'editor-default'`) is
+   * byte-identical to before this prop existed: `threeScene.background`
+   * stays three's own `null`, and the flat `renderer.setClearColor` clear
+   * color (theme-reactive, unchanged) does all the work. `'shop-gradient'`
+   * opts into Shop Mode's warm/near-black gradient backdrop
+   * (design_handoff_shop_mode/README.md Design Tokens' `--viewport-bg`) —
+   * a `THREE.CanvasTexture` built from that CSS custom property
+   * (`shopGradientBackground.ts`), rebuilt on mount and on every live theme
+   * change the same way `originAxes`/`infiniteGrid`'s colors are. The only
+   * caller today is `ShopApp.tsx`; the editor (`App.tsx`) never passes it.
+   */
+  background?: 'editor-default' | 'shop-gradient'
+  /**
+   * Read-only viewer mode (shop-mode playtest findings 1-2), default
+   * `false` — the desktop editor never passes this, so every path below it
+   * gates is byte-identical to before this prop existed. `true` (Shop Mode
+   * only) makes the Select tool's drag-to-move gesture NEVER arm: a press
+   * that lands on a node behaves exactly like a press on empty space (the
+   * SAME code path a plain empty-space press already takes — a deferred
+   * click-pick on release, or the Select marquee's own rubber-band drag,
+   * neither of which ever calls into the kernel), and the annotation
+   * offset/leader drag (which DOES commit a kernel mutation on release) is
+   * skipped from arming at all. It also puts the Tape Measure tool into
+   * measure-only mode (`TapeMeasureTool`'s `measureOnly` constructor flag) —
+   * the readout still works, but no guide line/point is ever committed,
+   * confirmation or not — and biases the Select tool's own tap-to-inspect
+   * snap acquisition back to the unscaled (mouse-tuned) radius rather than
+   * the coarse-pointer-widened one every other tool keeps (see
+   * `dispatchSelectPick`'s call into `SnapService.resolve` and that
+   * override parameter's own doc — shop-mode playtest finding 5).
+   */
+  readOnly?: boolean
+  /**
+   * Initial ground-grid/origin-axes visibility — both default `true`
+   * (three's own `Object3D.visible` default, and the editor's own
+   * unchanged behavior). Shop Mode passes `false` for both: every
+   * design_handoff_shop_mode/README.md screenshot shows the model floating
+   * on the plain gradient backdrop with no CAD grid or axis lines (a
+   * "product photo" viewer, not the editor's drafting canvas) — and the
+   * grid's ground plane is a large OPAQUE quad (`viewport/InfiniteGrid.ts`'s
+   * module doc) that would otherwise sit in front of the `background=
+   * 'shop-gradient'` texture and hide it at the app's usual 3/4 camera
+   * angle. Applied ONCE at construction (inside this same mount effect,
+   * alongside `originAxes`/`infiniteGrid` themselves) rather than via a
+   * post-mount `ViewportApi.setGridVisible`/`setAxesVisible` call — a
+   * post-mount call raced React StrictMode's dev-only double-invoke (mount →
+   * cleanup → remount): a caller's OWN effect keyed on an unrelated prop
+   * (e.g. `wasmScene`, stable across the remount) never re-fires for the
+   * SECOND, actually-rendered Viewport instance, silently leaving its grid/
+   * axes visible. A prop applied inside Viewport's own mount effect has no
+   * such race — it's correct on every mount, StrictMode-doubled or not.
+   */
+  showGrid?: boolean
+  showAxes?: boolean
   /** Called when tool name or snap kind changes (for status bar) */
   onStatusChange?: (toolName: string, snapKind: string | null) => void
   /** Called on every pointer move with the live inference-cursor info,
@@ -272,6 +340,28 @@ interface Props {
   activeLitSet?: Set<bigint> | null
   /** Lift an in-viewport selection up to the parent. `additive` = shift-click. */
   onSelect?: (node: NodeRef | null, additive: boolean) => void
+  /** Shop Mode only (shop-mode playtest): a HELD press on a clear face of a
+   *  part while Tape Measure is active requests isolating that part. Driven
+   *  from here (not a chrome-level long-press timer) because only the Viewport
+   *  has the live press snap under Tape — a chrome timer would isolate a stale
+   *  Select-tap node. The editor never passes this. */
+  onIsolateRequest?: (node: NodeRef) => void
+  /**
+   * Fired immediately BEFORE `onSelect`, from the SAME Select-tool click
+   * resolution (`handleSelect`) — the ordering is a contract (see the call
+   * site's comment): an `onSelect` handler may stash-and-read this snap
+   * for the same tap. Carries the raw pre-resolution `Snap` —
+   * `onSelect` only ever reports the whole node the snap resolved UP to
+   * (`resolveSelectableRef` collapses any face/edge/vertex snap on an
+   * Object to that Object's NodeRef), so a caller that wants to know WHICH
+   * face or edge was actually under the tap (Shop Mode's tap-to-inspect:
+   * an edge's exact length, a face's bounding extent) needs the snap
+   * itself — `snap.elementKind` ("vertex" | "edge" | "face" | …) plus
+   * `snap.object`/`snap.element` name it. `null` for a miss, same as
+   * `onSelect`'s `node`. Undefined for every other `onSelect` call site
+   * (drag-move auto-select, marquee, outliner clicks, …) — those have no
+   * single corresponding tap snap to report. */
+  onSelectSnap?: (snap: Snap | null) => void
   /** Lift a multi-node selection (marquee, Select All) up to the parent.
    * `additive` = shift held: merge into the current selection. */
   onSelectMany?: (nodes: NodeRef[], additive: boolean) => void
@@ -396,6 +486,15 @@ interface Props {
    *  makes the sampled id current (`setCurrentMaterialId`), so the palette
    *  selection follows exactly like picking the swatch directly. */
   onSampleMaterial?: (id: bigint) => void
+  /**
+   * Tape Measure's fixed gesture points (shop-mode playtest finding 3) — see
+   * `TapeMeasureTool`'s `OnGesturePoint` doc. Optional and additive; the
+   * editor never subscribes. Shop Mode uses this to render persistent
+   * world-anchored terracotta markers + a connecting segment (its touch
+   * flow has no continuous hover to drive the editor's own cursor-following
+   * dashed preview line).
+   */
+  onTapeMeasurePoints?: (points: readonly [number, number, number][]) => void
 }
 
 /** Imperative handle the viewport exposes to the parent. */
@@ -578,6 +677,15 @@ export interface ViewportApi {
     onDone?: (placed: boolean) => void,
   ) => void
   /**
+   * Drop the shared `SnapService`'s held sticky snap (shop-mode playtest
+   * finding 5 — see `SnapService.clearHold`'s own doc for why touch's
+   * discrete tap stream needs this where continuous mouse hover doesn't).
+   * Shop Mode calls this once a tap has fully resolved (after `onSelect`/
+   * `onSelectSnap` fire) so the NEXT tap starts from a clean slate. A no-op
+   * seam for the editor — nothing there calls it.
+   */
+  clearSnapHold: () => void
+  /**
    * Call after a `scene.load()` to rebuild all viewport-side caches and
    * propagate the new watertight state / docRev to the parent.  Mirrors the
    * same path that undo/redo use (`handleSceneRefresh` + `refreshAllSketches`).
@@ -620,6 +728,18 @@ export interface ViewportApi {
    * scene is empty. Idempotent — safe to call multiple times.
    */
   zoomExtents: () => void
+  /**
+   * Frame an explicit world-space AABB (`min`/`max` corners) into view — the
+   * same fit-distance/view-limit math `zoomExtents` runs, just against a
+   * caller-supplied box instead of the whole rendered scene. Added for Shop
+   * Mode's double-tap-to-zoom (frame the tapped object's bounds, from
+   * `objectBounds.worldBoundsForSelection`) without duplicating that math
+   * outside the viewport or teaching `zoomExtents` about a single-object
+   * mode. A degenerate (zero-volume) box is still framed — unlike
+   * `zoomExtents`'s empty-scene no-op, a single point is a legitimate
+   * target here (e.g. a thin sketch edge).
+   */
+  zoomToWorldBounds: (min: [number, number, number], max: [number, number, number]) => void
   /**
    * Reposition the orbit camera to a standard axis-aligned or isometric view
    * (Camera ▸ Standard Views), re-framing the scene each time. The current
@@ -710,8 +830,18 @@ export interface ViewportApi {
    * Update the renderer's hidden object/instance sets.  Hidden groups have
    * `.visible = false` (not raypicked by three.js tools) and are excluded from
    * the kernel pick results in the Select tool path.
+   *
+   * `opts.fadeMs`, when given, opts into `SceneRenderer.setHiddenFaded`'s
+   * opacity tween (design_handoff_shop_mode/README.md §4's isolate fade)
+   * instead of the plain instant hide/reveal — omitted entirely (not even an
+   * explicit `undefined` third argument) by every editor call site, so the
+   * editor's own hide/reveal behavior is byte-identical to before this
+   * option existed. Shop Mode is the only caller that ever passes it
+   * (`ShopApp.tsx`'s `pushHidden`), and only from its isolate/show-all
+   * paths — the Parts sheet's own eye toggles call this with no third
+   * argument at all, same as the editor.
    */
-  setHidden: (hiddenObjectIds: bigint[], hiddenInstanceIds: bigint[]) => void
+  setHidden: (hiddenObjectIds: bigint[], hiddenInstanceIds: bigint[], opts?: { fadeMs?: number }) => void
   /** Select every visible top-level node + free sketch (Edit ▸ Select All);
    * inside a group's editing context, its direct members. */
   selectAll: () => void
@@ -813,6 +943,14 @@ export interface ViewportApi {
    */
   export3mf: () => Promise<Uint8Array | null>
   /**
+   * Serialize the current scene (objects + instances) to a USDZ container
+   * via `crates/mesh-export` (docs/design/shop-mode.md §5) — meter unit,
+   * Y-up, one `Xform`+`Mesh` prim per part with `UsdPreviewSurface`
+   * materials, for AR Quick Look and USD pipelines. Resolves null when
+   * nothing exports.
+   */
+  exportUsdz: () => Promise<Uint8Array | null>
+  /**
    * Camera ▸ Parallel Projection (docs/design/camera.md §1): toggles between
    * perspective and parallel projection, visually stable at the orbit
    * target. `onProjectionChange` (a Props callback) reports the result so
@@ -883,6 +1021,23 @@ const ORIGIN_AXIS_COLORS: Record<'light' | 'dark', { x: [number, number, number]
   // #d6454b/#28a055/#2d78e1 light) converted to float triples.
   dark: { x: [0.910, 0.353, 0.376], y: [0.373, 0.808, 0.502], z: [0.373, 0.588, 0.922] },
   light: { x: [0.839, 0.271, 0.294], y: [0.157, 0.627, 0.333], z: [0.176, 0.471, 0.882] },
+}
+
+/**
+ * Shop Mode's read-only tool-switch allowlist (shop-mode adversarial
+ * review, CRITICAL finding 1) — the only three tools `readOnly` Shop Mode
+ * ever exposes chrome for (`ShopApp.tsx`'s own `ShopToolName`/
+ * `TOOL_SEGMENTS`). `switchToolRef`'s switch statement below is the ONE
+ * choke point every tool switch funnels through (a keyboard shortcut, a
+ * palette-shaped verb, any future caller), so consulting this at its very
+ * top makes every one of those callers safe by construction — no branch
+ * further down needs its own `readOnly` check. Exported as a standalone
+ * pure predicate (rather than inlined in the closure) so it's unit-testable
+ * without mounting the whole component/WASM stack, mirroring this file's
+ * existing `computeEditContext`/`applyEditContext` precedent.
+ */
+export function isToolSwitchAllowedUnderReadOnly(toolName: string): boolean {
+  return toolName === 'Select' || toolName === 'Orbit' || toolName === 'Tape Measure'
 }
 
 /** Each axis half's nominal world length — beyond the camera's DEFAULT
@@ -1751,6 +1906,10 @@ export function runBooleanCore(
 
 export default function Viewport({
   wasmScene,
+  background = 'editor-default',
+  readOnly = false,
+  showGrid = true,
+  showAxes = true,
   onStatusChange,
   onInferenceChange,
   onSceneChange,
@@ -1764,6 +1923,8 @@ export default function Viewport({
   selectedIds = [],
   activeLitSet = null,
   onSelect,
+  onSelectSnap,
+  onIsolateRequest,
   onSelectMany,
   onSelectGuide,
   selectedGuide = null,
@@ -1786,6 +1947,7 @@ export default function Viewport({
   onProjectionChange,
   onToolReverted,
   onSampleMaterial,
+  onTapeMeasurePoints,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -1804,6 +1966,10 @@ export default function Viewport({
   onPrecisionChangeRef.current = onPrecisionChange
   const onSelectRef = useRef(onSelect)
   onSelectRef.current = onSelect
+  const onSelectSnapRef = useRef(onSelectSnap)
+  onSelectSnapRef.current = onSelectSnap
+  const onIsolateRequestRef = useRef(onIsolateRequest)
+  onIsolateRequestRef.current = onIsolateRequest
   const onSelectManyRef = useRef(onSelectMany)
   onSelectManyRef.current = onSelectMany
   const onSelectGuideRef = useRef(onSelectGuide)
@@ -1828,6 +1994,11 @@ export default function Viewport({
   onHistoryChangedRef.current = onHistoryChanged
   const apiRefRef = useRef(apiRef)
   apiRefRef.current = apiRef
+  // Live-read inside the mount effect below (which depends only on
+  // `[wasmScene]` — see its closing dependency array) — the same "prop
+  // changes without a remount" pattern every `onXRef` above follows.
+  const readOnlyRef = useRef(readOnly)
+  readOnlyRef.current = readOnly
   const onMeasurementRef = useRef(onMeasurement)
   onMeasurementRef.current = onMeasurement
   const onRescaleArmedRef = useRef(onRescaleArmed)
@@ -1844,6 +2015,8 @@ export default function Viewport({
   onInternalToolChangeRef.current = onInternalToolChange
   const onSampleMaterialRef = useRef(onSampleMaterial)
   onSampleMaterialRef.current = onSampleMaterial
+  const onTapeMeasurePointsRef = useRef(onTapeMeasurePoints)
+  onTapeMeasurePointsRef.current = onTapeMeasurePoints
   // Latest context path, readable inside the stable event closures.
   const activeContextRef = useRef<NodeRef[]>(activeContext)
   // This component's own belief about the open COMPONENT session
@@ -2047,6 +2220,25 @@ export default function Viewport({
 
     const threeScene = new THREE.Scene()
 
+    // Shop Mode's gradient backdrop opt-in (`background` prop's doc comment
+    // above) — a `scene.background` texture, never touched when `background`
+    // is 'editor-default' (the default): `threeScene.background` stays
+    // three's own `null`, so the flat `renderer.setClearColor` clear color
+    // above is exactly what paints, unchanged from before this prop existed.
+    // NO renderer alpha/transparent-canvas approach — a WebGL alpha context
+    // is a real mobile compositing cost, and every other overlay in this app
+    // already assumes an opaque canvas.
+    let shopGradientTexture: THREE.CanvasTexture | null = null
+    function applyShopGradientBackground(): void {
+      if (background !== 'shop-gradient') return
+      const next = buildShopGradientTextureFromToken()
+      if (next === null) return
+      shopGradientTexture?.dispose()
+      shopGradientTexture = next
+      threeScene.background = shopGradientTexture
+    }
+    applyShopGradientBackground()
+
     // CameraRig owns BOTH a perspective and an orthographic camera and keeps
     // them pose-synchronized (docs/design/camera.md §1); `camera` is always
     // whichever is currently live (`rig.active`), reassigned by
@@ -2120,6 +2312,14 @@ export default function Viewport({
     // later theme change instead of silently resetting to the default.
     let axesHalfLength = AXIS_HALF_LENGTH_DEFAULT
     let originAxes = buildOriginAxes(getResolvedTheme(), axesHalfLength)
+    // `showAxes` prop's doc comment: applied HERE, at construction, not via
+    // a post-mount imperative call. `set_axes_snappable` only called when
+    // actually suppressing axes — the editor's default `showAxes` (true)
+    // issues NO extra kernel call at all, matching this prop's "byte-
+    // identical editor default" contract exactly (rather than relying on
+    // a redundant `true` call being a provable no-op).
+    originAxes.visible = showAxes
+    if (!showAxes) wasmScene.set_axes_snappable(false)
     updateAxisResolution(originAxes, el.clientWidth, el.clientHeight)
     // Seed every other fat-line material (sketch edges, tool-preview
     // rubber-bands) at the initial canvas size too — mirrors the axes call
@@ -2128,10 +2328,13 @@ export default function Viewport({
     updateFatLineResolutions(el.clientWidth, el.clientHeight)
     threeScene.add(originAxes)
     const initialGridColors = GROUND_GRID_COLORS[currentTheme]
-    // `originAxes.visible` (default true — nothing sets it false before
-    // here) seeds the grid's own through-origin-line suppression so the two
-    // start in sync; `setAxesVisible` below keeps them in sync from then on.
+    // `originAxes.visible` (set from `showAxes` just above) seeds the grid's
+    // own through-origin-line suppression so the two start in sync;
+    // `setAxesVisible` (the live Settings > Axes toggle, unaffected by this
+    // prop) keeps them in sync from then on.
     const infiniteGrid = new InfiniteGrid(initialGridColors.ground, initialGridColors.minor, initialGridColors.major, originAxes.visible)
+    // `showGrid` prop's doc comment.
+    infiniteGrid.mesh.visible = showGrid
     threeScene.add(infiniteGrid.mesh)
 
     function disposeOriginAxes(group: THREE.Group): void {
@@ -2173,6 +2376,7 @@ export default function Viewport({
       const gridColors = GROUND_GRID_COLORS[theme]
       infiniteGrid.setColors(gridColors.ground, gridColors.minor, gridColors.major)
       rebuildOriginAxes(theme)
+      applyShopGradientBackground()
       // The edit-context dim opacity is theme-tuned too (component-edit-
       // parity.md Finding 2) — re-apply it so a context already active when
       // the toggle fires reads correctly right away.
@@ -2288,6 +2492,12 @@ export default function Viewport({
       // that valid kernel operation unreachable from the real UI.
       const additive = selectAdditiveRef.current
       const ref = resolveSelectableRef(snap, ray, selectionDeps())
+      // Snap BEFORE node, deliberately: a consumer keying inspection off
+      // `onSelect` (Shop Mode's tap-to-inspect) stashes the snap in a ref
+      // and reads it inside its `onSelect` handler — firing the snap
+      // second would hand that handler the PREVIOUS tap's snap, an
+      // off-by-one misreporting which edge/face was actually tapped.
+      onSelectSnapRef.current?.(snap)
       onSelectRef.current?.(ref, additive)
       scheduleRender()
     }
@@ -2520,7 +2730,38 @@ export default function Viewport({
      * deliberate targets beat the object beneath), then the tool's ray-pick
      * fallback chain. Shared by the in-context immediate press and the
      * top-level deferred (pointerup) click so the two paths stay in lockstep.
+     *
+     * `readOnly` (shop-mode playtest finding 5) passes `1` as the aperture
+     * override — the unscaled, mouse-tuned acquire radius rather than the
+     * coarse-pointer-widened one every other tool keeps (SnapService.resolve's
+     * `apertureScaleOverride` doc has the empirical case: a scattered
+     * face-tap sweep against a 1m fixture cube found the doubled radius
+     * resolving 'edge' for 5 of 7 taps comfortably inside the face's own
+     * silhouette). Shop Mode's tap-to-inspect is the only caller this
+     * affects — Tape Measure's own hover/commit resolution (this file's
+     * other `snapService.resolve` call sites) keeps the full widening,
+     * since it genuinely needs it to acquire thin targets on a phone.
      */
+    /**
+     * Shop Mode round-3 playtest finding 2: Shop Mode renders no world axes
+     * at all (`showAxes=false`), so an `'on-axis'` snap is a target the
+     * Select tap-pick can resolve to that references nothing on screen —
+     * excluded outright, `readOnly` only, and ONLY for the Select tap chain
+     * (this function's own callers, plus the general hover path when Select
+     * is active, gated the same way below). `classifySnapPick` already
+     * treats an axis snap as non-selectable (`kind: 'fallback'`) for the
+     * SELECTED node itself, so this changes only what a hover/tap cue can
+     * show (SnapDot, tooltip, status text) — never what a tap can select,
+     * and never anything for the editor (`readOnlyRef.current` gates it) or
+     * for Tape Measure (which needs the full on-axis snap — see
+     * `CueLayer.update`'s own `suppressAxisLine` flag for that tool's
+     * narrower exclusion, the rendered guide LINE only).
+     */
+    function excludeAxisSnapForSelect(snap: Snap | null): Snap | null {
+      if (!readOnlyRef.current) return snap
+      return snap?.kind === 'on-axis' ? null : snap
+    }
+
     function dispatchSelectPick(ndcX: number, ndcY: number, ray: Ray): void {
       const g = pickGuide(ndcX, ndcY)
       if (g !== null) {
@@ -2528,8 +2769,191 @@ export default function Viewport({
         scheduleRender()
         return
       }
-      const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis())
-      toolController.activeTool.onPointerDown(snap, ray)
+      const { snap: rawSnap } = snapService.resolve(
+        ray, el.clientHeight, apertureBasis(),
+        undefined, undefined, undefined, undefined,
+        readOnlyRef.current ? 1 : undefined,
+      )
+      toolController.activeTool.onPointerDown(excludeAxisSnapForSelect(rawSnap), ray)
+    }
+
+    /**
+     * ARMS the Tape Measure loupe gesture (round-3 playtest finding 4)
+     * instead of committing this press immediately. Resolves and caches
+     * THIS press's own snap/ray — the fallback commit for a plain quick tap
+     * (never overwritten, since `loupeMove` doesn't track sub-slop drift
+     * for an `armed` press — see `loupeGesture.ts`'s own doc) or a
+     * slop-rejected drag (`onPointerMove`'s commit-at-rejection, replaying
+     * exactly what an un-deferred press would have committed at
+     * touch-down) — then starts the hold timer that engages the loupe if
+     * the press survives `LOUPE_HOLD_MS` without exceeding `LOUPE_SLOP_PX`
+     * of drift.
+     */
+    function armTapeLoupe(ev: PointerEvent, ray: Ray, viewportH: number, basis: ApertureBasis, grabEndpoint: 0 | 1 | null = null): void {
+      // Defensive reset: a genuinely fresh press should never inherit a
+      // stale gesture's state (controls disabled, overlay visible, a
+      // pending timer) — every normal exit path already clears these, but
+      // this makes a missed one merely redundant rather than a stuck loupe.
+      cancelTapeLoupe()
+      loupeGrabEndpoint = grabEndpoint
+      const [px, py] = canvasPoint(ev)
+      const tool = toolController.activeTool
+      const constraint = 'snapConstraint' in tool
+        ? (tool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
+        : null
+      const { snap, fromKernel } = snapService.resolve(
+        ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints,
+      )
+      loupePressSnap = snap
+      loupePressRay = ray
+      loupeProbeSnap = snap
+      loupeProbeRay = ray
+      loupeProbeFromKernel = fromKernel
+      // Narrow-aperture face-classification snap (adversarial review) — see
+      // `loupePressFaceSnap`'s doc. Aperture scale 1 (the same override
+      // `dispatchSelectPick` uses for Select's tap-to-inspect) so a casual
+      // mid-face hold resolves as a face, not a stray nearby edge. Consulted
+      // only by the clear-face isolate decision at engage.
+      loupePressFaceSnap = snapService.resolve(
+        ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, 1,
+      ).snap
+      loupeState = loupePress(px, py, performance.now())
+      // Adversarial-review finding 4 — see `loupePointerId`'s own doc
+      // comment.
+      loupePointerId = ev.pointerId
+      // Track the gesture even when the finger leaves the canvas — the
+      // same reasoning as every other armed press in this file
+      // (marqueeDrag/dragMove/annotationDrag above).
+      renderer.domElement.setPointerCapture(ev.pointerId)
+      // Touch has no hover (shop-mode playtest finding 3's own reasoning) —
+      // a stationary hold needs the same live cue publish a plain tap
+      // already gets under `readOnly`, or SnapDot/tooltip would never
+      // appear until the finger moves.
+      publishSnapCues(snap, tool)
+      clearLoupeTimer()
+      loupeTimerId = setTimeout(() => {
+        loupeTimerId = null
+        loupeState = loupeTick(loupeState, performance.now())
+        if (loupeState.phase === 'engaged') {
+          if (toolController.activeToolName === 'Tape Measure') {
+            const tapeTool = toolController.activeTool as Tool & {
+              capturingInput?(): boolean
+              beginMoveEndpoint(i: 0 | 1): void
+            }
+            // Shop-mode playtest: decide what this HOLD does by target
+            // (`classifyTapeHold`): grab an existing tape point, ISOLATE a
+            // clear face (only when NOT mid-measurement — a face hold with a
+            // point already down is the precise placement of the next point,
+            // not an isolate), or magnify. The face test reads the NARROW
+            // aperture `loupePressFaceSnap` (see its doc); the isolate node is
+            // resolved from the LIVE press, not a stale chrome-timer node.
+            const action = classifyTapeHold({
+              grabEndpoint: loupeGrabEndpoint,
+              midGesture: tapeTool.capturingInput?.() ?? false,
+              onClearFace: isClearFaceSnap(loupePressFaceSnap, hiddenObjectIdsRef.current, hiddenInstanceIdsRef.current),
+            })
+            if (action === 'isolate' && loupePressRay !== null) {
+              const node = resolveSelectableRef(loupePressFaceSnap, loupePressRay, selectionDeps())
+              if (node !== null) {
+                // No magnifier, no point: cancel the loupe so the release
+                // commits nothing.
+                onIsolateRequestRef.current?.(node)
+                cancelTapeLoupe()
+                scheduleRender()
+                return
+              }
+              // Node didn't resolve — fall through to the magnifier.
+            } else if (action === 'grab' && loupeGrabEndpoint !== null) {
+              // A HELD grab on an existing endpoint re-places it (the engaged
+              // loupe then drives it, committing on release through the same
+              // funnel a plain placement uses).
+              tapeTool.beginMoveEndpoint(loupeGrabEndpoint)
+            }
+          }
+          engageTapeLoupeControls()
+          updateLoupeOverlay(loupeState.x, loupeState.y, loupeProbeSnap, loupeProbeFromKernel)
+          scheduleRender()
+        }
+      }, LOUPE_HOLD_MS)
+    }
+
+    /** Whether `snap` landed on a VISIBLE part — see `isVisiblePartSnap`.
+     *  Shop Mode's Tape is a parts inspector: a tap that isn't on a visible
+     *  part CANCELS the measurement rather than dropping a free-space point
+     *  (shop-mode playtest: parts-only + tap-off cancels), and hidden geometry
+     *  (e.g. a cut-list part hidden by default) is never a legal snap target —
+     *  the same phantom-pick class the inspect card's own node gate closes. */
+    function snapIsVisiblePart(snap: Snap | null): boolean {
+      return isVisiblePartSnap(snap, hiddenObjectIdsRef.current, hiddenInstanceIdsRef.current)
+    }
+
+
+    /** Commits `snap`/`ray` through Tape Measure's own point-commit path
+     *  (`Tool.onPointerDown`) — the funnel both surviving loupe outcomes (a
+     *  quick tap and an engaged-hold release; a rejected drag no longer
+     *  commits, see `onPointerMove`) pass through, so markers/readout behave
+     *  exactly as a plain tap always has. A tap that isn't on a visible part
+     *  instead CANCELS (`snapIsVisiblePart`, parts-only): `cancel()` clears
+     *  the stage AND the persistent markers (its own `_notifyGesturePoints([])`).
+     *  Guards against the active tool having changed mid-gesture (a second
+     *  finger reaching the dock while the first still holds the canvas — the
+     *  same defensive pattern `onPointerUp`'s `marqueeDrag`/`dragMove`
+     *  handling uses). */
+    function commitTapeLoupePoint(snap: Snap | null, ray: Ray | null): void {
+      if (ray === null) return
+      if (toolController.activeToolName !== 'Tape Measure') return
+      const tool = toolController.activeTool as Tool & { cancel(): void }
+      if (!snapIsVisiblePart(snap)) {
+        tool.cancel()
+        scheduleRender()
+        return
+      }
+      tool.onPointerDown(snap, ray)
+      scheduleRender()
+    }
+
+    /** Tears down an in-progress loupe gesture with NO commit — the
+     *  `pointercancel`/window-blur paths, and the top of every fresh press
+     *  as a defensive reset. Provably restores `controls.enabled` (see
+     *  `restoreLoupeControls`'s own doc): unconditional, and idempotent —
+     *  safe to call even when no loupe gesture is in progress. */
+    function cancelTapeLoupe(): void {
+      clearLoupeTimer()
+      if (loupeState.phase === 'engaged') restoreLoupeControls()
+      hideLoupeOverlay()
+      loupeState = loupeCancel()
+      loupePointerId = null
+      loupeGrabEndpoint = null
+    }
+
+    /** Grab radius (canvas px) for a press landing ON an existing tape
+     *  endpoint marker — shop-mode playtest ("move a tape point"). */
+    const TAPE_ENDPOINT_GRAB_PX = 28
+    /** Shop-mode playtest ("move a tape point"): if `(px,py)` (canvas-relative)
+     *  landed on an endpoint of the last completed measurement, which one
+     *  (0/1) — else `null`. The nearer endpoint within `TAPE_ENDPOINT_GRAB_PX`
+     *  wins; a behind-camera endpoint is ignored. A HELD grab on the result
+     *  re-places it (see `armTapeLoupe`'s `grabEndpoint`). */
+    function hitTestTapeEndpoint(px: number, py: number): 0 | 1 | null {
+      const tool = toolController.activeTool
+      if (!('getMovableEndpoints' in tool)) return null
+      const ends = (tool as {
+        getMovableEndpoints(): { points: readonly (readonly [number, number, number])[] } | null
+      }).getMovableEndpoints()
+      if (ends === null) return null
+      let best: 0 | 1 | null = null
+      let bestDist = TAPE_ENDPOINT_GRAB_PX
+      for (let i = 0; i < ends.points.length; i++) {
+        const p = ends.points[i]
+        const s = worldToScreenPx([p[0], p[1], p[2]])
+        if (s.behind) continue
+        const d = Math.hypot(s.x - px, s.y - py)
+        if (d < bestDist) {
+          bestDist = d
+          best = i as 0 | 1
+        }
+      }
+      return best
     }
 
     /**
@@ -2611,6 +3035,95 @@ export default function Viewport({
       active: boolean
     }
     let marqueeDrag: MarqueeDrag | null = null
+
+    // Shop Mode's stand-in for the marquee above (round-3 playtest finding
+    // 1): `readOnly` has no multi-select, so a top-level press there must
+    // never arm the real marquee (no rubber-band overlay, no
+    // `computeMarqueeSelection` outcome) — but the deferred tap-pick on a
+    // plain release still has to work (tap-to-inspect), and a drag still has
+    // to reach OrbitControls untouched so it orbits. This tracks exactly the
+    // press-position/threshold bookkeeping the marquee needs for that
+    // distinction, with nothing else: no overlay, no additive flag, no
+    // selection-rect math. Deliberately a separate variable rather than
+    // reusing `marqueeDrag` with a "readOnly" flag threaded through its
+    // overlay/selection code — keeping it apart makes the exclusion
+    // structurally impossible to reach, not just conditionally suppressed.
+    interface DeferredTapDrag {
+      startX: number
+      startY: number
+      active: boolean
+      /** The pointer that ARMED this press (adversarial-review finding 4) —
+       *  mirrors `fovDragPointerId`'s exact pattern (camera-playtest2
+       *  finding 4, see that variable's own doc comment): every subsequent
+       *  touch of this state (move/up/cancel/a fresh pointerdown) checks
+       *  this before acting, so a second finger's own events can never
+       *  advance, resolve, or steal a gesture it didn't arm. */
+      pointerId: number
+    }
+    let deferredTapDrag: DeferredTapDrag | null = null
+
+    // ------------------------------------------------------------- Tape loupe
+    // Round-3 playtest finding 4: Tape Measure's own commit-on-press gesture
+    // (every click stage — TapeMeasureTool's module doc) makes fat-finger
+    // placement on a thin part or a cluster of nearby endpoints unreliable.
+    // Under `readOnly`, a Tape Measure press ARMS this state machine
+    // (`loupeGesture.ts`) instead of committing immediately: held ≥300ms
+    // with <10px of drift ENGAGES a magnified, camera-frozen probe that
+    // tracks the finger until release, which commits the FINAL probed
+    // snap/ray through the tool's normal `onPointerDown` — the same commit
+    // path a plain tap always used, just deferred to whenever the gesture's
+    // true nature resolves rather than fired at raw touch-down. A quick tap
+    // (released before either threshold) or a real drag (slop broken before
+    // the hold engages) fall back to exactly what an un-deferred press
+    // already did — see the pointerdown/pointermove wiring below for how
+    // each of the three outcomes replays the original behavior.
+    let loupeState: LoupeState = LOUPE_IDLE
+    /** The pointer that ARMED the current `loupeState` (adversarial-review
+     *  finding 4) — mirrors `fovDragPointerId`'s exact pattern
+     *  (camera-playtest2 finding 4, see that variable's own doc comment):
+     *  a second finger's own down/move/up/cancel must never touch a loupe
+     *  gesture it didn't arm. `null` whenever `loupeState.phase === 'idle'`. */
+    let loupePointerId: number | null = null
+    let loupeTimerId: ReturnType<typeof setTimeout> | null = null
+    /** The snap/ray resolved at the ORIGINAL press position — what a
+     *  rejected (drag-past-slop) hold commits, replicating the un-deferred
+     *  gesture's own press-time commit bit-for-bit. */
+    let loupePressSnap: Snap | null = null
+    let loupePressRay: Ray | null = null
+    /** A SEPARATE narrow-aperture (mouse-tuned) snap at the press position,
+     *  resolved only to classify the Tape HOLD's target as a clear FACE vs an
+     *  edge (shop-mode playtest adversarial review): Tape's own placement snap
+     *  (`loupePressSnap`) uses the touch-WIDENED aperture, which resolves
+     *  `'edge'` for most casual mid-face taps on a phone — reusing it would
+     *  make "hold a clear face to isolate" almost never fire. See
+     *  `isClearFaceSnap`. */
+    let loupePressFaceSnap: Snap | null = null
+    /** The MOST RECENTLY resolved snap/ray while a loupe gesture (armed or
+     *  engaged) is in progress — kept live by the general pointermove path
+     *  below (which already resolves one every move for Tape Measure's own
+     *  hover preview; this just remembers the latest one rather than
+     *  issuing a second redundant wasm call). What a quick tap OR an
+     *  engaged release commits. */
+    let loupeProbeSnap: Snap | null = null
+    let loupeProbeRay: Ray | null = null
+    /** Whether `loupeProbeSnap` is a real kernel candidate rather than the
+     *  bare ground/plane ray fallback (`SnapService.resolve`'s own
+     *  `fromKernel`) — the loupe overlay's "acquired" signal (terracotta
+     *  dot + label), same distinction `updateLoupeOverlay` documents. */
+    let loupeProbeFromKernel = false
+    /** Shop-mode playtest ("move a tape point"): which existing measurement
+     *  endpoint (0/1) the arming press landed on, or `null` for a normal
+     *  press. When a grab press survives to ENGAGE, the loupe re-places that
+     *  endpoint (`TapeMeasureTool.beginMoveEndpoint`) instead of dropping a
+     *  new point. Reset by `cancelTapeLoupe`/`onPointerUp`'s loupe teardown. */
+    let loupeGrabEndpoint: 0 | 1 | null = null
+
+    function clearLoupeTimer(): void {
+      if (loupeTimerId !== null) {
+        clearTimeout(loupeTimerId)
+        loupeTimerId = null
+      }
+    }
 
     // Drag-to-move (Select tool): a press on a movable node arms this instead
     // of the marquee. Past the drag threshold the gesture is handed to a
@@ -2767,6 +3280,7 @@ export default function Viewport({
     }
 
     const marqueeOverlay = document.createElement('div')
+    marqueeOverlay.setAttribute('data-testid', 'viewport-marquee-overlay')
     marqueeOverlay.style.position = 'absolute'
     marqueeOverlay.style.display = 'none'
     marqueeOverlay.style.pointerEvents = 'none'
@@ -2775,6 +3289,213 @@ export default function Viewport({
     marqueeOverlay.style.zIndex = '5'
     if (el.style.position === '') el.style.position = 'relative'
     el.appendChild(marqueeOverlay)
+
+    // ---------------------------------------------------------- Tape loupe DOM
+    // Round-3 playtest finding 4. Plain imperative DOM appended to `el`,
+    // the same pattern as `marqueeOverlay` above — not React-owned, so the
+    // render-loop hook below (which has to run synchronously right after
+    // `renderer.render()`, in the SAME animation frame — see that hook's own
+    // doc comment for why) can update it without waiting on a React
+    // re-render. `pointerEvents:'none'` throughout: the loupe is read-only
+    // feedback, never an input target.
+    const LOUPE_DIAMETER_PX = 120
+    const LOUPE_RADIUS_PX = LOUPE_DIAMETER_PX / 2
+    const LOUPE_FINGER_OFFSET_PX = 90
+    const LOUPE_ZOOM = 2.5
+    /** Side length (canvas CSS px) of the source region copied INTO the
+     *  loupe — sized so it fills the circle exactly at `LOUPE_ZOOM`. */
+    const LOUPE_SOURCE_PX = LOUPE_DIAMETER_PX / LOUPE_ZOOM
+
+    const loupeOverlay = document.createElement('div')
+    loupeOverlay.setAttribute('data-testid', 'tape-loupe')
+    loupeOverlay.style.position = 'absolute'
+    loupeOverlay.style.display = 'none'
+    loupeOverlay.style.pointerEvents = 'none'
+    loupeOverlay.style.width = `${LOUPE_DIAMETER_PX}px`
+    loupeOverlay.style.height = `${LOUPE_DIAMETER_PX}px`
+    loupeOverlay.style.borderRadius = '50%'
+    loupeOverlay.style.overflow = 'hidden'
+    loupeOverlay.style.border = '2px solid var(--shop-accent, #c1652f)'
+    loupeOverlay.style.boxShadow = '0 10px 28px -10px rgba(27,26,23,.6)'
+    loupeOverlay.style.background = '#1b1a17'
+    loupeOverlay.style.zIndex = '16'
+    el.appendChild(loupeOverlay)
+
+    // The magnified copy itself — a 2D canvas `drawImage`d from the WebGL
+    // canvas (see `copyLoupeSource` below for the technique and why it has
+    // to run inside the render loop). Backing store oversampled 2× the CSS
+    // size for a HiDPI-sharp result without querying `devicePixelRatio` at
+    // every frame — the SOURCE sampling already accounts for the real
+    // backing-store scale (`copyLoupeSource`), so this is purely about the
+    // DESTINATION's own crispness.
+    const loupeCanvas = document.createElement('canvas')
+    loupeCanvas.width = LOUPE_DIAMETER_PX * 2
+    loupeCanvas.height = LOUPE_DIAMETER_PX * 2
+    loupeCanvas.style.width = '100%'
+    loupeCanvas.style.height = '100%'
+    loupeCanvas.style.display = 'block'
+    loupeOverlay.appendChild(loupeCanvas)
+    const loupeCtx = loupeCanvas.getContext('2d')
+
+    // Fixed crosshair, dead center — marks the raw finger position the
+    // magnified region is centered on (the copy is always centered there,
+    // by construction, so this never needs repositioning, only the dot
+    // below does).
+    const loupeCrosshairH = document.createElement('div')
+    loupeCrosshairH.style.cssText =
+      'position:absolute; left:0; top:50%; width:100%; height:1px; background:rgba(255,255,255,.85); transform:translateY(-0.5px);'
+    loupeOverlay.appendChild(loupeCrosshairH)
+    const loupeCrosshairV = document.createElement('div')
+    loupeCrosshairV.style.cssText =
+      'position:absolute; top:0; left:50%; width:1px; height:100%; background:rgba(255,255,255,.85); transform:translateX(-0.5px);'
+    loupeOverlay.appendChild(loupeCrosshairV)
+
+    // The acquired-snap dot — offset from center by the snap's OWN screen
+    // position relative to the finger, magnified by the same LOUPE_ZOOM
+    // (`updateLoupeOverlay` below) — hidden entirely when nothing is
+    // acquired (a bare ground/plane fallback, `fromKernel === false`, isn't
+    // a "found" target).
+    const loupeDot = document.createElement('div')
+    loupeDot.style.cssText =
+      'position:absolute; left:50%; top:50%; width:10px; height:10px; border-radius:50%; ' +
+      'background:var(--shop-accent, #c1652f); border:1.5px solid rgba(255,255,255,.9); ' +
+      'transform:translate(-50%,-50%); display:none;'
+    loupeOverlay.appendChild(loupeDot)
+
+    // Cheap reuse of InferenceTooltip's own kind→label text (finding 4's
+    // own "plus the existing InferenceTooltip text if cheap") — NOT the
+    // positioned `InferenceTooltip` component itself, which anchors off the
+    // raw snap's screen position (under the finger, exactly where the loupe
+    // exists to look AWAY from); this renders the same label text inside
+    // the loupe's own overlay instead.
+    const loupeLabel = document.createElement('div')
+    loupeLabel.style.cssText =
+      'position:absolute; left:0; right:0; bottom:4px; text-align:center; ' +
+      'font-family:var(--font-family-ui); font-size:10px; font-weight:600; ' +
+      'color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.8); pointer-events:none;'
+    loupeOverlay.appendChild(loupeLabel)
+
+    /** Clamp a loupe-circle center coordinate so it never renders outside
+     *  the canvas — "clamped on-screen" (finding 4). */
+    function clampLoupeCenter(v: number, extent: number): number {
+      return Math.min(Math.max(v, LOUPE_RADIUS_PX), Math.max(LOUPE_RADIUS_PX, extent - LOUPE_RADIUS_PX))
+    }
+
+    /**
+     * Position + populate everything about the loupe overlay a plain DOM
+     * write can handle for probe position `px`/`py` (canvas-CSS-px,
+     * `canvasPoint`'s own coordinate space — `loupeOverlay` shares it,
+     * being `el`'s child just like `marqueeOverlay`): the circle's own
+     * clamped position, the acquired-snap dot's offset, and the label text.
+     * The magnified CANVAS COPY is a separate, render-loop-only step
+     * (`copyLoupeSource`) — this function never touches `loupeCtx`.
+     */
+    function updateLoupeOverlay(px: number, py: number, snap: Snap | null, fromKernel: boolean): void {
+      const w = el.clientWidth
+      const h = el.clientHeight
+      const cx = clampLoupeCenter(px, w)
+      const cy = clampLoupeCenter(py - LOUPE_FINGER_OFFSET_PX, h)
+      loupeOverlay.style.left = `${cx - LOUPE_RADIUS_PX}px`
+      loupeOverlay.style.top = `${cy - LOUPE_RADIUS_PX}px`
+      loupeOverlay.style.display = 'block'
+
+      // "a terracotta dot when a snap is acquired" (finding 4) — acquired
+      // means a real kernel candidate, not the bare ground/plane ray
+      // fallback that's available literally everywhere and represents no
+      // found target (`SnapService.resolve`'s own `fromKernel` flag is
+      // exactly this distinction, already computed by the caller).
+      if (snap !== null && fromKernel) {
+        const p = worldToPixels(new THREE.Vector3(snap.x, snap.y, snap.z))
+        const dx = (p.x - px) * LOUPE_ZOOM
+        const dy = (p.y - py) * LOUPE_ZOOM
+        // The snap point itself may have scrolled outside the magnified
+        // circle (a sticky/held snap can sit further from the raw ray than
+        // the source region covers) — hidden rather than drawn clipped.
+        if (Math.hypot(dx, dy) <= LOUPE_RADIUS_PX) {
+          loupeDot.style.left = `${LOUPE_RADIUS_PX + dx}px`
+          loupeDot.style.top = `${LOUPE_RADIUS_PX + dy}px`
+          loupeDot.style.display = 'block'
+        } else {
+          loupeDot.style.display = 'none'
+        }
+        loupeLabel.textContent = inferenceKindLabel(snap.kind)
+        loupeLabel.style.display = 'block'
+      } else {
+        loupeDot.style.display = 'none'
+        loupeLabel.style.display = 'none'
+      }
+    }
+
+    /**
+     * The magnified copy itself — `drawImage`s the region of the WebGL
+     * canvas around probe position `px`/`py` into the loupe's own 2D
+     * canvas. MUST run synchronously right after `renderer.render()`,
+     * still inside the SAME `render()` call (wired at this file's render
+     * loop, not here) — the renderer runs with no `preserveDrawingBuffer`
+     * (a real, deliberate perf cost this file avoids everywhere), so the
+     * WebGL drawing buffer's contents are only guaranteed valid for the
+     * remainder of the task that produced them; a React effect or any
+     * independently-scheduled callback could run after the browser has
+     * already presented (and is free to clear) that buffer. Copying HERE
+     * is what keeps the result non-blank — verified empirically in the
+     * loupe E2E spec (`shop-mode.spec.ts`), which samples a pixel from the
+     * loupe canvas while engaged and asserts it isn't transparent.
+     *
+     * Copies only the SOURCE region actually needed (a `LOUPE_SOURCE_PX`
+     * square around the probe, in device pixels) rather than the whole
+     * canvas, and reads the renderer's OWN backing-store-to-CSS ratio
+     * rather than trusting `window.devicePixelRatio` — `gpuCapability.ts`'s
+     * capped pixel ratio for low-power GPUs can leave the two diverged.
+     */
+    function copyLoupeSource(px: number, py: number): void {
+      if (loupeCtx === null) return
+      const rect = renderer.domElement.getBoundingClientRect()
+      if (rect.width === 0 || rect.height === 0) return
+      const scaleX = renderer.domElement.width / rect.width
+      const scaleY = renderer.domElement.height / rect.height
+      const half = LOUPE_SOURCE_PX / 2
+      const sx = (px - half) * scaleX
+      const sy = (py - half) * scaleY
+      const sw = LOUPE_SOURCE_PX * scaleX
+      const sh = LOUPE_SOURCE_PX * scaleY
+      loupeCtx.clearRect(0, 0, loupeCanvas.width, loupeCanvas.height)
+      loupeCtx.drawImage(renderer.domElement, sx, sy, sw, sh, 0, 0, loupeCanvas.width, loupeCanvas.height)
+    }
+
+    function hideLoupeOverlay(): void {
+      loupeOverlay.style.display = 'none'
+      loupeDot.style.display = 'none'
+      loupeLabel.style.display = 'none'
+    }
+
+    /**
+     * Suppression mechanism (finding 4): `controls.enabled = false` for the
+     * gesture's duration, rather than intercepting/`stopPropagation`-ing
+     * the raw pointer events before OrbitControls' own listeners see them.
+     * Chosen because it's provably restorable from ANY exit path — every
+     * `onTapeLoupe*` handler below (release, cancel, pointercancel, window
+     * blur) calls `restoreLoupeControls` unconditionally, and OrbitControls
+     * itself re-checks `this.enabled` on every `pointermove`/`pointerup`
+     * (not just at the initial `pointerdown`, `OrbitControls.js`'s own
+     * `onPointerMove`/`onPointerUp`), so flipping it back to `true` mid- or
+     * post-gesture resumes normal handling immediately with no stale
+     * internal state to reconcile — unlike a capture/`stopPropagation`
+     * approach, which would need to reason about exactly which future
+     * events to keep suppressing and could strand the SUPPRESSION itself
+     * active past the gesture if any one of those cancel/blur paths missed
+     * a case. Within `readOnly`, only Select/Orbit/Tape Measure are
+     * reachable (`isToolSwitchAllowedUnderReadOnly`), and none of them ever
+     * sets `controls.enabled = false` themselves (only Position Camera/Look
+     * Around/Walk do, all unreachable here) — so `true` is always the
+     * correct value to restore to, unconditionally, with no prior value to
+     * snapshot.
+     */
+    function engageTapeLoupeControls(): void {
+      controls.enabled = false
+    }
+    function restoreLoupeControls(): void {
+      controls.enabled = true
+    }
 
     function canvasPoint(ev: PointerEvent): [number, number] {
       const r = renderer.domElement.getBoundingClientRect()
@@ -3931,6 +4652,24 @@ export default function Viewport({
     }
 
     function notifyLoaded(): void {
+      // Adversarial-review finding 5: a document swap can land MID-LOUPE —
+      // Shop Mode's QR receive path (`ShopApp.tsx`'s `applyOpenedBytes`,
+      // which calls this) resolves on a background fetch, so a finger can
+      // still be holding an armed/engaged tape loupe (or its Select-tool
+      // `deferredTapDrag` stand-in) when a brand-new document lands. Left
+      // alone, `cancelTapeLoupe`'s own "provably restores `controls.enabled`"
+      // guarantee (its own doc comment) would never run for this exit path,
+      // stranding OrbitControls disabled (an `engaged` loupe suppresses it)
+      // against a document that has nothing to do with the gesture anymore
+      // — the same class of bug `applyOpenedBytes` already guards against
+      // one layer up (clearing selection/tape-anchors/the long-press timer
+      // for the OUTGOING document). `deferredTapDrag` has no "restore"
+      // side effect of its own (unlike the loupe, it never touches
+      // `controls.enabled`) — cleared directly rather than through a
+      // dedicated cancel function for symmetry with `onPointerCancel`'s own
+      // handling of the same pair.
+      cancelTapeLoupe()
+      deferredTapDrag = null
       // A new/loaded document replaced the Scene — any explode session the
       // PREVIOUS scene had open is meaningless against this one (`Scene.save()`
       // always serializes as-if-closed, so a freshly loaded document never
@@ -4191,6 +4930,36 @@ export default function Viewport({
       syncWorldLengthViewState(ratio)
 
       // Keep the current view direction; re-target at box center.
+      const dir = new THREE.Vector3()
+      dir.subVectors(camera.position, controls.target).normalize()
+      controls.target.copy(center)
+      camera.position.copy(center).addScaledVector(dir, distance)
+      if (rig.projection === 'parallel') {
+        rig.frameOrthoToRadius(halfDiag, 1.2, el.clientWidth / el.clientHeight)
+      }
+      camera.updateProjectionMatrix()
+      controls.update()
+      scheduleRender()
+    }
+
+    /** See `ViewportApi.zoomToWorldBounds`'s doc comment — the same framing
+     * steps `zoomExtents` runs (fit distance, view-limit resync, re-target),
+     * against an explicit box instead of one measured from the rendered
+     * scene groups. */
+    function zoomToWorldBounds(min: [number, number, number], max: [number, number, number]): void {
+      const box = new THREE.Box3(
+        new THREE.Vector3(min[0], min[1], min[2]),
+        new THREE.Vector3(max[0], max[1], max[2]),
+      )
+      const center = new THREE.Vector3()
+      box.getCenter(center)
+      const halfDiag = Math.max(box.getBoundingSphere(new THREE.Sphere()).radius, 1e-6)
+      const distance = rig.perspectiveFramingDistance(halfDiag, 1.2)
+
+      const limits = zoomExtentsViewLimits(distance)
+      const ratio = limits.far / camera.far
+      syncWorldLengthViewState(ratio)
+
       const dir = new THREE.Vector3()
       dir.subVectors(camera.position, controls.target).normalize()
       controls.target.copy(center)
@@ -4541,10 +5310,15 @@ export default function Viewport({
       scheduleRender()
     }
 
-    function setHidden(objectIds: bigint[], instanceIds: bigint[]): void {
+    function setHidden(objectIds: bigint[], instanceIds: bigint[], opts?: { fadeMs?: number }): void {
       hiddenObjectIdsRef.current = new Set(objectIds)
       hiddenInstanceIdsRef.current = new Set(instanceIds)
-      sceneRenderer.setHidden(objectIds, instanceIds)
+      const fadeMs = opts?.fadeMs
+      if (fadeMs !== undefined && fadeMs > 0) {
+        sceneRenderer.setHiddenFaded(objectIds, instanceIds, fadeMs)
+      } else {
+        sceneRenderer.setHidden(objectIds, instanceIds)
+      }
       scheduleRender()
     }
 
@@ -4722,7 +5496,7 @@ export default function Viewport({
       }
     }
 
-    // All three formats now go through the one shared Rust writer
+    // All formats now go through the one shared Rust writer
     // (`crates/mesh-export`, exposed as `Scene.export`) rather than the
     // app's own retired TypeScript exporters — the three.js scene is not
     // involved for any of them anymore.
@@ -4736,6 +5510,10 @@ export default function Viewport({
 
     async function export3mf(): Promise<Uint8Array | null> {
       return wasmScene.export('3mf', 0) ?? null
+    }
+
+    async function exportUsdz(): Promise<Uint8Array | null> {
+      return wasmScene.export('usdz', 0) ?? null
     }
 
     if (apiRefRef.current !== undefined) {
@@ -4833,7 +5611,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -5277,6 +6055,16 @@ export default function Viewport({
           sceneRenderer.refreshAllSketches()
           sceneRenderer.refreshGuides()
         },
+        // Measure-only mode (shop-mode playtest finding 2, CRITICAL) — see
+        // `TapeMeasureTool`'s `_measureOnly` doc. `false` for the editor
+        // (readOnly's own default), so this call is unchanged there.
+        readOnlyRef.current,
+        // Gesture-point markers (shop-mode playtest finding 3) — undefined
+        // for the editor (nothing there passes `onTapeMeasurePoints`), which
+        // `TapeMeasureTool`'s own constructor default (a no-op) absorbs.
+        onTapeMeasurePointsRef.current === undefined
+          ? undefined
+          : (points) => onTapeMeasurePointsRef.current?.(points),
       )
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       // Finding 6 (group-session.md): `refreshSessionScope` pushes fresh
@@ -5557,6 +6345,19 @@ export default function Viewport({
 
     // Switch tool by name
     switchToolRef.current = (toolName: string) => {
+      // Shop Mode's read-only contract (shop-mode adversarial review,
+      // CRITICAL finding 1): this is the ONE choke point every tool switch
+      // funnels through — keyboard shortcuts, the command palette, and any
+      // future caller alike — so refusing anything outside the read-only
+      // allowlist HERE, before a single other line runs, makes every one of
+      // those callers safe by construction instead of requiring each to
+      // duplicate the check. A silent no-op: `readOnly` Shop Mode has no
+      // chrome for a refused switch to report failure through, and the
+      // caller (a keydown, a palette-shaped verb) has no error path to
+      // handle either — the active tool simply stays what it was.
+      if (readOnlyRef.current && !isToolSwitchAllowedUnderReadOnly(toolName)) {
+        return
+      }
       // Record the requested name on EVERY invocation, before anything else
       // runs — this is the tool-switch guard's comparison source (see
       // `lastAppliedToolNameRef`'s doc comment), not
@@ -5584,6 +6385,18 @@ export default function Viewport({
       }
       zoomWindowActive = false
       cancelFovEntry()
+      // Adversarial-review finding 9: a second finger can reach the dock/
+      // rail's tool buttons (`switchToolRef`'s callers) while the FIRST
+      // finger still holds the canvas mid-loupe — without this, the switch
+      // above would leave `loupeState`/`deferredTapDrag` (and, for an
+      // `engaged` loupe, `controls.enabled`) stranded pointing at a tool
+      // that isn't active anymore, the same "no gesture survives a tool
+      // switch" rule `abortFovDrag`/`zoomWindowDrag`/`cancelFovEntry` just
+      // above already enforce for their own gestures. A no-op in the editor
+      // (`loupeState` is always idle and `deferredTapDrag` always null
+      // there — both are readOnly-only state).
+      cancelTapeLoupe()
+      deferredTapDrag = null
       // Exiting a walkthrough tool (design §4) — see the const's doc above.
       // `dist` MUST be read before `controls.target` is overwritten below:
       // `controls.getDistance()` measures FROM the (still stale, pre-reseed)
@@ -6322,15 +7135,18 @@ export default function Viewport({
       if (!snapService.setPrecision(on)) return
       onPrecisionChangeRef.current?.(on)
       const cached = lastRayRef.current
-      const snapPathLive = !cameraModeRef.current && marqueeDrag === null && dragMove === null
+      const snapPathLive = !cameraModeRef.current && marqueeDrag === null && deferredTapDrag === null && dragMove === null
       if (cached !== null && snapPathLive) {
         const activeTool = toolController.activeTool
         const constraint = 'snapConstraint' in activeTool
           ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(cached.ray)
           : null
-        const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
+        const { snap: rawSnap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
+        // Same Select-only axis exclusion as the pointer-move path — see
+        // `excludeAxisSnapForSelect`'s doc.
+        const snap = toolController.activeToolName === 'Select' ? excludeAxisSnapForSelect(rawSnap) : rawSnap
         activeTool.onPointerMove(snap, cached.ray)
-        cueLayer.update(snap)
+        cueLayer.update(snap, readOnlyRef.current)
         drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
         publishSnapCues(snap, activeTool)
       }
@@ -6353,12 +7169,39 @@ export default function Viewport({
     window.addEventListener('keyup', onPrecisionKey)
     window.addEventListener('blur', onWindowBlurClearsPrecision)
 
+    // A blur mid-hold (Cmd-Tab, an incoming call/notification on the phone
+    // itself, devtools) swallows the pointerup/pointercancel that would
+    // otherwise end the gesture — this is the final safety net
+    // `engageTapeLoupeControls`'s own doc references: `cancelTapeLoupe` is
+    // unconditional and idempotent, so this can never strand
+    // `controls.enabled` at `false` regardless of what state the gesture
+    // was actually in when the blur happened.
+    function onWindowBlurClearsLoupe(): void {
+      cancelTapeLoupe()
+    }
+    window.addEventListener('blur', onWindowBlurClearsLoupe)
+
     // ------------------------------------------------------------------ animation loop
     let rafId = 0
     let needsRender = true
 
     function render(): void {
       rafId = requestAnimationFrame(render)
+      // Shop Mode's isolate-fade opt-in (SceneRenderer.setHiddenFaded/
+      // tickFades, driven by Viewport.setHidden's `{fadeMs}` option): a
+      // single `Map.size` check that's always false outside Shop Mode, so
+      // this costs nothing on the editor's own hot path. An opacity-only
+      // change doesn't otherwise mark the scene dirty, so force a render
+      // this frame while any tween is still in flight.
+      if (sceneRenderer.tickFades(performance.now())) needsRender = true
+      // Tape loupe (round-3 playtest finding 4): force a render EVERY frame
+      // while engaged, same idiom as `tickFades` above — the finger can
+      // hold perfectly still (no pointermove of its own to `scheduleRender`
+      // from), but the magnified copy still has to reflect whatever the
+      // scene is doing right now (a live measurement readout, a theme
+      // change, anything else that repaints). Free outside engagement: a
+      // single phase check.
+      if (loupeState.phase === 'engaged') needsRender = true
       // `controls.enabled` only gates OrbitControls' OWN input listeners —
       // `update()` itself runs its full position/orientation recomputation
       // regardless, including an unconditional `camera.lookAt(controls.
@@ -6460,6 +7303,12 @@ export default function Viewport({
         if (statsActive) {
           recordRender(renderer.info, performance.now() - renderStart)
         }
+        // Tape loupe copy (finding 4): MUST run synchronously right here,
+        // immediately after `renderer.render()` and still inside this same
+        // `render()` call — see `copyLoupeSource`'s own doc for why (no
+        // `preserveDrawingBuffer`, so the drawing buffer's contents aren't
+        // guaranteed to survive past this task).
+        if (loupeState.phase === 'engaged') copyLoupeSource(loupeState.x, loupeState.y)
         needsRender = false
       }
     }
@@ -6660,6 +7509,31 @@ export default function Viewport({
       // In camera-nav mode, OrbitControls owns left-drag — skip geometry routing.
       if (cameraModeRef.current) return
 
+      // Armed deferred-tap (Shop Mode's readOnly stand-in for the marquee,
+      // above): only tracks whether the press has moved past the drag
+      // threshold, so the pointerup handler knows whether to treat this as
+      // a tap (resolve the deferred pick) or a drag (OrbitControls already
+      // owns it via its own document-level listeners — this branch never
+      // calls preventDefault/stopPropagation, so it never competes).
+      // Scoped to the arming pointer (adversarial-review finding 4) — a
+      // second finger's own move must fall through to normal routing below
+      // rather than being read as this gesture's own move.
+      if (deferredTapDrag !== null && ev.pointerId === deferredTapDrag.pointerId) {
+        if ((ev.buttons & 1) === 0) {
+          // The release happened outside our listeners (focus loss) — drop it.
+          deferredTapDrag = null
+        } else {
+          const [px, py] = canvasPoint(ev)
+          if (
+            !deferredTapDrag.active &&
+            Math.hypot(px - deferredTapDrag.startX, py - deferredTapDrag.startY) >= MARQUEE_DRAG_THRESHOLD_PX
+          ) {
+            deferredTapDrag.active = true
+          }
+          if (deferredTapDrag.active) return
+        }
+      }
+
       // Armed marquee: past the drag threshold the rubber-band owns the
       // pointer — update the rectangle and skip hover/snap work entirely.
       if (marqueeDrag !== null) {
@@ -6738,9 +7612,15 @@ export default function Viewport({
       const constraint = !isRawDragTool && 'snapConstraint' in activeTool
         ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
         : null
-      const { snap } = isRawDragTool
-        ? { snap: null }
+      const resolved = isRawDragTool
+        ? { snap: null, fromKernel: false }
         : snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
+      const rawSnap = resolved.snap
+      // Select-only axis-kind exclusion under `readOnly` (shop-mode round-3
+      // playtest finding 2) — see `excludeAxisSnapForSelect`'s doc. A no-op
+      // for every other tool/name, including Tape Measure, which keeps the
+      // full on-axis snap here and only loses the rendered guide LINE below.
+      const snap = toolController.activeToolName === 'Select' ? excludeAxisSnapForSelect(rawSnap) : rawSnap
       activeTool.onPointerMove(snap, ray)
       if (isRawDragTool) {
         const [rawX, rawY] = canvasPoint(ev)
@@ -6748,11 +7628,50 @@ export default function Viewport({
           onPointerRawMove(xPx: number, yPx: number, buttons: number, mods: { shift: boolean }): void
         }).onPointerRawMove(rawX, rawY, ev.buttons, { shift: ev.shiftKey })
       }
-      cueLayer.update(snap)
+      // `suppressAxisLine` (finding 2): Shop Mode shows no world axes, so the
+      // dashed guide line CueLayer draws through an on-axis direction is
+      // incoherent there — suppressed for every readOnly tool (Select's own
+      // snap is already null by this point when it was axis-kind; Tape
+      // Measure's isn't, so this is what actually hides ITS line while
+      // leaving the snap — and therefore its SnapDot/tooltip — intact).
+      cueLayer.update(snap, readOnlyRef.current)
       drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
       scheduleRender()
 
       publishSnapCues(snap, activeTool)
+
+      // Tape loupe (round-3 playtest finding 4): keep the latest probe live
+      // for whichever commit outcome eventually applies (armTapeLoupe's own
+      // doc), and react to a slop break / drive the engaged overlay. A
+      // no-op the instant `loupeState` is idle (every OTHER tool, and Tape
+      // Measure outside a held press) — a single phase check. Also scoped
+      // to the arming pointer (ADVERSARIAL-REVIEW finding 4, a different
+      // finding from the one above despite the shared number — a second
+      // finger's own move must not perturb a loupe it never armed).
+      if (loupeState.phase !== 'idle' && ev.pointerId === loupePointerId) {
+        const [px, py] = canvasPoint(ev)
+        loupeProbeSnap = snap
+        loupeProbeRay = ray
+        loupeProbeFromKernel = resolved.fromKernel
+        const wasArmed = loupeState.phase === 'armed'
+        loupeState = loupeMove(loupeState, px, py)
+        if (wasArmed && loupeState.phase === 'rejected') {
+          // The hold broke before engaging — a real drag. In Shop Mode's
+          // read-only parts inspector a drag is purely a CAMERA gesture
+          // (orbit/pan), NEVER a point drop (shop-mode playtest: Tape "really
+          // wants to be dropping points willy-nilly" — orbit/pan/zoom must
+          // win a drag). Just stop the hold timer and get out of the way:
+          // OrbitControls (never suppressed during `armed` — see
+          // `engageTapeLoupeControls`'s own doc on why NOT here) takes the
+          // rest of this drag, and the eventual release is a no-op for a
+          // `rejected` phase (`onPointerUp`). This used to replay the press
+          // as a committed point at the instant of rejection — that drop is
+          // exactly what made the camera unusable in Tape mode.
+          clearLoupeTimer()
+        } else if (loupeState.phase === 'engaged') {
+          updateLoupeOverlay(loupeState.x, loupeState.y, snap, resolved.fromKernel)
+        }
+      }
     }
 
     /** Status-bar text + the cursor-anchored inference chip/dot for a freshly
@@ -6933,6 +7852,25 @@ export default function Viewport({
     function onPointerDown(ev: PointerEvent): void {
       recordPointerInput('pointerdown', ev)
       if (ev.button !== 0) return
+      // Adversarial-review finding 4: a second finger's own press must not
+      // disturb a readOnly gesture (the tape loupe, or its Select-tool
+      // `deferredTapDrag` stand-in) already armed by a DIFFERENT pointer —
+      // without this, `armTapeLoupe`'s own defensive `cancelTapeLoupe()`
+      // reset (or a bare re-assignment of `deferredTapDrag`) would silently
+      // cancel/steal the first finger's still-live gesture the instant a
+      // second finger touched down anywhere on the canvas. Ignored
+      // entirely, not queued — Shop Mode's 3-tool registry has no
+      // two-finger gesture of its own (pinch-zoom is OrbitControls' native
+      // `touches.TWO` binding, untouched here), so a second touch during
+      // either gesture is stray input. Always false in the editor
+      // (`loupeState`/`deferredTapDrag` are readOnly-only state — module
+      // doc), so this never changes editor behavior.
+      if (
+        (loupeState.phase !== 'idle' && ev.pointerId !== loupePointerId) ||
+        (deferredTapDrag !== null && ev.pointerId !== deferredTapDrag.pointerId)
+      ) {
+        return
+      }
       // Counted here, before any of the early returns below, so the sequence
       // reflects every primary press the canvas actually received rather than
       // only the ones that reach the tool-routing guard further down.
@@ -6970,8 +7908,13 @@ export default function Viewport({
         // A press directly on an annotation selects it and arms its own
         // offset/leader drag (docs/design/dimensions-text.md) — a thin
         // deliberate target, like a guide, but (unlike a guide) draggable in
-        // place rather than only click-pickable.
-        if (!ev.shiftKey) {
+        // place rather than only click-pickable. Skipped entirely under
+        // `readOnly` (shop-mode playtest finding 1): the drag's RELEASE
+        // commits a kernel mutation (`_commitAnnotationDrag`), and Shop Mode
+        // has no chrome for annotation selection anyway (`onSelectAnnotation`
+        // is one of the deliberately-unwired callbacks — see ShopApp.tsx's
+        // own comment on its `Viewport` usage).
+        if (!ev.shiftKey && !readOnlyRef.current) {
           const annotationId = pickAnnotation(ndcX, ndcY)
           if (annotationId !== null) {
             onSelectAnnotationRef.current?.(annotationId)
@@ -6989,8 +7932,21 @@ export default function Viewport({
         // threshold hands the gesture to a one-shot Move (see beginDragMove),
         // a plain release still just selects (click ≠ drag). Shift presses
         // keep the additive-click/marquee path, and a press near a
-        // construction guide keeps the guide's click priority.
-        const pressedNode = ev.shiftKey || pickGuide(ndcX, ndcY) !== null
+        // construction guide keeps the guide's click priority. `readOnly`
+        // (shop-mode playtest finding 1, CRITICAL) forces this branch off
+        // entirely — a press on a part behaves exactly like a press on
+        // empty space below: the SAME marquee-arm-or-immediate-pick path,
+        // which never arms a Move gesture and so never reaches
+        // `beginDragMove`/the kernel, not even transiently. Empirically (a
+        // real touch tap on a part), that path is also what already lets
+        // OrbitControls' own touch rotate take over a drag on empty space
+        // (its `touches.ONE` binding is never nulled for Select — only
+        // `mouseButtons.LEFT` is, which OrbitControls doesn't consult for
+        // touch input at all, see `onFovDragPointerDownCapture`'s doc
+        // comment on the same distinction) — so a drag that starts on a
+        // part now orbits the camera instead of moving the part, matching
+        // what a drag on empty space already does.
+        const pressedNode = ev.shiftKey || pickGuide(ndcX, ndcY) !== null || readOnlyRef.current
           ? null
           : pickTransformableUnderCursor(ray)
         if (pressedNode !== null) {
@@ -7013,9 +7969,22 @@ export default function Viewport({
         // Top level: arm a marquee and DEFER the pick to pointerup — a drag
         // becomes a rubber-band selection, a plain release runs the click-pick
         // at the release position. Inside an editing context the marquee is
-        // out of scope; the press is an immediate click-pick.
+        // out of scope; the press is an immediate click-pick. `readOnly`
+        // (shop-mode round-3 playtest finding 1) arms the lighter
+        // `deferredTapDrag` instead of the real marquee — Shop Mode has no
+        // multi-select, so the rubber-band overlay and its selection outcome
+        // are meaningless clutter over what a drag here already does: orbit.
+        // Nothing below calls preventDefault/stopPropagation on this
+        // pointerdown, so OrbitControls' own listeners (registered
+        // independently on the document, see `onPointerDown` in
+        // OrbitControls.js) see the exact same gesture a press on empty
+        // space already produces — this branch doesn't distinguish the two.
         if (topLevel) {
-          marqueeDrag = { startX: px, startY: py, additive: ev.shiftKey, active: false }
+          if (readOnlyRef.current) {
+            deferredTapDrag = { startX: px, startY: py, active: false, pointerId: ev.pointerId }
+          } else {
+            marqueeDrag = { startX: px, startY: py, additive: ev.shiftKey, active: false }
+          }
           // Track the drag even when it leaves the canvas.
           renderer.domElement.setPointerCapture(ev.pointerId)
         } else {
@@ -7025,6 +7994,28 @@ export default function Viewport({
       }
 
       const activeTool = toolController.activeTool
+
+      // Round-3 playtest finding 4 (the Tape Measure loupe): under
+      // `readOnly`, Tape Measure's own commit-on-press gesture (every click
+      // stage fires `onPointerDown` immediately — TapeMeasureTool's module
+      // doc) makes fat-finger placement unreliable. ARM the loupe state
+      // machine instead of committing here — `armTapeLoupe` resolves and
+      // caches this press's own snap/ray (what a rejected/quick-tap outcome
+      // replays) and starts the hold timer; the eventual commit (quick tap,
+      // slop-rejected drag, or an engaged release) happens in
+      // `onPointerMove`/`onPointerUp` below, each calling `activeTool.
+      // onPointerDown` itself exactly once, with whichever snap/ray that
+      // outcome resolved to. Scoped to Tape Measure specifically (the only
+      // OTHER tool `isToolSwitchAllowedUnderReadOnly` admits — Select
+      // returns above, Orbit resets to Select and never reaches here).
+      if (readOnlyRef.current && toolController.activeToolName === 'Tape Measure') {
+        // Shop-mode playtest ("move a tape point"): a press landing ON an
+        // existing measurement endpoint arms a GRAB — a held loupe then
+        // re-places that endpoint instead of dropping a new point.
+        const [gpx, gpy] = canvasPoint(ev)
+        armTapeLoupe(ev, ray, viewportH, basis, hitTestTapeEndpoint(gpx, gpy))
+        return
+      }
 
       // The second pointerdown of a double-click is the phantom that precedes
       // the 'dblclick' event. For tools that finish on double-click (LineTool
@@ -7079,6 +8070,16 @@ export default function Viewport({
         : null
       const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
       activeTool.onPointerDown(snap, ray)
+      // Shop-mode playtest finding 3: touch has no hover, so `onPointerMove`
+      // (the only other `publishSnapCues` caller) never runs before a plain
+      // tap — SnapDot/InferenceTooltip would otherwise never appear at all
+      // for a stationary tap, only during an actual drag. Gated on
+      // `readOnly` so the editor (continuous mouse hover already publishes
+      // this on every move leading up to the click) is untouched — this
+      // would just be a harmless, redundant re-publish of the same snap
+      // there, but the point is to keep this an opt-in seam, not to rely on
+      // "harmless" reasoning about the shared path.
+      if (readOnlyRef.current) publishSnapCues(snap, activeTool)
       // Walk's press-relative drag (camera.md §4) — see Tool.onPointerRawDown's doc.
       if ('onPointerRawDown' in activeTool) {
         const [rawX, rawY] = canvasPoint(ev)
@@ -7120,6 +8121,16 @@ export default function Viewport({
 
     function onDoubleClick(ev: MouseEvent): void {
       if (ev.button !== 0) return
+      // Shop Mode read-only (shop-mode adversarial review, CRITICAL finding
+      // 2): a complete no-op under `readOnly`. Every branch below either
+      // opens the annotation text editor, hands off to the active tool's own
+      // `onDoubleClick` (a mutation-capable hook — LineTool ending a chain,
+      // etc.), or enters/exits a group/component EDIT SESSION — a real
+      // document mutation with its own history entry (group-session.md), not
+      // just a view-state toggle. ShopApp's own double-tap-zoom handles the
+      // gesture's UX role in Shop Mode; context entry via sessions is purely
+      // an editing concept with no read-only equivalent.
+      if (readOnlyRef.current) return
       const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
       const ray = makeWorldRay(ndcX, ndcY, camera)
 
@@ -7259,6 +8270,14 @@ export default function Viewport({
         return
       }
 
+      // Esc cancels an in-flight deferredTapDrag (readOnly's marquee stand-in)
+      // the same way — no keyboard reaches Shop Mode in practice, but this
+      // keeps the state machine consistent for any input source that can.
+      if (ev.key === 'Escape' && deferredTapDrag !== null) {
+        deferredTapDrag = null
+        return
+      }
+
       // Esc cancels an in-flight drag-to-move (before the context pop below,
       // so escaping a drag inside a group doesn't ALSO exit the group).
       if (ev.key === 'Escape' && dragMove !== null) {
@@ -7342,7 +8361,11 @@ export default function Viewport({
               : null
             const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints)
             activeTool.onPointerMove(snap, cached.ray)
-            cueLayer.update(snap)
+            // Only Tape Measure's VCB reaches this under `readOnly` (Select
+            // has none) — `suppressAxisLine` keeps its on-axis snap fully
+            // functional while hiding the incoherent guide line, same as
+            // the pointer-move path.
+            cueLayer.update(snap, readOnlyRef.current)
             drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
           }
           return
@@ -7375,9 +8398,17 @@ export default function Viewport({
         if (ev.key === 's' || ev.key === 'S') { switchToolRef.current?.('Scale'); return }
       }
 
-      // Undo: Cmd/Ctrl+Z — document-level, covers creations + per-object ops
+      // Undo: Cmd/Ctrl+Z — document-level, covers creations + per-object ops.
+      // Shop Mode read-only (shop-mode adversarial review, CRITICAL finding
+      // 1b): Undo/Redo bypass switchToolRef entirely (they call runUndo/
+      // runRedo directly, never a tool switch), so the allowlist check
+      // guarding switchToolRef's top never sees them — a dedicated check is
+      // needed here too. Still swallows the keystroke (preventDefault) so
+      // nothing else on the page reacts to it; only the document mutation
+      // itself is skipped.
       if (isMod && !ev.shiftKey && ev.key === 'z') {
         ev.preventDefault()
+        if (readOnlyRef.current) return
         runUndo()
         return
       }
@@ -7385,9 +8416,10 @@ export default function Viewport({
       // Redo: Shift+Cmd/Ctrl+Z — document-level. With Shift held, ev.key is
       // the UPPERCASE letter, so compare case-insensitively (a bare === 'z'
       // never fires on a physical keyboard — caught by the input-pipeline
-      // E2E redo spec).
+      // E2E redo spec). Same read-only guard as Undo just above.
       if (isMod && ev.shiftKey && ev.key.toLowerCase() === 'z') {
         ev.preventDefault()
+        if (readOnlyRef.current) return
         runRedo()
         return
       }
@@ -7450,6 +8482,44 @@ export default function Viewport({
       // Zoom Window owns the pointer for its whole gesture — see onPointerDown.
       if (zoomWindowActive) {
         finishZoomWindowDrag(ev)
+        return
+      }
+      // Tape loupe release (round-3 playtest finding 4) — owns this
+      // pointer's release completely once armed. Scoped to the arming
+      // pointer (ADVERSARIAL-REVIEW finding 4 — a different finding from
+      // the one above despite the shared number): an unrelated pointer's
+      // own release must not resolve/cancel a loupe it never armed — it
+      // falls through to the checks below instead, all of which are no-ops
+      // for it too (loupeState is Tape-Measure-only, so `deferredTapDrag`/
+      // `dragMove`/`marqueeDrag` are all guaranteed null while it's active),
+      // landing on the harmless bare `return` at the very end.
+      //
+      // `armed` (never engaged, never rejected) is a plain quick tap:
+      // commits at the ORIGINAL press position (`loupePressSnap`/
+      // `loupePressRay`) — ADVERSARIAL-REVIEW finding 6: this used to reuse
+      // `loupeProbeSnap`/`loupeProbeRay` here too, which `onPointerMove`
+      // keeps overwriting on every move regardless of phase (armTapeLoupe's
+      // own doc), so ordinary touch jitter during a quick tap could commit
+      // a DIFFERENT snap than the one under the finger at touch-down —
+      // contradicting both this comment's own "plain quick tap" framing and
+      // a normal (non-loupe) tap's press-time semantics. `engaged` is the
+      // fine-positioned hold this gesture exists for — that one legitimately
+      // commits the LIVE probe (the whole point of holding still to fine-
+      // tune). `rejected` has nothing left to do: it already committed at
+      // the moment of rejection, in `onPointerMove`.
+      if (loupeState.phase !== 'idle' && ev.pointerId === loupePointerId) {
+        const priorPhase = loupeState.phase
+        clearLoupeTimer()
+        if (priorPhase === 'engaged') restoreLoupeControls()
+        hideLoupeOverlay()
+        loupeState = LOUPE_IDLE
+        loupePointerId = null
+        loupeGrabEndpoint = null
+        if (priorPhase === 'engaged') {
+          commitTapeLoupePoint(loupeProbeSnap, loupeProbeRay)
+        } else if (priorPhase === 'armed') {
+          commitTapeLoupePoint(loupePressSnap, loupePressRay)
+        }
         return
       }
       if (!cameraModeRef.current) {
@@ -7526,6 +8596,27 @@ export default function Viewport({
         return
       }
 
+      // `readOnly`'s deferredTapDrag stand-in (shop-mode round-3 playtest
+      // finding 1): a plain release resolves the tap-pick exactly like the
+      // marquee's own `!active` branch below; an active (past-threshold)
+      // release commits nothing — the gesture was an orbit the whole time,
+      // owned entirely by OrbitControls, so there's no selection outcome to
+      // apply here. Scoped to the arming pointer (ADVERSARIAL-REVIEW
+      // finding 4): an unrelated pointer's own release must not resolve a
+      // tap-pick (or clear the state) for a press it never made — it falls
+      // through to the bare `marqueeDrag === null` return below instead
+      // (marqueeDrag is always null while readOnly, per its own arm site).
+      if (deferredTapDrag !== null && ev.pointerId === deferredTapDrag.pointerId) {
+        const drag = deferredTapDrag
+        deferredTapDrag = null
+        if (toolController.activeToolName !== 'Select') return
+        if (!drag.active) {
+          const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
+          dispatchSelectPick(ndcX, ndcY, makeWorldRay(ndcX, ndcY, camera))
+        }
+        return
+      }
+
       if (marqueeDrag === null) return
       const drag = marqueeDrag
       clearMarquee()
@@ -7561,6 +8652,12 @@ export default function Viewport({
       // still-armed drag.
       abortFovDrag(ev.pointerId)
       clearMarquee()
+      // Both scoped to the arming pointer too (ADVERSARIAL-REVIEW finding
+      // 4) — this listener fires for every pointer's own cancel, same as
+      // `abortFovDrag`'s own reasoning just above, so an unrelated
+      // pointer's cancellation must not end a gesture it never armed.
+      if (deferredTapDrag !== null && ev.pointerId === deferredTapDrag.pointerId) deferredTapDrag = null
+      if (loupeState.phase !== 'idle' && ev.pointerId === loupePointerId) cancelTapeLoupe()
       abortDragMove()
       if (zoomWindowDrag !== null) {
         // Mirrors abortDragMove's own precedent: an ACTIVE (past-threshold)
@@ -7655,6 +8752,8 @@ export default function Viewport({
       window.removeEventListener('keydown', onPrecisionKey)
       window.removeEventListener('keyup', onPrecisionKey)
       window.removeEventListener('blur', onWindowBlurClearsPrecision)
+      window.removeEventListener('blur', onWindowBlurClearsLoupe)
+      clearLoupeTimer()
       window.removeEventListener('keydown', onKeyDownRecord)
       window.removeEventListener('keyup', onKeyUpRecord)
       renderer.domElement.removeEventListener('webglcontextlost', onContextLost)
@@ -7668,6 +8767,7 @@ export default function Viewport({
       renderer.domElement.removeEventListener('pointercancel', onPointerCancel)
       renderer.domElement.removeEventListener('dblclick', onDoubleClickTracked)
       marqueeOverlay.remove()
+      loupeOverlay.remove()
       window.removeEventListener('keydown', onKeyDownTracked)
       el.removeEventListener('pointerdown', onFovDragPointerDownCapture, true)
       el.removeEventListener('wheel', onFovWheelCapture, true)
@@ -7678,6 +8778,7 @@ export default function Viewport({
       unsubscribeLengthUnit()
       disposeOriginAxes(originAxes)
       infiniteGrid.dispose()
+      shopGradientTexture?.dispose()
       controls.dispose()
       cueLayer.clear()
       drawPlaneCueLayer.clear()

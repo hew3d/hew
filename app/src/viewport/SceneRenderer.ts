@@ -39,6 +39,7 @@ import { expandByVisibleObject } from './visibleBounds'
 import { facePlaneBasis, crossV3, normalizeV3, clamp, pushArrowChevron, type V3 } from './geoHelpers'
 import type { SectionPlane } from './sectionManager'
 import { getResolvedTheme } from '../settings/theme'
+import { prefersReducedMotion } from '../platform'
 import { inlineTextQuaternion, TextBillboard } from './TextBillboard'
 import { GUIDE_COLOR } from './guideColors'
 import { axisDashGapWorldFromWorldPerPixel } from './math'
@@ -132,6 +133,28 @@ const CONTEXT_DIM_OPACITY: Record<'light' | 'dark', number> = {
 const GUIDE_LINE_HALF_LENGTH = 50
 /** Half-size of a point guide's cross marker (meters). */
 const GUIDE_POINT_MARKER_HALF_SIZE = 0.05
+
+/**
+ * One in-flight opacity tween owned by `setHiddenFaded`/`tickFades` (Shop
+ * Mode's isolate fade). `kind`/`id` name the ONE object or MATERIALIZED
+ * instance it drives — see `setHiddenFaded`'s doc comment for why a still-
+ * batched instance never gets one of these (it would fade its batch-mates
+ * too, since they share one `InstancedMesh` material). `hideOnComplete`
+ * distinguishes a fade-OUT (reaching `toOpacity` 0 sets `group.visible =
+ * false` and resets opacity to 1, the same baseline `_applyHidden` always
+ * assumes) from a fade-IN (reaching `toOpacity` 1 needs no further action —
+ * the group was already made visible up front, at the START of the tween,
+ * so the fade-in reads as a fade instead of a hard pop).
+ */
+interface FadeTween {
+  kind: 'object' | 'instance'
+  id: bigint
+  fromOpacity: number
+  toOpacity: number
+  startMs: number
+  durationMs: number
+  hideOnComplete: boolean
+}
 
 /**
  * Per-annotation CAMERA-INDEPENDENT render data (`SceneRenderer.annotationBase`,
@@ -576,6 +599,14 @@ export class SceneRenderer {
   private hiddenObjectIds: Set<bigint> = new Set()
   /** Instance ids that are hidden (group.visible = false). Session-only. */
   private hiddenInstanceIds: Set<bigint> = new Set()
+  /** In-flight opacity tweens started by `setHiddenFaded` (Shop Mode's
+   *  isolate fade, design_handoff_shop_mode/README.md §4), keyed by
+   *  `` `${kind}:${id}` ``. Advanced once per rendered frame by `tickFades`
+   *  (called from `Viewport.tsx`'s render loop only while non-empty — see
+   *  its own call site). Empty for the entire lifetime of every OTHER
+   *  renderer (the plain editor never calls `setHiddenFaded`), so this is a
+   *  zero-cost `Map.size` check on the editor's hot path. */
+  private fadeTweens: Map<string, FadeTween> = new Map()
 
   /** Parent group for the section-plane widget overlay (DESIGN §4) —
    * NEVER visited by `_forEachSolidMaterial`, so it is excluded from
@@ -1588,6 +1619,8 @@ export class SceneRenderer {
 
     this.instancesGroup.remove(g.group)
     this.instanceGroups.delete(instanceId)
+    // See the matching comment in `_removeObjectGroup`.
+    this.fadeTweens.delete(`instance:${instanceId}`)
   }
 
   /** Drop one placement entirely (kernel no longer has it). The caller
@@ -1879,6 +1912,10 @@ export class SceneRenderer {
     ;(g.edgesLines.material as THREE.Material).dispose()
     this.objectsGroup.remove(g.group)
     this.objectGroups.delete(objectId)
+    // Drop any in-flight isolate-fade tween for this id (setHiddenFaded/
+    // tickFades) — Shop Mode never mutates the document mid-fade, but this
+    // keeps the map from ever referencing a disposed group regardless.
+    this.fadeTweens.delete(`object:${objectId}`)
     this.watertightMap.delete(objectId)
     // If the removed object was selected, drop it from the selection
     this.selectedObjectIds = this.selectedObjectIds.filter((id) => id !== objectId)
@@ -2995,6 +3032,143 @@ export class SceneRenderer {
     this.hiddenInstanceIds = new Set(hiddenInstanceIds)
     this._applyHidden()
     this._resizeSectionWidget()
+  }
+
+  /**
+   * `setHidden`'s opt-in animated sibling — Shop Mode's isolate fade
+   * (design_handoff_shop_mode/README.md §4: "Other parts fade to opacity 0
+   * over 240ms ease... Un-isolate... fades back IN symmetric"). Every OTHER
+   * caller keeps calling plain `setHidden` (byte-identical, unanimated); the
+   * editor never calls this method at all.
+   *
+   * Picking/inference visibility (`hiddenObjectIds`/`hiddenInstanceIds`
+   * themselves, and everything downstream of them — `_resizeSectionWidget`,
+   * `_refreshSlots`' batch-slot suppression) flips to the FINAL state
+   * immediately, same as `setHidden`; only the RENDERED opacity animates —
+   * an object mid-fade-out is already unselectable, and one mid-fade-in is
+   * already selectable, matching how a real hide/reveal already behaves
+   * during its instant frame.
+   *
+   * Only plain objects and ALREADY-MATERIALIZED instances (`objectGroups`/
+   * `instanceGroups` — each has its own unique, never-shared material array;
+   * see `_buildMaterialArray`'s doc comment) fade individually. A still-
+   * BATCHED instance shares one `InstancedMesh` material with every other
+   * placement in its (definition member, side) bucket (`_buildBatch`); it
+   * gets the SAME instant slot-degeneration treatment `_applyHidden` already
+   * gives it (the `_refreshSlots` sweep below), since animating it would
+   * fade its unrelated batch-mates too. Reduced motion
+   * (`prefersReducedMotion()`) and a non-positive `fadeMs` both fall
+   * straight through to the plain instant `setHidden` path.
+   */
+  setHiddenFaded(hiddenObjectIds: bigint[], hiddenInstanceIds: bigint[], fadeMs: number): void {
+    if (fadeMs <= 0 || prefersReducedMotion()) {
+      this.setHidden(hiddenObjectIds, hiddenInstanceIds)
+      return
+    }
+    const nextHiddenObjectIds = new Set(hiddenObjectIds)
+    const nextHiddenInstanceIds = new Set(hiddenInstanceIds)
+    const now = performance.now()
+
+    for (const [id] of this.objectGroups) {
+      const wasHidden = this.hiddenObjectIds.has(id)
+      const willHide = nextHiddenObjectIds.has(id)
+      if (wasHidden !== willHide) this._startFadeTween('object', id, willHide, now, fadeMs)
+    }
+    for (const [id] of this.instanceGroups) {
+      const wasHidden = this.hiddenInstanceIds.has(id)
+      const willHide = nextHiddenInstanceIds.has(id)
+      if (wasHidden !== willHide) this._startFadeTween('instance', id, willHide, now, fadeMs)
+    }
+
+    this.hiddenObjectIds = nextHiddenObjectIds
+    this.hiddenInstanceIds = nextHiddenInstanceIds
+    // Def-sketch groups + every batch slot: instant, identical to
+    // `_applyHidden` (unchanged) — only `objectGroups`/`instanceGroups`
+    // above ever get a tween.
+    for (const [id, g] of this.defSketchGroups) {
+      g.group.visible = !this.hiddenInstanceIds.has(id)
+    }
+    for (const id of this.instanceRecords.keys()) {
+      this._refreshSlots(id)
+    }
+    this._resizeSectionWidget()
+  }
+
+  /** Arm one fade tween, folding in whatever opacity an EXISTING tween for
+   *  the same id had reached (rather than assuming a hard 0/1 start) so a
+   *  rapid isolate → show-all → isolate reverses smoothly instead of
+   *  jumping. Applies `fromOpacity` synchronously (not just on the NEXT
+   *  `tickFades` tick) so an external render triggered before the next
+   *  animation frame — synchronous, off the RAF loop — can never catch a
+   *  fade-in mid-arm still showing its old, un-tweened opacity. Making an id
+   *  visible again (`hiding` false) un-hides its group immediately too — the
+   *  tween then animates its opacity UP from `fromOpacity`, rather than
+   *  leaving it invisible until the tween completes. */
+  private _startFadeTween(kind: 'object' | 'instance', id: bigint, hiding: boolean, now: number, durationMs: number): void {
+    const key = `${kind}:${id}`
+    const existing = this.fadeTweens.get(key)
+    const fromOpacity = existing !== undefined ? this._fadeOpacityAt(existing, now) : hiding ? 1 : 0
+    this.fadeTweens.set(key, { kind, id, fromOpacity, toOpacity: hiding ? 0 : 1, startMs: now, durationMs, hideOnComplete: hiding })
+    if (kind === 'object') {
+      const g = this.objectGroups.get(id)
+      if (g !== undefined) {
+        if (!hiding) g.group.visible = true
+        this._setObjectOpacity(g, fromOpacity)
+      }
+    } else {
+      const g = this.instanceGroups.get(id)
+      if (g !== undefined) {
+        if (!hiding) g.group.visible = true
+        this._setInstanceOpacity(g, fromOpacity)
+      }
+    }
+  }
+
+  private _fadeOpacityAt(t: FadeTween, now: number): number {
+    const elapsed = now - t.startMs
+    const p = t.durationMs <= 0 ? 1 : Math.min(1, Math.max(0, elapsed / t.durationMs))
+    return t.fromOpacity + (t.toOpacity - t.fromOpacity) * p
+  }
+
+  /**
+   * Advance every in-flight fade tween by one rendered frame — called from
+   * `Viewport.tsx`'s render loop every frame (cheap no-op, a single
+   * `Map.size` check, whenever nothing is fading). Returns whether any tween
+   * is STILL in flight after this call, so the caller can force a render
+   * this frame even when nothing else changed (an opacity-only change
+   * doesn't otherwise mark the scene dirty).
+   */
+  tickFades(now: number): boolean {
+    if (this.fadeTweens.size === 0) return false
+    for (const [key, t] of this.fadeTweens) {
+      const opacity = this._fadeOpacityAt(t, now)
+      if (t.kind === 'object') {
+        const g = this.objectGroups.get(t.id)
+        if (g !== undefined) this._setObjectOpacity(g, opacity)
+      } else {
+        const g = this.instanceGroups.get(t.id)
+        if (g !== undefined) this._setInstanceOpacity(g, opacity)
+      }
+      if (now - t.startMs >= t.durationMs) {
+        this.fadeTweens.delete(key)
+        if (t.hideOnComplete) {
+          if (t.kind === 'object') {
+            const g = this.objectGroups.get(t.id)
+            if (g !== undefined) {
+              g.group.visible = false
+              this._setObjectOpacity(g, 1)
+            }
+          } else {
+            const g = this.instanceGroups.get(t.id)
+            if (g !== undefined) {
+              g.group.visible = false
+              this._setInstanceOpacity(g, 1)
+            }
+          }
+        }
+      }
+    }
+    return this.fadeTweens.size > 0
   }
 
   /** Re-apply visibility for all objects, instances, and definition-owned

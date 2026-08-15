@@ -17,15 +17,15 @@ import { MaterialPalette } from './panels/MaterialPalette'
 import { MenuBar } from './panels/MenuBar'
 import { CAMERA_HANDOFF_TOOL_NAMES } from './panels/cameraHandoffTools'
 import { TitleBar } from './TitleBar'
-import { isLinux, isMac, isWindows } from './platform'
+import { isCoarsePointer, isLinux, isMac, isWindows } from './platform'
 import { nextPaint } from './paint'
 import { TagsPanel } from './panels/TagsPanel'
 import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
 import { ToolRail } from './panels/ToolRail'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, collectLeafIds as collectLeafIdsShared, pruneDeadSelection, structuralSelection, type NodeRef } from './panels/treeModel'
-import { tagPathKey, isPathUnder } from './panels/tagModel'
+import { nextSelection, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, type NodeRef } from './panels/treeModel'
+import { tagPathKey } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { installTestHarness } from './test/harness'
@@ -45,6 +45,9 @@ import {
   type DocSessionState,
 } from './io/documentSession'
 import { makeRecoveryStore, shouldPromptRecovery, type RecoveryListing, type RecoverySnapshot, type RecoveryMeta } from './io/recoveryStore'
+import { loadHewBytes, isPanicError, isSceneEmpty, seedHiddenKeysFromRegistry, seedHiddenTagPathsFromRegistry, unionHiddenLeafIds } from './io/documentLoad'
+import { writeShellModeOverride } from './shop/shellMode'
+import { listRecents, recordRecent, type RecentEntry } from './io/recents'
 import { ImportReportDialog } from './panels/ImportReportDialog'
 import { ImportingOverlay, ensureSpinnerKeyframes } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
@@ -56,6 +59,7 @@ import { StlUnitsDialog } from './panels/StlUnitsDialog'
 import { RescaleConfirmDialog } from './panels/RescaleConfirmDialog'
 import { setLastStlImportUnit } from './settings/stlImportUnit'
 import { ExportDialog, type ExportFormat } from './panels/ExportDialog'
+import { PhoneShareDialog, type PhoneShareDocument } from './panels/PhoneShareDialog'
 import { TextDialog, type TextDialogResult } from './panels/TextDialog'
 import { layoutGlyphRun } from './text/glyphRun'
 import { collectNonSolidObjects } from './io/solidGating'
@@ -163,21 +167,6 @@ function basenameOf(path: string): string {
   return path.replace(/[/\\]+/g, '/').split('/').filter(Boolean).pop() ?? path
 }
 
-/** Strings that signal the Scene borrow-lock after a Rust panic. */
-const PANIC_SIGNATURES = ['recursive use of an object', 'unreachable']
-
-/** True when the document holds no entities at all (a pristine "Untitled").
- *  Used by File ▸ New (blank documents are reused instead of spawning a
- *  second empty window) and by the open-time Zoom Extents (nothing to frame). */
-function isSceneEmpty(scene: Scene): boolean {
-  return (
-    scene.object_ids().length === 0 &&
-    scene.group_ids().length === 0 &&
-    scene.instance_ids().length === 0 &&
-    scene.sketch_ids().length === 0
-  )
-}
-
 /** True when a window holds nothing worth protecting — no named file, no
  *  unsaved edits, no geometry — so a File ▸ Open or File ▸ New pick may
  *  reuse it in place instead of opening a fresh window. Stricter than
@@ -186,11 +175,6 @@ function isSceneEmpty(scene: Scene): boolean {
  *  behind it and must not be silently abandoned by reusing the window. */
 export function isPristineDocument(session: DocSessionState, scene: Scene): boolean {
   return session.currentRef === null && !session.dirty && isSceneEmpty(scene)
-}
-
-function isPanicError(message: string): boolean {
-  const lower = message.toLowerCase()
-  return PANIC_SIGNATURES.some((sig) => lower.includes(sig))
 }
 
 /** Whether two session stacks are the SAME sequence of frames (identity at
@@ -1259,6 +1243,16 @@ export default function App() {
       .catch(() => { /* ignore */ })
   }, [])
 
+  // Window ▸ Shop Mode: the mirror of ShopApp's own "Use full editor" — pin
+  // the override and reload so `main.tsx`'s `resolveShellMode` picks it up
+  // on the next boot. Never called from the desktop shell or a fine-pointer
+  // session (MenuBars's `onEnterShopMode` prop is only wired up when neither
+  // holds — see the render below), so this doesn't need to re-check either.
+  const handleEnterShopMode = useCallback(() => {
+    writeShellModeOverride('shop')
+    window.location.reload()
+  }, [])
+
   useEffect(() => {
     const unsub = LogStore.subscribe((entries) => {
       const latest = entries[entries.length - 1]
@@ -1305,41 +1299,6 @@ export default function App() {
     const leaves = Array.from(state.scene.node_leaf_objects(kind, deepest.id))
     return new Set(leaves)
   }, [activeContext, state])
-
-  // Build the set of tag path keys marked hidden-by-default in the document's
-  // tag metadata registry (scene.tag_meta_paths()/tag_meta_hidden()) — this
-  // covers tags no node carries (e.g. an imported .skp layer list, empty
-  // layers included), so a hidden empty layer still comes up hidden.
-  const seedHiddenTagPathsFromRegistry = (scene: Scene): Set<string> => {
-    const paths = scene.tag_meta_paths()
-    const hidden = scene.tag_meta_hidden()
-    const seeded = new Set<string>()
-    for (let i = 0; i < paths.length; i++) {
-      if (hidden[i] !== 1) continue
-      const path = paths[i].split('/').map((s) => s.trim()).filter((s) => s.length > 0)
-      if (path.length > 0) seeded.add(tagPathKey(path))
-    }
-    return seeded
-  }
-
-  // Build the set of hiddenKeys (nodeKey strings) from the document's
-  // persisted USER-hidden registry (scene.user_hidden_kinds()/
-  // user_hidden_ids(), manifest v6) — this is how imported .skp hidden
-  // groups/components/instances (and a re-opened .hew with nodes previously
-  // eye-toggled) arrive, since hiddenKeys itself is session-only React state
-  // that gets reset on every load.
-  const seedHiddenKeysFromRegistry = (scene: Scene): Set<string> => {
-    const kinds = scene.user_hidden_kinds()
-    const ids = scene.user_hidden_ids()
-    const kindNames: NodeRef['kind'][] = ['object', 'group', 'instance']
-    const seeded = new Set<string>()
-    for (let i = 0; i < kinds.length; i++) {
-      const kind = kindNames[kinds[i]]
-      if (kind === undefined) continue
-      seeded.add(nodeKey({ kind, id: ids[i] }))
-    }
-    return seeded
-  }
 
   // Selection-dependent command availability — one derivation shared by the
   // render-body handlers, the native Edit menu (sync_menu_state), and the
@@ -1526,14 +1485,12 @@ export default function App() {
   const applyLoadedBytes = useCallback((bytes: Uint8Array): boolean => {
     const scene = sceneRef.current
     if (scene === null) return false
-    try {
-      scene.load(bytes)
-    } catch (err) {
-      const raw = err instanceof Error ? err.message : String(err)
-      if (isPanicError(raw)) {
+    const loaded = loadHewBytes(scene, bytes)
+    if (!loaded.ok) {
+      if (loaded.panicked) {
         setKernelPanicked(true)
       }
-      handleToast(friendlyErrorText(err))
+      handleToast(friendlyErrorText(loaded.error))
       return false
     }
     // Any successful load supersedes the welcome screen — e.g. a warm
@@ -1882,6 +1839,12 @@ export default function App() {
           import('@tauri-apps/api/core').then(({ invoke }) =>
             invoke('push_recent', { path: pick.handle as string })
           ).catch(() => { /* ignore */ })
+        } else if (!isTauri) {
+          // Web build only — the Tauri desktop shell has its own path-based
+          // recents (push_recent above); this is the IndexedDB-backed shelf
+          // WelcomeScreen/ShopApp read (io/recents.ts). Fire-and-forget: a
+          // lost write here must never interrupt the open that triggered it.
+          void recordRecent(pick.bytes, pick.name)
         }
         return
       }
@@ -2165,6 +2128,29 @@ export default function App() {
       .catch(() => { /* ignore */ })
   }, [])
 
+  // ---------------------------------------------------------------- offline recents (web build; io/recents.ts)
+  // Distinct from recentFiles/openRecent above (Tauri's path-based shell
+  // recents.json, re-read from disk): these already carry their bytes,
+  // recorded on every successful web-build open (this component's own
+  // applyLoadedBytes-adjacent open paths below, and ShopApp.tsx's). Loaded
+  // once per welcome-screen showing so a model opened earlier in the SAME
+  // session (or in Shop Mode, sharing the one IndexedDB store) shows up.
+  const [webRecents, setWebRecents] = useState<RecentEntry[]>([])
+  useEffect(() => {
+    if (isTauri) return
+    listRecents().then(setWebRecents)
+  }, [welcomeOpen])
+
+  const openWebRecent = useCallback((entry: RecentEntry) => {
+    if (applyLoadedBytes(entry.bytes)) {
+      setDocSession(afterImport(entry.name, Date.now()))
+      // Bumps the entry back to most-recently-used — the LRU behavior a
+      // "recents" list is expected to have, matching ShopApp.tsx's
+      // identical re-record-on-reopen choice.
+      void recordRecent(entry.bytes, entry.name)
+    }
+  }, [applyLoadedBytes])
+
   // ---------------------------------------------------------------- recovery prompt actions
 
   /** Load a claimed snapshot into THIS window's document and session. Shared
@@ -2309,6 +2295,47 @@ export default function App() {
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
+  // ---------------------------------------------------------------- USDZ export
+  // Like glTF, USDZ is a visualization/AR format, not a slicer input — no
+  // solid-gating dialog, same posture as exportGltf above (module doc,
+  // crates/mesh-export's "Non-solid inclusion": Scene::export always
+  // includes non-solid geometry, the gating dialogs only ever warn ahead of
+  // the STL/3MF slicer formats below).
+  const exportUsdz = useCallback(async () => {
+    const api = viewportApi.current
+    if (api === null) {
+      handleToast('Export failed: viewport not ready.')
+      return
+    }
+    let bytes: Uint8Array | null
+    try {
+      bytes = await api.exportUsdz()
+    } catch (err: unknown) {
+      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      return
+    }
+    if (bytes === null) {
+      handleToast('Nothing to export — the model has no solids.')
+      return
+    }
+    // Suggest a name derived from the current document, dropping any .hew suffix.
+    const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
+    const base = rawBase.replace(/\.hew$/i, '')
+    try {
+      const ok = await fileHostRef.current.exportBinary(bytes, base, {
+        description: 'USDZ',
+        ext: 'usdz',
+        mime: 'model/vnd.usdz+zip',
+      })
+      if (ok) {
+        handleToast('Exported USDZ.')
+        LogStore.log.info('app', `Exported USDZ (${bytes.length} bytes)`)
+      }
+    } catch (err: unknown) {
+      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+    }
+  }, [docSession.currentRef, docSession.importedName, handleToast])
+
   // ------------------------------------------------- slicer exports (STL/3MF)
   // Non-solid objects pending the solid-gating confirmation, plus which
   // format's export is waiting on it; null = no dialog. STL and 3MF feed
@@ -2411,10 +2438,39 @@ export default function App() {
   }, [doExportStl, doExport3mf])
 
   // ---------------------------------------------------------------- unified Export dialog
-  // File ▸ Export… opens ONE dialog with a Format select (glTF/STL/3MF) —
+  // File ▸ Export… opens ONE dialog with a Format select (glTF/STL/3MF/USDZ) —
   // the dialog's Export dispatches to the picked format; the slicer formats'
   // solid-gating dialog remains the follow-on step (chain unchanged).
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
+
+  // ---------------------------------------------------------------- "Open on Phone" (docs/design/shop-mode.md §4)
+  const [phoneShareOpen, setPhoneShareOpen] = useState(false)
+
+  // The bytes+name PhoneShareDialog serializes and sends to the shell,
+  // read once when the dialog mounts — the exact same `pushCameraStateToScene`
+  // + `scene.save()` pair `saveDocument`/`saveAsDocument` use, and the same
+  // baseName-plus-`.hew`-suffix name derivation `saveAsDocument` suggests,
+  // so the phone receives precisely what a real Save would have written.
+  const getPhoneShareDocument = useCallback((): PhoneShareDocument | null => {
+    const scene = sceneRef.current
+    if (scene === null) return null
+    pushCameraStateToScene(scene)
+    const bytes = new Uint8Array(scene.save())
+    const baseName = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
+    const name = baseName.endsWith('.hew') ? baseName : baseName + '.hew'
+    return { bytes, name }
+  }, [docSession.currentRef, docSession.importedName, pushCameraStateToScene])
+
+  // File ▸ Open on Phone… is disabled on an empty document (nothing worth
+  // sharing) — re-derived on every `docRev` bump (the same "something in
+  // the document changed" signal the tree/tag panels re-read on), so a
+  // draw/undo/redo on a previously-blank document flips it live rather
+  // than only at the next unrelated re-render.
+  const phoneShareDisabled = useMemo(() => {
+    const scene = sceneRef.current
+    return scene === null || isSceneEmpty(scene)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docRev])
 
   // -------------------------------------------------------------------- 3D Text
   // Draw ▸ 3D Text… (docs/design/3d-text.md): the dialog resolves text/font/
@@ -2959,10 +3015,12 @@ export default function App() {
     setExportDialogOpen(false)
     if (format === 'glb') {
       void exportGltf()
+    } else if (format === 'usdz') {
+      void exportUsdz()
     } else {
       void exportSolidGated(format, format === 'stl' ? stlSegmentsPerTurn : undefined)
     }
-  }, [exportGltf, exportSolidGated])
+  }, [exportGltf, exportUsdz, exportSolidGated])
 
   // ---------------------------------------------------------------- settings window
   // Per-platform settings surface:
@@ -3146,6 +3204,14 @@ export default function App() {
       case 'open':     openDocumentRef.current(); break
       case 'import':   importDocumentRef.current(); break
       case 'export':   setExportDialogOpen(true); break
+      // macOS native "Open on Phone…" — always enabled natively (macOS has
+      // no live disabled-state push for it, same posture as
+      // save-to-library-doc), so the empty-document gate the web MenuBar
+      // enforces via `openOnPhoneDisabled` is enforced here with a toast.
+      case 'open-on-phone':
+        if (phoneShareDisabled) handleToast('Nothing to share yet — the document is empty')
+        else setPhoneShareOpen(true)
+        break
       case 'draw-3d-text': openTextDialog(); break
       case 'save':     saveDocumentRef.current(); break
       case 'save-as':  saveAsDocumentRef.current(); break
@@ -3981,18 +4047,10 @@ export default function App() {
   // ── Hide/Show + Tags (must be declared BEFORE the early returns below so the
   // hook count is stable across the loading and loaded renders — Rules of Hooks).
   /**
-   * Collect all leaf object and instance ids for a node (recurse into
-   * groups). Thin wrapper over the shared `collectLeafIds` in treeModel —
-   * supplies the wasm `group_members` lookup as plain NodeRefs.
-   */
-  const collectLeafIds = (node: NodeRef): { objectIds: bigint[]; instanceIds: bigint[] } =>
-    collectLeafIdsShared(node, (groupId) =>
-      state!.scene.group_members(groupId).map((m) => ({ kind: m.kind as NodeRef['kind'], id: m.id })),
-    )
-
-  /**
-   * Derive the union hidden id sets from both manual-hide and tag-hide sources,
-   * then push the result to the renderer.
+   * Derive the union hidden id sets from both manual-hide and tag-hide
+   * sources (`unionHiddenLeafIds`, documentLoad.ts — shared with Shop Mode's
+   * boot-time seed so both shells compute the identical hidden set), then
+   * push the result to the renderer AND the kernel's inference-hide state.
    *
    * Both sets are passed in explicitly so callers can pass the *next* set
    * (before setState is applied) without waiting for a re-render.
@@ -4001,72 +4059,12 @@ export default function App() {
     (nextHiddenKeys: Set<string>, nextHiddenTagPaths: Set<string>) => {
       const scene = state?.scene
       if (scene === undefined) return
-
-      const hiddenObjectIds: bigint[] = []
-      const hiddenInstanceIds: bigint[] = []
-
-      // --- (a) manual per-node hides ---
-      for (const k of nextHiddenKeys) {
-        const colonIdx = k.indexOf(':')
-        const kind = k.slice(0, colonIdx) as NodeRef['kind']
-        const id = BigInt(k.slice(colonIdx + 1))
-        const n: NodeRef = { kind, id }
-        const { objectIds, instanceIds } = collectLeafIds(n)
-        hiddenObjectIds.push(...objectIds)
-        hiddenInstanceIds.push(...instanceIds)
-      }
-
-      // --- (b) tag-path hides ---
-      if (nextHiddenTagPaths.size > 0) {
-        // Build the current tag list from the scene using first-class tag data.
-        const allNodes = [
-          ...Array.from(scene.object_ids()).map((id) => ({ kind: 'object' as const, id })),
-          ...Array.from(scene.group_ids()).map((id) => ({ kind: 'group' as const, id })),
-          ...Array.from(scene.instance_ids()).map((id) => ({ kind: 'instance' as const, id })),
-        ]
-        const tagged: { node: NodeRef; path: string[] }[] = []
-        for (const raw of allNodes) {
-          const node: NodeRef = raw as NodeRef
-          const kindNum = node.kind === 'object' ? 0 : node.kind === 'group' ? 1 : 2
-          const rawTags = scene.node_tags(kindNum, node.id)
-          for (const rawTag of rawTags) {
-            const path = rawTag.split('/').map((s) => s.trim()).filter((s) => s.length > 0)
-            if (path.length > 0) {
-              tagged.push({ node, path })
-            }
-          }
-        }
-
-        // For each hidden tag path, collect all nodes whose tag path is at or
-        // under it.  We iterate once over all tagged nodes for efficiency.
-        const hiddenAnchorPaths: string[][] = []
-        for (const key of nextHiddenTagPaths) {
-          try {
-            const parsed = JSON.parse(key)
-            if (Array.isArray(parsed)) hiddenAnchorPaths.push(parsed as string[])
-          } catch { /* invalid key — skip */ }
-        }
-
-        // A node is covered if its tag path is at or under any hidden anchor path.
-        // isPathUnder handles both exact matches and descendant paths, so hiding
-        // a parent tag automatically covers all nodes tagged further down.
-        for (const { node, path } of tagged) {
-          const covered = hiddenAnchorPaths.some((anchor) => isPathUnder(path, anchor))
-          if (!covered) continue
-          const { objectIds, instanceIds } = collectLeafIds(node)
-          hiddenObjectIds.push(...objectIds)
-          hiddenInstanceIds.push(...instanceIds)
-        }
-      }
-
-      // Deduplicate (a leaf may be covered by multiple hidden paths/tags).
-      const objIds = [...new Set(hiddenObjectIds)]
-      const instIds = [...new Set(hiddenInstanceIds)]
+      const { objectIds, instanceIds } = unionHiddenLeafIds(scene, nextHiddenKeys, nextHiddenTagPaths)
       // (1) Renderer: hide the meshes. (2) Kernel inference: drop the hidden
       // geometry so snap/pick_face skip it — otherwise you'd still snap to and
       // be unable to click past a hidden solid's edges/faces.
-      viewportApi.current?.setHidden(objIds, instIds)
-      scene.set_hidden(new BigUint64Array(objIds), new BigUint64Array(instIds))
+      viewportApi.current?.setHidden(objectIds, instanceIds)
+      scene.set_hidden(new BigUint64Array(objectIds), new BigUint64Array(instanceIds))
     },
     // state?.scene changes on every render; we capture it fresh via the closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4385,6 +4383,9 @@ export default function App() {
         onOpenSettings={openSettings}
         onReportBug={handleReportBug}
         onCheckForUpdates={updaterAvailable ? handleCheckForUpdates : undefined}
+        onOpenOnPhone={isTauri ? () => setPhoneShareOpen(true) : undefined}
+        openOnPhoneDisabled={phoneShareDisabled}
+        onEnterShopMode={!isTauri && isCoarsePointer() ? handleEnterShopMode : undefined}
         windowList={isTauri ? windowList : undefined}
         onFocusWindow={focusWindow}
       />
@@ -4992,6 +4993,19 @@ export default function App() {
         />
       )}
 
+      {/* File ▸ Open on Phone… (docs/design/shop-mode.md §4,
+          workers/share-relay/README.md) — the QR handoff dialog. Encrypts
+          and uploads to the cloud dead-drop on mount, best-effort
+          invalidates it on unmount (PhoneShareDialog's own module doc);
+          this render gate is the only thing that ever mounts or unmounts
+          it. */}
+      {phoneShareOpen && (
+        <PhoneShareDialog
+          getDocument={getPhoneShareDocument}
+          onClose={() => setPhoneShareOpen(false)}
+        />
+      )}
+
       {/* Draw ▸ 3D Text… (docs/design/3d-text.md) — resolves text/font/
           height/depth; OK arms the placement tool via handleTextPlace. */}
       {textDialogOpen && (
@@ -5047,6 +5061,11 @@ export default function App() {
           onOpenSample={(sample) => {
             setWelcomeOpen(false)
             void openSample(sample)
+          }}
+          webRecents={isTauri ? undefined : webRecents}
+          onOpenWebRecent={(entry) => {
+            setWelcomeOpen(false)
+            openWebRecent(entry)
           }}
           showOnStartup={showWelcomeSetting}
           onShowOnStartupChange={(show) => {

@@ -95,8 +95,22 @@ export class CueLayer {
     this.group.name = 'CueLayer'
   }
 
-  /** Rebuild the cue layer for the current snap result */
-  update(snap: Snap | null): void {
+  /**
+   * Rebuild the cue layer for the current snap result.
+   *
+   * `suppressAxisLine` (Shop Mode round-3 playtest finding 2): Shop Mode
+   * renders no world axes at all (`showAxes=false`), so the dashed guide
+   * line this class draws through an `'on-axis'` snap's own direction would
+   * reference geometry that literally isn't on screen — incoherent, not
+   * just redundant. Scoped to that one kind: a guide line through an
+   * `'on-edge'`/`'on-guide'` direction still references something real and
+   * visible, so those are untouched. The snap POINT itself (this class's
+   * caller also drives the DOM `SnapDot`/tooltip via `publishSnapCues`) is
+   * a separate concern this flag never touches — callers that want the
+   * point but not the line (Tape Measure under `readOnly`) get exactly
+   * that by passing `true` here while leaving the snap itself unmodified.
+   */
+  update(snap: Snap | null, suppressAxisLine = false): void {
     // Dispose old geometry
     this.group.traverse((child) => {
       if (child instanceof THREE.LineSegments) {
@@ -128,7 +142,7 @@ export class CueLayer {
     // against any geometry, unlike the thin 1px three.js cross this used to
     // draw. CueLayer keeps only the in-scene dashed GUIDE line (which the DOM
     // layer can't do — it needs depth + world extent along the axis/edge).
-    if (snap.direction !== undefined) {
+    if (snap.direction !== undefined && !(suppressAxisLine && snap.kind === 'on-axis')) {
       this.group.add(buildGuideLine(pos, snap.direction, color))
     }
   }

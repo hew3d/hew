@@ -2,17 +2,24 @@
  *  — component tests for the dialog chrome.
  *
  * Covers: RecoveryDialog, ImportingOverlay, ImportReportDialog, the STL
- * solid-gating dialog StlExportDialog, and the STL import units-chooser
- * StlUnitsDialog.
- * None of these touch WASM or three.js, so no mocks beyond callbacks are needed.
+ * solid-gating dialog StlExportDialog, the STL import units-chooser
+ * StlUnitsDialog, and the "Open on Phone…" handoff dialog PhoneShareDialog.
+ * None of these touch WASM or three.js, so no mocks beyond callbacks are
+ * needed — except PhoneShareDialog, which calls through
+ * `@tauri-apps/api/core`'s `invoke` directly (for `qr_svg`) and uploads/
+ * invalidates its encrypted drop via the dynamically-imported
+ * `@tauri-apps/plugin-http`'s `fetch` (native HTTP, not the browser's —
+ * see that module's doc comment for why); both are mocked for its describe
+ * block only, per the `mockInvoke`/`mockFetch` helpers just below the
+ * imports.
  *
  * FloatingPanel's tests lived here too until deleted that component
  * (replaced by the permanently docked tray, `TraySection.tsx` — see its own
  * test file).
  */
 
-import { render, screen, fireEvent } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RecoveryDialog } from './RecoveryDialog'
 import { ImportingOverlay } from './ImportingOverlay'
 import { ImportReportDialog } from './ImportReportDialog'
@@ -20,9 +27,22 @@ import { StlExportDialog } from './StlExportDialog'
 import { StlUnitsDialog } from './StlUnitsDialog'
 import { ExportDialog } from './ExportDialog'
 import { RescaleConfirmDialog } from './RescaleConfirmDialog'
+import { PhoneShareDialog } from './PhoneShareDialog'
 import { resetStlImportUnitForTest, setLastStlImportUnit } from '../settings/stlImportUnit'
 import type { RecoveryListing } from '../io/recoveryStore'
 import type { ImportReport } from '../io/fileHost'
+
+// PhoneShareDialog's external dependencies — hoisted so the vi.mock
+// factories below (themselves hoisted above these imports by Vitest) can
+// reference mockInvoke/mockFetch without a "used before initialization"
+// error. PhoneShareDialog imports `@tauri-apps/plugin-http` dynamically
+// (`await import(...)`, for web-bundle hygiene — see its module doc), but
+// vi.mock intercepts dynamic imports of a mocked specifier exactly like
+// static ones, so mocking it here still reaches that call.
+const mockInvoke = vi.hoisted(() => vi.fn())
+vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }))
+const mockFetch = vi.hoisted(() => vi.fn())
+vi.mock('@tauri-apps/plugin-http', () => ({ fetch: mockFetch }))
 
 /**
  * Every dialog's Escape handler must `stopPropagation()` alongside its
@@ -599,6 +619,7 @@ describe('ExportDialog', () => {
     expect(screen.getByText(/gltf binary \(\.glb\).*y-up, meters/i)).toBeInTheDocument()
     expect(screen.getByText(/stl binary \(\.stl\).*millimeters, for 3d printing/i)).toBeInTheDocument()
     expect(screen.getByText(/3mf \(\.3mf\).*part names and colors/i)).toBeInTheDocument()
+    expect(screen.getByText(/usdz \(\.usdz\).*ar quick look/i)).toBeInTheDocument()
   })
 
   it('defaults to glTF and calls onExport with "glb" when Export is clicked', () => {
@@ -649,6 +670,20 @@ describe('ExportDialog', () => {
     expect(onExport).toHaveBeenCalledWith('3mf', 48)
   })
 
+  it('calls onExport with "usdz" after switching the Format select to USDZ', () => {
+    const onExport = vi.fn()
+    render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'usdz' } })
+    fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
+    expect(onExport).toHaveBeenCalledWith('usdz', 48)
+  })
+
+  it('hides the curve-resolution select for USDZ, like glTF and 3MF', () => {
+    render(<ExportDialog onExport={vi.fn()} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'usdz' } })
+    expect(screen.queryByLabelText(/curve resolution/i)).not.toBeInTheDocument()
+  })
+
   it('calls onCancel when Cancel is clicked', () => {
     const onCancel = vi.fn()
     render(<ExportDialog onExport={vi.fn()} onCancel={onCancel} />)
@@ -668,5 +703,353 @@ describe('ExportDialog', () => {
   it('stops Escape from bubbling to window (so it does not also fire the Viewport handler)', () => {
     render(<ExportDialog onExport={vi.fn()} onCancel={vi.fn()} />)
     expectEscapeStopsPropagationToWindow()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// PhoneShareDialog (File ▸ Open on Phone…, docs/design/shop-mode.md §4,
+// workers/share-relay/README.md) — encrypts+uploads on mount via `fetch`,
+// renders the QR `qr_svg` (mocked `invoke`) returns, and best-effort
+// invalidates the drop with a DELETE on unmount.
+// ---------------------------------------------------------------------------
+
+describe('PhoneShareDialog', () => {
+  const sampleDoc = { bytes: new Uint8Array([1, 2, 3]), name: 'Bench.hew' }
+  const sampleToken = 'a'.repeat(22)
+  const sampleQrSvg = '<svg>qr</svg>'
+
+  /** Wires `mockFetch` (the module-level `@tauri-apps/plugin-http` mock) to
+   *  the normal happy path: any PUT to /drop succeeds with `sampleToken`,
+   *  any DELETE succeeds with 204. */
+  function mockSuccessfulRelay(): void {
+    mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        return new Response(JSON.stringify({ token: sampleToken }), { status: 200 })
+      }
+      if (init?.method === 'DELETE') {
+        return new Response(null, { status: 204 })
+      }
+      throw new Error(`unexpected fetch: ${init?.method ?? 'GET'} ${url}`)
+    })
+  }
+
+  beforeEach(() => {
+    mockInvoke.mockReset()
+    mockInvoke.mockResolvedValue(sampleQrSvg)
+    mockFetch.mockReset()
+  })
+
+  it('encrypts the document and PUTs ciphertext (not plaintext) to the share-relay /drop endpoint', async () => {
+    mockSuccessfulRelay()
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    await waitFor(() => expect(mockFetch).toHaveBeenCalled())
+
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('https://share.hew3d.com/drop')
+    expect(init.method).toBe('PUT')
+    const uploaded = new Uint8Array(init.body as ArrayBuffer)
+    // Never the plaintext bytes verbatim, and long enough to be
+    // IV(12) + ciphertext(3) + GCM tag(16) = 31 bytes, not 3.
+    expect(uploaded).not.toEqual(sampleDoc.bytes)
+    expect(uploaded.byteLength).toBe(31)
+  })
+
+  it('asks the shell to render a QR for a #recv= URL on the app origin, carrying the token', async () => {
+    mockSuccessfulRelay()
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('qr_svg', expect.anything()))
+
+    const { text } = mockInvoke.mock.calls[0][1] as { text: string }
+    expect(text.startsWith(`https://app.hew3d.com/#recv=${sampleToken}.`)).toBe(true)
+    // The name segment is last and urlencoded — "Bench.hew" survives intact
+    // (as %2E-free literal dots, per shareCrypto.ts's fragment grammar).
+    expect(text.endsWith('.Bench.hew')).toBe(true)
+  })
+
+  it('shows a starting state before the upload resolves', () => {
+    mockFetch.mockReturnValue(new Promise(() => { /* never resolves in this test */ }))
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    expect(screen.getByText(/starting/i)).toBeInTheDocument()
+  })
+
+  it('renders the QR image and the URL as selectable text once ready', async () => {
+    mockSuccessfulRelay()
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    const url = await screen.findByLabelText<HTMLInputElement>(/handoff url/i)
+    expect(url.value).toContain('https://app.hew3d.com/#recv=')
+    const img = screen.getByAltText(/qr code/i)
+    expect(img.getAttribute('src')).toContain('data:image/svg+xml')
+    expect(decodeURIComponent(img.getAttribute('src') ?? '')).toContain(sampleQrSvg)
+    expect(screen.getByText(/scan from shop mode/i)).toBeInTheDocument()
+  })
+
+  it('shows a clear message when the upload is offline (fetch throws a TypeError)', async () => {
+    mockFetch.mockRejectedValue(new TypeError('Failed to fetch'))
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not reach the share server/i)
+  })
+
+  it('shows a clear message on a 413 (document too large)', async () => {
+    mockFetch.mockResolvedValue(new Response(null, { status: 413 }))
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/too large/i)
+  })
+
+  it('shows a clear message on a non-200/413 response', async () => {
+    mockFetch.mockResolvedValue(new Response(null, { status: 500 }))
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/status 500/i)
+  })
+
+  it('shows an empty-document message and never calls fetch when getDocument returns null', () => {
+    render(<PhoneShareDialog getDocument={() => null} onClose={vi.fn()} />)
+    expect(screen.getByRole('alert')).toHaveTextContent(/nothing to share/i)
+    expect(mockFetch).not.toHaveBeenCalled()
+  })
+
+  it('best-effort DELETEs the drop on unmount via the Close button, once a token exists', async () => {
+    mockSuccessfulRelay()
+    const onClose = vi.fn()
+    const { unmount } = render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
+    await screen.findByLabelText(/handoff url/i)
+    fireEvent.click(screen.getByRole('button', { name: /close/i }))
+    expect(onClose).toHaveBeenCalledOnce()
+    // The dialog itself doesn't unmount on onClose (App.tsx's conditional
+    // render owns that) — simulate the parent reacting to it, mirroring
+    // every other close trigger below.
+    unmount()
+    await waitFor(() =>
+      expect(mockFetch).toHaveBeenCalledWith(`https://share.hew3d.com/drop/${sampleToken}`, {
+        method: 'DELETE',
+      }),
+    )
+  })
+
+  it('best-effort DELETEs the drop on unmount via Escape', async () => {
+    mockSuccessfulRelay()
+    const onClose = vi.fn()
+    const { unmount } = render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
+    await screen.findByLabelText(/handoff url/i)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledOnce()
+    unmount()
+    await waitFor(() =>
+      expect(mockFetch).toHaveBeenCalledWith(`https://share.hew3d.com/drop/${sampleToken}`, {
+        method: 'DELETE',
+      }),
+    )
+  })
+
+  it('best-effort DELETEs the drop on unmount via the backdrop click', async () => {
+    mockSuccessfulRelay()
+    const onClose = vi.fn()
+    const { unmount } = render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
+    await screen.findByLabelText(/handoff url/i)
+    fireEvent.click(screen.getByRole('dialog', { name: /open on phone/i }).parentElement as HTMLElement)
+    expect(onClose).toHaveBeenCalledOnce()
+    unmount()
+    await waitFor(() =>
+      expect(mockFetch).toHaveBeenCalledWith(`https://share.hew3d.com/drop/${sampleToken}`, {
+        method: 'DELETE',
+      }),
+    )
+  })
+
+  it('never DELETEs on unmount if the upload never got a token (still in flight)', async () => {
+    mockFetch.mockReturnValue(new Promise(() => { /* never resolves */ }))
+    const { unmount } = render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    // Let the mount effect's own encrypt-then-PUT actually start before
+    // unmounting — otherwise this can race the effect itself, depending on
+    // exactly which pending microtask the test runner schedules next.
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    unmount()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(mockFetch).not.toHaveBeenCalledWith(expect.stringContaining('/drop/'), expect.anything())
+  })
+
+  it('stops Escape from bubbling to window (so it does not also fire the Viewport handler)', async () => {
+    mockSuccessfulRelay()
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    await screen.findByLabelText(/handoff url/i)
+    expectEscapeStopsPropagationToWindow()
+  })
+
+  it('has the expected ARIA dialog role and label', async () => {
+    mockSuccessfulRelay()
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    expect(screen.getByRole('dialog', { name: /open on phone/i })).toBeInTheDocument()
+    await screen.findByLabelText(/handoff url/i) // let the pending upload settle before the test ends
+  })
+
+  // ---------------------------------------------------------------------
+  // Pickup polling — QR auto-close on pickup. `shouldAdvanceTime` keeps the
+  // fake clock ticking in step with real time (so the plain async work that
+  // reaches `ready` — encrypt/PUT/qr_svg, none of it timer-based — still
+  // resolves and `findByLabelText` doesn't hang), while
+  // `vi.advanceTimersByTimeAsync` fast-forwards the 2s poll interval itself
+  // without the test actually waiting on it.
+  // ---------------------------------------------------------------------
+
+  describe('pickup polling', () => {
+    const DROP_TTL_MS = 10 * 60 * 1000 // mirrors dropStore.ts's TTL_MS
+
+    beforeEach(() => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('HEAD-polls /drop/<token> every 2s once ready — never GET, which would consume the drop', async () => {
+      mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (init?.method === 'PUT') return new Response(JSON.stringify({ token: sampleToken }), { status: 200 })
+        if (init?.method === 'HEAD') return new Response(null, { status: 200 })
+        throw new Error(`unexpected fetch: ${init?.method ?? 'GET'} ${url}`)
+      })
+      render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+      await screen.findByLabelText(/handoff url/i)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000)
+      })
+      expect(mockFetch).toHaveBeenCalledWith(`https://share.hew3d.com/drop/${sampleToken}`, {
+        method: 'HEAD',
+      })
+      // Still showing the QR — a 200 means "still there", not pickup.
+      expect(screen.getByLabelText(/handoff url/i)).toBeInTheDocument()
+    })
+
+    it('shows a success confirmation and auto-closes when a poll 404s before the TTL (pickup)', async () => {
+      let headCalls = 0
+      mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (init?.method === 'PUT') return new Response(JSON.stringify({ token: sampleToken }), { status: 200 })
+        if (init?.method === 'HEAD') {
+          headCalls += 1
+          // First tick: still there. Second tick: gone (picked up).
+          return new Response(null, { status: headCalls === 1 ? 200 : 404 })
+        }
+        if (init?.method === 'DELETE') return new Response(null, { status: 204 })
+        throw new Error(`unexpected fetch: ${init?.method ?? 'GET'} ${url}`)
+      })
+      const onClose = vi.fn()
+      render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
+      await screen.findByLabelText(/handoff url/i)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000) // 200 — still polling
+      })
+      expect(screen.getByLabelText(/handoff url/i)).toBeInTheDocument()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000) // 404 — picked up
+      })
+      expect(screen.getByText(/opened on your phone/i)).toBeInTheDocument()
+      expect(screen.queryByLabelText(/handoff url/i)).not.toBeInTheDocument()
+      expect(onClose).not.toHaveBeenCalled()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1500) // the auto-dismiss delay
+      })
+      expect(onClose).toHaveBeenCalledOnce()
+
+      // Polling itself has stopped — no further HEAD calls once picked up.
+      const headCallsAtClose = mockFetch.mock.calls.filter(
+        (c) => (c[1] as RequestInit | undefined)?.method === 'HEAD',
+      ).length
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(4000)
+      })
+      expect(
+        mockFetch.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method === 'HEAD').length,
+      ).toBe(headCallsAtClose)
+    })
+
+    it('leaves the QR up (no phantom pickup) when the FIRST poll 404s — a relay without the HEAD peek route', async () => {
+      // Regression: a deployed relay that predates the HEAD peek answers 404
+      // to every HEAD. The desktop just created this drop, so a first-look
+      // 404 cannot be a real pickup — it must NOT falsely close a valid QR
+      // (the phantom "Opened on your phone" a stale deploy produced).
+      mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (init?.method === 'PUT') return new Response(JSON.stringify({ token: sampleToken }), { status: 200 })
+        if (init?.method === 'HEAD') return new Response(null, { status: 404 }) // stale worker: no HEAD route
+        if (init?.method === 'DELETE') return new Response(null, { status: 204 })
+        throw new Error(`unexpected fetch: ${init?.method ?? 'GET'} ${url}`)
+      })
+      const onClose = vi.fn()
+      render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
+      await screen.findByLabelText(/handoff url/i)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000) // several poll ticks, all 404
+      })
+      // The QR stays; no phantom success, no expiry, no auto-close.
+      expect(screen.getByLabelText(/handoff url/i)).toBeInTheDocument()
+      expect(screen.queryByText(/opened on your phone/i)).not.toBeInTheDocument()
+      expect(screen.queryByText(/expired/i)).not.toBeInTheDocument()
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
+    it('shows an expired message (no auto-close) when the 404 arrives at/after the TTL', async () => {
+      const start = Date.now()
+      mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (init?.method === 'PUT') return new Response(JSON.stringify({ token: sampleToken }), { status: 200 })
+        if (init?.method === 'HEAD') {
+          const elapsed = Date.now() - start
+          return new Response(null, { status: elapsed >= DROP_TTL_MS ? 404 : 200 })
+        }
+        if (init?.method === 'DELETE') return new Response(null, { status: 204 })
+        throw new Error(`unexpected fetch: ${init?.method ?? 'GET'} ${url}`)
+      })
+      const onClose = vi.fn()
+      render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
+      await screen.findByLabelText(/handoff url/i)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(DROP_TTL_MS + 2000)
+      })
+      expect(screen.getByText(/expired.*reopen to try again/i)).toBeInTheDocument()
+
+      // Unlike a pickup, expiry never auto-dismisses.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000)
+      })
+      expect(onClose).not.toHaveBeenCalled()
+    }, 20_000)
+
+    it('keeps polling through a network error mid-poll instead of closing or erroring', async () => {
+      let headCalls = 0
+      mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+        if (init?.method === 'PUT') return new Response(JSON.stringify({ token: sampleToken }), { status: 200 })
+        if (init?.method === 'HEAD') {
+          headCalls += 1
+          if (headCalls === 1) throw new TypeError('network unreachable') // a missed tick
+          return new Response(null, { status: headCalls === 2 ? 200 : 404 })
+        }
+        if (init?.method === 'DELETE') return new Response(null, { status: 204 })
+        throw new Error(`unexpected fetch: ${init?.method ?? 'GET'} ${url}`)
+      })
+      const onClose = vi.fn()
+      render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
+      await screen.findByLabelText(/handoff url/i)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000) // transport error — skipped tick
+      })
+      // Still up, not closed and not showing an error — the QR stays valid.
+      expect(screen.getByLabelText(/handoff url/i)).toBeInTheDocument()
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+      expect(onClose).not.toHaveBeenCalled()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000) // 200 — still there
+      })
+      expect(screen.getByLabelText(/handoff url/i)).toBeInTheDocument()
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000) // 404 — picked up
+      })
+      expect(screen.getByText(/opened on your phone/i)).toBeInTheDocument()
+    })
   })
 })

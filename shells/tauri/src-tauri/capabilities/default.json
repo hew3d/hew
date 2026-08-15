@@ -18,6 +18,10 @@
     "core:window:allow-set-decorations",
     "dialog:default",
     "opener:allow-open-url",
-    "opener:allow-default-urls"
+    "opener:allow-default-urls",
+    {
+      "identifier": "http:default",
+      "allow": [{ "url": "https://share.hew3d.com/*" }]
+    }
   ]
 }

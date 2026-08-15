@@ -296,3 +296,98 @@ describe('SnapService — ApertureBasis (projection-aware aperture, camera.md §
     expect(wide).toBeCloseTo(5 * tight, 12)
   })
 })
+
+// Shop-mode playtest finding 5.
+describe('SnapService — clearHold (finding 5a: discrete-tap hysteresis)', () => {
+  it('drops a held sticky snap — the next miss releases in ONE query instead of resist-releasing in two', () => {
+    const held = {
+      x: () => 1, y: () => 2, z: () => 3,
+      kind: () => 'endpoint',
+      direction: () => undefined,
+      object: () => undefined,
+      instance: () => undefined,
+      element: () => 7n,
+      element_kind: () => 'vertex',
+      sketch: () => undefined,
+      sketch_region: () => undefined,
+      sketch_curve: () => undefined,
+      free: () => {},
+    }
+    let hit = true
+    const snapFn = vi.fn(() => (hit ? held : undefined))
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+
+    // Acquire the sticky endpoint.
+    expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.kind).toBe('endpoint')
+
+    // Control (mirrors the precision-mode test above): with the hold
+    // intact, losing it costs TWO queries — acquire, then the wider
+    // resist-release query.
+    hit = false
+    snapFn.mockClear()
+    expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.kind).toBe('ground')
+    expect(snapFn.mock.calls.length).toBe(2)
+
+    // Re-acquire, then clear the hold explicitly — the next miss has
+    // nothing left to resist-release, so only the acquire query runs.
+    hit = true
+    svc.resolve(DOWN, 800, PERSPECTIVE_45)
+    svc.clearHold()
+    hit = false
+    snapFn.mockClear()
+    expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.kind).toBe('ground')
+    expect(snapFn.mock.calls.length).toBe(1)
+  })
+
+  it('is safe to call with no held snap at all (idle taps, or two in a row)', () => {
+    const svc = new SnapService({ snap: vi.fn(() => undefined) } as unknown as Scene)
+    expect(() => {
+      svc.clearHold()
+      svc.clearHold()
+    }).not.toThrow()
+  })
+})
+
+describe('SnapService — apertureScaleOverride (finding 5b: tap-inspect vs. coarse-pointer widening)', () => {
+  const held = {
+    x: () => 1, y: () => 2, z: () => 3,
+    kind: () => 'endpoint',
+    direction: () => undefined,
+    object: () => undefined,
+    instance: () => undefined,
+    element: () => 7n,
+    element_kind: () => 'vertex',
+    sketch: () => undefined,
+    sketch_region: () => undefined,
+    sketch_curve: () => undefined,
+    free: () => {},
+  }
+
+  it('omitted (every caller but dispatchSelectPick under readOnly): the acquire aperture is UNCHANGED', () => {
+    const snapFn = vi.fn((..._args: unknown[]) => held)
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+    svc.resolve(DOWN, 800, PERSPECTIVE_45)
+    const aperture = snapFn.mock.calls[0][6] as number
+    expect(aperture).toBeCloseTo(pixelRadiusToAperture(SNAP_RADIUS_PX, 800, 45), 12)
+  })
+
+  it('an explicit override of 1 sends the UNSCALED (mouse-tuned) radius regardless of the platform\'s own coarse-pointer scale', () => {
+    const snapFn = vi.fn((..._args: unknown[]) => held)
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+    // Passed positionally as the 8th argument (after offPlanePoints) —
+    // dispatchSelectPick's own call site.
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, 1)
+    const aperture = snapFn.mock.calls[0][6] as number
+    // Exactly the SNAP_RADIUS_PX-derived aperture — no COARSE_POINTER_APERTURE_SCALE
+    // multiplier applied, whatever isCoarsePointer() would otherwise report.
+    expect(aperture).toBeCloseTo(pixelRadiusToAperture(SNAP_RADIUS_PX, 800, 45), 12)
+  })
+
+  it('a wider explicit override scales the aperture proportionally, same as the coarse-pointer path would', () => {
+    const snapFn = vi.fn((..._args: unknown[]) => held)
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, 3)
+    const aperture = snapFn.mock.calls[0][6] as number
+    expect(aperture).toBeCloseTo(pixelRadiusToAperture(SNAP_RADIUS_PX * 3, 800, 45), 12)
+  })
+})

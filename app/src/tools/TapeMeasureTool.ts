@@ -298,6 +298,23 @@ export type OnRescaleArmed = (info: RescaleConfirmInfo) => void
  *  must NOT apply that camera/grid companion scaling in that case. */
 export type OnRescaleApplied = (factor: number, scoped: boolean) => void
 
+/**
+ * Fired at the two moments a gesture FIXES a world point (shop-mode
+ * playtest finding 3) — never on a live pointer-move preview, only on an
+ * actual click/tap: `[p0]` the instant a new gesture starts (idle →
+ * `parallel`/`measure`, the tapped/clicked anchor — the edge point for a
+ * parallel guide, the picked point for a measure), then `[p0, p1]` the
+ * instant it commits (the tool then resets to idle internally, but this
+ * callback's own last value is left standing for the caller to keep
+ * showing — see `_notifyGesturePoints`'s doc). Optional and additive: the
+ * editor never subscribes, so this changes nothing there. Shop Mode's own
+ * touch flow has no continuous hover to drive a cursor-following rubber
+ * band the way a mouse does, so it renders persistent world-anchored
+ * markers at these two points instead (reprojected via
+ * `ViewportApi.worldToScreen` on camera moves, like the gesture-hint dot).
+ */
+export type OnGesturePoint = (points: readonly [number, number, number][]) => void
+
 /** Toast shown when a session is open and the scoped-rescale arm gate
  *  (finding 6, group-session.md) declines because one of the two measured
  *  endpoints lies outside it — points the user at what actually resizes. */
@@ -531,7 +548,8 @@ export class TapeMeasureTool implements Tool {
     // which stays highest precedence (unchanged from before this WP; see
     // the `parallel` case).
     const suppressSuffix =
-      (this.stage.kind === 'parallel' || this.stage.kind === 'measure') && !this.createGuides
+      (this.stage.kind === 'parallel' || this.stage.kind === 'measure') &&
+      (!this.createGuides || this._measureOnly)
         ? ' — measuring only, no guide will be created.'
         : ''
 
@@ -680,6 +698,35 @@ export class TapeMeasureTool implements Tool {
    *  `true` by `_resetToIdle()`. */
   private createGuides = true
 
+  /**
+   * Permanent measure-only mode (shop-mode playtest finding 2, CRITICAL) —
+   * unlike `createGuides` (the transient Ctrl/Cmd suppression above, reset
+   * to `true` by every `_resetToIdle()`), this is set ONCE at construction
+   * and never changes: Shop Mode is read-only end to end (module doc), and
+   * the editor never passes it, so this field is always `false` there.
+   * Gates the same two `add_guide_line`/`add_guide_point` kernel call sites
+   * `createGuides` gates (`_commitParallelGuide`/`_commitMeasure`) with an
+   * additional `&& !this._measureOnly` — the readout/preview above each of
+   * those calls is UNCHANGED either way, so measuring still works and still
+   * shows a distance; only the kernel commit itself is skipped. Gating the
+   * commit rather than, say, forcing `createGuides` permanently `false`
+   * keeps this independent of the Ctrl/Cmd toggle's own bookkeeping
+   * (`createGuidesAtArm`, the `_resetToIdle` reset) — no risk of one
+   * mechanism's reset silently re-enabling the other's suppression. */
+  private readonly _measureOnly: boolean
+
+  /** See `OnGesturePoint`'s doc — optional, defaults to a no-op so every
+   *  editor call site (which never passes it) is unaffected. */
+  private readonly onGesturePoint: OnGesturePoint
+
+  /** Funnels every `OnGesturePoint` firing through one place, mirroring
+   *  `_pushReadout`'s own single-point-of-truth pattern. `points` is a
+   *  fresh array each call (the caller may hold onto it — e.g. React state
+   *  — without this class ever mutating it later). */
+  private _notifyGesturePoints(points: readonly [number, number, number][]): void {
+    this.onGesturePoint(points)
+  }
+
   /** True when the ACTIVE stage's lock (`offsetLock` in `parallel`,
    *  `lockAxis` in `measure`) was set by a Shift latch (`_tryShiftLatch`)
    *  rather than an explicit arrow key (WP-7 item 2) — governs both
@@ -731,6 +778,24 @@ export class TapeMeasureTool implements Tool {
     dist: number
   } | null = null
 
+  /** The last COMPLETED two-click measurement's endpoints, kept so Shop
+   *  Mode's touch flow can re-place either one (`getMovableEndpoints`/
+   *  `beginMoveEndpoint`, shop-mode playtest finding: "move a tape point").
+   *  Distinct from `_recall`, which exists only for the typed-rescale path
+   *  and is gated on rescale ELIGIBILITY — this is simply the two points
+   *  currently drawn as persistent markers, always recorded on commit
+   *  regardless of eligibility. Set by `onPointerDown`'s measure commit,
+   *  cleared the instant any new gesture starts (`onPointerDown` idle,
+   *  `beginMoveEndpoint`) or the measurement is abandoned (`cancel`). */
+  private _lastCommitted: {
+    p0: [number, number, number]
+    p0OnGeometry: boolean
+    p0Attribution: GeometryAttribution
+    p1: [number, number, number]
+    p1OnGeometry: boolean
+    p1Attribution: GeometryAttribution
+  } | null = null
+
   /** The open session's live object/instance/sketch scope (finding 6,
    *  group-session.md), or `null` while no session is open — see
    *  `SessionScopeIds`'s doc. Pushed by the Viewport via `setSessionScope`;
@@ -768,6 +833,10 @@ export class TapeMeasureTool implements Tool {
     onMeasurement: OnMeasurement = () => { /* no-op */ },
     onRescaleArmed: OnRescaleArmed = () => { /* no-op */ },
     onRescaleApplied: OnRescaleApplied = () => { /* no-op */ },
+    /** See `_measureOnly`'s doc — defaults `false` (every editor call site;
+     *  the Viewport only ever passes `true` under its own `readOnly` prop). */
+    measureOnly = false,
+    onGesturePoint: OnGesturePoint = () => { /* no-op */ },
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
@@ -776,6 +845,8 @@ export class TapeMeasureTool implements Tool {
     this.onMeasurementCb = onMeasurement
     this.onRescaleArmed = onRescaleArmed
     this.onRescaleApplied = onRescaleApplied
+    this._measureOnly = measureOnly
+    this.onGesturePoint = onGesturePoint
   }
 
   // ── Optional Tool interface extensions ─────────────────────────────────
@@ -1002,12 +1073,19 @@ export class TapeMeasureTool implements Tool {
       // recalled (tape-measure-rework part 2) — the old measurement's world
       // points are about to be superseded as "the last thing measured".
       this._recall = null
+      this._lastCommitted = null
 
       // Freeze the gesture's plane (design §6 bullet 2), BEFORE branching
       // into parallel/measure mode, so it constrains snapping for either.
       this._gesturePlane = this._resolveGesturePlane(ray, [snap.x, snap.y, snap.z])
 
-      const edge = this._tryResolveEdge(snap)
+      // Shop-mode playtest (parts-only Tape): measure-only mode never creates
+      // a guide, so PARALLEL-guide mode — an edge tap starting a sideways
+      // offset drag instead of a measurement — is pure confusion in a
+      // read-only inspector. Force straight point-to-point measure there: an
+      // edge/axis/guide tap measures FROM the picked point like any other.
+      // The editor (`_measureOnly` false) keeps SketchUp's full parallel mode.
+      const edge = this._measureOnly ? null : this._tryResolveEdge(snap)
       if (edge !== null) {
         const { edgePoint, edgeDir } = edge
         // WP-4: a frozen `_gesturePlane` that disagrees with the picked edge
@@ -1029,6 +1107,7 @@ export class TapeMeasureTool implements Tool {
           lastCursor: edgePoint,
         }
         this._updateParallelOrigin(edgePoint)
+        this._notifyGesturePoints([edgePoint])
         return
       }
 
@@ -1045,6 +1124,7 @@ export class TapeMeasureTool implements Tool {
         p1: p0, onGeometry: p0OnGeometry, p1Attribution: p0Attribution,
       }
       this._updatePreviewLine()
+      this._notifyGesturePoints([p0])
       return
     }
 
@@ -1060,15 +1140,20 @@ export class TapeMeasureTool implements Tool {
       // purely about WHERE the endpoint lands, not what it commits as — and
       // it's the SAME method `onPointerMove`'s preview just called, so a
       // click always commits to exactly the point the preview was showing.
+      const { p0, p0OnGeometry, p0Attribution } = this.stage
       const p1 = this._measurePoint(snap, ray)
+      const p1OnGeometry = snapOnGeometry(snap)
+      const p1Attribution = attributionOf(snap)
       // A real second click (not a typed distance — `_commitFromTyped` never
       // calls this) — remember it for the retroactive-rescale recall
       // (tape-measure-rework part 2) before committing.
-      this._rememberMeasurement(
-        this.stage.p0, this.stage.p0OnGeometry, this.stage.p0Attribution,
-        p1, snapOnGeometry(snap), attributionOf(snap),
-      )
-      this._commitMeasure(this.stage.p0, p1, snapOnGeometry(snap))
+      this._rememberMeasurement(p0, p0OnGeometry, p0Attribution, p1, p1OnGeometry, p1Attribution)
+      this._commitMeasure(p0, p1, p1OnGeometry)
+      // Shop-mode playtest ("move a tape point"): keep the committed endpoints
+      // (with each end's on-geometry/attribution) so a HELD grab on either
+      // marker can re-place it from the other — captured AFTER `_commitMeasure`
+      // has reset the stage, since these locals outlive it.
+      this._lastCommitted = { p0, p0OnGeometry, p0Attribution, p1, p1OnGeometry, p1Attribution }
     }
   }
 
@@ -1251,7 +1336,76 @@ export class TapeMeasureTool implements Tool {
   cancel(): void {
     this.idlePlaneLock = null
     this._recall = null
+    this._lastCommitted = null
     this._resetToIdle('clear')
+    // Shop-mode adversarial review finding 3: `cancel()` (an explicit Esc,
+    // or `onDocumentReset()` below on a doc swap) previously left the last
+    // `OnGesturePoint` firing's markers on screen — nothing committed, so
+    // nothing should still be pointing at fixed world coordinates that may
+    // no longer mean anything (a swapped document reuses dense ids for
+    // unrelated geometry). `_commitParallelGuide`/`_commitMeasure` do NOT
+    // get this treatment: they notify their own final `[p0, p1]` BEFORE
+    // calling `_resetToIdle('freeze')`, and those markers are meant to
+    // persist alongside the frozen readout until the tool switches away
+    // (tape-measure-rework part 1) — only a genuine abort clears them.
+    this._notifyGesturePoints([])
+  }
+
+  /** Shop-mode playtest ("move a tape point"): the two endpoints of the last
+   *  COMPLETED measurement — the persistent markers currently on screen —
+   *  or `null` when idle with nothing committed (or mid-gesture). The
+   *  Viewport projects these to screen to decide whether a HELD press landed
+   *  on one, then calls `beginMoveEndpoint` to grab it. Order matches the
+   *  markers: index 0 is `p0`, index 1 is `p1`. */
+  getMovableEndpoints(): { points: readonly (readonly [number, number, number])[] } | null {
+    // In-progress: the single placed point (p0) can be grabbed to RELOCATE it
+    // before the second point is placed — a hold on the just-placed point
+    // must move it, not drop the second point (shop-mode playtest).
+    if (this.stage.kind === 'measure') return { points: [this.stage.p0] }
+    // Completed: either endpoint of the last measurement can be re-placed.
+    if (this.stage.kind === 'idle' && this._lastCommitted !== null) {
+      return { points: [this._lastCommitted.p0, this._lastCommitted.p1] }
+    }
+    return null
+  }
+
+  /** Shop-mode playtest ("move a tape point"): re-place endpoint `grabbed`
+   *  (0 = `p0`, 1 = `p1`) of the last committed measurement. Seeds a fresh
+   *  measure gesture anchored at the OTHER (fixed) endpoint — carrying that
+   *  end's own on-geometry/attribution forward untouched — so the loupe's
+   *  subsequent drag positions the grabbed endpoint and the release commits a
+   *  new measurement between the fixed point and wherever the grab landed.
+   *  Mirrors `onPointerDown`'s idle→measure branch, minus the pick (the
+   *  anchor is a stored point, not a fresh snap); no plane is frozen, since
+   *  Shop Mode's parts-only measure never needs one. No-op unless there is a
+   *  committed measurement to move. */
+  beginMoveEndpoint(grabbed: 0 | 1): void {
+    // In-progress single point (only index 0 exists): there is no other
+    // endpoint to re-measure from, so relocate it by clearing back to idle —
+    // the loupe's release then re-places p0 fresh at the new spot, instead of
+    // treating the grab as the SECOND click of a measurement (shop-mode
+    // playtest: a hold on the just-placed point dropped a second point).
+    if (this.stage.kind === 'measure') {
+      this.cancel()
+      return
+    }
+    const lc = this._lastCommitted
+    if (this.stage.kind !== 'idle' || lc === null) return
+    const fixed = grabbed === 0
+      ? { p: lc.p1, onGeometry: lc.p1OnGeometry, attribution: lc.p1Attribution }
+      : { p: lc.p0, onGeometry: lc.p0OnGeometry, attribution: lc.p0Attribution }
+    this._recall = null
+    this._lastCommitted = null
+    this._gesturePlane = null
+    this.lockAxis = null
+    this._snapProjected = false
+    this.stage = {
+      kind: 'measure',
+      p0: fixed.p, p0OnGeometry: fixed.onGeometry, p0Attribution: fixed.attribution,
+      p1: fixed.p, onGeometry: fixed.onGeometry, p1Attribution: fixed.attribution,
+    }
+    this._updatePreviewLine()
+    this._notifyGesturePoints([fixed.p])
   }
 
   /** The document changed under an idle recall (undo/redo/explicit delete):
@@ -1723,10 +1877,17 @@ export class TapeMeasureTool implements Tool {
   }
 
   private _commitParallelGuide(origin: [number, number, number], dir: [number, number, number]): void {
+    // Shop-mode playtest finding 3: the two fixed points of this gesture —
+    // the tapped edge point, then the committed offset origin — regardless
+    // of whether a guide actually gets created below (`_measureOnly`
+    // suppresses the commit, never the UI). Read BEFORE `_resetToIdle()`
+    // (this function's own last line) clears `this.stage`.
+    if (this.stage.kind === 'parallel') this._notifyGesturePoints([this.stage.edgePoint, origin])
     // WP-7 item 1: Ctrl/Cmd's measure-only mode skips the guide entirely —
     // there is nothing else this commit does besides create it, so a
-    // suppressed commit is just a return to idle.
-    if (this.createGuides) {
+    // suppressed commit is just a return to idle. `_measureOnly` (shop-mode
+    // playtest finding 2) is the SAME gate, permanently on.
+    if (this.createGuides && !this._measureOnly) {
       try {
         this.wasmScene.add_guide_line(origin[0], origin[1], origin[2], dir[0], dir[1], dir[2])
         this.onGuideCreated()
@@ -1755,11 +1916,14 @@ export class TapeMeasureTool implements Tool {
     p1: [number, number, number],
     onGeometry: boolean,
   ): void {
+    // Shop-mode playtest finding 3: the two fixed points of this gesture,
+    // regardless of whether a guide actually gets created below.
+    this._notifyGesturePoints([p0, p1])
     const dx = p1[0] - p0[0], dy = p1[1] - p0[1], dz = p1[2] - p0[2]
     const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
     this._pushReadout(formatLength(dist), false)
 
-    if (!onGeometry && this.createGuides) {
+    if (!onGeometry && this.createGuides && !this._measureOnly) {
       try {
         if (dist > 1e-9) {
           this.wasmScene.add_guide_line(p0[0], p0[1], p0[2], dx / dist, dy / dist, dz / dist)

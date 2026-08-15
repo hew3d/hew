@@ -1,6 +1,6 @@
 ---
 title: "Import and export"
-description: "Hew reads SketchUp, COLLADA, glTF, and STL, and writes manifold STL and 3MF for printing plus glTF for everything else."
+description: "Hew reads SketchUp, COLLADA, glTF, and STL, and writes manifold STL and 3MF for printing, glTF for everything else, and USDZ for AR."
 order: 18
 ---
 
@@ -12,6 +12,7 @@ order: 18
 | SketchUp (`.skp`, 2017 format) | ✓ | — |
 | STL (`.stl`) | ✓ | ✓ |
 | 3MF (`.3mf`) | — | ✓ |
+| USDZ (`.usdz`) | — | ✓ |
 
 ## Importing
 
@@ -63,6 +64,12 @@ The export is **gated on solidity**. If any object is leaky, Hew shows *Export S
 
 A single `.glb` file in the industry-standard format: **meters, Y-up**, with your object hierarchy, per-instance transforms, names, colors, and embedded textures. Use it for Blender, game engines, web viewers, or any modern 3D pipeline; the round trip through Blender is tested for fidelity. Only solid geometry exports; sketches and guides stay home.
 
+### USDZ — for AR Quick Look and USD pipelines
+
+A single `.usdz` file — **meters, Y-up**, one named part per object or component instance, with face colors carried over as materials. This is the format iOS understands natively: AirDrop it, attach it to a Message, or open it from Files, and it launches straight into AR Quick Look, dropped into the room in front of you at true scale, no app required. It also opens in any USD-aware tool (Pixar's usdview, Blender's USD importer, Apple's Reality Composer). Textured materials export as their tint color rather than the image itself.
+
+On an iPhone or iPad, [Shop Mode](/learn/hew-on-your-phone/#view-in-ar-ios-only) skips this dialog entirely — a **View in AR** button exports and launches Quick Look directly from the model open in your hand.
+
 ### What about STEP or `.skp` export?
 
-STEP/IGES interchange and `.skp` export are planned further out. For today: STL or 3MF to print, glTF to interchange, `.hew` to keep working.
+STEP/IGES interchange and `.skp` export are planned further out. For today: STL or 3MF to print, glTF to interchange, USDZ for AR, `.hew` to keep working.

@@ -2158,3 +2158,108 @@ describe('SceneRenderer — section widget coverage (D1, section-plane-polish)',
     )
   })
 })
+
+describe('SceneRenderer — isolate fade (setHiddenFaded/tickFades, Shop Mode)', () => {
+  it('fades an object out over the given duration, then hides it and resets opacity to 1', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+
+    // Pin `performance.now()` for the ARM call only, so the tween's
+    // internal `startMs` is exactly `t0` — `tickFades` below takes an
+    // explicit timestamp, so nothing else needs mocking.
+    const t0 = 1_000
+    const nowSpy = vi.spyOn(performance, 'now').mockReturnValue(t0)
+    renderer.setHiddenFaded([1n], [], 240)
+    nowSpy.mockRestore()
+    // Still visible mid-fade — only opacity should have moved, not the
+    // group's own visibility (that flips only once the tween completes).
+    expect(renderer.objectsGroup.getObjectByName('Object_1')?.visible).toBe(true)
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').opacity).toBe(1)
+
+    expect(renderer.tickFades(t0 + 60)).toBe(true)
+    const midOpacity = facesMaterial(renderer.objectsGroup, 'Object_1').opacity
+    expect(midOpacity).toBeGreaterThan(0)
+    expect(midOpacity).toBeLessThan(1)
+    expect(renderer.objectsGroup.getObjectByName('Object_1')?.visible).toBe(true)
+
+    expect(renderer.tickFades(t0 + 240)).toBe(false)
+    expect(renderer.objectsGroup.getObjectByName('Object_1')?.visible).toBe(false)
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').opacity).toBe(1)
+  })
+
+  it('fades an object back in symmetrically on un-isolate, unhiding immediately and animating opacity up', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setHidden([1n], []) // starts hidden, instant
+    expect(renderer.objectsGroup.getObjectByName('Object_1')?.visible).toBe(false)
+
+    const t0 = 2_000
+    const nowSpy = vi.spyOn(performance, 'now').mockReturnValue(t0)
+    renderer.setHiddenFaded([], [], 240)
+    nowSpy.mockRestore()
+    expect(renderer.objectsGroup.getObjectByName('Object_1')?.visible).toBe(true)
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').opacity).toBe(0)
+
+    renderer.tickFades(t0 + 120)
+    const midOpacity = facesMaterial(renderer.objectsGroup, 'Object_1').opacity
+    expect(midOpacity).toBeGreaterThan(0)
+    expect(midOpacity).toBeLessThan(1)
+
+    expect(renderer.tickFades(t0 + 240)).toBe(false)
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').opacity).toBe(1)
+    expect(renderer.objectsGroup.getObjectByName('Object_1')?.visible).toBe(true)
+  })
+
+  it('falls back to the plain instant setHidden when fadeMs is not positive', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+
+    renderer.setHiddenFaded([1n], [], 0)
+
+    expect(renderer.objectsGroup.getObjectByName('Object_1')?.visible).toBe(false)
+    expect(renderer.tickFades(performance.now())).toBe(false)
+  })
+
+  it('a still-batched (un-materialized) instance hides instantly via slot degeneration, never animated — it shares its InstancedMesh material with its batch-mates', () => {
+    const scene = makeScene({
+      instances: {
+        '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } },
+        '11': { def: 100n, pose: [1, 0, 0, 2, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+      },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    const batch = instancedBatches(renderer.instancesGroup)[0]
+
+    renderer.setHiddenFaded([], [10n], 240)
+
+    expect(materializedGroups(renderer.instancesGroup)).toHaveLength(0)
+    expect(slotMatrices(batch).filter(isDegenerate)).toHaveLength(1)
+    // No tween was armed for it — nothing left in flight for tickFades to
+    // advance next frame.
+    expect(renderer.tickFades(performance.now())).toBe(false)
+  })
+
+  it('respects prefers-reduced-motion by falling back to the instant path', () => {
+    const originalWindow = (globalThis as { window?: unknown }).window
+    ;(globalThis as unknown as { window: { matchMedia: (q: string) => { matches: boolean } } }).window = {
+      matchMedia: (query: string) => ({ matches: query === '(prefers-reduced-motion: reduce)' }),
+    }
+    try {
+      const scene = makeScene({ objects: { '1': true } })
+      const renderer = new SceneRenderer(new THREE.Scene(), scene)
+      renderer.refresh()
+
+      renderer.setHiddenFaded([1n], [], 240)
+
+      expect(renderer.objectsGroup.getObjectByName('Object_1')?.visible).toBe(false)
+      expect(renderer.tickFades(performance.now())).toBe(false)
+    } finally {
+      if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window
+      else (globalThis as unknown as { window: unknown }).window = originalWindow
+    }
+  })
+})
