@@ -387,6 +387,11 @@ below.
   cavity. Objects are named from the file (`bunny.stl` → "bunny", "bunny (2)",
   …). STL carries no unit information, so the UI prompts once per import
   (millimeters default, the maker convention)
+- USDZ export for AR Quick Look — an uncompressed USD zip (`model.usda`),
+  Y-up in meters, one mesh per part with `UsdPreviewSurface` materials,
+  validated against Apple's ARKit profile so it opens straight into iOS AR
+  Quick Look; gated on solids the same way STL and 3MF are, and reachable
+  from `hew.doc.export` everywhere (wasm API, scripting registry, CLI)
 
 | Format | Import | Export |
 |---|---|---|
@@ -396,6 +401,7 @@ below.
 | SketchUp (`.skp`, 2017 format) | yes | — |
 | STL | yes | yes |
 | 3MF | — | yes |
+| USDZ | — | yes |
 
 ### Application shell & UX
 
@@ -437,6 +443,16 @@ below.
   untouched "Untitled" document, so an in-progress model is never silently
   replaced; the Window menu lists every open document window, with a
   checkmark on the current one, to switch between them
+- Shop Mode — a read-only, touch-first phone viewer (auto-selected on a
+  phone, or via an explicit override) for referencing a model in the
+  workshop: tap a part for its size, a live parts cutlist, a Tape Measure
+  with a magnifier loupe, hold-a-face to isolate a part, standard camera
+  views, offline recents with thumbnails, and View in AR on iOS. A model
+  reaches the phone via the Files app or "Open on Phone" from the desktop —
+  an end-to-end-encrypted QR handoff through a zero-knowledge relay (the
+  desktop encrypts in the browser; the decryption key rides in the QR
+  fragment and never reaches the server), picked up by an in-app camera
+  scanner
 
 ### Reliability & diagnostics
 
