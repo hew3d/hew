@@ -2,7 +2,12 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for the Hew desktop app.",
-  "windows": ["main", "main-*", "settings", "library"],
+  "windows": [
+    "main",
+    "main-*",
+    "settings",
+    "library"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-close",
@@ -18,10 +23,6 @@
     "core:window:allow-set-decorations",
     "dialog:default",
     "opener:allow-open-url",
-    "opener:allow-default-urls",
-    {
-      "identifier": "http:default",
-      "allow": [{ "url": "https://share.hew3d.com/*" }]
-    }
+    "opener:allow-default-urls"
   ]
 }

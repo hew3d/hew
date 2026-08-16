@@ -6,12 +6,13 @@
  * StlUnitsDialog, and the "Open on Phone…" handoff dialog PhoneShareDialog.
  * None of these touch WASM or three.js, so no mocks beyond callbacks are
  * needed — except PhoneShareDialog, which calls through
- * `@tauri-apps/api/core`'s `invoke` directly (for `qr_svg`) and uploads/
- * invalidates its encrypted drop via the dynamically-imported
- * `@tauri-apps/plugin-http`'s `fetch` (native HTTP, not the browser's —
- * see that module's doc comment for why); both are mocked for its describe
- * block only, per the `mockInvoke`/`mockFetch` helpers just below the
- * imports.
+ * `@tauri-apps/api/core`'s `invoke` for everything it does against the
+ * shell: `qr_svg`, and the four Rust relay commands (`relay_identity`,
+ * `relay_put`, `relay_peek`, `relay_delete` — `io/relayClient.ts`) that
+ * replaced the old `@tauri-apps/plugin-http` fetches. `invoke` is mocked
+ * once for the whole file (`mockInvoke` below) and routed by command name
+ * per test; the server setting (`settings/server.ts`) is mocked so a test
+ * can pick cloud or self-hosted without a Rust backend.
  *
  * FloatingPanel's tests lived here too until deleted that component
  * (replaced by the permanently docked tray, `TraySection.tsx` — see its own
@@ -34,15 +35,28 @@ import type { ImportReport } from '../io/fileHost'
 
 // PhoneShareDialog's external dependencies — hoisted so the vi.mock
 // factories below (themselves hoisted above these imports by Vitest) can
-// reference mockInvoke/mockFetch without a "used before initialization"
-// error. PhoneShareDialog imports `@tauri-apps/plugin-http` dynamically
-// (`await import(...)`, for web-bundle hygiene — see its module doc), but
-// vi.mock intercepts dynamic imports of a mocked specifier exactly like
-// static ones, so mocking it here still reaches that call.
+// reference them without a "used before initialization" error. The relay
+// client imports `@tauri-apps/api/core` dynamically (`await import(...)`,
+// for web-bundle hygiene), but vi.mock intercepts dynamic imports of a
+// mocked specifier exactly like static ones, so mocking it here still
+// reaches those calls. `mockServerSetting` is what `getServerSetting()`
+// resolves to (the real `effectiveOrigin` stays in play).
 const mockInvoke = vi.hoisted(() => vi.fn())
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }))
-const mockFetch = vi.hoisted(() => vi.fn())
-vi.mock('@tauri-apps/plugin-http', () => ({ fetch: mockFetch }))
+const mockServerSetting = vi.hoisted(() => ({
+  current: { mode: 'cloud', origin: 'https://app.hew3d.com', uploadKey: '' } as {
+    mode: 'cloud' | 'self-hosted'
+    origin: string
+    uploadKey: string
+  },
+}))
+vi.mock('../settings/server', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../settings/server')>()
+  return {
+    ...actual,
+    getServerSetting: () => Promise.resolve(mockServerSetting.current),
+  }
+})
 
 /**
  * Every dialog's Escape handler must `stopPropagation()` alongside its
@@ -708,72 +722,125 @@ describe('ExportDialog', () => {
 
 // ---------------------------------------------------------------------------
 // PhoneShareDialog (File ▸ Open on Phone…, docs/design/shop-mode.md §4,
-// workers/share-relay/README.md) — encrypts+uploads on mount via `fetch`,
-// renders the QR `qr_svg` (mocked `invoke`) returns, and best-effort
-// invalidates the drop with a DELETE on unmount.
+// workers/share-relay/README.md) — asks the relay who it is, encrypts +
+// uploads on mount via the Rust relay commands, renders the QR `qr_svg`
+// (mocked `invoke`) returns, and best-effort invalidates the drop on unmount.
 // ---------------------------------------------------------------------------
 
 describe('PhoneShareDialog', () => {
   const sampleDoc = { bytes: new Uint8Array([1, 2, 3]), name: 'Bench.hew' }
   const sampleToken = 'a'.repeat(22)
   const sampleQrSvg = '<svg>qr</svg>'
+  const CLOUD = { mode: 'cloud' as const, origin: 'https://app.hew3d.com', uploadKey: '' }
+  const SELF = { mode: 'self-hosted' as const, origin: 'https://hew.example.org', uploadKey: 'k' }
+  const identity = (over: Partial<Record<string, unknown>> = {}) => ({
+    origin: 'https://app.hew3d.com',
+    service: 'hew-relay',
+    contract: 1,
+    maxBytes: 32 * 1024 * 1024,
+    ttlMs: 10 * 60 * 1000,
+    auth: 'none',
+    ...over,
+  })
 
-  /** Wires `mockFetch` (the module-level `@tauri-apps/plugin-http` mock) to
-   *  the normal happy path: any PUT to /drop succeeds with `sampleToken`,
-   *  any DELETE succeeds with 204. */
-  function mockSuccessfulRelay(): void {
-    mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
-      if (init?.method === 'PUT') {
-        return new Response(JSON.stringify({ token: sampleToken }), { status: 200 })
+  /** A typed Rust `RelayError` as `invoke` rejects with it (a plain object). */
+  const relayError = (kind: string, message = kind, status?: number) => ({ kind, message, status })
+
+  type Handlers = Partial<{
+    relay_identity: () => unknown
+    relay_put: (bytes: Uint8Array) => unknown
+    relay_peek: (token: string) => unknown
+    relay_delete: (token: string) => unknown
+  }>
+
+  /** Routes `mockInvoke` by command name. Defaults: identity answers as the
+   *  open cloud relay, PUT succeeds with `sampleToken`, HEAD says present,
+   *  DELETE succeeds, `qr_svg` renders. Each is overridable per test; a
+   *  handler may return a value, a Promise, or throw/reject. */
+  function mockRelay(handlers: Handlers = {}): void {
+    mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+      switch (cmd) {
+        case 'qr_svg':
+          return sampleQrSvg
+        case 'relay_identity':
+          return handlers.relay_identity ? handlers.relay_identity() : identity()
+        case 'relay_put':
+          return handlers.relay_put ? handlers.relay_put(args as Uint8Array) : { token: sampleToken }
+        case 'relay_peek':
+          return handlers.relay_peek ? handlers.relay_peek((args as { token: string }).token) : 'present'
+        case 'relay_delete':
+          return handlers.relay_delete ? handlers.relay_delete((args as { token: string }).token) : undefined
+        default:
+          throw new Error(`unexpected invoke: ${cmd}`)
       }
-      if (init?.method === 'DELETE') {
-        return new Response(null, { status: 204 })
-      }
-      throw new Error(`unexpected fetch: ${init?.method ?? 'GET'} ${url}`)
     })
   }
 
+  const callsTo = (cmd: string) => mockInvoke.mock.calls.filter((c) => c[0] === cmd)
+
   beforeEach(() => {
     mockInvoke.mockReset()
-    mockInvoke.mockResolvedValue(sampleQrSvg)
-    mockFetch.mockReset()
+    mockServerSetting.current = CLOUD
   })
 
-  it('encrypts the document and PUTs ciphertext (not plaintext) to the share-relay /drop endpoint', async () => {
-    mockSuccessfulRelay()
+  it('encrypts the document and PUTs ciphertext (not plaintext) as a raw byte body', async () => {
+    mockRelay()
     render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
-    await waitFor(() => expect(mockFetch).toHaveBeenCalled())
+    await waitFor(() => expect(callsTo('relay_put')).toHaveLength(1))
 
-    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit]
-    expect(url).toBe('https://share.hew3d.com/drop')
-    expect(init.method).toBe('PUT')
-    const uploaded = new Uint8Array(init.body as ArrayBuffer)
+    const uploaded = callsTo('relay_put')[0][1] as Uint8Array
+    expect(uploaded).toBeInstanceOf(Uint8Array)
     // Never the plaintext bytes verbatim, and long enough to be
     // IV(12) + ciphertext(3) + GCM tag(16) = 31 bytes, not 3.
     expect(uploaded).not.toEqual(sampleDoc.bytes)
     expect(uploaded.byteLength).toBe(31)
+    // No URL anywhere in the call — the Rust side owns the origin.
+    expect(JSON.stringify(callsTo('relay_put')[0].slice(1))).not.toMatch(/https?:/)
+  })
+
+  it('asks the relay who it is before uploading', async () => {
+    mockRelay()
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    await waitFor(() => expect(callsTo('relay_put')).toHaveLength(1))
+    expect(callsTo('relay_identity')).toHaveLength(1)
   })
 
   it('asks the shell to render a QR for a #recv= URL on the app origin, carrying the token', async () => {
-    mockSuccessfulRelay()
+    mockRelay()
     render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('qr_svg', expect.anything()))
 
-    const { text } = mockInvoke.mock.calls[0][1] as { text: string }
+    const { text } = callsTo('qr_svg')[0][1] as { text: string }
     expect(text.startsWith(`https://app.hew3d.com/#recv=${sampleToken}.`)).toBe(true)
     // The name segment is last and urlencoded — "Bench.hew" survives intact
     // (as %2E-free literal dots, per shareCrypto.ts's fragment grammar).
     expect(text.endsWith('.Bench.hew')).toBe(true)
   })
 
-  it('shows a starting state before the upload resolves', () => {
-    mockFetch.mockReturnValue(new Promise(() => { /* never resolves in this test */ }))
+  it('points the QR at the self-hosted origin when one is configured, and names the server', async () => {
+    mockServerSetting.current = SELF
+    mockRelay({ relay_identity: () => identity({ origin: SELF.origin }) })
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    const url = await screen.findByLabelText<HTMLInputElement>(/handoff url/i)
+    expect(url.value.startsWith(`https://hew.example.org/#recv=${sampleToken}.`)).toBe(true)
+    expect(screen.getByTestId('phone-share-server')).toHaveTextContent('hew.example.org')
+  })
+
+  it('shows no server line for the Hew cloud', async () => {
+    mockRelay()
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    await screen.findByLabelText(/handoff url/i)
+    expect(screen.queryByTestId('phone-share-server')).not.toBeInTheDocument()
+  })
+
+  it('shows a starting state before the relay answers', () => {
+    mockRelay({ relay_identity: () => new Promise(() => { /* never resolves in this test */ }) })
     render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
     expect(screen.getByText(/starting/i)).toBeInTheDocument()
   })
 
   it('renders the QR image and the URL as selectable text once ready', async () => {
-    mockSuccessfulRelay()
+    mockRelay()
     render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
     const url = await screen.findByLabelText<HTMLInputElement>(/handoff url/i)
     expect(url.value).toContain('https://app.hew3d.com/#recv=')
@@ -783,32 +850,102 @@ describe('PhoneShareDialog', () => {
     expect(screen.getByText(/scan from shop mode/i)).toBeInTheDocument()
   })
 
-  it('shows a clear message when the upload is offline (fetch throws a TypeError)', async () => {
-    mockFetch.mockRejectedValue(new TypeError('Failed to fetch'))
+  it('shows a clear message when the cloud relay is unreachable', async () => {
+    mockRelay({ relay_identity: () => Promise.reject(relayError('unreachable')) })
     render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
     expect(await screen.findByRole('alert')).toHaveTextContent(/could not reach the share server/i)
+    expect(callsTo('relay_put')).toHaveLength(0)
+  })
+
+  it('names the self-hosted server when it is unreachable, and points at Settings ▸ Advanced', async () => {
+    mockServerSetting.current = SELF
+    mockRelay({ relay_identity: () => Promise.reject(relayError('unreachable')) })
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(/could not reach hew\.example\.org/i)
+    expect(alert).toHaveTextContent(/settings ▸ advanced/i)
+  })
+
+  it('explains an untrusted certificate', async () => {
+    mockServerSetting.current = SELF
+    mockRelay({ relay_identity: () => Promise.reject(relayError('tls')) })
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/certificate isn't trusted by this computer/i)
+  })
+
+  it('explains a rejected upload key (401 on PUT)', async () => {
+    mockServerSetting.current = SELF
+    mockRelay({
+      relay_identity: () => identity({ auth: 'bearer' }),
+      relay_put: () => Promise.reject(relayError('unauthorized', 'unauthorized', 401)),
+    })
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/rejected the upload key.*settings ▸ advanced/i)
+  })
+
+  it('refuses to upload without a key when the server requires one, without calling PUT', async () => {
+    mockServerSetting.current = { ...SELF, uploadKey: '' }
+    mockRelay({ relay_identity: () => identity({ auth: 'bearer' }) })
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/upload key/i)
+    expect(callsTo('relay_put')).toHaveLength(0)
+  })
+
+  it('explains a full relay (503 relay full)', async () => {
+    mockRelay({ relay_put: () => Promise.reject(relayError('full', 'full', 503)) })
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/relay is full/i)
+  })
+
+  it('degrades to the mirrored constants and still uploads when the identity route is missing (notARelay)', async () => {
+    // A proxy that forwards /relay/drop but not GET /relay/, or an older
+    // relay: the design's fallback — the upload proceeds with the mirrored
+    // cap/TTL rather than failing on the identity probe alone.
+    mockServerSetting.current = SELF
+    mockRelay({ relay_identity: () => Promise.reject(relayError('notARelay')) })
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    await screen.findByLabelText(/handoff url/i)
+    expect(callsTo('relay_put')).toHaveLength(1)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('explains a server that answers the upload with a non-relay shape (notARelay from PUT)', async () => {
+    mockServerSetting.current = SELF
+    mockRelay({ relay_put: () => Promise.reject(relayError('notARelay')) })
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/isn’t serving a hew relay/i)
   })
 
   it('shows a clear message on a 413 (document too large)', async () => {
-    mockFetch.mockResolvedValue(new Response(null, { status: 413 }))
+    mockRelay({ relay_put: () => Promise.reject(relayError('tooLarge', 'too large', 413)) })
     render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
     expect(await screen.findByRole('alert')).toHaveTextContent(/too large/i)
   })
 
-  it('shows a clear message on a non-200/413 response', async () => {
-    mockFetch.mockResolvedValue(new Response(null, { status: 500 }))
+  it("uses the relay's own size cap from the identity route, not the mirrored constant", async () => {
+    // A self-hosted relay running --max-bytes 2 refuses our 3-byte document
+    // before any upload happens.
+    mockRelay({ relay_identity: () => identity({ maxBytes: 2 }) })
+    render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/too large/i)
+    expect(callsTo('relay_put')).toHaveLength(0)
+  })
+
+  it('shows a clear message on an unexpected status', async () => {
+    mockRelay({ relay_put: () => Promise.reject(relayError('status', 'unexpected status 500', 500)) })
     render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
     expect(await screen.findByRole('alert')).toHaveTextContent(/status 500/i)
   })
 
-  it('shows an empty-document message and never calls fetch when getDocument returns null', () => {
+  it('shows an empty-document message and never talks to the relay when getDocument returns null', () => {
+    mockRelay()
     render(<PhoneShareDialog getDocument={() => null} onClose={vi.fn()} />)
     expect(screen.getByRole('alert')).toHaveTextContent(/nothing to share/i)
-    expect(mockFetch).not.toHaveBeenCalled()
+    expect(mockInvoke).not.toHaveBeenCalled()
   })
 
   it('best-effort DELETEs the drop on unmount via the Close button, once a token exists', async () => {
-    mockSuccessfulRelay()
+    mockRelay()
     const onClose = vi.fn()
     const { unmount } = render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
     await screen.findByLabelText(/handoff url/i)
@@ -818,64 +955,53 @@ describe('PhoneShareDialog', () => {
     // render owns that) — simulate the parent reacting to it, mirroring
     // every other close trigger below.
     unmount()
-    await waitFor(() =>
-      expect(mockFetch).toHaveBeenCalledWith(`https://share.hew3d.com/drop/${sampleToken}`, {
-        method: 'DELETE',
-      }),
-    )
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('relay_delete', { token: sampleToken }))
   })
 
   it('best-effort DELETEs the drop on unmount via Escape', async () => {
-    mockSuccessfulRelay()
+    mockRelay()
     const onClose = vi.fn()
     const { unmount } = render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
     await screen.findByLabelText(/handoff url/i)
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(onClose).toHaveBeenCalledOnce()
     unmount()
-    await waitFor(() =>
-      expect(mockFetch).toHaveBeenCalledWith(`https://share.hew3d.com/drop/${sampleToken}`, {
-        method: 'DELETE',
-      }),
-    )
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('relay_delete', { token: sampleToken }))
   })
 
   it('best-effort DELETEs the drop on unmount via the backdrop click', async () => {
-    mockSuccessfulRelay()
+    mockRelay()
     const onClose = vi.fn()
     const { unmount } = render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
     await screen.findByLabelText(/handoff url/i)
     fireEvent.click(screen.getByRole('dialog', { name: /open on phone/i }).parentElement as HTMLElement)
     expect(onClose).toHaveBeenCalledOnce()
     unmount()
-    await waitFor(() =>
-      expect(mockFetch).toHaveBeenCalledWith(`https://share.hew3d.com/drop/${sampleToken}`, {
-        method: 'DELETE',
-      }),
-    )
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('relay_delete', { token: sampleToken }))
   })
 
   it('never DELETEs on unmount if the upload never got a token (still in flight)', async () => {
-    mockFetch.mockReturnValue(new Promise(() => { /* never resolves */ }))
+    mockRelay({ relay_put: () => new Promise(() => { /* never resolves */ }) })
     const { unmount } = render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
-    // Let the mount effect's own encrypt-then-PUT actually start before
-    // unmounting — otherwise this can race the effect itself, depending on
-    // exactly which pending microtask the test runner schedules next.
-    await new Promise((resolve) => setTimeout(resolve, 10))
+    // Let the mount effect's own identity → encrypt → PUT actually start
+    // before unmounting — otherwise this can race the effect itself,
+    // depending on exactly which pending microtask the test runner
+    // schedules next.
+    await waitFor(() => expect(callsTo('relay_put')).toHaveLength(1))
     unmount()
     await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(mockFetch).not.toHaveBeenCalledWith(expect.stringContaining('/drop/'), expect.anything())
+    expect(callsTo('relay_delete')).toHaveLength(0)
   })
 
   it('stops Escape from bubbling to window (so it does not also fire the Viewport handler)', async () => {
-    mockSuccessfulRelay()
+    mockRelay()
     render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
     await screen.findByLabelText(/handoff url/i)
     expectEscapeStopsPropagationToWindow()
   })
 
   it('has the expected ARIA dialog role and label', async () => {
-    mockSuccessfulRelay()
+    mockRelay()
     render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
     expect(screen.getByRole('dialog', { name: /open on phone/i })).toBeInTheDocument()
     await screen.findByLabelText(/handoff url/i) // let the pending upload settle before the test ends
@@ -884,8 +1010,8 @@ describe('PhoneShareDialog', () => {
   // ---------------------------------------------------------------------
   // Pickup polling — QR auto-close on pickup. `shouldAdvanceTime` keeps the
   // fake clock ticking in step with real time (so the plain async work that
-  // reaches `ready` — encrypt/PUT/qr_svg, none of it timer-based — still
-  // resolves and `findByLabelText` doesn't hang), while
+  // reaches `ready` — identity/encrypt/PUT/qr_svg, none of it timer-based —
+  // still resolves and `findByLabelText` doesn't hang), while
   // `vi.advanceTimersByTimeAsync` fast-forwards the 2s poll interval itself
   // without the test actually waiting on it.
   // ---------------------------------------------------------------------
@@ -901,48 +1027,39 @@ describe('PhoneShareDialog', () => {
       vi.useRealTimers()
     })
 
-    it('HEAD-polls /drop/<token> every 2s once ready — never GET, which would consume the drop', async () => {
-      mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
-        if (init?.method === 'PUT') return new Response(JSON.stringify({ token: sampleToken }), { status: 200 })
-        if (init?.method === 'HEAD') return new Response(null, { status: 200 })
-        throw new Error(`unexpected fetch: ${init?.method ?? 'GET'} ${url}`)
-      })
+    it('HEAD-polls the token every 2s once ready — never a GET, which would consume the drop', async () => {
+      mockRelay()
       render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={vi.fn()} />)
       await screen.findByLabelText(/handoff url/i)
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2000)
       })
-      expect(mockFetch).toHaveBeenCalledWith(`https://share.hew3d.com/drop/${sampleToken}`, {
-        method: 'HEAD',
-      })
-      // Still showing the QR — a 200 means "still there", not pickup.
+      expect(mockInvoke).toHaveBeenCalledWith('relay_peek', { token: sampleToken })
+      // Still showing the QR — "present" means "still there", not pickup.
       expect(screen.getByLabelText(/handoff url/i)).toBeInTheDocument()
     })
 
-    it('shows a success confirmation and auto-closes when a poll 404s before the TTL (pickup)', async () => {
-      let headCalls = 0
-      mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
-        if (init?.method === 'PUT') return new Response(JSON.stringify({ token: sampleToken }), { status: 200 })
-        if (init?.method === 'HEAD') {
-          headCalls += 1
+    it('shows a success confirmation and auto-closes when a poll says gone before the TTL (pickup)', async () => {
+      let peeks = 0
+      mockRelay({
+        relay_peek: () => {
+          peeks += 1
           // First tick: still there. Second tick: gone (picked up).
-          return new Response(null, { status: headCalls === 1 ? 200 : 404 })
-        }
-        if (init?.method === 'DELETE') return new Response(null, { status: 204 })
-        throw new Error(`unexpected fetch: ${init?.method ?? 'GET'} ${url}`)
+          return peeks === 1 ? 'present' : 'gone'
+        },
       })
       const onClose = vi.fn()
       render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
       await screen.findByLabelText(/handoff url/i)
 
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000) // 200 — still polling
+        await vi.advanceTimersByTimeAsync(2000) // present — still polling
       })
       expect(screen.getByLabelText(/handoff url/i)).toBeInTheDocument()
 
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000) // 404 — picked up
+        await vi.advanceTimersByTimeAsync(2000) // gone — picked up
       })
       expect(screen.getByText(/opened on your phone/i)).toBeInTheDocument()
       expect(screen.queryByLabelText(/handoff url/i)).not.toBeInTheDocument()
@@ -953,35 +1070,26 @@ describe('PhoneShareDialog', () => {
       })
       expect(onClose).toHaveBeenCalledOnce()
 
-      // Polling itself has stopped — no further HEAD calls once picked up.
-      const headCallsAtClose = mockFetch.mock.calls.filter(
-        (c) => (c[1] as RequestInit | undefined)?.method === 'HEAD',
-      ).length
+      // Polling itself has stopped — no further peeks once picked up.
+      const peeksAtClose = callsTo('relay_peek').length
       await act(async () => {
         await vi.advanceTimersByTimeAsync(4000)
       })
-      expect(
-        mockFetch.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method === 'HEAD').length,
-      ).toBe(headCallsAtClose)
+      expect(callsTo('relay_peek').length).toBe(peeksAtClose)
     })
 
-    it('leaves the QR up (no phantom pickup) when the FIRST poll 404s — a relay without the HEAD peek route', async () => {
+    it('leaves the QR up (no phantom pickup) when the FIRST poll says gone — a relay without the HEAD peek route', async () => {
       // Regression: a deployed relay that predates the HEAD peek answers 404
       // to every HEAD. The desktop just created this drop, so a first-look
       // 404 cannot be a real pickup — it must NOT falsely close a valid QR
       // (the phantom "Opened on your phone" a stale deploy produced).
-      mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
-        if (init?.method === 'PUT') return new Response(JSON.stringify({ token: sampleToken }), { status: 200 })
-        if (init?.method === 'HEAD') return new Response(null, { status: 404 }) // stale worker: no HEAD route
-        if (init?.method === 'DELETE') return new Response(null, { status: 204 })
-        throw new Error(`unexpected fetch: ${init?.method ?? 'GET'} ${url}`)
-      })
+      mockRelay({ relay_peek: () => 'gone' })
       const onClose = vi.fn()
       render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
       await screen.findByLabelText(/handoff url/i)
 
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(10_000) // several poll ticks, all 404
+        await vi.advanceTimersByTimeAsync(10_000) // several poll ticks, all gone
       })
       // The QR stays; no phantom success, no expiry, no auto-close.
       expect(screen.getByLabelText(/handoff url/i)).toBeInTheDocument()
@@ -990,17 +1098,9 @@ describe('PhoneShareDialog', () => {
       expect(onClose).not.toHaveBeenCalled()
     })
 
-    it('shows an expired message (no auto-close) when the 404 arrives at/after the TTL', async () => {
+    it('shows an expired message (no auto-close) when the gone arrives at/after the TTL', async () => {
       const start = Date.now()
-      mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
-        if (init?.method === 'PUT') return new Response(JSON.stringify({ token: sampleToken }), { status: 200 })
-        if (init?.method === 'HEAD') {
-          const elapsed = Date.now() - start
-          return new Response(null, { status: elapsed >= DROP_TTL_MS ? 404 : 200 })
-        }
-        if (init?.method === 'DELETE') return new Response(null, { status: 204 })
-        throw new Error(`unexpected fetch: ${init?.method ?? 'GET'} ${url}`)
-      })
+      mockRelay({ relay_peek: () => (Date.now() - start >= DROP_TTL_MS ? 'gone' : 'present') })
       const onClose = vi.fn()
       render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
       await screen.findByLabelText(/handoff url/i)
@@ -1017,17 +1117,34 @@ describe('PhoneShareDialog', () => {
       expect(onClose).not.toHaveBeenCalled()
     }, 20_000)
 
+    it("uses the relay's own TTL from the identity route for the expiry call", async () => {
+      // A self-hosted relay with --ttl-secs 30: a gone at 20 s is expiry
+      // (30 s − 12 s margin), not a pickup — under the 10-minute mirrored
+      // constant it would have read as "opened on your phone".
+      const start = Date.now()
+      mockRelay({
+        relay_identity: () => identity({ ttlMs: 30_000 }),
+        relay_peek: () => (Date.now() - start >= 20_000 ? 'gone' : 'present'),
+      })
+      const onClose = vi.fn()
+      render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
+      await screen.findByLabelText(/handoff url/i)
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(24_000)
+      })
+      expect(screen.getByText(/expired/i)).toBeInTheDocument()
+      expect(screen.queryByText(/opened on your phone/i)).not.toBeInTheDocument()
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
     it('keeps polling through a network error mid-poll instead of closing or erroring', async () => {
-      let headCalls = 0
-      mockFetch.mockImplementation(async (url: string, init?: RequestInit) => {
-        if (init?.method === 'PUT') return new Response(JSON.stringify({ token: sampleToken }), { status: 200 })
-        if (init?.method === 'HEAD') {
-          headCalls += 1
-          if (headCalls === 1) throw new TypeError('network unreachable') // a missed tick
-          return new Response(null, { status: headCalls === 2 ? 200 : 404 })
-        }
-        if (init?.method === 'DELETE') return new Response(null, { status: 204 })
-        throw new Error(`unexpected fetch: ${init?.method ?? 'GET'} ${url}`)
+      let peeks = 0
+      mockRelay({
+        relay_peek: () => {
+          peeks += 1
+          if (peeks === 1) return Promise.reject(relayError('unreachable')) // a missed tick
+          return peeks === 2 ? 'present' : 'gone'
+        },
       })
       const onClose = vi.fn()
       render(<PhoneShareDialog getDocument={() => sampleDoc} onClose={onClose} />)
@@ -1042,12 +1159,12 @@ describe('PhoneShareDialog', () => {
       expect(onClose).not.toHaveBeenCalled()
 
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000) // 200 — still there
+        await vi.advanceTimersByTimeAsync(2000) // present — still there
       })
       expect(screen.getByLabelText(/handoff url/i)).toBeInTheDocument()
 
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(2000) // 404 — picked up
+        await vi.advanceTimersByTimeAsync(2000) // gone — picked up
       })
       expect(screen.getByText(/opened on your phone/i)).toBeInTheDocument()
     })

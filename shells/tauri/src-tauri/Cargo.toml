@@ -26,16 +26,19 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 tauri-plugin-opener = "2.5.4"
-# Native HTTP client for the "Open on Phone" upload/delete (see the module
-# comment above `mod qr`): the webview's own `fetch` is a browser fetch,
-# which the share-relay Worker's CORS allowlist (workers/share-relay,
-# app.hew3d.com only — the phone's real browser origin) correctly does not
-# admit `tauri dev`'s http://localhost:5173 devUrl. Routing the desktop's
-# PUT/DELETE through this plugin instead sidesteps CORS entirely (it's a
-# native Rust HTTP client, not a browser one), with identical behavior in
-# dev and packaged builds. Scoped tight to the relay host in
-# capabilities/default.json — see that file's comment.
-tauri-plugin-http = "2"
+# The "Open on Phone" relay client (src/relay_client.rs): four Rust
+# commands bound to a Rust-held server setting replace what used to be
+# `tauri-plugin-http` calls from the webview — no arbitrary-URL network
+# capability exists in the webview at all, and TLS goes through the
+# platform verifier so a homelab CA trusted in the OS keychain works. This
+# is exactly the stack `tauri-plugin-updater` already uses (reqwest 0.13
+# with `rustls-no-provider` + a crate-level `rustls` with the `ring`
+# provider), so it adds no new crates to the build; the direct `rustls`
+# dependency keeps exactly one crypto provider compiled in for
+# `--no-default-features` (updater-less) builds too.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+url = "2"
 # System font enumeration for the 3D Text font picker (docs/design/3d-text.md's
 # font section) — pure Rust, MIT-licensed, no system font-library linking.
 # Shell-crate-only dependency; kernel crates never gain new dependencies for

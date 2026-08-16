@@ -40,7 +40,7 @@ import { tagPathKey } from '../panels/tagModel'
 import { makeFileHost, type OpenPick } from '../io/fileHost'
 import { anchorDownload } from '../io/webFileHost'
 import { decrypt, fromBase64Url } from '../io/shareCrypto'
-import { SHARE_RELAY_BASE } from '../io/shareRelay'
+import { phoneRelayBase } from '../io/shareRelay'
 import { loadHewBytes, isSceneEmpty, seedHiddenKeysFromRegistry, seedHiddenTagPathsFromRegistry, unionHiddenLeafIds } from '../io/documentLoad'
 import { listRecents, recordRecent, type RecentEntry } from '../io/recents'
 import { formatRelativeTime } from '../io/relativeTime'
@@ -117,11 +117,6 @@ const ISOLATE_FADE_MS = 240
  *  bought nothing. */
 const HINT_TICK_MS = 500
 
-/** share-relay's `/drop/<token>` route (workers/share-relay/README.md) —
- *  shares `io/shareRelay.ts`'s `SHARE_RELAY_BASE` with `PhoneShareDialog.tsx`
- *  (the desktop's upload side); duplicated rather than factored into a
- *  shared module since the two call sites (upload vs. receive) have no
- *  other code in common. */
 
 /** The dock's segmented tool group (README §1 "Toolbar row"): icon + a
  *  visible label per segment, in `ShopToolName` order. Tape Measure's
@@ -963,7 +958,10 @@ export function ShopApp() {
     const noun = source === 'scanner' ? 'code' : 'link'
     let ciphertext: Uint8Array
     try {
-      const response = await fetch(`${SHARE_RELAY_BASE}/${params.token}`)
+      // The relay lives next to THIS page — `<origin>/relay/` (io/shareRelay.ts):
+      // a self-hosted PWA reads from its own relay, the public one from the
+      // Workers route on app.hew3d.com. Same origin, so no CORS either way.
+      const response = await fetch(`${phoneRelayBase()}/drop/${params.token}`)
       if (!response.ok) {
         // A 404 here means the token was already consumed, expired (10
         // minutes — share-relay's own TTL), or never existed — from the

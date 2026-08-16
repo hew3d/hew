@@ -115,7 +115,7 @@ function safeLocalStorage(): Storage | undefined {
 
 /** The `#recv=…` E2E-encrypted handoff's decoded fields
  *  (`shareCrypto.ts`'s module doc has the exact wire grammar this parses):
- *  `token` identifies the one-shot ciphertext drop on `share.hew3d.com`,
+ *  `token` identifies the one-shot ciphertext drop on the relay,
  *  `key` is the still-base64url-encoded AES key (callers pass it through
  *  `fromBase64Url` before handing it to `shareCrypto.decrypt`), and `name`
  *  is the desktop's display name, already percent-DEcoded. */
@@ -169,6 +169,26 @@ const KEY_RE = /^[A-Za-z0-9_-]{43}$/
  * (`decodeURIComponent` throws). Pure and DOM-free, so it's unit-tested
  * directly like the rest of this file.
  */
+/**
+ * The origin a scanned handoff names, or `null` when it names none: a bare
+ * `#recv=…` fragment (the documented repeated-scan edge case) or anything
+ * that is not an absolute http(s) URL. `ScanSheet.tsx` compares this with
+ * its own `location.origin` — a QR minted for a DIFFERENT origin (a homelab
+ * desktop scanned from the public PWA, or vice versa) is not fetched from
+ * here (docs/design/self-hosting-relay.md §3, "phone-side origin
+ * mismatch"): the sheet offers to open the code's own origin instead, which
+ * lands on that origin's link-arrived confirmation. No cross-origin fetch,
+ * so no CORS surface to widen and no new phishing shape.
+ */
+export function scannedOrigin(text: string): string | null {
+  if (!/^https?:\/\//i.test(text)) return null
+  try {
+    return new URL(text).origin
+  } catch {
+    return null
+  }
+}
+
 export function parseRecvParams(hashOrUrl: string): RecvParams | null {
   const hashStart = hashOrUrl.indexOf('#')
   if (hashStart === -1) return null

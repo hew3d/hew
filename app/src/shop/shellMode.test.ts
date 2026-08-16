@@ -4,6 +4,7 @@ import {
   readShellModeOverride,
   writeShellModeOverride,
   parseRecvParams,
+  scannedOrigin,
   SHELL_MODE_OVERRIDE_KEY,
   type ResolveShellModeInput,
 } from './shellMode'
@@ -266,5 +267,26 @@ describe('parseRecvParams', () => {
 
   it('rejects a name segment that is not valid percent-encoding', () => {
     expect(parseRecvParams(`#recv=${TOKEN}.${KEY}.%E0%A4%A`)).toBeNull()
+  })
+})
+
+describe('scannedOrigin', () => {
+  const TOKEN = 'a'.repeat(22)
+  const KEY = 'k'.repeat(43)
+
+  it('returns the origin of an absolute http(s) URL, dropping path/hash/port defaults', () => {
+    expect(scannedOrigin(`https://app.hew3d.com/#recv=${TOKEN}.${KEY}.Bench`)).toBe('https://app.hew3d.com')
+    expect(scannedOrigin('https://Hew.Example.org:443/#recv=x')).toBe('https://hew.example.org')
+    expect(scannedOrigin('http://192.168.1.50:8080/#recv=x')).toBe('http://192.168.1.50:8080')
+    expect(scannedOrigin('HTTPS://hew.example.org/')).toBe('https://hew.example.org')
+  })
+
+  it('returns null for a bare fragment or anything that is not an absolute http(s) URL', () => {
+    expect(scannedOrigin(`#recv=${TOKEN}.${KEY}.Bench`)).toBeNull()
+    expect(scannedOrigin(`#shop&recv=${TOKEN}.${KEY}.Bench`)).toBeNull()
+    expect(scannedOrigin('recv=abc')).toBeNull()
+    expect(scannedOrigin('ftp://hew.example.org/#recv=x')).toBeNull()
+    expect(scannedOrigin('')).toBeNull()
+    expect(scannedOrigin('https://')).toBeNull()
   })
 })

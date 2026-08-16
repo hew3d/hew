@@ -248,14 +248,50 @@ describe('ScanSheet — decoding', () => {
     return { track }
   }
 
-  it('a valid Hew code decodes, calls onDecoded with the parsed params, and stops the camera', async () => {
-    installFakeQrEngine(`https://app.hew3d.com/${VALID_RECV}`)
+  it('a valid Hew code for THIS origin decodes, calls onDecoded with the parsed params, and stops the camera', async () => {
+    installFakeQrEngine(`${window.location.origin}/${VALID_RECV}`)
     const onDecoded = vi.fn()
     const { track } = await openScanning(onDecoded)
 
     await waitFor(() => expect(onDecoded).toHaveBeenCalledTimes(1))
     expect(onDecoded).toHaveBeenCalledWith({ token: VALID_TOKEN, key: VALID_KEY, name: 'Bench' })
     expect(track.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('a bare #recv= fragment (no origin) is same-origin by definition and decodes', async () => {
+    installFakeQrEngine(VALID_RECV)
+    const onDecoded = vi.fn()
+    await openScanning(onDecoded)
+    await waitFor(() => expect(onDecoded).toHaveBeenCalledTimes(1))
+  })
+
+  // docs/design/self-hosting-relay.md §3, "phone-side origin mismatch": a
+  // code minted for ANOTHER server (its relay is not ours) is never fetched
+  // from here — the sheet names the server and offers to open it there,
+  // which is a plain navigation to the QR's own URL (landing on that
+  // origin's link-arrived confirmation). Camera stopped, onDecoded never.
+  it('a valid Hew code for a DIFFERENT origin is not handed to onDecoded — it offers to open it there', async () => {
+    const foreign = `https://hew.example.org/${VALID_RECV}`
+    installFakeQrEngine(foreign)
+    const onDecoded = vi.fn()
+    const { track } = await openScanning(onDecoded)
+
+    await waitFor(() => expect(screen.getByTestId('shop-scan-foreign')).toBeInTheDocument())
+    expect(screen.getByTestId('shop-scan-foreign')).toHaveTextContent('hew.example.org')
+    expect(onDecoded).not.toHaveBeenCalled()
+    expect(track.stop).toHaveBeenCalledTimes(1)
+
+    const assign = vi.fn()
+    const original = window.location
+    Object.defineProperty(window, 'location', { configurable: true, value: { ...original, assign } })
+    try {
+      fireEvent.click(screen.getByTestId('shop-scan-open-there'))
+      expect(assign).toHaveBeenCalledWith(foreign)
+    } finally {
+      Object.defineProperty(window, 'location', { configurable: true, value: original })
+    }
+    // Still no fetch-from-here path taken.
+    expect(onDecoded).not.toHaveBeenCalled()
   })
 
   it('an unrecognized QR shows a "not a Hew code" hint and keeps scanning', async () => {
@@ -333,7 +369,7 @@ describe('ScanSheet — decoding', () => {
     // The in-flight decode now resolves to a VALID handoff, after the sheet
     // has already closed — it must never reach `onDecoded`, and the
     // already-stopped track must not be touched again.
-    resolveDetect(`https://app.hew3d.com/${VALID_RECV}`)
+    resolveDetect(`${window.location.origin}/${VALID_RECV}`)
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(onDecoded).not.toHaveBeenCalled()
     expect(track.stop).toHaveBeenCalledTimes(1)

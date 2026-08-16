@@ -658,7 +658,7 @@ test('switching units via the header chip\'s picker changes a row\'s rendered di
 // the PHONE side: does booting with (or in-app-scanning) a `#recv=…`
 // handoff actually fetch the relay, decrypt with the key riding the
 // fragment, load the bytes, and clean up after itself. `page.route`
-// intercepts `share.hew3d.com/drop/<token>` with REAL ciphertext — built
+// intercepts the same-origin `/relay/drop/<token>` with REAL ciphertext — built
 // in-test via `shareCrypto.encrypt`, the exact function the desktop itself
 // calls — so this needs no real desktop, no real network relay, and no
 // fake/simplified crypto standing in for the real wire format.
@@ -716,7 +716,7 @@ test('QR handoff (#recv=): shows a confirmation gate before fetching; Open compl
   const key = generateKey()
   const ciphertext = await encrypt(key, HANDOFF_FIXTURE)
   let fetchCount = 0
-  await page.route(`https://share.hew3d.com/drop/${HANDOFF_TOKEN}`, async (route) => {
+  await page.route(`**/relay/drop/${HANDOFF_TOKEN}`, async (route) => {
     fetchCount++
     await route.fulfill({ status: 200, contentType: 'application/octet-stream', body: Buffer.from(ciphertext) })
   })
@@ -768,7 +768,7 @@ test('QR handoff (#recv=): shows a confirmation gate before fetching; Open compl
 test('QR handoff (#recv=): Cancel never fetches, strips the hash, and leaves the empty state intact (no re-prompt on reload)', async ({ page }) => {
   const key = generateKey()
   let fetchCount = 0
-  await page.route(`https://share.hew3d.com/drop/${HANDOFF_TOKEN}`, async (route) => {
+  await page.route(`**/relay/drop/${HANDOFF_TOKEN}`, async (route) => {
     fetchCount++
     await route.fulfill({ status: 200, contentType: 'application/octet-stream', body: Buffer.from(await encrypt(key, HANDOFF_FIXTURE)) })
   })
@@ -797,7 +797,7 @@ test('QR handoff (#recv=): Cancel never fetches, strips the hash, and leaves the
 
 test('QR handoff (#recv=): a 404 (expired/consumed token) after confirming shows a toast and leaves the empty state intact', async ({ page }) => {
   const key = generateKey()
-  await page.route(`https://share.hew3d.com/drop/${HANDOFF_TOKEN}`, async (route) => {
+  await page.route(`**/relay/drop/${HANDOFF_TOKEN}`, async (route) => {
     await route.fulfill({ status: 404, body: '' })
   })
 
@@ -869,7 +869,7 @@ async function installFakeCamera(page: Page): Promise<void> {
 test('scanner: decoding a valid handoff in-app closes the sheet and loads the model', async ({ page }) => {
   const key = generateKey()
   const ciphertext = await encrypt(key, HANDOFF_FIXTURE)
-  await page.route(`https://share.hew3d.com/drop/${HANDOFF_TOKEN}`, async (route) => {
+  await page.route(`**/relay/drop/${HANDOFF_TOKEN}`, async (route) => {
     await route.fulfill({ status: 200, contentType: 'application/octet-stream', body: Buffer.from(ciphertext) })
   })
 
@@ -888,8 +888,13 @@ test('scanner: decoding a valid handoff in-app closes the sheet and loads the mo
   // real (jsQR, since this sandboxed Chromium has no `BarcodeDetector`)
   // engine would already be the one running, and it has no idea about this
   // fake value — it only ever sees the actual (blank) canvas frames.
+  // The QR names THIS page's origin (a desktop pointed at the same server
+  // the phone is bookmarked on) — a code for a different origin is not
+  // fetched from here; the sheet offers to open it there instead
+  // (`ScanSheet.tsx`'s foreign-origin state, unit-tested in
+  // ScanSheet.test.tsx).
   await page.evaluate(
-    ({ token, key, name }) => window.__hew_shop_test!.setFakeQrDecode(`https://app.hew3d.com/#recv=${token}.${key}.${name}`),
+    ({ token, key, name }) => window.__hew_shop_test!.setFakeQrDecode(`${window.location.origin}/#recv=${token}.${key}.${name}`),
     { token: HANDOFF_TOKEN, key: toBase64Url(key), name: 'Bench' },
   )
 

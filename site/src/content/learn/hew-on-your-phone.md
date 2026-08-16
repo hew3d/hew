@@ -38,6 +38,18 @@ Scan it from **inside Shop Mode**: open Shop Mode on your phone, tap **From your
 
 **Reopen from Recents.** Once a model has been opened on the phone once — by either route above — it's saved locally and shows up in a **Recents** list on Shop Mode's empty-state screen, no network needed at all.
 
+### Using your own server
+
+The desktop app doesn't have to send "Open on Phone" through Hew's own servers. On the desktop, **Settings ▸ Advanced ▸ Server** offers **Hew cloud** or **Self-hosted** — pick self-hosted, paste the address of a server you're running, and use **Test connection** to confirm it's reachable before you rely on it.
+
+For this to work, your phone has to reach that same server, not app.hew3d.com. Open Shop Mode at your self-hosted address instead of the public one, and if you use **Add to Home Screen**, do it from that address — a home-screen icon installed from app.hew3d.com will only ever look for handoffs from app.hew3d.com.
+
+If you scan (or open) a code meant for a different server than the one you're currently on, Shop Mode doesn't silently fail — it tells you which server the code is for and offers a button to open it there instead.
+
+Plain `http://` works for this on a LAN, with one catch: Shop Mode's in-app QR scanner needs a secure context to use the camera, so it won't open over `http://`. Scan with your phone's regular camera app instead — it'll hand off to Shop Mode in the browser, which doesn't have that restriction.
+
+Setting up a server is covered in [`docs/SELF_HOSTING.md`](https://github.com/hew3d/hew/blob/main/docs/SELF_HOSTING.md) on GitHub.
+
 ## Working in Shop Mode
 
 The viewport fills the whole screen. A thin strip along the top shows the document's name and the overflow menu; everything else — tool switching, part inspection, the parts list — lives in floating chips and a bottom sheet, reachable with a thumb.

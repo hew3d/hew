@@ -1,20 +1,31 @@
 /**
  * PhoneShareDialog — File ▸ Open on Phone… (docs/design/shop-mode.md §4,
  * workers/share-relay/README.md): encrypts the document client-side,
- * uploads the ciphertext to the share-relay Worker's one-shot dead-drop,
- * and shows a QR code (rendered natively via `qr_svg`, `qr.rs`) encoding a
- * `https://app.hew3d.com/#recv=…` URL that carries the drop's token and
- * decryption key. The server never sees plaintext and never sees the key —
- * see `shareCrypto.ts`'s module doc for the exact wire format and
+ * uploads the ciphertext to the configured relay's one-shot dead-drop, and
+ * shows a QR code (rendered natively via `qr_svg`, `qr.rs`) encoding a
+ * `<origin>/#recv=…` URL that carries the drop's token and decryption key.
+ * The server never sees plaintext and never sees the key — see
+ * `shareCrypto.ts`'s module doc for the exact wire format and
  * `workers/share-relay/README.md`'s "Security model" for the full
  * argument.
  *
- * Tauri-only — `qr_svg` is a Tauri command, and the web editor doesn't
- * offer this yet (App.tsx only renders the File ▸ Open on Phone… menu item
- * under `isTauri`). `getDocument` supplies the exact bytes + display name
- * `Save` would write (App.tsx already has that path via `scene.save()`);
- * this dialog never touches the kernel itself, the same "renders chrome,
- * the caller owns the data" split ExportDialog/StlUnitsDialog use.
+ * Which server: Settings ▸ Advanced ▸ Server (`settings/server.ts`) — Hew
+ * cloud (app.hew3d.com) or a self-hosted origin, optionally with an upload
+ * key. Every relay request goes through the Rust relay client
+ * (`io/relayClient.ts` → `relay_client.rs`), which reads that setting itself
+ * and derives `<origin>/relay/…`; this dialog never handles a relay URL and
+ * only derives the QR text (`<origin>/#recv=…`) from the same setting. Rust
+ * also does TLS through the platform verifier, so a self-hoster's own CA
+ * trusted in the OS keychain works. Errors arrive typed (`RelayError.kind`)
+ * and are worded specifically below.
+ *
+ * Tauri-only — `qr_svg` and the relay commands are Tauri commands, and the
+ * web editor doesn't offer this yet (App.tsx only renders the File ▸ Open on
+ * Phone… menu item under `isTauri`). `getDocument` supplies the exact bytes
+ * + display name `Save` would write (App.tsx already has that path via
+ * `scene.save()`); this dialog never touches the kernel itself, the same
+ * "renders chrome, the caller owns the data" split ExportDialog/
+ * StlUnitsDialog use.
  *
  * Closing the dialog needs nothing torn down server-side (unlike the old
  * LAN-server design, which owned a listening socket) — it best-effort
@@ -38,7 +49,9 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { encrypt, generateKey, toBase64Url } from '../io/shareCrypto'
-import { SHARE_RELAY_BASE, RECEIVE_ORIGIN } from '../io/shareRelay'
+import { receiveUrlFor } from '../io/shareRelay'
+import { RelayError, relayDelete, relayIdentity, relayPeek, relayPut } from '../io/relayClient'
+import { effectiveOrigin, getServerSetting } from '../settings/server'
 
 export interface PhoneShareDocument {
   bytes: Uint8Array
@@ -51,7 +64,9 @@ export interface PhoneShareDocument {
 /** Matches share-relay's own `MAX_BYTES` (workers/share-relay/src/
  *  handlers.ts) — checked here too so an oversized upload fails instantly
  *  with a clear message instead of waiting on a round trip to learn the
- *  same thing from a 413. */
+ *  same thing from a 413. The FALLBACK: the relay's identity route reports
+ *  its real cap (a self-hosted relay may run a smaller one), which wins
+ *  when available. */
 const MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 
 /** How often to poll the relay for pickup once a QR is up. Frequent enough
@@ -62,7 +77,8 @@ const POLL_INTERVAL_MS = 2000
 /** Matches share-relay's own drop TTL (workers/share-relay/src/dropStore.ts's
  *  `TTL_MS`) — mirrored here (not imported; the Worker and this app are
  *  separate deployables) so a 404 that arrives after this much time has
- *  elapsed since upload is attributed to expiry rather than pickup. */
+ *  elapsed since upload is attributed to expiry rather than pickup. The
+ *  FALLBACK, like `MAX_UPLOAD_BYTES`: the identity route's `ttlMs` wins. */
 const DROP_TTL_MS = 10 * 60 * 1000
 
 /** Safety margin subtracted from `DROP_TTL_MS` when telling a genuine expiry
@@ -77,7 +93,17 @@ const EXPIRY_MARGIN_MS = POLL_INTERVAL_MS + 10_000
 
 type PhoneShareState =
   | { kind: 'starting' }
-  | { kind: 'ready'; url: string; qrSvg: string; token: string; uploadedAt: number }
+  | {
+      kind: 'ready'
+      url: string
+      qrSvg: string
+      token: string
+      uploadedAt: number
+      /** The relay's own TTL (identity route), for the expiry-vs-pickup call. */
+      ttlMs: number
+      /** Shown under the QR when the server is not the Hew cloud. */
+      serverHost: string | null
+    }
   | { kind: 'picked-up' }
   | { kind: 'expired' }
   | { kind: 'error'; message: string }
@@ -195,23 +221,48 @@ const CLOSE_BUTTON_STYLE: React.CSSProperties = {
   cursor: 'pointer',
 }
 
-/** Thrown when the upload request never completes at the transport level —
- *  offline, DNS failure, connection refused. Browser `fetch` signals this as
- *  a bare `TypeError`, but the Tauri HTTP plugin rejects with a plain `Error`
- *  carrying raw reqwest text ("error sending request…"), which reads badly
- *  verbatim; wrapping the transport call (below) in this type lets
- *  `describeUploadError` show one friendly message regardless of which
- *  `fetch` implementation is in play. Errors thrown AFTER a response arrives
- *  (a 413, a non-2xx status) are deliberately NOT this type — they keep their
- *  own specific wording. */
-class ShareServerUnreachable extends Error {}
-
-/** Turns a thrown upload/QR error into a message worth showing a user. */
-function describeUploadError(err: unknown): string {
-  if (err instanceof ShareServerUnreachable || err instanceof TypeError) {
-    return 'Could not reach the share server — check your internet connection and try again.'
+/** Turns a thrown upload/QR error into a message worth showing a user. The
+ *  Rust relay client classifies every failure (`RelayError.kind`, docs/design/
+ *  self-hosting-relay.md §3's error mapping); `serverHost` is null for the
+ *  Hew cloud, else the self-hosted host the messages can name. */
+export function describeUploadError(err: unknown, serverHost: string | null, maxBytes: number): string {
+  if (err instanceof RelayError) {
+    const where = serverHost === null ? 'the share server' : serverHost
+    switch (err.kind) {
+      case 'unreachable':
+        return serverHost === null
+          ? 'Could not reach the share server — check your internet connection and try again.'
+          : `Could not reach ${where} — check your connection and the server address in Settings ▸ Advanced.`
+      case 'tls':
+        return `The server's certificate isn't trusted by this computer — install its certificate authority in the system keychain, then try again.`
+      case 'unauthorized':
+        return 'The server rejected the upload key — check Settings ▸ Advanced.'
+      case 'full':
+        return 'The relay is full — try again in a minute, or ask its admin to raise the memory cap.'
+      case 'tooLarge':
+        return `This document is too large to share this way (${Math.floor(maxBytes / (1024 * 1024))} MB max).`
+      case 'notARelay':
+        return serverHost === null
+          ? 'The share server isn’t answering as a Hew relay — try again later.'
+          : `Reachable, but ${where} isn’t serving a Hew relay at /relay/ — check Settings ▸ Advanced.`
+      case 'status':
+        return `Could not reach ${where} (status ${err.status ?? '?'}).`
+      case 'invalidOrigin':
+      case 'io':
+        return err.message
+    }
   }
   return err instanceof Error ? err.message : String(err)
+}
+
+/** The host name to show for a non-cloud origin, or null for the cloud. */
+function hostForDisplay(origin: string, isCloud: boolean): string | null {
+  if (isCloud) return null
+  try {
+    return new URL(origin).host
+  } catch {
+    return origin
+  }
 }
 
 export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps) {
@@ -230,51 +281,53 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
       setState({ kind: 'error', message: 'Nothing to share yet — the document is empty.' })
       return
     }
+    // Resolved before anything else so the error wording can name the
+    // server even when the very first request fails.
+    let serverHost: string | null = null
+    let maxBytes = MAX_UPLOAD_BYTES
     void (async () => {
       try {
+        const setting = await getServerSetting()
+        const appOrigin = effectiveOrigin(setting)
+        serverHost = hostForDisplay(appOrigin, setting.mode === 'cloud')
+
+        // Fast fail against the contract's cap before encrypting anything;
+        // the relay's own (possibly smaller) cap is checked again below.
         if (doc.bytes.byteLength > MAX_UPLOAD_BYTES) {
-          throw new Error(
-            `This document is too large to share this way (${Math.ceil(doc.bytes.byteLength / (1024 * 1024))} MB, 32 MB max).`,
-          )
+          throw new RelayError('tooLarge', 'too large')
         }
 
+        // Identity first (docs/design/self-hosting-relay.md §2): the relay's
+        // real size cap and TTL replace the mirrored fallbacks above, and a
+        // wrong server address or an untrusted certificate fails HERE with
+        // its specific message rather than as a mysterious upload status.
+        // Runs concurrently with the encryption. A server that answers but
+        // is NOT a relay at /relay/ (a proxy that forwards /relay/drop but
+        // not the identity GET, an older relay without the route) degrades
+        // to the mirrored constants — the design's stated fallback — and
+        // the upload proceeds; only a transport/TLS failure short-circuits,
+        // since the PUT would fail the same way.
         const key = generateKey()
-        const ciphertext = await encrypt(key, doc.bytes)
+        const [identity, ciphertext] = await Promise.all([
+          relayIdentity().catch((err: unknown) => {
+            if (err instanceof RelayError && err.kind === 'notARelay') return null
+            throw err
+          }),
+          encrypt(key, doc.bytes),
+        ])
+        maxBytes = identity?.maxBytes ?? MAX_UPLOAD_BYTES
+        const ttlMs = identity?.ttlMs ?? DROP_TTL_MS
 
-        // Routed through Tauri's native HTTP plugin, not the webview's own
-        // `fetch` — see the module doc and shells/tauri's Cargo.toml comment
-        // on the `tauri-plugin-http` dependency: the share-relay Worker's
-        // CORS allowlist correctly admits only app.hew3d.com (the phone's
-        // real browser origin), which excludes `tauri dev`'s
-        // http://localhost:5173 devUrl. The plugin's `fetch` is a native
-        // Rust HTTP client — no CORS involved — and is API-compatible with
-        // browser `fetch` for everything used here. Imported dynamically so
-        // it never lands in the web build's entry chunk: this dialog is
-        // statically imported by App.tsx but only ever rendered under Tauri
-        // (module doc), same pattern as the `@tauri-apps/api/core` imports
-        // below.
-        const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http')
-        // Only the transport call is wrapped: a rejection here means the
-        // request never reached the server (offline / DNS / refused), which
-        // becomes the friendly "could not reach" message regardless of the
-        // fetch implementation's error shape. A response that arrives with a
-        // bad status is handled below with its own specific wording.
-        let response: Awaited<ReturnType<typeof tauriFetch>>
-        try {
-          response = await tauriFetch(SHARE_RELAY_BASE, {
-            method: 'PUT',
-            body: ciphertext as BodyInit,
-          })
-        } catch {
-          throw new ShareServerUnreachable('share upload transport failed')
+        if (doc.bytes.byteLength > maxBytes) {
+          throw new RelayError('tooLarge', 'too large')
         }
-        if (response.status === 413) {
-          throw new Error('This document is too large to share this way (32 MB max).')
+        if (identity?.auth === 'bearer' && setting.mode === 'self-hosted' && setting.uploadKey === '') {
+          throw new RelayError('unauthorized', 'key required')
         }
-        if (!response.ok) {
-          throw new Error(`Could not reach the share server (status ${response.status}).`)
-        }
-        const { token } = (await response.json()) as { token: string }
+
+        // The upload itself: raw bytes to the Rust command, which PUTs them
+        // to `<origin>/relay/drop` with the configured key (self-hosted only).
+        const { token } = await relayPut(ciphertext)
         uploadedToken = token
         const uploadedAt = Date.now()
 
@@ -282,14 +335,14 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
         // the name segment (last, urlencoded) must never be re-split on
         // its own embedded "." characters.
         const fragment = `recv=${token}.${toBase64Url(key)}.${encodeURIComponent(doc.name)}`
-        const url = `${RECEIVE_ORIGIN}/#${fragment}`
+        const url = receiveUrlFor(appOrigin, fragment)
 
         const { invoke } = await import('@tauri-apps/api/core')
         const qrSvg = await invoke<string>('qr_svg', { text: url })
 
-        if (!cancelled) setState({ kind: 'ready', url, qrSvg, token, uploadedAt })
+        if (!cancelled) setState({ kind: 'ready', url, qrSvg, token, uploadedAt, ttlMs, serverHost })
       } catch (err) {
-        if (!cancelled) setState({ kind: 'error', message: describeUploadError(err) })
+        if (!cancelled) setState({ kind: 'error', message: describeUploadError(err, serverHost, maxBytes) })
       }
     })()
     return () => {
@@ -302,16 +355,9 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
       // harmless: the drop expires on its own regardless (shareCrypto.ts /
       // share-relay's 10-minute TTL).
       if (uploadedToken !== null) {
-        // Same native-HTTP-plugin routing as the upload above, for the same
-        // CORS reason; dynamically imported for the same bundle-hygiene
-        // reason.
-        void import('@tauri-apps/plugin-http')
-          .then(({ fetch: tauriFetch }) =>
-            tauriFetch(`${SHARE_RELAY_BASE}/${uploadedToken}`, { method: 'DELETE' }),
-          )
-          .catch(() => {
-            /* best-effort only */
-          })
+        void relayDelete(uploadedToken).catch(() => {
+          /* best-effort only */
+        })
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -325,6 +371,7 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
   // because the component is unmounting.
   const readyToken = state.kind === 'ready' ? state.token : null
   const readyUploadedAt = state.kind === 'ready' ? state.uploadedAt : null
+  const readyTtlMs = state.kind === 'ready' ? state.ttlMs : DROP_TTL_MS
   useEffect(() => {
     if (readyToken === null || readyUploadedAt === null) return
     let cancelled = false
@@ -341,32 +388,29 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
 
     const interval = setInterval(() => {
       void (async () => {
-        // Same native-HTTP-plugin transport as the upload/DELETE above, for
-        // the same CORS reason. Only the request itself is try/caught: a
-        // rejection here means the request never reached the server
-        // (offline / DNS / refused) — a missed tick, not a signal about the
-        // drop's state, so this poll is simply skipped and retried next
-        // interval instead of closing or erroring the dialog out.
-        const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http')
-        let response: Awaited<ReturnType<typeof tauriFetch>>
+        // The Rust relay client's HEAD peek; a rejection means the request
+        // never got a 200/404 (offline / DNS / refused / a proxy 5xx) — a
+        // missed tick, not a signal about the drop's state, so this poll is
+        // simply skipped and retried next interval instead of closing or
+        // erroring the dialog out.
+        let answer: 'present' | 'gone'
         try {
-          response = await tauriFetch(`${SHARE_RELAY_BASE}/${readyToken}`, { method: 'HEAD' })
+          answer = await relayPeek(readyToken)
         } catch {
           return
         }
         if (cancelled) return
-        if (response.ok) {
+        if (answer === 'present') {
           seenAlive = true // drop confirmed present — keep polling
           return
         }
-        if (response.status !== 404) return // transient non-404 — keep polling
 
         clearInterval(interval)
         if (!seenAlive) return // 404 before the drop was ever confirmed alive:
         // the relay doesn't support the HEAD peek (or is unreliable) — leave
         // the QR up rather than report a phantom pickup.
         const elapsed = Date.now() - readyUploadedAt
-        setState(elapsed >= DROP_TTL_MS - EXPIRY_MARGIN_MS ? { kind: 'expired' } : { kind: 'picked-up' })
+        setState(elapsed >= readyTtlMs - EXPIRY_MARGIN_MS ? { kind: 'expired' } : { kind: 'picked-up' })
       })()
     }, POLL_INTERVAL_MS)
 
@@ -374,7 +418,7 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
       cancelled = true
       clearInterval(interval)
     }
-  }, [readyToken, readyUploadedAt])
+  }, [readyToken, readyUploadedAt, readyTtlMs])
 
   // A pickup is a success, not an error — auto-dismiss after a beat so the
   // confirmation is visible but doesn't linger. An expiry (the other 404
@@ -462,6 +506,11 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
             <p style={HINT_STYLE}>
               Scan from Shop Mode on your phone (From your desktop…), or with your camera.
             </p>
+            {state.serverHost !== null && (
+              <p style={HINT_STYLE} data-testid="phone-share-server">
+                Server: {state.serverHost} — your phone must be able to reach it too.
+              </p>
+            )}
           </>
         )}
 

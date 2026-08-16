@@ -38,6 +38,10 @@ mod live;
 // URL as an SVG QR code (the encryption and upload happen entirely in the
 // webview — see qr.rs's own doc comment).
 mod qr;
+// The "Open on Phone" relay client + the server setting it is bound to
+// (Settings ▸ Advanced ▸ Server) — see its module doc for why the requests
+// live in Rust rather than behind an HTTP plugin scope.
+mod relay_client;
 
 // ---------------------------------------------------------------------------
 // In-app auto-updater (compiled in via the `updater` feature — see Cargo.toml).
@@ -2447,12 +2451,7 @@ fn main() {
         // Opener: lets the webview hand a URL (the getting-started guide link on
         // the welcome screen) to the OS default browser instead of trying to
         // navigate the app's own webview.
-        .plugin(tauri_plugin_opener::init())
-        // Native HTTP client for the "Open on Phone" upload/delete
-        // (PhoneShareDialog.tsx) — bypasses the webview's browser `fetch` and
-        // its CORS restrictions entirely. Scoped to the share-relay host
-        // alone in capabilities/default.json.
-        .plugin(tauri_plugin_http::init());
+        .plugin(tauri_plugin_opener::init());
 
     // The updater plugin ships only in updater-enabled builds (the `updater`
     // feature); package-manager builds compile it out.
@@ -2509,6 +2508,12 @@ fn main() {
             fonts::list_system_fonts,
             fonts::read_font_file,
             qr::qr_svg,
+            relay_client::get_server_setting,
+            relay_client::set_server_setting,
+            relay_client::relay_identity,
+            relay_client::relay_put,
+            relay_client::relay_peek,
+            relay_client::relay_delete,
         ])
         // Build and attach the native menu bar; wire menu-item clicks to
         // `menu-action` events emitted to the webview.
@@ -3254,6 +3259,11 @@ fn main() {
             // fonts.rs's top-of-file doc comment for the token registry's
             // security role.
             app.manage(fonts::SystemFontState::default());
+            // "Open on Phone" server setting + HTTP client — loaded once from
+            // server.json; only `set_server_setting` ever changes it.
+            app.manage(relay_client::RelayState::new(relay_client::load_setting(
+                handle,
+            )));
             for path in &recents {
                 approve_file(handle, Path::new(path), true);
             }

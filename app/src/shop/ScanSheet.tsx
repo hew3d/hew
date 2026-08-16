@@ -10,12 +10,20 @@
  * Scope ends at decoding: this component only acquires the camera, runs the
  * scan loop, and — the instant a frame decodes to a valid "Open on Phone"
  * handoff (`shellMode.ts`'s `parseRecvParams`, which accepts both a full
- * `https://app.hew3d.com/#recv=…` URL and a bare `#recv=…` payload, so a
- * decode from either a same-origin QR or a repeated-scan edge case both
- * work) — stops the camera and hands the parsed params to `onDecoded`.
+ * `https://<origin>/#recv=…` URL and a bare `#recv=…` payload, so a decode
+ * from either a same-origin QR or a repeated-scan edge case both work) —
+ * stops the camera and hands the parsed params to `onDecoded`.
  * `ShopApp.tsx` owns everything after that (the actual fetch/decrypt/load,
  * shared with the boot-time `#recv=` hash path so a camera-app scan that
  * lands in Safari works identically).
+ *
+ * One exception it handles itself: a code minted for a DIFFERENT origin
+ * (`shellMode.ts`'s `scannedOrigin` ≠ this page's — a desktop pointed at a
+ * self-hosted server, scanned from the public app, or the reverse). Its
+ * relay is not ours, so nothing is fetched; the sheet says which server the
+ * code is for and offers to open it there (a plain navigation to the QR's
+ * own URL, which lands on that origin's link-arrived confirmation). A bare
+ * fragment names no origin and is same-origin by definition.
  *
  * Camera lifecycle is the one thing here that is NOT allowed to have a
  * bug: every `MediaStreamTrack` this component ever acquires is stopped on
@@ -30,7 +38,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createQrEngine, type QrEngine } from './qrEngine'
-import { parseRecvParams, type RecvParams } from './shellMode'
+import { parseRecvParams, scannedOrigin, type RecvParams } from './shellMode'
 import { QrIcon } from './icons'
 import type { ShopOrientation } from './orientation'
 
@@ -55,6 +63,8 @@ type ScanState =
   // https app) instead of falsely claiming the device has no camera.
   | { kind: 'insecure' }
   | { kind: 'scanning'; notHew: boolean }
+  // Decoded a valid handoff for ANOTHER origin — see the module doc.
+  | { kind: 'foreign'; host: string; url: string }
 
 /** How often the scan loop grabs a frame and runs it through the decode
  *  engine — fast enough that a QR held steady in frame decodes within a
@@ -154,6 +164,17 @@ export function ScanSheet({ open, orientation, onClose, onDecoded }: ScanSheetPr
       }
       decodedRef.current = true
       stopStream()
+      const origin = scannedOrigin(text)
+      if (origin !== null && origin !== window.location.origin) {
+        let host = origin
+        try {
+          host = new URL(origin).host
+        } catch {
+          /* keep the raw origin */
+        }
+        setState({ kind: 'foreign', host, url: text })
+        return
+      }
       onDecoded(params)
     }
 
@@ -342,6 +363,26 @@ export function ScanSheet({ open, orientation, onClose, onDecoded }: ScanSheetPr
             <>
               <p style={hintStyle}>The camera needs a secure (https) connection — open the installed Hew app rather than a local preview.</p>
               <p style={hintStyle}>Or scan the QR with your camera app instead.</p>
+            </>
+          )}
+          {state.kind === 'foreign' && (
+            <>
+              <p data-testid="shop-scan-foreign" style={hintStyle}>
+                This code is for <strong>{state.host}</strong>, not this server — open it there?
+              </p>
+              <button
+                type="button"
+                data-testid="shop-scan-open-there"
+                onClick={() => window.location.assign(state.url)}
+                style={{
+                  display: 'block', width: '100%', height: '44px', marginTop: '4px',
+                  background: 'var(--shop-accent-fill)', color: 'var(--shop-on-accent)',
+                  border: 'none', borderRadius: '13px', cursor: 'pointer',
+                  fontFamily: 'var(--font-family-ui)', fontSize: '15px', fontWeight: 600,
+                }}
+              >
+                Open on {state.host}
+              </button>
             </>
           )}
           {scanning && (state as { kind: 'scanning'; notHew: boolean }).notHew && (

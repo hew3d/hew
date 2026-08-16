@@ -19,8 +19,9 @@ import { UnitsPane } from './UnitsPane'
 import { ThemePane } from './ThemePane'
 import { DebugPane } from './DebugPane'
 import { FoldersPane } from './FoldersPane'
+import { AdvancedPane } from './AdvancedPane'
 
-type Category = 'units' | 'theme' | 'folders' | 'debug'
+type Category = 'units' | 'theme' | 'folders' | 'advanced' | 'debug'
 
 const iconProps = {
   width: 22,
@@ -74,10 +75,23 @@ function FoldersIcon() {
   )
 }
 
+/** Sliders — Advanced. */
+function AdvancedIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M4 7.5h16M4 12h16M4 16.5h16" />
+      <circle cx="9" cy="7.5" r="1.8" fill="var(--surface-bar, #202020)" />
+      <circle cx="15" cy="12" r="1.8" fill="var(--surface-bar, #202020)" />
+      <circle cx="8" cy="16.5" r="1.8" fill="var(--surface-bar, #202020)" />
+    </svg>
+  )
+}
+
 const TABS: { id: Category; label: string; icon: ReactElement }[] = [
   { id: 'units', label: 'Units', icon: <UnitsIcon /> },
   { id: 'theme', label: 'Theme', icon: <ThemeIcon /> },
   { id: 'folders', label: 'Folders', icon: <FoldersIcon /> },
+  { id: 'advanced', label: 'Advanced', icon: <AdvancedIcon /> },
   { id: 'debug', label: 'Debug', icon: <DebugIcon /> },
 ]
 
@@ -170,6 +184,7 @@ export function SettingsWindow() {
         {active === 'units' && <UnitsPane />}
         {active === 'theme' && <ThemePane />}
         {active === 'folders' && <FoldersPane />}
+        {active === 'advanced' && <AdvancedPane />}
         {active === 'debug' && <DebugPane />}
       </div>
     </div>

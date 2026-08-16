@@ -14,8 +14,9 @@
  *
  * All colors come from theme tokens (app/src/theme/tokens.css) so light and
  * dark themes both render correctly. Bound to the same settings singletons
- * as the macOS panes (units.ts / theme.ts / debugMode.ts) — changes apply
- * instantly and sync across windows; no OK/Cancel.
+ * as the macOS panes (units.ts / theme.ts / debugMode.ts, and the
+ * Rust-held server setting via serverForm.ts) — changes apply instantly and
+ * sync across windows; no OK/Cancel.
  */
 
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
@@ -38,6 +39,8 @@ import {
 } from './theme'
 import { getDebugMode, setDebugMode, subscribe as subscribeDebug } from './debugMode'
 import { libraryStore } from '../io/libraryStore'
+import { describeIdentity, useServerSettingForm } from './serverForm'
+import { CLOUD_ORIGIN } from './server'
 
 // Windows 11 app type ramp (Segoe UI Variable falls back to Segoe UI in
 // webviews that don't expose the variable face).
@@ -277,6 +280,123 @@ const THEME_OPTIONS: { value: ThemeSetting; label: string }[] = [
   { value: 'auto', label: 'Use system setting' },
 ]
 
+/** The "Server" section — the Windows mirror of AdvancedPane.tsx, on the
+ *  same `useServerSettingForm` state machine (see serverForm.ts). */
+function ServerSection() {
+  const form = useServerSettingForm()
+  const selfHosted = form.draft.mode === 'self-hosted'
+  const commitOnEnter = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      void form.commit()
+    }
+  }
+  if (!form.available) {
+    return (
+      <>
+        <div style={sectionHeaderStyle}>Server</div>
+        <SettingsCard
+          title="Open on Phone server"
+          description="In the browser, Hew talks to the server it was loaded from — there is nothing to configure here."
+        >
+          <span style={{ ...libraryPathInputStyle, flex: 'none' }} data-testid="settings-server-readonly">
+            {typeof window !== 'undefined' ? window.location.origin : ''}
+          </span>
+        </SettingsCard>
+      </>
+    )
+  }
+  return (
+    <>
+      <div style={sectionHeaderStyle}>Server</div>
+      <SettingsCard
+        title="Open on Phone server"
+        description="Where the desktop uploads and where the QR code points your phone. A self-hosted server must serve the Hew web app with the relay under /relay/ (see the self-hosting guide)."
+        htmlFor="fluent-server-mode"
+      >
+        <select
+          id="fluent-server-mode"
+          value={form.draft.mode}
+          onChange={(e) => form.setMode(e.target.value as 'cloud' | 'self-hosted')}
+          style={selectStyle}
+        >
+          <option value="cloud" style={optionStyle}>
+            Hew cloud ({CLOUD_ORIGIN.replace(/^https:\/\//, '')})
+          </option>
+          <option value="self-hosted" style={optionStyle}>
+            Self-hosted
+          </option>
+        </select>
+      </SettingsCard>
+      {selfHosted && (
+        <div style={cardStyle}>
+          <label htmlFor="fluent-server-origin" style={{ ...cardTitleStyle, flexShrink: 0 }}>
+            Address:
+          </label>
+          <input
+            id="fluent-server-origin"
+            type="url"
+            inputMode="url"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="https://hew.example.org"
+            value={form.draft.origin === CLOUD_ORIGIN ? '' : form.draft.origin}
+            onChange={(e) => form.setOriginDraft(e.target.value)}
+            onBlur={() => void form.commit()}
+            onKeyDown={commitOnEnter}
+            style={libraryPathInputStyle}
+          />
+        </div>
+      )}
+      {selfHosted && (
+        <SettingsCard
+          title="Upload key"
+          description="Only if the server's admin set one. Stored on this computer in plain text and only ever sent to the address above — never to the Hew cloud."
+          htmlFor="fluent-server-upload-key"
+        >
+          <input
+            id="fluent-server-upload-key"
+            type="password"
+            autoComplete="off"
+            placeholder="none"
+            value={form.draft.uploadKey}
+            onChange={(e) => form.setUploadKeyDraft(e.target.value)}
+            onBlur={() => void form.commit()}
+            onKeyDown={commitOnEnter}
+            style={{ ...libraryPathInputStyle, flex: 'none', width: '260px' }}
+          />
+        </SettingsCard>
+      )}
+      {form.error !== null && (
+        <div style={{ ...cardDescStyle, color: 'var(--danger-text, #e88)', margin: '2px 1px 6px' }} role="alert" data-testid="settings-server-error">
+          {form.error}
+        </div>
+      )}
+      <SettingsCard
+        title="Test connection"
+        description={
+          form.test.kind === 'ok'
+            ? `Reachable: ${new URL(form.test.identity.origin).host} — ${describeIdentity(form.test.identity)}`
+            : form.test.kind === 'fail'
+              ? form.test.message
+              : selfHosted
+                ? "Checks that the address serves a Hew relay and, if it needs one, that your upload key is accepted. Over plain http:// the phone's in-app scanner can't open the camera; scan with the camera app instead. A certificate from your own authority must be trusted on this computer and on the phone."
+                : 'Checks that the Hew cloud relay is reachable from this computer.'
+        }
+      >
+        <button
+          type="button"
+          onClick={() => void form.testConnection()}
+          disabled={form.test.kind === 'testing'}
+          style={fluentButtonStyle(form.test.kind === 'testing')}
+        >
+          {form.test.kind === 'testing' ? 'Testing…' : 'Test connection'}
+        </button>
+      </SettingsCard>
+    </>
+  )
+}
+
 export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
   const [format, setFormat] = useState<LengthFormat>(() => getLengthUnit())
   const [theme, setTheme] = useState<ThemeSetting>(() => getThemeSetting())
@@ -450,6 +570,8 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
               Change…
             </button>
           </div>
+
+          <ServerSection />
 
           <div style={sectionHeaderStyle}>Debug</div>
           <SettingsCard

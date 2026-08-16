@@ -1,37 +1,40 @@
 /**
- * shareRelay — the one place the "Open on Phone" relay endpoints are
- * spelled out. The desktop dialog (panels/PhoneShareDialog.tsx) PUTs
- * ciphertext to `SHARE_RELAY_BASE`, and Shop Mode's receive path
- * (shop/ShopApp.tsx) GETs it back from the same base; the desktop mints the
- * QR against `RECEIVE_ORIGIN` so a camera-app scan opens the right web app.
+ * shareRelay — where the "Open on Phone" relay lives, relative to the origin
+ * that serves the Hew web app: always `<origin>/relay/` (docs/design/
+ * self-hosting-relay.md §2). That one convention replaces every hard-wired
+ * hostname this module used to carry:
  *
- * Both values default to production and can be overridden at BUILD time via
- * Vite env vars, so a self-hosted HTTPS test origin — a homelab
- * `https://hew.granroth.xyz` serving this build behind a real cert — can be
- * exercised end to end without editing (or committing) that origin:
+ *   - the PHONE (Shop Mode's receive path, `shop/ShopApp.tsx`) fetches the
+ *     ciphertext from its OWN origin — `phoneRelayBase()` — so a self-hosted
+ *     PWA talks to the self-hosted relay next to it, and the public PWA at
+ *     app.hew3d.com talks to the Workers route on app.hew3d.com. No runtime
+ *     config file, no env var, no CORS (same origin);
+ *   - the DESKTOP (`panels/PhoneShareDialog.tsx`) has one setting, the server
+ *     origin (`settings/server.ts`), and the Rust relay client derives the
+ *     upload URL from it; this module only derives the QR's receive URL,
+ *     `<origin>/#recv=…`, from the same setting.
  *
- *   - `VITE_HEW_RECEIVE_ORIGIN` — the origin QR links point at. Set this on
- *     the DESKTOP build so the QR (and the camera-app fallback that opens it
- *     in Safari) lands on the test app instead of app.hew3d.com. The web
- *     build doesn't mint QRs, so it ignores this.
- *   - `VITE_HEW_SHARE_RELAY` — the relay drop endpoint. Leave it at the
- *     default unless the Cloudflare Worker itself is also self-hosted; the
- *     relay is a dumb encrypted pipe and normally stays on Cloudflare even
- *     when the web app is served locally.
- *
- * Whatever origin the web build is served from must ALSO be added to the
- * Worker's CORS allowlist (its `EXTRA_ALLOWED_ORIGINS` var) or the receive
- * GET is blocked — see workers/share-relay/src/handlers.ts. The web shell's
- * own CSP `connect-src` (shells/web/inject-csp.mjs) already admits the relay
- * host; a non-default `VITE_HEW_SHARE_RELAY` host would need adding there too.
+ * The public deployment follows the same rule: `app.hew3d.com/relay/*` is a
+ * Workers route to the share-relay Worker (`share.hew3d.com` keeps routing
+ * there too, for older builds — workers/share-relay/README.md).
  */
 
-/** Base URL of the share-relay Worker's drop store (workers/share-relay). */
-export const SHARE_RELAY_BASE =
-  import.meta.env.VITE_HEW_SHARE_RELAY ?? 'https://share.hew3d.com/drop'
+/** The relay's path under any origin that serves the app. No trailing slash
+ *  here — callers append `/drop`, `/drop/<token>`, or `/` (the identity
+ *  route, whose trailing slash IS part of the contract). */
+export const RELAY_PATH = '/relay'
 
-/** The web-app origin QR links are minted against — scanning with the OS
- *  camera opens this origin in Safari, so the fragment loads even without
- *  the installed app. */
-export const RECEIVE_ORIGIN =
-  import.meta.env.VITE_HEW_RECEIVE_ORIGIN ?? 'https://app.hew3d.com'
+/** `<origin>/relay` for the given app origin. */
+export function relayBaseFor(origin: string): string {
+  return `${origin.replace(/\/+$/, '')}${RELAY_PATH}`
+}
+
+/** The relay next to THIS page — the phone side's one and only relay. */
+export function phoneRelayBase(): string {
+  return relayBaseFor(window.location.origin)
+}
+
+/** The `#recv=…` receive URL a desktop mints for `appOrigin`. */
+export function receiveUrlFor(appOrigin: string, fragment: string): string {
+  return `${appOrigin.replace(/\/+$/, '')}/#${fragment}`
+}

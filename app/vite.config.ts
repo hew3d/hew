@@ -69,6 +69,20 @@ export default defineConfig({
         // a future kernel growth never silently drops the WASM from the precache.
         globPatterns: ['**/*.{js,css,html,wasm,png,svg,ico,hew}'],
         maximumFileSizeToCacheInBytes: 10 * 1024 * 1024, // 10 MB
+        // The "Open on Phone" relay lives at <origin>/relay/ on the SAME
+        // origin as this app (app/src/io/shareRelay.ts). Nothing there is
+        // ever cacheable — a GET consumes the drop, a HEAD is a live poll —
+        // so pin it to NetworkOnly explicitly rather than relying on the
+        // absence of a matching runtimeCaching rule, and keep the SPA
+        // navigation fallback away from it too (a navigation to /relay/
+        // must reach the server, not resolve to the precached index.html).
+        runtimeCaching: [
+          {
+            urlPattern: ({ url, sameOrigin }) => sameOrigin && url.pathname.startsWith('/relay/'),
+            handler: 'NetworkOnly',
+          },
+        ],
+        navigateFallbackDenylist: [/^\/relay(\/|$)/],
       },
 
       // Leave the service worker disabled in dev so `pnpm dev` is unaffected.
