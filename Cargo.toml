@@ -14,6 +14,7 @@ members = [
     "crates/skp-import",
     "crates/stl-import",
     "crates/hew-cli",
+    "crates/hew-relay",
 ]
 # The Tauri host crate is deliberately NOT a workspace member: it drags
 # desktop-only dependencies into `cargo test --workspace` and would slow the

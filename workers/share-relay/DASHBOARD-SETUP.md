@@ -21,8 +21,12 @@ here.
 - [ ] **Rule name**: `share-relay-put-throttle` (or anything you'll
       recognize later).
 - [ ] **If incoming requests match…**
-  - Field: **Hostname** — equals `share.hew3d.com`
-  - AND Field: **URI Path** — starts with `/drop`
+  - Field: **URI Path** — contains `/drop`
+  - No Hostname clause: this single rule now covers both
+    `share.hew3d.com/drop*` (the legacy hostname) and
+    `app.hew3d.com/relay/drop*` (the same-origin route added below) —
+    "contains", not "starts with", since the second form has `/relay`
+    ahead of `/drop`.
 - [ ] **When rate exceeds**: pick a threshold above normal usage but well
       below anything that could stress the DO free tier from one IP — e.g.
       **> 15 requests per 10 seconds**.
@@ -90,25 +94,56 @@ again, a Cloudflare pricing change) — go find out why before dismissing it.
       $0 argument in `README.md` stops holding the moment this account (or
       this Worker's Durable Objects) leaves Free.
 
+## (d) Route app.hew3d.com/relay/* to this Worker
+
+New desktops and the phone app reach the relay as `<origin>/relay/…` — for
+the hosted deployment that means routing `app.hew3d.com/relay/*` to this
+same Worker, alongside the legacy `share.hew3d.com/*` route. Both hostnames
+resolve to the same Worker and the same Durable Object namespace (the DO id
+derives from the token, not the hostname), so old and new clients
+interoperate without a migration step.
+
+- [ ] Dashboard → **Workers & Pages** → `share-relay` → **Settings** →
+      **Domains & Routes** → **Add** → route pattern `app.hew3d.com/relay/*`
+      on zone `hew3d.com`.
+- [ ] Save.
+- [ ] Verify: `curl -s https://app.hew3d.com/relay/` should return the
+      identity JSON (`{"service":"hew-relay",...}`), the same shape
+      `https://share.hew3d.com/` returns.
+- [ ] `app.hew3d.com` also serves the Pages-hosted web app on a custom
+      domain. Cloudflare documents that a Workers route wins over a Pages
+      custom domain on the same hostname — **confirm this on the first
+      request** rather than trust the documented precedence: the `curl`
+      above should hit the Worker (JSON), not the Pages app (HTML). If it
+      returns HTML instead, the route did not take priority and needs a
+      second look before shipping this to real clients.
+
 ## Optional: allow a self-hosted HTTPS test origin
 
-To exercise the phone flow against a self-hosted build (e.g. a homelab
-`https://hew.granroth.xyz` serving `shells/web/dist` behind a real cert)
-rather than production `app.hew3d.com`, the relay must let that origin read
-its responses. It is NOT in the committed allowlist; add it as a Worker var:
+A self-hosted deployment doesn't need any of this — a phone at a
+self-hosted origin talks to the relay running right next to it under
+`/relay/`, same-origin, no CORS entry required. `EXTRA_ALLOWED_ORIGINS`
+exists only for the unsupported split-origin layout: a phone-facing web
+app on one origin, backed by this Worker (or another relay) on a
+different one — for example, exercising the phone flow against this
+Worker from a homelab origin like `https://hew.example.org` that doesn't
+run its own relay.
 
 1. Cloudflare dashboard → Workers & Pages → `share-relay` → Settings →
    Variables and Secrets → add a plaintext variable
-   `EXTRA_ALLOWED_ORIGINS` = `https://hew.granroth.xyz` (comma-separate
+   `EXTRA_ALLOWED_ORIGINS` = `https://hew.example.org` (comma-separate
    several). Deploy/save.
    - Or, for a local `wrangler dev`: `wrangler dev --var
-     'EXTRA_ALLOWED_ORIGINS:https://hew.granroth.xyz'`.
+     'EXTRA_ALLOWED_ORIGINS:https://hew.example.org'`.
 2. Serve the shop web build (`pnpm --dir shells/web build` →
    `shells/web/dist`) at that origin.
-3. Build the DESKTOP with `VITE_HEW_RECEIVE_ORIGIN=https://hew.granroth.xyz`
-   so the QR (and a camera-app scan of it) points at the test origin. The
-   in-app scanner works regardless of this — it reads the token off the QR
-   and fetches the relay directly — so this only matters for the
-   camera-app fallback path.
+3. Point the DESKTOP at the test origin from Settings ▸ Advanced ▸ Server
+   (Self-hosted, address `https://hew.example.org`) — there is no longer a
+   build-time `VITE_HEW_*` override for this; those variables have been
+   removed. The in-app scanner works regardless of any of this — it reads
+   the token off the QR and fetches the relay directly — so this split-
+   origin allowance only matters for a camera-app scan or a typed link
+   landing on a browser that isn't the desktop's own webview.
 
-Remove the var when done; production needs only the three base origins.
+Remove the var when done; production needs only the base origins plus the
+route added in (d) above.

@@ -10,9 +10,15 @@
 #              Windows, /usr/bin/hew-cli on Linux .deb/.rpm (on PATH), and
 #              inside the AppImage (not independently runnable there without
 #              --appimage-extract; the .deb/.rpm are what puts it on PATH)
-#   Web        hew-web-vX.Y.Z.tar.gz self-hosting tarball + Cloudflare Pages
-#              deploy of app.hew3d.com (skipped loudly until the Cloudflare
-#              secrets exist)
+#   Web        hew-web-vX.Y.Z.tar.gz self-hosting tarball (the built app plus
+#              a deploy/ directory: nginx.conf, the relay proxy stanza, the
+#              relay systemd unit — so a deployment is version-locked to the
+#              app it ships) + Cloudflare Pages deploy of app.hew3d.com
+#              (skipped loudly until the Cloudflare secrets exist)
+#   Relay      hew-relay-vX.Y.Z-linux-{x86_64,aarch64}.tar.gz — the
+#              self-hostable "Open on Phone" relay (static musl binary +
+#              systemd unit + README), built natively on the x64 and arm64
+#              runners; plus a multi-arch ghcr.io/<owner>/hew-relay image
 #   Updater    latest.json assembled from the per-platform .sig assets by a
 #              final job (NOT tauri-action's per-job merge, which loses
 #              updates when parallel matrix jobs race the read-modify-write)
@@ -42,6 +48,8 @@ on:
 
 permissions:
   contents: write
+  # The relay-image job pushes ghcr.io/<owner>/hew-relay with GITHUB_TOKEN.
+  packages: write
 
 env:
   # Version = tag minus the leading `v`; stamped into the bundle via a
@@ -476,13 +484,16 @@ jobs:
         run: pnpm --dir shells/web build
 
       # The self-hosting artifact: "unzip behind any static file server".
-      # Deliberately excludes the Cloudflare-specific _headers file.
+      # Deliberately excludes the Cloudflare-specific _headers file. Carries
+      # shells/web/deploy/ as a top-level deploy/ (nginx.conf, hew.d/relay.conf,
+      # hew-relay.service) so an installation takes its configs from the
+      # release it is running, not from whatever `main` says today.
       - name: Pack and upload self-hosting tarball
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: |
-          tar -czf "hew-web-$TAG.tar.gz" -C shells/web/dist .
+          tar -czf "hew-web-$TAG.tar.gz" -C shells/web/dist . -C ../ deploy
           # Idempotent: GitHub 422s on duplicate asset names, so a re-run of
           # this job (e.g. to fire the Cloudflare deploy after the secrets
           # appear) must first drop the asset it uploaded last time.
@@ -510,6 +521,126 @@ jobs:
           cp shells/web/_headers shells/web/dist/_headers
           npx wrangler@4 pages deploy shells/web/dist \
             --project-name=hew-app --branch=main --commit-dirty=true
+
+  # The self-hostable relay: a static musl binary per Linux architecture,
+  # each built NATIVELY (the arm64 leg on the arm64 runner, as the desktop
+  # job's Linux arm64 leg already is) — no cross-linker to keep working.
+  # Each tarball carries the binary, the systemd unit, and the crate README.
+  relay:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            platform: linux/amd64
+          - name: linux-aarch64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+            platform: linux/arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: relay-${{ matrix.target }}
+
+      # rustup honors rust-toolchain.toml for the compiler; the musl target
+      # is added on top of that pinned toolchain.
+      - name: musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+          rustup target add ${{ matrix.target }}
+
+      - name: Build hew-relay (static)
+        run: cargo build --release -p hew-relay --target ${{ matrix.target }}
+
+      - name: Smoke the binary
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/hew-relay"
+          file "$BIN" | grep -qi 'static' || { echo "::error::hew-relay is not statically linked"; file "$BIN"; exit 1; }
+          "$BIN" --version
+          "$BIN" --listen 127.0.0.1:18787 &
+          sleep 1
+          curl -sf http://127.0.0.1:18787/relay/ | grep -q '"service":"hew-relay"'
+          kill %1
+
+      - name: Pack and upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          NAME="hew-relay-$TAG-${{ matrix.name }}.tar.gz"
+          rm -rf stage && mkdir stage
+          cp "target/${{ matrix.target }}/release/hew-relay" stage/
+          cp shells/web/deploy/hew-relay.service stage/
+          cp crates/hew-relay/README.md stage/README.md
+          tar -czf "$NAME" -C stage .
+          # Idempotent re-upload, same as the web tarball.
+          existing="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
+            --jq ".[] | select(.name == \"$NAME\") | .id")"
+          [ -z "$existing" ] || gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$existing"
+          gh api --method POST \
+            -H "Content-Type: application/gzip" \
+            "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$NAME" \
+            --input "$NAME"
+
+  # ghcr.io/<owner>/hew-relay — a scratch image around the two static
+  # binaries the relay job just uploaded (fetched back from the draft
+  # release, so no artifact plumbing and no extra pinned action). Pushed
+  # with GITHUB_TOKEN under this workflow's `packages: write`; the first
+  # push creates the package PRIVATE — flip it to public once in the
+  # package's settings for the docs' `docker pull` to work anonymously.
+  relay-image:
+    needs: [create-release, relay]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch the relay binaries from the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          fetch() { # <asset name> <platform dir>
+            id="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --paginate \
+              --jq ".[] | select(.name == \"$1\") | .id")"
+            [ -n "$id" ] || { echo "::error::release asset $1 missing"; exit 1; }
+            mkdir -p "dist/$2"
+            gh api -H "Accept: application/octet-stream" "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "$1"
+            tar -xzf "$1" -C "dist/$2" ./hew-relay
+            chmod +x "dist/$2/hew-relay"
+          }
+          fetch "hew-relay-$TAG-linux-x86_64.tar.gz" linux/amd64
+          fetch "hew-relay-$TAG-linux-aarch64.tar.gz" linux/arm64
+
+      - name: Build and push the multi-arch image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/hew-relay"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx create --use --name hew-relay-builder
+          # COPY-only Dockerfile: both platforms build without emulation.
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --file crates/hew-relay/Dockerfile \
+            --tag "$IMAGE:$VERSION" \
+            --tag "$IMAGE:latest" \
+            --push \
+            .
 
   # Assemble latest.json from the uploaded .sig assets. A single writer after
   # the whole matrix, so no read-modify-write races. URLs use the published
@@ -608,7 +739,7 @@ jobs:
   # (Re-running the whole workflow still mints a fresh draft via
   # create-release; that is the pre-existing deal for every job here.)
   release-notes:
-    needs: [create-release, desktop, web]
+    needs: [create-release, desktop, web, relay]
     runs-on: ubuntu-latest
     steps:
       - name: Write the download table into the release body
@@ -648,6 +779,8 @@ jobs:
           RPM_X64="Hew-${VERSION}-1.x86_64.rpm";     need "$RPM_X64"
           RPM_ARM="Hew-${VERSION}-1.aarch64.rpm";    need "$RPM_ARM"
           WEB="hew-web-v${VERSION}.tar.gz";          need "$WEB"
+          RELAY_X64="hew-relay-v${VERSION}-linux-x86_64.tar.gz";   need "$RELAY_X64"
+          RELAY_ARM="hew-relay-v${VERSION}-linux-aarch64.tar.gz";  need "$RELAY_ARM"
 
           url() { echo "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$1"; }
 
@@ -673,6 +806,7 @@ jobs:
           | **Linux** — Debian/Ubuntu | [.deb][deb-x64] | [.deb][deb-arm64] |
           | **Linux** — Fedora/openSUSE | [.rpm][rpm-x64] | [.rpm][rpm-arm64] |
           | **Web** — self-hosting tarball | [.tar.gz][web] | [.tar.gz][web] |
+          | **Relay** — self-hosted Open on Phone (Linux) | [.tar.gz][relay-x64] | [.tar.gz][relay-arm64] |
 
           - $MAC_NOTE
             covers Apple Silicon and Intel.
@@ -685,6 +819,9 @@ jobs:
             for manual download.
           - Or skip installing entirely: Hew runs in the browser at
             [app.hew3d.com](https://app.hew3d.com).
+          - Self-hosting the web app, and the optional relay that makes
+            *Open on Phone* work against your own server, is documented in
+            [docs/SELF_HOSTING.md](https://github.com/$GITHUB_REPOSITORY/blob/$TAG/docs/SELF_HOSTING.md).
 
           [mac]: $(url "$MAC")
           [win-x64]: $(url "$WIN_X64")
@@ -696,6 +833,8 @@ jobs:
           [rpm-x64]: $(url "$RPM_X64")
           [rpm-arm64]: $(url "$RPM_ARM")
           [web]: $(url "$WEB")
+          [relay-x64]: $(url "$RELAY_X64")
+          [relay-arm64]: $(url "$RELAY_ARM")
           EOF
 
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \

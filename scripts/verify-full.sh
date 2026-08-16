@@ -14,6 +14,10 @@
 #   verify.sh            fmt, clippy, cargo test, wasm (web), vitest, builds, tauri
 #   replay gate          node-target wasm + golden state-hash fixtures
 #   web E2E (chromium)   Playwright — the blocking functional browser lane
+#   relay contract       scripts/relay-contract.sh — the share-relay Worker's
+#                        unit suite plus the black-box conformance suite
+#                        against wrangler dev AND the hew-relay binary (CI's
+#                        `relay-contract` job)
 #
 # Deliberately NOT covered (none can fail the push, or none can run here):
 #   - web E2E visual goldens: BLOCKING in CI, but genuinely unrunnable here.
@@ -93,5 +97,10 @@ if grep -qE '[0-9]+ skipped' "$E2E_LOG"; then
   echo "state the case for the skip in scripts/verify-full.sh."
   exit 1
 fi
+
+# Relay contract — mirrors ci.yml's `relay-contract` job exactly (same
+# script). Starts and stops its own local servers on the 187xx/1879x ports.
+echo "=== relay contract (Worker + hew-relay) ==="
+scripts/relay-contract.sh
 
 echo "verify-full: all green"

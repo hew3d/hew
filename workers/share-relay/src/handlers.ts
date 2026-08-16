@@ -17,9 +17,27 @@
  */
 
 import type { DropEnv } from './types.ts'
+import { RPC_BATCH_CHUNKS, TTL_MS } from './dropStore.ts'
 
 /** Upload size ceiling — PUT /drop rejects anything larger with a 413. */
 export const MAX_BYTES = 32 * 1024 * 1024
+
+/** The relay contract version reported by the identity route (`GET /`).
+ *  Bumped only for an incompatible change; every addition so far — the
+ *  `/relay` prefix, this identity route, the optional bearer upload key —
+ *  is additive, so old clients keep working against contract 1. The
+ *  self-hostable Rust twin (`crates/hew-relay`) reports the same number;
+ *  the black-box conformance suite (`contract/`) pins both to it. */
+export const CONTRACT_VERSION = 1
+
+/** Optional path prefix. Self-hosting serves the relay from the SAME origin
+ *  as the web app under `/relay/` (docs/design/self-hosting-relay.md §2), and
+ *  the public deployment adds an `app.hew3d.com/relay/*` route to this Worker
+ *  alongside the legacy `share.hew3d.com/*` one. `route()` strips this once
+ *  and dispatches, so `/relay/drop` and `/drop` are the same route — a
+ *  reverse proxy that strips the prefix itself (nginx `proxy_pass` with a
+ *  URI part) and one that forwards it verbatim both work. */
+export const RELAY_PREFIX = '/relay'
 
 /** Each upload is split into pieces this size before being handed to
  *  `ShareDrop.store` — a single SQLite row/BLOB in a Durable Object caps at
@@ -69,6 +87,52 @@ export function resolveAllowedOrigins(env: DropEnv): Set<string> {
     .map((o) => o.trim())
     .filter((o) => o.length > 0)
   return new Set([...BASE_ALLOWED_ORIGINS, ...extra])
+}
+
+// ---------------------------------------------------------------------------
+// Optional upload key (docs/design/self-hosting-relay.md §4)
+// ---------------------------------------------------------------------------
+
+/** The configured upload key, or `null` when uploads are open (production:
+ *  the public relay's `PUT /drop` is unauthenticated by design — README.md's
+ *  "Security model"). A self-hoster who exposes their relay to the internet
+ *  sets `HEW_RELAY_UPLOAD_KEY` (a Worker secret here; an env/flag on the
+ *  Rust binary) so only their own desktops can fill its memory. Only PUT
+ *  checks it: GET/HEAD/DELETE stay keyless because the token is the
+ *  capability and the phone never holds the upload key. */
+export function resolveUploadKey(env: DropEnv): string | null {
+  // Trimmed, and whitespace-only counts as unset — the same reading
+  // hew-relay gives its `--upload-key`/env twin, so a stray space in a
+  // secret field never silently becomes "the key is a single space".
+  const key = (env.HEW_RELAY_UPLOAD_KEY ?? '').trim()
+  return key.length > 0 ? key : null
+}
+
+/** Constant-time string equality over UTF-8 bytes — the loop always runs to
+ *  the longer length and folds every byte (and the length difference) into
+ *  one accumulator, so a mismatch takes the same time wherever it is. Not
+ *  `crypto.subtle.timingSafeEqual`: that is a Cloudflare extension absent
+ *  from Node, and this module's tests run under bare `node --test`. */
+export function constantTimeEqual(a: string, b: string): boolean {
+  const enc = new TextEncoder()
+  const ab = enc.encode(a)
+  const bb = enc.encode(b)
+  let diff = ab.length ^ bb.length
+  const n = Math.max(ab.length, bb.length)
+  for (let i = 0; i < n; i++) diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0)
+  return diff === 0
+}
+
+/** Whether `request` carries `Authorization: Bearer <key>` for the configured
+ *  upload key. Always true when no key is configured. The key is never
+ *  logged or echoed anywhere — a failure is a bare 401. */
+export function uploadAuthorized(request: Request, env: DropEnv): boolean {
+  const key = resolveUploadKey(env)
+  if (key === null) return true
+  const header = request.headers.get('authorization') ?? ''
+  const prefix = 'Bearer '
+  if (!header.startsWith(prefix)) return false
+  return constantTimeEqual(header.slice(prefix.length), key)
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +197,7 @@ export function preflightResponse(origin: string | null, allowed: Set<string>): 
     headers: {
       'access-control-allow-origin': origin,
       'access-control-allow-methods': 'PUT, GET, HEAD, DELETE, OPTIONS',
-      'access-control-allow-headers': 'content-type',
+      'access-control-allow-headers': 'content-type, authorization',
       'access-control-max-age': '86400',
       vary: 'origin',
     },
@@ -159,14 +223,31 @@ export function withCors(response: Response, origin: string | null, allowed: Set
 
 export type Route =
   | { kind: 'preflight' }
+  | { kind: 'identity' }
   | { kind: 'put' }
   | { kind: 'get'; token: string }
   | { kind: 'peek'; token: string }
   | { kind: 'delete'; token: string }
   | { kind: 'not-found' }
 
-export function route(method: string, pathname: string): Route {
+/** Strips one leading `RELAY_PREFIX` segment: `/relay` → `/`, `/relay/x` →
+ *  `/x`; anything else (including `/relayx`) is returned unchanged. Applied
+ *  exactly once — `/relay/relay/drop` is NOT `/drop`. */
+export function stripRelayPrefix(pathname: string): string {
+  if (pathname === RELAY_PREFIX) return '/'
+  if (pathname.startsWith(`${RELAY_PREFIX}/`)) return pathname.slice(RELAY_PREFIX.length)
+  return pathname
+}
+
+export function route(method: string, rawPathname: string): Route {
   if (method === 'OPTIONS') return { kind: 'preflight' }
+  const pathname = stripRelayPrefix(rawPathname)
+  // The identity route answers at the prefix root with AND without the
+  // trailing slash (`/relay`, `/relay/`, and bare `/`) — clients always end
+  // the identity URL with `/` (design §2: a bare `/relay` on nginx falls
+  // into `try_files` unless the 308 in `deploy/hew.d/relay.conf` is present),
+  // but the server is lenient so a hand-typed check works too.
+  if (pathname === '/' && method === 'GET') return { kind: 'identity' }
   if (pathname === '/drop' && method === 'PUT') return { kind: 'put' }
   const match = /^\/drop\/([^/]+)$/.exec(pathname)
   if (match) {
@@ -191,6 +272,24 @@ function jsonResponse(status: number, body: unknown): Response {
   })
 }
 
+/** `GET /` (or `GET /relay`, `GET /relay/`) — the identity route: what a
+ *  desktop's *Test connection* hits, and where a new desktop reads the real
+ *  size cap / TTL instead of its mirrored constants. `auth` tells the client
+ *  whether PUT wants a bearer key (§4). `cache-control: no-store` so a proxy
+ *  never serves a stale answer after the admin flips a setting. */
+export function handleIdentity(env: DropEnv): Response {
+  return new Response(
+    JSON.stringify({
+      service: 'hew-relay',
+      contract: CONTRACT_VERSION,
+      maxBytes: MAX_BYTES,
+      ttlMs: TTL_MS,
+      auth: resolveUploadKey(env) === null ? 'none' : 'bearer',
+    }),
+    { status: 200, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } },
+  )
+}
+
 /** `PUT /drop` — the request body is opaque ciphertext (the desktop side
  *  never sends this Worker anything else); chunked (`chunkBytes`) and
  *  stored under a fresh token's `ShareDrop` DO, which stamps its own
@@ -200,6 +299,12 @@ function jsonResponse(status: number, body: unknown): Response {
  *  against the actually-read byte count (a missing or lying
  *  `Content-Length` can't be trusted alone). */
 export async function handlePutDrop(request: Request, env: DropEnv): Promise<Response> {
+  // Auth first, before the size checks and long before the body is read: an
+  // unauthorized upload should cost the relay nothing but a header read.
+  if (!uploadAuthorized(request, env)) {
+    return jsonResponse(401, { error: 'unauthorized' })
+  }
+
   const contentLength = request.headers.get('content-length')
   if (contentLength !== null) {
     const declared = Number(contentLength)
@@ -220,18 +325,38 @@ export async function handlePutDrop(request: Request, env: DropEnv): Promise<Res
   const chunks = chunkBytes(new Uint8Array(body), CHUNK_BYTES)
   const id = env.SHARE_DROP.idFromName(token)
   const stub = env.SHARE_DROP.get(id)
-  await stub.store(DROP_NAME, chunks)
+  // Batched: one RPC call may not carry more than 32 MiB of arguments, and a
+  // maximum-size drop is exactly that (`dropStore.ts`'s protocol note). The
+  // first batch rides `store` (which declares the full count, so the DO can
+  // tell "still uploading" from "complete"); the rest ride `append`.
+  await stub.store(DROP_NAME, chunks.length, body.byteLength, rpcBatch(chunks, 0))
+  for (let from = RPC_BATCH_CHUNKS; from < chunks.length; from += RPC_BATCH_CHUNKS) {
+    await stub.append(rpcBatch(chunks, from))
+  }
   return jsonResponse(200, { token })
 }
 
-/** `GET /drop/<token>` — one-shot: `ShareDrop.consume()` reads and wipes
- *  the drop's storage as a single synchronous-then-gated sequence, so this
- *  is genuinely atomic against a concurrent second GET for the same token
- *  (see `shareDrop.ts`'s class doc) — unlike the old R2-backed version,
- *  which only ever narrowed that race. `consume()` folds "never existed",
- *  "already consumed", and "expired" into the same `null` — the receiving
- *  phone gets no signal to distinguish those cases, which is the point (no
- *  information leak either way). */
+/** One RPC batch of `chunks` starting at `from`, each chunk COPIED into its
+ *  own buffer. `chunkBytes` returns `subarray` views over the single upload
+ *  buffer, and structured clone (which is what RPC serialization is) of a
+ *  typed-array view ships its ENTIRE backing buffer — so a batch of eight
+ *  1.9 MB views of a 32 MiB body would still serialize as 32 MiB and hit the
+ *  cap. Copying at the boundary is what makes the batching real. */
+function rpcBatch(chunks: Uint8Array[], from: number): Uint8Array[] {
+  return chunks.slice(from, from + RPC_BATCH_CHUNKS).map((chunk) => chunk.slice())
+}
+
+/** `GET /drop/<token>` — one-shot: `ShareDrop.consume()` CLAIMS the drop in
+ *  one synchronous burst inside the single-threaded DO, so this is genuinely
+ *  atomic against a concurrent second GET for the same token (see
+ *  `shareDrop.ts`'s class doc) — unlike the old R2-backed version, which only
+ *  ever narrowed that race. The bytes then come back through `take` in
+ *  RPC-sized batches (each of which deletes what it returns; the last one
+ *  wipes the drop) — a single return value may not carry a whole 32 MiB
+ *  drop (`dropStore.ts`'s protocol note). `consume()` folds "never existed",
+ *  "already consumed", "still uploading", and "expired" into the same `null`
+ *  — the receiving phone gets no signal to distinguish those cases, which is
+ *  the point (no information leak either way). */
 export async function handleGetDrop(token: string, env: DropEnv): Promise<Response> {
   if (!isValidToken(token)) {
     return jsonResponse(400, { error: 'invalid token' })
@@ -239,13 +364,32 @@ export async function handleGetDrop(token: string, env: DropEnv): Promise<Respon
 
   const id = env.SHARE_DROP.idFromName(token)
   const stub = env.SHARE_DROP.get(id)
-  const drop = await stub.consume()
+  const head = await stub.consume()
 
-  if (drop === null) {
+  if (head === null) {
     return jsonResponse(404, { error: 'not found' })
   }
 
-  return new Response(drop.bytes, {
+  const bytes = new Uint8Array(head.totalBytes)
+  let offset = 0
+  for (let from = 0; from < head.chunkCount; from += RPC_BATCH_CHUNKS) {
+    for (const chunk of await stub.take(from, RPC_BATCH_CHUNKS)) {
+      bytes.set(chunk, offset)
+      offset += chunk.byteLength
+    }
+  }
+  if (offset !== head.totalBytes) {
+    // The rows did not add up to the declared size: the drop was destroyed
+    // between the claim and the last `take` — the TTL alarm fired, or the
+    // desktop's dialog-close DELETE landed mid-download (`take` answers an
+    // empty array for a vanished drop rather than throwing). From the
+    // phone's side that is exactly "gone": the same 404 as any other
+    // consumed/expired token, never truncated ciphertext (which would only
+    // fail the auth-tag check with a misleading message).
+    return jsonResponse(404, { error: 'not found' })
+  }
+
+  return new Response(bytes, {
     status: 200,
     headers: { 'content-type': 'application/octet-stream', 'cache-control': 'no-store' },
   })
@@ -304,6 +448,8 @@ export async function handleRequest(request: Request, env: DropEnv): Promise<Res
   switch (matched.kind) {
     case 'preflight':
       return preflightResponse(origin, allowed)
+    case 'identity':
+      return withCors(handleIdentity(env), origin, allowed)
     case 'put':
       return withCors(await handlePutDrop(request, env), origin, allowed)
     case 'get':

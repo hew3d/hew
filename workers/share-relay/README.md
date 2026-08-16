@@ -20,15 +20,27 @@ same-network requirement.
 
 ## API surface
 
+This is **the relay contract** — the same one the self-hostable Rust binary
+(`crates/hew-relay`) implements, and the black-box conformance suite in
+`contract/` checks both against (see "Testing"). Every route also answers
+under an optional `/relay` prefix (`/relay/drop`, `/relay/drop/<token>`,
+`/relay/`), stripped exactly once: self-hosting serves the relay from the
+same origin as the web app under `/relay/`, and the public deployment
+routes `app.hew3d.com/relay/*` here alongside the legacy `share.hew3d.com/*`.
+
 | Route | Method | Body | Response |
 |---|---|---|---|
-| `/drop` | `PUT` | opaque ciphertext, ≤32 MiB | `200 {"token": "…"}` / `413` if too large / `400` if empty |
+| `/` (also `/relay`, `/relay/`) | `GET` | — | `200 {"service":"hew-relay","contract":1,"maxBytes":33554432,"ttlMs":600000,"auth":"none"\|"bearer"}` — the identity route a desktop's *Test connection* hits, `cache-control: no-store` |
+| `/drop` | `PUT` | opaque ciphertext, ≤32 MiB | `200 {"token": "…"}` / `413` if too large / `400` if empty / `401 {"error":"unauthorized"}` when an upload key is configured and the `Authorization: Bearer <key>` header is missing or wrong |
 | `/drop/<token>` | `GET` | — | `200` ciphertext bytes (one-shot — deleted on read) / `404` if unknown, expired, or already consumed |
 | `/drop/<token>` | `HEAD` | — | `200` empty body if a drop is present and unexpired / `404` otherwise — never consumes it (see below) |
 | `/drop/<token>` | `DELETE` | — | `204` always (deletes if present; best-effort client-side invalidation) |
-| `/drop`, `/drop/<token>` | `OPTIONS` | — | CORS preflight |
+| any path | `OPTIONS` | — | CORS preflight (`204` for an allowed origin, `403` otherwise) |
 
-Every other path/method is a `404`.
+Every other path/method is a `404`. `hew-relay` additionally answers `PUT
+/drop` with `503 {"error":"relay full"}` + `Retry-After` when its memory
+cap would be exceeded (this Worker has no such cap — Durable Object storage
+is the bound, and its free-tier limits fail closed).
 
 - **Token**: 128 random bits, base64url-encoded (22 characters, no
   padding), generated server-side on `PUT`. It's a bearer capability, not a
@@ -53,7 +65,17 @@ Every other path/method is a `404`.
   fetched it yet?) without racing — or losing to — the phone's own `GET`.
 - **CORS**: only `https://app.hew3d.com`, `tauri://localhost`, and
   `https://tauri.localhost` are allowed (the three origins the hosted app
-  and the two Tauri webview flavors run under). No wildcard, ever.
+  and the two Tauri webview flavors run under), plus anything in the
+  `EXTRA_ALLOWED_ORIGINS` var. No wildcard, ever. A same-origin
+  self-hosted phone never needs CORS at all, and the desktop's Rust relay
+  client sends no `Origin`.
+- **Optional upload key**: set the `HEW_RELAY_UPLOAD_KEY` secret and `PUT`
+  requires `Authorization: Bearer <key>` (constant-time compared, never
+  logged); `GET`/`HEAD`/`DELETE` stay keyless — the token is the capability
+  and the phone never holds the key. Unset in production: the public relay
+  is open by design (next section). The identity route reports which mode
+  is in effect so a desktop can say "the server rejected the upload key"
+  instead of a bare 401.
 
 ## Security model — no auth, by design
 
@@ -171,6 +193,24 @@ upload is at most `⌈32 MiB / 1.9 MB⌉ = 17` chunk rows — nowhere near the
 them before returning, so `handlers.ts` and everything on the client side
 sees one contiguous blob, exactly as before.
 
+### Batched RPC: no single call carries a whole drop
+
+Workers RPC caps one call's serialized arguments or return value at
+32 MiB — exactly the contract's per-drop maximum, so a maximum-size drop
+handed to the DO in one `store(...)` call (or handed back in one
+`consume()` return) fails with "Serialized RPC arguments or return values
+are limited to 32MiB". The unit suite's fake namespace never serializes, so
+it could not see this; the black-box conformance suite against real
+`workerd` did. Both directions are therefore batched at
+`RPC_BATCH_CHUNKS` (8 chunks ≈ 15 MB per call): the upload rides
+`store(name, chunkCount, totalBytes, firstBatch)` then `append(batch)*`,
+and a drop is invisible to `GET`/`HEAD` until every declared chunk row is
+present; the download rides `consume()` (the one-shot claim, below) then
+`take(from, count)*`, each of which deletes what it returns and the last
+of which wipes the drop. Chunks are COPIED at the RPC boundary — they are
+`subarray` views of the one upload buffer, and structured clone of a view
+ships its whole backing buffer.
+
 ### One-shot atomicity, for real this time
 
 The old R2-backed `GET` dispatched R2's `get` and `delete` back-to-back to
@@ -178,11 +218,11 @@ narrow (not close) a race where two concurrent `GET`s for the same token
 could both observe the object before either delete completed. Durable
 Objects close that race structurally: a DO instance is single-threaded per
 id, so two `consume()` calls against the same token's `ShareDrop` cannot
-interleave. Whichever request's `consume()` runs first reads the rows and
-wipes storage as an atomic unit (relative to any other request to that same
-DO — this is a runtime guarantee, the input/output gates described in
+interleave. Whichever request's `consume()` runs first marks the drop
+claimed in one synchronous burst (relative to any other request to that
+same DO — this is a runtime guarantee, the input/output gates described in
 Cloudflare's Durable Objects documentation); the second one always finds
-empty storage and returns `null`. `handleGetDrop` turns that `null` into a
+it claimed and returns `null`. `handleGetDrop` turns that `null` into a
 404, indistinguishable from a token that never existed or already expired
 — same "no information leak either way" property the old design had, now
 on a foundation that's actually atomic instead of merely narrowed.
@@ -205,7 +245,9 @@ on a foundation that's actually atomic instead of merely narrowed.
 - `src/testSupport/fakeDurableObject.ts` — a fake DO namespace/storage
   stack backed by Node's built-in `node:sqlite`, used only by the tests
   below (not part of the deployed Worker).
-- `src/handlers.test.ts`, `src/shareDrop.test.ts` — unit tests (see below).
+- `src/handlers.test.ts`, `src/dropStore.test.ts` — unit tests (see below).
+- `contract/relay.contract.test.ts` — the black-box conformance suite, run
+  against a live server (this Worker under `wrangler dev`, or `hew-relay`).
 
 ## Testing
 
@@ -223,6 +265,30 @@ network, no Cloudflare account required. It's backed by `node:sqlite`
 actual SQL runs for real rather than against a hand-rolled query matcher.
 `npm install` is only needed for `wrangler dev`/`wrangler deploy` (below),
 which pull in the real `wrangler` CLI.
+
+### Conformance suite (both implementations)
+
+`contract/relay.contract.test.ts` exercises the contract table above over
+real HTTP against whatever `HEW_RELAY_URL` points at — one-shot consume,
+HEAD peek, DELETE idempotence, token grammar, both size caps, CORS with
+allowed/denied/absent origins, prefix and no-prefix routing, the identity
+route with and without its slash, the bearer key on and off, plus (server
+runs that enable them) TTL expiry and the full-relay 503. Its header
+comment lists every `HEW_RELAY_*` knob. Against this Worker:
+
+```sh
+npx wrangler dev --local --port 8787 &            # optionally: --var HEW_RELAY_UPLOAD_KEY:<key>
+HEW_RELAY_URL=http://127.0.0.1:8787 HEW_RELAY_BUFFERS_BODY=1 npm run test:contract
+```
+
+`HEW_RELAY_BUFFERS_BODY=1` skips the two header-only fail-fast cases:
+`wrangler dev`'s local proxy buffers request bodies to completion before
+the Worker sees them, so a PUT whose declared `Content-Length` is never met
+gets no answer there (and the client's eventual disconnect crashes the dev
+server) — production Cloudflare streams, and `hew-relay` must pass those
+cases without the flag. `.github/workflows/ci.yml`'s `relay-contract` job
+runs the unit suite, this suite against `wrangler dev`, and this suite
+against `hew-relay`, all blocking; `scripts/verify-full.sh` runs the same.
 
 ## Deploy checklist (maintainer)
 
@@ -265,8 +331,20 @@ the migration in `wrangler.toml` on first deploy.
    `https://share.hew3d.com/drop/<token>` should return the same bytes
    once, then `404` on a second try.
 
-No environment variables or secrets are needed — see "Security model"
-above for why.
+No environment variables or secrets are needed for the public relay — see
+"Security model" above for why. (`HEW_RELAY_UPLOAD_KEY` is a self-hoster's
+knob; do not set it on the production Worker.)
+
+8. **Add the same-origin route**: alongside `share.hew3d.com/*`, route
+   `app.hew3d.com/relay/*` to this Worker (dashboard → the Worker →
+   Settings → Domains & Routes, zone `hew3d.com`) — new desktops and the
+   phone app reach the relay as `<origin>/relay/…` (`DASHBOARD-SETUP.md`
+   has the checklist, including the rate-limit rule re-key). Both hostnames
+   reach the same Worker and the same Durable Object namespace — the DO id
+   derives from the token, not the hostname — so old and new clients
+   interoperate. Verify on the first request that the Workers route wins
+   over the Pages custom domain on the same hostname (Cloudflare documents
+   that precedence; confirm rather than trust).
 
 ### Cleaning up a prior R2 deploy
 

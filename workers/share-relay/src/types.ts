@@ -60,10 +60,13 @@ export interface DurableObjectId {
  *  of this file. Real Durable Object RPC (compatibility date ≥
  *  2024-04-03, comfortably true for this Worker's pinned date) exposes any
  *  public method on a DO class as an async call on its stub — this
- *  interface is exactly `ShareDrop`'s four public methods. */
+ *  interface is exactly `ShareDrop`'s six public methods (`dropStore.ts`'s
+ *  batched write/read protocol — no single call ever carries a whole drop). */
 export interface ShareDropStub {
-  store(name: string, chunks: Uint8Array[]): Promise<void>
-  consume(): Promise<{ name: string; bytes: Uint8Array } | null>
+  store(name: string, chunkCount: number, totalBytes: number, chunks: Uint8Array[]): Promise<void>
+  append(chunks: Uint8Array[]): Promise<void>
+  consume(): Promise<{ name: string; totalBytes: number; chunkCount: number } | null>
+  take(from: number, count: number): Promise<Uint8Array[]>
   destroy(): Promise<void>
   peek(): Promise<{ exists: boolean }>
 }
@@ -87,4 +90,10 @@ export interface DropEnv {
    *  self-hosted HTTPS test origin (a homelab `https://hew.granroth.xyz`)
    *  read relay responses. Unset in production. */
   EXTRA_ALLOWED_ORIGINS?: string
+  /** Optional upload key (docs/design/self-hosting-relay.md §4). When set,
+   *  `PUT /drop` requires `Authorization: Bearer <key>` and the identity
+   *  route reports `auth: "bearer"`. A Worker SECRET (`wrangler secret put
+   *  HEW_RELAY_UPLOAD_KEY`), never a plaintext var, and unset in production
+   *  — the public relay stays open by design. */
+  HEW_RELAY_UPLOAD_KEY?: string
 }

@@ -16,7 +16,14 @@ import assert from 'node:assert/strict'
 import {
   MAX_BYTES,
   CHUNK_BYTES,
+  CONTRACT_VERSION,
+  RELAY_PREFIX,
   chunkBytes,
+  constantTimeEqual,
+  resolveUploadKey,
+  uploadAuthorized,
+  stripRelayPrefix,
+  handleIdentity,
   toBase64Url,
   generateToken,
   isValidToken,
@@ -31,7 +38,7 @@ import {
   handleDeleteDrop,
   handleRequest,
 } from './handlers.ts'
-import { DropStore } from './dropStore.ts'
+import { DropStore, RPC_BATCH_CHUNKS, TTL_MS } from './dropStore.ts'
 import { FakeDurableObjectNamespace } from './testSupport/fakeDurableObject.ts'
 import type { DropEnv, ShareDropStub } from './types.ts'
 
@@ -180,6 +187,9 @@ describe('corsHeaders / preflightResponse', () => {
     assert.equal(res.status, 204)
     assert.equal(res.headers.get('access-control-allow-origin'), 'https://app.hew3d.com')
     assert.equal(res.headers.get('access-control-allow-methods'), 'PUT, GET, HEAD, DELETE, OPTIONS')
+    // `authorization` so a browser-side PUT carrying the optional upload key
+    // (§4) passes preflight; harmless when no key is configured.
+    assert.equal(res.headers.get('access-control-allow-headers'), 'content-type, authorization')
   })
 
   test('preflight from a disallowed origin is a bare 403', () => {
@@ -250,7 +260,128 @@ describe('route', () => {
   })
 
   test('an unrelated path is not-found', () => {
-    assert.deepEqual(route('GET', '/'), { kind: 'not-found' })
+    assert.deepEqual(route('GET', '/nope'), { kind: 'not-found' })
+    assert.deepEqual(route('GET', '/relay/nope'), { kind: 'not-found' })
+  })
+
+  test('GET / (and GET /relay, GET /relay/) is the identity route', () => {
+    assert.deepEqual(route('GET', '/'), { kind: 'identity' })
+    assert.deepEqual(route('GET', '/relay'), { kind: 'identity' })
+    assert.deepEqual(route('GET', '/relay/'), { kind: 'identity' })
+  })
+
+  test('the identity route is GET-only', () => {
+    assert.deepEqual(route('HEAD', '/'), { kind: 'not-found' })
+    assert.deepEqual(route('PUT', '/'), { kind: 'not-found' })
+    assert.deepEqual(route('DELETE', '/relay/'), { kind: 'not-found' })
+  })
+
+  test('the /relay prefix routes exactly like the bare paths', () => {
+    assert.deepEqual(route('PUT', '/relay/drop'), { kind: 'put' })
+    assert.deepEqual(route('GET', '/relay/drop/abc123'), { kind: 'get', token: 'abc123' })
+    assert.deepEqual(route('HEAD', '/relay/drop/abc123'), { kind: 'peek', token: 'abc123' })
+    assert.deepEqual(route('DELETE', '/relay/drop/abc123'), { kind: 'delete', token: 'abc123' })
+    assert.deepEqual(route('GET', '/relay/drop'), { kind: 'not-found' })
+  })
+
+  test('the prefix is stripped exactly once, and only as a whole segment', () => {
+    assert.deepEqual(route('PUT', '/relay/relay/drop'), { kind: 'not-found' })
+    assert.deepEqual(route('PUT', '/relayx/drop'), { kind: 'not-found' })
+    assert.deepEqual(route('GET', '/relayx'), { kind: 'not-found' })
+  })
+})
+
+describe('stripRelayPrefix', () => {
+  test('strips the bare prefix to the root', () => {
+    assert.equal(stripRelayPrefix(RELAY_PREFIX), '/')
+    assert.equal(stripRelayPrefix('/relay/'), '/')
+  })
+
+  test('strips one prefixed segment', () => {
+    assert.equal(stripRelayPrefix('/relay/drop'), '/drop')
+    assert.equal(stripRelayPrefix('/relay/drop/tok'), '/drop/tok')
+  })
+
+  test('leaves other paths alone', () => {
+    assert.equal(stripRelayPrefix('/drop'), '/drop')
+    assert.equal(stripRelayPrefix('/relayx'), '/relayx')
+    assert.equal(stripRelayPrefix('/'), '/')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Upload key
+// ---------------------------------------------------------------------------
+
+describe('constantTimeEqual', () => {
+  test('equal strings compare equal', () => {
+    assert.equal(constantTimeEqual('', ''), true)
+    assert.equal(constantTimeEqual('abc', 'abc'), true)
+    assert.equal(constantTimeEqual('ünïcödé', 'ünïcödé'), true)
+  })
+
+  test('different strings (same or different length) compare unequal', () => {
+    assert.equal(constantTimeEqual('abc', 'abd'), false)
+    assert.equal(constantTimeEqual('abc', 'ab'), false)
+    assert.equal(constantTimeEqual('ab', 'abc'), false)
+    assert.equal(constantTimeEqual('', 'a'), false)
+  })
+})
+
+describe('resolveUploadKey / uploadAuthorized', () => {
+  test('no key configured (or an empty one) means uploads are open', () => {
+    assert.equal(resolveUploadKey({} as DropEnv), null)
+    assert.equal(resolveUploadKey({ HEW_RELAY_UPLOAD_KEY: '' } as DropEnv), null)
+    assert.equal(resolveUploadKey({ HEW_RELAY_UPLOAD_KEY: '   ' } as DropEnv), null)
+    assert.equal(resolveUploadKey({ HEW_RELAY_UPLOAD_KEY: ' k ' } as DropEnv), 'k')
+    const req = new Request('https://x/drop', { method: 'PUT', body: new Uint8Array([1]).buffer })
+    assert.equal(uploadAuthorized(req, {} as DropEnv), true)
+  })
+
+  test('with a key configured, only the exact Bearer value passes', () => {
+    const env = { HEW_RELAY_UPLOAD_KEY: 's3cret' } as DropEnv
+    const withHeader = (authorization?: string) =>
+      new Request('https://x/drop', {
+        method: 'PUT',
+        body: new Uint8Array([1]).buffer,
+        headers: authorization === undefined ? {} : { authorization },
+      })
+    assert.equal(uploadAuthorized(withHeader('Bearer s3cret'), env), true)
+    assert.equal(uploadAuthorized(withHeader(), env), false)
+    assert.equal(uploadAuthorized(withHeader('Bearer wrong'), env), false)
+    assert.equal(uploadAuthorized(withHeader('Bearer s3cret2'), env), false)
+    assert.equal(uploadAuthorized(withHeader('s3cret'), env), false)
+    assert.equal(uploadAuthorized(withHeader('Basic s3cret'), env), false)
+    // Case-sensitive scheme, exactly one space.
+    assert.equal(uploadAuthorized(withHeader('bearer s3cret'), env), false)
+    assert.equal(uploadAuthorized(withHeader('Bearer  s3cret'), env), false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleIdentity
+// ---------------------------------------------------------------------------
+
+describe('handleIdentity', () => {
+  test('reports the service, contract, caps, and auth: none by default', async () => {
+    const res = handleIdentity({} as DropEnv)
+    assert.equal(res.status, 200)
+    assert.equal(res.headers.get('content-type'), 'application/json')
+    assert.equal(res.headers.get('cache-control'), 'no-store')
+    assert.deepEqual(await res.json(), {
+      service: 'hew-relay',
+      contract: CONTRACT_VERSION,
+      maxBytes: MAX_BYTES,
+      ttlMs: TTL_MS,
+      auth: 'none',
+    })
+  })
+
+  test('reports auth: bearer when an upload key is configured, without leaking it', async () => {
+    const res = handleIdentity({ HEW_RELAY_UPLOAD_KEY: 's3cret' } as DropEnv)
+    const text = await res.text()
+    assert.equal((JSON.parse(text) as { auth: string }).auth, 'bearer')
+    assert.equal(text.includes('s3cret'), false)
   })
 })
 
@@ -293,6 +424,37 @@ describe('handlePutDrop', () => {
     })
     const res = await handlePutDrop(request, env)
     assert.equal(res.status, 413)
+  })
+
+  test('with an upload key configured: 401 without/with the wrong key, 200 with it', async () => {
+    const env = makeEnv()
+    env.HEW_RELAY_UPLOAD_KEY = 'hunter2'
+    const put = (headers: Record<string, string>) =>
+      handlePutDrop(
+        new Request('https://share.hew3d.com/drop', { method: 'PUT', body: new Uint8Array([1]).buffer, headers }),
+        env,
+      )
+    const noKey = await put({})
+    assert.equal(noKey.status, 401)
+    assert.deepEqual(await noKey.json(), { error: 'unauthorized' })
+    assert.equal((await put({ authorization: 'Bearer wrong' })).status, 401)
+    const ok = await put({ authorization: 'Bearer hunter2' })
+    assert.equal(ok.status, 200)
+    assert.equal(isValidToken(((await ok.json()) as { token: string }).token), true)
+  })
+
+  test('the 401 wins over the size checks (an unauthorized oversized PUT is 401, not 413)', async () => {
+    const env = makeEnv()
+    env.HEW_RELAY_UPLOAD_KEY = 'hunter2'
+    const res = await handlePutDrop(
+      new Request('https://share.hew3d.com/drop', {
+        method: 'PUT',
+        body: new Uint8Array([1]).buffer,
+        headers: { 'content-length': String(MAX_BYTES + 1000) },
+      }),
+      env,
+    )
+    assert.equal(res.status, 401)
   })
 
   test('accepts a body exactly at MAX_BYTES', async () => {
@@ -368,6 +530,30 @@ describe('handleGetDrop', () => {
     const bytes = await putAndGet(env, input)
     assert.equal(bytes.byteLength, MAX_BYTES)
     assert.deepEqual(bytes, input)
+  })
+
+  test('a drop destroyed mid-download (between the claim and a take) is a 404, not a 500', async () => {
+    const env = makeEnv()
+    // Enough chunks for several take() batches.
+    const putRes = await handlePutDrop(
+      new Request('https://x/drop', { method: 'PUT', body: fillPattern(CHUNK_BYTES * (RPC_BATCH_CHUNKS + 2)).buffer as ArrayBuffer }),
+      env,
+    )
+    const { token } = (await putRes.json()) as { token: string }
+    // Wrap the stub so the FIRST take() also destroys the drop underneath —
+    // the alarm firing (or a DELETE landing) between two RPC calls.
+    const id = env.SHARE_DROP.idFromName(token)
+    const stub = env.SHARE_DROP.get(id)
+    const realTake = stub.take.bind(stub)
+    let takes = 0
+    stub.take = async (from: number, count: number) => {
+      const out = await realTake(from, count)
+      takes += 1
+      if (takes === 1) await stub.destroy()
+      return out
+    }
+    const res = await handleGetDrop(token, env)
+    assert.equal(res.status, 404)
   })
 
   test('is one-shot: a second GET for the same token 404s', async () => {
@@ -575,6 +761,53 @@ describe('handleRequest', () => {
 
     const secondHead = await handleRequest(headReq, env)
     assert.equal(secondHead.status, 404)
+  })
+
+  test('the same round trip works under the /relay prefix, mixed with bare paths', async () => {
+    const putRes = await handleRequest(
+      new Request('https://app.hew3d.com/relay/drop', { method: 'PUT', body: new Uint8Array([9]).buffer }),
+      env,
+    )
+    assert.equal(putRes.status, 200)
+    const { token } = (await putRes.json()) as { token: string }
+    // Peek through the bare path, consume through the prefixed one — one
+    // store behind both spellings.
+    assert.equal((await handleRequest(new Request(`https://x/drop/${token}`, { method: 'HEAD' }), env)).status, 200)
+    const getRes = await handleRequest(new Request(`https://x/relay/drop/${token}`, { method: 'GET' }), env)
+    assert.equal(getRes.status, 200)
+    assert.deepEqual(Array.from(new Uint8Array(await getRes.arrayBuffer())), [9])
+    assert.equal((await handleRequest(new Request(`https://x/relay/drop/${token}`, { method: 'GET' }), env)).status, 404)
+  })
+
+  test('GET /, /relay, and /relay/ all answer the identity document, CORS-wrapped', async () => {
+    for (const path of ['/', '/relay', '/relay/']) {
+      const res = await handleRequest(
+        new Request(`https://app.hew3d.com${path}`, { method: 'GET', headers: { origin: 'https://app.hew3d.com' } }),
+        env,
+      )
+      assert.equal(res.status, 200, path)
+      assert.equal(res.headers.get('access-control-allow-origin'), 'https://app.hew3d.com')
+      const body = (await res.json()) as { service: string; contract: number }
+      assert.equal(body.service, 'hew-relay')
+      assert.equal(body.contract, CONTRACT_VERSION)
+    }
+  })
+
+  test('with an upload key, GET/HEAD/DELETE stay keyless — only PUT is gated', async () => {
+    env.HEW_RELAY_UPLOAD_KEY = 'k'
+    const putRes = await handleRequest(
+      new Request('https://x/drop', {
+        method: 'PUT',
+        body: new Uint8Array([4]).buffer,
+        headers: { authorization: 'Bearer k' },
+      }),
+      env,
+    )
+    assert.equal(putRes.status, 200)
+    const { token } = (await putRes.json()) as { token: string }
+    assert.equal((await handleRequest(new Request(`https://x/drop/${token}`, { method: 'HEAD' }), env)).status, 200)
+    assert.equal((await handleRequest(new Request(`https://x/drop/${token}`, { method: 'GET' }), env)).status, 200)
+    assert.equal((await handleRequest(new Request(`https://x/drop/${token}`, { method: 'DELETE' }), env)).status, 204)
   })
 
   test('OPTIONS is routed to the preflight response', async () => {

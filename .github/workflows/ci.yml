@@ -2,7 +2,8 @@
 # clippy -D warnings + cargo test + wasm-pack + Vitest + app build + the
 # site build + the Tauri host crate's fmt/clippy), then adds the replay
 # gate, the web-E2E smoke, and the visual goldens, and artifacts the built
-# web app.
+# web app. A second job holds the "Open on Phone" relay to its contract
+# (scripts/relay-contract.sh) on both implementations.
 #
 # Every toolchain here is pinned, and every action is pinned to a commit SHA;
 # Renovate proposes the bumps (.github/renovate.json5). Nothing in this file
@@ -173,3 +174,35 @@ jobs:
           name: playwright-report
           path: app/playwright-report
           if-no-files-found: ignore
+
+  # The relay contract, on both implementations (scripts/relay-contract.sh —
+  # the same script scripts/verify-full.sh runs): the share-relay Worker's
+  # unit suite (never wired into CI before this), then the black-box
+  # conformance suite in workers/share-relay/contract/ against the Worker
+  # under `wrangler dev --local` (open, and with an upload key) and against
+  # the self-hostable hew-relay binary (defaults, upload key, and a short-TTL
+  # / tiny-cap run for the expiry and relay-full cases). BLOCKING: the
+  # desktop, the phone app, and every self-hoster depend on the two servers
+  # answering identically.
+  relay-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      # wrangler comes from workers/share-relay's own package-lock (that
+      # directory is deliberately outside the pnpm workspace); the script
+      # runs `npm ci` itself when the binary is missing.
+      - name: Relay contract (unit + conformance on Worker and hew-relay)
+        env:
+          CI: '1'
+        run: scripts/relay-contract.sh
+

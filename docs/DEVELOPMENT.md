@@ -98,14 +98,20 @@ crates/skp-import/    SketchUp .skp -> Objects/Instances, built on the
 crates/stl-import/    STL (binary + ASCII) -> Objects; hand-written parser,
                       no external STL dependency
 crates/wasm-api/      wasm-bindgen surface exposing the kernel to the UI
+crates/hew-relay/     self-hostable "Open on Phone" relay binary (axum;
+                      speaks workers/share-relay's contract)
 crates/vendor/        vendored third-party code (dae-parser)
 app/                  TypeScript UI (viewport, tools, panels, E2E suite)
 shells/tauri/         desktop shell
-shells/web/           static web build
+shells/web/           static web build + deploy/ (nginx, relay stanza,
+                      systemd unit — shipped inside the release tarball)
+workers/share-relay/  the public relay Worker, its unit suite, and the
+                      black-box conformance suite both relays must pass
 tools/                replay runner and development tooling
 site/                 the hew3d.com website (Astro)
 docs/                 architecture, file format spec, roadmap, this guide
-scripts/              verify.sh (per-commit gate), verify-full.sh (pre-push)
+scripts/              verify.sh (per-commit gate), verify-full.sh (pre-push),
+                      relay-contract.sh (relay conformance, both servers)
 brand/                logo, mark, and icon assets
 ```
 

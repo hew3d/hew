@@ -453,6 +453,12 @@ below.
   desktop encrypts in the browser; the decryption key rides in the QR
   fragment and never reaches the server), picked up by an in-app camera
   scanner
+- The relay is self-hostable: whatever origin serves a self-hosted Hew web
+  app also serves the relay under `/relay/`, no separate config on the
+  phone. The `hew-relay` binary (also a Docker image and a Proxmox LXC
+  installer) runs the same contract as the public relay; the desktop's
+  Settings ▸ Advanced ▸ Server pane points at it, with an optional upload
+  key
 
 ### Reliability & diagnostics
 

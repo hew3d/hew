@@ -1,0 +1,47 @@
+# systemd unit for hew-relay, the self-hosted "Open on Phone" relay. Installed
+# to /etc/systemd/system/hew-relay.service; the binary lives at
+# /usr/local/bin/hew-relay and every setting is an environment variable in
+# /etc/hew/relay.env (see docs/SELF_HOSTING.md — there is no config file).
+#
+# Only the loopback listener is exposed by default; nginx proxies /relay/ to
+# it (deploy/hew.d/relay.conf). Runs as a throwaway dynamic user with no
+# filesystem access at all — the relay keeps everything in memory.
+
+[Unit]
+Description=Hew Open on Phone relay
+Documentation=https://github.com/hew3d/hew/blob/main/docs/SELF_HOSTING.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/hew-relay
+# `-` = optional: the defaults work without it.
+EnvironmentFile=-/etc/hew/relay.env
+DynamicUser=yes
+Restart=on-failure
+RestartSec=2
+
+# The relay refuses uploads past HEW_RELAY_MAX_TOTAL_BYTES (default 256 MiB)
+# with a 503; this is the hard backstop above that, with headroom for the
+# runtime. Raise both together. The LXC installer writes a drop-in override
+# for this line from the memory cap it asked for.
+MemoryMax=512M
+
+# Hardening — nothing here needs anything but a socket.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

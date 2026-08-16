@@ -1,0 +1,45 @@
+[package]
+name = "hew-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Self-hostable Open on Phone relay: a one-shot, in-memory ciphertext dead-drop speaking the share-relay contract"
+
+# Standalone binary — the first HTTP server in the workspace. Not a kernel
+# crate (DEVELOPMENT.md rule 1 does not bind it), and it depends on no kernel
+# crate: it only ever moves opaque ciphertext. The contract it implements is
+# workers/share-relay/src/handlers.ts; workers/share-relay/contract/ holds
+# the black-box suite both implementations must pass.
+[[bin]]
+name = "hew-relay"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP stack: axum over hyper 1 / tokio. Chosen over the tiny_http the old
+# LAN server used because a relay that may face the internet needs read/
+# write timeouts and a body cap enforced before buffering — the tower stack
+# gives both directly (docs/design/self-hosting-relay.md §5).
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
+tower-http = { version = "0.6", features = ["timeout"] }
+http-body-util = "0.1"
+# The accept loop is hand-rolled over hyper-util (rather than `axum::serve`)
+# so a header-read timeout can be armed on every connection — axum::serve
+# installs no timer, which leaves hyper's slow-loris guard disabled. Both
+# crates are already in the tree through axum; this only names them.
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "tokio", "service"] }
+# Flags with env twins (`--listen` / HEW_RELAY_LISTEN, ...) — the systemd
+# unit carries the env; there is no config file.
+clap = { version = "4", features = ["derive", "env"] }
+# Constant-time compare for the optional upload key.
+subtle = "2"
+# 128 random bits per token — the same grammar as the Worker's.
+getrandom = "0.3"
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+[dev-dependencies]
+# `ServiceExt::oneshot` drives the router in-process for the unit tests.
+tower = { version = "0.5", features = ["util"] }

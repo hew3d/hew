@@ -22,7 +22,7 @@
 
 import { DurableObject } from 'cloudflare:workers'
 
-import { DropStore } from './dropStore.ts'
+import { DropStore, type DropHead } from './dropStore.ts'
 import type { DropEnv, DurableObjectStorage } from './types.ts'
 
 export { TTL_MS } from './dropStore.ts'
@@ -39,14 +39,26 @@ export class ShareDrop extends DurableObject<DropEnv> {
     this.store_ = new DropStore(ctx.storage as unknown as DurableObjectStorage)
   }
 
-  /** RPC — `handlers.ts` `handlePutDrop`. */
-  store(name: string, chunks: Uint8Array[]): Promise<void> {
-    return this.store_.store(name, chunks)
+  /** RPC — `handlers.ts` `handlePutDrop`, first batch (see `dropStore.ts`'s
+   *  batched-protocol note: every RPC argument list stays under the 32 MiB
+   *  serialization cap). */
+  store(name: string, chunkCount: number, totalBytes: number, chunks: Uint8Array[]): Promise<void> {
+    return this.store_.store(name, chunkCount, totalBytes, chunks)
   }
 
-  /** RPC — `handlers.ts` `handleGetDrop` (one-shot). */
-  consume(): Promise<{ name: string; bytes: Uint8Array } | null> {
+  /** RPC — `handlers.ts` `handlePutDrop`, every batch after the first. */
+  append(chunks: Uint8Array[]): Promise<void> {
+    return this.store_.append(chunks)
+  }
+
+  /** RPC — `handlers.ts` `handleGetDrop` (the one-shot claim). */
+  consume(): Promise<DropHead | null> {
     return this.store_.consume()
+  }
+
+  /** RPC — `handlers.ts` `handleGetDrop`, one batch of a claimed drop's bytes. */
+  take(from: number, count: number): Promise<Uint8Array[]> {
+    return this.store_.take(from, count)
   }
 
   /** RPC — `handlers.ts` `handlePeek` (non-consuming existence check). */
