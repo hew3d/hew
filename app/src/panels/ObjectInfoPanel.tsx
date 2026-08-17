@@ -125,6 +125,23 @@ const INPUT_STYLE: React.CSSProperties = {
   outline: 'none',
 }
 
+const ADD_TAG_BUTTON_STYLE: React.CSSProperties = {
+  background: 'none',
+  border: '1px solid var(--border-strong, #444)',
+  color: 'var(--text-muted, #999)',
+  cursor: 'pointer',
+  borderRadius: '3px',
+  width: '16px',
+  height: '16px',
+  fontSize: '11px',
+  lineHeight: 1,
+  padding: 0,
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  flexShrink: 0,
+}
+
 export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged, onSelectMany, onToast }: Props) {
   // --------------------------------------------------------------------------
   // Derive the node info from the scene whenever docRev or selectedIds changes.
@@ -477,8 +494,9 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
   const [addingTag, setAddingTag] = useState(false)
   const [tagInput, setTagInput] = useState('')
 
-  // Close the add-tag field whenever the selected node changes.
-  const selectedKeyForReset = nodeInfo !== null ? nodeKey(nodeInfo.node) : null
+  // Close the add-tag field whenever the selection changes (single node or
+  // the whole multi-selection).
+  const selectedKeyForReset = nodeInfo !== null ? nodeKey(nodeInfo.node) : selectedIds.map(nodeKey).join('|')
   const prevSelectedKeyRef = useRef<string | null>(selectedKeyForReset)
   useEffect(() => {
     if (prevSelectedKeyRef.current !== selectedKeyForReset) {
@@ -488,15 +506,75 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
     }
   }, [selectedKeyForReset])
 
+  // ---- Multi-selection tags ------------------------------------------
+  // Every taggable node in the selection (objects/groups/instances; sketch
+  // entities carry no tags), as the parallel kind/id lists the kernel's
+  // `*_many` calls take, plus the tags carried by EVERY one of them — the
+  // intersection. A tag only some of the selection carries is not shown:
+  // this section answers "what is true of the whole selection", so + adds
+  // a tag to all (and it appears at once) and × removes it from all
+  // (playtest round 2: a union-with-counts view read as noise).
+  const multi = useMemo(() => {
+    if (selectedIds.length < 2) return null
+    const kinds: number[] = []
+    const ids: bigint[] = []
+    let common: Map<string, string[]> | null = null
+    for (const node of selectedIds) {
+      const kindNum = nodeKindToNumber(node.kind)
+      if (kindNum < 0) continue
+      kinds.push(kindNum)
+      ids.push(node.id)
+      const own = new Map<string, string[]>()
+      for (const raw of scene.node_tags(kindNum, node.id)) {
+        const path = raw.split('/').map((seg) => seg.trim()).filter((seg) => seg.length > 0)
+        if (path.length > 0) own.set(path.join('/'), path)
+      }
+      if (common === null) {
+        common = own
+      } else {
+        for (const key of [...common.keys()]) {
+          if (!own.has(key)) common.delete(key)
+        }
+      }
+    }
+    if (kinds.length === 0) return null
+    const tags = [...(common ?? new Map<string, string[]>()).values()].sort((a, b) => a.join('/').localeCompare(b.join('/')))
+    return { kinds, ids, tags }
+    // docRev: tags change on every mutation without changing identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIds, scene, docRev])
+
   const handleAddTag = useCallback(() => {
-    if (nodeInfo === null || nodeInfo.kindNum === null) return
     const segments = tagInput.split('/').map((s) => s.trim()).filter((s) => s.length > 0)
     if (segments.length === 0) return
-    scene.add_node_tag(nodeInfo.kindNum, nodeInfo.id, segments)
+    if (nodeInfo !== null && nodeInfo.kindNum !== null) {
+      scene.add_node_tag(nodeInfo.kindNum, nodeInfo.id, segments)
+    } else if (multi !== null) {
+      // One undo step across the whole selection (kernel compound).
+      try {
+        scene.add_node_tag_many(new Uint8Array(multi.kinds), new BigUint64Array(multi.ids), segments)
+      } catch (err) {
+        onToast?.(`Add tag failed: ${err instanceof Error ? err.message : String(err)}`)
+        return
+      }
+    } else {
+      return
+    }
     setTagInput('')
     setAddingTag(false)
     onDocumentChanged()
-  }, [nodeInfo, tagInput, scene, onDocumentChanged])
+  }, [nodeInfo, multi, tagInput, scene, onDocumentChanged, onToast])
+
+  const handleRemoveTagFromAll = useCallback((path: string[]) => {
+    if (multi === null) return
+    try {
+      scene.remove_node_tag_many(new Uint8Array(multi.kinds), new BigUint64Array(multi.ids), path)
+    } catch (err) {
+      onToast?.(`Remove tag failed: ${err instanceof Error ? err.message : String(err)}`)
+      return
+    }
+    onDocumentChanged()
+  }, [multi, scene, onDocumentChanged, onToast])
 
   const handleRemoveTag = useCallback((path: string[]) => {
     if (nodeInfo === null || nodeInfo.kindNum === null) return
@@ -513,8 +591,11 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
     return <div style={PANEL_STYLE} />
   }
 
-  // Multi-selection → a single quiet count line (information, not boilerplate),
-  // plus the union Bounding Box of every selected node's mesh, if any.
+  // Multi-selection → a quiet count line, the union Bounding Box of every
+  // selected node's mesh (if any), and a Tags section for the whole
+  // selection: a chip per tag EVERY selected node carries, × removes it from
+  // every selected node, + adds one to every selected node — each as ONE
+  // undo step (playtest: "apply a tag to multiple selected objects").
   if (nodeInfo === null) {
     return (
       <div style={PANEL_STYLE}>
@@ -522,6 +603,63 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
           {selectedIds.length} selected
         </div>
         {bounds !== null && <BoundingBoxRow bounds={bounds} />}
+        {multi !== null && (
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
+              <div style={{ ...LABEL_STYLE, marginBottom: 0 }}>Tags</div>
+              {!addingTag && (
+                <button
+                  onClick={() => setAddingTag(true)}
+                  title="Add tag to all selected"
+                  aria-label="Add tag to all selected"
+                  style={ADD_TAG_BUTTON_STYLE}
+                >
+                  +
+                </button>
+              )}
+            </div>
+            {multi.tags.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {multi.tags.map((path) => (
+                  <TagChip
+                    key={path.join('/')}
+                    path={path}
+                    onRemove={() => handleRemoveTagFromAll(path)}
+                    removeLabel={`Remove tag ${path.join(' / ')} from all selected`}
+                  />
+                ))}
+              </div>
+            )}
+            {addingTag && (
+              <input
+                style={{ ...INPUT_STYLE, marginTop: multi.tags.length > 0 ? '6px' : '2px' }}
+                autoFocus
+                aria-label="New tag for all selected"
+                value={tagInput}
+                onChange={(e) => setTagInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleAddTag()
+                  } else if (e.key === 'Escape') {
+                    e.stopPropagation()
+                    setTagInput('')
+                    setAddingTag(false)
+                  }
+                }}
+                onBlur={() => {
+                  if (tagInput.trim() === '') {
+                    setTagInput('')
+                    setAddingTag(false)
+                  } else {
+                    handleAddTag()
+                  }
+                }}
+                placeholder="Structure/Roof"
+                spellCheck={false}
+              />
+            )}
+          </div>
+        )}
       </div>
     )
   }
@@ -689,22 +827,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
               onClick={() => setAddingTag(true)}
               title="Add tag"
               aria-label="Add tag"
-              style={{
-                background: 'none',
-                border: '1px solid var(--border-strong, #444)',
-                color: 'var(--text-muted, #999)',
-                cursor: 'pointer',
-                borderRadius: '3px',
-                width: '16px',
-                height: '16px',
-                fontSize: '11px',
-                lineHeight: 1,
-                padding: 0,
-                display: 'inline-flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                flexShrink: 0,
-              }}
+              style={ADD_TAG_BUTTON_STYLE}
             >
               +
             </button>
@@ -792,7 +915,15 @@ function BoundingBoxRow({ bounds }: { bounds: Bounds }) {
 // TagChip — a single removable tag chip
 // ---------------------------------------------------------------------------
 
-function TagChip({ path, onRemove }: { path: string[]; onRemove: () => void }) {
+function TagChip({
+  path,
+  onRemove,
+  removeLabel,
+}: {
+  path: string[]
+  onRemove: () => void
+  removeLabel?: string
+}) {
   const display = path.join(' / ')
   return (
     <div
@@ -813,7 +944,8 @@ function TagChip({ path, onRemove }: { path: string[]; onRemove: () => void }) {
       </span>
       <button
         onClick={onRemove}
-        title="Remove tag"
+        aria-label={removeLabel ?? `Remove tag ${display}`}
+        title={removeLabel ?? 'Remove tag'}
         style={{
           background: 'none',
           border: 'none',

@@ -36,7 +36,7 @@ Scan it from **inside Shop Mode**: open Shop Mode on your phone, tap **From your
 
 **Open from the Files app.** Any `.hew` file synced through iCloud Drive, Nextcloud, or another Files-integrated provider is now selectable from Shop Mode's **Open…** — the file picker used to grey out `.hew` files on iOS because it filtered by a file type the Files app didn't recognize; that filter is dropped on touch devices, so `.hew` shows up like any other file.
 
-**Reopen from Recents.** Once a model has been opened on the phone once — by either route above — it's saved locally and shows up in a **Recents** list on Shop Mode's empty-state screen, no network needed at all.
+**Reopen from Recents.** Once a model has been opened on the phone once — by either route above — it's saved locally and shows up in a **Recents** list on Shop Mode's empty-state screen, and under **Recent models…** in the document menu (tap the filename pill) while another model is open — no network needed at all.
 
 ### Using your own server
 

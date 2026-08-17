@@ -116,6 +116,53 @@ describe('ObjectInfoPanel', () => {
     expect(screen.queryByText(/multiple nodes selected/i)).not.toBeInTheDocument()
   })
 
+  it('multi-selection: only tags carried by EVERY selected item show; + adds to all, × removes from all — each as one kernel batch', () => {
+    const add_node_tag_many = vi.fn()
+    const remove_node_tag_many = vi.fn()
+    const onDocumentChanged = vi.fn()
+    const scene = makeScene({
+      node_tags: (_kind: number, id: bigint) => (id === 1n ? ['Hardware', 'Oak'] : id === 2n ? ['Hardware', 'Pine'] : ['Hardware']),
+      add_node_tag_many,
+      remove_node_tag_many,
+    })
+    render(
+      <ObjectInfoPanel
+        scene={scene}
+        docRev={0}
+        selectedIds={[
+          { kind: 'object', id: 1n },
+          { kind: 'group', id: 2n },
+          { kind: 'object', id: 3n },
+        ]}
+        onDocumentChanged={onDocumentChanged}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    // "Hardware" is on all three → shown; "Oak"/"Pine" are partial → not.
+    expect(screen.getByText('Hardware')).toBeInTheDocument()
+    expect(screen.queryByText('Oak')).not.toBeInTheDocument()
+    expect(screen.queryByText('Pine')).not.toBeInTheDocument()
+    expect(screen.queryByText(/\d\/3/)).not.toBeInTheDocument()
+
+    // + → type → Enter: one add_node_tag_many over the taggable selection.
+    fireEvent.click(screen.getByRole('button', { name: 'Add tag to all selected' }))
+    const input = screen.getByRole('textbox', { name: 'New tag for all selected' })
+    fireEvent.change(input, { target: { value: 'Walnut/Legs' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(add_node_tag_many).toHaveBeenCalledTimes(1)
+    const [kinds, ids, segments] = add_node_tag_many.mock.calls[0]
+    expect(Array.from(kinds as Uint8Array)).toEqual([0, 1, 0])
+    expect(Array.from(ids as BigUint64Array)).toEqual([1n, 2n, 3n])
+    expect(segments).toEqual(['Walnut', 'Legs'])
+    expect(onDocumentChanged).toHaveBeenCalledTimes(1)
+
+    // × on Hardware → one remove_node_tag_many over the whole selection.
+    fireEvent.click(screen.getByRole('button', { name: 'Remove tag Hardware from all selected' }))
+    expect(remove_node_tag_many).toHaveBeenCalledTimes(1)
+    expect(remove_node_tag_many.mock.calls[0][2]).toEqual(['Hardware'])
+    expect(onDocumentChanged).toHaveBeenCalledTimes(2)
+  })
+
   it('shows the type label "Object" for an object node', () => {
     render(
       <ObjectInfoPanel

@@ -27,7 +27,7 @@ Object Info (Window ▸ Object Info, `⇧⌘O` / `Ctrl+Shift+O`) shows the singl
 - **Dimensions**: the selection's overall size — `X × Y × Z` in your current units — as a world, axis-aligned bounding box. A rotated part's box is bigger than its own footprint, same as SketchUp's; it's the number that tells you whether the thing fits your print bed or stock, not its true local size.
 - **Tags**: the item's tag chips. Click **+** to add a tag; click a chip's **×** to remove it.
 
-With several things selected, Object Info shows just the count and the selection's combined Dimensions; select one item to edit its details.
+With several things selected, Object Info shows the count, the selection's combined Dimensions, and a **Tags** section for the whole selection: the tags that *every* selected item carries. **+** adds a tag to every selected item (it appears in the list at once) and a chip's **×** removes it from all of them — each as a single undo step. A tag only some of the selection carries isn't listed; select those items on their own to see it. Select one item to edit its name and other details.
 
 ## Tags
 

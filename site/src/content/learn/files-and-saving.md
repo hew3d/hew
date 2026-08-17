@@ -10,7 +10,7 @@ Hew's native format is **`.hew`**, an open, documented container (a zip holding 
 
 - **Save**: `⌘S` / `Ctrl+S`, or File ▸ Save. The first save asks where; after that it writes in place.
 - **Save As…** (`⇧⌘S` / `Ctrl+Shift+S`) saves a copy under a new name and switches to it.
-- **Open…**: `⌘O` / `Ctrl+O`. On desktop, this opens into the current window only if it's a brand-new, untouched "Untitled" document; otherwise it opens the picked file into a fresh window, leaving whatever you were doing untouched. The web app, which can't open extra windows, offers to discard instead.
+- **Open…**: `⌘O` / `Ctrl+O`. On desktop, this opens into the current window only if it's a brand-new, untouched "Untitled" document; otherwise it opens the picked file into a fresh window, leaving whatever you were doing untouched. Opening a file that is already open in another window just brings that window forward — one file is never open in two windows at once. The web app, which can't open extra windows, offers to discard instead.
 - **New**: `⌘N` / `Ctrl+N`. Same rule as Open: a non-pristine document opens a fresh window on desktop; the web app offers to discard.
 - **Close** (`⌘W`, or File ▸ Close) closes the window (macOS desktop only).
 

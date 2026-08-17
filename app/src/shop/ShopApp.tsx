@@ -44,7 +44,8 @@ import { decrypt, fromBase64Url } from '../io/shareCrypto'
 import { phoneRelayBase } from '../io/shareRelay'
 import { loadHewBytes, isSceneEmpty, seedHiddenKeysFromRegistry, seedHiddenTagPathsFromRegistry, unionHiddenLeafIds } from '../io/documentLoad'
 import { listRecents, recordRecent, type RecentEntry } from '../io/recents'
-import { formatRelativeTime } from '../io/relativeTime'
+import { RecentsList } from './RecentsList'
+import { RecentsSheet } from './RecentsSheet'
 import { friendlyErrorText } from '../kernelErrors'
 import { MultiClickTracker, type MultiClickPress } from '../viewport/multiClick'
 import { worldBoundsForSelection } from '../panels/objectBounds'
@@ -579,6 +580,16 @@ export function ShopApp() {
   const openScanner = useCallback(() => {
     setDocumentMenuOpen(false)
     setScanSheetOpen(true)
+  }, [])
+  // Recent models sheet (`RecentsSheet.tsx`) — the offline recents list
+  // reachable WHILE a document is open (playtest: getting back to a
+  // scanned handoff after opening a local file used to mean killing the
+  // PWA to reach the empty state's Recents). Same open-state pattern as
+  // the scanner above; reached from the Document menu.
+  const [recentsSheetOpen, setRecentsSheetOpen] = useState(false)
+  const openRecentsSheet = useCallback(() => {
+    setDocumentMenuOpen(false)
+    setRecentsSheetOpen(true)
   }, [])
 
   // ---------------------------------------------------------------- camera views (playtest finding 12)
@@ -1960,38 +1971,19 @@ export function ShopApp() {
                 }}>
                   Recents
                 </span>
-                {recents.slice(0, 5).map((entry) => (
-                  <button key={entry.id} type="button" className="shop-press" onClick={() => openRecentEntry(entry)} style={recentRowStyle}>
-                    {/* Playtest finding 4: a real model thumbnail
-                        (`RecentEntry.thumbnail`, captured at open time —
-                        `applyOpenedBytes`'s own doc comment) replaces the
-                        striped placeholder swatch once one's been recorded;
-                        an entry that predates the fix, or whose capture
-                        failed, simply keeps the placeholder — same
-                        additive-field fallback contract as `partCount`. */}
-                    {entry.thumbnail !== undefined ? (
-                      <img data-testid="shop-recent-thumb" src={entry.thumbnail} alt="" aria-hidden="true" style={recentThumbImageStyle} />
-                    ) : (
-                      <span aria-hidden="true" style={recentThumbStyle} />
-                    )}
-                    <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                      <span style={{ fontSize: '15px', fontWeight: 600, color: 'var(--shop-text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {entry.name}
-                      </span>
-                      <span style={{ fontSize: '12px', color: 'var(--shop-text-muted)' }}>
-                        {formatRelativeTime(entry.timestamp, Date.now())}
-                        {entry.partCount !== undefined
-                          ? ` · ${entry.partCount} ${entry.partCount === 1 ? 'part' : 'parts'}`
-                          : ''}
-                      </span>
-                    </span>
-                    <ChevronRightIcon size={18} style={{ color: 'var(--shop-text-muted)', flexShrink: 0 }} />
-                  </button>
-                ))}
+                <RecentsList entries={recents} onOpen={openRecentEntry} limit={5} />
               </div>
             )}
           </div>
         )}
+
+        <RecentsSheet
+          open={recentsSheetOpen}
+          orientation={orientation}
+          entries={recents}
+          onClose={() => setRecentsSheetOpen(false)}
+          onOpen={openRecentEntry}
+        />
 
         <ScanSheet
           open={scanSheetOpen}
@@ -2082,6 +2074,7 @@ export function ShopApp() {
           onClose={() => setDocumentMenuOpen(false)}
           onOpen={openDocument}
           onOpenScanner={openScanner}
+          onOpenRecents={openRecentsSheet}
           onSaveCopy={saveCopy}
           onUseFullEditor={useFullEditor}
           // Task 2 dropped the dock/rail AR button — this row is now its
@@ -2580,26 +2573,5 @@ const emptyGhostButtonStyle: React.CSSProperties = {
   fontFamily: 'var(--font-family-ui)', fontSize: '15px', fontWeight: 600,
 }
 
-const recentRowStyle: React.CSSProperties = {
-  display: 'flex', alignItems: 'center', gap: '12px', width: '100%',
-  padding: '8px 12px', borderRadius: '13px', border: 'none', cursor: 'pointer',
-  background: 'color-mix(in srgb, var(--shop-text) 5%, transparent)', textAlign: 'left', minWidth: 0, minHeight: 'var(--hit-min, 48px)',
-}
 
-/** Striped placeholder thumbnail (design §8: "striped thumbnail placeholder —
- *  real model thumbnails when available") — plain CSS, no raster asset.
- *  Fallback for any `RecentEntry` with no `thumbnail` yet (playtest finding
- *  4's own doc comment above). */
-const recentThumbStyle: React.CSSProperties = {
-  width: '46px', height: '46px', borderRadius: '8px', flexShrink: 0,
-  background: 'repeating-linear-gradient(45deg, rgba(196,93,60,.22), rgba(196,93,60,.22) 4px, rgba(196,93,60,.08) 4px, rgba(196,93,60,.08) 8px)',
-}
 
-/** The real model thumbnail (playtest finding 4) — same box as
- *  `recentThumbStyle` above so swapping between the two never reflows the
- *  row, `objectFit: 'cover'` as a second line of defense alongside
- *  `buildRecentThumbnail`'s own center-crop (belt and suspenders — the
- *  stored JPEG is already square). */
-const recentThumbImageStyle: React.CSSProperties = {
-  width: '46px', height: '46px', borderRadius: '8px', flexShrink: 0, objectFit: 'cover',
-}

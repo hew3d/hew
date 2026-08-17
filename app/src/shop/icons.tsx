@@ -114,6 +114,16 @@ export function UploadIcon({ size = 24, className, style }: ShopIconProps) {
 /** "Scan from desktop" ghost button (empty state) — a QR glyph; Shop Mode
  *  has no camera scan flow of its own (module doc on the button's handler
  *  in ShopApp.tsx), this only illustrates the desktop-initiated handoff. */
+/** Document menu "Recent models…" row — a clock face. */
+export function ClockIcon({ size = 24, className, style }: ShopIconProps) {
+  return (
+    <svg width={size} height={size} aria-hidden="true" className={className} style={style} {...BASE_PROPS} strokeLinecap="round">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5V12l3 2" />
+    </svg>
+  )
+}
+
 export function QrIcon({ size = 24, className, style }: ShopIconProps) {
   return (
     <svg width={size} height={size} aria-hidden="true" className={className} style={style} {...BASE_PROPS}>

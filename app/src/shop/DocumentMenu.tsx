@@ -26,7 +26,7 @@
  * either side of the tool group dropped it from both bars, and this row is
  * its new and only home.
  */
-import { ArCubeIcon, FullEditorIcon, HewMark, QrIcon, SaveCopyIcon, UploadIcon } from './icons'
+import { ArCubeIcon, ClockIcon, FullEditorIcon, HewMark, QrIcon, SaveCopyIcon, UploadIcon } from './icons'
 import type { ShopOrientation } from './orientation'
 import { MenuPanel, MenuItem } from './MenuPanel'
 
@@ -44,6 +44,10 @@ export interface DocumentMenuProps {
    *  your desktop…" button; both call the exact same handler ShopApp.tsx
    *  wires to each). */
   onOpenScanner: () => void
+  /** "Recent models…" — the offline recents list as a sheet, reachable
+   *  while a document is open (playtest: getting back to a scanned model
+   *  used to need a full PWA relaunch into the empty state). */
+  onOpenRecents: () => void
   onSaveCopy: () => void
   /** Gates the "View in AR…" row — `ShopApp.tsx` bundles its own document-
    *  loaded check together with `isArQuickLookCandidate()` (iOS Safari
@@ -59,7 +63,7 @@ export interface DocumentMenuProps {
   onUseFullEditor: () => void
 }
 
-export function DocumentMenu({ open, docName, orientation, onClose, onOpen, onOpenScanner, onSaveCopy, showViewInAr, arBusy, onViewInAr, onUseFullEditor }: DocumentMenuProps) {
+export function DocumentMenu({ open, docName, orientation, onClose, onOpen, onOpenScanner, onOpenRecents, onSaveCopy, showViewInAr, arBusy, onViewInAr, onUseFullEditor }: DocumentMenuProps) {
   return (
     <MenuPanel open={open} orientation={orientation} anchor="left" onClose={onClose} scrimTestId="shop-document-scrim" panelTestId="shop-document-panel">
       {/* Header: non-interactive title row — where the filename "lives"
@@ -73,6 +77,7 @@ export function DocumentMenu({ open, docName, orientation, onClose, onOpen, onOp
 
       <MenuItem icon={<UploadIcon size={19} />} label="Open…" onClick={onOpen} />
       <MenuItem icon={<QrIcon size={19} />} label="Open from desktop…" onClick={onOpenScanner} />
+      <MenuItem icon={<ClockIcon size={19} />} label="Recent models…" onClick={onOpenRecents} />
       {docName !== null && <MenuItem icon={<SaveCopyIcon size={19} />} label="Save a copy (.hew)" onClick={onSaveCopy} />}
       {showViewInAr && <MenuItem icon={<ArCubeIcon size={19} />} label={arBusy ? 'Preparing…' : 'View in AR…'} onClick={onViewInAr} />}
       <MenuItem icon={<FullEditorIcon size={19} />} label="Use full editor" onClick={onUseFullEditor} last />

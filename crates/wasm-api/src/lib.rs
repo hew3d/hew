@@ -515,6 +515,33 @@ fn node_id(kind: u8, id: u64) -> Result<NodeId, ApiError> {
     }
 }
 
+/// Decode parallel `(kinds, ids)` FFI lists into [`NodeId`]s — the
+/// multi-selection shape the `*_many` tag calls take. Mismatched lengths or
+/// an empty list are boundary errors.
+fn node_ids(kinds: &[u8], ids: &[u64]) -> Result<Vec<NodeId>, ApiError> {
+    if kinds.len() != ids.len() {
+        return Err(ApiError(
+            "BadNodeList: kinds and ids must have the same length".to_string(),
+        ));
+    }
+    if kinds.is_empty() {
+        return Err(ApiError(
+            "BadNodeList: at least one node is required".to_string(),
+        ));
+    }
+    kinds
+        .iter()
+        .zip(ids)
+        .map(|(&k, &i)| node_id(k, i))
+        .collect()
+}
+
+/// The undo label of a multi-node tag batch ("Tag 3 objects" / "Untag 1
+/// object").
+fn tag_batch_label(verb: &str, n: usize) -> String {
+    format!("{verb} {n} {}", if n == 1 { "object" } else { "objects" })
+}
+
 /// Decode an xyz `Box<[f64]>` boundary arg into a `[f64; 3]`, rejecting any
 /// other length. `name` labels the field in the error (`camera_state`'s
 /// `eye`/`target`/`up`, the same boundary shape `Scene::snap`'s `anchor`
@@ -4480,6 +4507,55 @@ impl Scene {
         Ok(())
     }
 
+    /// [`Scene::add_node_tag`] across several nodes as ONE undo step (a
+    /// labeled compound — the Object Info panel's multi-selection tagging).
+    /// `kinds`/`ids` are parallel; nodes already carrying the tag are left
+    /// alone; a stale handle anywhere refuses the whole batch with nothing
+    /// applied.
+    pub fn add_node_tag_many(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        path: Vec<String>,
+    ) -> Result<(), ApiError> {
+        let nodes = node_ids(kinds, ids)?;
+        let label = tag_batch_label("Tag", nodes.len());
+        let change = self
+            .doc
+            .add_node_tag_many(&nodes, path.clone(), &label)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::AddNodeTagMany {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            path,
+        });
+        Ok(())
+    }
+
+    /// [`Scene::remove_node_tag`] across several nodes as ONE undo step —
+    /// the counterpart of [`Scene::add_node_tag_many`].
+    pub fn remove_node_tag_many(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        path: Vec<String>,
+    ) -> Result<(), ApiError> {
+        let nodes = node_ids(kinds, ids)?;
+        let label = tag_batch_label("Untag", nodes.len());
+        let change = self
+            .doc
+            .remove_node_tag_many(&nodes, &path, &label)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::RemoveNodeTagMany {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            path,
+        });
+        Ok(())
+    }
+
     /// Remove the first occurrence of `path` from a visible tree node's tag
     /// list (undoable). No-op (no undo entry) if the path is not present.
     ///
@@ -8303,6 +8379,12 @@ impl Scene {
                     RemoveNodeTag { kind, id, path } => {
                         self.remove_node_tag(kind, id, path)?;
                     }
+                    AddNodeTagMany { kinds, ids, path } => {
+                        self.add_node_tag_many(&kinds, &ids, path)?;
+                    }
+                    RemoveNodeTagMany { kinds, ids, path } => {
+                        self.remove_node_tag_many(&kinds, &ids, path)?;
+                    }
                     SetTagHidden { path, hidden } => {
                         self.set_tag_hidden(path, hidden);
                     }
@@ -10734,6 +10816,47 @@ mod tests {
                 .is_err()
         );
         assert!(scene.rename_scene(sid, "  ".to_string()).is_err());
+    }
+
+    /// Multi-selection tagging is one compound undo step, refuses a stale
+    /// handle wholesale, and replays.
+    #[test]
+    fn record_then_replay_covers_bulk_tags() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s1, r1) = ground_unit_square_at(&mut scene, 0.0, 0.0);
+        let a = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 3.0, 0.0);
+        let b = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let depth = scene.doc.undo_depth();
+        scene
+            .add_node_tag_many(&[0, 0], &[a, b], vec!["Hardware".to_string()])
+            .unwrap();
+        assert_eq!(scene.doc.undo_depth(), depth + 1);
+        assert_eq!(scene.node_tags(0, a).unwrap(), vec!["Hardware".to_string()]);
+        assert_eq!(scene.node_tags(0, b).unwrap(), vec!["Hardware".to_string()]);
+        assert!(
+            scene
+                .add_node_tag_many(&[0], &[a, b], vec!["X".to_string()])
+                .is_err()
+        );
+        assert!(
+            scene
+                .add_node_tag_many(&[], &[], vec!["X".to_string()])
+                .is_err()
+        );
+        scene
+            .remove_node_tag_many(&[0, 0], &[a, b], vec!["Hardware".to_string()])
+            .unwrap();
+        scene.scene_undo().unwrap(); // both tagged again
+        assert_eq!(scene.node_tags(0, b).unwrap(), vec!["Hardware".to_string()]);
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save());
     }
 
     /// extrude, not unwind the camera (there is nothing to unwind), and the

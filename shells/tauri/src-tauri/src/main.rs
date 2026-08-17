@@ -437,6 +437,102 @@ struct WindowCounter(u32);
 /// [`PendingRecovery`], just for a plain open instead of a recovery slot.
 struct PendingWindowOpen(HashMap<String, PendingWindowOpenEntry>);
 
+/// Which `.hew` file each document window currently has open (label →
+/// canonical path), reported by the webview through `set_document_path`
+/// whenever its document session changes (open, Save As, New, Close). Read
+/// by every open entry point so opening a path that is ALREADY open in some
+/// window focuses that window instead of minting a second one — two windows
+/// editing one file would be confusing at best and, at worst, two writers
+/// that don't know about each other. Entries drop with their window.
+struct DocumentPaths(HashMap<String, String>);
+
+/// A comparable form of `path`: the filesystem's canonical path when it
+/// resolves (symlinks, `..`, case-insensitive volumes), else the raw string
+/// — good enough to keep two windows apart on a path that no longer exists.
+fn canonical_document_path(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
+/// The label of the document window that has `path` open — or is ABOUT to:
+/// a window minted by `open_in_new_window` whose queued path is still in
+/// `PendingWindowOpen` (created, not yet mounted) counts too, so a second
+/// open of the same file racing the first one's load focuses the window
+/// already on its way instead of minting another. `as_copy` entries are a
+/// fresh untitled document and never claim the file.
+fn window_label_for_path(app: &tauri::AppHandle, path: &str) -> Option<String> {
+    let wanted = canonical_document_path(path);
+    {
+        let state = app.state::<Mutex<DocumentPaths>>();
+        let guard = state.lock().ok()?;
+        if let Some((label, _)) = guard
+            .0
+            .iter()
+            .find(|(label, p)| **p == wanted && app.get_webview_window(label).is_some())
+        {
+            return Some(label.clone());
+        }
+    }
+    let state = app.state::<Mutex<PendingWindowOpen>>();
+    let guard = state.lock().ok()?;
+    guard
+        .0
+        .iter()
+        .find(|(label, entry)| {
+            !entry.as_copy
+                && canonical_document_path(&entry.path) == wanted
+                && app.get_webview_window(label).is_some()
+        })
+        .map(|(label, _)| label.clone())
+}
+
+/// Record (or clear, with `None`) the `.hew` path this window has open —
+/// see [`DocumentPaths`].
+#[tauri::command]
+fn set_document_path(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    path: Option<String>,
+) -> Result<(), String> {
+    let state = app.state::<Mutex<DocumentPaths>>();
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    match path {
+        Some(p) => {
+            guard
+                .0
+                .insert(window.label().to_string(), canonical_document_path(&p));
+        }
+        None => {
+            guard.0.remove(window.label());
+        }
+    }
+    Ok(())
+}
+
+/// If some OTHER document window already has `path` open, raise and focus
+/// it and return `true` — the caller then skips its own open. `false` when
+/// no window has it, or when the only window that does is the CALLER
+/// itself: a window minted for a queued open holds the claim on its own
+/// path before it loads (`take_pending_window_open`), and asking "is this
+/// open elsewhere?" from that very window must not answer "yes, in you"
+/// and abort the load it is about to do (the regression that left every
+/// second-opened file as a blank Untitled window).
+#[tauri::command]
+fn focus_window_with_path(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    path: String,
+) -> Result<bool, String> {
+    match window_label_for_path(&app, &path) {
+        Some(label) if label != window.label() => {
+            focus_window_by_label(&app, &label)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 /// One queued open for a freshly created window: the path, whether the
 /// window should treat it as a COPY (library "Open as Document" — import
 /// semantics, Save always prompts) rather than a path-bound open, and the
@@ -1033,6 +1129,14 @@ async fn open_in_new_window(
     as_copy: Option<bool>,
     name: Option<String>,
 ) -> Result<(), String> {
+    // Already open somewhere (and not a Library "open as copy", which is a
+    // fresh untitled document that merely STARTS from that file)? Focus that
+    // window instead of opening the same file twice — see `DocumentPaths`.
+    if !as_copy.unwrap_or(false) {
+        if let Some(label) = window_label_for_path(&app, &path) {
+            return focus_window_by_label(&app, &label);
+        }
+    }
     let label = create_document_window(&app, &window, None).await?;
     // Propagate a lock failure (matches the sibling recover_slot insert in
     // create_document_window) rather than swallowing it: on a poisoned
@@ -1062,10 +1166,23 @@ fn take_pending_window_open(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
 ) -> Option<PendingWindowOpenEntry> {
-    app.state::<Mutex<PendingWindowOpen>>()
+    let entry = app
+        .state::<Mutex<PendingWindowOpen>>()
         .lock()
         .ok()
-        .and_then(|mut guard| guard.0.remove(window.label()))
+        .and_then(|mut guard| guard.0.remove(window.label()))?;
+    // Carry the claim over: from here until the webview reports its loaded
+    // document, this window is the one opening `path` (see `DocumentPaths`
+    // and `window_label_for_path`). An open-as-copy claims nothing.
+    if !entry.as_copy {
+        if let Ok(mut paths) = app.state::<Mutex<DocumentPaths>>().lock() {
+            paths.0.insert(
+                window.label().to_string(),
+                canonical_document_path(&entry.path),
+            );
+        }
+    }
+    Some(entry)
 }
 
 /// Reflect webview state into the native menu bar: `checked` drives check
@@ -1815,6 +1932,12 @@ fn emit_to_active(app: &tauri::AppHandle, event: &str, payload: &str) {
 /// written pre-readiness, so it cannot go stale and leak into a later
 /// File ▸ New window.
 fn deliver_open(app: &tauri::AppHandle, path: &str) {
+    // Already open in some window (a second double-click on the same file
+    // in Finder/Explorer, say)? Focus it — never a second copy.
+    if let Some(label) = window_label_for_path(app, path) {
+        let _ = focus_window_by_label(app, &label);
+        return;
+    }
     approve_file(app, Path::new(path), true);
     let target_ready = active_document_window(app).is_some_and(|w| {
         app.state::<Mutex<ReadyWindows>>()
@@ -2474,6 +2597,8 @@ fn main() {
             take_pending_window_open,
             list_windows,
             focus_window,
+            set_document_path,
+            focus_window_with_path,
             set_window_title,
             open_settings_window,
             open_library_window,
@@ -3355,6 +3480,7 @@ fn main() {
                 config_dir.as_deref(),
             ))));
             app.manage(Mutex::new(ReadyWindows(HashSet::new())));
+            app.manage(Mutex::new(DocumentPaths(HashMap::new())));
             app.manage(Mutex::new(ActiveWindow(None)));
             app.manage(Mutex::new(PendingRecovery(HashMap::new())));
             app.manage(Mutex::new(PendingWindowOpen(HashMap::new())));
@@ -3428,6 +3554,9 @@ fn main() {
                 tauri::WindowEvent::Destroyed => {
                     if let Ok(mut ready) = app.state::<Mutex<ReadyWindows>>().lock() {
                         ready.0.remove(window.label());
+                    }
+                    if let Ok(mut paths) = app.state::<Mutex<DocumentPaths>>().lock() {
+                        paths.0.remove(window.label());
                     }
                     if let Ok(mut active) = app.state::<Mutex<ActiveWindow>>().lock() {
                         if active.0.as_deref() == Some(window.label()) {

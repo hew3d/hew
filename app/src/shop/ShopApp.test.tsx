@@ -1753,12 +1753,24 @@ describe('ShopApp — Scenes (docs/design/scenes.md §6)', () => {
     })
   }
 
-  it('the pill is absent until a Scene is activated', async () => {
-    mockScene.scenes_json.mockReturnValue(JSON.stringify([SCENE_1_JSON]))
+  it('the pill is absent for a document without Scenes, and names the FIRST Scene once one is opened (auto-activated on open)', async () => {
+    mockScene.scenes_json.mockReturnValue(JSON.stringify([]))
     fixture.objects = [1n, 2n]
     await renderAndOpenWithFixture()
+    expect(screen.queryByTestId('scene-pill')).not.toBeInTheDocument()
+  })
 
-    expect(screen.queryByText('Cut layout')).not.toBeInTheDocument()
+  it('opens on the first Scene: the pill names it and its resolution is applied instantly', async () => {
+    mockScene.scenes_json.mockReturnValue(JSON.stringify([SCENE_1_JSON, SCENE_2_JSON]))
+    mockScene.resolve_scene.mockImplementation((sid: bigint) =>
+      sid === 1n ? resolvedForScene1() : makeFakeResolvedScene(),
+    )
+    fixture.objects = [1n, 2n]
+    const api = await renderAndOpenWithFixture()
+    await waitFor(() => expect(screen.getByTestId('scene-pill')).toHaveTextContent('Cut layout'))
+    expect(mockScene.resolve_scene).toHaveBeenCalledWith(1n)
+    // Instant on open — no tween — regardless of the transitions setting.
+    expect(api.tweenCameraState).toHaveBeenLastCalledWith(SCENE_1_CAMERA, 0, expect.any(Function))
   })
 
   it('the Views sheet lists Scenes above the standard views', async () => {
@@ -1767,9 +1779,10 @@ describe('ShopApp — Scenes (docs/design/scenes.md §6)', () => {
     await renderAndOpenWithFixture()
 
     fireEvent.click(screen.getByRole('button', { name: /^views$/i }))
-    expect(screen.getByText('Cut layout')).toBeInTheDocument()
-    expect(screen.getByText('Tenon section')).toBeInTheDocument()
-    expect(screen.getByText('Cut layout on a sheet')).toBeInTheDocument()
+    const sheet = screen.getByRole('dialog', { name: 'Views' })
+    expect(within(sheet).getByText('Cut layout')).toBeInTheDocument()
+    expect(within(sheet).getByText('Tenon section')).toBeInTheDocument()
+    expect(within(sheet).getByText('Cut layout on a sheet')).toBeInTheDocument()
   })
 
   it('activating a Scene from the Views sheet resolves it (never apply_scene), pushes hidden with fade, applies the section plane, and tweens the camera', async () => {
@@ -1777,10 +1790,13 @@ describe('ShopApp — Scenes (docs/design/scenes.md §6)', () => {
     mockScene.resolve_scene.mockImplementation(() => resolvedForScene1())
     fixture.objects = [1n, 2n]
     const api = await renderAndOpenWithFixture()
+    await waitFor(() => expect(screen.getByTestId('scene-pill')).toHaveTextContent('Cut layout'))
     api.setHidden.mockClear()
+    api.tweenCameraState.mockClear()
+    mockScene.resolve_scene.mockClear()
 
     fireEvent.click(screen.getByRole('button', { name: /^views$/i }))
-    fireEvent.click(screen.getByText('Cut layout'))
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Views' })).getByText('Cut layout'))
 
     expect(mockScene.resolve_scene).toHaveBeenCalledWith(1n)
     expect(api.setHidden).toHaveBeenLastCalledWith([2n], [], { fadeMs: 240 })
@@ -1806,11 +1822,11 @@ describe('ShopApp — Scenes (docs/design/scenes.md §6)', () => {
     fixture.objects = [1n, 2n]
     await renderAndOpenWithFixture()
 
-    fireEvent.click(screen.getByRole('button', { name: /^views$/i }))
-    fireEvent.click(screen.getByText('Cut layout'))
-
-    expect(screen.getByText('Cut layout')).toBeInTheDocument()
-    fireEvent.click(screen.getByText('Cut layout'))
+    // Auto-activated on open: the pill already names it; tapping the name
+    // opens the Views sheet.
+    const pill = await screen.findByTestId('scene-pill')
+    await waitFor(() => expect(pill).toHaveTextContent('Cut layout'))
+    fireEvent.click(within(pill).getByText('Cut layout'))
     expect(screen.getByRole('dialog', { name: 'Views' })).toBeInTheDocument()
   })
 
@@ -1886,7 +1902,7 @@ describe('ShopApp — Scenes (docs/design/scenes.md §6)', () => {
     expect((mockScene as Record<string, unknown>).set_section_plane).toBeUndefined()
 
     fireEvent.click(screen.getByRole('button', { name: /^views$/i }))
-    fireEvent.click(screen.getByText('Cut layout'))
+    fireEvent.click(within(screen.getByRole('dialog', { name: 'Views' })).getByText('Cut layout'))
 
     expect(mockScene.set_hidden).not.toHaveBeenCalled()
   })

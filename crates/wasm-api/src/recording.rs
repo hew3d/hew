@@ -431,6 +431,19 @@ pub enum RecordedCall {
         id: u64,
         path: Vec<String>,
     },
+    /// `add_node_tag_many(kinds, ids, path)` — one labeled compound over
+    /// several nodes (multi-selection tagging). Additive variant.
+    AddNodeTagMany {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        path: Vec<String>,
+    },
+    /// `remove_node_tag_many(kinds, ids, path)`.
+    RemoveNodeTagMany {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        path: Vec<String>,
+    },
     /// `set_tag_hidden(path, hidden)` — not undoable, but persisted with
     /// the document (manifest v5), so it must replay for the saved bytes
     /// and state hash to match.

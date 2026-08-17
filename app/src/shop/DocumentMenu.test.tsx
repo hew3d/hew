@@ -20,6 +20,7 @@ function renderMenu(overrides: Partial<Parameters<typeof DocumentMenu>[0]> = {})
     onClose: vi.fn(),
     onOpen: vi.fn(),
     onOpenScanner: vi.fn(),
+    onOpenRecents: vi.fn(),
     onSaveCopy: vi.fn(),
     // Off by default — most of this file's existing tests don't care about
     // "View in AR…" at all, so they'd otherwise need to know about it just
@@ -136,5 +137,13 @@ describe('DocumentMenu', () => {
       expect(screen.queryByRole('button', { name: /^view in ar…$/i })).not.toBeInTheDocument()
       expect(screen.getByRole('button', { name: /^preparing…$/i })).toBeInTheDocument()
     })
+  })
+})
+
+describe('DocumentMenu — Recent models', () => {
+  it('offers "Recent models…" whether or not a document is open, and it calls onOpenRecents', () => {
+    const props = renderMenu({ docName: null })
+    fireEvent.click(screen.getByRole('button', { name: /^recent models…$/i }))
+    expect(props.onOpenRecents).toHaveBeenCalledTimes(1)
   })
 })

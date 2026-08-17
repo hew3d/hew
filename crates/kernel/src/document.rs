@@ -6676,6 +6676,66 @@ impl Document {
         Ok(self.node_change(node))
     }
 
+    /// [`Document::add_node_tag`] across several nodes as ONE undo step
+    /// (a labeled compound, like an API transaction) — the Object Info
+    /// panel's multi-selection tagging. Nodes that already carry the tag are
+    /// left alone; a stale handle anywhere aborts the whole batch with
+    /// nothing applied. `label` is the compound's undo label ("Tag 3
+    /// objects"). Returns the merged change.
+    pub fn add_node_tag_many(
+        &mut self,
+        nodes: &[NodeId],
+        path: Vec<String>,
+        label: &str,
+    ) -> Result<DocChange, DocumentError> {
+        self.tag_many(nodes, label, |doc, node| {
+            doc.add_node_tag(node, path.clone())
+        })
+    }
+
+    /// [`Document::remove_node_tag`] across several nodes as ONE undo step
+    /// — the counterpart of [`Document::add_node_tag_many`]. Nodes that do
+    /// not carry the tag are left alone.
+    pub fn remove_node_tag_many(
+        &mut self,
+        nodes: &[NodeId],
+        path: &[String],
+        label: &str,
+    ) -> Result<DocChange, DocumentError> {
+        self.tag_many(nodes, label, |doc, node| doc.remove_node_tag(node, path))
+    }
+
+    /// The transaction bracket behind the two `*_many` tag edits: snapshot,
+    /// apply per node, merge the changes, commit as one labeled compound;
+    /// any per-node error aborts back to the snapshot. A batch that changed
+    /// nothing (every node already had / lacked the tag) commits no entry.
+    fn tag_many(
+        &mut self,
+        nodes: &[NodeId],
+        label: &str,
+        mut op: impl FnMut(&mut Document, NodeId) -> Result<DocChange, DocumentError>,
+    ) -> Result<DocChange, DocumentError> {
+        let txn = self.begin_transaction();
+        let mut merged = DocChange::default();
+        for &node in nodes {
+            match op(self, node) {
+                Ok(change) => merge_doc_change(&mut merged, change),
+                Err(e) => {
+                    self.abort_transaction(txn);
+                    return Err(e);
+                }
+            }
+        }
+        self.commit_transaction(
+            txn,
+            CompoundMeta {
+                label: label.to_string(),
+                origin: HistoryOrigin::User,
+            },
+        )?;
+        Ok(merged)
+    }
+
     /// Append `path` to `node`'s tag list if not already present, recording an
     /// undoable [`DocAction::NodeMetaChanged`]. Returns the change (touching the
     /// node) whether or not the tag was new; only pushes an undo entry when the

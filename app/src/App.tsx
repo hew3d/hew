@@ -199,6 +199,24 @@ export function sameSessionStackIdentity(
   return a.every((f, i) => nodeEq(f.node, b[i].node))
 }
 
+
+/**
+ * Multi-window dedupe (desktop): if some document window already has `path`
+ * open, raise and focus it and answer `true` — the caller then skips its own
+ * open. Two windows on one file would be confusing at best and, at worst,
+ * two writers that don't know about each other. `false` on the web (single
+ * window) or an older shell without the command.
+ */
+async function focusExistingWindowFor(path: string): Promise<boolean> {
+  if (!isTauri) return false
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    return await invoke<boolean>('focus_window_with_path', { path })
+  } catch {
+    return false
+  }
+}
+
 export default function App() {
   const [state, setState] = useState<AppState | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -675,6 +693,31 @@ export default function App() {
       }).catch(() => { /* ignore */ })
     }
   }, [docSession])
+  // Tell the shell which file this window has open (`DocumentPaths` in
+  // main.rs) so opening the same path again focuses this window instead of
+  // minting a second one. A Tauri FileRef handle is the absolute path; a
+  // web handle (or an untitled/imported document) reports nothing.
+  //
+  // The mount-time run (currentRef still null) reports NOTHING: a window
+  // minted for a queued open already holds a claim on its path in the
+  // shell (`take_pending_window_open` moved it into the registry), and a
+  // `null` here would erase that claim in the very window it protects.
+  // Only a real transition to/from a path is reported.
+  const lastReportedPathRef = useRef<string | null | undefined>(undefined)
+  useEffect(() => {
+    if (!isTauri) return
+    const handle = docSession.currentRef?.handle
+    const path = typeof handle === 'string' ? handle : null
+    if (lastReportedPathRef.current === undefined && path === null) {
+      lastReportedPathRef.current = null
+      return
+    }
+    if (lastReportedPathRef.current === path) return
+    lastReportedPathRef.current = path
+    import('@tauri-apps/api/core').then(({ invoke }) => {
+      invoke('set_document_path', { path }).catch(() => { /* older shell — ignore */ })
+    }).catch(() => { /* ignore */ })
+  }, [docSession.currentRef])
 
   // Warn before unload when there are unsaved changes.
   useEffect(() => {
@@ -1930,6 +1973,11 @@ export default function App() {
       }
       if (pick === null) return // user cancelled — current document unchanged
 
+      // Already open in another window? Focus it and stop — never a second
+      // window on the same file (a `.hew` pick only; an import lands as a
+      // new untitled document and has no window to be "already open" in).
+      if (pick.kind === 'hew' && typeof pick.handle === 'string' && (await focusExistingWindowFor(pick.handle))) return
+
       if (opensNewWindow) {
         // Every Tauri pick (hew or import) carries a real filesystem path —
         // hew's `handle`, import kinds' `path` — so this should always
@@ -2139,13 +2187,29 @@ export default function App() {
     if (scene === null) return
     const { invoke } = await import('@tauri-apps/api/core')
     if (/\.hew$/i.test(path)) {
-      const buf = await invoke<ArrayBuffer>('read_file', { path })
-      const bytes = new Uint8Array(buf)
-      const discardsUnsaved = docSessionRef.current.dirty
-      if (applyLoadedBytes(bytes)) {
-        setDocSession(afterOpen({ name: basenameOf(path), handle: path }, Date.now()))
-        if (discardsUnsaved) void clearRecoverySnapshot()
-        invoke('push_recent', { path }).catch(() => { /* ignore */ })
+      // Claim the path in the shell BEFORE the read/apply, so a second open
+      // of the same file racing this one focuses this window instead of
+      // opening its own copy (`DocumentPaths` in main.rs). Released again if
+      // the open fails to land — the session effect never re-reports an
+      // unchanged null.
+      invoke('set_document_path', { path }).catch(() => { /* older shell — ignore */ })
+      lastReportedPathRef.current = path
+      let landed = false
+      try {
+        const buf = await invoke<ArrayBuffer>('read_file', { path })
+        const bytes = new Uint8Array(buf)
+        const discardsUnsaved = docSessionRef.current.dirty
+        if (applyLoadedBytes(bytes)) {
+          landed = true
+          setDocSession(afterOpen({ name: basenameOf(path), handle: path }, Date.now()))
+          if (discardsUnsaved) void clearRecoverySnapshot()
+          invoke('push_recent', { path }).catch(() => { /* ignore */ })
+        }
+      } finally {
+        if (!landed) {
+          lastReportedPathRef.current = null
+          invoke('set_document_path', { path: null }).catch(() => { /* ignore */ })
+        }
       }
       return
     }
@@ -2203,6 +2267,8 @@ export default function App() {
   const openPath = useCallback(async (path: string) => {
     const scene = sceneRef.current
     if (scene === null) return
+    // Already open in some window (this one included)? Focus it, done.
+    if (await focusExistingWindowFor(path)) return
     const pristine = isPristineDocument(docSessionRef.current, scene)
     if (!pristine) {
       try {
