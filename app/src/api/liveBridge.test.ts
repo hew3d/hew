@@ -482,9 +482,9 @@ describe('installLiveBridge', () => {
   // mutates_document = true command — it already refreshes the viewport
   // through the normal mutation path above. The ActivateScene directive
   // is a SEPARATE, additive signal so the app can drive its own
-  // Scene-activation UI (camera tween, panel/outliner sync) once
-  // `LiveBridgeDeps.activateScene` is wired (TODO(scenes.activate /
-  // useScenesController) — see that dep's own doc comment in liveBridge.ts).
+  // Scene-activation UI (camera tween, panel/outliner sync) through
+  // `LiveBridgeDeps.activateScene` — see that dep's own doc comment in
+  // liveBridge.ts.
   describe('hew.scenes.apply directive', () => {
     it('calls deps.activateScene with the Scene sid', async () => {
       const activateScene = vi.fn()

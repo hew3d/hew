@@ -291,9 +291,13 @@ below.
 - Document outliner with click-to-select and double-click to enter an
   object's editing context, with the rest of the scene dimmed for focus
 - Tags for organizing and toggling visibility of groups of objects,
-  deletable without touching the geometry that carries them
+  deletable without touching the geometry that carries them; clicking a
+  tag selects everything it carries, and a tag is renamed in place
+  (Finder-style click-twice or double-click, and `hew.tag.rename` from the
+  API) with every object and nested tag path following the new name
 - An Object Info panel for renaming, tagging, and checking an object's
-  solid status
+  solid status; with several objects selected it tags them all at once,
+  showing the tags they share
 
 ### Materials
 
@@ -453,7 +457,9 @@ below.
   open into a fresh window whenever the current one isn't a blank,
   untouched "Untitled" document, so an in-progress model is never silently
   replaced; the Window menu lists every open document window, with a
-  checkmark on the current one, to switch between them
+  checkmark on the current one, to switch between them, and opening a file
+  that is already open brings its window forward instead of opening a
+  duplicate
 - Shop Mode — a read-only, touch-first phone viewer (auto-selected on a
   phone, or via an explicit override) for referencing a model in the
   workshop: tap a part for its size, a live parts cutlist, a Tape Measure

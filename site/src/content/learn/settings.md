@@ -1,6 +1,6 @@
 ---
 title: "Settings and diagnostics"
-description: "Units and theme, plus Debug Mode and a bug reporter that bundles everything a developer needs into one file."
+description: "Units and theme, the server Open on Phone uses, plus Debug Mode and a bug reporter that bundles everything a developer needs into one file."
 order: 21
 ---
 
@@ -20,6 +20,10 @@ This controls how every length is displayed and how bare typed numbers are inter
 ## Theme
 
 **Auto** follows your operating system's light/dark appearance, live. Pick **Light** or **Dark** to override.
+
+## Advanced: your own server
+
+The Advanced pane (desktop only) has one job: choosing where **Open on Phone** sends a model. **Hew cloud** is the default. **Self-hosted** takes the address of a server you run yourself, plus an optional **Upload key** if that server requires one; **Test connection** confirms the address answers as a Hew relay before you rely on it — and the QR code you get from File ▸ Open on Phone… then points at that server, never at app.hew3d.com. What your phone has to do differently, and how to stand up a server, is covered in [Using your own server](/learn/hew-on-your-phone/#using-your-own-server).
 
 ## Debug Mode
 

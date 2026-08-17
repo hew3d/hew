@@ -72,7 +72,7 @@ dependencies = [
 
 [[package]]
 name = "api"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -270,7 +270,7 @@ dependencies = [
 
 [[package]]
 name = "dae-import"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "dae-parser",
  "kernel",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "gltf-import"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "gltf",
  "kernel",
@@ -464,7 +464,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hew-cli"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "api",
  "dae-import",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "hew-relay"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "axum",
  "clap",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "inference"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -654,7 +654,7 @@ dependencies = [
 
 [[package]]
 name = "kernel"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "proptest",
  "serde",
@@ -711,7 +711,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mesh-export"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "kernel",
  "serde_json",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-heal"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "skp-import"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "dae-import",
  "kernel",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "softrender"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "kernel",
  "tessellate",
@@ -1099,7 +1099,7 @@ dependencies = [
 
 [[package]]
 name = "stl-import"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "kernel",
  "mesh-heal",
@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "tessellate"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -1370,7 +1370,7 @@ dependencies = [
 
 [[package]]
 name = "wasm-api"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "api",
  "dae-import",
