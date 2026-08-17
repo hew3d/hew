@@ -846,7 +846,12 @@ than the relay's own port directly. It exercises uploads, one-shot
 downloads, the size and TTL limits, and CORS against the real server, not
 just the identity route. Worth running once after standing up a relay,
 especially behind a hand-written Apache or Caddy config; the desktop's own
-*Test connection* covers the everyday case afterward.
+*Test connection* covers the everyday case afterward. If the only failure
+is "a declared Content-Length over maxBytes is 413 before the body is read"
+timing out, the proxy in front of `hew-relay` buffers request bodies to
+completion before forwarding them (the shipped nginx stanza turns that off
+with `proxy_request_buffering off`); either stream through, or accept it
+and rerun with `HEW_RELAY_BUFFERS_BODY=1` to skip those two cases.
 
 ## Troubleshooting
 

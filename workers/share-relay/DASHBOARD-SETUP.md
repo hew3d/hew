@@ -106,6 +106,12 @@ interoperate without a migration step.
 - [ ] Dashboard → **Workers & Pages** → `share-relay` → **Settings** →
       **Domains & Routes** → **Add** → route pattern `app.hew3d.com/relay/*`
       on zone `hew3d.com`.
+- [ ] Add a second route, `app.hew3d.com/relay` (no wildcard), on the same
+      zone. `/relay/*` matches `/relay/…` only, so without it the bare,
+      slash-less identity URL falls through to the Pages 404 — and the
+      contract suite requires it to answer, the same way the shipped nginx
+      stanza (`location = /relay { return 308 /relay/; }`) and `hew-relay`
+      itself do.
 - [ ] Save.
 - [ ] Verify: `curl -s https://app.hew3d.com/relay/` should return the
       identity JSON (`{"service":"hew-relay",...}`), the same shape
@@ -117,6 +123,16 @@ interoperate without a migration step.
       above should hit the Worker (JSON), not the Pages app (HTML). If it
       returns HTML instead, the route did not take priority and needs a
       second look before shipping this to real clients.
+- [ ] Then run the conformance suite against the live origin:
+      `cd workers/share-relay && HEW_RELAY_URL=https://app.hew3d.com
+      HEW_RELAY_PREFIX_ONLY=1 HEW_RELAY_BUFFERS_BODY=1 npm run test:contract`.
+      `PREFIX_ONLY` because only `/relay…` reaches the Worker on this
+      hostname; `BUFFERS_BODY` because Cloudflare's edge holds the Worker's
+      answer until the whole request body has arrived, so the two
+      header-only fail-fast cases cannot be observed through it (they time
+      out without the flag — same as against `share.hew3d.com`). Everything
+      else — bare `/relay`, uploads, one-shot downloads, size caps, CORS —
+      must pass.
 
 ## Optional: allow a self-hosted HTTPS test origin
 

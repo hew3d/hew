@@ -49,8 +49,14 @@
  *                              met gets no answer, and the client's eventual
  *                              disconnect crashes the dev server), so the
  *                              header-only fail-fast cases are skipped on that
- *                              leg. Production Cloudflare and hew-relay stream
- *                              and must pass them.
+ *                              leg. Production Cloudflare does the same — its
+ *                              edge holds the Worker's answer until the whole
+ *                              request body has arrived — so set it against
+ *                              share.hew3d.com / app.hew3d.com too. hew-relay
+ *                              behind a streaming proxy (the shipped nginx
+ *                              stanza) must pass them without the flag; a
+ *                              timeout here behind a hand-written Apache/Caddy
+ *                              config means that proxy buffers bodies.
  *
  * Every drop this suite creates is consumed or deleted before the test ends,
  * so a run leaves the server empty (matters for the total-bytes case).

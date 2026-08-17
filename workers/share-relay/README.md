@@ -285,8 +285,11 @@ HEW_RELAY_URL=http://127.0.0.1:8787 HEW_RELAY_BUFFERS_BODY=1 npm run test:contra
 `wrangler dev`'s local proxy buffers request bodies to completion before
 the Worker sees them, so a PUT whose declared `Content-Length` is never met
 gets no answer there (and the client's eventual disconnect crashes the dev
-server) — production Cloudflare streams, and `hew-relay` must pass those
-cases without the flag. `.github/workflows/ci.yml`'s `relay-contract` job
+server). Production Cloudflare needs the flag as well: its edge holds the
+Worker's response until the whole request body has arrived, so an
+oversized upload gets its 413 only after it has been sent in full (the
+desktop never sends one — it reads the cap from the identity route first).
+`hew-relay` must pass those cases without the flag. `.github/workflows/ci.yml`'s `relay-contract` job
 runs the unit suite, this suite against `wrangler dev`, and this suite
 against `hew-relay`, all blocking; `scripts/verify-full.sh` runs the same.
 
@@ -335,9 +338,11 @@ No environment variables or secrets are needed for the public relay — see
 "Security model" above for why. (`HEW_RELAY_UPLOAD_KEY` is a self-hoster's
 knob; do not set it on the production Worker.)
 
-8. **Add the same-origin route**: alongside `share.hew3d.com/*`, route
-   `app.hew3d.com/relay/*` to this Worker (dashboard → the Worker →
-   Settings → Domains & Routes, zone `hew3d.com`) — new desktops and the
+8. **Add the same-origin routes**: alongside `share.hew3d.com/*`, route
+   `app.hew3d.com/relay/*` **and** the bare `app.hew3d.com/relay` to this
+   Worker (dashboard → the Worker → Settings → Domains & Routes, zone
+   `hew3d.com`; the wildcard pattern does not cover the slash-less identity
+   URL, which the contract requires) — new desktops and the
    phone app reach the relay as `<origin>/relay/…` (`DASHBOARD-SETUP.md`
    has the checklist, including the rate-limit rule re-key). Both hostnames
    reach the same Worker and the same Durable Object namespace — the DO id
