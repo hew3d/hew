@@ -1040,6 +1040,18 @@ export interface TagDeleteParams {
 export interface TagDeleteResult {}
 
 /**
+ * `hew.tag.rename` (v1) — Rename a tag path (and every tag nested under it), keeping its identity.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_tag, duplicate_tag, invalid_tag_path
+ */
+export interface TagRenameParams {
+  new_path: string[]
+  path: string[]
+}
+
+export interface TagRenameResult {}
+
+/**
  * `hew.tag.set_visible` (v1) — Toggle a tag's visibility. Registry-state: records no undo entry (§6.4).
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: none.
@@ -1265,6 +1277,7 @@ export class HewApiClient {
     assign: (params: TagAssignParams): Promise<TagAssignResult> => this.mutate('hew.tag.assign', params),
     create: (params: TagCreateParams): Promise<TagCreateResult> => this.mutate('hew.tag.create', params),
     delete: (params: TagDeleteParams): Promise<TagDeleteResult> => this.mutate('hew.tag.delete', params),
+    rename: (params: TagRenameParams): Promise<TagRenameResult> => this.mutate('hew.tag.rename', params),
     setVisible: (params: TagSetVisibleParams): Promise<TagSetVisibleResult> => this.mutate('hew.tag.set_visible', params),
   }
 

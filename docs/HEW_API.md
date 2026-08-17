@@ -619,6 +619,14 @@ The registry classes every command, and the class governs placement:
   undo log — an unreferenced material is harmless, and a tag's visibility
   is view state, not a modeled edit. Their registry entries note this in
   their summaries.
+
+  `hew.tag.rename` is an ordinary undoable edit: it moves a tag path — and
+  every tag nested under it — to a new path while keeping the tag's
+  identity (stable id, hidden flag, attributes; a Scene's captured hidden
+  tags follow it) and rewriting every node that carried it. It refuses an
+  unknown source (`unknown_tag`), a target already in use
+  (`duplicate_tag`; tags are never merged), and an empty or self-nested
+  target (`invalid_tag_path`).
 - **Read-only** commands — `hew.query.*`, `hew.meta.*`, and
   `hew.attr.get` — are legal anywhere: standalone (adding no undo
   entry), or interleaved inside a transaction, where their results are
@@ -655,7 +663,7 @@ for, not shipped.
 | `hew.group` | `create`, `explode` | Required |
 | `hew.component` | `create`, `place`, `make_unique`, `explode` | Standard |
 | `hew.material` | `create` (color or texture), `paint`, `set_default`, `set_opacity` | Standard |
-| `hew.tag` | `create`, `assign`, `set_visible`, `delete` | Standard |
+| `hew.tag` | `create`, `assign`, `set_visible`, `delete`, `rename` | Standard |
 | `hew.guide` | `line`, `point`, `angular`, `clear` | Standard |
 | `hew.scenes` | `list`, `add`, `update`, `rename`, `describe`, `remove`, `reorder`, `apply` (§7.1) | Standard |
 | `hew.attr` | `get`, `set`, `delete` (§8) | Required |

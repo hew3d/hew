@@ -35,6 +35,8 @@ Tags are labels for slicing a model into toggleable categories — Structure, Ha
 
 - **Add a tag** in Object Info with the **+** button. Use `/` to nest: typing `Structure/Roof` creates (or reuses) a *Structure* parent with a *Roof* child.
 - **The Tags panel** (Window ▸ Tags, `⇧⌘T` / `Ctrl+Shift+T`) shows the resulting tree, with a count of tagged items on each row and an eye toggle that hides everything tagged at or under that path.
+- **Click a tag** to select everything that carries it (or a tag nested under it) — the same gesture as clicking a row in the Outliner, and the quickest way to grab a whole category to move, group, or re-tag it.
+- **Rename a tag** the way you rename a file: click the already-selected row a second time (a moment later, not a double-click), or double-click it, and its name opens for editing in place. Enter commits, Escape cancels. Only that segment changes — sub-tags and every item carrying the tag follow it, and the rename is undoable. A name that's already in use is refused.
 - Tag visibility **composes** with Outliner visibility — an item hidden by either stays hidden until both show it again.
 - **Delete a tag** with the **×** button on its row. This removes the tag (and any sub-tags) from every item that carries it — the items themselves are never deleted, and anything that was hidden only by that tag becomes visible again. Deleting a tag is undoable.
 - Tags import from SketchUp files, so a tagged SketchUp model arrives pre-organized. They're saved in your `.hew` file and searchable in the command palette.

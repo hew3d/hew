@@ -1353,6 +1353,18 @@ enum DocAction {
         /// Per-node tag lists: `(node, tags before, tags after)`.
         nodes: Vec<TagListTransition>,
     },
+    /// `rename_tag` moved a tag path (and every registered tag nested under
+    /// it) to a new path: registry entries re-keyed — keeping their stable
+    /// ids, hidden flags, and dictionaries, so the tag stays the SAME entity
+    /// (a Scene's captured hidden-tag sids keep pointing at it) — and every
+    /// visible node's tag list rewritten. Undo moves the entries back and
+    /// restores each node's previous list; redo re-applies both.
+    TagRenamed {
+        /// Registry moves: `(path before, path after)`.
+        registry: Vec<(Vec<String>, Vec<String>)>,
+        /// Per-node tag lists: `(node, tags before, tags after)`.
+        nodes: Vec<TagListTransition>,
+    },
     /// [`Document::follow_me_face`] swept a solid FACE profile into a new
     /// object (design §3a), OR [`Document::extrude_face_as_new_object`]
     /// straight-extruded one (design tool-parity §2, Ctrl-push/pull) — same
@@ -1605,7 +1617,7 @@ impl DocAction {
                 _ => Vec::new(),
             },
             DocAction::ComponentRenamed { .. } => Vec::new(),
-            DocAction::TagDeleted { nodes, .. } => nodes
+            DocAction::TagDeleted { nodes, .. } | DocAction::TagRenamed { nodes, .. } => nodes
                 .iter()
                 .filter_map(|(n, ..)| match n {
                     NodeId::Object(id) => Some(*id),
@@ -1695,6 +1707,7 @@ impl DocAction {
             | DocAction::NodeMetaChanged { .. }
             | DocAction::ComponentRenamed { .. }
             | DocAction::TagDeleted { .. }
+            | DocAction::TagRenamed { .. }
             | DocAction::FollowMeFace { .. }
             | DocAction::Imported { .. }
             | DocAction::DeletedDefMember { .. } => Vec::new(),
@@ -1932,6 +1945,13 @@ pub enum DocumentError {
     UnknownSketch,
     /// The object handle is stale, hidden, or from another Document.
     UnknownObject,
+    /// `rename_tag`'s target path (or a nested path it would produce) is
+    /// already a tag — registered or carried by a node — that the rename
+    /// does not itself move; tags stay unique per path, never merged.
+    DuplicateTag,
+    /// `rename_tag` was asked for an empty path, a path with an empty
+    /// segment, or a target nested under the path being renamed.
+    InvalidTagPath,
     /// The Scene stable id names no Scene of this document
     /// (docs/design/scenes.md §3.1).
     UnknownScene,
@@ -2204,6 +2224,8 @@ impl std::fmt::Display for DocumentError {
         match self {
             DocumentError::UnknownSketch => write!(f, "no such sketch in this document"),
             DocumentError::UnknownObject => write!(f, "no such object in this document"),
+            DocumentError::DuplicateTag => write!(f, "a tag with that path already exists"),
+            DocumentError::InvalidTagPath => write!(f, "tag path is empty or nested under itself"),
             DocumentError::UnknownScene => write!(f, "no such scene in this document"),
             DocumentError::DuplicateSceneName => write!(f, "a scene with that name already exists"),
             DocumentError::EmptySceneName => write!(f, "a scene name must not be empty"),
@@ -6802,6 +6824,152 @@ impl Document {
         self.redo.clear();
         self.debug_validate();
         Ok(self.node_change(node))
+    }
+
+    /// Rename a tag path — and every registered tag nested under it — to
+    /// `new_path`, undoably ([`DocAction::TagRenamed`]). The tag keeps its
+    /// stable id, hidden flag, and attribute dictionaries (it is the same
+    /// entity under a new name; a Scene's captured hidden-tag sids follow
+    /// it for free), and every visible node carrying the old path (or a
+    /// nested path) is rewritten. Renaming to the current path is a no-op
+    /// (no undo entry).
+    ///
+    /// # Errors
+    /// - [`DocumentError::InvalidTagPath`] — empty path / empty segment, or
+    ///   `new_path` nested under `path` (which could never terminate).
+    /// - [`DocumentError::DuplicateTag`] — `new_path` (or a nested path the
+    ///   rename would produce) already exists, registered or on a node, and
+    ///   is not itself being moved. Tags are never merged by rename.
+    pub fn rename_tag(
+        &mut self,
+        path: &[String],
+        new_path: Vec<String>,
+    ) -> Result<DocChange, DocumentError> {
+        if path.is_empty()
+            || new_path.is_empty()
+            || new_path.iter().any(|seg| seg.trim().is_empty())
+        {
+            return Err(DocumentError::InvalidTagPath);
+        }
+        if new_path.as_slice() == path {
+            return Ok(DocChange::default());
+        }
+        let covers = |tag: &[String]| tag.len() >= path.len() && tag[..path.len()] == *path;
+        if covers(&new_path) {
+            return Err(DocumentError::InvalidTagPath);
+        }
+        let rewrite = |tag: &[String]| -> Vec<String> {
+            let mut out = new_path.clone();
+            out.extend_from_slice(&tag[path.len()..]);
+            out
+        };
+
+        // Collision check: every path the rename produces must be free —
+        // among registered paths and node-carried paths alike — unless the
+        // occupant is itself being moved (covered by `path`).
+        let mut existing: BTreeSet<Vec<String>> = self.tag_meta.keys().cloned().collect();
+        for (_, rec) in self.objects.iter() {
+            if !rec.hidden {
+                existing.extend(rec.tags.iter().cloned());
+            }
+        }
+        for (_, rec) in self.groups.iter() {
+            if !rec.hidden {
+                existing.extend(rec.tags.iter().cloned());
+            }
+        }
+        for (_, rec) in self.instances.iter() {
+            if !rec.hidden {
+                existing.extend(rec.tags.iter().cloned());
+            }
+        }
+        for tag in existing.iter().filter(|t| covers(t)) {
+            let target = rewrite(tag);
+            if existing.contains(&target) && !covers(&target) {
+                return Err(DocumentError::DuplicateTag);
+            }
+        }
+
+        // Registry: move each covered entry, keeping id/flag/dictionaries.
+        let registry: Vec<(Vec<String>, Vec<String>)> = self
+            .tag_meta
+            .keys()
+            .filter(|p| covers(p))
+            .map(|p| (p.clone(), rewrite(p)))
+            .collect();
+        for (from, to) in &registry {
+            self.move_tag_identity(from, to);
+        }
+
+        // Nodes: rewrite covered tags in place, dropping a duplicate a node
+        // would otherwise end up with (it already carried the target path).
+        let mut nodes: Vec<TagListTransition> = Vec::new();
+        let mut change = DocChange::default();
+        let rewrite_list = |tags: &[Vec<String>]| -> Vec<Vec<String>> {
+            let mut out: Vec<Vec<String>> = Vec::with_capacity(tags.len());
+            for t in tags {
+                let next = if covers(t) { rewrite(t) } else { t.clone() };
+                if !out.contains(&next) {
+                    out.push(next);
+                }
+            }
+            out
+        };
+        for (id, rec) in self.objects.iter_mut() {
+            if rec.hidden || !rec.tags.iter().any(|t| covers(t)) {
+                continue;
+            }
+            let prev = rec.tags.clone();
+            rec.tags = rewrite_list(&prev);
+            nodes.push((NodeId::Object(id), prev, rec.tags.clone()));
+            change.objects_touched.push(id);
+        }
+        for (id, rec) in self.groups.iter_mut() {
+            if rec.hidden || !rec.tags.iter().any(|t| covers(t)) {
+                continue;
+            }
+            let prev = rec.tags.clone();
+            rec.tags = rewrite_list(&prev);
+            nodes.push((NodeId::Group(id), prev, rec.tags.clone()));
+            change.groups_touched.push(id);
+        }
+        for (id, rec) in self.instances.iter_mut() {
+            if rec.hidden || !rec.tags.iter().any(|t| covers(t)) {
+                continue;
+            }
+            let prev = rec.tags.clone();
+            rec.tags = rewrite_list(&prev);
+            nodes.push((NodeId::Instance(id), prev, rec.tags.clone()));
+            change.instances_touched.push(id);
+        }
+
+        if registry.is_empty() && nodes.is_empty() {
+            // Unknown tag — nothing changed, no undo entry.
+            return Ok(DocChange::default());
+        }
+        self.undo.push(DocAction::TagRenamed { registry, nodes });
+        self.redo.clear();
+        self.debug_validate();
+        Ok(change)
+    }
+
+    /// Re-key one registered tag from `from` to `to`, carrying its hidden
+    /// flag, stable id, and attribute dictionaries — the unit both
+    /// `rename_tag` and `TagRenamed`'s undo/redo apply.
+    fn move_tag_identity(&mut self, from: &[String], to: &[String]) {
+        if let Some(hidden) = self.tag_meta.remove(from) {
+            self.tag_meta.insert(to.to_vec(), hidden);
+        }
+        if let Some(sid) = self.sids.remove(&EntityRef::Tag(from.to_vec())) {
+            self.sids.insert(EntityRef::Tag(to.to_vec()), sid);
+        }
+        if let Some(dict) = self
+            .attrs
+            .remove(&AttrTarget::Entity(EntityRef::Tag(from.to_vec())))
+        {
+            self.attrs
+                .insert(AttrTarget::Entity(EntityRef::Tag(to.to_vec())), dict);
+        }
     }
 
     /// Delete the tag `path` — and every registered tag nested under it —
@@ -15993,6 +16161,23 @@ impl Document {
                 }
                 change
             }
+            DocAction::TagRenamed { registry, nodes } => {
+                // Undo: move the entries back (identity travels with them)
+                // and restore every affected node's previous tag list.
+                for (from, to) in registry.iter().rev() {
+                    self.move_tag_identity(to, from);
+                }
+                let mut change = DocChange::default();
+                for (node, prev_tags, _) in nodes.clone() {
+                    self.apply_node_tags(node, prev_tags);
+                    match node {
+                        NodeId::Object(id) => change.objects_touched.push(id),
+                        NodeId::Group(id) => change.groups_touched.push(id),
+                        NodeId::Instance(id) => change.instances_touched.push(id),
+                    }
+                }
+                change
+            }
             DocAction::Imported {
                 objects,
                 components,
@@ -17149,6 +17334,23 @@ impl Document {
                     self.sids.remove(&EntityRef::Tag(path.clone()));
                     self.attrs
                         .remove(&AttrTarget::Entity(EntityRef::Tag(path.clone())));
+                }
+                let mut change = DocChange::default();
+                for (node, _, next_tags) in nodes.clone() {
+                    self.apply_node_tags(node, next_tags);
+                    match node {
+                        NodeId::Object(id) => change.objects_touched.push(id),
+                        NodeId::Group(id) => change.groups_touched.push(id),
+                        NodeId::Instance(id) => change.instances_touched.push(id),
+                    }
+                }
+                change
+            }
+            DocAction::TagRenamed { registry, nodes } => {
+                // Redo: move the entries forward again and re-apply the
+                // rewritten tag lists.
+                for (from, to) in registry.iter() {
+                    self.move_tag_identity(from, to);
                 }
                 let mut change = DocChange::default();
                 for (node, _, next_tags) in nodes.clone() {

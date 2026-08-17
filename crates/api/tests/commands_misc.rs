@@ -747,6 +747,68 @@ fn tag_delete_deletes_a_registered_tag_and_refuses_an_unknown_path() {
     assert_eq!(data["refusal"], "unknown_tag");
 }
 
+#[test]
+fn tag_rename_moves_the_tag_keeping_identity_and_refuses_unknown_duplicate_and_invalid() {
+    let mut doc = Document::new();
+    doc.set_tag_hidden(vec!["Structure".to_string()], true);
+    doc.set_tag_hidden(vec!["Structure".to_string(), "Roof".to_string()], false);
+    doc.set_tag_hidden(vec!["Oak".to_string()], false);
+    let sid = doc
+        .sid_of(&kernel::EntityRef::Tag(vec![
+            "Structure".to_string(),
+            "Roof".to_string(),
+        ]))
+        .unwrap();
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+    let bytes_before = doc.save();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.tag.rename",
+        json!({ "path": ["Structure"], "new_path": ["Frame"] }),
+    );
+    assert!(!doc.tag_meta().any(|(p, _)| p == ["Structure"]));
+    assert!(doc.tag_hidden(&["Frame".to_string()]));
+    assert_eq!(
+        doc.sid_of(&kernel::EntityRef::Tag(vec![
+            "Frame".to_string(),
+            "Roof".to_string()
+        ])),
+        Some(sid),
+        "nested tag moved with its identity"
+    );
+    assert_one_undo_and_clean_undo(&mut doc, depth_before, &bytes_before);
+
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.tag.rename",
+        json!({ "path": ["NoSuchTag"], "new_path": ["X"] }),
+    );
+    assert_eq!(data["refusal"], "unknown_tag");
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.tag.rename",
+        json!({ "path": ["Structure"], "new_path": ["Oak"] }),
+    );
+    assert_eq!(data["refusal"], "duplicate_tag");
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.tag.rename",
+        json!({ "path": ["Structure"], "new_path": ["Structure", "Inner"] }),
+    );
+    assert_eq!(data["refusal"], "invalid_tag_path");
+}
+
 // ================================================================== hew.guide
 
 #[test]

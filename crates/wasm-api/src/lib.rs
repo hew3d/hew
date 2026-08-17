@@ -4642,6 +4642,29 @@ impl Scene {
         Ok(())
     }
 
+    /// Rename a tag path (and every registered tag nested under it) to
+    /// `new_path` — undoable, identity-preserving (same stable id, hidden
+    /// flag, and attributes; a Scene's captured hidden tags follow). Both
+    /// paths are `/`-joined like [`Scene::delete_tag`]'s. Refuses a
+    /// collision (`DuplicateTag`) or an empty / self-nested target
+    /// (`InvalidTagPath`).
+    pub fn rename_tag(&mut self, path: String, new_path: String) -> Result<(), ApiError> {
+        let from: Vec<String> = path
+            .split('/')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let to: Vec<String> = new_path
+            .split('/')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let change = self.doc.rename_tag(&from, to).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::RenameTag { path, new_path });
+        Ok(())
+    }
+
     /// Whether a node is USER-hidden (persisted view state, manifest v6).
     ///
     /// `kind`: 0 = object, 1 = group, 2 = instance.
@@ -8376,6 +8399,9 @@ impl Scene {
                     AddNodeTag { kind, id, path } => {
                         self.add_node_tag(kind, id, path)?;
                     }
+                    RenameTag { path, new_path } => {
+                        self.rename_tag(path, new_path)?;
+                    }
                     RemoveNodeTag { kind, id, path } => {
                         self.remove_node_tag(kind, id, path)?;
                     }
@@ -10816,6 +10842,60 @@ mod tests {
                 .is_err()
         );
         assert!(scene.rename_scene(sid, "  ".to_string()).is_err());
+    }
+
+    /// Renaming a tag is undoable, keeps its stable id, and replays.
+    #[test]
+    fn record_then_replay_covers_rename_tag() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s1, r1) = ground_unit_square_at(&mut scene, 0.0, 0.0);
+        let a = scene.extrude_region(s1, r1, 1.0).unwrap();
+        scene
+            .add_node_tag(0, a, vec!["Hardware".to_string(), "Screws".to_string()])
+            .unwrap();
+        scene.set_tag_hidden("Hardware/Screws".to_string(), true);
+        let sid_before = scene
+            .doc
+            .sid_of(&kernel::EntityRef::Tag(vec![
+                "Hardware".to_string(),
+                "Screws".to_string(),
+            ]))
+            .unwrap();
+        let depth = scene.doc.undo_depth();
+        scene
+            .rename_tag("Hardware".to_string(), "Fixings".to_string())
+            .unwrap();
+        assert_eq!(scene.doc.undo_depth(), depth + 1);
+        assert_eq!(
+            scene.node_tags(0, a).unwrap(),
+            vec!["Fixings/Screws".to_string()]
+        );
+        assert_eq!(
+            scene.doc.sid_of(&kernel::EntityRef::Tag(vec![
+                "Fixings".to_string(),
+                "Screws".to_string()
+            ])),
+            Some(sid_before)
+        );
+        assert!(
+            scene
+                .rename_tag("Fixings".to_string(), "".to_string())
+                .is_err()
+        );
+        scene.scene_undo().unwrap();
+        assert_eq!(
+            scene.node_tags(0, a).unwrap(),
+            vec!["Hardware/Screws".to_string()]
+        );
+        scene.scene_redo().unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save());
     }
 
     /// Multi-selection tagging is one compound undo step, refuses a stale

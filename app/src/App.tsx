@@ -4375,6 +4375,26 @@ export default function App() {
   }, [resyncTagVisibility, handleDocumentChanged, handleToast])
   deleteTagRef.current = handleDeleteTag
 
+  // Rename a tag in place (Tags panel: second click on the active row, or a
+  // double-click) — the LAST segment only; parents stay. Undoable and
+  // identity-preserving in the kernel (`rename_tag`): the registry entry
+  // keeps its stable id and hidden flag, so `hiddenTagPaths` (keyed by
+  // PATH) is re-seeded from the registry afterwards, exactly like delete.
+  // Returns the inline error text for the panel, or null on success.
+  const handleRenameTag = useCallback((path: string[], newSegment: string): string | null => {
+    const scene = sceneRef.current
+    if (scene === null) return 'No document.'
+    const next = [...path.slice(0, -1), newSegment]
+    try {
+      scene.rename_tag(path.join('/'), next.join('/'))
+    } catch (err: unknown) {
+      return friendlyErrorText(err)
+    }
+    resyncTagVisibility()
+    handleDocumentChanged()
+    return null
+  }, [resyncTagVisibility, handleDocumentChanged])
+
   if (error !== null) {
     return (
       <main style={{ fontFamily: 'sans-serif', padding: '1rem', color: 'var(--danger-base, red)' }}>
@@ -5068,6 +5088,8 @@ export default function App() {
               onToggleTagPath={handleToggleTagPath}
               onDeleteTag={handleDeleteTag}
               revealTag={revealTag}
+              onSelectNodes={handleReplaceSelection}
+              onRenameTag={handleRenameTag}
             />
           </TraySection>
           <TraySection

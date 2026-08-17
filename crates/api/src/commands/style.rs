@@ -27,6 +27,7 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.tag.assign" => tag_assign,
         "hew.tag.set_visible" => tag_set_visible,
         "hew.tag.delete" => tag_delete,
+        "hew.tag.rename" => tag_rename,
         "hew.guide.line" => guide_line,
         "hew.guide.point" => guide_point,
         "hew.guide.angular" => guide_angular,
@@ -256,6 +257,50 @@ fn tag_delete(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         )));
     }
     ctx.doc.delete_tag(&p.path)?;
+    Ok(serde_json::json!({}))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TagRenameParams {
+    path: Vec<String>,
+    new_path: Vec<String>,
+}
+
+/// `hew.tag.rename` — the Tags panel's in-place rename: move `path` (and
+/// every tag nested under it) to `new_path`, keeping the tag's identity
+/// (stable id, hidden flag, attributes; a Scene's captured hidden tags
+/// follow). Undoable, one entry. Refuses an unknown source (mirroring
+/// `hew.tag.delete`), a collision (`duplicate_tag`), and an empty or
+/// self-nested target (`invalid_tag_path`) — never a silent no-op.
+fn tag_rename(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: TagRenameParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    validate_tag_path(&p.path)?;
+    validate_tag_path(&p.new_path)?;
+    let covers = |tag: &[String]| tag.len() >= p.path.len() && tag[..p.path.len()] == p.path[..];
+    let registered = ctx.doc.tag_meta().any(|(tag, _)| covers(tag));
+    let carried = !registered && {
+        let doc = &ctx.doc;
+        let mut nodes: Vec<kernel::NodeId> = Vec::new();
+        nodes.extend(
+            doc.visible_object_ids()
+                .into_iter()
+                .map(kernel::NodeId::Object),
+        );
+        nodes.extend(doc.group_ids().into_iter().map(kernel::NodeId::Group));
+        nodes.extend(doc.instance_ids().into_iter().map(kernel::NodeId::Instance));
+        nodes
+            .into_iter()
+            .any(|n| doc.node_tags(n).iter().any(|t| covers(t)))
+    };
+    if !registered && !carried {
+        return Err(CmdError::Refusal(Refusal::api(
+            "unknown_tag",
+            &format!("No tag is registered at or under '{}'.", p.path.join("/")),
+        )));
+    }
+    ctx.doc.rename_tag(&p.path, p.new_path)?;
     Ok(serde_json::json!({}))
 }
 

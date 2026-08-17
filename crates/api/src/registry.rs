@@ -490,6 +490,13 @@ impl Registry {
             "Delete a tag path, unassigning it everywhere.",
         );
         add(
+            "hew.tag.rename",
+            M,
+            Kernel,
+            Std,
+            "Rename a tag path (and every tag nested under it), keeping its identity.",
+        );
+        add(
             "hew.guide.line",
             M,
             Kernel,
@@ -1793,6 +1800,25 @@ impl Registry {
                 "additionalProperties": false
             });
             cmd.refusals = vec!["unknown_tag"];
+        }
+        {
+            let cmd = commands.get_mut("hew.tag.rename").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                    "new_path": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                },
+                "required": ["path", "new_path"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["unknown_tag", "duplicate_tag", "invalid_tag_path"];
         }
         {
             let cmd = commands.get_mut("hew.guide.line").expect("declared above");

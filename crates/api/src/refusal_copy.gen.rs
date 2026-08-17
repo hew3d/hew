@@ -90,6 +90,10 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "DegenerateGuide" => {
             "The guide needs a definite direction. Drag a little further before dropping it."
         }
+        "DuplicateTag" => "A tag with that name already exists. Choose a different name.",
+        "InvalidTagPath" => {
+            "That isn't a valid tag name — it can't be empty, and a tag can't be moved inside itself."
+        }
         "UnknownScene" => "That Scene no longer exists — it may have been deleted.",
         "DuplicateSceneName" => "A Scene with that name already exists. Choose a different name.",
         "EmptySceneName" => "A Scene needs a name.",

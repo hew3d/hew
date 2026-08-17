@@ -2299,6 +2299,72 @@ describe('TagsPanel', () => {
     expect(screen.queryByText(/hew_export_tags/i)).not.toBeInTheDocument()
   })
 
+  it('clicking a tag row selects every item carrying it or a nested tag; the eye/delete buttons do not', () => {
+    const scene = makeScene({
+      object_ids: () => new BigUint64Array([1n, 2n, 3n]),
+      node_tags: (_kind: number, id: bigint) => (id === 1n ? ['Hardware'] : id === 2n ? ['Hardware/Screws'] : ['Oak']),
+    })
+    const onSelectNodes = vi.fn()
+    render(<TagsPanel {...baseTagProps} scene={scene} onSelectNodes={onSelectNodes} />)
+    fireEvent.click(screen.getByText('Hardware'))
+    expect(onSelectNodes).toHaveBeenCalledTimes(1)
+    const picked = (onSelectNodes.mock.calls[0][0] as { id: bigint }[]).map((n) => n.id).sort()
+    expect(picked).toEqual([1n, 2n])
+    // The row is now the active (highlighted) one.
+    expect(screen.getAllByTestId('tag-row').find((r) => r.textContent?.includes('Hardware'))).toHaveAttribute('data-active', 'true')
+    // Eye / delete are their own controls: no selection change.
+    fireEvent.click(screen.getAllByTitle('Hide tagged objects')[0])
+    fireEvent.click(screen.getByRole('button', { name: 'Delete tag Oak' }))
+    expect(onSelectNodes).toHaveBeenCalledTimes(1)
+  })
+
+  it('double-click renames a tag in place (last segment); Enter commits, a refusal shows inline, Escape cancels', () => {
+    const scene = makeScene({
+      object_ids: () => new BigUint64Array([1n]),
+      node_tags: (_kind: number, id: bigint) => (id === 1n ? ['Hardware/Screws'] : []),
+    })
+    const onRenameTag = vi.fn((path: string[], next: string) => (next === 'Taken' ? 'A tag with that name already exists.' : null))
+    render(<TagsPanel {...baseTagProps} scene={scene} onRenameTag={onRenameTag} />)
+    fireEvent.doubleClick(screen.getByText('Screws'))
+    const input = screen.getByRole('textbox', { name: 'Tag name' })
+    expect((input as HTMLInputElement).value).toBe('Screws')
+    fireEvent.change(input, { target: { value: 'Taken' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onRenameTag).toHaveBeenCalledWith(['Hardware', 'Screws'], 'Taken')
+    expect(screen.getByText('A tag with that name already exists.')).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Tag name' })).toBeInTheDocument()
+    fireEvent.change(input, { target: { value: 'Bolts' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onRenameTag).toHaveBeenLastCalledWith(['Hardware', 'Screws'], 'Bolts')
+    expect(screen.queryByRole('textbox', { name: 'Tag name' })).not.toBeInTheDocument()
+    // Escape cancels without a call.
+    fireEvent.doubleClick(screen.getByText('Screws'))
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Tag name' }), { key: 'Escape' })
+    expect(onRenameTag).toHaveBeenCalledTimes(2)
+    expect(screen.queryByRole('textbox', { name: 'Tag name' })).not.toBeInTheDocument()
+  })
+
+  it('a slow second click on the active row opens rename; a fast one does not', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const scene = makeScene({
+        object_ids: () => new BigUint64Array([1n]),
+        node_tags: (_kind: number, id: bigint) => (id === 1n ? ['Hardware'] : []),
+      })
+      const onRenameTag = vi.fn(() => null)
+      render(<TagsPanel {...baseTagProps} scene={scene} onSelectNodes={vi.fn()} onRenameTag={onRenameTag} />)
+      fireEvent.click(screen.getByText('Hardware'))
+      vi.advanceTimersByTime(100)
+      fireEvent.click(screen.getByText('Hardware'))
+      expect(screen.queryByRole('textbox', { name: 'Tag name' })).not.toBeInTheDocument()
+      vi.advanceTimersByTime(600)
+      fireEvent.click(screen.getByText('Hardware'))
+      expect(screen.getByRole('textbox', { name: 'Tag name' })).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('renders the root tag segment from node_tags', () => {
     const scene = makeScene({
       object_ids: () => new BigUint64Array([1n]),
@@ -2323,7 +2389,7 @@ describe('TagsPanel', () => {
         onToggleTagPath={onToggleTagPath}
       />,
     )
-    fireEvent.click(screen.getByTitle('Hide tagged objects'))
+    fireEvent.click(screen.getAllByTitle('Hide tagged objects')[0])
     expect(onToggleTagPath).toHaveBeenCalledWith(['Walls'])
   })
 

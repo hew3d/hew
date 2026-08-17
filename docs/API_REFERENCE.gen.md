@@ -4518,6 +4518,60 @@ Delete a tag path, unassigning it everywhere.
 
 - `unknown_tag` — That tag doesn't exist in this model. Check the tag name and try again.
 
+### `hew.tag.rename`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Rename a tag path (and every tag nested under it), keeping its identity.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "new_path": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "path": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "path",
+    "new_path"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_tag` — That tag doesn't exist in this model. Check the tag name and try again.
+- `duplicate_tag` — A tag with that name already exists. Choose a different name.
+- `invalid_tag_path` — That isn't a valid tag name — it can't be empty, and a tag can't be moved inside itself.
+
 ### `hew.tag.set_visible`
 
 - **Version:** 1

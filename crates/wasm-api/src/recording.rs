@@ -450,6 +450,8 @@ pub enum RecordedCall {
     SetTagHidden { path: String, hidden: bool },
     /// `delete_tag(path)`.
     DeleteTag { path: String },
+    /// `rename_tag(path, new_path)` — undoable, identity-preserving.
+    RenameTag { path: String, new_path: String },
     /// `set_node_user_hidden(kind, id, hidden)` — persisted view state
     /// (manifest v6), same rationale as [`RecordedCall::SetTagHidden`].
     SetNodeUserHidden { kind: u8, id: u64, hidden: bool },

@@ -17,8 +17,8 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { buildTagTree, tagPathKey, type TagTreeNode } from './tagModel'
-import { nodeRefFromJs, nodeKindToNumber } from './treeModel'
+import { buildTagTree, collectTagDescendantNodes, tagPathKey, type TagTreeNode } from './tagModel'
+import { nodeRefFromJs, nodeKindToNumber, type NodeRef } from './treeModel'
 
 /** A palette "jump to tag" request: which row to reveal (expand ancestors,
  * scroll into view, briefly highlight). `nonce` distinguishes repeat jumps
@@ -40,7 +40,21 @@ interface Props {
   onDeleteTag: (path: string[]) => void
   /** Reveal request from the command palette (null = none). */
   revealTag?: TagReveal | null
+  /** Click a tag row → select every item carrying it (or a nested tag),
+   *  the way clicking an Outliner row selects that object. Replaces the
+   *  selection. */
+  onSelectNodes?: (nodes: NodeRef[]) => void
+  /** Rename a tag in place (its LAST segment; parents stay): a second
+   *  click on the already-active row, or a double-click, opens the editor
+   *  — Finder/Explorer style. Returns inline error text, or null on
+   *  success (the kernel refuses a duplicate or empty name). */
+  onRenameTag?: (path: string[], newSegment: string) => string | null
 }
+
+/** A second click on the ACTIVE row later than this opens rename (Finder's
+ *  "click twice" — slower than a double-click, which the browser reports as
+ *  `dblclick` and which also opens rename). */
+export const RENAME_CLICK_TWICE_MIN_MS = 350
 
 const ROW_BASE: React.CSSProperties = {
   display: 'flex',
@@ -56,7 +70,54 @@ const ROW_BASE: React.CSSProperties = {
   color: 'var(--text-secondary, #ccc)',
 }
 
-export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDeleteTag, revealTag }: Props) {
+export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDeleteTag, revealTag, onSelectNodes, onRenameTag }: Props) {
+  // The row last clicked (highlighted); a later click on it opens rename.
+  const [activeKey, setActiveKey] = useState<string | null>(null)
+  const [editingKey, setEditingKey] = useState<string | null>(null)
+  const [editingText, setEditingText] = useState('')
+  const [editingError, setEditingError] = useState<string | null>(null)
+  const lastClickRef = useRef<{ key: string; at: number } | null>(null)
+
+  const startRename = (node: TagTreeNode) => {
+    if (onRenameTag === undefined) return
+    setEditingKey(tagPathKey(node.path))
+    setEditingText(node.segment)
+    setEditingError(null)
+  }
+  const cancelRename = () => {
+    setEditingKey(null)
+    setEditingText('')
+    setEditingError(null)
+  }
+  const commitRename = (node: TagTreeNode) => {
+    if (onRenameTag === undefined) return
+    const next = editingText.trim()
+    if (next.length === 0 || next === node.segment) {
+      cancelRename()
+      return
+    }
+    const err = onRenameTag(node.path, next)
+    if (err !== null) {
+      setEditingError(err)
+      return
+    }
+    // The renamed row re-keys; keep it active under its new path.
+    setActiveKey(tagPathKey([...node.path.slice(0, -1), next]))
+    cancelRename()
+  }
+  const clickRow = (node: TagTreeNode) => {
+    const key = tagPathKey(node.path)
+    const now = Date.now()
+    const last = lastClickRef.current
+    lastClickRef.current = { key, at: now }
+    if (activeKey === key && last !== null && last.key === key && now - last.at >= RENAME_CLICK_TWICE_MIN_MS) {
+      startRename(node)
+      return
+    }
+    setActiveKey(key)
+    onSelectNodes?.(collectTagDescendantNodes(node))
+  }
+
   // Re-query the scene on every docRev bump.
   const tagTree = useMemo(() => {
     // Collect all nodes (objects, groups, instances) and parse their names.
@@ -124,6 +185,16 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDe
             onDeleteTag={onDeleteTag}
             revealTag={revealTag ?? null}
             revealExpandKeys={revealExpandKeys}
+            activeKey={activeKey}
+            editingKey={editingKey}
+            editingText={editingText}
+            editingError={editingError}
+            onClickRow={clickRow}
+            onStartRename={startRename}
+            onEditingTextChange={setEditingText}
+            onCommitRename={commitRename}
+            onCancelRename={cancelRename}
+            canRename={onRenameTag !== undefined}
           />
         ))}
       </div>
@@ -135,6 +206,19 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDe
 // TagRow — recursive tree row for a tag node
 // ---------------------------------------------------------------------------
 
+interface RowInteraction {
+  activeKey: string | null
+  editingKey: string | null
+  editingText: string
+  editingError: string | null
+  onClickRow: (node: TagTreeNode) => void
+  onStartRename: (node: TagTreeNode) => void
+  onEditingTextChange: (text: string) => void
+  onCommitRename: (node: TagTreeNode) => void
+  onCancelRename: () => void
+  canRename: boolean
+}
+
 function TagRow({
   node,
   depth,
@@ -143,6 +227,7 @@ function TagRow({
   onDeleteTag,
   revealTag,
   revealExpandKeys,
+  ...rowInteraction
 }: {
   node: TagTreeNode
   depth: number
@@ -151,11 +236,14 @@ function TagRow({
   onDeleteTag: (path: string[]) => void
   revealTag: TagReveal | null
   revealExpandKeys: Set<string>
-}) {
+} & RowInteraction) {
+  const { activeKey, editingKey, editingText, editingError, onClickRow, onStartRename, onEditingTextChange, onCommitRename, onCancelRename, canRename } = rowInteraction
   const [expanded, setExpanded] = useState(true)
   const hasChildren = node.children.length > 0
   const key = tagPathKey(node.path)
   const hidden = hiddenTagPaths.has(key)
+  const isActive = activeKey === key
+  const isEditing = editingKey === key
 
   // Palette jump: pop open when on the reveal path, and scroll the revealed
   // row itself into view. Keyed on the nonce so a repeat jump re-fires.
@@ -181,17 +269,30 @@ function TagRow({
     <>
       <div
         ref={rowRef}
+        data-testid="tag-row"
+        data-active={isActive ? 'true' : 'false'}
+        aria-current={isActive ? 'true' : undefined}
+        onClick={() => {
+          if (!isEditing) onClickRow(node)
+        }}
+        onDoubleClick={() => {
+          if (!isEditing && canRename) onStartRename(node)
+        }}
         style={{
           ...ROW_BASE,
           paddingLeft: `${8 + depth * 16}px`,
           paddingRight: '4px',
-          background: isRevealed ? 'var(--accent-tint-18)' : 'transparent',
+          background: isRevealed || isActive ? 'var(--accent-tint-18)' : 'transparent',
         }}
       >
         {/* Expand/collapse button for tag folders with children */}
         {hasChildren ? (
           <button
-            onClick={() => setExpanded((e) => !e)}
+            onClick={(e) => {
+              e.stopPropagation()
+              setExpanded((v) => !v)
+            }}
+            onDoubleClick={(e) => e.stopPropagation()}
             style={{
               background: 'none',
               border: 'none',
@@ -212,20 +313,57 @@ function TagRow({
         {/* Tag folder/label icon */}
         <span style={{ fontSize: '11px', color: 'var(--tag-accent)', flexShrink: 0 }}>⬧</span>
 
-        {/* Tag name */}
-        <span
-          style={{
-            flex: 1,
-            minWidth: 0,
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-            color: isHiddenByAncestorOrSelf ? 'var(--text-faint, #555)' : 'var(--text-secondary, #ccc)',
-            fontSize: '12px',
-          }}
-        >
-          {node.segment}
-        </span>
+        {/* Tag name — or, while renaming, the in-place editor (Enter commits,
+            Escape cancels, blur commits a changed name / cancels an unchanged
+            one; a kernel refusal shows below the row). */}
+        {isEditing ? (
+          <input
+            autoFocus
+            aria-label="Tag name"
+            value={editingText}
+            onChange={(e) => onEditingTextChange(e.target.value)}
+            onFocus={(e) => e.currentTarget.select()}
+            onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                onCommitRename(node)
+              } else if (e.key === 'Escape') {
+                e.stopPropagation()
+                onCancelRename()
+              }
+            }}
+            onBlur={() => onCommitRename(node)}
+            spellCheck={false}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              background: 'var(--surface-input, #111)',
+              border: '1px solid var(--accent-border)',
+              borderRadius: '3px',
+              color: 'var(--text-primary, #eee)',
+              fontFamily: 'var(--font-family-ui)',
+              fontSize: '12px',
+              padding: '1px 4px',
+              outline: 'none',
+            }}
+          />
+        ) : (
+          <span
+            style={{
+              flex: 1,
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              color: isHiddenByAncestorOrSelf ? 'var(--text-faint, #555)' : 'var(--text-secondary, #ccc)',
+              fontSize: '12px',
+            }}
+          >
+            {node.segment}
+          </span>
+        )}
 
         {/* Direct node count badge */}
         {directCount > 0 && (
@@ -244,7 +382,11 @@ function TagRow({
 
         {/* Eye toggle */}
         <button
-          onClick={() => onToggleTagPath(node.path)}
+          onClick={(e) => {
+            e.stopPropagation()
+            onToggleTagPath(node.path)
+          }}
+          onDoubleClick={(e) => e.stopPropagation()}
           title={hidden ? 'Show tagged objects' : 'Hide tagged objects'}
           style={{
             background: 'none',
@@ -262,7 +404,11 @@ function TagRow({
 
         {/* Delete tag — unassigns everywhere (undoable); never deletes geometry */}
         <button
-          onClick={() => onDeleteTag(node.path)}
+          onClick={(e) => {
+            e.stopPropagation()
+            onDeleteTag(node.path)
+          }}
+          onDoubleClick={(e) => e.stopPropagation()}
           title={hasChildren ? 'Delete tag and sub-tags (objects are kept)' : 'Delete tag (objects are kept)'}
           aria-label={`Delete tag ${node.segment}`}
           style={{
@@ -279,6 +425,11 @@ function TagRow({
           ×
         </button>
       </div>
+      {isEditing && editingError !== null && (
+        <div style={{ padding: `2px 8px 4px ${8 + depth * 16 + 20}px`, fontSize: '11px', color: 'var(--scene-delete-text)' }}>
+          {editingError}
+        </div>
+      )}
 
       {/* Children — shown when expanded */}
       {hasChildren && expanded && node.children.map((child) => (
@@ -291,6 +442,7 @@ function TagRow({
           onDeleteTag={onDeleteTag}
           revealTag={revealTag}
           revealExpandKeys={revealExpandKeys}
+          {...rowInteraction}
         />
       ))}
     </>

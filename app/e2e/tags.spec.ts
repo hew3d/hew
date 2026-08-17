@@ -110,3 +110,53 @@ test('harness undo of a tag delete re-hides content hidden by the restored tag',
     () => window.__hew_test!.pickFace([0.5, 0.5, 5], [0, 0, -1]) !== null,
   )
 })
+
+test('Tags panel: clicking a tag selects its items; double-click renames it in place, undoably', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('hew.settings.trayLayout', JSON.stringify({ modelInfo: true, objectInfo: true, materials: false, tags: true, scenes: false }))
+  })
+  await setup(page)
+  const ids = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const a = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    const b = h.drawBox([3, 0, 0], [4, 1, 0], 1)
+    const c = h.drawBox([6, 0, 0], [7, 1, 0], 1)
+    h.addNodeTag('object', a, ['Hardware'])
+    h.addNodeTag('object', b, ['Hardware', 'Screws'])
+    h.addNodeTag('object', c, ['Oak'])
+    return { a, b, c }
+  })
+
+  // Click "Hardware" → both the tagged and the nested-tagged item are selected.
+  const hardwareRow = page.getByTestId('tag-row').filter({ hasText: 'Hardware' }).first()
+  await hardwareRow.click()
+  await expect
+    .poll(async () => (await page.evaluate(() => window.__hew_test!.getSelection().map((n) => n.id))).sort())
+    .toEqual([ids.a, ids.b].sort())
+  await expect(hardwareRow).toHaveAttribute('data-active', 'true')
+
+  // Double-click → rename in place; Enter commits; every carrier is rewritten.
+  await hardwareRow.getByText('Hardware').dblclick()
+  const input = page.getByRole('textbox', { name: 'Tag name' })
+  await expect(input).toBeVisible()
+  await input.fill('Fixings')
+  await input.press('Enter')
+  await expect(page.getByTestId('tag-row').filter({ hasText: 'Fixings' }).first()).toBeVisible()
+  expect(await page.evaluate((id) => window.__hew_test!.getNodeTags('object', id), ids.a)).toEqual(['Fixings'])
+  expect(await page.evaluate((id) => window.__hew_test!.getNodeTags('object', id), ids.b)).toEqual(['Fixings/Screws'])
+  expect(await page.evaluate((id) => window.__hew_test!.getNodeTags('object', id), ids.c)).toEqual(['Oak'])
+
+  // A colliding rename is refused inline and nothing changes.
+  const fixingsRow = page.getByTestId('tag-row').filter({ hasText: 'Fixings' }).first()
+  await fixingsRow.getByText('Fixings').dblclick()
+  await page.getByRole('textbox', { name: 'Tag name' }).fill('Oak')
+  await page.getByRole('textbox', { name: 'Tag name' }).press('Enter')
+  await expect(page.getByText(/already exists/)).toBeVisible()
+  await page.getByRole('textbox', { name: 'Tag name' }).press('Escape')
+  expect(await page.evaluate((id) => window.__hew_test!.getNodeTags('object', id), ids.a)).toEqual(['Fixings'])
+
+  // Undo restores the old name on every carrier.
+  await page.locator('canvas').first().click({ position: { x: 5, y: 5 } })
+  await page.keyboard.press('Control+z')
+  await expect.poll(async () => page.evaluate((id) => window.__hew_test!.getNodeTags('object', id), ids.b)).toEqual(['Hardware/Screws'])
+})
