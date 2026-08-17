@@ -64,6 +64,41 @@ function makeFakeCameraState() {
   }
 }
 
+/** A minimal fake of the wasm-bound `ResolvedSceneJs` `Scene.resolve_scene()`
+ *  returns (docs/design/scenes.md §3.1) — every getter defaults to "not
+ *  captured" (mirrors a Scene with nothing checked), so a bare
+ *  `resolve_scene` call is a no-op until a test overrides specific fields.
+ *  `free()` is a spy so tests can assert it's always released. */
+function makeFakeResolvedScene(overrides: {
+  cameraJson?: string
+  hiddenObjectIds?: bigint[]
+  hiddenInstanceIds?: bigint[]
+  hiddenTagPaths?: string[]
+  hiddenNodeKinds?: number[]
+  hiddenNodeIds?: bigint[]
+  hasHiddenTags?: boolean
+  hasHiddenNodes?: boolean
+  sectionJson?: string
+  hasSection?: boolean
+} = {}) {
+  const hasHidden = (overrides.hasHiddenTags ?? false) || (overrides.hasHiddenNodes ?? false)
+  return {
+    camera_json: () => overrides.cameraJson,
+    display_json: () => undefined as string | undefined,
+    has_hidden: () => hasHidden,
+    has_hidden_nodes: () => overrides.hasHiddenNodes ?? false,
+    has_hidden_tags: () => overrides.hasHiddenTags ?? false,
+    has_section: () => overrides.hasSection ?? false,
+    hidden_instance_ids: () => new BigUint64Array(overrides.hiddenInstanceIds ?? []),
+    hidden_node_ids: () => new BigUint64Array(overrides.hiddenNodeIds ?? []),
+    hidden_node_kinds: () => new Uint8Array(overrides.hiddenNodeKinds ?? []),
+    hidden_object_ids: () => new BigUint64Array(overrides.hiddenObjectIds ?? []),
+    hidden_tag_paths: () => overrides.hiddenTagPaths ?? [],
+    section_json: () => overrides.sectionJson,
+    free: vi.fn(),
+  }
+}
+
 const mockScene = {
   object_ids: () => new BigUint64Array(fixture.objects),
   group_ids: () => new BigUint64Array(),
@@ -104,6 +139,14 @@ const mockScene = {
   user_hidden_ids: vi.fn(() => new BigUint64Array()),
   tag_meta_paths: vi.fn(() => [] as string[]),
   tag_meta_hidden: vi.fn(() => new Uint8Array()),
+  // Scenes (docs/design/scenes.md §6) — read-only in Shop Mode. Defaults to
+  // "no Scenes, no persisted section plane" so every EXISTING test (none of
+  // which know about Scenes) is unaffected; the dedicated "Scenes" describe
+  // block below overrides these per test via mockReturnValueOnce/mockReturnValue.
+  scenes_json: vi.fn(() => '[]'),
+  section_plane_json: vi.fn((): string | undefined => undefined),
+  resolve_scene: vi.fn((_sid: bigint) => makeFakeResolvedScene()),
+  scene_drift: vi.fn(() => '{}'),
 }
 
 vi.mock('../wasm/loader', () => ({
@@ -136,6 +179,7 @@ import { makeFileHost } from '../io/fileHost'
 import { listRecents, recordRecent } from '../io/recents'
 import { isArQuickLookCandidate, launchArQuickLook } from './arQuickLook'
 import { setLengthUnit } from '../settings/units'
+import { getSceneTransitions, SCENE_TRANSITION_MS } from '../settings/sceneTransitions'
 import { HINT_STORAGE_KEYS } from './hints'
 import { loadKernel } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
@@ -188,6 +232,17 @@ function makeViewportApiStub() {
     setStandardView: vi.fn(),
     toggleProjection: vi.fn(),
     getProjection: vi.fn(() => 'perspective' as const),
+    // Scenes (docs/design/scenes.md §6) — activation's own renderer/camera
+    // calls. `tweenCameraState` invokes its `onDone` synchronously (no real
+    // animation frame in jsdom) so `refreshSceneDrift` runs deterministically
+    // within the same test tick.
+    setSectionPlane: vi.fn(),
+    getCameraState: vi.fn(() => ({
+      projection: 'perspective' as const, fovDeg: 45, eye: [1, 2, 3] as [number, number, number],
+      target: [0, 0, 0] as [number, number, number], up: [0, 0, 1] as [number, number, number],
+    })),
+    tweenCameraState: vi.fn((_cam: unknown, _ms: number, onDone?: () => void) => onDone?.()),
+    cancelCameraTween: vi.fn(),
   }
 }
 
@@ -201,6 +256,7 @@ function latestViewportProps(): {
   onInternalToolChange?: (name: string) => void
   onTapeMeasurePoints?: (points: readonly [number, number, number][]) => void
   onProjectionChange?: (projection: 'perspective' | 'parallel') => void
+  onCameraSettled?: () => void
   apiRef?: { current: ReturnType<typeof makeViewportApiStub> | null }
   background?: string
   showGrid?: boolean
@@ -1668,5 +1724,170 @@ describe('ShopApp — Views sheet (playtest finding 12)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /^views$/i }))
     expect(screen.getByRole('dialog', { name: 'Views' })).toBeInTheDocument()
+  })
+})
+
+// docs/design/scenes.md §6 / SPEC.md §2 — Shop Mode's read-only Scenes
+// contract: activation goes through the PURE `resolve_scene` (never
+// `apply_scene`, `set_hidden`/`set_tag_hidden`/`set_node_user_hidden`, or
+// `set_section_plane` — `mockScene` above deliberately never defines
+// `apply_scene`/`set_section_plane`/`set_tag_hidden`/`set_node_user_hidden`
+// at all, so a stray call to any of them fails the test with a bare
+// TypeError rather than needing an explicit "was not called" assertion).
+describe('ShopApp — Scenes (docs/design/scenes.md §6)', () => {
+  const SCENE_1_JSON = { sid: 1, name: 'Cut layout', description: 'Cut layout on a sheet', props: 31 }
+  const SCENE_2_JSON = { sid: 2, name: 'Tenon section', description: '', props: 31 }
+  const SCENE_1_CAMERA = { projection: 'perspective' as const, fovDeg: 40, eye: [5, 5, 5] as [number, number, number], target: [0, 0, 0] as [number, number, number], up: [0, 0, 1] as [number, number, number] }
+  const SCENE_1_SECTION = { origin: [0, 0, 0] as [number, number, number], normal: [0, 1, 0] as [number, number, number], active: true }
+
+  function resolvedForScene1() {
+    return makeFakeResolvedScene({
+      cameraJson: JSON.stringify(SCENE_1_CAMERA),
+      hasHiddenNodes: true,
+      hiddenNodeKinds: [0],
+      hiddenNodeIds: [2n],
+      hiddenObjectIds: [2n],
+      hiddenInstanceIds: [],
+      hasSection: true,
+      sectionJson: JSON.stringify(SCENE_1_SECTION),
+    })
+  }
+
+  it('the pill is absent until a Scene is activated', async () => {
+    mockScene.scenes_json.mockReturnValue(JSON.stringify([SCENE_1_JSON]))
+    fixture.objects = [1n, 2n]
+    await renderAndOpenWithFixture()
+
+    expect(screen.queryByText('Cut layout')).not.toBeInTheDocument()
+  })
+
+  it('the Views sheet lists Scenes above the standard views', async () => {
+    mockScene.scenes_json.mockReturnValue(JSON.stringify([SCENE_1_JSON, SCENE_2_JSON]))
+    fixture.objects = [1n, 2n]
+    await renderAndOpenWithFixture()
+
+    fireEvent.click(screen.getByRole('button', { name: /^views$/i }))
+    expect(screen.getByText('Cut layout')).toBeInTheDocument()
+    expect(screen.getByText('Tenon section')).toBeInTheDocument()
+    expect(screen.getByText('Cut layout on a sheet')).toBeInTheDocument()
+  })
+
+  it('activating a Scene from the Views sheet resolves it (never apply_scene), pushes hidden with fade, applies the section plane, and tweens the camera', async () => {
+    mockScene.scenes_json.mockReturnValue(JSON.stringify([SCENE_1_JSON]))
+    mockScene.resolve_scene.mockImplementation(() => resolvedForScene1())
+    fixture.objects = [1n, 2n]
+    const api = await renderAndOpenWithFixture()
+    api.setHidden.mockClear()
+
+    fireEvent.click(screen.getByRole('button', { name: /^views$/i }))
+    fireEvent.click(screen.getByText('Cut layout'))
+
+    expect(mockScene.resolve_scene).toHaveBeenCalledWith(1n)
+    expect(api.setHidden).toHaveBeenLastCalledWith([2n], [], { fadeMs: 240 })
+    expect(api.setSectionPlane).toHaveBeenCalledWith(SCENE_1_SECTION)
+    expect(api.tweenCameraState).toHaveBeenCalledWith(
+      SCENE_1_CAMERA,
+      getSceneTransitions() ? SCENE_TRANSITION_MS : 0,
+      expect.any(Function),
+    )
+    // Shop Mode issues zero kernel transactions — the resolved handle's own
+    // renderer-level ids are pushed via `ViewportApi.setHidden`, never a
+    // kernel `scene.set_hidden` call (App.tsx's editor equivalent DOES call
+    // it; ShopApp deliberately never does — module doc, and the existing
+    // "renderer-only hide" assertions elsewhere in this file).
+    expect(mockScene.set_hidden).not.toHaveBeenCalled()
+    // The sheet act-and-closes, same as a standard-view row.
+    expect(screen.queryByRole('dialog', { name: 'Views' })).not.toBeInTheDocument()
+  })
+
+  it('the pill shows the active Scene\'s name, and tapping it opens the Views sheet', async () => {
+    mockScene.scenes_json.mockReturnValue(JSON.stringify([SCENE_1_JSON]))
+    mockScene.resolve_scene.mockImplementation(() => resolvedForScene1())
+    fixture.objects = [1n, 2n]
+    await renderAndOpenWithFixture()
+
+    fireEvent.click(screen.getByRole('button', { name: /^views$/i }))
+    fireEvent.click(screen.getByText('Cut layout'))
+
+    expect(screen.getByText('Cut layout')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Cut layout'))
+    expect(screen.getByRole('dialog', { name: 'Views' })).toBeInTheDocument()
+  })
+
+  it('the chevrons cycle Scenes with wrap', async () => {
+    mockScene.scenes_json.mockReturnValue(JSON.stringify([SCENE_1_JSON, SCENE_2_JSON]))
+    mockScene.resolve_scene.mockImplementation((sid: bigint) =>
+      sid === 1n ? resolvedForScene1() : makeFakeResolvedScene(),
+    )
+    fixture.objects = [1n, 2n]
+    await renderAndOpenWithFixture()
+
+    // The document opens on its FIRST Scene (playtest round 1, matching the
+    // desktop and SketchUp): the pill is already up, naming "Cut layout".
+    const pill = () => screen.getByTestId('scene-pill')
+    await waitFor(() => expect(pill()).toHaveTextContent('Cut layout'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next Scene' }))
+    await waitFor(() => expect(pill()).toHaveTextContent('Tenon section'))
+
+    // Wraps back to the first Scene.
+    fireEvent.click(screen.getByRole('button', { name: 'Next Scene' }))
+    await waitFor(() => expect(pill()).toHaveTextContent('Cut layout'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Previous Scene' }))
+    await waitFor(() => expect(pill()).toHaveTextContent('Tenon section'))
+  })
+
+  it('"Show all" while a Scene is active returns to the Scene\'s hidden set, not everything-visible', async () => {
+    mockScene.scenes_json.mockReturnValue(JSON.stringify([SCENE_1_JSON]))
+    mockScene.resolve_scene.mockImplementation(() => resolvedForScene1())
+    fixture.objects = [1n, 2n, 3n]
+    for (const id of [1n, 2n, 3n]) fixture.objectMesh[String(id)] = new Float32Array([0, 0, 0, 1, 1, 1])
+    const api = await renderAndOpenWithFixture()
+
+    // Opens on the first Scene (auto-activated on open); re-activate it
+    // explicitly from the Views sheet all the same — the row is the SCENES
+    // section's, distinct from the pill's own name label.
+    await waitFor(() => expect(screen.getByTestId('scene-pill')).toHaveTextContent('Cut layout'))
+    fireEvent.click(screen.getByRole('button', { name: /^views$/i }))
+    const sheet = screen.getByRole('dialog', { name: 'Views' })
+    fireEvent.click(within(sheet).getByText('Cut layout'))
+    await waitFor(() => expect(api.setHidden).toHaveBeenLastCalledWith([2n], [], { fadeMs: 240 }))
+
+    // Long-press isolate Object 1 — hides Object 3 too (outside its leaf
+    // set), on TOP of the Scene's own Object 2.
+    const row1 = screen.getByText('Object 1').closest('div') as HTMLElement
+    fireEvent.pointerDown(row1, { clientX: 10, clientY: 10 })
+    await new Promise((resolve) => setTimeout(resolve, LONG_PRESS_MS + 50))
+    fireEvent.pointerUp(row1, { clientX: 10, clientY: 10 })
+    await waitFor(() => {
+      const [hiddenObjects] = api.setHidden.mock.calls[api.setHidden.mock.calls.length - 1]
+      expect(new Set(hiddenObjects)).toEqual(new Set([2n, 3n]))
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /show all/i }))
+    await waitFor(() => {
+      const [hiddenObjects, hiddenInstances, opts] = api.setHidden.mock.calls[api.setHidden.mock.calls.length - 1]
+      expect(new Set(hiddenObjects)).toEqual(new Set([2n]))
+      expect(hiddenInstances).toEqual([])
+      expect(opts).toEqual({ fadeMs: 240 })
+    })
+  })
+
+  it('never calls apply_scene, set_hidden, set_tag_hidden, set_node_user_hidden, or set_section_plane — read-only contract', async () => {
+    mockScene.scenes_json.mockReturnValue(JSON.stringify([SCENE_1_JSON]))
+    mockScene.resolve_scene.mockImplementation(() => resolvedForScene1())
+    fixture.objects = [1n, 2n]
+    await renderAndOpenWithFixture()
+
+    expect((mockScene as Record<string, unknown>).apply_scene).toBeUndefined()
+    expect((mockScene as Record<string, unknown>).set_tag_hidden).toBeUndefined()
+    expect((mockScene as Record<string, unknown>).set_node_user_hidden).toBeUndefined()
+    expect((mockScene as Record<string, unknown>).set_section_plane).toBeUndefined()
+
+    fireEvent.click(screen.getByRole('button', { name: /^views$/i }))
+    fireEvent.click(screen.getByText('Cut layout'))
+
+    expect(mockScene.set_hidden).not.toHaveBeenCalled()
   })
 })

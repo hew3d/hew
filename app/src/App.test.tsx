@@ -582,7 +582,7 @@ describe('App — tray layout persistence', () => {
   })
 
   it('restores each tray section\'s collapsed/expanded state from the persisted layout', async () => {
-    setTrayLayout({ modelInfo: false, objectInfo: false, materials: true, tags: false })
+    setTrayLayout({ modelInfo: false, objectInfo: false, materials: true, tags: false, scenes: false })
     await renderAndLoad()
     expect(screen.getByRole('button', { name: /outliner/i })).toHaveAttribute('aria-expanded', 'false')
     expect(screen.getByRole('button', { name: /object info/i })).toHaveAttribute('aria-expanded', 'false')

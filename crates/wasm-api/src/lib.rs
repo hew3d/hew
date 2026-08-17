@@ -24,6 +24,7 @@
 mod live;
 mod log;
 mod recording;
+mod scenes_api;
 
 use dae_import::ImageMap;
 use inference::{
@@ -8326,6 +8327,59 @@ impl Scene {
                             Box::new(up),
                         )?;
                     }
+                    SetSectionPlane {
+                        origin,
+                        normal,
+                        active,
+                    } => {
+                        self.set_section_plane(
+                            origin[0], origin[1], origin[2], normal[0], normal[1], normal[2],
+                            active,
+                        )?;
+                    }
+                    ClearSectionPlane => {
+                        self.clear_section_plane();
+                    }
+                    AddScene {
+                        name,
+                        props,
+                        camera_json,
+                        display_json,
+                        after,
+                    } => {
+                        self.add_scene(name, props, camera_json, display_json, after)?;
+                    }
+                    UpdateScene {
+                        sid,
+                        props,
+                        camera_json,
+                        display_json,
+                    } => {
+                        self.update_scene(sid, props, camera_json, display_json)?;
+                    }
+                    SetSceneProps {
+                        sid,
+                        props,
+                        camera_json,
+                        display_json,
+                    } => {
+                        self.set_scene_props(sid, props, camera_json, display_json)?;
+                    }
+                    RenameScene { sid, name } => {
+                        self.rename_scene(sid, name)?;
+                    }
+                    SetSceneDescription { sid, text } => {
+                        self.set_scene_description(sid, text)?;
+                    }
+                    MoveScene { sid, index } => {
+                        self.move_scene(sid, index)?;
+                    }
+                    RemoveScene { sid } => {
+                        self.remove_scene(sid)?;
+                    }
+                    ApplyScene { sid } => {
+                        self.apply_scene(sid)?;
+                    }
                     AddMaterial { name, r, g, b, a } => {
                         self.add_material(name, r, g, b, a);
                     }
@@ -10535,6 +10589,153 @@ mod tests {
     /// `set_camera_state` is not undoable but IS persisted (manifest v13) —
     /// mirrors `record_then_replay_covers_tag_ops_and_their_undo` for the
     /// camera view instead of tags: a trailing `scene_undo` must hit the
+    /// Scenes + the section plane (docs/design/scenes.md) are persisted
+    /// view state like the camera: every recorded Scene edit and apply must
+    /// replay to the same bytes and state hash, and the JSON shapes crossing
+    /// the boundary must round-trip.
+    #[test]
+    fn record_then_replay_covers_scenes_and_section_plane() {
+        recording::reset();
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s, r) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(s, r, 2.0).unwrap();
+        scene
+            .add_node_tag(0, obj, vec!["Hardware".to_string()])
+            .unwrap();
+        scene.set_tag_hidden("Hardware".to_string(), true);
+        scene
+            .set_section_plane(0.5, 0.5, 1.0, 0.0, 0.0, 1.0, true)
+            .unwrap();
+        let cam = r#"{"projection":"perspective","fovDeg":45,"eye":[4,-6,3],"target":[0,0,0],"up":[0,0,1]}"#;
+        let disp = r#"{"grid":true,"axes":false,"guides":true}"#;
+        let a = scene
+            .add_scene(
+                None,
+                31,
+                Some(cam.to_string()),
+                Some(disp.to_string()),
+                None,
+            )
+            .unwrap();
+        scene.rename_scene(a, "Assembled".to_string()).unwrap();
+        scene
+            .set_scene_description(a, "Everything.".to_string())
+            .unwrap();
+        // Drift, then a second Scene without the section, then apply the first.
+        scene.set_tag_hidden("Hardware".to_string(), false);
+        scene.clear_section_plane();
+        let b = scene
+            .add_scene(
+                Some("Cam only".to_string()),
+                1,
+                Some(cam.to_string()),
+                None,
+                Some(a),
+            )
+            .unwrap();
+        scene.move_scene(b, 0).unwrap();
+        scene.set_scene_props(a, 31 - 16, None, None).unwrap();
+        scene.update_scene(a, 4, None, None).unwrap(); // re-capture visible tags (now none hidden)
+        scene.set_tag_hidden("Hardware".to_string(), true);
+        scene.update_scene(a, 4, None, None).unwrap(); // hidden again
+        scene.set_tag_hidden("Hardware".to_string(), false);
+        let resolved = scene.apply_scene(a).unwrap();
+        assert!(resolved.has_hidden());
+        assert_eq!(resolved.hidden_object_ids(), vec![obj]);
+        assert_eq!(resolved.hidden_tag_paths(), vec!["Hardware".to_string()]);
+        assert!(resolved.has_section());
+        assert!(resolved.section_json().unwrap().contains("\"active\":true"));
+        assert!(resolved.display_json().is_none(), "display was uncaptured");
+        assert!(scene.doc.tag_hidden(&["Hardware".to_string()]));
+
+        let c = scene.add_scene(None, 31, None, None, None).unwrap();
+        scene.remove_scene(c).unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replaying a Scenes session reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+
+        let list: serde_json::Value = serde_json::from_str(&replayed.scenes_json()).unwrap();
+        let arr = list.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["name"], "Cam only");
+        assert_eq!(arr[0]["props"], 1);
+        assert_eq!(arr[1]["name"], "Assembled");
+        assert_eq!(arr[1]["description"], "Everything.");
+        assert_eq!(arr[1]["props"], 15);
+        assert_eq!(arr[1]["section"]["active"], true);
+        assert!(arr[1].get("display").is_none());
+        assert_eq!(arr[1]["camera"]["projection"], "perspective");
+        assert!(
+            replayed
+                .section_plane_json()
+                .unwrap()
+                .contains("\"active\":true")
+        );
+
+        let drift: serde_json::Value = serde_json::from_str(
+            &replayed
+                .scene_drift(a, Some(cam.to_string()), None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(drift["camera"], false);
+        assert_eq!(drift["hiddenTags"], false);
+        assert_eq!(drift["staleRefs"], 0);
+        assert!(replayed.next_scene_name() == "Scene 1");
+    }
+
+    /// Malformed boundary JSON is a typed refusal, never a silent default.
+    #[test]
+    fn scene_json_inputs_are_validated() {
+        let mut scene = Scene::new();
+        assert!(
+            scene
+                .add_scene(None, 1, Some("{not json".to_string()), None, None)
+                .is_err()
+        );
+        assert!(scene
+            .add_scene(
+                None,
+                1,
+                Some(r#"{"projection":"iso","fovDeg":45,"eye":[0,0,0],"target":[0,0,0],"up":[0,0,1]}"#.to_string()),
+                None,
+                None
+            )
+            .is_err());
+        assert!(
+            scene
+                .add_scene(None, 16, None, Some(r#"{"grid":1}"#.to_string()), None)
+                .is_err()
+        );
+        assert!(
+            scene
+                .set_section_plane(0.0, 0.0, 0.0, 0.0, 0.0, 2.0, true)
+                .is_err()
+        );
+        assert!(scene.rename_scene(42, "x".to_string()).is_err());
+        let sid = scene
+            .add_scene(Some("A".to_string()), 0, None, None, None)
+            .unwrap();
+        assert!(
+            scene
+                .add_scene(Some("A".to_string()), 0, None, None, None)
+                .is_err()
+        );
+        assert!(scene.rename_scene(sid, "  ".to_string()).is_err());
+    }
+
     /// extrude, not unwind the camera (there is nothing to unwind), and the
     /// replayed document must carry the same camera state.
     #[test]

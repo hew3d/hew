@@ -39,6 +39,26 @@ pub fn curve_id(sketch_sid: u64, curve: kernel::SketchCurveId) -> String {
     format!("crv_{sketch_sid:x}_{:x}", curve.data().as_ffi())
 }
 
+/// The public id for a Scene (docs/HEW_API.md §5.1). Scenes are NOT
+/// entities — they carry no [`EntityRef`], do not appear in
+/// [`Document::sids`], and are addressed by their own list
+/// (`kernel::Document::scenes`) — so this is its own top-level id shape
+/// rather than a [`public_id`] prefix, minted straight from the Scene's
+/// stable id.
+pub fn scene_id(sid: u64) -> String {
+    format!("scene_{sid:x}")
+}
+
+/// Parses a Scene public id back to its stable id — `None` for anything
+/// that isn't well-formed `scene_<hex>`. Does not check the id is a LIVE
+/// Scene in any particular document; callers do that with
+/// `Document::scene`, which is what turns a since-deleted Scene's id into
+/// the same typed `unknown_scene` refusal a malformed one gets.
+pub fn resolve_scene_id(public: &str) -> Option<u64> {
+    let hex = public.strip_prefix("scene_")?;
+    u64::from_str_radix(hex, 16).ok()
+}
+
 /// A compound public id for a sketch edge — minted exactly like
 /// [`region_id`]/[`curve_id`] (docs/HEW_API.md §5.2): the owning sketch's
 /// stable id plus the edge's session-stable slotmap key bits. Unlike a
@@ -165,6 +185,16 @@ mod tests {
         let forged = public.replace("skt_", "obj_");
         assert_eq!(resolver.resolve(&forged), None);
         assert_eq!(resolver.resolve("obj_zzz"), None);
+    }
+
+    #[test]
+    fn scene_ids_round_trip_and_reject_malformed_input() {
+        assert_eq!(scene_id(0x2a), "scene_2a");
+        assert_eq!(resolve_scene_id("scene_2a"), Some(0x2a));
+        assert_eq!(resolve_scene_id("scene_"), None);
+        assert_eq!(resolve_scene_id("scene_zz"), None);
+        assert_eq!(resolve_scene_id("obj_2a"), None);
+        assert_eq!(resolve_scene_id("2a"), None);
     }
 
     #[test]

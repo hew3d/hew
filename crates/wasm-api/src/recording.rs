@@ -454,6 +454,52 @@ pub enum RecordedCall {
         target: [f64; 3],
         up: [f64; 3],
     },
+    /// `set_section_plane(ox, oy, oz, nx, ny, nz, active)` — the document's
+    /// section plane (docs/design/scenes.md §4): persisted view state
+    /// (manifest v16), same rationale as [`RecordedCall::SetCameraState`].
+    SetSectionPlane {
+        origin: [f64; 3],
+        normal: [f64; 3],
+        active: bool,
+    },
+    /// `clear_section_plane()`.
+    ClearSectionPlane,
+    /// `add_scene(name, props, camera_json, display_json, after)` — Scenes
+    /// (docs/design/scenes.md) are persisted view state; every Scene edit
+    /// replays so saved bytes and the state hash match. Additive variants,
+    /// same posture as [`RecordedCall::SetCameraState`].
+    AddScene {
+        name: Option<String>,
+        props: u8,
+        camera_json: Option<String>,
+        display_json: Option<String>,
+        after: Option<u64>,
+    },
+    /// `update_scene(sid, props, camera_json, display_json)`.
+    UpdateScene {
+        sid: u64,
+        props: u8,
+        camera_json: Option<String>,
+        display_json: Option<String>,
+    },
+    /// `set_scene_props(sid, props, camera_json, display_json)`.
+    SetSceneProps {
+        sid: u64,
+        props: u8,
+        camera_json: Option<String>,
+        display_json: Option<String>,
+    },
+    /// `rename_scene(sid, name)`.
+    RenameScene { sid: u64, name: String },
+    /// `set_scene_description(sid, text)`.
+    SetSceneDescription { sid: u64, text: String },
+    /// `move_scene(sid, index)`.
+    MoveScene { sid: u64, index: u32 },
+    /// `remove_scene(sid)`.
+    RemoveScene { sid: u64 },
+    /// `apply_scene(sid)` — writes tag visibility, user-hidden nodes, and
+    /// the section plane, all persisted, so it must replay.
+    ApplyScene { sid: u64 },
     /// `add_material(name, r, g, b, a)` — palette additions are not
     /// undoable but are saved, and later recorded paint calls reference
     /// the handle this call deterministically produces.

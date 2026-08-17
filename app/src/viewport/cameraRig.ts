@@ -171,6 +171,28 @@ export class CameraRig {
     this.perspective.up.copy(this.orthographic.up)
   }
 
+  /**
+   * Re-pose BOTH cameras from an eye/target/up/fov tuple without flipping
+   * `active`/`projection` — the per-frame step of a camera tween
+   * (docs/design/scenes.md §5 "Tween mechanics"). The perspective camera
+   * takes the pose directly; the orthographic camera is then sized and
+   * posed from it through the same `matchOrthoToPerspective` math a
+   * projection toggle uses, so under parallel projection the frustum
+   * follows the interpolated eye–target DISTANCE each frame (the saved
+   * `target` already encodes the ortho zoom as a distance —
+   * `Viewport.getCameraState`'s synthesis) with no double toggle and no
+   * controls rebuild. Callers update their controls target and matrices.
+   */
+  applyPose(eye: THREE.Vector3, target: THREE.Vector3, up: THREE.Vector3, fovDeg: number): void {
+    this.perspective.position.copy(eye)
+    this.perspective.up.copy(up)
+    this.perspective.lookAt(target)
+    this.perspective.fov = Math.min(MAX_FOV_DEG, Math.max(MIN_FOV_DEG, fovDeg))
+    this.perspective.updateProjectionMatrix()
+    this.matchOrthoToPerspective(target)
+    this.orthographic.updateProjectionMatrix()
+  }
+
   /** Set the perspective vertical fov (degrees), clamped to
    * [`MIN_FOV_DEG`, `MAX_FOV_DEG`]. No-op on the orthographic frustum — fov
    * only ever applies to (and persists across toggles on) `perspective`. */

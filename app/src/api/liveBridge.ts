@@ -48,6 +48,20 @@ export interface LiveBridgeDeps {
    * — mirrors `HarnessDeps.reconcile` (`test/harness.ts`), the app's own
    * document-changed path. */
   reconcile: () => void
+  /**
+   * Applies a Scene the live app just activated via `hew.scenes.apply`
+   * (`ViewDirective::ActivateScene`, crates/wasm-api/src/live.rs) — the
+   * kernel-side state (hidden nodes/tags, section plane) is already
+   * written by the time this fires; `sid` names which Scene so this can
+   * drive the same app-side activation path Scene Tray uses (camera
+   * tween, panel/outliner sync).
+   *
+   * Optional (a host without a Scenes UI omits it — an `ActivateScene`
+   * directive is then a no-op here, harmless since the kernel state it
+   * names is already written); App.tsx wires it to
+   * `useScenesController`'s `activate`.
+   */
+  activateScene?: (sid: number) => void
 }
 
 /** Whether a dispatch of `method` could have changed the document, per
@@ -146,6 +160,7 @@ type ViewDirective =
     }
   | { kind: 'zoom_extents' }
   | { kind: 'units'; format: LengthFormat }
+  | { kind: 'activate_scene'; sid: number }
 
 /** `hew.view.camera`'s own defaults for an explicit camera's optional
  * fields (docs/HEW_API.md §7, `crates/api/src/host.rs`'s `SnapshotCamera`
@@ -176,7 +191,11 @@ const DEFAULT_CAMERA_FOV_DEG = 35
  * document. `units`, unlike the other two, never touches the viewport at
  * all, so it is unaffected by this case.
  */
-function applyViewDirective(directive: ViewDirective, viewportApi: ViewportApi | null): void {
+function applyViewDirective(
+  directive: ViewDirective,
+  viewportApi: ViewportApi | null,
+  activateScene: ((sid: number) => void) | undefined,
+): void {
   switch (directive.kind) {
     case 'camera':
       if (viewportApi === null) return
@@ -199,6 +218,10 @@ function applyViewDirective(directive: ViewDirective, viewportApi: ViewportApi |
     case 'units':
       setLengthUnit(directive.format)
       return
+    case 'activate_scene':
+      // Optional — see `LiveBridgeDeps.activateScene`'s doc.
+      activateScene?.(directive.sid)
+      return
   }
 }
 
@@ -207,9 +230,13 @@ function applyViewDirective(directive: ViewDirective, viewportApi: ViewportApi |
  * side is the only producer) by no-op rather than throwing into the Tauri
  * event handler. Exported for direct unit testing alongside
  * `shouldRefreshAfterDispatch`. */
-export function applyPendingViewDirective(directiveJson: string, viewportApi: ViewportApi | null): void {
+export function applyPendingViewDirective(
+  directiveJson: string,
+  viewportApi: ViewportApi | null,
+  activateScene?: (sid: number) => void,
+): void {
   try {
-    applyViewDirective(JSON.parse(directiveJson) as ViewDirective, viewportApi)
+    applyViewDirective(JSON.parse(directiveJson) as ViewDirective, viewportApi, activateScene)
   } catch {
     /* malformed directive JSON should never happen — defensive no-op */
   }
@@ -323,7 +350,7 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     // view command.
     const directiveJson = scene.take_pending_view_directive()
     if (directiveJson !== undefined) {
-      applyPendingViewDirective(directiveJson, deps.getViewportApi())
+      applyPendingViewDirective(directiveJson, deps.getViewportApi(), deps.activateScene)
     }
   }
 

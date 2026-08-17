@@ -114,3 +114,24 @@ pub const FOLLOW_ME_MITER_LIMIT: f64 = 8.0;
 /// frame that is only approximately orthonormal (rule 4: refused, never
 /// silently re-orthonormalized).
 pub const AXES_ORTHONORMAL: f64 = 1e-9;
+
+/// Scene camera drift, position components (meters): the eye and target of
+/// the live camera must each sit within this of a Scene's captured camera
+/// for the Scene to count as still matching (docs/design/scenes.md §3.1).
+/// A tween landing or an orbit-and-return leaves float noise far below this;
+/// a deliberate move is far above it.
+pub const SCENE_CAMERA_POSITION: f64 = 1e-4;
+
+/// Scene camera drift, direction components (dimensionless): the `up`
+/// vector's tolerance under the same test.
+pub const SCENE_CAMERA_DIRECTION: f64 = 1e-4;
+
+/// Scene camera drift, field of view (degrees).
+pub const SCENE_CAMERA_FOV_DEG: f64 = 1e-2;
+
+/// Section-plane normal unit-length tolerance (dimensionless): a stored or
+/// supplied normal whose length is further than this from 1 is refused, not
+/// renormalized (rule 4). Looser than [`AXES_ORTHONORMAL`] because the
+/// normal originates in the app's double-precision normalization of a face
+/// normal, not in exact kernel construction.
+pub const SECTION_NORMAL_UNIT: f64 = 1e-6;

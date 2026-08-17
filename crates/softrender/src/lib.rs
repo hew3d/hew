@@ -459,17 +459,57 @@ fn node_or_ancestor_hidden(doc: &kernel::Document, node: kernel::NodeId) -> bool
     false
 }
 
+/// The hidden leaf sets a render skips: object handles and instance
+/// handles, as `kernel::Document::hidden_leaves` (the document's own view
+/// state — user-hidden nodes AND hidden tags) or a Scene's
+/// `ResolvedScene` (docs/design/scenes.md §7) produce them.
+#[derive(Debug, Clone, Default)]
+pub struct HiddenLeaves {
+    pub objects: std::collections::BTreeSet<kernel::ObjectId>,
+    pub instances: std::collections::BTreeSet<kernel::InstanceId>,
+}
+
+impl HiddenLeaves {
+    /// The document's current hidden state.
+    pub fn of_document(doc: &kernel::Document) -> HiddenLeaves {
+        let (objects, instances) = doc.hidden_leaves();
+        HiddenLeaves {
+            objects: objects.into_iter().collect(),
+            instances: instances.into_iter().collect(),
+        }
+    }
+
+    /// From explicit lists (a resolved Scene's leaf sets).
+    pub fn from_lists(
+        objects: &[kernel::ObjectId],
+        instances: &[kernel::InstanceId],
+    ) -> HiddenLeaves {
+        HiddenLeaves {
+            objects: objects.iter().copied().collect(),
+            instances: instances.iter().copied().collect(),
+        }
+    }
+}
+
 /// Tessellates every visible scene item of `doc`: each visible world object
 /// at identity pose, and each placed instance's definition members at the
 /// instance's own pose — tagged with the INSTANCE's stable id, so pixels
-/// report the instance, not the shared definition. User-hidden nodes (and
-/// nodes under user-hidden groups) are skipped; an object that fails to
-/// tessellate is skipped, not fatal, so one bad object cannot blank a whole
-/// render.
+/// report the instance, not the shared definition. Hidden geometry — the
+/// document's user-hidden nodes (and nodes under user-hidden groups) AND
+/// nodes under a hidden tag, exactly the set the app's own viewport hides —
+/// is skipped; an object that fails to tessellate is skipped, not fatal,
+/// so one bad object cannot blank a whole render.
 pub fn document_items(doc: &kernel::Document) -> Vec<DocumentItem> {
+    document_items_hiding(doc, &HiddenLeaves::of_document(doc))
+}
+
+/// [`document_items`] with an explicit hidden set — a Scene's resolved
+/// leaf sets (docs/design/scenes.md §7) instead of the document's own.
+pub fn document_items_hiding(doc: &kernel::Document, hidden: &HiddenLeaves) -> Vec<DocumentItem> {
     let mut items: Vec<DocumentItem> = Vec::new();
     for id in doc.visible_object_ids() {
-        if node_or_ancestor_hidden(doc, kernel::NodeId::Object(id)) {
+        if hidden.objects.contains(&id) || node_or_ancestor_hidden(doc, kernel::NodeId::Object(id))
+        {
             continue;
         }
         let Some(obj) = doc.object(id) else { continue };
@@ -486,7 +526,9 @@ pub fn document_items(doc: &kernel::Document) -> Vec<DocumentItem> {
         });
     }
     for instance in doc.instance_ids() {
-        if node_or_ancestor_hidden(doc, kernel::NodeId::Instance(instance)) {
+        if hidden.instances.contains(&instance)
+            || node_or_ancestor_hidden(doc, kernel::NodeId::Instance(instance))
+        {
             continue;
         }
         let (Some(def), Some(pose)) = (doc.instance_def(instance), doc.instance_pose(instance))
@@ -500,6 +542,11 @@ pub fn document_items(doc: &kernel::Document) -> Vec<DocumentItem> {
         // composes its def-local pose with this instance's own — still
         // tagged with the OUTERMOST instance's sid.
         for (member, local) in doc.expanded_def_placements(def) {
+            // A user-hidden definition member is hidden in every instance
+            // (the per-node flag's documented semantics).
+            if hidden.objects.contains(&member) {
+                continue;
+            }
             let Some(obj) = doc.object(member) else {
                 continue;
             };
@@ -521,6 +568,11 @@ pub fn document_items(doc: &kernel::Document) -> Vec<DocumentItem> {
 /// Falls back to a unit box about the origin for an empty scene, so view
 /// fitting always has something to frame.
 pub fn document_bbox(doc: &kernel::Document) -> (Point3, Point3) {
+    document_bbox_hiding(doc, &HiddenLeaves::of_document(doc))
+}
+
+/// [`document_bbox`] with an explicit hidden set (a resolved Scene's).
+pub fn document_bbox_hiding(doc: &kernel::Document, hidden: &HiddenLeaves) -> (Point3, Point3) {
     let mut acc: Option<(Point3, Point3)> = None;
     let mut extend = |p: Point3| {
         acc = Some(match acc {
@@ -532,7 +584,8 @@ pub fn document_bbox(doc: &kernel::Document) -> (Point3, Point3) {
         });
     };
     for id in doc.visible_object_ids() {
-        if node_or_ancestor_hidden(doc, kernel::NodeId::Object(id)) {
+        if hidden.objects.contains(&id) || node_or_ancestor_hidden(doc, kernel::NodeId::Object(id))
+        {
             continue;
         }
         if let Some(obj) = doc.object(id) {
@@ -542,7 +595,9 @@ pub fn document_bbox(doc: &kernel::Document) -> (Point3, Point3) {
         }
     }
     for instance in doc.instance_ids() {
-        if node_or_ancestor_hidden(doc, kernel::NodeId::Instance(instance)) {
+        if hidden.instances.contains(&instance)
+            || node_or_ancestor_hidden(doc, kernel::NodeId::Instance(instance))
+        {
             continue;
         }
         let (Some(def), Some(pose)) = (doc.instance_def(instance), doc.instance_pose(instance))
@@ -550,6 +605,9 @@ pub fn document_bbox(doc: &kernel::Document) -> (Point3, Point3) {
             continue;
         };
         for (member, local) in doc.expanded_def_placements(def) {
+            if hidden.objects.contains(&member) {
+                continue;
+            }
             let composed = local.then(&pose);
             if let Some(obj) = doc.object(member) {
                 for v in obj.vertices().values() {
@@ -614,6 +672,83 @@ mod tests {
         let (obj, _) = doc.extrude_region(s, region, 1.0).unwrap();
         let mesh = tessellate::tessellate(doc.object(obj).unwrap(), doc.materials()).unwrap();
         (mesh, doc.materials().clone())
+    }
+
+    fn box_at(doc: &mut kernel::Document, x0: f64) -> kernel::ObjectId {
+        let plane = kernel::Plane::from_polygon(&[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ])
+        .unwrap();
+        let s = doc.add_sketch(plane);
+        doc.begin_sketch_gesture(s).unwrap();
+        {
+            let sk = doc.sketch_mut(s).unwrap();
+            for (a, b) in [
+                (Point3::new(x0, 0.0, 0.0), Point3::new(x0 + 1.0, 0.0, 0.0)),
+                (
+                    Point3::new(x0 + 1.0, 0.0, 0.0),
+                    Point3::new(x0 + 1.0, 1.0, 0.0),
+                ),
+                (Point3::new(x0 + 1.0, 1.0, 0.0), Point3::new(x0, 1.0, 0.0)),
+                (Point3::new(x0, 1.0, 0.0), Point3::new(x0, 0.0, 0.0)),
+            ] {
+                sk.add_segment(a, b).unwrap();
+            }
+        }
+        doc.end_sketch_gesture(s).unwrap();
+        let region = doc.extrudable_regions(s).unwrap()[0];
+        doc.extrude_region(s, region, 1.0).unwrap().0
+    }
+
+    /// Headless renders hide what the app's own viewport hides: user-hidden
+    /// nodes AND tag-hidden nodes (docs/design/scenes.md §7) — and a Scene's
+    /// resolved leaf sets override the document's own state.
+    #[test]
+    fn document_items_skip_tag_hidden_and_honor_a_scene_override() {
+        let mut doc = kernel::Document::new();
+        let a = box_at(&mut doc, 0.0);
+        let b = box_at(&mut doc, 3.0);
+        let c = box_at(&mut doc, 6.0);
+        doc.add_node_tag(kernel::NodeId::Object(b), vec!["Hardware".to_string()])
+            .unwrap();
+        let sid_of =
+            |doc: &kernel::Document, id| doc.sid_of(&kernel::EntityRef::Object(id)).unwrap();
+        assert_eq!(document_items(&doc).len(), 3);
+
+        doc.set_tag_hidden(vec!["Hardware".to_string()], true);
+        let sids: Vec<u64> = document_items(&doc).iter().map(|i| i.sid).collect();
+        assert_eq!(
+            sids,
+            vec![sid_of(&doc, a), sid_of(&doc, c)],
+            "tag-hidden b is skipped"
+        );
+        let (lo, hi) = document_bbox(&doc);
+        assert!(lo.x >= -1e-9 && hi.x <= 7.0 + 1e-9);
+
+        // A Scene captured with c hidden and the tag visible: rendering
+        // through its resolution shows a and b, not c — regardless of the
+        // document's current tag state.
+        doc.set_tag_hidden(vec!["Hardware".to_string()], false);
+        doc.set_node_user_hidden(kernel::NodeId::Object(c), true);
+        let scene = doc
+            .add_scene(None, kernel::SceneProps::ALL, None, None, None)
+            .unwrap();
+        doc.set_node_user_hidden(kernel::NodeId::Object(c), false);
+        doc.set_tag_hidden(vec!["Hardware".to_string()], true);
+        let resolved = doc.resolve_scene(scene).unwrap();
+        let hidden = HiddenLeaves::from_lists(
+            resolved.hidden_object_ids.as_deref().unwrap_or(&[]),
+            resolved.hidden_instance_ids.as_deref().unwrap_or(&[]),
+        );
+        let sids: Vec<u64> = document_items_hiding(&doc, &hidden)
+            .iter()
+            .map(|i| i.sid)
+            .collect();
+        assert_eq!(sids, vec![sid_of(&doc, a), sid_of(&doc, b)]);
+        let (_, hi) = document_bbox_hiding(&doc, &hidden);
+        assert!(hi.x <= 4.0 + 1e-9, "bbox excludes the Scene-hidden c");
     }
 
     #[test]

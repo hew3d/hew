@@ -149,7 +149,8 @@ fn import_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 /// resolution) turns it into a typed [`SnapshotParams`]. `camera`/`view`
 /// are the shared vocabulary `camera.rs` parses — the same one
 /// `hew.view.camera` (view.rs) accepts, so there is exactly one camera
-/// spec in the protocol (docs/HEW_API.md §7).
+/// spec in the protocol (docs/HEW_API.md §7). `scene` is a Scene's public
+/// id (docs/HEW_API.md's Scenes section) — mutually exclusive with both.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSnapshotParams {
@@ -161,6 +162,8 @@ struct RawSnapshotParams {
     camera: Option<RawCamera>,
     #[serde(default)]
     view: Option<String>,
+    #[serde(default)]
+    scene: Option<String>,
     #[serde(default)]
     include_ids: Option<bool>,
     #[serde(default)]
@@ -177,7 +180,17 @@ const SNAPSHOT_MAX_SIZE: u32 = 2048;
 
 fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let raw: RawSnapshotParams = parse(params)?;
+    if raw.scene.is_some() && (raw.camera.is_some() || raw.view.is_some()) {
+        return Err(CmdError::Params(
+            "scene is mutually exclusive with camera and view".to_string(),
+        ));
+    }
     let (camera, view) = parse_camera_or_view(raw.camera, raw.view)?;
+    let scene = raw
+        .scene
+        .as_deref()
+        .map(super::scenes::resolve_scene_id)
+        .transpose()?;
     let width = raw
         .width
         .unwrap_or(SNAPSHOT_DEFAULT_SIZE)
@@ -192,6 +205,7 @@ fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         height,
         camera,
         view,
+        scene,
         include_ids: raw.include_ids.unwrap_or(false),
         path: raw.path,
     };

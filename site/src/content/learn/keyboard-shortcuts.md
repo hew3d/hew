@@ -1,7 +1,7 @@
 ---
 title: "Keyboard shortcuts"
 description: "Every default shortcut on one page, including the modifier keys that change what a tool does mid-gesture."
-order: 21
+order: 22
 ---
 
 Tool shortcuts are plain letters, the same on every platform, and match SketchUp's defaults wherever SketchUp has one. Command shortcuts use `⌘` on macOS and `Ctrl` on Windows, Linux, and the web.
@@ -49,6 +49,7 @@ Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key (
 | Toggle Materials | `⇧⌘C` | `Ctrl+Shift+C` |
 | Toggle Tags | `⇧⌘T` | `Ctrl+Shift+T` |
 | Toggle Object Info | `⇧⌘O` | `Ctrl+Shift+O` |
+| Next Scene / Previous Scene | `Page Down` / `Page Up` | `Page Down` / `Page Up` |
 | Library | `⇧L` (viewport) / `⇧⌘L` | `Shift+L` (viewport) / `Ctrl+Shift+L` |
 | Settings | `⌘,` | `Ctrl+,` |
 

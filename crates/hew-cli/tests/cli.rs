@@ -826,6 +826,7 @@ fn snapshot_respects_user_hidden_state() {
         height: 128,
         camera: None,
         view: api::host::StandardView::from_name("iso"),
+        scene: None,
         include_ids: true,
         path: None,
     };
@@ -844,4 +845,163 @@ fn snapshot_respects_user_hidden_state() {
         !result.id_palette.contains(&public(b)),
         "user-hidden object never renders"
     );
+}
+
+/// `hew.view.snapshot`'s `scene` param renders through the Scene's OWN
+/// resolved hidden set and captured camera (`Document::resolve_scene`),
+/// not the document's live state — the whole point of a Scene as a saved
+/// view. An object the Scene captured as hidden stays hidden even though
+/// nothing in the LIVE document is hiding it anymore.
+#[test]
+fn snapshot_scene_renders_through_the_scenes_own_resolved_state() {
+    let mut doc = Document::new();
+    let import = ImportScene {
+        materials: Vec::new(),
+        defs: Vec::new(),
+        roots: vec![
+            ImportNode::Mesh(unit_box_mesh("A")),
+            ImportNode::Mesh(unit_box_mesh("B")),
+        ],
+        guides: Vec::new(),
+        tags: Vec::new(),
+    };
+    doc.ingest(import, Vec::new()).expect("ingest two boxes");
+    let ids = doc.visible_object_ids();
+    let (a, b) = (ids[0], ids[1]);
+
+    // Capture a Scene with B hidden and an explicit camera, THEN unhide B
+    // live — the snapshot must still honor the Scene's own captured
+    // state, not the document's current one.
+    doc.set_node_user_hidden(kernel::NodeId::Object(b), true);
+    let camera = kernel::CameraState {
+        projection: kernel::CameraProjection::Perspective,
+        fov_deg: 40.0,
+        eye: kernel::Point3::new(5.0, 0.0, 0.0),
+        target: kernel::Point3::ORIGIN,
+        up: kernel::Vec3::new(0.0, 0.0, 1.0),
+    };
+    let sid = doc
+        .add_scene(
+            Some("Snap".to_string()),
+            kernel::SceneProps::ALL,
+            Some(camera),
+            None,
+            None,
+        )
+        .expect("add scene");
+    doc.set_node_user_hidden(kernel::NodeId::Object(b), false);
+
+    let mut host = CliHost::new();
+    let params = api::host::SnapshotParams {
+        width: 128,
+        height: 128,
+        camera: None,
+        view: None,
+        scene: Some(sid),
+        include_ids: true,
+        path: None,
+    };
+    let result = host.snapshot(&doc, &params).expect("renders");
+    let public = |id: kernel::ObjectId| {
+        api::ids::public_id(
+            &kernel::EntityRef::Object(id),
+            doc.sid_of(&kernel::EntityRef::Object(id)).unwrap(),
+        )
+    };
+    assert!(
+        result.id_palette.contains(&public(a)),
+        "A is visible in the Scene"
+    );
+    assert!(
+        !result.id_palette.contains(&public(b)),
+        "B stays hidden per the Scene's captured state, even though it is live-visible now"
+    );
+}
+
+/// A camera-only Scene captures neither hidden property, so its snapshot
+/// renders with the DOCUMENT's live hidden state — what activating it in
+/// the app shows — never with everything un-hidden.
+#[test]
+fn snapshot_camera_only_scene_keeps_the_documents_live_hidden_state() {
+    let mut doc = Document::new();
+    let import = ImportScene {
+        materials: Vec::new(),
+        defs: Vec::new(),
+        roots: vec![
+            ImportNode::Mesh(unit_box_mesh("A")),
+            ImportNode::Mesh(unit_box_mesh("B")),
+        ],
+        guides: Vec::new(),
+        tags: Vec::new(),
+    };
+    doc.ingest(import, Vec::new()).expect("ingest two boxes");
+    let ids = doc.visible_object_ids();
+    let (a, b) = (ids[0], ids[1]);
+    let camera = kernel::CameraState {
+        projection: kernel::CameraProjection::Perspective,
+        fov_deg: 40.0,
+        eye: kernel::Point3::new(5.0, 0.0, 0.0),
+        target: kernel::Point3::ORIGIN,
+        up: kernel::Vec3::new(0.0, 0.0, 1.0),
+    };
+    let props = kernel::SceneProps {
+        camera: true,
+        ..kernel::SceneProps::NONE
+    };
+    let sid = doc
+        .add_scene(Some("Cam".to_string()), props, Some(camera), None, None)
+        .expect("add scene");
+    // Hide B live AFTER capture: a camera-only Scene leaves it hidden.
+    doc.set_node_user_hidden(kernel::NodeId::Object(b), true);
+
+    let mut host = CliHost::new();
+    let params = api::host::SnapshotParams {
+        width: 128,
+        height: 128,
+        camera: None,
+        view: None,
+        scene: Some(sid),
+        include_ids: true,
+        path: None,
+    };
+    let result = host.snapshot(&doc, &params).expect("renders");
+    let public = |id: kernel::ObjectId| {
+        api::ids::public_id(
+            &kernel::EntityRef::Object(id),
+            doc.sid_of(&kernel::EntityRef::Object(id)).unwrap(),
+        )
+    };
+    assert!(result.id_palette.contains(&public(a)));
+    assert!(
+        !result.id_palette.contains(&public(b)),
+        "the document's live hidden state applies when the Scene captures no hidden property"
+    );
+}
+
+/// `scene` refuses `unknown_scene`, exactly like any other Scene
+/// command, rather than a generic params error.
+#[test]
+fn snapshot_scene_refuses_unknown_scene() {
+    let mut doc = Document::new();
+    let import = ImportScene {
+        materials: Vec::new(),
+        defs: Vec::new(),
+        roots: vec![ImportNode::Mesh(unit_box_mesh("A"))],
+        guides: Vec::new(),
+        tags: Vec::new(),
+    };
+    doc.ingest(import, Vec::new()).expect("ingest a box");
+
+    let mut host = CliHost::new();
+    let params = api::host::SnapshotParams {
+        width: 64,
+        height: 64,
+        camera: None,
+        view: None,
+        scene: Some(0xffff_ffff),
+        include_ids: false,
+        path: None,
+    };
+    let err = host.snapshot(&doc, &params).unwrap_err();
+    assert_eq!(err.name, "unknown_scene");
 }

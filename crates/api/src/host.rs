@@ -84,11 +84,22 @@ pub struct SnapshotCamera {
 pub struct SnapshotParams {
     pub width: u32,
     pub height: u32,
-    /// An explicit camera. Mutually exclusive with `view`.
+    /// An explicit camera. Mutually exclusive with `view` and `scene`.
     pub camera: Option<SnapshotCamera>,
     /// A named standard view, fitted to the scene. Mutually exclusive
-    /// with `camera`.
+    /// with `camera` and `scene`.
     pub view: Option<StandardView>,
+    /// A Scene's stable id (`crates/api/src/commands/scenes.rs` has
+    /// already resolved and validated the public id into this). Mutually
+    /// exclusive with `camera` and `view`: renders through the Scene's
+    /// resolved camera and hidden sets (`kernel::Document::resolve_scene`)
+    /// instead of the document's own. When the Scene captures no camera,
+    /// a host falls back to its usual cameraless resolution — the
+    /// document's saved working camera, else a fitted isometric view —
+    /// fitted to what the SCENE leaves visible, not the whole document.
+    /// The Scene's section plane, if any, is NOT rendered headlessly at
+    /// 1.0 (docs/HEW_API.md's Scenes section).
+    pub scene: Option<u64>,
     /// When true, the result also carries a per-pixel id-buffer and the
     /// palette of public ids it indexes.
     pub include_ids: bool,
@@ -272,6 +283,22 @@ pub trait Host {
     fn set_display_units(&mut self, format: &str) -> Result<(), Refusal> {
         let _ = format;
         Err(unsupported("set the display unit format"))
+    }
+
+    /// Notifies the host that a Scene just finished applying
+    /// (`hew.scenes.apply`): called AFTER `kernel::Document::apply_scene`
+    /// has already written the kernel-side state (tag/node hidden flags,
+    /// section plane) — this is a best-effort signal for a host that
+    /// wants to react further (drive a live viewport's camera, tell a
+    /// Scene-tray UI which Scene is now active), never a second veto
+    /// point: the document mutation already happened whether or not any
+    /// host implements this. The default is a silent no-op success —
+    /// unlike every other method on this trait, there is nothing
+    /// "unsupported" about a host that simply has nothing extra to do
+    /// (`NoHost`, `hew-cli`'s `CliHost`).
+    fn scene_applied(&mut self, sid: u64) -> Result<(), Refusal> {
+        let _ = sid;
+        Ok(())
     }
 }
 

@@ -185,6 +185,23 @@ export interface HewTestHarness {
   /** Show/hide all construction guides (View ▸ Guides). */
   setGuidesVisible(visible: boolean): void
 
+  // -------- scenes (docs/design/scenes.md) --------
+  /** Adds a Scene capturing every property (`Scene.add_scene`'s full
+   *  bitmask, 31 = camera|hidden nodes|hidden tags|section|display) at the
+   *  viewport's CURRENT camera pose, named `name`, appended after the
+   *  active Scene (or at the end if none) — the minimal fixture builder
+   *  `shop-mode.spec.ts` needs to prove Shop Mode's own read-only Scenes UI
+   *  (pill, Views-sheet SCENES section) against a real captured Scene,
+   *  without driving the full editor `ScenesPanel` this harness
+   *  deliberately doesn't otherwise expose. Returns the new Scene's stable
+   *  id (decimal string — this harness's usual `bigint`-as-string
+   *  convention). */
+  addScene(name: string): string
+  /** Whether a tag path is hidden in the document's registry — a plain
+   *  read of the persisted flag, for asserting what a Scene activation
+   *  restored (docs/design/scenes.md §5). */
+  isTagHidden(path: string[]): boolean
+
   // -------- section plane (session view state, non-destructive) --------
   /** "Toggle Section Plane Active" — flips the placed section's clip on/off
    *  (Tools menu / palette). No-op when none is placed. */
@@ -1103,6 +1120,25 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       api.setGuidesVisible(visible)
+    },
+
+    addScene: (name) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      const cam = api.getCameraState()
+      return act((s) => s.add_scene(name, 31, JSON.stringify(cam), undefined, undefined).toString())
+    },
+
+    isTagHidden: (path) => {
+      const scene = deps.getScene()
+      if (scene === null) throw new Error('__hew_test: scene not ready')
+      const paths = scene.tag_meta_paths()
+      const hidden = scene.tag_meta_hidden()
+      const key = path.join('/')
+      for (let i = 0; i < paths.length; i++) {
+        if (paths[i] === key) return hidden[i] === 1
+      }
+      return false
     },
 
     toggleSectionActive: () => {

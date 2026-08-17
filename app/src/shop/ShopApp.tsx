@@ -27,6 +27,7 @@
  * which editor-chrome callbacks are wired for real vs. deliberately
  * inert, and why.
  */
+import { buildFrameThumbnail } from '../viewport/frameThumbnail'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { loadKernel, type Scene } from '../wasm/loader'
 import Viewport, { type ViewportApi, type InferenceInfo, type StandardView } from '../viewport/Viewport'
@@ -65,6 +66,18 @@ import { UnitPicker } from './UnitPicker'
 import { ScanSheet } from './ScanSheet'
 import { ViewsSheet } from './ViewsSheet'
 import { ReceiveConfirmSheet } from './ReceiveConfirmSheet'
+import { ScenePill } from './ScenePill'
+import { getSceneTransitions, SCENE_TRANSITION_MS } from '../settings/sceneTransitions'
+import {
+  parseScenesJson,
+  parseCameraJson,
+  parseSectionJson,
+  parseDriftJson,
+  neighborScene,
+  driftAny,
+  type SceneEntry,
+  type SceneDrift,
+} from '../scenes/scenesModel'
 import { useShopOrientation } from './orientation'
 import {
   ChevronDownIcon,
@@ -211,65 +224,13 @@ export const RECENT_THUMB_SIZE_PX = 92
 const RECENT_THUMB_QUALITY = 0.72
 
 /**
- * Downscales a raw `ViewportApi.captureFrame()` result (full-resolution
- * RGBA canvas pixels) into a small JPEG data URL for a Recents row
- * thumbnail (playtest finding 4) — two canvas passes: `putImageData` onto a
- * full-size offscreen canvas (the only way to get raw RGBA bytes back into
- * something `drawImage` can read from), then `drawImage` that onto a
- * `RECENT_THUMB_SIZE_PX` one with a "cover" crop (scale so the SHORTER side
- * fills the square, centering the longer side's overflow off both edges
- * equally) rather than a letterboxed contain-fit — a JPEG has no
- * transparency to letterbox onto, and a full-bleed square swatch reads
- * better in a small list row than one with visible bars.
- *
- * `null` on any failure (a 0×0 frame, no 2D context) — every caller treats
- * that as "no thumbnail", falling back to the placeholder swatch, not an
- * error.
+ * Recents-row thumbnail: a `RECENT_THUMB_SIZE_PX` square "cover" crop of a
+ * `captureFrame` result as a JPEG data URL (playtest finding 4) — the shared
+ * `buildFrameThumbnail` with this shell's size/quality. `null` on failure;
+ * callers treat that as "no thumbnail" (placeholder swatch), not an error.
  */
 function buildRecentThumbnail(frame: { width: number; height: number; pixels: Uint8Array }): string | null {
-  if (frame.width === 0 || frame.height === 0) return null
-  const source = document.createElement('canvas')
-  source.width = frame.width
-  source.height = frame.height
-  const sourceCtx = source.getContext('2d')
-  if (sourceCtx === null) return null
-  // `ImageData`'s constructor wants a plain-`ArrayBuffer`-backed
-  // `Uint8ClampedArray` (`ImageDataArray`), not the `ArrayBuffer |
-  // SharedArrayBuffer`-backed one this project's TS/DOM lib version infers
-  // for a wasm-returned view — same cast, same reasoning, as
-  // `io/recents.ts`'s own `hashBytes` (a different SubtleCrypto API hitting
-  // the identical friction). The pixels are never mutated here.
-  const clamped = new Uint8ClampedArray(frame.pixels.buffer, frame.pixels.byteOffset, frame.pixels.byteLength) as Uint8ClampedArray<ArrayBuffer>
-  sourceCtx.putImageData(new ImageData(clamped, frame.width, frame.height), 0, 0)
-
-  const thumb = document.createElement('canvas')
-  thumb.width = RECENT_THUMB_SIZE_PX
-  thumb.height = RECENT_THUMB_SIZE_PX
-  const thumbCtx = thumb.getContext('2d')
-  if (thumbCtx === null) return null
-  const scale = Math.max(RECENT_THUMB_SIZE_PX / frame.width, RECENT_THUMB_SIZE_PX / frame.height)
-  const drawWidth = frame.width * scale
-  const drawHeight = frame.height * scale
-  const drawX = (RECENT_THUMB_SIZE_PX - drawWidth) / 2
-  const drawY = (RECENT_THUMB_SIZE_PX - drawHeight) / 2
-  // `frame.pixels` is `captureFrame`'s raw `gl.readPixels` output — WebGL's
-  // row order is BOTTOM-to-TOP, but the `putImageData` call above treats
-  // row 0 as `source`'s TOP row, so `source` itself is vertically flipped
-  // relative to what was actually on screen. Corrected here, at the DRAW
-  // rather than by reversing `frame.pixels`' rows before `putImageData`:
-  // mirroring the thumb canvas's own coordinate space around its
-  // horizontal centerline (`translate` to the far edge, then `scale(1,
-  // -1)`) leaves the "cover" crop math above untouched — `drawX`/`drawY`
-  // stay the plain centered values, and the flip keeps the crop centered
-  // for free (the crop box is itself symmetric about that centerline, so
-  // mirroring it lands back on the same span, just reading the source
-  // rows in the opposite order).
-  thumbCtx.save()
-  thumbCtx.translate(0, RECENT_THUMB_SIZE_PX)
-  thumbCtx.scale(1, -1)
-  thumbCtx.drawImage(source, drawX, drawY, drawWidth, drawHeight)
-  thumbCtx.restore()
-  return thumb.toDataURL('image/jpeg', RECENT_THUMB_QUALITY)
+  return buildFrameThumbnail(frame, RECENT_THUMB_SIZE_PX, RECENT_THUMB_SIZE_PX, RECENT_THUMB_QUALITY)
 }
 
 export function ShopApp() {
@@ -361,6 +322,36 @@ export function ShopApp() {
   // Shop Mode issues zero kernel transactions.
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
   const [hiddenTagPaths, setHiddenTagPaths] = useState<Set<string>>(new Set())
+
+  // ---------------------------------------------------------------- Scenes (read-only — docs/design/scenes.md §6)
+  // The document's Scenes never change during a Shop Mode session (zero
+  // kernel mutations — module doc), so this is read ONCE per document open
+  // (`applyOpenedBytes`) rather than re-derived on every render. `sid`s are
+  // stable per document (kernel-minted), so a plain array is fine — no
+  // Map/index needed for a handful of rows.
+  const [sceneEntries, setSceneEntries] = useState<SceneEntry[]>([])
+  const [activeSceneSid, setActiveSceneSid] = useState<number | null>(null)
+  // Mirrors `activeSceneSid` synchronously (React state updates are async,
+  // but `activateScene`/`refreshSceneDrift` below need the JUST-activated
+  // sid immediately — same "state, plus a ref for same-tick reads" pattern
+  // `useScenesController.ts`'s own `activeSidRef` uses for the identical
+  // reason). Never read for rendering — `activeSceneSid` state is.
+  const activeSceneSidRef = useRef<number | null>(null)
+  const activateSceneRef = useRef<((sid: number, opts?: { instant?: boolean }) => void) | null>(null)
+  const [sceneDrift, setSceneDrift] = useState<SceneDrift | null>(null)
+  const activeSceneEntry = useMemo(
+    () => (activeSceneSid === null ? null : (sceneEntries.find((e) => e.sid === activeSceneSid) ?? null)),
+    [sceneEntries, activeSceneSid],
+  )
+  // A Scene reads as drifted from EITHER source (SPEC.md §2 "Drift & Show
+  // all"): the kernel-computed camera/section/hidden-tag/hidden-node
+  // mismatch (`sceneDrift`, refreshed on camera settle — see
+  // `refreshSceneDrift` below), OR an active long-press isolate — which
+  // `scene_drift` structurally CANNOT see (isolate is pure renderer state;
+  // the kernel's own hidden-node/hidden-tag registries never change in Shop
+  // Mode, module doc), so it's folded in here as a live boolean instead of
+  // routed through the kernel at all.
+  const activeSceneDrifted = activeSceneSid !== null && (driftAny(sceneDrift) || isolatedNode !== null)
 
   /**
    * Push the renderer-hidden set implied by (manual hides ∪ tag hides), plus
@@ -780,6 +771,14 @@ export function ShopApp() {
     dismissInspectInstant()
     setInspectPos(null)
     setIsolatedNode(null)
+    // Scenes (docs/design/scenes.md §6): the PREVIOUS document's Scene
+    // list/activation/drift belong to a sid space the new document reuses
+    // for unrelated entities — reset before the new document's own list is
+    // read further down, same "belongs to the outgoing document" reasoning
+    // as `lastTapNodeRef`/`setTapeAnchors([])` just below.
+    activeSceneSidRef.current = null
+    setActiveSceneSid(null)
+    setSceneDrift(null)
     // The last tap belongs to the OUTGOING document: its NodeRef/Snap key
     // dense ids the new document reuses for unrelated geometry, and this
     // open can land mid-gesture (the QR receive path resolves on a
@@ -815,6 +814,20 @@ export function ShopApp() {
     // before the seeded push below lands (mirrors App.tsx's applyLoadedBytes).
     viewportApi.current?.setHidden([], [])
     viewportApi.current?.notifyLoaded()
+    // The document's persisted section plane (docs/design/scenes.md §4) —
+    // AFTER `notifyLoaded()`, which clears the viewport's own section state
+    // as part of its reset. Independent of Scenes: a document can carry a
+    // section plane with zero Scenes defined.
+    const sectionPlaneJson = liveScene.section_plane_json()
+    viewportApi.current?.setSectionPlane(
+      sectionPlaneJson !== undefined ? (parseSectionJson(JSON.parse(sectionPlaneJson)) ?? null) : null,
+    )
+    // Scenes list (docs/design/scenes.md §6): read once — Shop Mode never
+    // mutates it (module doc), so there is nothing to keep in sync with
+    // later. The Views sheet's "SCENES" section and the pill both read
+    // this; empty for a document with none.
+    const openedScenes = parseScenesJson(liveScene.scenes_json())
+    setSceneEntries(openedScenes)
     setDocName(name)
     lastBytesRef.current = bytes
     // Push the seeded hides now that the scene is tessellated (notifyLoaded
@@ -930,6 +943,18 @@ export function ShopApp() {
     // An empty scene frames nothing real (module doc's own reasoning for
     // the isSceneEmpty gate above) — no thumbnail worth capturing either;
     // that document's recents row just keeps the placeholder swatch.
+    //
+    // A document with Scenes opens on its FIRST Scene (docs/design/scenes.md
+    // §5/§6, playtest; same as the desktop and SketchUp) — activated
+    // instantly, no tween, in a rAF registered AFTER the camera-restore /
+    // thumbnail rAF above so it runs after it and the Scene's camera wins.
+    if (openedScenes.length > 0) {
+      const firstSid = openedScenes[0].sid
+      requestAnimationFrame(() => {
+        if (lastBytesRef.current !== bytes) return // superseded by a newer open
+        activateSceneRef.current?.(firstSid, { instant: true })
+      })
+    }
   }, [pushHidden, dismissInspectInstant, syncActiveHint])
 
   // ---------------------------------------------------------------- QR handoff receive path
@@ -1279,12 +1304,158 @@ export function ShopApp() {
     pushHidden(hiddenKeys, hiddenTagPaths, node, ISOLATE_FADE_MS)
   }, [pushHidden, hiddenKeys, hiddenTagPaths])
 
+  // ---------------------------------------------------------------- Scenes activation (docs/design/scenes.md §6)
+  // Applies a resolved Scene's CAPTURED hidden-objects/visible-tags
+  // properties into `hiddenKeys`/`hiddenTagPaths` (App.tsx's equivalent
+  // panel state — `useScenesController.ts`'s `applyResolved` mirrored,
+  // minus its `scene.set_hidden` kernel call, which Shop Mode never makes),
+  // then pushes the result through `pushHidden` — the SAME renderer-only
+  // path long-press isolate uses, with the SAME fade. A property the Scene
+  // did NOT capture is left exactly as it was (design's "None = not
+  // captured, don't touch"). Shared by `activateScene` and `showAll`'s own
+  // "return to the Scene's hidden set" branch below, so both stay in sync
+  // by construction rather than by two independently-maintained copies.
+  const applyResolvedHidden = useCallback((resolved: {
+    has_hidden(): boolean
+    has_hidden_tags(): boolean
+    hidden_tag_paths(): string[]
+    has_hidden_nodes(): boolean
+    hidden_node_kinds(): Uint8Array
+    hidden_node_ids(): BigUint64Array
+  }) => {
+    let nextHiddenKeys = hiddenKeys
+    let nextHiddenTagPaths = hiddenTagPaths
+    if (resolved.has_hidden_tags()) {
+      nextHiddenTagPaths = new Set(
+        resolved.hidden_tag_paths().map((p) => tagPathKey(p.split('/').map((seg) => seg.trim()).filter((seg) => seg.length > 0))),
+      )
+      setHiddenTagPaths(nextHiddenTagPaths)
+    }
+    if (resolved.has_hidden_nodes()) {
+      const kinds = resolved.hidden_node_kinds()
+      const ids = resolved.hidden_node_ids()
+      const kindNames: NodeRef['kind'][] = ['object', 'group', 'instance']
+      const keys = new Set<string>()
+      for (let i = 0; i < kinds.length; i++) {
+        const kind = kindNames[kinds[i]]
+        if (kind !== undefined) keys.add(nodeKey({ kind, id: ids[i] }))
+      }
+      nextHiddenKeys = keys
+      setHiddenKeys(keys)
+    }
+    if (resolved.has_hidden()) {
+      pushHidden(nextHiddenKeys, nextHiddenTagPaths, null, ISOLATE_FADE_MS)
+    }
+  }, [hiddenKeys, hiddenTagPaths, pushHidden])
+
+  // Recomputes the active Scene's drift (SPEC.md §2 "Drift & Show all") —
+  // called from `activateScene`, `Viewport`'s `onCameraSettled` (fires
+  // ~250ms after ANY camera move settles: orbit, a standard view, zoom
+  // extents, or this file's own camera tween — docs/design/scenes.md §5),
+  // and after `showAll`'s own re-resolve. Display is deliberately never
+  // compared (`undefined` — SPEC.md §2 "Never on the phone": grid/axes/
+  // guides are ignored in Shop Mode, so they can never legitimately drift
+  // here). Reads `activeSceneSidRef` (not the `activeSceneSid` STATE) so a
+  // just-activated sid is visible on the same tick `activateScene` sets it,
+  // before React has committed the state update.
+  const refreshSceneDrift = useCallback(() => {
+    const scn = sceneRef.current
+    const sid = activeSceneSidRef.current
+    if (scn === null || sid === null) {
+      setSceneDrift(null)
+      return
+    }
+    try {
+      const cam = viewportApi.current?.getCameraState()
+      const json = scn.scene_drift(BigInt(sid), cam === undefined ? undefined : JSON.stringify(cam), undefined)
+      setSceneDrift(parseDriftJson(json))
+    } catch {
+      setSceneDrift(null)
+    }
+  }, [])
+
+  // Activation (SPEC.md §2, docs/design/scenes.md §6): PURE `resolve_scene`
+  // — never `apply_scene` (that mutates the kernel's own document state;
+  // Shop Mode issues zero kernel transactions, module doc) — feeding its
+  // renderer-level leaf ids straight to `ViewportApi.setHidden`/
+  // `setSectionPlane`/`tweenCameraState`. Isolate is cleared first (design's
+  // "Isolate is cleared on activation"); display is never touched (SPEC.md
+  // §2 "Never on the phone").
+  const activateScene = useCallback((sid: number, opts?: { instant?: boolean }) => {
+    const scn = sceneRef.current
+    if (scn === null) return
+    setIsolatedNode(null)
+    let resolved
+    try {
+      resolved = scn.resolve_scene(BigInt(sid))
+    } catch (err) {
+      showToast(`Activate Scene failed: ${friendlyErrorText(err)}`)
+      return
+    }
+    try {
+      applyResolvedHidden(resolved)
+      if (resolved.has_section()) {
+        const sj = resolved.section_json()
+        const plane = sj === undefined ? null : (parseSectionJson(JSON.parse(sj)) ?? null)
+        viewportApi.current?.setSectionPlane(plane)
+      }
+      const cj = resolved.camera_json()
+      const api = viewportApi.current
+      if (cj !== undefined && api !== null) {
+        const cam = parseCameraJson(JSON.parse(cj))
+        if (cam !== undefined) {
+          api.tweenCameraState(cam, getSceneTransitions() && opts?.instant !== true ? SCENE_TRANSITION_MS : 0, () => refreshSceneDrift())
+        }
+      }
+    } finally {
+      resolved.free()
+    }
+    activeSceneSidRef.current = sid
+    setActiveSceneSid(sid)
+    refreshSceneDrift()
+  }, [applyResolvedHidden, showToast, refreshSceneDrift])
+  // `applyOpenedBytes` (declared above) activates the first Scene on open
+  // through this ref — same declaration-order reason as the other refs.
+  activateSceneRef.current = activateScene
+
+  /** Views sheet / pill chevrons: the neighbor in tab order, wrapping —
+   *  `null` (no Scenes at all) is a no-op. */
+  const stepScene = useCallback((dir: 1 | -1) => {
+    const next = neighborScene(sceneEntries, activeSceneSidRef.current, dir)
+    if (next !== null) activateScene(next.sid)
+  }, [sceneEntries, activateScene])
+
   // Undoes ONLY the isolate — whatever the Parts sheet hid stays hidden
-  // (pushHidden's doc comment), so the chip and the sheet stay coherent.
+  // (pushHidden's doc comment). Under an ACTIVE Scene (SPEC.md §2 "Drift &
+  // Show all"), this returns to the SCENE's hidden set — not
+  // everything-visible — by re-resolving it fresh (rather than trusting
+  // whatever `hiddenKeys`/`hiddenTagPaths` happen to hold, which could have
+  // drifted from the Scene's own capture via a Parts-sheet eye toggle in
+  // the meantime) and clears the drift isolate itself caused (the
+  // `activeSceneDrifted` memo's `isolatedNode !== null` term clears the
+  // instant `setIsolatedNode(null)` below commits; the explicit
+  // `refreshSceneDrift()` catches any camera/section drift already present
+  // too). No active Scene: unchanged prior behavior.
   const showAll = useCallback(() => {
     setIsolatedNode(null)
+    const sid = activeSceneSidRef.current
+    const scn = sceneRef.current
+    if (sid !== null && scn !== null) {
+      try {
+        const resolved = scn.resolve_scene(BigInt(sid))
+        try {
+          applyResolvedHidden(resolved)
+        } finally {
+          resolved.free()
+        }
+      } catch {
+        // Best-effort — the isolate is already cleared above regardless.
+      }
+      refreshSceneDrift()
+      return
+    }
     pushHidden(hiddenKeys, hiddenTagPaths, null, ISOLATE_FADE_MS)
-  }, [pushHidden, hiddenKeys, hiddenTagPaths])
+  }, [pushHidden, hiddenKeys, hiddenTagPaths, applyResolvedHidden, refreshSceneDrift])
 
   const handleWrapperPointerDownCapture = useCallback((ev: React.PointerEvent<HTMLDivElement>) => {
     pressStartRef.current = { x: ev.clientX, y: ev.clientY }
@@ -1436,6 +1607,11 @@ export function ShopApp() {
     const result = resolveInspect(scene, isolatedNode, null)
     return result !== null && result.kind === 'node' ? result.label : null
   }, [isolatedNode, scene])
+
+  // The Scene pill no longer shares this row (portrait: bottom, above the
+  // dock; landscape: on the top strip's own row), so the banner sits at
+  // its original offset in both orientations.
+  const isolateBannerTopCss = `calc(${TOP_STRIP_OFFSET_CSS} + 54px)`
 
   const inspectCardEl = useMemo(() => {
     if (inspectResult === null || inspectPos === null) return null
@@ -1660,6 +1836,13 @@ export function ShopApp() {
             onTapeMeasurePoints={(points) => setTapeAnchors([...points])}
             onRescaleArmed={handleRescaleArmed}
             onCameraDragChange={handleCameraDragChange}
+            // Scenes drift (docs/design/scenes.md §5/§6): fires ~250ms after
+            // ANY camera move settles (orbit, a standard view, zoom extents,
+            // or this file's own camera tween) — the SAME debounced signal
+            // the editor's `useScenesController` keys drift refresh off.
+            // A no-op when no Scene is active (`refreshSceneDrift`'s own
+            // early-return).
+            onCameraSettled={refreshSceneDrift}
             onToast={(message) => showToast(message)}
             // Views sheet (playtest finding 12): mirrors the live
             // parallel/perspective state into React so `ViewsSheet` can
@@ -1939,6 +2122,30 @@ export function ShopApp() {
           onSelectView={handleSelectStandardView}
           projection={projection}
           onToggleProjection={toggleViewProjection}
+          scenes={sceneEntries}
+          activeSid={activeSceneSid}
+          drifted={activeSceneDrifted}
+          onSelectScene={activateScene}
+        />
+
+        {/* Active-Scene pill (SPEC.md §2; placement per playtest round 1):
+            portrait — bottom-center, 12px above the workbench dock's tool
+            row (which itself rides on the Parts sheet, so it lifts with the
+            sheet's live height); landscape — top-center on the top strip's
+            own row, between the document pill and the ⋯ menu. Hidden
+            entirely when no Scene is active (`ScenePill`'s `entry === null`
+            gate). */}
+        <ScenePill
+          entry={activeSceneEntry}
+          drifted={activeSceneDrifted}
+          onPrevious={() => stepScene(-1)}
+          onNext={() => stepScene(1)}
+          onOpenName={openViewsSheet}
+          placement={
+            isLandscape
+              ? { kind: 'top', topCss: TOP_STRIP_OFFSET_CSS }
+              : { kind: 'bottom', bottomPx: sheetHeightPx + DOCK_ROW_HEIGHT_PX }
+          }
         />
 
         {/* Isolate banner (design §4) — see its doc comment above
@@ -1949,12 +2156,16 @@ export function ShopApp() {
             centers it in whatever room is free between the left edge and
             the right rail — the old left bound tracked the since-removed
             side sheet's live width (item 8); with that sheet gone the left
-            bound is simply the viewport edge. */}
+            bound is simply the viewport edge. Shifted down an extra pill's
+            worth (`isolateBannerTopCss`) whenever the Scene pill above is
+            ALSO showing — SPEC.md's own screenshots never depict both HUD
+            elements up at once, so this is this file's own call rather than
+            a spec value. */}
         {hasDocument && isolatedNode !== null && (
           isLandscape ? (
             <div
               style={{
-                position: 'absolute', top: `calc(${TOP_STRIP_OFFSET_CSS} + 54px)`,
+                position: 'absolute', top: isolateBannerTopCss,
                 left: 0, right: LANDSCAPE_RAIL_CLEARANCE_CSS,
                 zIndex: 35, display: 'flex', justifyContent: 'center', pointerEvents: 'none',
               }}
@@ -1964,7 +2175,7 @@ export function ShopApp() {
               </div>
             </div>
           ) : (
-            <div style={isolateBannerPositionStyle}>
+            <div style={{ ...isolateBannerPositionStyle, top: isolateBannerTopCss }}>
               <div className="shop-isolate-in" style={isolateBannerContentStyle}>
                 <IsolateBannerBody label={isolatedLabel} onShowAll={showAll} />
               </div>

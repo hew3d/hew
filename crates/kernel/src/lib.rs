@@ -33,6 +33,7 @@ pub mod material;
 pub mod math;
 pub mod offset;
 pub mod ops;
+pub mod scenes;
 pub mod serialize;
 pub mod sketch;
 pub mod tol;
@@ -72,6 +73,7 @@ pub use ops::{
     FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, FollowMeError,
     Operand, PushPullError, PushPullReport, SliceError, StickyError,
 };
+pub use scenes::{DisplayState, ResolvedScene, Scene, SceneDrift, SceneProps, SectionPlaneState};
 pub use serialize::{
     DecodeError, GEOMETRY_FORMAT_VERSION, ItemSummary, LoadError, MANIFEST_FORMAT_VERSION,
     MaterialSummary, NO_MATERIAL, read_item_asset, read_item_summary,

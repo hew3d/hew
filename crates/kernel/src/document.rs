@@ -62,7 +62,7 @@ use crate::transform::{Transform, TransformError};
 /// A node in the document tree (ARCHITECTURE.md): either a solid Object or a
 /// merge [`Group`](GroupRecord). This is the unit of selection, picking, and
 /// transform — *not* of rendering, which stays flat over leaf objects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum NodeId {
     /// A solid object leaf.
     Object(ObjectId),
@@ -1932,6 +1932,17 @@ pub enum DocumentError {
     UnknownSketch,
     /// The object handle is stale, hidden, or from another Document.
     UnknownObject,
+    /// The Scene stable id names no Scene of this document
+    /// (docs/design/scenes.md §3.1).
+    UnknownScene,
+    /// Another Scene already has this name — names are unique per document
+    /// because the API addresses Scenes by name.
+    DuplicateSceneName,
+    /// A Scene name must be non-empty.
+    EmptySceneName,
+    /// A section plane's normal is not unit length, or a coordinate is not
+    /// finite (docs/design/scenes.md §4) — refused, never normalized.
+    InvalidSectionPlane,
     /// The face handle is not present in the target object ( paint).
     UnknownFace,
     /// The material handle is stale or from another Document's palette.
@@ -2193,6 +2204,12 @@ impl std::fmt::Display for DocumentError {
         match self {
             DocumentError::UnknownSketch => write!(f, "no such sketch in this document"),
             DocumentError::UnknownObject => write!(f, "no such object in this document"),
+            DocumentError::UnknownScene => write!(f, "no such scene in this document"),
+            DocumentError::DuplicateSceneName => write!(f, "a scene with that name already exists"),
+            DocumentError::EmptySceneName => write!(f, "a scene name must not be empty"),
+            DocumentError::InvalidSectionPlane => {
+                write!(f, "section plane normal must be unit length and finite")
+            }
             DocumentError::UnknownFace => write!(f, "no such face in the target object"),
             DocumentError::UnknownMaterial => write!(f, "no such material in this document"),
             DocumentError::UnknownGroup => write!(f, "no such group in this document"),
@@ -2585,6 +2602,14 @@ pub struct Document {
     /// deliberately do NOT read this (design's v1 scope) — they stay
     /// world-aligned.
     axes: AxesFrame,
+    /// Saved views (docs/design/scenes.md §3.1; manifest v16+), in tab
+    /// order. View state outside undo history like `camera`/`tag_meta`/
+    /// `user_hidden_*`; the editing methods live in `scenes.rs`.
+    pub(crate) scenes: Vec<crate::scenes::Scene>,
+    /// The document's one section plane (docs/design/scenes.md §4;
+    /// manifest v16+): non-undoable, persisted view state, captured by value
+    /// into Scenes. `None` when no plane is placed.
+    pub(crate) section_plane: Option<crate::scenes::SectionPlaneState>,
     /// Persistent per-entity **stable ids** (manifest v14+; docs/HEW_API.md
     /// §5.1): the identity that survives save/load, undo/redo, and the
     /// dense-id renumbering every save performs (HEW_FILE_FORMAT.md §4.2).
@@ -2665,7 +2690,7 @@ impl Document {
 
     /// Mints the next stable id. Monotonic for the document's in-memory
     /// lifetime; see the `next_sid` field for why it is never serialized.
-    fn mint_sid(&mut self) -> u64 {
+    pub(crate) fn mint_sid(&mut self) -> u64 {
         let sid = self.next_sid;
         self.next_sid += 1;
         sid
@@ -3187,6 +3212,8 @@ impl Document {
             axes: self.axes,
             sids: self.sids.clone(),
             attrs: self.attrs.clone(),
+            scenes: self.scenes.clone(),
+            section_plane: self.section_plane,
         })
     }
 
@@ -3838,6 +3865,71 @@ impl Document {
 
         // ── Movable drawing axes (manifest v13+; identity for older files) ─
         doc.axes = raw.axes;
+
+        // ── Section plane + Scenes (manifest v16+; docs/design/scenes.md) ─
+        // Decode validated shapes; Scene references are checked against the
+        // sids restored above (a dangling one is a typed error, never
+        // dropped — the WRITER prunes, the reader rejects).
+        doc.section_plane = raw.section_plane;
+        {
+            let node_sids: BTreeSet<u64> = doc
+                .sids
+                .iter()
+                .filter(|(e, _)| {
+                    matches!(
+                        e,
+                        EntityRef::Object(_) | EntityRef::Group(_) | EntityRef::Instance(_)
+                    )
+                })
+                .map(|(_, &s)| s)
+                .collect();
+            let tag_sids: BTreeSet<u64> = doc
+                .sids
+                .iter()
+                .filter(|(e, _)| matches!(e, EntityRef::Tag(_)))
+                .map(|(_, &s)| s)
+                .collect();
+            let mut names: BTreeSet<&str> = BTreeSet::new();
+            let mut scene_sids: BTreeSet<u64> = BTreeSet::new();
+            for scene in &raw.scenes {
+                if !names.insert(scene.name.as_str()) {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!("duplicate scene name '{}'", scene.name),
+                    });
+                }
+                if !scene_sids.insert(scene.sid) || doc.sids.values().any(|&s| s == scene.sid) {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!(
+                            "duplicate stable id {} on scene '{}'",
+                            scene.sid, scene.name
+                        ),
+                    });
+                }
+                if let Some(nodes) = &scene.hidden_nodes {
+                    for s in nodes {
+                        if !node_sids.contains(s) {
+                            return Err(LoadError::DanglingReference {
+                                what: format!("scene '{}' hides unknown node sid {s}", scene.name),
+                            });
+                        }
+                    }
+                }
+                if let Some(tags) = &scene.hidden_tags {
+                    for s in tags {
+                        if !tag_sids.contains(s) {
+                            return Err(LoadError::DanglingReference {
+                                what: format!("scene '{}' hides unknown tag sid {s}", scene.name),
+                            });
+                        }
+                    }
+                }
+            }
+            doc.scenes = raw.scenes;
+            // Scene sids share the entity counter; re-seat it past them too.
+            if let Some(max) = doc.scenes.iter().map(|s| s.sid).max() {
+                doc.next_sid = doc.next_sid.max(max + 1);
+            }
+        }
 
         // Undo/redo stacks are empty by construction (Document::new() gives empty).
         Ok(doc)
@@ -6911,6 +7003,17 @@ impl Document {
             NodeId::Object(id) => self.objects.get(id).filter(|r| !r.hidden)?.group_parent(),
             NodeId::Group(id) => self.groups.get(id).filter(|r| !r.hidden)?.parent,
             NodeId::Instance(id) => self.instances.get(id).filter(|r| !r.hidden)?.parent,
+        }
+    }
+
+    /// Whether `node` is a live (non-tombstoned) node of any kind — world or
+    /// definition-owned. The liveness test Scenes use when resolving stored
+    /// stable ids (`scenes.rs`).
+    pub(crate) fn node_live(&self, node: NodeId) -> bool {
+        match node {
+            NodeId::Object(id) => self.objects.get(id).is_some_and(|r| !r.hidden),
+            NodeId::Group(id) => self.groups.get(id).is_some_and(|r| !r.hidden),
+            NodeId::Instance(id) => self.instances.get(id).is_some_and(|r| !r.hidden),
         }
     }
 

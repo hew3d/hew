@@ -88,6 +88,8 @@ export interface MenuBarProps {
   showMaterials?: boolean
   /** Whether the Tags pane is visible. */
   showTags?: boolean
+  /** Whether the Scenes pane is visible (docs/design/scenes.md §5). */
+  showScenes?: boolean
   /** Whether the Object Info pane is visible. */
   showObjectInfo?: boolean
   /** Whether the Debug Log panel is visible. */
@@ -100,6 +102,8 @@ export interface MenuBarProps {
   onToggleMaterials?: () => void
   /** Toggle the Tags pane. */
   onToggleTags?: () => void
+  /** Toggle the Scenes pane. */
+  onToggleScenes?: () => void
   /** Toggle the Object Info pane. */
   onToggleObjectInfo?: () => void
   /** Toggle the Debug Log panel. */
@@ -163,6 +167,22 @@ export interface MenuBarProps {
   }
   /** Zoom the camera to fit all scene geometry (View → Zoom Extents). */
   onZoomExtents?: () => void
+  /** View ▸ Scenes ▸ Add Scene (docs/design/scenes.md §5). */
+  onScenesAdd?: () => void
+  /** View ▸ Scenes ▸ Update Scene — re-captures the active Scene's checked
+   *  properties. Greyed out (`sceneUpdateEnabled`) with none active. */
+  onScenesUpdate?: () => void
+  sceneUpdateEnabled?: boolean
+  /** View ▸ Scenes ▸ Next/Previous Scene (Page Down/Up's menu mirror). */
+  onScenesNext?: () => void
+  onScenesPrevious?: () => void
+  /** Greys Next/Previous out when the document has no Scenes at all. */
+  scenesNavEnabled?: boolean
+  /** View ▸ Scenes ▸ Scene Transitions checkmark — a SPEC.md deviation: the
+   *  design put this toggle in Settings; it lives here instead, at a fixed
+   *  0.6s (`settings/sceneTransitions.ts`'s own doc comment on why). */
+  sceneTransitionsChecked?: boolean
+  onToggleSceneTransitions?: () => void
   /** Open the "3D Text…" dialog (Draw → 3D Text…, docs/design/3d-text.md). */
   onDrawText?: () => void
   /** Reposition the camera to a standard view (Camera → Standard Views). */
@@ -499,12 +519,14 @@ export function MenuBar({
   showModelInfo = true,
   showMaterials = true,
   showTags = false,
+  showScenes = false,
   showObjectInfo = false,
   showDebugLog = false,
   showLibrary = false,
   onToggleModelInfo,
   onToggleMaterials,
   onToggleTags,
+  onToggleScenes,
   onToggleObjectInfo,
   onToggleDebugLog,
   onToggleLibrary,
@@ -524,6 +546,14 @@ export function MenuBar({
   editGates,
   onZoomExtents,
   onDrawText,
+  onScenesAdd,
+  onScenesUpdate,
+  sceneUpdateEnabled = false,
+  onScenesNext,
+  onScenesPrevious,
+  scenesNavEnabled = false,
+  sceneTransitionsChecked = true,
+  onToggleSceneTransitions,
   onStandardView,
   parallelProjectionChecked = false,
   onToggleParallelProjection,
@@ -778,6 +808,34 @@ export function MenuBar({
               disabled={!sectionPlaneExists}
               onClick={withClose(() => onToggleSectionActive?.())}
             />
+            <div style={SEPARATOR_STYLE} />
+            <SubMenu label="Scenes">
+              <MenuItem label="Add Scene" onClick={withClose(() => onScenesAdd?.())} />
+              <MenuItem
+                label="Update Scene"
+                disabled={!sceneUpdateEnabled}
+                onClick={withClose(() => onScenesUpdate?.())}
+              />
+              <div style={SEPARATOR_STYLE} />
+              <MenuItem
+                label="Next Scene"
+                shortcut="Page Down"
+                disabled={!scenesNavEnabled}
+                onClick={withClose(() => onScenesNext?.())}
+              />
+              <MenuItem
+                label="Previous Scene"
+                shortcut="Page Up"
+                disabled={!scenesNavEnabled}
+                onClick={withClose(() => onScenesPrevious?.())}
+              />
+              <div style={SEPARATOR_STYLE} />
+              <CheckMenuItem
+                label="Scene Transitions"
+                checked={sceneTransitionsChecked}
+                onClick={withClose(() => onToggleSceneTransitions?.())}
+              />
+            </SubMenu>
           </div>
         )}
       </div>
@@ -1031,6 +1089,11 @@ export function MenuBar({
               shortcut={`⇧${mod}T`}
               checked={showTags}
               onClick={withClose(() => onToggleTags?.())}
+            />
+            <CheckMenuItem
+              label="Scenes"
+              checked={showScenes}
+              onClick={withClose(() => onToggleScenes?.())}
             />
             <CheckMenuItem
               label="Object Info"

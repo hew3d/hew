@@ -676,6 +676,124 @@ export interface QuerySceneResult {
 }
 
 /**
+ * `hew.scenes.add` (v1) — Add a Scene capturing the document's current view state. Records no undo entry (§6.4).
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: duplicate_scene_name, empty_scene_name, unknown_scene
+ */
+export interface ScenesAddParams {
+  /** insert after this Scene's id; appended at the end when omitted */
+  after?: string
+  /** an explicit camera to capture — no named-view shorthand, a Scene captures a concrete eye/target, not a fitted view; when omitted and the camera property is captured, falls back to the document's own saved working camera */
+  camera?: { eye: [number, number, number]; fov_deg?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
+  description?: string
+  /** opaque editor display toggles: stored and returned, never interpreted by the kernel */
+  display?: { axes: boolean; grid: boolean; guides: boolean }
+  /** must be non-empty and unused; auto-named "Scene N" when omitted */
+  name?: string
+  /** which of the five capturable properties to (re-)capture; each defaults to true */
+  properties?: { camera?: boolean; display?: boolean; hidden_nodes?: boolean; hidden_tags?: boolean; section?: boolean }
+}
+
+export interface ScenesAddResult {
+  id: string
+  name: string
+  sid: number
+}
+
+/**
+ * `hew.scenes.apply` (v1) — Apply a Scene: write its captured camera/hidden-set/section state into the document. Records no undo entry (§6.4).
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_scene
+ */
+export interface ScenesApplyParams {
+  id: string
+}
+
+export interface ScenesApplyResult {
+  camera?: { eye: [number, number, number]; fov_deg: number; projection: "perspective" | "parallel"; target: [number, number, number]; up: [number, number, number] }
+  hidden_instance_ids?: string[]
+  hidden_object_ids?: string[]
+  /** null means captured-but-no-plane-placed */
+  section?: null | { active: boolean; normal: [number, number, number]; origin: [number, number, number] }
+}
+
+/**
+ * `hew.scenes.describe` (v1) — Set a Scene's free-text description. Records no undo entry (§6.4).
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_scene
+ */
+export interface ScenesDescribeParams {
+  description: string
+  id: string
+}
+
+export interface ScenesDescribeResult {}
+
+/**
+ * `hew.scenes.list` (v1) — Every Scene, in tab order.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: none.
+ */
+export interface ScenesListParams {}
+
+export interface ScenesListResult {
+  scenes: ({ camera?: { eye: [number, number, number]; fov_deg: number; projection: "perspective" | "parallel"; target: [number, number, number]; up: [number, number, number] }; description: string; display?: { axes: boolean; grid: boolean; guides: boolean }; id: string; name: string; props: { camera: boolean; display: boolean; hidden_nodes: boolean; hidden_tags: boolean; section: boolean }; section?: null | { active: boolean; normal: [number, number, number]; origin: [number, number, number] }; sid: number })[]
+}
+
+/**
+ * `hew.scenes.remove` (v1) — Delete a Scene. Records no undo entry (§6.4).
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_scene
+ */
+export interface ScenesRemoveParams {
+  id: string
+}
+
+export interface ScenesRemoveResult {}
+
+/**
+ * `hew.scenes.rename` (v1) — Rename a Scene. Records no undo entry (§6.4).
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_scene, duplicate_scene_name, empty_scene_name
+ */
+export interface ScenesRenameParams {
+  id: string
+  name: string
+}
+
+export interface ScenesRenameResult {}
+
+/**
+ * `hew.scenes.reorder` (v1) — Move a Scene to a new position in tab order. Records no undo entry (§6.4).
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_scene
+ */
+export interface ScenesReorderParams {
+  id: string
+  /** tab-order position; clamped to the end for an out-of-range index, never refused */
+  index: number
+}
+
+export interface ScenesReorderResult {}
+
+/**
+ * `hew.scenes.update` (v1) — Re-capture a Scene's properties from the document's current state. Records no undo entry (§6.4).
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_scene
+ */
+export interface ScenesUpdateParams {
+  /** an explicit camera to capture — no named-view shorthand, a Scene captures a concrete eye/target, not a fitted view; when omitted and the camera property is captured, falls back to the document's own saved working camera */
+  camera?: { eye: [number, number, number]; fov_deg?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
+  /** opaque editor display toggles: stored and returned, never interpreted by the kernel */
+  display?: { axes: boolean; grid: boolean; guides: boolean }
+  id: string
+  /** which of the five capturable properties to (re-)capture; each defaults to true */
+  properties?: { camera?: boolean; display?: boolean; hidden_nodes?: boolean; hidden_tags?: boolean; section?: boolean }
+}
+
+export interface ScenesUpdateResult {}
+
+/**
  * `hew.sketch.draw_arc` (v1) — Draw an arc on a plane spec.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, segments_above_cap, unknown_entity, locator_missed, ambiguous_locator, path_too_short, endpoint_not_on_boundary, path_not_simple, loop_not_strictly_inside, loop_self_intersects, curve_claim_off_loop, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
@@ -950,7 +1068,7 @@ export interface ViewCameraResult {}
 /**
  * `hew.view.snapshot` (v1) — Render the attached document to PNG, headless-rendered via a software rasterizer (a live host may render through its viewport instead) — bytes base64 by default, or a path on hosts with filesystem access.
  * Tier: Standard · Class: solitary · Served: host
- * Refusals: host_capability_missing, nothing_to_render, save_failed
+ * Refusals: host_capability_missing, nothing_to_render, save_failed, unknown_scene
  */
 export interface ViewSnapshotParams {
   /** mutually exclusive with view */
@@ -961,7 +1079,9 @@ export interface ViewSnapshotParams {
   include_ids?: boolean
   /** when given, the PNG is written here instead of returned inline, honored by hosts with filesystem access and refused typed elsewhere (mirrors hew.doc.export) */
   path?: string
-  /** a named standard view fitted to the scene bounding box; mutually exclusive with camera */
+  /** a Scene's id: renders through its resolved camera and hidden sets (Document::resolve_scene) instead of the document's own — falls back to the usual cameraless resolution when the Scene captures no camera. Mutually exclusive with camera and view. The Scene's section plane, if any, is NOT rendered headlessly at 1.0. */
+  scene?: string
+  /** a named standard view fitted to the scene bounding box; mutually exclusive with camera and scene */
   view?: "iso" | "front" | "back" | "left" | "right" | "top" | "bottom"
   /** defaults to 512; out-of-range values are clamped, not refused */
   width?: number
@@ -1109,6 +1229,17 @@ export class HewApiClient {
     raycast: (params: QueryRaycastParams): Promise<QueryRaycastResult> => this.call('hew.query.raycast', params),
     resolve: (params: QueryResolveParams): Promise<QueryResolveResult> => this.call('hew.query.resolve', params),
     scene: (params: QuerySceneParams): Promise<QuerySceneResult> => this.call('hew.query.scene', params),
+  }
+
+  readonly scenes = {
+    add: (params: ScenesAddParams): Promise<ScenesAddResult> => this.mutate('hew.scenes.add', params),
+    apply: (params: ScenesApplyParams): Promise<ScenesApplyResult> => this.mutate('hew.scenes.apply', params),
+    describe: (params: ScenesDescribeParams): Promise<ScenesDescribeResult> => this.mutate('hew.scenes.describe', params),
+    list: (params: ScenesListParams): Promise<ScenesListResult> => this.call('hew.scenes.list', params),
+    remove: (params: ScenesRemoveParams): Promise<ScenesRemoveResult> => this.mutate('hew.scenes.remove', params),
+    rename: (params: ScenesRenameParams): Promise<ScenesRenameResult> => this.mutate('hew.scenes.rename', params),
+    reorder: (params: ScenesReorderParams): Promise<ScenesReorderResult> => this.mutate('hew.scenes.reorder', params),
+    update: (params: ScenesUpdateParams): Promise<ScenesUpdateResult> => this.mutate('hew.scenes.update', params),
   }
 
   readonly sketch = {

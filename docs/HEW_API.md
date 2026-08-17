@@ -33,10 +33,14 @@
 > `app/src/settings/units.ts`'s own setter — the same code paths the
 > Camera menu and Settings window already use. So `--live` today is real
 > for the kernel-served command surface (sketch/solid/structure/entity/
-> style/attrs/history — the bulk of the protocol), for `save`/`export`,
-> for these three view/display effects, and honestly refuses the
-> remaining host-effect commands that need filesystem or rendering access
-> this sandbox does not have. Sections marked *Reserved* remain
+> style/attrs/history/scenes — the bulk of the protocol), for
+> `save`/`export`, for these three view/display effects, and honestly
+> refuses the remaining host-effect commands that need filesystem or
+> rendering access this sandbox does not have. `hew.scenes.apply`
+> additionally leaves a `ViewDirective::ActivateScene` for the live
+> bridge (§7.1) — real on the Rust/WASM side, though the app-side
+> `LiveBridgeDeps.activateScene` hookup that would actually drive the
+> UI from it is not yet wired. Sections marked *Reserved* remain
 > deliberately unbuilt; per-command gaps are declared in the registry and
 > answer typed refusals.
 
@@ -349,6 +353,17 @@ keep the derived, identity-stable semantics the kernel maintains for
 them (ARCHITECTURE.md §2.6), stable within an open document session;
 clients re-resolve them after open or attach.
 
+**Scenes are not entities.** A Scene (§7.1) carries a kernel stable id
+minted from the same shared counter as every entity's, but it is not an
+`EntityRef`: it never appears in `hew.query.scene`'s tree, carries no
+attribute dictionaries (§8), and is addressed by its own list
+(`hew.scenes.list`), not by locators. Its public id is therefore its own
+top-level shape, `"scene_<hex>"` — the hex of its stable id, exactly like
+`public_id`'s entity prefixes (`obj_`, `skt_`, …) but minted by a
+dedicated helper rather than that function, since there is no
+`EntityRef::Scene` to hand it. It parses back to the stable id the same
+way: opaque to clients, not to be constructed or decoded by hand.
+
 ### 5.2 Faces and edges: solid geometry by locator, sketch edges by id
 
 Faces and edges of a **solid** deliberately have **no persistent public
@@ -642,6 +657,7 @@ for, not shipped.
 | `hew.material` | `create` (color or texture), `paint`, `set_default`, `set_opacity` | Standard |
 | `hew.tag` | `create`, `assign`, `set_visible`, `delete` | Standard |
 | `hew.guide` | `line`, `point`, `angular`, `clear` | Standard |
+| `hew.scenes` | `list`, `add`, `update`, `rename`, `describe`, `remove`, `reorder`, `apply` (§7.1) | Standard |
 | `hew.attr` | `get`, `set`, `delete` (§8) | Required |
 | `hew.history` | `undo`, `redo`, `status` (depth; top entry's label and origin) | Required |
 | `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format) | Standard (`core` grants `snapshot` specifically; `camera`/`zoom_extents`/`units` stay `app`-only — live-host-only effects) |
@@ -719,11 +735,13 @@ Semantics notes, normative:
   true and seeing what it built. A headless host renders it through a
   deterministic software rasterizer (no GPU, no viewport, bytes in and
   bytes out); a live host may render through its actual viewport instead
-  — either way the command takes an explicit camera or a named standard
-  view (`camera` and `view` mutually exclusive; giving neither renders the
-  document's saved working camera if it has one, else a fitted isometric
-  view) and returns PNG bytes base64-encoded by default, or writes them
-  to an explicit `path` instead (below). `include_ids: true` also
+  — either way the command takes an explicit camera, a named standard
+  view, or a Scene's id (`camera`, `view`, and `scene` mutually
+  exclusive; giving none of the three renders the document's saved
+  working camera if it has one, else a fitted isometric view — §7.1's
+  `scene` renders through that Scene's OWN resolved camera and hidden
+  sets instead) and returns PNG bytes base64-encoded by default, or
+  writes them to an explicit `path` instead (below). `include_ids: true` also
   returns a per-pixel id-buffer (`u16` little-endian, 0 = background) and
   the palette of public ids it indexes, so a caller can ask "what object
   is at pixel (x, y)" machine-readably.
@@ -792,6 +810,97 @@ Semantics notes, normative:
   direct storage write), so the desktop app's separate Settings window
   stays in sync via the existing cross-window broadcast; a headless host
   has no display preference to set and refuses `host_capability_missing`.
+
+### 7.1 Scenes
+
+A **Scene** is a named, saved view of the document: the camera, the
+hidden-object set, the hidden-tag set, the section plane, and the
+editor's display toggles, captured and restored together in one step —
+SketchUp's Scenes/Pages idiom (`crates/kernel/src/scenes.rs`,
+docs/design/scenes.md §3, §7). `hew.scenes.*` is the API surface over the
+kernel's own Scene document: `list` (every Scene, in tab order), `add`
+(capture a new one), `update` (re-capture an existing one's properties
+from the document's current state), `rename`, `describe` (free-text
+notes), `remove`, `reorder` (move within tab order), and `apply` (write a
+Scene's captured state back into the document).
+
+**View state, not modeled geometry — but still `mutates_document`.**
+Every command here but `list` is `ModelMutating` (may ride a transaction)
+and the registry marks `mutates_document = true`, so a host still
+re-renders and re-syncs after one — but NONE of it is undoable: the
+kernel calls behind these commands never record a kernel op
+(`crates/kernel/src/scenes.rs`'s own module doc: "Everything here is view
+state, outside undo history"), so a transaction's compound entry commits
+empty and no undo entry lands, exactly like `hew.tag.create`/
+`set_visible` (§6.4's registry-state carve-out). `hew.scenes.apply`
+additionally is not a *dirtying* change (view activation, not an edit) —
+`add`/`update`/`rename`/`describe`/`remove`/`reorder` are, in the sense
+that a lost Scene is a lost hour of work even though it costs no undo
+step.
+
+**A Scene's `properties` decide what to (re-)capture — but the reported
+`props` on `list`/`add`/`update` say what was ACTUALLY captured, not
+merely what was requested.** `hew.scenes.add`'s `properties` (each of
+`camera`, `hidden_nodes`, `hidden_tags`, `section`, `display`) defaults
+to `true` for all five; `hew.scenes.update`'s defaults to whatever the
+Scene already captures (re-capture, never silently widen). `camera` and
+`display` are captured only when there is something to capture: an
+explicit `camera` param, or — when none was given and the property is
+requested — the document's own saved working camera
+(`hew.view.snapshot`'s cameraless-path fallback); a brand-new document
+with no working camera and no explicit `camera` param therefore reports
+`props.camera: false` even though `properties.camera` defaulted to
+`true`. `hidden_nodes`, `hidden_tags`, and `section` always capture
+something when requested — an empty set, or a captured-but-no-plane
+`section: null` — so those three stay `true` whenever asked for. This
+mirrors the kernel's own `Scene::props()`, which is literally "which
+fields are `Some`," not a separately stored intent.
+
+**Hidden sets are FULL sets, not deltas.** A captured `hidden_nodes`/
+`hidden_tags` set names everything hidden AT CAPTURE TIME; anything
+absent is visible, including geometry created after the Scene was saved.
+Applying an old Scene never resurrects hidden state for objects it never
+knew about.
+
+**Public id shape.** Scenes are not entities (§5.1) — their public id is
+`"scene_<hex>"`, not one of `public_id`'s entity prefixes.
+
+**`hew.scenes.apply`** writes the Scene's captured kernel-side state —
+the hidden-tag registry flags, the user-hidden node set, the section
+plane — into the document (`Document::apply_scene`), and returns what
+changed: `camera` (present only if captured), `section` (present,
+possibly `null`, only if captured), and `hidden_object_ids`/
+`hidden_instance_ids` (public ids, present as a pair only when
+`hidden_nodes` or `hidden_tags` is captured — possibly empty arrays —
+and OMITTED entirely, not empty-arrayed, when neither is, so a
+camera-only Scene can never read as "show everything" and silently
+un-hide what the user currently has hidden). After the kernel write, it
+also notifies the host (`Host::scene_applied`) — a best-effort signal, not
+a second veto point: the document mutation already happened whether or
+not any host acts on it. A live host (`crates/wasm-api`'s `LiveHost`)
+records a `ViewDirective::ActivateScene { sid }` the same way
+`hew.view.camera`'s effect rides the live bridge (§7's `hew.view.camera`
+note) — `app/src/api/liveBridge.ts` hands the sid to the app's own
+Scene-activation logic (camera tween, panel/outliner sync) rather than
+recomputing it from raw numbers; a headless host (`NoHost`, `hew-cli`'s
+`CliHost`) has nothing further to do and no-ops successfully.
+
+**`hew.view.snapshot`'s `scene` param** (§7) renders through a Scene's
+own resolved state instead of the document's live one: its captured
+camera when it has one (else the usual cameraless fallback — the
+document's saved working camera, else a fitted isometric view, fitted to
+what the SCENE leaves visible, not the whole document), and its resolved
+hidden object/instance sets in place of the document's own live hidden
+state. Mutually exclusive with `camera` and `view`. The Scene's section
+plane, if any, is NOT rendered headlessly at 1.0 — clipping is a
+viewport-renderer feature `crates/softrender`'s software rasterizer does
+not implement yet; a snapshot through a Scene with an active section
+plane still renders, unclipped.
+
+Refusals: `unknown_scene` (a malformed or since-deleted Scene id, on any
+command that takes one, including `hew.view.snapshot`'s `scene`),
+`duplicate_scene_name`/`empty_scene_name` (`add`/`rename`'s naming
+rules, mirroring the kernel's own `check_scene_name`).
 
 ## 8. Attribute dictionaries
 

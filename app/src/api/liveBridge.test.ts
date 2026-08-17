@@ -477,6 +477,50 @@ describe('installLiveBridge', () => {
       }
     })
   })
+
+  // hew.scenes.apply: unlike hew.view.*, this is a KERNEL-served,
+  // mutates_document = true command — it already refreshes the viewport
+  // through the normal mutation path above. The ActivateScene directive
+  // is a SEPARATE, additive signal so the app can drive its own
+  // Scene-activation UI (camera tween, panel/outliner sync) once
+  // `LiveBridgeDeps.activateScene` is wired (TODO(scenes.activate /
+  // useScenesController) — see that dep's own doc comment in liveBridge.ts).
+  describe('hew.scenes.apply directive', () => {
+    it('calls deps.activateScene with the Scene sid', async () => {
+      const activateScene = vi.fn()
+      deps.activateScene = activateScene
+      installLiveBridge(deps)
+      await flush()
+      fire('hew://api-connection-open', { connId: 3 })
+      scene.api_dispatch.mockReturnValue('{"jsonrpc":"2.0","id":2,"result":{}}')
+      scene.take_pending_view_directive.mockReturnValue(
+        JSON.stringify({ kind: 'activate_scene', sid: 7 }),
+      )
+      fire('hew://api-frame', {
+        connId: 3,
+        frame: '{"jsonrpc":"2.0","id":2,"method":"hew.scenes.apply","params":{"id":"scene_7"}}',
+      })
+      expect(activateScene).toHaveBeenCalledWith(7)
+      // Never a viewport call — activation is not a camera directive.
+      expect(viewportApi.setCamera).not.toHaveBeenCalled()
+    })
+
+    it('is a silent no-op when activateScene is not wired', async () => {
+      installLiveBridge(deps)
+      await flush()
+      fire('hew://api-connection-open', { connId: 3 })
+      scene.api_dispatch.mockReturnValue('{"jsonrpc":"2.0","id":2,"result":{}}')
+      scene.take_pending_view_directive.mockReturnValue(
+        JSON.stringify({ kind: 'activate_scene', sid: 7 }),
+      )
+      expect(() =>
+        fire('hew://api-frame', {
+          connId: 3,
+          frame: '{"jsonrpc":"2.0","id":2,"method":"hew.scenes.apply","params":{"id":"scene_7"}}',
+        }),
+      ).not.toThrow()
+    })
+  })
 })
 
 describe('shouldRefreshAfterDispatch', () => {

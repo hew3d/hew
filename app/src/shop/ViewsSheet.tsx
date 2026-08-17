@@ -15,10 +15,18 @@
  * shape), not a one-shot pick, so tapping it toggles WITHOUT closing the
  * sheet — the user may want to compare a view under both projections before
  * dismissing.
+ *
+ * SPEC.md §2 "Scenes in the Views sheet": a "SCENES" section, FIRST, above
+ * the standard views — only when the document has any (an additive prop
+ * set, `scenes`/`activeSid`/`drifted`/`onSelectScene`, all optional so
+ * every pre-existing caller/test that never heard of Scenes keeps working
+ * unchanged). Rows act-and-close exactly like the standard-view rows below
+ * them; no thumbnails (SPEC.md §2 "No thumbnails").
  */
 import type { StandardView } from '../viewport/Viewport'
 import type { Projection } from '../viewport/cameraRig'
 import type { ShopOrientation } from './orientation'
+import type { SceneEntry } from '../scenes/scenesModel'
 
 export interface ViewsSheetProps {
   open: boolean
@@ -33,6 +41,18 @@ export interface ViewsSheetProps {
    *  component never reads the viewport api directly. */
   projection: Projection
   onToggleProjection: () => void
+  /** The document's Scenes, in tab order (SPEC.md §2) — the "SCENES"
+   *  section renders only when this is non-empty. Omitted/empty for a
+   *  document with none, so every existing caller is unaffected. */
+  scenes?: SceneEntry[]
+  /** The active Scene's sid, or `null`/absent when none is active — drives
+   *  which row's state dot renders filled. */
+  activeSid?: number | null
+  /** Whether the ACTIVE Scene has drifted — the active row's dot renders as
+   *  a ring instead of a filled dot (SPEC.md §2, mirroring the pill). */
+  drifted?: boolean
+  /** A Scene row's tap (act-and-close, same as a standard-view row). */
+  onSelectScene?: (sid: number) => void
 }
 
 /** The seven standard views (design task's own list) in the order they're
@@ -53,7 +73,18 @@ const PROJECTION_SEGMENTS: { value: Projection; label: string }[] = [
   { value: 'parallel', label: 'Parallel' },
 ]
 
-export function ViewsSheet({ open, orientation, onClose, onSelectView, projection, onToggleProjection }: ViewsSheetProps) {
+export function ViewsSheet({
+  open,
+  orientation,
+  onClose,
+  onSelectView,
+  projection,
+  onToggleProjection,
+  scenes = [],
+  activeSid = null,
+  drifted = false,
+  onSelectScene,
+}: ViewsSheetProps) {
   if (!open) return null
 
   const isLandscape = orientation === 'landscape'
@@ -95,6 +126,65 @@ export function ViewsSheet({ open, orientation, onClose, onSelectView, projectio
         <div style={{ padding: '0 10px 6px' }}>
           <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '18px', fontWeight: 600, color: 'var(--shop-text)' }}>Views</span>
         </div>
+
+        {scenes.length > 0 && (
+          <div style={{ padding: '4px 10px 6px', borderBottom: '1px solid var(--shop-hairline-2)', marginBottom: '4px' }}>
+            <span
+              style={{
+                display: 'block', padding: '0 4px 4px', fontFamily: 'var(--font-family-ui)', fontSize: '12px',
+                fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--shop-text-muted)',
+              }}
+            >
+              Scenes
+            </span>
+            {scenes.map((entry) => {
+              const active = entry.sid === activeSid
+              const rowDrifted = active && drifted
+              return (
+                <button
+                  key={entry.sid}
+                  type="button"
+                  onClick={() => { onSelectScene?.(entry.sid); onClose() }}
+                  style={{
+                    display: 'flex', alignItems: 'flex-start', width: '100%', minHeight: '54px', padding: '12px 4px',
+                    gap: '10px', borderRadius: '13px', cursor: 'pointer', textAlign: 'left',
+                    background: 'transparent', border: 'none',
+                  }}
+                >
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      flexShrink: 0, width: '20px', height: '54px', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}
+                  >
+                    <svg width="8" height="8" viewBox="0 0 8 8">
+                      {rowDrifted ? (
+                        <circle cx="4" cy="4" r="3.25" fill="none" stroke="var(--shop-accent)" strokeWidth="1.5" />
+                      ) : (
+                        <circle cx="4" cy="4" r="4" fill={active ? 'var(--shop-accent)' : 'transparent'} />
+                      )}
+                    </svg>
+                  </span>
+                  <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                    <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '16px', fontWeight: 600, color: 'var(--shop-text)' }}>
+                      {entry.name}
+                    </span>
+                    {entry.description !== '' && (
+                      <span
+                        style={{
+                          fontFamily: 'var(--font-family-ui)', fontSize: '13px', color: 'var(--shop-text-muted)',
+                          display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+                        }}
+                      >
+                        {entry.description}
+                      </span>
+                    )}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+        )}
 
         {STANDARD_VIEWS.map(({ view, label }) => (
           <button

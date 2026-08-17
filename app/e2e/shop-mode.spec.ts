@@ -1552,6 +1552,105 @@ test.describe('Tape Measure loupe', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Scenes (docs/design/scenes.md §6, SPEC.md §2) — the pill, the Views
+// sheet's SCENES section, chevron cycling, and the SAME read-only contract
+// (bounds unchanged, sessionDepth 0) the CONTRACT tests above already prove
+// for the rest of Shop Mode, now proven to hold across a Scene activation
+// too. Fixture built through the EDITOR harness's `addScene` (`harness.ts`)
+// — captures the CURRENT (pinned) camera under the full property bitmask.
+// ---------------------------------------------------------------------------
+
+/** Two boxes, two Scenes ("Cut layout" then "Tenon section"), camera pinned
+ *  before each capture — the editor harness's `addScene` reads whatever the
+ *  viewport's CURRENT camera is (mirrors `useScenesController.ts`'s own
+ *  `add`), so this fixture pins a DIFFERENT camera per Scene rather than
+ *  capturing the same pose twice, which would make an activation's own
+ *  camera tween unobservable. Returns the saved bytes and Object 1's own
+ *  kernel id, for the read-only-contract bounds check below. */
+async function buildSceneFixture(page: Page): Promise<{ bytes: number[]; objectId: string }> {
+  await page.addInitScript(() => localStorage.setItem('hew:shellMode', 'editor'))
+  await page.goto('/')
+  await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, { timeout: 15_000 })
+  return page.evaluate(() => {
+    const h = window.__hew_test!
+    const objectId = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    h.setCamera({ position: [8, 6, 8], target: [0, 0, 0], up: [0, 0, 1], fovDeg: 45 })
+    h.addScene('Cut layout')
+    h.setCamera({ position: [-8, 6, 8], target: [0, 0, 0], up: [0, 0, 1], fovDeg: 35 })
+    h.addScene('Tenon section')
+    return { bytes: h.save(), objectId }
+  })
+}
+
+test('Scenes: the Views sheet lists them, activating shows the pill and tweens the camera, chevrons cycle with wrap, and the read-only contract still holds', async ({ page }) => {
+  const { bytes, objectId } = await buildSceneFixture(page)
+  await bootShopModeWith(page, bytes)
+
+  const boundsBefore = await page.evaluate((id) => window.__hew_shop_test!.getObjectBounds(id), objectId)
+
+  // A document with Scenes opens on its FIRST Scene (playtest round 1,
+  // matching the desktop): the pill is already up naming "Cut layout" and
+  // the camera sits at that Scene's pinned pose — instantly, no tween.
+  const pill = page.getByTestId('scene-pill')
+  await expect(pill).toBeVisible()
+  await expect(pill).toContainText('Cut layout')
+  await expect(async () => {
+    const cam = await page.evaluate(() => window.__hew_shop_test!.getCameraPose())
+    expect(cam.position[0]).toBeCloseTo(8, 1)
+    expect(cam.position[1]).toBeCloseTo(6, 1)
+    expect(cam.position[2]).toBeCloseTo(8, 1)
+  }).toPass({ timeout: 2000 })
+  const cameraBefore = await page.evaluate(() => window.__hew_shop_test!.getCameraPose())
+
+  // The Views sheet's SCENES section lists both, above the standard views.
+  await page.getByRole('button', { name: /^views$/i }).click()
+  const dialog = page.getByRole('dialog', { name: 'Views' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByText('Cut layout')).toBeVisible()
+  await expect(dialog.getByText('Tenon section')).toBeVisible()
+
+  // Activating "Tenon section" act-and-closes the sheet, the pill follows,
+  // and the camera tweens away from the first Scene's pose.
+  await dialog.getByText('Tenon section').click()
+  await expect(dialog).not.toBeVisible()
+  await expect(pill).toContainText('Tenon section')
+  await expect(async () => {
+    const cam = await page.evaluate(() => window.__hew_shop_test!.getCameraPose())
+    expect(Math.hypot(cam.position[0] - 8, cam.position[1] - 6, cam.position[2] - 8)).toBeGreaterThan(0.5)
+  }).toPass({ timeout: 2000 })
+
+  // Chevrons cycle with wrap (SPEC.md §2 "Active-Scene pill").
+  await page.getByRole('button', { name: 'Next Scene' }).click() // wraps back
+  await expect(pill).toContainText('Cut layout')
+  await page.getByRole('button', { name: 'Next Scene' }).click()
+  await expect(pill).toContainText('Tenon section')
+  await page.getByRole('button', { name: 'Previous Scene' }).click()
+  await expect(pill).toContainText('Cut layout')
+
+  // Tapping the pill's own name reopens the Views sheet; tapping a row
+  // there activates too (not just the chevrons).
+  await pill.getByText('Cut layout').click()
+  await expect(dialog).toBeVisible()
+  await dialog.getByText('Tenon section').click()
+  await expect(dialog).not.toBeVisible()
+  await expect(pill).toContainText('Tenon section')
+
+  // CONTRACT (same proof technique as the CONTRACT tests above): Shop Mode
+  // issues zero kernel transactions, so a Scene activation — a renderer/
+  // camera-only affair (`resolve_scene`, never `apply_scene`) — must not
+  // have moved the object or opened a session, even though the CAMERA
+  // itself legitimately changed.
+  const boundsAfter = await page.evaluate((id) => window.__hew_shop_test!.getObjectBounds(id), objectId)
+  expect(boundsAfter).toEqual(boundsBefore)
+  expect(await page.evaluate(() => window.__hew_shop_test!.sessionDepth())).toBe(0)
+
+  // The camera itself DID change (proof this was a real activation, not a
+  // no-op) — contrasted against the pre-activation pose captured above.
+  const cameraAfter = await page.evaluate(() => window.__hew_shop_test!.getCameraPose())
+  expect(cameraAfter).not.toEqual(cameraBefore)
+})
+
+// ---------------------------------------------------------------------------
 // Landscape (design_handoff_shop_mode/README.md §5, corrected by Kurt's
 // on-device playtest — item 8): the right rail keeps its own composition,
 // but the old left-edge side sheet (tab <-> 340px panel) is gone entirely.

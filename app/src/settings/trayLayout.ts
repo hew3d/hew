@@ -31,18 +31,20 @@ export interface TrayLayout {
   objectInfo: boolean
   materials: boolean
   tags: boolean
+  scenes: boolean
 }
 
 const STORAGE_KEY = 'hew.settings.trayLayout'
 
-const KEYS = ['modelInfo', 'objectInfo', 'materials', 'tags'] as const
+const KEYS = ['modelInfo', 'objectInfo', 'materials', 'tags', 'scenes'] as const
 
-/**  defaults: Object Info + Outliner open, Materials + Tags collapsed. */
+/**  defaults: Object Info + Outliner + Scenes open, Materials + Tags collapsed. */
 export const DEFAULT_TRAY_LAYOUT: TrayLayout = {
   modelInfo: true,
   objectInfo: true,
   materials: false,
   tags: false,
+  scenes: true,
 }
 
 /** Parse a persisted/broadcast value. Unknown shapes return null; individual

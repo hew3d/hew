@@ -50,6 +50,26 @@ impl RawCamera {
     }
 }
 
+/// Converts a validated explicit camera into the kernel's own
+/// `CameraState`, resolving the same defaults every other consumer of
+/// this vocabulary does (identity up `[0,0,1]`, perspective, 35°) —
+/// `hew.scenes.add`/`update`'s path, which captures a camera into
+/// document state rather than rendering it or moving a live viewport.
+pub(crate) fn to_kernel_camera(cam: &SnapshotCamera) -> kernel::CameraState {
+    let up = cam.up.unwrap_or([0.0, 0.0, 1.0]);
+    let projection = match cam.projection.unwrap_or(SnapshotProjection::Perspective) {
+        SnapshotProjection::Perspective => kernel::CameraProjection::Perspective,
+        SnapshotProjection::Parallel => kernel::CameraProjection::Parallel,
+    };
+    kernel::CameraState {
+        projection,
+        fov_deg: cam.fov_deg.unwrap_or(35.0),
+        eye: kernel::Point3::new(cam.eye[0], cam.eye[1], cam.eye[2]),
+        target: kernel::Point3::new(cam.target[0], cam.target[1], cam.target[2]),
+        up: kernel::Vec3::new(up[0], up[1], up[2]),
+    }
+}
+
 /// Validates the shared `camera`/`view` vocabulary: mutually exclusive, an
 /// unknown standard-view name refused, an unknown camera projection
 /// refused. Used by both `hew.view.snapshot` and `hew.view.camera` so

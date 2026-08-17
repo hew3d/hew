@@ -69,11 +69,12 @@ None of this does anything under Parallel Projection — a parallel view has no 
 - **View ▸ Guides** shows or hides all construction guides (see [Precision, measurement, and guides](/learn/measurement-and-guides/)). Hidden guides also stop participating in snapping.
 - **View ▸ Section Plane** turns a placed section's cut on or off (below); unlike the other three, it's greyed out until you've placed one.
 - The **Outliner** and **Tags** panels have per-object and per-tag visibility toggles ([Organizing your model](/learn/organizing/)).
+- **Scenes** save a whole view — camera, hidden objects and tags, section cut, and these toggles — and bring it back in one click ([Scenes](/learn/scenes/)).
 - When you double-click into a group, component, or object to edit it, the rest of the scene dims so your editing context is unmistakable. Press `Esc` to step back out one level.
 
 ## Looking inside with a Section Plane
 
-The **Section Plane** tool (Tools ▸ Section Plane) is a view aid, not a modeling operation: it clips away part of the model so you can look inside — check wall thickness, verify clearance between mating parts, spot a hidden void — without touching any geometry. It's the opposite of [Slice](/learn/combining-solids/#slice), which actually cuts a solid into two separate objects; a section plane changes only what the viewport draws, and it isn't saved with the file.
+The **Section Plane** tool (Tools ▸ Section Plane) is a view aid, not a modeling operation: it clips away part of the model so you can look inside — check wall thickness, verify clearance between mating parts, spot a hidden void — without touching any geometry. It's the opposite of [Slice](/learn/combining-solids/#slice), which actually cuts a solid into two separate objects; a section plane changes only what the viewport draws. It is saved with the file as view state (like the camera, outside undo), and a [Scene](/learn/scenes/) can capture it.
 
 1. Activate the tool and click a face — the section plane is created coincident with, and normal to, that face, and becomes active immediately. Click empty ground instead for a horizontal section at ground level. The tool stays active so you can adjust the section right away; press `Space` to return to the Select tool when you're done.
 2. Everything on the back side of the plane disappears, and cut walls render from the inside, so wall thickness reads directly off the exposed edges (the cut itself isn't filled in — there's no solid cap).
@@ -82,7 +83,7 @@ The **Section Plane** tool (Tools ▸ Section Plane) is a view aid, not a modeli
 5. **Turn it off without losing it** — check **View ▸ Section Plane** (also in the command palette as "Section Plane") to see the whole model again. The widget stays put, drawn dashed, ready to switch back on when you check the box again.
 6. **Remove it** — with the Section Plane tool active, press Delete or Backspace. The model returns to whole.
 
-Only one section plane exists at a time — placing a new one replaces whichever was there before.
+Only one section plane exists at a time — placing a new one replaces whichever was there before. To keep several cuts of the same model, capture each in a [Scene](/learn/scenes/#scenes-and-the-section-plane).
 
 ## Reading the axes
 

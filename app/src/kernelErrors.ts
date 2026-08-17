@@ -89,6 +89,12 @@ const DESCRIPTIONS: Record<string, string> = {
     'The drawing tools got out of step. Press Escape and try again.',
   DegenerateGuide:
     'The guide needs a definite direction. Drag a little further before dropping it.',
+  // ------------------------------------------------ Scenes (scenes.md)
+  UnknownScene: 'That Scene no longer exists — it may have been deleted.',
+  DuplicateSceneName: 'A Scene with that name already exists. Choose a different name.',
+  EmptySceneName: 'A Scene needs a name.',
+  InvalidSectionPlane:
+    "That section plane isn't valid. Place it again on a face or the ground.",
   DegenerateUvFrame:
     "That texture position isn't valid. Drag the handle further before releasing it.",
   BadUvFrame:
@@ -327,6 +333,8 @@ const DESCRIPTIONS: Record<string, string> = {
   // each carry exactly one.
   BadVector: `Hew's own request to the model kernel carried a malformed xyz value. ${internalRequest}`,
   BadProjection: `Hew's own request to the model kernel named a camera projection it doesn't recognize. ${internalRequest}`,
+  BadCamera: `Hew's own request to the model kernel carried a malformed camera. ${internalRequest}`,
+  BadDisplay: `Hew's own request to the model kernel carried malformed display settings. ${internalRequest}`,
   BadPlane: `Hew's own request to the model kernel carried a malformed plane. ${internalRequest}`,
   BadRadialKind: `Hew's own request to the model kernel asked for a dimension style it doesn't recognize. ${internalRequest}`,
   BadAffine: `Hew's own request to the model kernel carried a malformed move, rotate, or scale. ${internalRequest}`,

@@ -257,9 +257,20 @@ below.
   model (wall thickness, clearance, voids) — click a face to section it
   there, drag its widget to sweep the cut, toggle it on/off, delete it.
   Distinct from the destructive Slice tool: it changes no geometry, only
-  what the viewport draws. Session-only (not saved to `.hew`) and
-  uncapped (the cut reads via exposed walls, not a filled stencil) in this
-  release; persistence and section fill follow the Scenes feature
+  what the viewport draws. Saved with the document as view state (outside
+  undo, like the camera) and captured by value into Scenes; uncapped (the
+  cut reads via exposed walls, not a filled stencil) — section fill is a
+  later rendering feature
+- Scenes: named, saved views of a document — the camera, which objects
+  and tags are hidden, the section plane, and the grid/axes/guides
+  toggles, each independently capturable — restored in one step with an
+  animated camera move (View ▸ Scenes ▸ Scene Transitions to turn it off).
+  Authored in the editor's Scenes tray section (add, update, rename,
+  describe, reorder, delete; the active Scene shows a drift marker once
+  the view no longer matches what it captured); consumed in Shop Mode,
+  where a pill under the top strip and the Views sheet switch between
+  them; addressable from the Hew API (`hew.scenes.*`, and
+  `hew.view.snapshot` renders a named Scene headlessly)
 - Metric and imperial units, including SketchUp-style architectural
   (feet-inches-fractions) input, with typed numeric entry on every
   length-driven tool
@@ -511,7 +522,8 @@ below.
   analytic behavior for pipes and lathe rings
 - **STEP/IGES import and export**, for precise CAD interchange with
   engineering tools (via OpenCASCADE)
-- **Layers and saved Scenes** (named camera bookmarks)
+- **Section fill** (capping the cut) and multi-plane management, on top
+  of the persisted section plane Scenes already capture
 - **A WebGPU rendering path**, as a progressive enhancement over the
   current WebGL2 baseline
 - **An out-of-process kernel option** for very large models

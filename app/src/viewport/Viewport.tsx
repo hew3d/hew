@@ -24,6 +24,7 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js'
 import { updateFatLineResolutions } from './fatLine'
+import { prefersReducedMotion } from '../platform'
 import { DEPTH_BIAS } from './depthPolicy'
 import type { Scene as WasmScene, DocChangeJs } from '../wasm/loader'
 import { CueLayer } from './CueLayer'
@@ -429,6 +430,11 @@ interface Props {
    * rather than tracking a shadow boolean that could drift from the section
    * manager's real state (D3, section-plane-polish). */
   onSectionChanged?: () => void
+  /** Fired ~250 ms after the camera last moved (any OrbitControls change:
+   * drag, wheel, keyboard, or a programmatic re-pose that goes through the
+   * controls). Scenes drift detection keys off this (docs/design/scenes.md
+   * §5 "Active + drift") instead of polling. */
+  onCameraSettled?: () => void
   /** Fired after a SUCCESSFUL undo/redo, from the one code path every
    * entry point shares (menu, palette, and the viewport's own Cmd+Z/Cmd+
    * Shift+Z all funnel into runUndo/runRedo). Undo/redo can change state
@@ -819,6 +825,38 @@ export interface ViewportApi {
     target: [number, number, number]
     up: [number, number, number]
   }) => void
+  /**
+   * Animate the camera to `state` over `durationMs` (docs/design/scenes.md
+   * §5 "Tween mechanics"): eye and target lerp, the look rotation slerps
+   * (a per-component up lerp rolls on large moves), fov lerps, ease-in-out.
+   * A projection change happens instantly at the start. Any camera input
+   * (an OrbitControls `start`) cancels the tween where it is — the user
+   * wins. `durationMs <= 0` or reduced-motion applies instantly through
+   * `applyCameraState`. `onDone(completed)` fires once when the tween ends
+   * or is cancelled/superseded.
+   */
+  tweenCameraState: (
+    state: {
+      projection: Projection
+      fovDeg: number
+      eye: [number, number, number]
+      target: [number, number, number]
+      up: [number, number, number]
+    },
+    durationMs: number,
+    onDone?: (completed: boolean) => void,
+  ) => void
+  /** Cancel an in-flight `tweenCameraState`, leaving the camera where it is. */
+  cancelCameraTween: () => void
+  /**
+   * Set (or clear, with `null`) the section plane from OUTSIDE the tool —
+   * document load and Scene activation (docs/design/scenes.md §4): the
+   * kernel now owns the persisted plane and this viewport's SectionManager
+   * mirrors it. Updates the manager, the renderer clip, and fires
+   * `onSectionChanged` like every other committed change so the parent's
+   * kernel/menu mirrors stay in step. Normal points at the removed side.
+   */
+  setSectionPlane: (plane: { origin: [number, number, number]; normal: [number, number, number]; active: boolean } | null) => void
   /**
    * Re-pose the camera at the default home view, `scale`× the meter-scale
    * distance (the welcome screen's unit choice re-frames a blank document —
@@ -1937,6 +1975,7 @@ export default function Viewport({
   onSessionChange,
   onDocumentChanged,
   onSectionChanged,
+  onCameraSettled,
   onHistoryChanged,
   apiRef,
   onMeasurement,
@@ -1990,6 +2029,8 @@ export default function Viewport({
   onDocumentChangedRef.current = onDocumentChanged
   const onSectionChangedRef = useRef(onSectionChanged)
   onSectionChangedRef.current = onSectionChanged
+  const onCameraSettledRef = useRef(onCameraSettled)
+  onCameraSettledRef.current = onCameraSettled
   const onHistoryChangedRef = useRef(onHistoryChanged)
   onHistoryChangedRef.current = onHistoryChanged
   const apiRefRef = useRef(apiRef)
@@ -5279,6 +5320,122 @@ export default function Viewport({
       scheduleRender()
     }
 
+    // ---- Camera tween (docs/design/scenes.md §5 "Tween mechanics") ----
+    // One tween at a time; a new one supersedes (its onDone gets `false`).
+    let cameraTween: { raf: number; onDone?: (completed: boolean) => void } | null = null
+
+    function cancelCameraTween(): void {
+      if (cameraTween === null) return
+      cancelAnimationFrame(cameraTween.raf)
+      const done = cameraTween.onDone
+      cameraTween = null
+      done?.(false)
+    }
+
+    // Debounced "camera settled" notification for drift detection.
+    let cameraSettledTimer: ReturnType<typeof setTimeout> | null = null
+    function noteCameraMoved(): void {
+      if (cameraSettledTimer !== null) clearTimeout(cameraSettledTimer)
+      cameraSettledTimer = setTimeout(() => {
+        cameraSettledTimer = null
+        onCameraSettledRef.current?.()
+      }, 250)
+    }
+
+    function tweenCameraState(
+      state: {
+        projection: Projection
+        fovDeg: number
+        eye: [number, number, number]
+        target: [number, number, number]
+        up: [number, number, number]
+      },
+      durationMs: number,
+      onDone?: (completed: boolean) => void,
+    ): void {
+      cancelCameraTween()
+      if (durationMs <= 0 || prefersReducedMotion()) {
+        applyCameraState(state)
+        noteCameraMoved()
+        onDone?.(true)
+        return
+      }
+      const start = getCameraState()
+      // A projection change switches instantly at the start; the pose then
+      // tweens under the destination projection.
+      if (start.projection !== state.projection) {
+        applyCameraState({ ...start, projection: state.projection })
+      }
+      const eye0 = new THREE.Vector3(...start.eye)
+      const eye1 = new THREE.Vector3(...state.eye)
+      const tgt0 = new THREE.Vector3(...start.target)
+      const tgt1 = new THREE.Vector3(...state.target)
+      const dist0 = eye0.distanceTo(tgt0)
+      const dist1 = eye1.distanceTo(tgt1)
+      // Look rotations, slerped — derived through the same lookAt math the
+      // cameras use so start/end quaternions match their poses exactly.
+      const probe = new THREE.PerspectiveCamera()
+      probe.position.copy(eye0)
+      probe.up.set(...start.up)
+      probe.lookAt(tgt0)
+      const q0 = probe.quaternion.clone()
+      probe.position.copy(eye1)
+      probe.up.set(...state.up)
+      probe.lookAt(tgt1)
+      const q1 = probe.quaternion.clone()
+      const fov0 = start.fovDeg
+      const fov1 = state.fovDeg
+      const t0 = performance.now()
+      const ease = (t: number): number => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
+      const q = new THREE.Quaternion()
+      const eye = new THREE.Vector3()
+      const forward = new THREE.Vector3()
+      const up = new THREE.Vector3()
+      const target = new THREE.Vector3()
+
+      const step = (): void => {
+        const raw = Math.min(1, (performance.now() - t0) / durationMs)
+        const t = ease(raw)
+        eye.lerpVectors(eye0, eye1, t)
+        q.slerpQuaternions(q0, q1, t)
+        forward.set(0, 0, -1).applyQuaternion(q)
+        up.set(0, 1, 0).applyQuaternion(q)
+        const dist = dist0 + (dist1 - dist0) * t
+        target.copy(eye).addScaledVector(forward, dist)
+        rig.applyPose(eye, target, up, fov0 + (fov1 - fov0) * t)
+        controls.target.copy(target)
+        controls.update()
+        scheduleRender()
+        if (raw < 1) {
+          cameraTween = { raf: requestAnimationFrame(step), onDone }
+          return
+        }
+        // Land exactly on the requested state (kills interpolation residue).
+        cameraTween = null
+        applyCameraState(state)
+        noteCameraMoved()
+        onDone?.(true)
+      }
+      cameraTween = { raf: requestAnimationFrame(step), onDone }
+    }
+
+    /**
+     * Set or clear the section plane from outside the tool (load / Scene
+     * activation) — see the ViewportApi doc.
+     */
+    function setSectionPlane(
+      plane: { origin: [number, number, number]; normal: [number, number, number]; active: boolean } | null,
+    ): void {
+      if (plane === null) {
+        sectionManager.delete()
+      } else {
+        sectionManager.setPlane({ origin: plane.origin, normal: plane.normal, active: plane.active })
+      }
+      sceneRenderer.setSectionPlane(sectionManager.current)
+      onSectionChangedRef.current?.()
+      scheduleRender()
+    }
+
     // Test-only world→screen projection (ViewportApi.worldToScreen). Delegates
     // to the same `worldToPixels` the inference-dot overlay uses (hoisted —
     // declared later in this effect). Canvas-relative CSS pixels, top-left
@@ -5611,7 +5768,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -6707,9 +6864,11 @@ export default function Viewport({
     // ever CALLED after both exist.
     function attachControlsListeners(c: OrbitControls): void {
       c.addEventListener('start', onControlsStart)
+      c.addEventListener('start', cancelCameraTween)
       c.addEventListener('end', onControlsEnd)
       c.addEventListener('change', scheduleRender)
       c.addEventListener('change', recordCameraInput)
+      c.addEventListener('change', noteCameraMoved)
     }
     attachControlsListeners(controls)
 
@@ -8727,9 +8886,19 @@ export default function Viewport({
     // ------------------------------------------------------------------ cleanup
     return () => {
       cancelAnimationFrame(rafId)
+      // A Scene camera tween and its settle timer outlive nothing: cancel
+      // both so no post-unmount frame or callback fires into a torn-down
+      // tree (docs/design/scenes.md §5).
+      cancelCameraTween()
+      if (cameraSettledTimer !== null) {
+        clearTimeout(cameraSettledTimer)
+        cameraSettledTimer = null
+      }
       controls.removeEventListener('change', scheduleRender)
       controls.removeEventListener('change', recordCameraInput)
+      controls.removeEventListener('change', noteCameraMoved)
       controls.removeEventListener('start', onControlsStart)
+      controls.removeEventListener('start', cancelCameraTween)
       controls.removeEventListener('end', onControlsEnd)
       window.removeEventListener('pointerdown', onCameraPointerDown, true)
       window.removeEventListener('pointerup', onCameraPointerUp, true)

@@ -194,6 +194,9 @@ const transformRs = readRust('crates/kernel/src/transform.rs')
 const mathRs = readRust('crates/kernel/src/math.rs')
 const serializeRs = readRust('crates/kernel/src/serialize.rs')
 const wasmApiRs = readRust('crates/wasm-api/src/lib.rs')
+// The Scenes boundary lives in its own module (docs/design/scenes.md §3.3)
+// and mints its own literal codes.
+const wasmScenesApiRs = readRust('crates/wasm-api/src/scenes_api.rs')
 
 // `DocumentError` variants that delegate their CODE to an inner typed error
 // instead of contributing their own field name — derived structurally by
@@ -239,7 +242,7 @@ const LEAF_ENUMS: ReadonlyArray<readonly [string, string]> = [
 ]
 const leafErrorCodes = LEAF_ENUMS.flatMap(([name, source]) => extractEnumVariants(source, name))
 
-const literalCodes = extractLiteralCodes(wasmApiRs)
+const literalCodes = [...new Set([...extractLiteralCodes(wasmApiRs), ...extractLiteralCodes(wasmScenesApiRs)])]
 
 /** Every error code the wasm boundary can emit, derived structurally from
  * the checked-in Rust sources (see the module doc comment above). */

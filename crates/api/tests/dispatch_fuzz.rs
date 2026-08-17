@@ -421,11 +421,16 @@ proptest! {
                     // A zero-undo-entry success is read-only or solitary —
                     // no byte change — EXCEPT the three §6.4 registry-state
                     // commands, which mutate the serialized registries
-                    // while deliberately recording no undo entry.
+                    // while deliberately recording no undo entry, and the
+                    // Scenes family (§7.1): Scenes are persisted view
+                    // state outside undo history (docs/design/scenes.md
+                    // §3.1), so add/update/rename/describe/remove/reorder
+                    // change the saved bytes with no undo entry, and apply
+                    // writes the persisted tag/hidden/section view state.
                     let registry_state = matches!(
                         method_name.as_str(),
                         "hew.material.create" | "hew.tag.create" | "hew.tag.set_visible"
-                    );
+                    ) || (method_name.starts_with("hew.scenes.") && method_name != "hew.scenes.list");
                     if !registry_state {
                         prop_assert_eq!(
                             doc.save(), bytes_before,

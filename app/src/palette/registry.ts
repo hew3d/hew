@@ -54,6 +54,11 @@ export type PaletteGate =
   | 'canBoolean'
   | 'canImport'
   | 'canDrawText'
+  /** A Scene is currently active (docs/design/scenes.md §5) — gates
+   *  "Update Scene", which has nothing to re-capture with none active. */
+  | 'sceneActive'
+  /** At least one Scene exists — gates "Next Scene"/"Previous Scene". */
+  | 'scenesAny'
 
 export interface PaletteEntry {
   /** Matches a `menuActionRef.current(id)` payload string in App.tsx. */
@@ -214,6 +219,12 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'toggle-model-info', label: 'Toggle Model Info', description: 'Show or hide the Model Info panel.', group: 'Actions' },
   { id: 'toggle-materials', label: 'Toggle Materials', description: 'Show or hide the Materials panel.', group: 'Actions' },
   { id: 'toggle-tags', label: 'Toggle Tags', description: 'Show or hide the Tags panel.', group: 'Actions' },
+  { id: 'toggle-scenes', label: 'Toggle Scenes', description: 'Show or hide the Scenes panel.', group: 'Actions' },
+  { id: 'scenes-add', label: 'Add Scene', description: 'Save the current camera, visibility, and section cut as a new Scene.', group: 'Actions', synonyms: ['scene', 'save view', 'named view'] },
+  { id: 'scenes-update', label: 'Update Scene', description: 'Re-capture the active Scene’s checked properties.', group: 'Actions', synonyms: ['scene', 'refresh scene'], gate: 'sceneActive' },
+  { id: 'scenes-next', label: 'Next Scene', description: 'Activate the next Scene in the list.', group: 'Actions', synonyms: ['scene'], gate: 'scenesAny' },
+  { id: 'scenes-previous', label: 'Previous Scene', description: 'Activate the previous Scene in the list.', group: 'Actions', synonyms: ['scene'], gate: 'scenesAny' },
+  { id: 'scenes-transitions', label: 'Scene Transitions', description: 'Toggle the 0.6s camera tween when activating a Scene.', group: 'Actions', synonyms: ['scene', 'animation', 'tween'] },
   { id: 'toggle-object-info', label: 'Toggle Object Info', description: 'Show or hide the Object Info panel.', group: 'Actions' },
   { id: 'toggle-debug-log', label: 'Toggle Debug Log', description: 'Show or hide the debug log panel.', group: 'Actions' },
   { id: 'open-library', label: 'Library', description: 'Browse and insert saved components, materials, and models', group: 'Actions', synonyms: ['library', 'components', 'insert'] },

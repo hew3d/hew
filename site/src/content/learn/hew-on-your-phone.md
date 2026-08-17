@@ -1,7 +1,7 @@
 ---
 title: "Hew on your phone"
 description: "Shop Mode turns a phone into a touch viewer for a model you built at the desk: tap a part for its dimensions, check a cut length, work offline at the bench."
-order: 19
+order: 20
 ---
 
 Hew is a desktop and web modeler, but a model is often most useful away from the desk — at the bench, next to the material, checking a dimension before a cut. Shop Mode is a fullscreen, touch-first viewer for exactly that: open a model on your phone, orbit it, tap a part for its name and size, tap an edge for its length, and work through the whole thing with no wifi if the shop doesn't have any.
@@ -65,6 +65,14 @@ The viewport fills the whole screen. A thin strip along the top shows the docume
 **The Parts sheet** is a bottom sheet you can drag by its handle through three heights — a peek showing just a part count, a half view, and a full list. It's built from the same Outliner and Tags data as the desktop, folded into one mobile list: every row shows a part's name and overall dimensions, with an eye icon to hide it; a tag section gets its own eye icon that hides everything under that tag at once. Tapping a row selects and zooms to that part, the same as tapping it in the viewport; long-pressing a row isolates it, the same as long-pressing in the viewport. Think of it as a live cutlist — drag it to half height, scroll through the parts, and hide the ones you've already cut so what's left to do stays visible.
 
 **Tape Measure on touch.** Selecting the Tape Measure chip gives you the same click-an-edge, click-a-point measuring the desktop has, with the snap targets widened for a fingertip: touch devices get roughly double the pixel radius a mouse gets for picking up and holding onto an endpoint, midpoint, or edge, so a real fingertip doesn't have to land pixel-perfect to snap. [Precision, measurement, and guides](/learn/measurement-and-guides/) covers what the Tape Measure does in full; Shop Mode's copy behaves the same way, just at touch scale.
+
+## Scenes on the phone
+
+If a model has [Scenes](/learn/scenes/), Shop Mode opens on the first one and puts them first in the **Views** sheet (the grid button in the dock), each with its description, above the standard views. Tap one and the camera glides there while the Scene's hidden parts and section cut switch at once. The grid and axes never show on the phone, so a Scene's display toggles are ignored here.
+
+While a Scene is active, a pill names it — just above the tool row in portrait, top-center in landscape — with **‹** and **›** to step to the previous and next Scene (wrapping at the ends). Tap the name to open the Views sheet. Orbiting, a standard view, or a long-press isolate leaves the Scene active but *drifted* — the pill's dot becomes a ring — and tapping the Scene again snaps back. **Show all** after an isolate returns to the Scene's own hidden set, not to everything visible.
+
+Scenes are read-only on the phone: add, update, and edit them on the desktop and they arrive with the file.
 
 ## Keeping models for offline use
 

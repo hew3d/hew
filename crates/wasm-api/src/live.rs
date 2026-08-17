@@ -61,6 +61,15 @@ pub enum ViewDirective {
     /// cross-window `'settings-changed'` broadcast firing, so a live
     /// desktop's separate Settings window stays in sync.
     Units { format: String },
+    /// `hew.scenes.apply`'s host notification (`Host::scene_applied`):
+    /// the kernel-side state (tag/node hidden flags, section plane) is
+    /// already written by the time this fires — `sid` alone is enough
+    /// for the bridge to drive whatever app-side activation logic
+    /// `useScenesController`'s `scenes.activate` path already has
+    /// (camera tween, panel/outliner sync), rather than duplicating that
+    /// logic here from raw numbers. See `applyPendingViewDirective`
+    /// (`app/src/api/liveBridge.ts`) for the JS side.
+    ActivateScene { sid: u64 },
 }
 
 /// The wire shape `ViewDirective::Camera` hands the live bridge for an
@@ -300,6 +309,16 @@ impl Host for LiveHost {
         });
         Ok(())
     }
+
+    /// `hew.scenes.apply`'s host notification: unlike the three effects
+    /// above, this one is reachable through the SAME kernel-served
+    /// dispatch path (`Document::apply_scene` already wrote the kernel
+    /// state before `crates/api`'s handler calls this) — it never itself
+    /// refuses, it only records the directive for the bridge to pick up.
+    fn scene_applied(&mut self, sid: u64) -> Result<(), Refusal> {
+        self.directive = Some(ViewDirective::ActivateScene { sid });
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -492,5 +511,74 @@ mod tests {
             "a read-only kernel command succeeds live: {:?}",
             r.error
         );
+    }
+
+    /// `hew.scenes.apply` — a kernel-served command, unlike `hew.view.*` —
+    /// still leaves a `ViewDirective::ActivateScene` for the bridge, via
+    /// `LiveHost::scene_applied` (`Host::scene_applied`'s live impl):
+    /// `crates/api`'s handler writes the kernel-side state for real AND
+    /// notifies the host, both in the same dispatch.
+    #[test]
+    fn scene_apply_leaves_an_activate_scene_directive() {
+        let mut conn = Connection::new(Profile::App, "test");
+        let mut doc = kernel::Document::new();
+        conn.dispatch(
+            &mut doc,
+            &mut LiveHost::default(),
+            req(0, "hew.meta.hello", serde_json::json!({"protocol": 1})),
+        );
+        conn.dispatch(
+            &mut doc,
+            &mut LiveHost::default(),
+            req(1, "hew.doc.attach", serde_json::json!({})),
+        );
+
+        // Add a Scene through the same live connection first.
+        let mut host = LiveHost::default();
+        let DispatchOutcome::Reply(add_reply) = conn.dispatch(
+            &mut doc,
+            &mut host,
+            req(2, "hew.scenes.add", serde_json::json!({ "name": "Front" })),
+        ) else {
+            panic!("dispatch replies")
+        };
+        assert!(
+            add_reply.error.is_none(),
+            "add succeeds: {:?}",
+            add_reply.error
+        );
+        // A plain (non-`hew.doc.transact`) mutating dispatch is exactly a
+        // one-command transaction (docs/HEW_API.md §6.1): the reply is
+        // `{"results": [...], "label": ...}`, the add's own result at
+        // `results[0]`, not the bare command result.
+        let add_body = add_reply.result.expect("add succeeds");
+        let add_result = &add_body["results"][0];
+        let sid = add_result["sid"].as_u64().expect("sid is a number");
+        let id = add_result["id"]
+            .as_str()
+            .expect("id is a string")
+            .to_string();
+
+        // A directive from `add` (registry-state, ModelMutating, no
+        // Host effect) must not leak into the NEXT dispatch's directive.
+        assert!(host.directive.is_none());
+
+        let mut host = LiveHost::default();
+        let DispatchOutcome::Reply(apply_reply) = conn.dispatch(
+            &mut doc,
+            &mut host,
+            req(3, "hew.scenes.apply", serde_json::json!({ "id": id })),
+        ) else {
+            panic!("dispatch replies")
+        };
+        assert!(
+            apply_reply.error.is_none(),
+            "apply succeeds: {:?}",
+            apply_reply.error
+        );
+        match host.directive {
+            Some(ViewDirective::ActivateScene { sid: got }) => assert_eq!(got, sid),
+            other => panic!("expected an ActivateScene directive, got {other:?}"),
+        }
     }
 }

@@ -98,6 +98,11 @@ function contrastRatio(hexA: string, hexB: string): number {
 }
 
 const WCAG_AA_TEXT_MIN = 4.5
+/** WCAG's non-text/large-text floor — SPEC.md §4's own bar for the delete
+ *  color's small-label uses ("#d5484f on panel >= 3:1"), deliberately
+ *  looser than the full text AA bar `WCAG_AA_TEXT_MIN` above. */
+const WCAG_UI_MIN = 3.0
+const WHITE = '#ffffff'
 
 describe('Shop Mode token contrast (WCAG AA text, >=4.5:1)', () => {
   it.each(['dark', 'light'] as const)('%s: --shop-text-faint on --surface-sheet', (theme) => {
@@ -132,6 +137,36 @@ describe('Shop Mode token contrast (WCAG AA text, >=4.5:1)', () => {
   it.each(['dark', 'light'] as const)('%s: --shop-dock-text-strong on --shop-dock', (theme) => {
     const themeVars = theme === 'dark' ? darkVars! : lightVars!
     const ratio = contrastRatio(tokenValue(themeVars, 'shop-dock-text-strong'), tokenValue(themeVars, 'shop-dock'))
+    expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_TEXT_MIN)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Scenes tokens (SPEC.md §4 "Contrast (tested pairs)") — a design deviation:
+// the spec's own #d5484f/#b98a2e fail full text AA against the LIGHT panel at
+// the 11.5-12px sizes Scenes uses them at (ScenesPanel.tsx's duplicate-name
+// error and stale-refs line), so the light theme substitutes darker,
+// hue-preserved variants (tokens.css's own doc comments on why). Dark keeps
+// the spec's hex verbatim for the small-text tokens (SPEC.md's own bar for
+// delete is the looser 3:1 UI floor, not full AA) but needs a separately
+// darkened --scene-delete-fill for the filled Delete confirm button, where
+// WHITE text sits on it as a large fill (full AA applies there).
+describe('Scenes token contrast', () => {
+  it.each(['dark', 'light'] as const)('%s: --scene-delete-text on --surface-panel (SPEC.md §4: >=3:1)', (theme) => {
+    const themeVars = theme === 'dark' ? darkVars! : lightVars!
+    const ratio = contrastRatio(tokenValue(themeVars, 'scene-delete-text'), tokenValue(themeVars, 'surface-panel'))
+    expect(ratio).toBeGreaterThanOrEqual(WCAG_UI_MIN)
+  })
+
+  it.each(['dark', 'light'] as const)('%s: --scene-stale-text on --surface-panel (SPEC.md §4: AA)', (theme) => {
+    const themeVars = theme === 'dark' ? darkVars! : lightVars!
+    const ratio = contrastRatio(tokenValue(themeVars, 'scene-stale-text'), tokenValue(themeVars, 'surface-panel'))
+    expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_TEXT_MIN)
+  })
+
+  it.each(['dark', 'light'] as const)('%s: white on --scene-delete-fill (SPEC.md §4: white on #d5484f >= AA)', (theme) => {
+    const themeVars = theme === 'dark' ? darkVars! : lightVars!
+    const ratio = contrastRatio(WHITE, tokenValue(themeVars, 'scene-delete-fill'))
     expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_TEXT_MIN)
   })
 })

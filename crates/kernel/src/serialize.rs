@@ -191,7 +191,25 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// mint counter is deliberately NOT serialized — loaders resume at
 /// max(sid)+1. Geometry buffer unchanged (`GEOMETRY_FORMAT_VERSION`
 /// stays 6).
-pub const MANIFEST_FORMAT_VERSION: u32 = 15;
+/// **v16** (docs/design/scenes.md): two optional top-level view-state
+/// fields — `section_plane` (`{origin, normal, active}`, the document's one
+/// clipping plane, design §4) and `scenes` (saved views, design §3.2: each
+/// `{sid, name, description, camera?, hidden_nodes?, hidden_tags?,
+/// section?, display?}` where an absent property means "not captured").
+/// Both are outside undo history like `camera`; both are omitted when
+/// empty/absent so an untouched document's manifest is byte-identical to
+/// v15 output. Gated both ways by [`SCENES_MIN_VERSION`]. Scene sids share
+/// the entity counter (a duplicate against any entity sid is malformed);
+/// hidden node/tag sids must name live entities (the writer prunes dead
+/// ones; a reader rejects a dangling one). Geometry buffer unchanged
+/// (`GEOMETRY_FORMAT_VERSION` stays 6).
+pub const MANIFEST_FORMAT_VERSION: u32 = 16;
+
+/// The manifest version at which `section_plane` and `scenes`
+/// (docs/design/scenes.md) were introduced. Version-gated like every
+/// sibling field: a file declaring an OLDER version that carries either is
+/// malformed for its own declared version and rejected (reject-not-repair).
+pub(crate) const SCENES_MIN_VERSION: u32 = 16;
 
 /// The manifest version at which per-entity stable ids (`sid`) were
 /// introduced (docs/HEW_API.md §5.1). Version-gated both ways: a file
@@ -1540,6 +1558,70 @@ pub(crate) struct Manifest {
     /// `attrs` fields.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attrs: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+    /// The document's section plane (manifest v16+, docs/design/scenes.md
+    /// §4). Absent → no plane placed. View state, not undoable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_plane: Option<SectionPlaneDto>,
+    /// Saved views (manifest v16+, docs/design/scenes.md §3.2), in tab
+    /// order. Absent/empty → no Scenes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenes: Vec<SceneDto>,
+}
+
+/// The document's section plane (manifest v16+; docs/design/scenes.md §4).
+/// `normal` is unit length and points at the side the cut removes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SectionPlaneDto {
+    pub origin: [f64; 3],
+    pub normal: [f64; 3],
+    pub active: bool,
+}
+
+/// The editor display toggles a Scene captures (docs/design/scenes.md §2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DisplayDto {
+    pub grid: bool,
+    pub axes: bool,
+    pub guides: bool,
+}
+
+/// A saved view (manifest v16+; docs/design/scenes.md §3.2). Every
+/// captured property is present; an ABSENT key means "not captured, do not
+/// touch on apply". `section` uses `null` for "captured, no plane" and an
+/// object for a captured plane — the one field where JSON `null` and
+/// absence mean different things, hence the double `Option` and the
+/// `deserialize_with` below.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SceneDto {
+    pub sid: u64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera: Option<CameraDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_nodes: Option<Vec<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_tags: Option<Vec<u64>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_double_option"
+    )]
+    pub section: Option<Option<SectionPlaneDto>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<DisplayDto>,
+}
+
+/// serde's default `Option<Option<T>>` handling collapses an explicit
+/// `null` into `None`; this keeps `null` as `Some(None)` (captured, no
+/// plane) and only ABSENCE as `None` (not captured).
+fn deserialize_double_option<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(de)?))
 }
 
 /// A document-level movable drawing axes frame (manifest v13+). `z` is not
@@ -1555,7 +1637,7 @@ pub(crate) struct AxesFrameDto {
 /// The working camera view (manifest v13+; docs/design/camera.md §5). NOT
 /// undoable (`camera.rs`'s module doc) — saved on document save, applied on
 /// load, never touching `Document::undo`/`redo`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CameraDto {
     /// `"perspective"` | `"parallel"`.
     pub projection: String,
@@ -2096,6 +2178,12 @@ pub(crate) struct DocSaveData {
     /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8) — the
     /// whole table, same live-rows-only lookup posture as `sids`.
     pub attrs: std::collections::BTreeMap<crate::document::AttrTarget, crate::attr::AttrDict>,
+    /// Saved views (manifest v16+, docs/design/scenes.md). Encoding PRUNES
+    /// each Scene's hidden node/tag sids to the live rows above, so a
+    /// reference to a deleted entity never reaches the file.
+    pub scenes: Vec<crate::scenes::Scene>,
+    /// The document's section plane (manifest v16+), or `None`.
+    pub section_plane: Option<crate::scenes::SectionPlaneState>,
 }
 
 /// Encodes a complete document into `.hew` zip bytes (HEW_FILE_FORMAT.md).
@@ -2440,6 +2528,8 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 y: [data.axes.y.x, data.axes.y.y, data.axes.y.z],
             })
         },
+        section_plane: data.section_plane.map(encode_section_plane),
+        scenes: encode_scenes(&data),
     };
 
     let manifest_json =
@@ -2773,6 +2863,13 @@ pub(crate) struct DocLoadRaw {
     pub guide_attrs: Vec<crate::attr::AttrDict>,
     pub tag_attrs: Vec<crate::attr::AttrDict>,
     pub doc_attrs: crate::attr::AttrDict,
+    /// The section plane (manifest v16+; `None` for older files or none
+    /// placed). Shape-validated by decode; unit normal, finite.
+    pub section_plane: Option<crate::scenes::SectionPlaneState>,
+    /// Saved views (manifest v16+), shape-validated by decode. Reference
+    /// validation (hidden sids name live entities, unique names/sids)
+    /// happens in `Document::load`, which owns the restored sid table.
+    pub scenes: Vec<crate::scenes::Scene>,
 }
 
 pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError> {
@@ -2886,6 +2983,20 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     // Decode the camera block (manifest v13+; already confirmed absent for
     // older declared versions by `validate_manifest_references`).
     let camera = manifest.camera.as_ref().map(decode_camera).transpose()?;
+
+    // Section plane + Scenes (manifest v16+; docs/design/scenes.md). The
+    // version gate ran in `validate_manifest_references`; shapes decode here,
+    // references resolve in `Document::load`.
+    let section_plane = manifest
+        .section_plane
+        .as_ref()
+        .map(decode_section_plane)
+        .transpose()?;
+    let scenes = manifest
+        .scenes
+        .iter()
+        .map(decode_scene)
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Normalize member shapes against the DECLARED version (nested-
     // components, v15): pre-v15 files carry bare object ids (the only
@@ -3155,6 +3266,8 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         guide_attrs,
         tag_attrs,
         doc_attrs,
+        section_plane,
+        scenes,
     })
 }
 
@@ -3416,6 +3529,20 @@ fn validate_manifest_references(
             what: format!(
                 "a v{} manifest must not carry axes (introduced at v{})",
                 manifest.format_version, AXES_MIN_VERSION
+            ),
+        });
+    }
+
+    // `section_plane` / `scenes` are v16+ concepts (docs/design/scenes.md):
+    // same both-directions posture — a pre-v16 file carrying either is
+    // malformed for its own declared version, never honored.
+    if manifest.format_version < SCENES_MIN_VERSION
+        && (manifest.section_plane.is_some() || !manifest.scenes.is_empty())
+    {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "a v{} manifest must not carry section_plane/scenes (introduced at v{})",
+                manifest.format_version, SCENES_MIN_VERSION
             ),
         });
     }
@@ -3754,6 +3881,129 @@ fn decode_camera(dto: &CameraDto) -> Result<CameraState, LoadError> {
     })
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// Section plane + Scenes (manifest v16+; docs/design/scenes.md §3.2, §4)
+// ════════════════════════════════════════════════════════════════════════════
+
+fn encode_section_plane(p: crate::scenes::SectionPlaneState) -> SectionPlaneDto {
+    SectionPlaneDto {
+        origin: [p.origin.x, p.origin.y, p.origin.z],
+        normal: [p.normal.x, p.normal.y, p.normal.z],
+        active: p.active,
+    }
+}
+
+/// Decodes a section plane, refusing a non-unit or non-finite normal
+/// (reject-not-repair, like `axes`).
+fn decode_section_plane(
+    dto: &SectionPlaneDto,
+) -> Result<crate::scenes::SectionPlaneState, LoadError> {
+    let plane = crate::scenes::SectionPlaneState {
+        origin: Point3::new(dto.origin[0], dto.origin[1], dto.origin[2]),
+        normal: Vec3::new(dto.normal[0], dto.normal[1], dto.normal[2]),
+        active: dto.active,
+    };
+    crate::scenes::validate_section_plane(&plane).map_err(|_| LoadError::MalformedManifest {
+        what: "section_plane normal must be unit length and finite".to_string(),
+    })?;
+    Ok(plane)
+}
+
+/// Encodes every Scene, pruning hidden node/tag sids to entities that are
+/// live in this save (design §3.1: a Scene keeps a deleted entity's sid in
+/// memory so an undo re-links it; the FILE never carries a dangling one).
+/// Deterministic: sets are sorted, filtered by membership.
+fn encode_scenes(data: &DocSaveData) -> Vec<SceneDto> {
+    use crate::document::EntityRef;
+    if data.scenes.is_empty() {
+        return Vec::new();
+    }
+    let sid_of = |e: EntityRef| data.sids.get(&e).copied();
+    let mut live_node_sids: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    for (oid, _) in &data.world_objects {
+        live_node_sids.extend(sid_of(EntityRef::Object(*oid)));
+    }
+    for (oid, _, _) in &data.def_objects {
+        live_node_sids.extend(sid_of(EntityRef::Object(*oid)));
+    }
+    for row in &data.groups {
+        live_node_sids.extend(sid_of(EntityRef::Group(row.0)));
+    }
+    for row in &data.instances {
+        live_node_sids.extend(sid_of(EntityRef::Instance(row.0)));
+    }
+    let live_tag_sids: std::collections::BTreeSet<u64> = data
+        .tag_meta
+        .iter()
+        .filter_map(|(path, _)| sid_of(EntityRef::Tag(path.clone())))
+        .collect();
+
+    data.scenes
+        .iter()
+        .map(|scene| SceneDto {
+            sid: scene.sid,
+            name: scene.name.clone(),
+            description: scene.description.clone(),
+            camera: scene.camera.map(encode_camera),
+            hidden_nodes: scene.hidden_nodes.as_ref().map(|set| {
+                set.iter()
+                    .copied()
+                    .filter(|s| live_node_sids.contains(s))
+                    .collect()
+            }),
+            hidden_tags: scene.hidden_tags.as_ref().map(|set| {
+                set.iter()
+                    .copied()
+                    .filter(|s| live_tag_sids.contains(s))
+                    .collect()
+            }),
+            section: scene.section.map(|inner| inner.map(encode_section_plane)),
+            display: scene.display.map(|d| DisplayDto {
+                grid: d.grid,
+                axes: d.axes,
+                guides: d.guides,
+            }),
+        })
+        .collect()
+}
+
+/// Decodes one Scene's shape: name non-empty, camera/section well-formed.
+/// Reference resolution (do the sids name live entities? are names/sids
+/// unique?) is `Document::load`'s job.
+fn decode_scene(dto: &SceneDto) -> Result<crate::scenes::Scene, LoadError> {
+    if dto.name.trim().is_empty() {
+        return Err(LoadError::MalformedManifest {
+            what: format!("scene {} has an empty name", dto.sid),
+        });
+    }
+    let camera = dto.camera.as_ref().map(decode_camera).transpose()?;
+    let section = match &dto.section {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(p)) => Some(Some(decode_section_plane(p)?)),
+    };
+    Ok(crate::scenes::Scene {
+        sid: dto.sid,
+        name: dto.name.clone(),
+        description: dto.description.clone(),
+        camera,
+        hidden_nodes: dto
+            .hidden_nodes
+            .as_ref()
+            .map(|v| v.iter().copied().collect()),
+        hidden_tags: dto
+            .hidden_tags
+            .as_ref()
+            .map(|v| v.iter().copied().collect()),
+        section,
+        display: dto.display.as_ref().map(|d| crate::scenes::DisplayState {
+            grid: d.grid,
+            axes: d.axes,
+            guides: d.guides,
+        }),
+    })
+}
+
 #[cfg(test)]
 mod camera_manifest_tests {
     use super::*;
@@ -3778,6 +4028,8 @@ mod camera_manifest_tests {
             axes: None,
             annotations: Vec::new(),
             attrs: BTreeMap::new(),
+            section_plane: None,
+            scenes: Vec::new(),
         }
     }
 

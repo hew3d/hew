@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `15`**, and **geometry buffer format version `6`**. Both are covered
+version `16`**, and **geometry buffer format version `6`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,7 +59,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 14,
+  "format_version": 16,
   "geometry_version": 6,
   "app": "hew",
   "app_version": "0.1.0",
@@ -140,6 +140,20 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   },
   "axes": { "origin": [1.0, 2.0, 0.0],           // v13+; omitted entirely at world identity
             "x": [0.0, 1.0, 0.0], "y": [-1.0, 0.0, 0.0] },
+  "section_plane": {                 // v16+; omitted entirely when no plane is placed
+    "origin": [0.0, 0.3, 0.0],
+    "normal": [0.0, 1.0, 0.0],       // unit; points at the side the cut REMOVES
+    "active": true
+  },
+  "scenes": [                        // v16+; omitted entirely when empty; array order = tab order
+    { "sid": 42, "name": "Assembled", "description": "Everything, three-quarter view.",
+      "camera": { "projection": "perspective", "fov_deg": 45.0,
+                  "eye": [4.0, -6.0, 3.0], "target": [0.0, 0.0, 0.0], "up": [0.0, 0.0, 1.0] },
+      "hidden_nodes": [4, 6],        // sids of user-hidden objects/groups/instances; absent = not captured
+      "hidden_tags": [11],           // sids of hidden tag-registry entries; absent = not captured
+      "section": null,               // null = captured, no plane; an object = captured plane; absent = not captured
+      "display": { "grid": true, "axes": false, "guides": true } }
+  ],
   "attrs": {                         // v14+; the DOCUMENT's own dictionaries
     "com.example.project": { "site": "Bergen" }
   }
@@ -148,7 +162,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `15`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `16`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `6`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -253,6 +267,8 @@ of the manifest:
 | `sid` on `materials[]`/`objects[]`/`groups[]`/`components[]`/`instances[]`/`sketches[]`/`guides[]`/`tags[]` | 14 | pre-v14 upgrade: the loader mints fresh stable ids in dense order (deterministic). At v14+ absence is a fatal, typed error, not a default |
 | `attrs` on the same entity kinds, and top-level `attrs` | 14 | empty (no dictionaries) |
 | `components[].members` as `NodeRef`s, and `groups[].owner` / `instances[].owner` | 15 | pre-v15: members are bare object dense ids (the only member kind that existed) and every node is world-owned |
+| `section_plane` (top-level object) | 16 | absent — no section plane placed |
+| `scenes` (top-level array) | 16 | empty list (no Scenes) |
 
 Four fields land in the same v13 bump (four efforts in flight at once) and
 are version-gated the same way the retired fields below are (just in the
@@ -912,6 +928,86 @@ table in §2).
 Ground-plane rendering (the ground grid) and Scale/Section/standard views
 are NOT affected by this frame — they stay world-aligned regardless of the
 document's axes.
+
+### 4.13 Section plane
+
+`section_plane` (manifest v16+, optional) is the document's one
+non-destructive clipping plane (docs/design/scenes.md §4): `origin` (world
+xyz), `normal` (world xyz, **unit length**, pointing at the side the cut
+removes), and `active` (whether it is currently cutting; a placed-but-
+inactive plane keeps its position). Omitted entirely when no plane is
+placed — the only state every pre-v16 file is in.
+
+A reader MUST reject, never renormalize, a `normal` whose length is not
+within the section-normal tolerance of 1, or any non-finite coordinate
+(rule 4), and MUST reject a file declaring `format_version < 16` that
+carries the key at all (a version-gated field smuggled into an older file
+— see the field-by-version table in §2).
+
+**Not undoable.** Like `camera` (§4.11), the section plane is view state:
+placing, moving, toggling, or deleting it never enters the document's
+undo/redo history. It is captured **by value** into Scenes (§4.14) — a
+deliberate departure from SketchUp's plane-as-entity model, so a document
+needs no plane list to hold "assembled / section A / section B" as three
+Scenes on one plane.
+
+### 4.14 Scenes
+
+`scenes` (manifest v16+, optional) is the ordered list of the document's
+saved views (docs/design/scenes.md). Array order is tab order. Omitted
+entirely when empty. Each entry:
+
+- **`sid`** — the Scene's stable id, minted from the same counter as
+  every entity's `sid` (§4.2) so it can never collide with one; a Scene is
+  NOT an entity (it carries no `attrs`, is not a `NodeRef` target, and is
+  addressed only through this list). A duplicate against another Scene or
+  against any entity `sid` is a fatal, typed error. A loader re-seats its
+  mint counter past the maximum of entity and Scene sids alike.
+- **`name`** — non-empty and **unique** across the document's Scenes (the
+  Hew API addresses Scenes by name); a duplicate or empty name is a fatal,
+  typed error.
+- **`description`** — free text; omitted when empty.
+- The five **captured properties**, each optional. **Absence means "not
+  captured"**: activating the Scene leaves that aspect of the view alone.
+  Presence means the Scene restores it:
+  - `camera` — the same shape and validation as the top-level `camera`
+    block (§4.11).
+  - `hidden_nodes` — sorted list of `sid`s of the objects/groups/instances
+    that are user-hidden (§4.10) in this Scene. A **full set**, not a
+    delta: any node not listed is visible, so geometry created after the
+    Scene was captured is visible in it. May be nested (a member of a
+    group, or of a component definition — a hidden definition member is
+    hidden in every instance, exactly as the per-node `hidden` flag
+    behaves). May be empty (captured: nothing hidden).
+  - `hidden_tags` — sorted list of `sid`s of tag-registry entries (§4.10)
+    whose `hidden` flag is on in this Scene; the same full-set posture.
+  - `section` — either `null` (captured: **no** plane placed) or a
+    section-plane object with the §4.13 shape and validation (captured:
+    this plane, by value). This is the one place JSON `null` and absence
+    mean different things.
+  - `display` — `{grid, axes, guides}` booleans, the editor's display
+    toggles; opaque to the file format's readers other than the app.
+
+**References.** Every `sid` in `hidden_nodes` / `hidden_tags` MUST name a
+live entity of the file (an object, group, or instance for the former; a
+tag-registry entry for the latter). A dangling one is a fatal
+`DanglingReference`, never dropped. **Writers prune**: an in-memory Scene
+may hold the sid of a deleted node or tag (kept so that undoing the
+deletion re-links it), and the writer filters those out at save time —
+deterministically, so byte-identical output holds — which is why a
+conforming file never carries one.
+
+**Not undoable.** Adding, updating, renaming, reordering, or deleting a
+Scene, and activating one, are all outside undo/redo history — the same
+posture as `camera`, `axes`' cousins in the view-state family (§4.10,
+§4.11, §4.13). Unlike those, an app treats Scene edits as document
+changes for its dirty flag (a lost Scene is real work lost). Activation
+writes the captured tag `hidden` flags, per-node `hidden` flags, and
+`section_plane` back into the document; the camera and display are
+handed to the app.
+
+Thumbnails are never stored: they are derived at runtime, and GPU output
+is not deterministic (§1).
 
 ## 5. Versioning policy
 

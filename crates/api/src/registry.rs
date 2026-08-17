@@ -511,6 +511,69 @@ impl Registry {
             "Add an angular construction guide.",
         );
         add("hew.guide.clear", M, Kernel, Std, "Delete all guides.");
+        // hew.scenes — named, saved views (docs/HEW_API.md's Scenes
+        // section; docs/design/scenes.md §3, §7). Every command but
+        // `list` is `ModelMutating` (may ride a transaction,
+        // `mutates_document = true`) but NONE of it is undoable — same
+        // registry-state posture as `hew.tag.create`/`set_visible` above:
+        // the kernel calls behind these never record an op, so the
+        // compound entry a transaction commits ends up empty.
+        add(
+            "hew.scenes.list",
+            R,
+            Kernel,
+            Std,
+            "Every Scene, in tab order.",
+        );
+        add(
+            "hew.scenes.add",
+            M,
+            Kernel,
+            Std,
+            "Add a Scene capturing the document's current view state. Records no undo entry (§6.4).",
+        );
+        add(
+            "hew.scenes.update",
+            M,
+            Kernel,
+            Std,
+            "Re-capture a Scene's properties from the document's current state. Records no undo entry (§6.4).",
+        );
+        add(
+            "hew.scenes.rename",
+            M,
+            Kernel,
+            Std,
+            "Rename a Scene. Records no undo entry (§6.4).",
+        );
+        add(
+            "hew.scenes.describe",
+            M,
+            Kernel,
+            Std,
+            "Set a Scene's free-text description. Records no undo entry (§6.4).",
+        );
+        add(
+            "hew.scenes.remove",
+            M,
+            Kernel,
+            Std,
+            "Delete a Scene. Records no undo entry (§6.4).",
+        );
+        add(
+            "hew.scenes.reorder",
+            M,
+            Kernel,
+            Std,
+            "Move a Scene to a new position in tab order. Records no undo entry (§6.4).",
+        );
+        add(
+            "hew.scenes.apply",
+            M,
+            Kernel,
+            Std,
+            "Apply a Scene: write its captured camera/hidden-set/section state into the document. Records no undo entry (§6.4).",
+        );
         // hew.attr — attribute dictionaries (§8).
         add(
             "hew.attr.get",
@@ -1042,7 +1105,11 @@ impl Registry {
                     "view": {
                         "type": "string",
                         "enum": ["iso", "front", "back", "left", "right", "top", "bottom"],
-                        "description": "a named standard view fitted to the scene bounding box; mutually exclusive with camera"
+                        "description": "a named standard view fitted to the scene bounding box; mutually exclusive with camera and scene"
+                    },
+                    "scene": {
+                        "type": "string",
+                        "description": "a Scene's id: renders through its resolved camera and hidden sets (Document::resolve_scene) instead of the document's own — falls back to the usual cameraless resolution when the Scene captures no camera. Mutually exclusive with camera and view. The Scene's section plane, if any, is NOT rendered headlessly at 1.0."
                     },
                     "include_ids": {
                         "type": "boolean",
@@ -1089,6 +1156,7 @@ impl Registry {
                 "host_capability_missing",
                 "nothing_to_render",
                 "save_failed",
+                "unknown_scene",
             ];
         }
         {
@@ -1813,6 +1881,254 @@ impl Registry {
                 "additionalProperties": false
             });
             cmd.refusals = Vec::new();
+        }
+        {
+            // hew.scenes.* — named, saved views (docs/HEW_API.md's Scenes
+            // section). `camera_schema`/`display_schema`/`properties_schema`
+            // are the wire shapes `crates/api/src/commands/scenes.rs`
+            // parses, shared across `add`/`update`/`list`'s result.
+            let camera_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "eye": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "target": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "up": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "projection": { "type": "string", "enum": ["perspective", "parallel"] },
+                    "fov_deg": { "type": "number", "description": "perspective only; defaults to 35" }
+                },
+                "required": ["eye", "target"],
+                "additionalProperties": false,
+                "description": "an explicit camera to capture — no named-view shorthand, a Scene captures a concrete eye/target, not a fitted view; when omitted and the camera property is captured, falls back to the document's own saved working camera"
+            });
+            let display_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "grid": { "type": "boolean" },
+                    "axes": { "type": "boolean" },
+                    "guides": { "type": "boolean" }
+                },
+                "required": ["grid", "axes", "guides"],
+                "additionalProperties": false,
+                "description": "opaque editor display toggles: stored and returned, never interpreted by the kernel"
+            });
+            let properties_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "camera": { "type": "boolean" },
+                    "hidden_nodes": { "type": "boolean" },
+                    "hidden_tags": { "type": "boolean" },
+                    "section": { "type": "boolean" },
+                    "display": { "type": "boolean" }
+                },
+                "additionalProperties": false,
+                "description": "which of the five capturable properties to (re-)capture; each defaults to true"
+            });
+            let camera_result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "eye": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "target": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "up": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "projection": { "type": "string", "enum": ["perspective", "parallel"] },
+                    "fov_deg": { "type": "number" }
+                },
+                "required": ["eye", "target", "up", "projection", "fov_deg"]
+            });
+            let section_result_schema = serde_json::json!({
+                "oneOf": [
+                    { "type": "null" },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "origin": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                            "normal": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                            "active": { "type": "boolean" }
+                        },
+                        "required": ["origin", "normal", "active"]
+                    }
+                ],
+                "description": "null means captured-but-no-plane-placed"
+            });
+            let scene_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "sid": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "description": { "type": "string" },
+                    "props": {
+                        "type": "object",
+                        "properties": {
+                            "camera": { "type": "boolean" },
+                            "hidden_nodes": { "type": "boolean" },
+                            "hidden_tags": { "type": "boolean" },
+                            "section": { "type": "boolean" },
+                            "display": { "type": "boolean" }
+                        },
+                        "required": ["camera", "hidden_nodes", "hidden_tags", "section", "display"]
+                    },
+                    "camera": camera_result_schema.clone(),
+                    "section": section_result_schema.clone(),
+                    "display": display_schema.clone()
+                },
+                "required": ["id", "sid", "name", "description", "props"],
+                "description": "camera/display are present only when that property is captured AND has something to report; section is present (possibly null) whenever the section property is captured"
+            });
+
+            let cmd = commands.get_mut("hew.scenes.list").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "scenes": { "type": "array", "items": scene_schema } },
+                "required": ["scenes"]
+            });
+            cmd.refusals = Vec::new();
+
+            let cmd = commands.get_mut("hew.scenes.add").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "must be non-empty and unused; auto-named \"Scene N\" when omitted" },
+                    "description": { "type": "string" },
+                    "camera": camera_schema.clone(),
+                    "display": display_schema.clone(),
+                    "properties": properties_schema.clone(),
+                    "after": { "type": "string", "description": "insert after this Scene's id; appended at the end when omitted" }
+                },
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "sid": { "type": "integer" },
+                    "name": { "type": "string" }
+                },
+                "required": ["id", "sid", "name"]
+            });
+            cmd.refusals = vec!["duplicate_scene_name", "empty_scene_name", "unknown_scene"];
+
+            let cmd = commands
+                .get_mut("hew.scenes.update")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "properties": properties_schema.clone(),
+                    "camera": camera_schema,
+                    "display": display_schema.clone()
+                },
+                "required": ["id"],
+                "additionalProperties": false,
+                "description": "properties defaults to the Scene's currently captured set (re-capture, never widen) when omitted"
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["unknown_scene"];
+
+            let cmd = commands
+                .get_mut("hew.scenes.rename")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" }, "name": { "type": "string" } },
+                "required": ["id", "name"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["unknown_scene", "duplicate_scene_name", "empty_scene_name"];
+
+            let cmd = commands
+                .get_mut("hew.scenes.describe")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" }, "description": { "type": "string" } },
+                "required": ["id", "description"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["unknown_scene"];
+
+            let cmd = commands
+                .get_mut("hew.scenes.remove")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["unknown_scene"];
+
+            let cmd = commands
+                .get_mut("hew.scenes.reorder")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "index": { "type": "integer", "minimum": 0, "description": "tab-order position; clamped to the end for an out-of-range index, never refused" }
+                },
+                "required": ["id", "index"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["unknown_scene"];
+
+            let cmd = commands
+                .get_mut("hew.scenes.apply")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "camera": camera_result_schema,
+                    "section": section_result_schema,
+                    "hidden_object_ids": { "type": "array", "items": { "type": "string" } },
+                    "hidden_instance_ids": { "type": "array", "items": { "type": "string" } }
+                },
+                "description": "each key present only when the Scene captured that property; hidden_object_ids/hidden_instance_ids appear as a pair (possibly empty arrays) whenever hidden_nodes or hidden_tags is captured, and are OMITTED entirely — not empty-arrayed — when neither is, so a partial-capture Scene can never read as \"show everything\""
+            });
+            cmd.refusals = vec!["unknown_scene"];
         }
         {
             let cmd = commands.get_mut("hew.attr.get").expect("declared above");

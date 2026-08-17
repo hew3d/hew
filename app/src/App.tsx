@@ -20,6 +20,7 @@ import { TitleBar } from './TitleBar'
 import { isCoarsePointer, isLinux, isMac, isWindows } from './platform'
 import { nextPaint } from './paint'
 import { TagsPanel } from './panels/TagsPanel'
+import { ScenesPanel, ScenesAddButton, useSceneRenameState } from './panels/ScenesPanel'
 import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
 import { ToolRail } from './panels/ToolRail'
@@ -72,6 +73,7 @@ import { SaveToLibraryPopover } from './panels/SaveToLibraryPopover'
 import { libraryStore } from './io/libraryStore'
 import { buildItemGhost } from './library/ghostBuilder'
 import { readItemSummary, renderItemThumbnail, sha256Hex } from './library/itemFiles'
+import { loadThumbnails as loadSceneThumbnails, saveThumbnails as saveSceneThumbnails } from './scenes/sceneThumbnails'
 import { buildLibraryItem } from './library/libraryModel'
 import { itemFileName } from './library/fileNaming'
 import type { LibraryCategory, LibraryItem } from './library/types'
@@ -80,6 +82,9 @@ import { SettingsWindow } from './settings/SettingsWindow'
 import { FluentSettingsPage } from './settings/FluentSettingsPage'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
 import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
+import { getSceneTransitions, setSceneTransitions, subscribe as subscribeSceneTransitions } from './settings/sceneTransitions'
+import { useScenesController } from './scenes/useScenesController'
+import { parseSectionJson } from './scenes/scenesModel'
 import * as diagnosticLog from './log/diagnosticLog'
 import * as inputRecorder from './recording/inputRecorder'
 import { generateBugReport } from './log/reportBug'
@@ -324,6 +329,8 @@ export default function App() {
   const [showMaterials, setShowMaterials] = useState(() => getTrayLayout().materials)
   /** Pane visibility: Tags */
   const [showTags, setShowTags] = useState(() => getTrayLayout().tags)
+  /** Pane visibility: Scenes (docs/design/scenes.md §5) */
+  const [showScenes, setShowScenes] = useState(() => getTrayLayout().scenes)
   /** Pane visibility: Object Info */
   const [showObjectInfo, setShowObjectInfo] = useState(() => getTrayLayout().objectInfo)
   /** Debug Log panel visibility (default hidden — opt-in via Window menu only). */
@@ -545,6 +552,14 @@ export default function App() {
     return subscribeDebugMode(apply)
   }, [])
 
+  // View ▸ Scenes ▸ Scene Transitions checkmark (docs/design/scenes.md §5 —
+  // a SPEC.md deviation: the design put this in Settings, but it lives in
+  // the View menu at a fixed 600ms instead, same posture as `showDebugMode`
+  // above). `useScenesController` reads the singleton directly for the tween
+  // duration; this is only the menu/palette checkmark's own render cache.
+  const [sceneTransitionsOn, setSceneTransitionsOn] = useState(() => getSceneTransitions())
+  useEffect(() => subscribeSceneTransitions(setSceneTransitionsOn), [])
+
   // ---------------------------------------------------------------- tray layout persistence
   // Write the four section flags back to the singleton whenever any of them
   // changes (also fires once on mount, writing the just-restored values —
@@ -557,14 +572,16 @@ export default function App() {
       objectInfo: showObjectInfo,
       materials: showMaterials,
       tags: showTags,
+      scenes: showScenes,
     })
-  }, [showModelInfo, showObjectInfo, showMaterials, showTags])
+  }, [showModelInfo, showObjectInfo, showMaterials, showTags, showScenes])
   useEffect(() => {
     return subscribeTrayLayout((layout) => {
       setShowModelInfo(layout.modelInfo)
       setShowObjectInfo(layout.objectInfo)
       setShowMaterials(layout.materials)
       setShowTags(layout.tags)
+      setShowScenes(layout.scenes)
     })
   }, [])
 
@@ -1015,6 +1032,45 @@ export default function App() {
     for (let i = sessionStack.length; i > 0; i--) api?.runCloseInnermostSession()
   }, [sessionStack])
 
+  // ---------------------------------------------------------------- scenes
+  // The Scenes controller (docs/design/scenes.md §5): entries, active Scene,
+  // drift, thumbnails, and every Add/Update/Activate/... against the kernel
+  // + viewport. The tray section, View ▸ Scenes menu, palette, and Page
+  // Up/Down all drive this one object. Deps arrive as callbacks so the
+  // controller never reaches into this component's state directly.
+  const scenesDisplay = useMemo(() => ({ grid: showGrid, axes: showAxes, guides: showGuides }), [showGrid, showAxes, showGuides])
+  const scenesSetDisplay = useCallback((d: { grid: boolean; axes: boolean; guides: boolean }) => {
+    setShowGrid(d.grid)
+    setShowAxes(d.axes)
+    setShowGuides(d.guides)
+  }, [])
+  const scenesSetHiddenState = useCallback((next: { hiddenKeys?: Set<string>; hiddenTagPaths?: Set<string> }) => {
+    if (next.hiddenKeys !== undefined) setHiddenKeys(next.hiddenKeys)
+    if (next.hiddenTagPaths !== undefined) setHiddenTagPaths(next.hiddenTagPaths)
+  }, [])
+  const scenesMarkDirty = useCallback(() => {
+    setDocSession((s) => afterMutation(s, Date.now()))
+    dirtySinceAutosaveRef.current = true
+  }, [])
+  const scenesToast = useCallback((message: string) => handleToastRef.current?.(message), [])
+  const scenes = useScenesController({
+    scene: state?.scene ?? null,
+    viewportApi,
+    docRev,
+    display: scenesDisplay,
+    setDisplay: scenesSetDisplay,
+    setHiddenState: scenesSetHiddenState,
+    exitAllContexts: handleExitToModel,
+    markDirty: scenesMarkDirty,
+    onToast: scenesToast,
+  })
+  const scenesRef = useRef(scenes)
+  scenesRef.current = scenes
+  // Inline-rename UI state shared between the Scenes tray section's header
+  // ⊕ Add Scene button and its row list (ScenesPanel.tsx's own doc comment
+  // on why this can't just be local state in one component).
+  const scenesRename = useSceneRenameState(scenes)
+
   /** Validate and trim the context path when the document changes. */
   const trimContextPath = useCallback((scene: Scene, path: NodeRef[]): NodeRef[] => {
     const objectIds = new Set(Array.from(scene.object_ids()))
@@ -1094,6 +1150,20 @@ export default function App() {
   const handleSectionChanged = useCallback(() => {
     const state = viewportApi.current?.getSectionState() ?? null
     setSectionPlaneMenuState({ checked: state !== null && state.active, exists: state !== null })
+    // The kernel owns the persisted plane (docs/design/scenes.md §4); the
+    // viewport's SectionManager is its mirror. Every committed change lands
+    // here, so this is the one write-through point. View state — never
+    // dirties, like the camera.
+    const scene = sceneRef.current
+    if (scene !== null) {
+      try {
+        if (state === null) scene.clear_section_plane()
+        else scene.set_section_plane(state.origin[0], state.origin[1], state.origin[2], state.normal[0], state.normal[1], state.normal[2], state.active)
+      } catch {
+        /* a non-unit normal from a degenerate placement — the viewport keeps its own copy; nothing persists */
+      }
+    }
+    scenesRef.current.refreshDrift()
   }, [])
 
   // Semantic test harness `window.__hew_test`, installed only in
@@ -1137,6 +1207,11 @@ export default function App() {
       getScene: () => sceneRef.current,
       getViewportApi: () => viewportApi.current,
       reconcile: () => reconcileRef.current(),
+      // A live `hew.scenes.apply` drives the SAME activation path the Scenes
+      // tray uses (docs/design/scenes.md §7): the kernel state is already
+      // written by the time the directive arrives; this syncs panels, the
+      // renderer, and the camera exactly as a row click would.
+      activateScene: (sid) => scenesRef.current.activate(sid),
     })
   }, [])
 
@@ -1158,6 +1233,8 @@ export default function App() {
       setToasts((prev) => prev.filter((t) => t.id !== id))
     }, 4000)
   }, [])
+  const handleToastRef = useRef(handleToast)
+  handleToastRef.current = handleToast
 
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id))
@@ -1502,6 +1579,12 @@ export default function App() {
     setWelcomeOpen(false)
     setSelectedIds([])
     setActiveContext([])
+    // The wasm handle is reused and mutated in place across New/Open, so
+    // the Scenes controller must be told explicitly that this is a new
+    // document (docs/design/scenes.md §5): no active Scene, no drift, no
+    // thumbnails carried over — a stale sid could otherwise collide with a
+    // same-numbered Scene in the newly opened file.
+    scenesRef.current.resetForDocument()
     // Seed from the just-loaded document's registries rather than clearing —
     // hidden .skp layers/nodes (or a re-opened .hew with tags/nodes previously
     // hidden via the eye toggle) must come up hidden on first render, not
@@ -1514,6 +1597,17 @@ export default function App() {
     // document reuses, so stale ids would silently hide (and un-pick) unrelated
     // objects after a load. (No-op if the viewport isn't mounted yet.)
     viewportApi.current?.setHidden([], [])
+    // The document's persisted section plane (docs/design/scenes.md §4) —
+    // read BEFORE notifyLoaded, whose "new document, clean view state" reset
+    // deletes the viewport's plane and, through handleSectionChanged, would
+    // otherwise clear the kernel's freshly loaded one too.
+    let loadedSection: { origin: [number, number, number]; normal: [number, number, number]; active: boolean } | null = null
+    try {
+      const sectionJson = scene.section_plane_json()
+      if (sectionJson !== undefined) loadedSection = parseSectionJson(JSON.parse(sectionJson)) ?? null
+    } catch {
+      loadedSection = null
+    }
     // Suppress dirty-marking while notifyLoaded triggers handleDocumentChanged;
     // the caller will commit the authoritative afterOpen state (dirty=false).
     suppressDirtyRef.current = true
@@ -1522,6 +1616,9 @@ export default function App() {
     } finally {
       suppressDirtyRef.current = false
     }
+    // Re-establish the loaded plane in the viewport (fires onSectionChanged →
+    // writes the same plane back into the kernel; idempotent).
+    if (loadedSection !== null) viewportApi.current?.setSectionPlane(loadedSection)
     // Push the seeded hides now that the scene is tessellated (notifyLoaded
     // above), so hidden-by-default tags/nodes take effect on first render
     // instead of waiting for the user to touch an eye toggle.
@@ -1551,6 +1648,27 @@ export default function App() {
       // blank bytes) keep the default framing.
       requestAnimationFrame(() => viewportApi.current?.zoomExtents())
     }
+    // A document with Scenes opens on its first Scene (docs/design/scenes.md
+    // §5, playtest; SketchUp's own behavior) — activated instantly, no tween,
+    // AFTER the saved-camera/zoom-extents frame above so the Scene's camera
+    // (if it captures one) wins. Activation is view state: never dirties.
+    requestAnimationFrame(() => {
+      scenesRef.current.activateFirstOnLoad()
+    })
+    // Scene thumbnail cache (docs/design/scenes.md §5 "Add"): the derived
+    // JPEGs live in IndexedDB, keyed by content hash + sid, never in the
+    // file itself — restore whatever this exact document's bytes had cached
+    // from a prior session. Fire-and-forget: a cache miss/failure just shows
+    // placeholders, and must never delay or block the load it rides on.
+    void (async () => {
+      try {
+        const hash = await sha256Hex(bytes)
+        const cached = await loadSceneThumbnails(hash)
+        if (cached.size > 0) scenesRef.current.mergeThumbnails(cached)
+      } catch {
+        /* best-effort — placeholders are fine */
+      }
+    })()
     return true
   }, [handleToast])
   // Keep the harness's Open path ( __hew_test.load) pointed at the latest
@@ -1933,6 +2051,25 @@ export default function App() {
     }
   }, [confirmDiscard, handleToast, runImportPick, componentFrameOpen])
 
+  // Scene thumbnail cache (docs/design/scenes.md §5 "Add"): persist the
+  // controller's CURRENT thumbnail map under the just-written bytes' own
+  // content hash, so a later re-open of this exact save finds them again
+  // (`applyLoadedBytes`'s matching load). Re-keys on every save rather than
+  // once — an edit since the last save changes the content hash, and Save
+  // As always does. Fire-and-forget: never blocks or fails a save.
+  const persistSceneThumbnails = useCallback((savedBytes: Uint8Array) => {
+    const thumbs = scenesRef.current.thumbnails
+    if (thumbs.size === 0) return
+    void (async () => {
+      try {
+        const hash = await sha256Hex(savedBytes)
+        await saveSceneThumbnails(hash, thumbs)
+      } catch {
+        /* best-effort */
+      }
+    })()
+  }, [])
+
   const saveDocument = useCallback(() => {
     const scene = sceneRef.current
     if (scene === null) return
@@ -1953,6 +2090,7 @@ export default function App() {
           invoke('push_recent', { path: newRef.handle as string })
         ).catch(() => { /* ignore */ })
       }
+      persistSceneThumbnails(bytes)
     }).catch((err: unknown) => {
       handleToast(`Save failed: ${friendlyErrorText(err)}`)
     })
@@ -1979,6 +2117,7 @@ export default function App() {
           invoke('push_recent', { path: newRef.handle as string })
         ).catch(() => { /* ignore */ })
       }
+      persistSceneThumbnails(bytes)
     }).catch((err: unknown) => {
       handleToast(`Save As failed: ${friendlyErrorText(err)}`)
     })
@@ -3261,6 +3400,7 @@ export default function App() {
       case 'toggle-model-info':   setShowModelInfo((v) => !v); break
       case 'toggle-materials':    setShowMaterials((v) => !v); break
       case 'toggle-tags':         setShowTags((v) => !v); break
+      case 'toggle-scenes':       setShowScenes((v) => !v); break
       case 'toggle-object-info':  setShowObjectInfo((v) => !v); break
       case 'toggle-debug-log':    setShowDebugLog((v) => !v); break
       case 'toggle-axes':         setShowAxes((v) => !v); break
@@ -3337,6 +3477,18 @@ export default function App() {
       case 'edit-union': handleBoolean(0); break
       case 'edit-subtract': handleBoolean(1); break
       case 'edit-intersect': handleBoolean(2); break
+      // View ▸ Scenes (docs/design/scenes.md §5): Add/Update/Next/Previous
+      // drive the ScenesController exclusively — see its own module doc on
+      // why the UI never reaches the kernel directly for Scenes.
+      case 'scenes-add': scenesRename.add(); break
+      case 'scenes-update': {
+        const sid = scenesRef.current.activeSid
+        if (sid !== null) scenesRef.current.update(sid)
+        break
+      }
+      case 'scenes-next': scenesRef.current.next(); break
+      case 'scenes-previous': scenesRef.current.previous(); break
+      case 'scenes-transitions': setSceneTransitions(!sceneTransitionsOn); break
     }
   }
 
@@ -3775,6 +3927,11 @@ export default function App() {
         if (key === 'o') { ev.preventDefault(); activateTool('Orbit'); return }
         if (key === 'h') { ev.preventDefault(); activateTool('Pan'); return }
         if (key === 'z') { ev.preventDefault(); activateTool('Zoom'); return }
+        // Scenes: Page Down/Up = Next/Previous (docs/design/scenes.md §5,
+        // SketchUp's own default). Unmodified — no native-menu accelerator
+        // conflict, so this fires identically on web and desktop.
+        if (ev.key === 'PageDown') { ev.preventDefault(); scenesRef.current.next(); return }
+        if (ev.key === 'PageUp') { ev.preventDefault(); scenesRef.current.previous(); return }
       }
 
       // (Delete/Backspace handled by a dedicated always-on effect below.)
@@ -3970,10 +4127,12 @@ export default function App() {
       'win-model-info': showModelInfo,
       'win-materials': showMaterials,
       'win-tags': showTags,
+      'win-scenes': showScenes,
       'win-object-info': showObjectInfo,
       'win-debug-log': showDebugLog,
       'win-library': showLibrary,
       'cam-parallel-projection': parallelProjection,
+      'scenes-transitions': sceneTransitionsOn,
     }
     for (const [tool, id] of Object.entries(TOOL_MENU_IDS)) {
       checked[id] = tool === activeTool
@@ -3996,6 +4155,10 @@ export default function App() {
       // rather than a toast a user actually meets.
       'file-import': !componentFrameOpen,
       'draw-3d-text': !componentFrameOpen,
+      // View ▸ Scenes ▸ Update/Next/Previous (docs/design/scenes.md §5).
+      'scenes-update': scenes.activeSid !== null,
+      'scenes-next': scenes.entries.length > 0,
+      'scenes-previous': scenes.entries.length > 0,
     }
     import('@tauri-apps/api/core')
       .then(({ invoke }) => invoke('sync_menu_state', { checked, enabled }))
@@ -4009,6 +4172,7 @@ export default function App() {
     showModelInfo,
     showMaterials,
     showTags,
+    showScenes,
     showObjectInfo,
     showDebugLog,
     showLibrary,
@@ -4019,6 +4183,9 @@ export default function App() {
     menuFocusTick,
     parallelProjection,
     componentFrameOpen,
+    sceneTransitionsOn,
+    scenes.activeSid,
+    scenes.entries.length,
   ])
 
   // ---------------------------------------------------------------- drag-drop open
@@ -4343,15 +4510,25 @@ export default function App() {
         showModelInfo={showModelInfo}
         showMaterials={showMaterials}
         showTags={showTags}
+        showScenes={showScenes}
         showObjectInfo={showObjectInfo}
         showDebugLog={showDebugLog}
         showLibrary={showLibrary}
         onToggleModelInfo={() => setShowModelInfo((v) => !v)}
         onToggleMaterials={() => setShowMaterials((v) => !v)}
         onToggleTags={() => setShowTags((v) => !v)}
+        onToggleScenes={() => setShowScenes((v) => !v)}
         onToggleObjectInfo={() => setShowObjectInfo((v) => !v)}
         onToggleDebugLog={() => setShowDebugLog((v) => !v)}
         onToggleLibrary={() => setShowLibrary((v) => !v)}
+        onScenesAdd={() => scenesRename.add()}
+        onScenesUpdate={() => menuActionRef.current('scenes-update')}
+        sceneUpdateEnabled={scenes.activeSid !== null}
+        onScenesNext={() => scenes.next()}
+        onScenesPrevious={() => scenes.previous()}
+        scenesNavEnabled={scenes.entries.length > 0}
+        sceneTransitionsChecked={sceneTransitionsOn}
+        onToggleSceneTransitions={() => setSceneTransitions(!sceneTransitionsOn)}
         showAxes={showAxes}
         showGrid={showGrid}
         showGuides={showGuides}
@@ -4485,6 +4662,7 @@ export default function App() {
             onSessionChange={handleSessionChange}
             onDocumentChanged={handleDocumentChanged}
             onSectionChanged={handleSectionChanged}
+            onCameraSettled={scenes.refreshDrift}
             onHistoryChanged={handleHistoryChanged}
             apiRef={viewportApi}
             onMeasurement={handleMeasurement}
@@ -4826,6 +5004,14 @@ export default function App() {
               revealTag={revealTag}
             />
           </TraySection>
+          <TraySection
+            title="Scenes"
+            collapsed={!showScenes}
+            onToggle={() => setShowScenes((v) => !v)}
+            headerRight={<ScenesAddButton rename={scenesRename} />}
+          >
+            <ScenesPanel scenes={scenes} rename={scenesRename} />
+          </TraySection>
         </div>
       </div>
 
@@ -5108,6 +5294,8 @@ export default function App() {
           canBoolean: menuGates?.canBoolean ?? false,
           canImport: !componentFrameOpen,
           canDrawText: !componentFrameOpen,
+          sceneActive: scenes.activeSid !== null,
+          scenesAny: scenes.entries.length > 0,
         }}
       />
 

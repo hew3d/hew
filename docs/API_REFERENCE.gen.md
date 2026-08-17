@@ -2375,6 +2375,793 @@ The document tree with per-entity summaries.
 
 **Refusals:** none.
 
+## hew.scenes
+
+### `hew.scenes.add`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Add a Scene capturing the document's current view state. Records no undo entry (§6.4).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "after": {
+      "description": "insert after this Scene's id; appended at the end when omitted",
+      "type": "string"
+    },
+    "camera": {
+      "additionalProperties": false,
+      "description": "an explicit camera to capture — no named-view shorthand, a Scene captures a concrete eye/target, not a fitted view; when omitted and the camera property is captured, falls back to the document's own saved working camera",
+      "properties": {
+        "eye": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "fov_deg": {
+          "description": "perspective only; defaults to 35",
+          "type": "number"
+        },
+        "projection": {
+          "enum": [
+            "perspective",
+            "parallel"
+          ],
+          "type": "string"
+        },
+        "target": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "up": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "eye",
+        "target"
+      ],
+      "type": "object"
+    },
+    "description": {
+      "type": "string"
+    },
+    "display": {
+      "additionalProperties": false,
+      "description": "opaque editor display toggles: stored and returned, never interpreted by the kernel",
+      "properties": {
+        "axes": {
+          "type": "boolean"
+        },
+        "grid": {
+          "type": "boolean"
+        },
+        "guides": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "grid",
+        "axes",
+        "guides"
+      ],
+      "type": "object"
+    },
+    "name": {
+      "description": "must be non-empty and unused; auto-named \"Scene N\" when omitted",
+      "type": "string"
+    },
+    "properties": {
+      "additionalProperties": false,
+      "description": "which of the five capturable properties to (re-)capture; each defaults to true",
+      "properties": {
+        "camera": {
+          "type": "boolean"
+        },
+        "display": {
+          "type": "boolean"
+        },
+        "hidden_nodes": {
+          "type": "boolean"
+        },
+        "hidden_tags": {
+          "type": "boolean"
+        },
+        "section": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "sid": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "id",
+    "sid",
+    "name"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `duplicate_scene_name` — A Scene with that name already exists. Choose a different name.
+- `empty_scene_name` — A Scene needs a name.
+- `unknown_scene` — That Scene no longer exists — it may have been deleted.
+
+### `hew.scenes.apply`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Apply a Scene: write its captured camera/hidden-set/section state into the document. Records no undo entry (§6.4).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "each key present only when the Scene captured that property; hidden_object_ids/hidden_instance_ids appear as a pair (possibly empty arrays) whenever hidden_nodes or hidden_tags is captured, and are OMITTED entirely — not empty-arrayed — when neither is, so a partial-capture Scene can never read as \"show everything\"",
+  "properties": {
+    "camera": {
+      "properties": {
+        "eye": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "fov_deg": {
+          "type": "number"
+        },
+        "projection": {
+          "enum": [
+            "perspective",
+            "parallel"
+          ],
+          "type": "string"
+        },
+        "target": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "up": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "eye",
+        "target",
+        "up",
+        "projection",
+        "fov_deg"
+      ],
+      "type": "object"
+    },
+    "hidden_instance_ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "hidden_object_ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "section": {
+      "description": "null means captured-but-no-plane-placed",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "properties": {
+            "active": {
+              "type": "boolean"
+            },
+            "normal": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "origin": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            }
+          },
+          "required": [
+            "origin",
+            "normal",
+            "active"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_scene` — That Scene no longer exists — it may have been deleted.
+
+### `hew.scenes.describe`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Set a Scene's free-text description. Records no undo entry (§6.4).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "description": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "description"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_scene` — That Scene no longer exists — it may have been deleted.
+
+### `hew.scenes.list`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+
+Every Scene, in tab order.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "scenes": {
+      "items": {
+        "description": "camera/display are present only when that property is captured AND has something to report; section is present (possibly null) whenever the section property is captured",
+        "properties": {
+          "camera": {
+            "properties": {
+              "eye": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "fov_deg": {
+                "type": "number"
+              },
+              "projection": {
+                "enum": [
+                  "perspective",
+                  "parallel"
+                ],
+                "type": "string"
+              },
+              "target": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "up": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "eye",
+              "target",
+              "up",
+              "projection",
+              "fov_deg"
+            ],
+            "type": "object"
+          },
+          "description": {
+            "type": "string"
+          },
+          "display": {
+            "additionalProperties": false,
+            "description": "opaque editor display toggles: stored and returned, never interpreted by the kernel",
+            "properties": {
+              "axes": {
+                "type": "boolean"
+              },
+              "grid": {
+                "type": "boolean"
+              },
+              "guides": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "grid",
+              "axes",
+              "guides"
+            ],
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "props": {
+            "properties": {
+              "camera": {
+                "type": "boolean"
+              },
+              "display": {
+                "type": "boolean"
+              },
+              "hidden_nodes": {
+                "type": "boolean"
+              },
+              "hidden_tags": {
+                "type": "boolean"
+              },
+              "section": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "camera",
+              "hidden_nodes",
+              "hidden_tags",
+              "section",
+              "display"
+            ],
+            "type": "object"
+          },
+          "section": {
+            "description": "null means captured-but-no-plane-placed",
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "properties": {
+                  "active": {
+                    "type": "boolean"
+                  },
+                  "normal": {
+                    "items": {
+                      "type": "number"
+                    },
+                    "maxItems": 3,
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "origin": {
+                    "items": {
+                      "type": "number"
+                    },
+                    "maxItems": 3,
+                    "minItems": 3,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "origin",
+                  "normal",
+                  "active"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "sid": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "sid",
+          "name",
+          "description",
+          "props"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "scenes"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
+
+### `hew.scenes.remove`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Delete a Scene. Records no undo entry (§6.4).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_scene` — That Scene no longer exists — it may have been deleted.
+
+### `hew.scenes.rename`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Rename a Scene. Records no undo entry (§6.4).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "name"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_scene` — That Scene no longer exists — it may have been deleted.
+- `duplicate_scene_name` — A Scene with that name already exists. Choose a different name.
+- `empty_scene_name` — A Scene needs a name.
+
+### `hew.scenes.reorder`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Move a Scene to a new position in tab order. Records no undo entry (§6.4).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "index": {
+      "description": "tab-order position; clamped to the end for an out-of-range index, never refused",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "id",
+    "index"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_scene` — That Scene no longer exists — it may have been deleted.
+
+### `hew.scenes.update`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Re-capture a Scene's properties from the document's current state. Records no undo entry (§6.4).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "description": "properties defaults to the Scene's currently captured set (re-capture, never widen) when omitted",
+  "properties": {
+    "camera": {
+      "additionalProperties": false,
+      "description": "an explicit camera to capture — no named-view shorthand, a Scene captures a concrete eye/target, not a fitted view; when omitted and the camera property is captured, falls back to the document's own saved working camera",
+      "properties": {
+        "eye": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "fov_deg": {
+          "description": "perspective only; defaults to 35",
+          "type": "number"
+        },
+        "projection": {
+          "enum": [
+            "perspective",
+            "parallel"
+          ],
+          "type": "string"
+        },
+        "target": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "up": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "eye",
+        "target"
+      ],
+      "type": "object"
+    },
+    "display": {
+      "additionalProperties": false,
+      "description": "opaque editor display toggles: stored and returned, never interpreted by the kernel",
+      "properties": {
+        "axes": {
+          "type": "boolean"
+        },
+        "grid": {
+          "type": "boolean"
+        },
+        "guides": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "grid",
+        "axes",
+        "guides"
+      ],
+      "type": "object"
+    },
+    "id": {
+      "type": "string"
+    },
+    "properties": {
+      "additionalProperties": false,
+      "description": "which of the five capturable properties to (re-)capture; each defaults to true",
+      "properties": {
+        "camera": {
+          "type": "boolean"
+        },
+        "display": {
+          "type": "boolean"
+        },
+        "hidden_nodes": {
+          "type": "boolean"
+        },
+        "hidden_tags": {
+          "type": "boolean"
+        },
+        "section": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_scene` — That Scene no longer exists — it may have been deleted.
+
 ## hew.sketch
 
 ### `hew.sketch.draw_arc`
@@ -3948,8 +4735,12 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
       "description": "when given, the PNG is written here instead of returned inline, honored by hosts with filesystem access and refused typed elsewhere (mirrors hew.doc.export)",
       "type": "string"
     },
+    "scene": {
+      "description": "a Scene's id: renders through its resolved camera and hidden sets (Document::resolve_scene) instead of the document's own — falls back to the usual cameraless resolution when the Scene captures no camera. Mutually exclusive with camera and view. The Scene's section plane, if any, is NOT rendered headlessly at 1.0.",
+      "type": "string"
+    },
     "view": {
-      "description": "a named standard view fitted to the scene bounding box; mutually exclusive with camera",
+      "description": "a named standard view fitted to the scene bounding box; mutually exclusive with camera and scene",
       "enum": [
         "iso",
         "front",
@@ -4021,6 +4812,7 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
 - `host_capability_missing`
 - `nothing_to_render`
 - `save_failed`
+- `unknown_scene` — That Scene no longer exists — it may have been deleted.
 
 ### `hew.view.units`
 

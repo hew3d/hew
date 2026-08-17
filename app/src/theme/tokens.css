@@ -179,6 +179,19 @@
   --status-solid-bg: #1a7a3a;
   --status-leaky-bg: #cc3322;
 
+  /* ---- Scenes (editor tray + delete confirm; SPEC.md §1/§4) --------- */
+  /* Dark keeps the spec's own hex verbatim — both clear the spec's own
+   * bars on the dark panel (delete-on-panel >=3:1 UI bar; stale-on-panel
+   * >=4.5:1 AA). --scene-delete-fill is a DARKER variant used only where
+   * white text sits on this color as a FILLED BUTTON background (the
+   * delete confirm dialog's Delete button) — plain #d5484f only reaches
+   * ~4.0:1 with white on it, short of AA's 4.5:1 (an adversarial-review
+   * finding); mirrors --shop-accent-fill's own precedent above. Verified
+   * by tokensContrast.test.ts. */
+  --scene-delete-text: #d5484f;
+  --scene-delete-fill: #c93f46;
+  --scene-stale-text: #b98a2e;
+
   /* ---- Shop Mode (dark) -------------------------------------------- */
   --shop-accent-text: #d98a68; /* accent-tinted text/icons on a dark surface */
   --shop-dock: #1b1a17; /* charcoal dock/top-strip/toast chrome */
@@ -282,6 +295,18 @@
   /* ---- Shadows (light overrides) ----------------------------------- */
   --shadow-window: 0 34px 90px -28px rgba(40, 60, 90, 0.4);
   --shadow-chip: 0 6px 18px -8px rgba(40, 60, 90, 0.4);
+
+  /* ---- Scenes (light; SPEC.md §1/§4) --------------------------------- */
+  /* The spec's #d5484f/#b98a2e fail 4.5:1 AA against the light panel
+   * (#f5f7fa) at the 11.5-12px text sizes Scenes uses them at (the
+   * duplicate-name error, the stale-refs line) — an adversarial-review
+   * finding (design deviation, approved). Darker, hue-preserved variants
+   * restore contrast; --scene-delete-fill reuses the same delete value
+   * here since it already clears white-text AA on its own. Verified by
+   * tokensContrast.test.ts. */
+  --scene-delete-text: #b3262d;
+  --scene-delete-fill: #b3262d;
+  --scene-stale-text: #7a5a0f;
 
   /* ---- Shop Mode (light) --------------------------------------------- */
   --shop-accent-text: #a34f2e; /* accent-tinted text/icons on a light surface */

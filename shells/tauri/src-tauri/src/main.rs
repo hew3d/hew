@@ -2787,12 +2787,63 @@ fn main() {
             )
             .build(handle)?;
 
+            // View ▸ Scenes (docs/design/scenes.md §5): Add/Update/Next/
+            // Previous plus the Scene Transitions checkmark (a SPEC.md
+            // deviation — the design put transitions in Settings; it lives
+            // here at a fixed 600ms instead, App.tsx's own comment on why).
+            // Next/Previous carry NO native accelerator on purpose: the JS
+            // keydown handler already binds bare Page Down/Page Up on every
+            // platform (no CmdOrCtrl, so it isn't gated behind
+            // `nativeMenuOwnsModCombos`) — a native accelerator here would
+            // double-fire alongside it on macOS.
+            let scenes_add = MenuItemBuilder::with_id("scenes-add", "Add Scene").build(handle)?;
+            let scenes_update = gated_item(
+                handle,
+                &mut gated,
+                "scenes-update",
+                "Update Scene",
+                None,
+                None,
+            )?;
+            let _ = scenes_update.set_enabled(false); // nothing active at launch
+            let scenes_next =
+                gated_item(handle, &mut gated, "scenes-next", "Next Scene", None, None)?;
+            let _ = scenes_next.set_enabled(false); // no Scenes at launch
+            let scenes_previous = gated_item(
+                handle,
+                &mut gated,
+                "scenes-previous",
+                "Previous Scene",
+                None,
+                None,
+            )?;
+            let _ = scenes_previous.set_enabled(false);
+            let scenes_transitions = check_item(
+                handle,
+                &mut checks,
+                "scenes-transitions",
+                "Scene Transitions",
+                None,
+                None,
+            )?;
+            let scenes_menu = SubmenuBuilder::new(handle, "Scenes")
+                .item(&scenes_add)
+                .item(&scenes_update)
+                .item(&PredefinedMenuItem::separator(handle)?)
+                .item(&scenes_next)
+                .item(&scenes_previous)
+                .item(&PredefinedMenuItem::separator(handle)?)
+                .item(&scenes_transitions)
+                .build()?;
+
             let view_menu = SubmenuBuilder::new(handle, "View")
                 .item(&view_axes)
                 .item(&view_reset_axes)
                 .item(&view_grid)
                 .item(&view_guides)
                 .item(&view_section_plane)
+                .item(&PredefinedMenuItem::separator(handle)?)
+                .item(&scenes_menu)
                 .item(&PredefinedMenuItem::separator(handle)?)
                 .item(&view_palette)
                 .build()?;
@@ -3151,6 +3202,9 @@ fn main() {
                 Some("Shift+CmdOrCtrl+T"),
                 Some("Shift+CmdOrCtrl+T"),
             )?;
+            // No accelerator, for the same reason as win-debug-log below: a
+            // fifth Shift+Cmd-combo pane toggle isn't worth reserving.
+            let win_scenes = check_item(handle, &mut checks, "win-scenes", "Scenes", None, None)?;
             let win_object_info = check_item(
                 handle,
                 &mut checks,
@@ -3181,6 +3235,7 @@ fn main() {
                 .item(&win_model_info)
                 .item(&win_materials)
                 .item(&win_tags)
+                .item(&win_scenes)
                 .item(&win_object_info)
                 .item(&win_library)
                 .build()?;
@@ -3527,6 +3582,11 @@ fn main() {
                 "view-grid" => "toggle-grid",
                 "view-guides" => "toggle-guides",
                 "view-section-plane" => "toggle-section-active",
+                "scenes-add" => "scenes-add",
+                "scenes-update" => "scenes-update",
+                "scenes-next" => "scenes-next",
+                "scenes-previous" => "scenes-previous",
+                "scenes-transitions" => "scenes-transitions",
                 "view-palette" => "open-palette",
                 "draw-rectangle" => "tool-rectangle",
                 "draw-circle" => "tool-circle",
@@ -3570,6 +3630,7 @@ fn main() {
                 "win-model-info" => "toggle-model-info",
                 "win-materials" => "toggle-materials",
                 "win-tags" => "toggle-tags",
+                "win-scenes" => "toggle-scenes",
                 "win-object-info" => "toggle-object-info",
                 "win-library" => "toggle-library",
                 "win-debug-log" => "toggle-debug-log",

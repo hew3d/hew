@@ -145,7 +145,33 @@ fn export_refusal(e: mesh_export::ExportError) -> Refusal {
 /// tessellate skipped, not fatal). If nothing renders at all, refuses
 /// typed rather than returning a background-only image.
 fn render_snapshot(doc: &Document, params: &SnapshotParams) -> Result<SnapshotResult, Refusal> {
-    let items = softrender::document_items(doc);
+    // `scene` renders through the Scene's OWN resolved hidden set
+    // (docs/HEW_API.md's Scenes section) instead of the document's live
+    // one — `crates/api/src/commands/scenes.rs::resolve_scene_id` already
+    // validated the public id shape; an sid that no longer names a live
+    // Scene answers the same `unknown_scene` refusal here, through
+    // `Document::resolve_scene`.
+    let scene = match params.scene {
+        Some(sid) => Some(
+            doc.resolve_scene(sid)
+                .map_err(|e| Refusal::from_document_error(&e))?,
+        ),
+        None => None,
+    };
+    // A Scene that captures neither hidden property resolves to `None` leaf
+    // sets — "leave the current hidden state alone" — so a camera-only
+    // Scene renders with the DOCUMENT's own hidden state, exactly as
+    // activating it in the app would show, never with everything visible.
+    let hidden = match &scene {
+        Some(resolved) => match (&resolved.hidden_object_ids, &resolved.hidden_instance_ids) {
+            (Some(objects), Some(instances)) => {
+                softrender::HiddenLeaves::from_lists(objects, instances)
+            }
+            _ => softrender::HiddenLeaves::of_document(doc),
+        },
+        None => softrender::HiddenLeaves::of_document(doc),
+    };
+    let items = softrender::document_items_hiding(doc, &hidden);
 
     if items.is_empty() {
         return Err(Refusal::api(
@@ -163,7 +189,7 @@ fn render_snapshot(doc: &Document, params: &SnapshotParams) -> Result<SnapshotRe
         })
         .collect();
 
-    let camera = resolve_camera(doc, params);
+    let camera = resolve_camera(doc, params, scene.as_ref(), &hidden);
     let rendered = softrender::render(&render_items, &camera, params.width, params.height)
         .map_err(|e| {
             Refusal::api("too_many_objects", &e.to_string())
@@ -203,20 +229,44 @@ fn render_snapshot(doc: &Document, params: &SnapshotParams) -> Result<SnapshotRe
     })
 }
 
-/// The three-way camera resolution `docs/design/headless-snapshot.md`
-/// calls for: an explicit `camera` param, a named `view` fitted to the
-/// scene bbox, or — given neither — the document's saved working camera,
-/// falling back to a fitted isometric view.
-fn resolve_camera(doc: &Document, params: &SnapshotParams) -> softrender::Camera {
+/// The camera resolution `docs/design/headless-snapshot.md` calls for,
+/// extended with `scene` (docs/HEW_API.md's Scenes section — mutually
+/// exclusive with `camera`/`view`, already enforced by
+/// `crates/api/src/commands/doc.rs` before this is ever called): an
+/// explicit `camera` param, a named `view` fitted to the scene bbox, a
+/// Scene's own captured camera when `scene` was given and it captured
+/// one, or — given none of those — the document's saved working camera,
+/// falling back to a fitted isometric view. `hidden`/`scene`'s bbox
+/// fitting always accounts for what is actually visible (the Scene's
+/// resolved hidden set when one applies, the document's live one
+/// otherwise) — `render_snapshot` already computed both, so this stays
+/// infallible.
+fn resolve_camera(
+    doc: &Document,
+    params: &SnapshotParams,
+    scene: Option<&kernel::ResolvedScene>,
+    hidden: &softrender::HiddenLeaves,
+) -> softrender::Camera {
     if let Some(cam) = &params.camera {
         return build_camera(cam);
     }
     if let Some(view) = params.view {
-        return softrender::Camera::standard_view(to_softrender_view(view), fitted_bbox(doc));
+        return softrender::Camera::standard_view(
+            to_softrender_view(view),
+            fitted_bbox(doc, hidden),
+        );
+    }
+    if let Some(resolved) = scene
+        && let Some(cam) = resolved.camera
+    {
+        return softrender::Camera::from_kernel(&cam);
     }
     match doc.camera_state() {
         Some(state) => softrender::Camera::from_kernel(&state),
-        None => softrender::Camera::standard_view(softrender::StandardView::Iso, fitted_bbox(doc)),
+        None => softrender::Camera::standard_view(
+            softrender::StandardView::Iso,
+            fitted_bbox(doc, hidden),
+        ),
     }
 }
 
@@ -262,14 +312,19 @@ fn to_softrender_view(view: StandardView) -> softrender::StandardView {
     }
 }
 
-/// The scene's bounding box, world space, poses applied — every visible
-/// object's vertices plus every instance member's vertices transformed by
-/// its instance pose. Falls back to a unit box centered on the origin so
-/// a standard-view camera always has something to fit even in the
-/// degenerate case (unreachable in practice: `render_snapshot` already
-/// refuses `nothing_to_render` before this is called with no geometry).
-fn fitted_bbox(doc: &Document) -> (Point3, Point3) {
-    softrender::document_bbox(doc)
+/// The document's bounding box under `hidden`, world space, poses applied
+/// — every visible object's vertices plus every instance member's
+/// vertices transformed by its instance pose, skipping whatever `hidden`
+/// says isn't visible (the document's own live hidden set, or a Scene's
+/// resolved one — `render_snapshot` computes the right one and passes it
+/// through, so a Scene's fitted standard view frames what the SCENE
+/// shows, not the whole document). Falls back to a unit box centered on
+/// the origin so a standard-view camera always has something to fit even
+/// in the degenerate case (unreachable in practice: `render_snapshot`
+/// already refuses `nothing_to_render` before this is called with
+/// nothing visible).
+fn fitted_bbox(doc: &Document, hidden: &softrender::HiddenLeaves) -> (Point3, Point3) {
+    softrender::document_bbox_hiding(doc, hidden)
 }
 
 // -------------------------------------------------------- import unit scale
