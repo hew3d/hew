@@ -703,7 +703,9 @@ you set explicitly on the command line overrides what's stored; anything
 you leave unset keeps the persisted value. Neither ever regenerates the
 upload key or the TLS certificate. The optional weekly timer runs the copy
 of the installer saved at install time (never code fetched unattended from
-the network); the interactive `update` prefers a fresh copy from GitHub.
+the network); the interactive `update` prefers a fresh copy of the
+installer — from the same mirror the container was installed from
+(`CT_RELEASE_BASE`) if it has one, otherwise from GitHub.
 
 ### Installing from a mirror
 
@@ -720,8 +722,26 @@ var_release_base=http://192.168.1.50:8000 ./hew-web.sh
 
 Maintainers testing this path before a release exists:
 `scripts/stage-local-release.sh` builds exactly those assets (both
-architectures) from the working tree into `dist/local-release/` and prints
-the `python3 -m http.server` one-liner to serve them.
+architectures) from the working tree into `dist/local-release/`, generates
+a copy of `hew-web.sh` with `var_release_base` already defaulted to that
+mirror, and serves the lot with `python3 -m http.server` (`--no-serve` to
+skip; `--port` to change it from 8000). Nothing to type on the container
+side — this is the one-liner it prints, run from a Proxmox host shell to
+create a container, or pasted into an already-provisioned container's
+console to update it in place:
+
+```sh
+bash -c "$(curl -fsSL http://192.168.1.50:8000/hew-web.sh)"
+```
+
+That container's `CT_RELEASE_BASE` is then persisted in
+`/etc/hew/install.env`, so a plain `update` typed later in its console
+keeps pulling both the release assets *and the installer itself* from the
+same mirror (see "Updating" above) — never GitHub, so it never picks up a
+version of `hew-web.sh` newer than what's staged, and never needs the
+mirror's server to be anything other than reachable. If it isn't (the mirror
+host is off, or the port isn't serving), `update` falls back to the copy
+saved at install time, same as always.
 
 ## HTTPS and certificates
 

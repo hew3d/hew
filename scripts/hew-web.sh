@@ -25,9 +25,10 @@
 # container and it updates instead of installing (it recognizes an
 # existing install by /etc/hew/install.env). The container gets a
 # `/usr/bin/update` command that does exactly that — fetching this script
-# fresh from GitHub when it can, else re-running the copy saved at install
-# time — so `pct enter <CTID>` + `update` is the whole procedure. The
-# host-side `--update <CTID>` above is the same operation driven from
+# fresh (from CT_RELEASE_BASE's mirror if the container was installed from
+# one, GitHub otherwise) when it can, else re-running the copy saved at
+# install time — so `pct enter <CTID>` + `update` is the whole procedure.
+# The host-side `--update <CTID>` above is the same operation driven from
 # outside.
 #
 # Unattended (every prompt has a var_* twin; a missing/non-interactive
@@ -38,12 +39,18 @@
 # Installing from somewhere other than GitHub Releases — an internal
 # mirror, an air-gapped copy, or a not-yet-released build staged with
 # scripts/stage-local-release.sh and served with `python3 -m http.server`:
-#   var_release_base=http://192.168.1.10:8000/local-release ./hew-web.sh
+#   var_release_base=http://192.168.1.10:8000 ./hew-web.sh
 # The base is any HTTP directory laid out like a release: the
 # hew-web-vX.Y.Z.tar.gz and hew-relay-vX.Y.Z-linux-<arch>.tar.gz assets,
 # plus a `latest` text file naming the tag (e.g. `v0.9.0`) that
 # `var_version=latest` (the default) resolves through. Persisted inside the
 # container, so `--update` and the weekly timer keep using it.
+#
+# scripts/stage-local-release.sh does the above automatically: it stages
+# and serves a copy of THIS script with var_release_base already defaulted
+# to its own mirror, so `bash -c "$(curl -fsSL http://<mac>:8000/hew-web.sh)"`
+# — no var_release_base typed — installs (from a Proxmox host) or updates
+# (typed inside an already-provisioned container's console) from it.
 #
 # See docs/SELF_HOSTING.md for what's actually being deployed and why.
 
@@ -280,16 +287,24 @@ fi
 # `pct create` never sets a root password (see hew-web.sh), so the console
 # login prompt has no credentials that work. Auto-login root on the console
 # instead — same mechanism community-scripts.org's install.func uses when a
-# container has no password set.
-GETTY_OVERRIDE=/etc/systemd/system/container-getty@1.service.d/override.conf
-mkdir -p "$(dirname "$GETTY_OVERRIDE")"
-cat <<'GETTY_EOF' >"$GETTY_OVERRIDE"
+# container has no password set. CREATE ONLY: restarting container-getty@1
+# tears down whatever is currently attached to tty1, which on `update` run
+# from inside the container's own console (not `pct exec`, which uses a
+# pts/N pseudo-terminal instead) is the very login session running THIS
+# script — it would kill its own shell mid-provision. The override is
+# idempotent config written once at create time; there's nothing to redo
+# on later updates.
+if [ "$CT_MODE" = create ]; then
+  GETTY_OVERRIDE=/etc/systemd/system/container-getty@1.service.d/override.conf
+  mkdir -p "$(dirname "$GETTY_OVERRIDE")"
+  cat <<'GETTY_EOF' >"$GETTY_OVERRIDE"
 [Service]
 ExecStart=
 ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud tty%I 115200,38400,9600 $TERM
 GETTY_EOF
-systemctl daemon-reload
-systemctl restart container-getty@1 2>/dev/null || true
+  systemctl daemon-reload
+  systemctl restart container-getty@1 2>/dev/null || true
+fi
 
 # --- Resolve this release's assets (app tarball, and the matching-arch
 # relay tarball if the relay is enabled) from ONE release payload, so both
@@ -538,18 +553,27 @@ mkdir -p /usr/local/lib/hew
 chmod 700 /usr/local/lib/hew/update.sh
 
 # `update` — the community-scripts convention: re-run the installer inside
-# the container and it updates. Fresh from GitHub when reachable (so fixes
-# to the installer itself arrive too), else the copy saved just above.
-# Either way it re-reads /etc/hew/install.env; `var_*` overrides in front
-# of it work like they do for the host-side --update.
+# the container and it updates. Fresh from wherever this container's assets
+# actually come from when reachable (so fixes to the installer itself
+# arrive too), else the copy saved just above. A container installed from a
+# mirror (CT_RELEASE_BASE) fetches the installer from THAT mirror, not
+# GitHub — the mirror is a dev/test loop the maintainer is actively
+# iterating on, and GitHub's `main` won't have those changes yet (it may
+# not even have that release's assets). A GitHub-sourced install is
+# unaffected: CT_RELEASE_BASE is unset, so this is exactly the old
+# GitHub-only behavior. Either way it re-reads /etc/hew/install.env;
+# `var_*` overrides in front of it work like they do for the host-side
+# --update.
 cat >/usr/bin/update <<'UPD'
 #!/usr/bin/env bash
 set -euo pipefail
+[ -f /etc/hew/install.env ] && . /etc/hew/install.env
 url="https://raw.githubusercontent.com/hew3d/hew/main/scripts/hew-web.sh"
+[ -n "${CT_RELEASE_BASE:-}" ] && url="${CT_RELEASE_BASE%/}/hew-web.sh"
 if script="$(curl -fsSL --max-time 20 "$url" 2>/dev/null)" && [ -n "$script" ]; then
   exec bash -c "$script" hew-web.sh "$@"
 fi
-echo "update: could not fetch the current installer from GitHub; using the copy saved at install time" >&2
+echo "update: could not fetch the current installer from $url; using the copy saved at install time" >&2
 exec bash /usr/local/lib/hew/update.sh
 UPD
 chmod 755 /usr/bin/update
