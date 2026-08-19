@@ -73,7 +73,7 @@ On an iPhone or iPad, [Shop Mode](/learn/hew-on-your-phone/#view-in-ar-ios-only)
 
 ### SVG line drawing — for laser, CNC, and vector tools
 
-A true-size hidden-line drawing of the model, written as an `.svg` with a millimeter `viewBox` so laser cutters, CNC software, and any other vector tool reads it at its real dimensions. Choose a **View** (Current or one of the seven standard views), a **Scale** (1:1 by default — the ladder is the same one [Printing](/learn/printing/#to-scale-scaled) uses), whether **Hidden lines** draw dashed, and whether **Dimensions & text** are included. Hidden surfaces are removed by the same engine that draws vector Line art on a printed page — see [Printing](/learn/printing/) for paper and PDF output of the same drawing.
+A true-size hidden-line drawing of the model, written as an `.svg` with a millimeter `viewBox` so laser cutters, CNC software, and any other vector tool reads it at its real dimensions. Choose a **View** (Current or one of the seven standard views), a **Scale** (1:1 by default — the ladder is the same one [Printing](/learn/printing/#scaled) uses), whether **Hidden lines** draw dashed, and whether **Dimensions & text** are included. Hidden surfaces are removed by the same engine that draws vector Line art on a printed page — see [Printing](/learn/printing/) for paper and PDF output of the same drawing.
 
 ### What about STEP or `.skp` export?
 

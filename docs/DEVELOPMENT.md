@@ -97,6 +97,10 @@ crates/skp-import/    SketchUp .skp -> Objects/Instances, built on the
                       clean-room OpenSKP reader (see rule 7)
 crates/stl-import/    STL (binary + ASCII) -> Objects; hand-written parser,
                       no external STL dependency
+crates/hlr/           hidden-line removal: visible line work of a view as 2D
+                      segments (+ SVG), for vector Line-art printing and export
+crates/pdfwrite/      hand-written PDF 1.4 writer for Save PDF… and the
+                      headless hew.print.pdf
 crates/wasm-api/      wasm-bindgen surface exposing the kernel to the UI
 crates/hew-relay/     self-hostable "Open on Phone" relay binary (axum;
                       speaks workers/share-relay's contract)

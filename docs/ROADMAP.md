@@ -482,13 +482,14 @@ below.
   installer) runs the same contract as the public relay; the desktop's
   Settings ▸ Advanced ▸ Server pane points at it, with an optional upload
   key
-- File ▸ Print… — one dialog for paper and PDF, with a live page preview:
-  **Standard** mode prints one page, the current view letterboxed as-is;
-  **Scaled** mode forces parallel projection and prints at an exact
-  drawing scale (metric and architectural-imperial preset ladders, a
-  free-form custom entry, and a Fit action), with Model / Selection /
-  Current view extents — Selection is what makes "print this one part at
-  1:1 as a template" a single step
+- File ▸ Print… — one Print Layout window for paper and PDF, with a live
+  page preview: **Standard** mode prints one page, the current view as
+  framed or zoomed to fill the page; **Scaled** mode forces parallel
+  projection and prints at an exact drawing scale (metric and
+  architectural-imperial preset ladders, a free-form custom entry, and a
+  Fit action that sets the exact ratio filling one page), with Model /
+  Selection / Current view extents — Selection is what makes "print this
+  one part at 1:1 as a template" a single step
 - Multi-page scaled prints tile automatically into a lettered/numbered
   grid (A1, A2, B1…), with an overlap band for gluing reserved inside the
   printable area, corner crop marks, dashed trim lines, neighbor labels, a
@@ -496,8 +497,9 @@ below.
   scale bar on every page so a print can be verified with a ruler before
   anything is cut
 - Two print styles: As shown (a 300 dpi bitmap, always on white paper
-  under fixed lighting) and Line art (white faces, black edges); in
-  Scaled mode, Line art is true vector hidden-line art (`crates/hlr`) —
+  under fixed lighting) and Line art (white faces, black edges, and the
+  silhouettes of curved walls); in Scaled mode, Line art is true vector
+  hidden-line art (`crates/hlr`) —
   crisp at any zoom, a small PDF even across dozens of tiles — with an
   automatic raster fallback, flagged, for a model too complex to trace
 - **Save PDF…** writes the composed pages as a PDF directly
@@ -508,12 +510,12 @@ below.
   browser's print dialog)
 - Pages: Each Scene prints one page or tile set per Scene, from that
   Scene's own camera, hidden set, and section plane, with page numbers
-  running across the whole job; a Cut list page appends every part's
-  L × W × H and tag, the same rows Shop Mode's parts sheet shows
-- Shop Mode gets the same Print dialog in a phone-shaped layout from the
-  document menu, with Save PDF… as the primary action (the iOS share
-  sheet, or a download elsewhere) since AirPrint on iOS ignores the paper
-  size Hew composed for
+  running across the whole job; a Cut list page appends every part once
+  with its quantity and L × W × H, every placement of a component folded
+  onto its definition
+- Shop Mode gets its own Print Layout sheet from the document menu, with
+  Save PDF… as the primary action (the iOS share sheet, or a download
+  elsewhere) since AirPrint on iOS ignores the paper size Hew composed for
 
 ### Reliability & diagnostics
 

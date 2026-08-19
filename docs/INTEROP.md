@@ -20,6 +20,8 @@ way to bring outside geometry in, or send Hew models out to other tools.
 | 3MF | Export | Supported | OPC container with explicit millimeter units, Z-up; one `<object>` per world object / instance member carrying its display name and per-face colors (core-spec `basematerials`). Solid-gated like STL. |
 | 3MF | Import | Not implemented | No `.3mf` reader exists yet. |
 | USDZ | Export | Supported | Uncompressed USD zip (`model.usda`), Y-up, meters; one `Mesh` per part with `UsdPreviewSurface` materials. Validates under the ARKit profile, so it opens directly in AR Quick Look. |
+| SVG line drawing | Export | Supported | True-size hidden-line drawing of a view at a chosen scale, millimeter `viewBox`, hidden lines removed or dashed; the same engine (`hlr`) that draws vector Line art on a printed page. Also headless as `hew.view.line_drawing`. |
+| PDF | Export (print) | Supported | File ▸ Print… ▸ Save PDF…: the composed print pages (Standard or Scaled, tiled), written by `pdfwrite` — vector Line art stays vector; also headless as `hew.print.pdf`. |
 | STEP / IGES | Import / Export | Planned, not started | Planned as a C++ sidecar using OpenCASCADE, invoked from the desktop shell and converting through the native format. A full B-rep converter is a heavyweight piece of work and is not on the near-term path. |
 
 ## Import pipeline

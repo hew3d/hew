@@ -176,7 +176,7 @@ before it is rejected with `-32004`.
  "params": {"protocol": 1, "client": {"name": "table-demo", "version": "1.0.0"}}}
 
 {"jsonrpc": "2.0", "id": 1, "result":
- {"protocol": 1, "app": {"name": "hew", "version": "0.9.0"},
+ {"protocol": 1, "app": {"name": "hew", "version": "0.10.0"},
   "profile": "core", "encoding": "json", "documents": []}}
 ```
 
@@ -569,7 +569,7 @@ an embedded document.
 
 The server does not expose one tool per command. Eighty near-flat tools
 would bury a model in choices while stripping the transaction semantics
-that make multi-step work atomic. It serves five, and the list is
+that make multi-step work atomic. It serves seven, and the list is
 computed at connection time from the profile you were granted, so an
 agent never sees a tool it cannot call:
 
@@ -579,6 +579,8 @@ agent never sees a tool it cannot call:
 | `hew_query` | Any read-only command and its params. |
 | `hew_describe_scene` | The document tree as a summary tuned for reasoning over. |
 | `hew_snapshot` | Render to PNG, so the agent sees what it built. |
+| `hew_print_pdf` | Print the document to a PDF at an exact scale, tiled and titled like File ▸ Print…. |
+| `hew_line_drawing` | A hidden-line SVG, or raw 2D segments, for a camera, a standard view, or a Scene. |
 | `hew_capabilities` | Every command's schema and refusal inventory, at run time. |
 
 The handshake and the working document are handled for you — a

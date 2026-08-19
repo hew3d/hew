@@ -44,10 +44,18 @@ yanked = "deny"
 # the lane red the day it landed, and a permanently red check is one nobody
 # reads when a real finding arrives.
 unmaintained = "workspace"
-# Empty, and it should stay that way. An entry here is an admission that a
-# known vulnerability is shipping; it needs a reason string saying why it
-# cannot be fixed and what would let it be removed.
-ignore = []
+# Vulnerabilities: none, and it should stay that way — an entry here is an
+# admission that a known vulnerability is shipping. The one entry below is
+# an UNMAINTAINED notice, not a vulnerability: the Tauri shell names the
+# gtk-rs GTK3 crate directly (the same crate, at the same version, that Tauri
+# and wry already pull in on Linux) for one thing — the page setup and paper
+# size of the Linux print dialog, which WebKitGTK's print operation takes as
+# GTK3 objects. The "workspace" scope above would otherwise fail on that
+# direct edge while exempting the identical transitive one. Remove this the
+# day Tauri moves off GTK3 (the direct dependency goes with it).
+ignore = [
+  { id = "RUSTSEC-2024-0415", reason = "gtk-rs GTK3 bindings, named directly only for the Linux print dialog's page setup; the same crate Tauri/wry already carry — removable when Tauri leaves GTK3" },
+]
 
 # ---------------------------------------------------------------------------
 # Licenses. Hew ships under AGPL-3.0-only with a plugin exception (see LICENSE

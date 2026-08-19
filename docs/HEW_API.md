@@ -223,7 +223,7 @@ The first request on any connection is `hew.meta.hello`:
 
 ```json
 {"jsonrpc": "2.0", "id": 0, "method": "hew.meta.hello",
- "params": {"protocol": 1, "token": "…", "client": {"name": "hew-cli", "version": "0.9.0"},
+ "params": {"protocol": 1, "token": "…", "client": {"name": "hew-cli", "version": "0.10.0"},
             "encodings": ["json"]}}
 ```
 
@@ -1266,12 +1266,20 @@ chunky tools, all generated from the registry:
   built, not merely query it. Present headless: `hew.view.snapshot` now
   has a headless render path (a software rasterizer), and `core` grants it
   specifically, so a headless MCP session lists this tool too.
+- `hew_print_pdf` — `hew.print.pdf` (§7.2): the document printed to a PDF
+  at an exact drawing scale, tiled and titled exactly as File ▸ Print…
+  would, headless — bitmap pages through the software rasterizer or vector
+  Line art through `crates/hlr`; `core` grants it the same way.
+- `hew_line_drawing` — `hew.view.line_drawing` (§7.2): the hidden-line
+  drawing as an SVG or as raw 2D segments for a camera, a standard view, or
+  a Scene; `core` grants it the same way.
 
 The tool list is generated from the connection's granted profile: every
-profile today grants `hew_snapshot`, since core's one carve-out is exactly
-this command; a future `hew.view.*` addition that stays `app`-only would
-be the next tool a headless session lacks. An agent never sees a tool it
-cannot call.
+profile today grants `hew_snapshot`, `hew_print_pdf`, and
+`hew_line_drawing`, since core's carve-outs are exactly these
+headless-renderable commands; a future `hew.view.*` addition that stays
+`app`-only would be the next tool a headless session lacks. An agent never
+sees a tool it cannot call.
 
 The intended agent loop is: describe → plan → `hew_transact` → read the
 result or refusal → look → continue. Refusal explanations are the

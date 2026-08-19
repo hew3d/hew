@@ -4,9 +4,9 @@ description: "Print a view on paper, print a drawing to exact scale across as ma
 order: 20
 ---
 
-**File ▸ Print…** (`⌘P` / `Ctrl+P`, at the bottom of the File menu, also in the command palette) opens **Print Layout**, which puts the model on paper or into a PDF. It covers three different jobs: printing what's on screen for a quick reference, printing a drawing at an exact scale you can measure from with a ruler, and printing a part at 1:1 across several sheets to cut out and use as a template. One dialog, a mode switch at the top — **Standard** or **Scaled** — a live page preview on the left, controls on the right, and **Save PDF…** and **Print…** at the bottom. `Return` prints; `Escape` cancels.
+**File ▸ Print…** (`⌘P` / `Ctrl+P`, near the bottom of the File menu — last on macOS, just above Exit elsewhere — also in the command palette) opens **Print Layout**, which puts the model on paper or into a PDF. It covers three different jobs: printing what's on screen for a quick reference, printing a drawing at an exact scale you can measure from with a ruler, and printing a part at 1:1 across several sheets to cut out and use as a template. One dialog, a mode switch at the top — **Standard** or **Scaled** — a live page preview on the left, controls on the right, and **Save PDF…** and **Print…** at the bottom. `Return` prints; `Escape` cancels.
 
-<!-- TODO screenshot: the Print dialog -->
+![Print Layout in Scaled mode: the Café Table sample at 1:2 tiled across four Letter pages, with the preview on the left and the controls on the right](/docs/print-layout.png)
 
 ## Print what you see (Standard)
 

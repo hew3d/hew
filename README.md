@@ -62,7 +62,11 @@ planned.
 - SketchUp 2017 keyboard shortcuts
 - Import: SketchUp `.skp` (2017), COLLADA `.dae`, glTF — with names,
   hierarchy, materials, and tags preserved where the format carries them
-- Export: glTF, STL — see [docs/INTEROP.md](docs/INTEROP.md)
+- Export: glTF, STL, 3MF, USDZ, SVG line drawings — see
+  [docs/INTEROP.md](docs/INTEROP.md)
+- Print to paper or PDF: what you see, or a drawing at an exact scale
+  tiled across sheets with trim marks and a scale bar, as a bitmap or as
+  vector line art; headless too
 - Autosave and crash recovery, structured debug logging, and deterministic
   session record/replay ([docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md))
 
