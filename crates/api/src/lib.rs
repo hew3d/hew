@@ -25,6 +25,7 @@ pub mod geom;
 pub mod host;
 pub mod ids;
 pub mod locate;
+pub mod print_layout;
 pub mod refusal;
 pub mod registry;
 pub mod transact;
@@ -32,8 +33,9 @@ pub mod transact;
 pub use dispatch::{Connection, DispatchOutcome};
 pub use envelope::{ErrorObject, Request, RequestId, Response, codes};
 pub use host::{
-    Host, NoHost, SnapshotCamera, SnapshotParams, SnapshotProjection, SnapshotResult, StandardView,
-    ViewCameraSpec,
+    Host, LineDrawingFormat, LineDrawingParams, LineDrawingResult, NoHost, PrintPdfParams,
+    PrintPdfResult, SnapshotCamera, SnapshotParams, SnapshotProjection, SnapshotResult,
+    StandardView, ViewCameraSpec,
 };
 pub use ids::IdResolver;
 pub use refusal::Refusal;

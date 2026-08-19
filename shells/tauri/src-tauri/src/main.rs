@@ -37,6 +37,7 @@ mod live;
 // to a Cloudflare Worker dead-drop; this module only renders the resulting
 // URL as an SVG QR code (the encryption and upload happen entirely in the
 // webview — see qr.rs's own doc comment).
+mod print;
 mod qr;
 // The "Open on Phone" relay client + the server setting it is bound to
 // (Settings ▸ Advanced ▸ Server) — see its module doc for why the requests
@@ -2633,6 +2634,9 @@ fn main() {
             fonts::list_system_fonts,
             fonts::read_font_file,
             qr::qr_svg,
+            print::print_document,
+            print::print_defaults,
+            print::screen_mm_per_px,
             relay_client::get_server_setting,
             relay_client::set_server_setting,
             relay_client::relay_identity,
@@ -2709,6 +2713,9 @@ fn main() {
             // item here, but the design calls for format choice handled in-dialog like
             // every other app.
             let file_export = MenuItemBuilder::with_id("file-export", "Export…").build(handle)?;
+            let file_print = MenuItemBuilder::with_id("file-print", "Print…")
+                .accelerator("CmdOrCtrl+P")
+                .build(handle)?;
             // "Open on Phone…" (qr.rs, workers/share-relay/README.md):
             // encrypts the document and uploads it to a cloud dead-drop,
             // showing a QR the phone scans to fetch and decrypt it. Always
@@ -2752,6 +2759,9 @@ fn main() {
                 .item(&file_save_to_library)
                 .separator()
                 .item(&file_close)
+                // Print… sits last, as the platform guidelines put it.
+                .separator()
+                .item(&file_print)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -3687,6 +3697,7 @@ fn main() {
                 "file-open" => "open",
                 "file-import" => "import",
                 "file-export" => "export",
+                "file-print" => "print",
                 "file-open-on-phone" => "open-on-phone",
                 "file-save" => "save",
                 "file-save-as" => "save-as",

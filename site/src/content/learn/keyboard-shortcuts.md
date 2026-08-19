@@ -1,7 +1,7 @@
 ---
 title: "Keyboard shortcuts"
 description: "Every default shortcut on one page, including the modifier keys that change what a tool does mid-gesture."
-order: 22
+order: 23
 ---
 
 Tool shortcuts are plain letters, the same on every platform, and match SketchUp's defaults wherever SketchUp has one. Command shortcuts use `⌘` on macOS and `Ctrl` on Windows, Linux, and the web.
@@ -38,6 +38,7 @@ Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key (
 | Open | `⌘O` | `Ctrl+O` |
 | Save | `⌘S` | `Ctrl+S` |
 | Save As | `⇧⌘S` | `Ctrl+Shift+S` |
+| Print | `⌘P` | `Ctrl+P` |
 | Close window | `⌘W` (desktop) | — |
 | Undo | `⌘Z` | `Ctrl+Z` |
 | Redo | `⇧⌘Z` | `Ctrl+Shift+Z` |

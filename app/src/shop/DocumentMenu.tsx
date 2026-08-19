@@ -26,7 +26,7 @@
  * either side of the tool group dropped it from both bars, and this row is
  * its new and only home.
  */
-import { ArCubeIcon, ClockIcon, FullEditorIcon, HewMark, QrIcon, SaveCopyIcon, UploadIcon } from './icons'
+import { ArCubeIcon, ClockIcon, FullEditorIcon, HewMark, PrinterIcon, QrIcon, SaveCopyIcon, UploadIcon } from './icons'
 import type { ShopOrientation } from './orientation'
 import { MenuPanel, MenuItem } from './MenuPanel'
 
@@ -49,6 +49,9 @@ export interface DocumentMenuProps {
    *  used to need a full PWA relaunch into the empty state). */
   onOpenRecents: () => void
   onSaveCopy: () => void
+  /** "Print…" (document-only): the Print sheet — paper/PDF at a drawing
+   *  scale (docs/design/printing.md §9c). */
+  onPrint: () => void
   /** Gates the "View in AR…" row — `ShopApp.tsx` bundles its own document-
    *  loaded check together with `isArQuickLookCandidate()` (iOS Safari
    *  only, arQuickLook.ts) into this single flag rather than this component
@@ -63,7 +66,7 @@ export interface DocumentMenuProps {
   onUseFullEditor: () => void
 }
 
-export function DocumentMenu({ open, docName, orientation, onClose, onOpen, onOpenScanner, onOpenRecents, onSaveCopy, showViewInAr, arBusy, onViewInAr, onUseFullEditor }: DocumentMenuProps) {
+export function DocumentMenu({ open, docName, orientation, onClose, onOpen, onOpenScanner, onOpenRecents, onSaveCopy, onPrint, showViewInAr, arBusy, onViewInAr, onUseFullEditor }: DocumentMenuProps) {
   return (
     <MenuPanel open={open} orientation={orientation} anchor="left" onClose={onClose} scrimTestId="shop-document-scrim" panelTestId="shop-document-panel">
       {/* Header: non-interactive title row — where the filename "lives"
@@ -79,6 +82,7 @@ export function DocumentMenu({ open, docName, orientation, onClose, onOpen, onOp
       <MenuItem icon={<QrIcon size={19} />} label="Open from desktop…" onClick={onOpenScanner} />
       <MenuItem icon={<ClockIcon size={19} />} label="Recent models…" onClick={onOpenRecents} />
       {docName !== null && <MenuItem icon={<SaveCopyIcon size={19} />} label="Save a copy (.hew)" onClick={onSaveCopy} />}
+      {docName !== null && <MenuItem icon={<PrinterIcon size={19} />} label="Print…" onClick={onPrint} />}
       {showViewInAr && <MenuItem icon={<ArCubeIcon size={19} />} label={arBusy ? 'Preparing…' : 'View in AR…'} onClick={onViewInAr} />}
       <MenuItem icon={<FullEditorIcon size={19} />} label="Use full editor" onClick={onUseFullEditor} last />
     </MenuPanel>

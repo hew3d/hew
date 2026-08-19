@@ -1814,3 +1814,36 @@ test.describe('landscape', () => {
     expect(viewportWidth - (railBox.x + railBox.width)).toBeCloseTo(16, 0)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Print… (docs/design/printing.md §9c; SPEC §4): Shop Mode's own Print
+// sheet, reached from the document menu. Save PDF… is the primary action on
+// the phone (exact pages; iOS shares to Files) — headless Chromium has no
+// share sheet, so the bytes go out as a download.
+
+test('document menu ▸ Print… opens the phone Print sheet; Save PDF… downloads a PDF', async ({ page }) => {
+  const bytes = await buildFixtureBytes(page)
+  await bootShopModeWith(page, bytes)
+  await page.getByRole('button', { name: /^document menu/i }).click()
+  await page.getByRole('button', { name: /^print…$/i }).click()
+  const dialog = page.getByRole('dialog', { name: 'Print Layout' })
+  await expect(dialog).toBeVisible()
+  // Phone layout: Scaled shows Extent as Model | Current view (no Selection); Save PDF… present.
+  await dialog.getByRole('group', { name: 'Mode' }).getByRole('button', { name: 'Scaled' }).click()
+  const extent = dialog.getByRole('group', { name: 'Extent' })
+  await expect(extent.getByRole('button')).toHaveCount(2)
+  await expect(extent.getByRole('button', { name: 'Model' })).toBeVisible()
+  await expect(extent.getByRole('button', { name: 'Selection' })).toHaveCount(0)
+  // Quiet at rest: no summary line, no AirPrint blurb.
+  await expect(dialog.getByTestId('print-sheet-summary')).toHaveCount(0)
+  await expect(dialog.getByTestId('print-sheet-note')).toHaveCount(0)
+  const download = page.waitForEvent('download')
+  await dialog.getByRole('button', { name: 'Save PDF…' }).click()
+  const dl = await download
+  expect(dl.suggestedFilename()).toMatch(/\.pdf$/)
+  await expect(dialog).toHaveAttribute('data-status', 'saved', { timeout: 60_000 })
+  // Nothing edited: still read-only Shop Mode with the fixture loaded.
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
+  await expect(page.getByText('Fixture.hew')).toBeVisible()
+})

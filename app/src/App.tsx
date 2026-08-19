@@ -29,7 +29,7 @@ import { nextSelection, canBoolean as canBooleanHelper, canBooleanInComponent, c
 import { tagPathKey } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
-import { installTestHarness } from './test/harness'
+import { installTestHarness, type PrintRecorder } from './test/harness'
 import { installLiveBridge } from './api/liveBridge'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
@@ -61,6 +61,12 @@ import { RescaleConfirmDialog } from './panels/RescaleConfirmDialog'
 import { setLastStlImportUnit } from './settings/stlImportUnit'
 import { ExportDialog, type ExportFormat } from './panels/ExportDialog'
 import { PhoneShareDialog, type PhoneShareDocument } from './panels/PhoneShareDialog'
+import { PrintDialog } from './panels/PrintDialog'
+import { lineArtSvgDocument, projectAnnotationOverlay, requestLineDrawing } from './print/lineArt'
+import { printViewDirection } from './print/printJob'
+import { scaleRatio } from './print/scale'
+import type { SvgExportOptions } from './panels/ExportDialog'
+import { makePrintHost } from './print/printHost'
 import { TextDialog, type TextDialogResult } from './panels/TextDialog'
 import { layoutGlyphRun } from './text/glyphRun'
 import { collectNonSolidObjects } from './io/solidGating'
@@ -84,7 +90,8 @@ import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugM
 import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
 import { getSceneTransitions, setSceneTransitions, subscribe as subscribeSceneTransitions } from './settings/sceneTransitions'
 import { useScenesController } from './scenes/useScenesController'
-import { parseSectionJson } from './scenes/scenesModel'
+import { parseCameraJson, parseSectionJson } from './scenes/scenesModel'
+import type { SceneSource } from './print/printJob'
 import * as diagnosticLog from './log/diagnosticLog'
 import * as inputRecorder from './recording/inputRecorder'
 import { generateBugReport } from './log/reportBug'
@@ -472,6 +479,9 @@ export default function App() {
   const blankBytesRef = useRef<Uint8Array | null>(null)
   // Stable file host instance.
   const fileHostRef = useRef(makeFileHost())
+  const printHostRef = useRef(makePrintHost())
+  // Test-only recording print host (harness.ts `setPrintRecorder`).
+  const printRecorderRef = useRef<PrintRecorder | null>(null)
   // Resolver for the in-flight StlUnitsDialog promise (see promptStlUnits);
   // null when no chooser is open.
   const stlUnitsResolveRef = useRef<((unitScale: number | null) => void) | null>(null)
@@ -1238,6 +1248,9 @@ export default function App() {
       loadBytes: (bytes) => applyLoadedBytesRef.current?.(bytes) ?? false,
       toggleTagPath: (path) => toggleTagPathRef.current(path),
       deleteTag: (path) => deleteTagRef.current(path),
+      setPrintRecorder: (r) => {
+        printRecorderRef.current = r
+      },
     })
   }, [])
 
@@ -2647,6 +2660,7 @@ export default function App() {
   // the dialog's Export dispatches to the picked format; the slicer formats'
   // solid-gating dialog remains the follow-on step (chain unchanged).
   const [exportDialogOpen, setExportDialogOpen] = useState(false)
+  const [printDialogOpen, setPrintDialogOpen] = useState(false)
 
   // ---------------------------------------------------------------- "Open on Phone" (docs/design/shop-mode.md §4)
   const [phoneShareOpen, setPhoneShareOpen] = useState(false)
@@ -3216,16 +3230,65 @@ export default function App() {
     [docRev],
   )
 
-  const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number) => {
+  // SVG line drawing (docs/design/printing.md §7b): the kernel's hidden-line
+  // drawing from a print camera, written as a true-size SVG at a drawing
+  // scale — the same line work a Line-art print uses.
+  const exportSvg = useCallback(async (svg: SvgExportOptions) => {
+    const api = viewportApi.current
+    const scene = sceneRef.current
+    if (api === null || scene === null) {
+      handleToast('Export failed: viewport not ready.')
+      return
+    }
+    const live = api.getPrintView()
+    const { dir, up } = printViewDirection(svg.view, live)
+    const extent = api.computePrintExtent(dir, up, { includeSketches: true, includeAnnotations: svg.includeDimensions, restrictTo: null })
+    if (extent.empty) {
+      handleToast('Nothing to export — the model has nothing visible.')
+      return
+    }
+    const camera = { kind: 'ortho' as const, center: extent.center, dir, up, rect: extent.rect, depth: extent.depth }
+    const section = api.getSectionState()
+    const res = requestLineDrawing({
+      scene,
+      camera,
+      section: section !== null && section.active ? { origin: section.origin, normal: section.normal } : null,
+      hidden: api.getHiddenIds(),
+      only: null,
+      includeHidden: svg.hiddenDashed,
+    })
+    if (res.kind !== 'ok') {
+      handleToast(res.kind === 'too-complex' ? 'Export failed: the model is too complex for a vector line drawing.' : `Export failed: ${res.message}`)
+      return
+    }
+    const annotations = svg.includeDimensions ? projectAnnotationOverlay(api.collectAnnotationDrawing(), camera) : null
+    const text = lineArtSvgDocument(res.drawing, scaleRatio(svg.scale), { hiddenDashed: svg.hiddenDashed, annotations })
+    const bytes = new TextEncoder().encode(text)
+    const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
+    const base = rawBase.replace(/\.hew$/i, '')
+    try {
+      const ok = await fileHostRef.current.exportBinary(bytes, base, { description: 'SVG line drawing', ext: 'svg', mime: 'image/svg+xml' })
+      if (ok) {
+        handleToast('Exported SVG.')
+        LogStore.log.info('app', `Exported SVG line drawing (${bytes.length} bytes, ${res.drawing.kinds.length} segments)`)
+      }
+    } catch (err: unknown) {
+      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+    }
+  }, [docSession.currentRef, docSession.importedName, handleToast])
+
+  const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number, svg?: SvgExportOptions) => {
     setExportDialogOpen(false)
     if (format === 'glb') {
       void exportGltf()
     } else if (format === 'usdz') {
       void exportUsdz()
+    } else if (format === 'svg') {
+      if (svg !== undefined) void exportSvg(svg)
     } else {
       void exportSolidGated(format, format === 'stl' ? stlSegmentsPerTurn : undefined)
     }
-  }, [exportGltf, exportUsdz, exportSolidGated])
+  }, [exportGltf, exportUsdz, exportSolidGated, exportSvg])
 
   // ---------------------------------------------------------------- settings window
   // Per-platform settings surface:
@@ -3409,6 +3472,7 @@ export default function App() {
       case 'open':     openDocumentRef.current(); break
       case 'import':   importDocumentRef.current(); break
       case 'export':   setExportDialogOpen(true); break
+      case 'print':    setPrintDialogOpen(true); break
       // macOS native "Open on Phone…" — always enabled natively (macOS has
       // no live disabled-state push for it, same posture as
       // save-to-library-doc), so the empty-document gate the web MenuBar
@@ -4007,6 +4071,11 @@ export default function App() {
       // macOS Tauri: the native menu's accelerators own all Cmd-combos.
       if (nativeMenuOwnsModCombos) return
 
+      if (ev.key === 'p' && !ev.shiftKey && !ev.altKey) {
+        ev.preventDefault()
+        setPrintDialogOpen(true)
+        return
+      }
       if (ev.key === 's' && !ev.shiftKey) {
         ev.preventDefault()
         saveDocument()
@@ -4556,6 +4625,7 @@ export default function App() {
         onSaveAs={saveAsDocument}
         onImport={importDocument}
         onExport={() => setExportDialogOpen(true)}
+        onPrint={() => setPrintDialogOpen(true)}
         onSaveToLibrary={() => menuActionRef.current('save-to-library-doc')}
         saveToLibraryDisabled={!libraryStore().available()}
         onDrawText={openTextDialog}
@@ -5264,6 +5334,62 @@ export default function App() {
         <ExportDialog
           onExport={handleExportFormat}
           onCancel={() => setExportDialogOpen(false)}
+        />
+      )}
+
+      {/* File ▸ Print… (docs/design/printing.md): one dialog for paper and
+          PDF; the shell's PrintHost hands the composed pages to the OS print
+          dialog. */}
+      {printDialogOpen && (
+        <PrintDialog
+          getViewportApi={() => viewportApi.current}
+          getScene={() => sceneRef.current}
+          getScenes={() => {
+            // Each Scene: resolve every Scene the way activating it would —
+            // camera pose, authoritative hidden leaf sets, section plane —
+            // read-only (resolve_scene never mutates the document).
+            const scn = sceneRef.current
+            if (scn === null) return []
+            const out: SceneSource[] = []
+            for (const e of scenes.entries) {
+              let resolved
+              try {
+                resolved = scn.resolve_scene(BigInt(e.sid))
+              } catch {
+                continue
+              }
+              try {
+                const cj = resolved.camera_json()
+                const cam = cj === undefined ? undefined : parseCameraJson(JSON.parse(cj))
+                const hidden = resolved.has_hidden() ? { objects: Array.from(resolved.hidden_object_ids()), instances: Array.from(resolved.hidden_instance_ids()) } : null
+                let section: SceneSource['section'] = undefined
+                if (resolved.has_section()) {
+                  const sj = resolved.section_json()
+                  section = sj === undefined ? null : (parseSectionJson(JSON.parse(sj)) ?? null)
+                }
+                out.push({
+                  sid: e.sid,
+                  name: e.name,
+                  camera: cam === undefined ? null : { projection: cam.projection, eye: cam.eye, target: cam.target, up: cam.up, fovDeg: cam.fovDeg },
+                  hidden,
+                  section,
+                })
+              } finally {
+                resolved.free()
+              }
+            }
+            return out
+          }}
+          documentName={documentName(docSession)}
+          sceneName={scenes.activeSid !== null && !scenes.activeDrifted ? (scenes.entries.find((e) => e.sid === scenes.activeSid)?.name ?? null) : null}
+          printHost={printRecorderRef.current?.host ?? printHostRef.current}
+          savePdf={(bytes, name) =>
+            printRecorderRef.current?.savePdf !== undefined
+              ? printRecorderRef.current.savePdf(bytes, name)
+              : fileHostRef.current.exportBinary(bytes, name, { description: 'PDF', ext: 'pdf', mime: 'application/pdf' })
+          }
+          onPagesReady={printRecorderRef.current?.onPages}
+          onClose={() => setPrintDialogOpen(false)}
         />
       )}
 

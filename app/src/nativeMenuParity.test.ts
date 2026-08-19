@@ -161,6 +161,8 @@ describe('native menu parity — non-tool commands', () => {
   const source = readFileSync(MAIN_RS, 'utf8')
   const NON_TOOL_MENU_ACTIONS: Record<string, string> = {
     'reset-axes': 'view-reset-axes',
+    // File ▸ Print… (docs/design/printing.md §11) — ⌘P native accelerator.
+    print: 'file-print',
   }
 
   it('every mapped id is built as a native menu item (plain MenuItemBuilder — not checkable)', () => {

@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/api",
     "crates/softrender",
+    "crates/hlr",
+    "crates/pdfwrite",
     "crates/kernel",
     "crates/inference",
     "crates/tessellate",
@@ -38,6 +40,8 @@ license = "AGPL-3.0-only"
 [workspace.dependencies]
 api = { path = "crates/api" }
 softrender = { path = "crates/softrender" }
+hlr = { path = "crates/hlr" }
+pdfwrite = { path = "crates/pdfwrite" }
 kernel = { path = "crates/kernel" }
 inference = { path = "crates/inference" }
 tessellate = { path = "crates/tessellate" }

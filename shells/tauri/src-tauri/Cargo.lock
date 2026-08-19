@@ -1509,6 +1509,11 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "fontdb",
+ "gtk",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-web-kit",
  "qrcode",
  "reqwest",
  "rustls",
@@ -1521,6 +1526,9 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "url",
+ "webkit2gtk",
+ "webview2-com",
+ "windows-core 0.61.2",
  "windows-sys 0.61.2",
 ]
 

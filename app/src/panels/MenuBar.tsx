@@ -42,6 +42,9 @@ export interface MenuBarProps {
   onImport: () => void
   /** Open the unified Export dialog (format — glTF/GLB or STL — chosen there). */
   onExport: () => void
+  /** File ▸ Print… — the Print dialog (paper or PDF, standard or to scale;
+   *  docs/design/printing.md). ⌘P / Ctrl+P. */
+  onPrint: () => void
   /** File ▸ Save to Library… — prompts for a name, then saves the whole
    *  document as a library item. Omitted/no-op-guarded the same way the
    *  other optional handlers are; `saveToLibraryDisabled` greys the item out
@@ -503,6 +506,7 @@ export function MenuBar({
   onSaveAs,
   onImport,
   onExport,
+  onPrint,
   onSaveToLibrary,
   saveToLibraryDisabled = false,
   onClose,
@@ -679,14 +683,23 @@ export function MenuBar({
                 />
               </>
             )}
-            {(onClose !== undefined || onExit !== undefined) && (
-              <div style={SEPARATOR_STYLE} />
-            )}
             {onClose !== undefined && (
-              <MenuItem label="Close" shortcut={`${mod}W`} onClick={withClose(onClose)} />
+              <>
+                <div style={SEPARATOR_STYLE} />
+                <MenuItem label="Close" shortcut={`${mod}W`} onClick={withClose(onClose)} />
+              </>
             )}
+            {/* Windows/Linux: Exit must be the last item, so Print… sits
+                above it here. macOS never defines onExit (Quit lives in the
+                app menu instead), so Print… ends up last there — same rule
+                ("the platform guidelines put it"), different platforms. */}
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem label="Print…" shortcut={`${mod}P`} onClick={withClose(onPrint)} />
             {onExit !== undefined && (
-              <MenuItem label="Exit" onClick={withClose(onExit)} />
+              <>
+                <div style={SEPARATOR_STYLE} />
+                <MenuItem label="Exit" onClick={withClose(onExit)} />
+              </>
             )}
           </div>
         )}

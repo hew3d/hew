@@ -270,7 +270,8 @@ below.
   the view no longer matches what it captured); consumed in Shop Mode,
   where a pill under the top strip and the Views sheet switch between
   them; addressable from the Hew API (`hew.scenes.*`, and
-  `hew.view.snapshot` renders a named Scene headlessly)
+  `hew.view.snapshot`/`hew.view.line_drawing`/`hew.print.pdf` all accept a
+  Scene id and render it headlessly)
 - Metric and imperial units, including SketchUp-style architectural
   (feet-inches-fractions) input, with typed numeric entry on every
   length-driven tool
@@ -407,6 +408,10 @@ below.
   validated against Apple's ARKit profile so it opens straight into iOS AR
   Quick Look; gated on solids the same way STL and 3MF are, and reachable
   from `hew.doc.export` everywhere (wasm API, scripting registry, CLI)
+- SVG line-drawing export — a true-size, millimeter-`viewBox` hidden-line
+  drawing (`crates/hlr`) at a chosen view and scale, hidden lines removed
+  or dashed, for laser/CNC and other vector workflows; the same emitter
+  that draws vector Line art pages when printing to scale
 
 | Format | Import | Export |
 |---|---|---|
@@ -417,6 +422,7 @@ below.
 | STL | yes | yes |
 | 3MF | — | yes |
 | USDZ | — | yes |
+| SVG line drawing | — | yes |
 
 ### Application shell & UX
 
@@ -476,6 +482,38 @@ below.
   installer) runs the same contract as the public relay; the desktop's
   Settings ▸ Advanced ▸ Server pane points at it, with an optional upload
   key
+- File ▸ Print… — one dialog for paper and PDF, with a live page preview:
+  **Standard** mode prints one page, the current view letterboxed as-is;
+  **Scaled** mode forces parallel projection and prints at an exact
+  drawing scale (metric and architectural-imperial preset ladders, a
+  free-form custom entry, and a Fit action), with Model / Selection /
+  Current view extents — Selection is what makes "print this one part at
+  1:1 as a template" a single step
+- Multi-page scaled prints tile automatically into a lettered/numbered
+  grid (A1, A2, B1…), with an overlap band for gluing reserved inside the
+  printable area, corner crop marks, dashed trim lines, neighbor labels, a
+  drag-the-preview nudge to move a seam off an awkward spot, and a graphic
+  scale bar on every page so a print can be verified with a ruler before
+  anything is cut
+- Two print styles: As shown (a 300 dpi bitmap, always on white paper
+  under fixed lighting) and Line art (white faces, black edges); in
+  Scaled mode, Line art is true vector hidden-line art (`crates/hlr`) —
+  crisp at any zoom, a small PDF even across dozens of tiles — with an
+  automatic raster fallback, flagged, for a model too complex to trace
+- **Save PDF…** writes the composed pages as a PDF directly
+  (`crates/pdfwrite`), vector pages staying vector, with no OS print
+  dialog in the way; **Print…** hands the same pages to the operating
+  system's own print dialog (the macOS sheet, the Windows system dialog
+  including Microsoft Print to PDF, the Linux GTK dialog, or the
+  browser's print dialog)
+- Pages: Each Scene prints one page or tile set per Scene, from that
+  Scene's own camera, hidden set, and section plane, with page numbers
+  running across the whole job; a Cut list page appends every part's
+  L × W × H and tag, the same rows Shop Mode's parts sheet shows
+- Shop Mode gets the same Print dialog in a phone-shaped layout from the
+  document menu, with Save PDF… as the primary action (the iOS share
+  sheet, or a download elsewhere) since AirPrint on iOS ignores the paper
+  size Hew composed for
 
 ### Reliability & diagnostics
 

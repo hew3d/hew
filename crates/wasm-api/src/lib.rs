@@ -577,6 +577,146 @@ pub fn read_item_asset(bytes: &[u8], path: &str) -> Result<Vec<u8>, JsError> {
     kernel::read_item_asset(bytes, path).map_err(|e| JsError::new(&api_err(&e, &e).0))
 }
 
+#[wasm_bindgen]
+impl Scene {
+    /// Hidden-line drawing of the visible document from a camera
+    /// (docs/design/printing.md §7b). `camera_json` =
+    /// `{eye:[x,y,z], target:[x,y,z], up:[x,y,z], projection:"parallel"|"perspective"}`;
+    /// `opts_json` = `{section?: {origin:[..], normal:[..]}, include_hidden?,
+    /// include_soft?, only?: bool}` — with `only` true, `only_objects` /
+    /// `only_instances` are the ONLY leaves drawn (a Selection extent);
+    /// otherwise `hidden_objects` / `hidden_instances` (renderer-level leaf
+    /// handles, the app's own hidden union) are skipped on top of the
+    /// document's hidden state — or INSTEAD of it with `hidden_authoritative`
+    /// (a Scene's resolved sets). Throws on a malformed camera, a degenerate
+    /// camera, or a drawing over the complexity budget (message starts with
+    /// `TooComplex` — the app falls back to raster).
+    #[allow(clippy::too_many_arguments)]
+    pub fn line_drawing(
+        &self,
+        camera_json: &str,
+        opts_json: &str,
+        hidden_objects: Vec<u64>,
+        hidden_instances: Vec<u64>,
+        only_objects: Vec<u64>,
+        only_instances: Vec<u64>,
+    ) -> Result<LineDrawingJs, JsError> {
+        let cam: serde_json::Value = serde_json::from_str(camera_json)
+            .map_err(|e| JsError::new(&format!("BadCamera: {e}")))?;
+        let eye = parse_vec3(&cam["eye"], "eye")?;
+        let target = parse_vec3(&cam["target"], "target")?;
+        let up = parse_vec3(&cam["up"], "up")?;
+        let projection = match cam["projection"].as_str() {
+            Some("perspective") => hlr::Projection::Perspective,
+            _ => hlr::Projection::Parallel,
+        };
+        let camera = hlr::Camera {
+            eye: kernel::Point3::ORIGIN + eye,
+            target: kernel::Point3::ORIGIN + target,
+            up,
+            projection,
+        };
+        let opts_v: serde_json::Value = if opts_json.trim().is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(opts_json)
+                .map_err(|e| JsError::new(&format!("BadOptions: {e}")))?
+        };
+        let section = if opts_v["section"].is_object() {
+            let origin = parse_vec3(&opts_v["section"]["origin"], "section.origin")?;
+            let normal = parse_vec3(&opts_v["section"]["normal"], "section.normal")?;
+            Some(hlr::Section {
+                origin: kernel::Point3::ORIGIN + origin,
+                normal,
+            })
+        } else {
+            None
+        };
+        let opts = hlr::Options {
+            section,
+            include_hidden: opts_v["include_hidden"].as_bool().unwrap_or(false),
+            include_soft: opts_v["include_soft"].as_bool().unwrap_or(false),
+            budget: hlr::DEFAULT_BUDGET,
+        };
+        let only = opts_v["only"].as_bool().unwrap_or(false);
+        // `hidden_authoritative`: the given hidden leaves REPLACE the
+        // document's own hidden state (a Scene's resolved sets — which may
+        // unhide what the live document hides) instead of adding to it.
+        let hidden_authoritative = opts_v["hidden_authoritative"].as_bool().unwrap_or(false);
+
+        // What to draw: the document's own hidden state plus the app's extra
+        // hidden leaves — or, for a Selection extent, everything but the
+        // named leaves.
+        let mut hidden = if hidden_authoritative {
+            softrender::HiddenLeaves::default()
+        } else {
+            softrender::HiddenLeaves::of_document(&self.doc)
+        };
+        if only {
+            let keep_o: std::collections::BTreeSet<ObjectId> =
+                only_objects.iter().map(|&h| object_id(h)).collect();
+            let keep_i: std::collections::BTreeSet<InstanceId> =
+                only_instances.iter().map(|&h| instance_id(h)).collect();
+            for id in self.doc.visible_object_ids() {
+                if !keep_o.contains(&id) {
+                    hidden.objects.insert(id);
+                }
+            }
+            for id in self.doc.instance_ids() {
+                if !keep_i.contains(&id) {
+                    hidden.instances.insert(id);
+                }
+            }
+        } else {
+            hidden
+                .objects
+                .extend(hidden_objects.iter().map(|&h| object_id(h)));
+            hidden
+                .instances
+                .extend(hidden_instances.iter().map(|&h| instance_id(h)));
+        }
+        let doc_items = softrender::document_items_hiding(&self.doc, &hidden);
+        let items: Vec<hlr::Item> = doc_items
+            .iter()
+            .map(|it| hlr::Item {
+                mesh: &it.mesh,
+                pose: it.pose,
+                sid: it.sid,
+            })
+            .collect();
+        let d = hlr::line_drawing(&items, &camera, &opts).map_err(|e| match e {
+            hlr::HlrError::TooComplex { pairs, budget } => JsError::new(&format!(
+                "TooComplex: {pairs} candidate/occluder pairs (budget {budget})"
+            )),
+            hlr::HlrError::DegenerateCamera => JsError::new("BadCamera: degenerate camera"),
+        })?;
+        let mut coords = Vec::with_capacity(d.segs.len() * 4);
+        let mut kinds = Vec::with_capacity(d.segs.len());
+        let mut sids = Vec::with_capacity(d.segs.len());
+        for s in &d.segs {
+            coords.extend_from_slice(&[s.a[0], s.a[1], s.b[0], s.b[1]]);
+            kinds.push(match s.kind {
+                hlr::Kind::Hard => 0,
+                hlr::Kind::Silhouette => 1,
+                hlr::Kind::Soft => 2,
+                hlr::Kind::Section => 3,
+                hlr::Kind::Hidden => 4,
+            });
+            sids.push(s.sid);
+        }
+        let bounds = d
+            .bounds
+            .map(|(mn, mx)| vec![mn[0], mn[1], mx[0], mx[1]])
+            .unwrap_or_default();
+        Ok(LineDrawingJs {
+            coords,
+            kinds,
+            sids,
+            bounds,
+        })
+    }
+}
+
 /// Renders `.hew` item bytes to a square PNG thumbnail from a fitted
 /// isometric view ([`softrender::render_document_thumbnail`] — the same
 /// deterministic rasterizer behind `hew.view.snapshot`). `undefined` when
@@ -665,6 +805,194 @@ impl GhostMeshJs {
     pub fn bbox(&self) -> Vec<f64> {
         self.bbox.to_vec()
     }
+}
+
+/// Build a PDF from a page spec (docs/design/printing.md §9b — the app's
+/// Save PDF…). `spec_json` is `{title, pages: [{w_mm, h_mm, items: [...]}]}`
+/// with items `{kind: "jpeg"|"rgb", data: <blob index>, w, h, rect: {x,y,w,h}}`,
+/// `{kind: "path", segs: [[ax,ay,bx,by],…], width_mm, dash?: [..], gray, clip?: rect}`,
+/// `{kind: "text", x, y, size_mm, bold, text, gray, align: "left"|"center"|"right"}`,
+/// `{kind: "rect", rect, stroke_mm?, fill_gray?, gray}` — every length in
+/// millimetres from the page's top-left. `blobs` is an array of Uint8Array
+/// (JPEG bytes or raw RGB rows) indexed by `data`. Returns the PDF bytes.
+#[wasm_bindgen]
+pub fn build_pdf(spec_json: &str, blobs: js_sys::Array) -> Result<Vec<u8>, JsError> {
+    let v: serde_json::Value =
+        serde_json::from_str(spec_json).map_err(|e| JsError::new(&format!("BadPdfSpec: {e}")))?;
+    let spec = parse_pdf_spec(&v).map_err(|m| JsError::new(&format!("BadPdfSpec: {m}")))?;
+    let mut owned: Vec<Vec<u8>> = Vec::with_capacity(blobs.length() as usize);
+    for i in 0..blobs.length() {
+        let item = blobs.get(i);
+        let arr = Uint8Array::new(&item);
+        owned.push(arr.to_vec());
+    }
+    let refs: Vec<&[u8]> = owned.iter().map(|b| b.as_slice()).collect();
+    pdfwrite::build(&spec, &refs).map_err(|e| JsError::new(&format!("BadPdfSpec: {e}")))
+}
+
+fn parse_pdf_rect(v: &serde_json::Value) -> Result<pdfwrite::Rect, String> {
+    let n = |k: &str| {
+        v[k].as_f64()
+            .filter(|f| f.is_finite())
+            .ok_or_else(|| format!("rect.{k} must be a finite number"))
+    };
+    Ok(pdfwrite::Rect {
+        x: n("x")?,
+        y: n("y")?,
+        w: n("w")?,
+        h: n("h")?,
+    })
+}
+
+fn parse_pdf_spec(v: &serde_json::Value) -> Result<pdfwrite::PdfSpec, String> {
+    let title = v["title"].as_str().unwrap_or("").to_string();
+    let pages_v = v["pages"].as_array().ok_or("pages must be an array")?;
+    let mut pages = Vec::with_capacity(pages_v.len());
+    for (pi, p) in pages_v.iter().enumerate() {
+        let w_mm = p["w_mm"]
+            .as_f64()
+            .filter(|f| *f > 0.0)
+            .ok_or_else(|| format!("page {pi}: w_mm"))?;
+        let h_mm = p["h_mm"]
+            .as_f64()
+            .filter(|f| *f > 0.0)
+            .ok_or_else(|| format!("page {pi}: h_mm"))?;
+        let items_v = p["items"]
+            .as_array()
+            .ok_or_else(|| format!("page {pi}: items must be an array"))?;
+        let mut items = Vec::with_capacity(items_v.len());
+        for (ii, it) in items_v.iter().enumerate() {
+            let ctx = format!("page {pi} item {ii}");
+            let num = |k: &str| {
+                it[k]
+                    .as_f64()
+                    .filter(|f| f.is_finite())
+                    .ok_or_else(|| format!("{ctx}: {k} must be a finite number"))
+            };
+            let item = match it["kind"].as_str() {
+                Some("jpeg") | Some("rgb") => {
+                    let data = it["data"].as_u64().ok_or_else(|| format!("{ctx}: data"))? as usize;
+                    let w = it["w"].as_u64().ok_or_else(|| format!("{ctx}: w"))? as u32;
+                    let h = it["h"].as_u64().ok_or_else(|| format!("{ctx}: h"))? as u32;
+                    let rect = parse_pdf_rect(&it["rect"])?;
+                    if it["kind"] == "jpeg" {
+                        pdfwrite::Item::Jpeg { data, w, h, rect }
+                    } else {
+                        pdfwrite::Item::Rgb { data, w, h, rect }
+                    }
+                }
+                Some("path") => {
+                    let segs_v = it["segs"]
+                        .as_array()
+                        .ok_or_else(|| format!("{ctx}: segs"))?;
+                    let mut segs = Vec::with_capacity(segs_v.len());
+                    for s in segs_v {
+                        let a = s
+                            .as_array()
+                            .filter(|a| a.len() == 4)
+                            .ok_or_else(|| format!("{ctx}: seg must be [ax,ay,bx,by]"))?;
+                        let mut q = [0.0f64; 4];
+                        for (k, x) in a.iter().enumerate() {
+                            q[k] = x
+                                .as_f64()
+                                .filter(|f| f.is_finite())
+                                .ok_or_else(|| format!("{ctx}: seg[{k}]"))?;
+                        }
+                        segs.push(q);
+                    }
+                    let dash = it["dash"]
+                        .as_array()
+                        .map(|d| d.iter().filter_map(|x| x.as_f64()).collect::<Vec<f64>>());
+                    let clip = if it["clip"].is_object() {
+                        Some(parse_pdf_rect(&it["clip"])?)
+                    } else {
+                        None
+                    };
+                    pdfwrite::Item::Path {
+                        segs,
+                        width_mm: num("width_mm")?,
+                        dash,
+                        gray: it["gray"].as_f64().unwrap_or(0.0),
+                        clip,
+                    }
+                }
+                Some("text") => pdfwrite::Item::Text {
+                    x: num("x")?,
+                    y: num("y")?,
+                    size_mm: num("size_mm")?,
+                    bold: it["bold"].as_bool().unwrap_or(false),
+                    text: it["text"].as_str().unwrap_or("").to_string(),
+                    gray: it["gray"].as_f64().unwrap_or(0.0),
+                    align: match it["align"].as_str() {
+                        Some("center") => pdfwrite::Align::Center,
+                        Some("right") => pdfwrite::Align::Right,
+                        _ => pdfwrite::Align::Left,
+                    },
+                    rotate_deg: it["rotate"].as_f64().unwrap_or(0.0),
+                },
+                Some("rect") => pdfwrite::Item::Rect {
+                    rect: parse_pdf_rect(&it["rect"])?,
+                    stroke_mm: it["stroke_mm"].as_f64(),
+                    fill_gray: it["fill_gray"].as_f64(),
+                    gray: it["gray"].as_f64().unwrap_or(0.0),
+                },
+                other => return Err(format!("{ctx}: unknown kind {other:?}")),
+            };
+            items.push(item);
+        }
+        pages.push(pdfwrite::PageSpec { w_mm, h_mm, items });
+    }
+    Ok(pdfwrite::PdfSpec { title, pages })
+}
+
+/// A hidden-line drawing of the live document (docs/design/printing.md §7b):
+/// the visible line work seen from a camera, as flat 2D segments in
+/// view-plane metres (y up, origin at the camera target). Getters instead of
+/// one JSON blob so the coordinates cross as a Float64Array and the stable
+/// ids as a BigUint64Array.
+#[wasm_bindgen]
+pub struct LineDrawingJs {
+    coords: Vec<f64>,
+    kinds: Vec<u8>,
+    sids: Vec<u64>,
+    bounds: Vec<f64>,
+}
+
+#[wasm_bindgen]
+impl LineDrawingJs {
+    /// `[ax, ay, bx, by, …]`, one quad per segment.
+    pub fn coords(&self) -> Vec<f64> {
+        self.coords.clone()
+    }
+    /// One per segment: 0 hard, 1 silhouette, 2 soft, 3 section, 4 hidden.
+    pub fn kinds(&self) -> Vec<u8> {
+        self.kinds.clone()
+    }
+    /// One per segment: the stable id of the object/instance it belongs to.
+    pub fn sids(&self) -> Vec<u64> {
+        self.sids.clone()
+    }
+    /// `[min_x, min_y, max_x, max_y]`, or empty when there are no segments.
+    pub fn bounds(&self) -> Vec<f64> {
+        self.bounds.clone()
+    }
+    pub fn count(&self) -> usize {
+        self.kinds.len()
+    }
+}
+
+fn parse_vec3(v: &serde_json::Value, what: &str) -> Result<kernel::Vec3, JsError> {
+    let arr = v
+        .as_array()
+        .filter(|a| a.len() == 3)
+        .ok_or_else(|| JsError::new(&format!("BadCamera: {what} must be [x, y, z]")))?;
+    let mut out = [0.0f64; 3];
+    for (i, x) in arr.iter().enumerate() {
+        out[i] = x.as_f64().filter(|f| f.is_finite()).ok_or_else(|| {
+            JsError::new(&format!("BadCamera: {what}[{i}] must be a finite number"))
+        })?;
+    }
+    Ok(kernel::Vec3::new(out[0], out[1], out[2]))
 }
 
 /// Tessellates `.hew` item bytes into one [`GhostMeshJs`] — a FREE function

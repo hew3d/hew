@@ -20,8 +20,19 @@
  */
 
 import { useEffect, useCallback, useState } from 'react'
+import { VIEW_LABEL, type PrintViewKind } from '../print/printJob'
+import { scaleDisplay, scaleHint, scalePresetsFor, type PrintScale } from '../print/scale'
+import { getLengthUnit } from '../settings/units'
 
-export type ExportFormat = 'glb' | 'stl' | '3mf' | 'usdz'
+export type ExportFormat = 'glb' | 'stl' | '3mf' | 'usdz' | 'svg'
+
+/** SVG line-drawing options (docs/design/printing.md §7b). */
+export interface SvgExportOptions {
+  view: PrintViewKind
+  scale: PrintScale
+  hiddenDashed: boolean
+  includeDimensions: boolean
+}
 
 /** STL curve-resolution choices: segments per full turn (0 = stored facets). */
 const STL_RESOLUTIONS: { value: number; label: string }[] = [
@@ -38,7 +49,7 @@ interface ExportDialogProps {
    * `stlSegmentsPerTurn` is the STL curve resolution (segments per full
    * turn, 0 = stored facets); meaningless for glTF.
    */
-  onExport: (format: ExportFormat, stlSegmentsPerTurn: number) => void
+  onExport: (format: ExportFormat, stlSegmentsPerTurn: number, svg?: SvgExportOptions) => void
   /** Abort the dialog (also triggered by Escape). */
   onCancel: () => void
 }
@@ -122,6 +133,16 @@ const EXPORT_BUTTON_STYLE: React.CSSProperties = {
 export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
   const [format, setFormat] = useState<ExportFormat>('glb')
   const [stlSegments, setStlSegments] = useState(48)
+  // SVG line-drawing options (docs/design/printing.md §7b): a view, a
+  // drawing scale from the unit family's ladder (1:1 default — laser/CNC
+  // software reads the file at true size), dashed hidden lines, dimensions.
+  const unitFormat = getLengthUnit()
+  const svgPresets = scalePresetsFor(unitFormat)
+  const [svgView, setSvgView] = useState<PrintViewKind>('current')
+  const [svgScaleIndex, setSvgScaleIndex] = useState<number>(() => Math.max(0, svgPresets.findIndex((p) => Math.abs(p.paperMeters / p.modelMeters - 1) < 1e-9)))
+  const [svgHidden, setSvgHidden] = useState(false)
+  const [svgDimensions, setSvgDimensions] = useState(true)
+  const svgOptions = (): SvgExportOptions => ({ view: svgView, scale: svgPresets[svgScaleIndex] as PrintScale, hiddenDashed: svgHidden, includeDimensions: svgDimensions })
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -164,7 +185,34 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
           <option value="stl">STL binary (.stl) — Z-up, millimeters, for 3D printing</option>
           <option value="3mf">3MF (.3mf) — Z-up, millimeters, keeps part names and colors</option>
           <option value="usdz">USDZ (.usdz) — Y-up, meters, for AR Quick Look and USD pipelines</option>
+          <option value="svg">SVG line drawing (.svg) — hidden lines removed, true size at a drawing scale</option>
         </select>
+
+        {format === 'svg' && (
+          <>
+            <label style={LABEL_STYLE} htmlFor="export-svg-view-select">View</label>
+            <select id="export-svg-view-select" style={SELECT_STYLE} value={svgView} onChange={(e) => setSvgView(e.target.value as PrintViewKind)}>
+              {(Object.keys(VIEW_LABEL) as PrintViewKind[]).map((v) => (
+                <option key={v} value={v}>{VIEW_LABEL[v]}</option>
+              ))}
+            </select>
+            <label style={LABEL_STYLE} htmlFor="export-svg-scale-select">Scale</label>
+            <select id="export-svg-scale-select" style={SELECT_STYLE} value={svgScaleIndex} onChange={(e) => setSvgScaleIndex(Number(e.target.value))}>
+              {svgPresets.map((p, i) => {
+                const hint = scaleHint(p, unitFormat)
+                return (
+                  <option key={p.label} value={i}>{hint === null ? scaleDisplay(p) : `${p.label}  (${hint})`}</option>
+                )
+              })}
+            </select>
+            <label style={{ ...LABEL_STYLE, display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <input type="checkbox" checked={svgHidden} onChange={(e) => setSvgHidden(e.target.checked)} /> Hidden lines dashed
+            </label>
+            <label style={{ ...LABEL_STYLE, display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '16px' }}>
+              <input type="checkbox" checked={svgDimensions} onChange={(e) => setSvgDimensions(e.target.checked)} /> Dimensions &amp; text
+            </label>
+          </>
+        )}
 
         {format === 'stl' && (
           <>
@@ -190,7 +238,7 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
           <button style={CANCEL_BUTTON_STYLE} onClick={onCancel}>
             Cancel
           </button>
-          <button style={EXPORT_BUTTON_STYLE} onClick={() => onExport(format, stlSegments)}>
+          <button style={EXPORT_BUTTON_STYLE} onClick={() => onExport(format, stlSegments, format === 'svg' ? svgOptions() : undefined)}>
             Export
           </button>
         </div>

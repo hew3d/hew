@@ -107,6 +107,7 @@ mod camera;
 pub mod doc;
 pub mod entity;
 pub mod history;
+pub mod print;
 pub mod query;
 pub mod scenes;
 pub mod sketch;
@@ -129,4 +130,5 @@ pub fn handler(name: &str) -> Option<Handler> {
         .or_else(|| doc::handler(name))
         .or_else(|| view::handler(name))
         .or_else(|| scenes::handler(name))
+        .or_else(|| print::handler(name))
 }

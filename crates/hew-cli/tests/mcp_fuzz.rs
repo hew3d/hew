@@ -185,7 +185,7 @@ fn assert_server_still_works(server: &mut McpServer) {
         .expect("tools/list still returns a tool array");
     assert_eq!(
         tools.len(),
-        5,
+        7,
         "the headless-core tool inventory is unchanged after hostile input"
     );
 

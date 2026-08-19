@@ -100,7 +100,7 @@ export function anchorDownload(bytes: Uint8Array, name: string): void {
 }
 
 /** Trigger an anchor-download of bytes with an explicit filename + MIME type. */
-function anchorDownloadAs(bytes: Uint8Array, name: string, mime: string): void {
+export function anchorDownloadAs(bytes: Uint8Array, name: string, mime: string): void {
   const blob = new Blob([new Uint8Array(bytes)], { type: mime })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')

@@ -1,7 +1,7 @@
 ---
 title: "Settings and diagnostics"
 description: "Units and theme, the server Open on Phone uses, plus Debug Mode and a bug reporter that bundles everything a developer needs into one file."
-order: 21
+order: 22
 ---
 
 Open Settings with `⌘,` / `Ctrl+,`, from the menu (Hew ▸ Settings… on macOS, Window ▸ Settings… elsewhere), or from the command palette. Every control applies immediately (there's no OK button), and settings sync across windows.

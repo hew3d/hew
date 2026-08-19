@@ -22,6 +22,7 @@ function renderMenu(overrides: Partial<Parameters<typeof DocumentMenu>[0]> = {})
     onOpenScanner: vi.fn(),
     onOpenRecents: vi.fn(),
     onSaveCopy: vi.fn(),
+    onPrint: vi.fn(),
     // Off by default — most of this file's existing tests don't care about
     // "View in AR…" at all, so they'd otherwise need to know about it just
     // to keep asserting an absence.
@@ -145,5 +146,16 @@ describe('DocumentMenu — Recent models', () => {
     const props = renderMenu({ docName: null })
     fireEvent.click(screen.getByRole('button', { name: /^recent models…$/i }))
     expect(props.onOpenRecents).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers Print… only with a document, and it calls onPrint', () => {
+    const props = renderMenu()
+    fireEvent.click(screen.getByRole('button', { name: /^print…$/i }))
+    expect(props.onPrint).toHaveBeenCalledTimes(1)
+  })
+
+  it('hides Print… with no document', () => {
+    renderMenu({ docName: null })
+    expect(screen.queryByRole('button', { name: /^print…$/i })).toBeNull()
   })
 })

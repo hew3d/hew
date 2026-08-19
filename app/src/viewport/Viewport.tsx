@@ -24,6 +24,13 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js'
 import { updateFatLineResolutions } from './fatLine'
+import {
+  renderPrintPages as runPrintPass,
+  computeViewPlaneExtent,
+  type PrintPageRequest,
+  type PrintRenderOptions,
+  type ViewPlaneExtent,
+} from './printPass'
 import { prefersReducedMotion } from '../platform'
 import { DEPTH_BIAS } from './depthPolicy'
 import type { Scene as WasmScene, DocChangeJs } from '../wasm/loader'
@@ -781,6 +788,47 @@ export interface ViewportApi {
    * same task as the draw.
    */
   captureFrame: () => { width: number; height: number; pixels: Uint8Array }
+
+  /**
+   * Print pass (docs/design/printing.md §7): render each requested page with
+   * its own camera into an offscreen target at page resolution and return
+   * one encoded Blob per page. The live scene is reshaped for the pass
+   * (`SceneRenderer.beginPrintPass`) and restored afterwards; the viewport
+   * itself is untouched. Rejects if the WebGL context is lost.
+   */
+  renderPrintPages: (pages: PrintPageRequest[], opts: PrintRenderOptions, onProgress?: (done: number, total: number) => void) => Promise<Blob[]>
+  /**
+   * The current view for a Scaled print: unit view direction (eye → target),
+   * up, the orbit target, projection, and the live parallel frustum size
+   * (meters, full width/height) for the "Current view" extent.
+   */
+  getPrintView: () => {
+    dir: [number, number, number]
+    up: [number, number, number]
+    target: [number, number, number]
+    projection: 'perspective' | 'parallel'
+    orthoSize: { w: number; h: number }
+    aspect: number
+  }
+  /** Projected extent of the visible model (or a Selection subset) on the
+   * view plane of `dir`/`up` — see `computeViewPlaneExtent`. */
+  computePrintExtent: (
+    dir: [number, number, number],
+    up: [number, number, number],
+    opts: {
+      includeSketches: boolean
+      includeAnnotations: boolean
+      restrictTo: { objects: Set<bigint>; instances: Set<bigint> } | null
+      /** A Scene's resolved hidden sets (authoritative) for the measure. */
+      hiddenOverride?: { objects: bigint[]; instances: bigint[] } | null
+    },
+  ) => ViewPlaneExtent
+  /** Selected object / instance ids as the renderer knows them. */
+  getSelectedIds: () => { objects: bigint[]; instances: bigint[] }
+  /** The renderer's hidden leaf ids (eye-hidden ∪ tag-hidden). */
+  getHiddenIds: () => { objects: bigint[]; instances: bigint[] }
+  /** Annotation line work + labels in world space (vector prints). */
+  collectAnnotationDrawing: () => { segments: number[]; labels: { position: [number, number, number]; text: string; detached: boolean }[] }
 
   /**
    * Project a world point to canvas-relative CSS pixels (origin top-left) at
@@ -5111,6 +5159,81 @@ export default function Viewport({
       scheduleRender()
     }
 
+    function renderPrintPages(pages: PrintPageRequest[], opts: PrintRenderOptions, onProgress?: (done: number, total: number) => void): Promise<Blob[]> {
+      // Handles are gathered at call time: `originAxes` is rebuilt on a theme
+      // change, so a captured reference would go stale.
+      return runPrintPass(
+        {
+          renderer,
+          scene: threeScene,
+          rig,
+          sceneRenderer,
+          ambient,
+          dirLight,
+          lightRig: MODEL_LIGHT_RIG.light,
+          gridAxes: [infiniteGrid.mesh, originAxes],
+          hideAlways: [cueLayer.group, drawPlaneCueLayer.group, previewGroup, sceneRenderer.sectionGroup],
+          viewportCssSize: () => ({ width: el.clientWidth, height: el.clientHeight }),
+          liveTheme: () => readAppliedTheme(),
+          liveSection: () => getSectionState(),
+        },
+        pages,
+        opts,
+        onProgress,
+      )
+    }
+
+    function getPrintView(): ReturnType<ViewportApi['getPrintView']> {
+      const cam = rig.active
+      const dir = controls.target.clone().sub(cam.position)
+      if (dir.lengthSq() < 1e-18) cam.getWorldDirection(dir)
+      dir.normalize()
+      const o = rig.orthographic
+      // The inactive ortho camera tracks the perspective one's framing only
+      // through toggles/tweens; under perspective, size it from the live
+      // distance/fov the same way `toggleProjection` would.
+      let w: number
+      let h: number
+      if (rig.projection === 'parallel') {
+        w = (o.right - o.left) / o.zoom
+        h = (o.top - o.bottom) / o.zoom
+      } else {
+        const dist = Math.max(cam.position.distanceTo(controls.target), 1e-6)
+        h = 2 * dist * Math.tan((rig.perspective.fov * Math.PI) / 360)
+        w = h * rig.perspective.aspect
+      }
+      return {
+        dir: [dir.x, dir.y, dir.z],
+        up: [cam.up.x, cam.up.y, cam.up.z],
+        target: [controls.target.x, controls.target.y, controls.target.z],
+        projection: rig.projection,
+        orthoSize: { w, h },
+        aspect: el.clientWidth / Math.max(1, el.clientHeight),
+      }
+    }
+
+    function computePrintExtent(
+      dir: [number, number, number],
+      up: [number, number, number],
+      opts: {
+        includeSketches: boolean
+        includeAnnotations: boolean
+        restrictTo: { objects: Set<bigint>; instances: Set<bigint> } | null
+        hiddenOverride?: { objects: bigint[]; instances: bigint[] } | null
+      },
+    ): ViewPlaneExtent {
+      const override = opts.hiddenOverride ?? null
+      if (opts.restrictTo === null && override === null) return computeViewPlaneExtent(sceneRenderer, dir, up, opts)
+      // Selection extent / a Scene's hidden set: measure with the pass's
+      // visibility applied (begun and ended around the walk — no render).
+      sceneRenderer.beginPrintPass({ style: 'shaded', restrictTo: opts.restrictTo, includeGuides: true, hiddenOverride: override })
+      try {
+        return computeViewPlaneExtent(sceneRenderer, dir, up, { includeSketches: opts.restrictTo === null && opts.includeSketches, includeAnnotations: opts.includeAnnotations })
+      } finally {
+        sceneRenderer.endPrintPass()
+      }
+    }
+
     function captureFrame(): { width: number; height: number; pixels: Uint8Array } {
       // Mirror the per-frame camera-dependent updates of the animation loop
       // (this renders out-of-band, without going through it) so a captured
@@ -5768,7 +5891,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
     }
 
     // ------------------------------------------------------------------ tool factories

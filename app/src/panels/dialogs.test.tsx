@@ -634,13 +634,29 @@ describe('ExportDialog', () => {
     expect(screen.getByText(/stl binary \(\.stl\).*millimeters, for 3d printing/i)).toBeInTheDocument()
     expect(screen.getByText(/3mf \(\.3mf\).*part names and colors/i)).toBeInTheDocument()
     expect(screen.getByText(/usdz \(\.usdz\).*ar quick look/i)).toBeInTheDocument()
+    expect(screen.getByText(/svg line drawing \(\.svg\)/i)).toBeInTheDocument()
   })
 
   it('defaults to glTF and calls onExport with "glb" when Export is clicked', () => {
     const onExport = vi.fn()
     render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('glb', 48)
+    expect(onExport).toHaveBeenCalledWith('glb', 48, undefined)
+  })
+
+  it('SVG reveals view/scale/hidden-lines options and passes them to onExport (1:1 default)', () => {
+    const onExport = vi.fn()
+    render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'svg' } })
+    expect(screen.getByLabelText(/^view$/i)).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText(/^view$/i), { target: { value: 'top' } })
+    fireEvent.click(screen.getByLabelText(/hidden lines dashed/i))
+    fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
+    expect(onExport).toHaveBeenCalledTimes(1)
+    const [format, , svg] = onExport.mock.calls[0]
+    expect(format).toBe('svg')
+    expect(svg).toMatchObject({ view: 'top', hiddenDashed: true, includeDimensions: true })
+    expect(svg.scale.paperMeters / svg.scale.modelMeters).toBeCloseTo(1, 9)
   })
 
   it('calls onExport with "stl" after switching the Format select to STL', () => {
@@ -648,7 +664,7 @@ describe('ExportDialog', () => {
     render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
     fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'stl' } })
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('stl', 48)
+    expect(onExport).toHaveBeenCalledWith('stl', 48, undefined)
   })
 
   it('hides the curve-resolution select for glTF and shows it for STL', () => {
@@ -664,7 +680,7 @@ describe('ExportDialog', () => {
     fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'stl' } })
     fireEvent.change(screen.getByLabelText(/curve resolution/i), { target: { value: '96' } })
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('stl', 96)
+    expect(onExport).toHaveBeenCalledWith('stl', 96, undefined)
   })
 
   it('offers a stored-facets ("as modeled") resolution choice', () => {
@@ -673,7 +689,7 @@ describe('ExportDialog', () => {
     fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'stl' } })
     fireEvent.change(screen.getByLabelText(/curve resolution/i), { target: { value: '0' } })
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('stl', 0)
+    expect(onExport).toHaveBeenCalledWith('stl', 0, undefined)
   })
 
   it('calls onExport with "3mf" after switching the Format select to 3MF', () => {
@@ -681,7 +697,7 @@ describe('ExportDialog', () => {
     render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
     fireEvent.change(screen.getByLabelText(/format/i), { target: { value: '3mf' } })
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('3mf', 48)
+    expect(onExport).toHaveBeenCalledWith('3mf', 48, undefined)
   })
 
   it('calls onExport with "usdz" after switching the Format select to USDZ', () => {
@@ -689,7 +705,7 @@ describe('ExportDialog', () => {
     render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
     fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'usdz' } })
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('usdz', 48)
+    expect(onExport).toHaveBeenCalledWith('usdz', 48, undefined)
   })
 
   it('hides the curve-resolution select for USDZ, like glTF and 3MF', () => {

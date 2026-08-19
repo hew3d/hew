@@ -27,6 +27,9 @@
  */
 
 import type { Scene } from '../wasm/loader'
+import type { PrintHost, PrintSetup } from '../print/printHost'
+import type { PrintPageModel } from '../print/PrintDocument'
+import type { PrintPlan } from '../print/printJob'
 import type { ViewportApi } from '../viewport/Viewport'
 import { nodeKindToNumber, type NodeKind, type NodeRef } from '../panels/treeModel'
 import * as inputRecorder from '../recording/inputRecorder'
@@ -78,6 +81,21 @@ export interface HarnessDeps {
   /** Delete a tag everywhere through the app's real Tags-panel path
    * (kernel `delete_tag` + tag-visibility resync + document-changed). */
   deleteTag: (path: string[]) => void
+  /**
+   * Print (docs/design/printing.md §12): install a recording print host +
+   * page sink so a spec can drive File ▸ Print… end to end without the OS
+   * dialog and inspect the composed pages. Optional so headless callers
+   * without a print surface (Shop Mode boot) can omit it.
+   */
+  setPrintRecorder?: (recorder: PrintRecorder | null) => void
+}
+
+/** What App wires the harness's print recorder into (see App.tsx). */
+export interface PrintRecorder {
+  host: PrintHost
+  onPages: (pages: PrintPageModel[], plan: PrintPlan) => void
+  /** Records Save PDF… bytes instead of writing a file. */
+  savePdf?: (bytes: Uint8Array, name: string) => Promise<boolean>
 }
 
 /** The `ImportReport` shape `scene.import_stl` returns across the boundary
@@ -238,6 +256,34 @@ export interface HewTestHarness {
    * writer-side bookkeeping. Test-only — the round-trip verification uses
    * it. */
   exportStl(segmentsPerTurn: number): { bytes: number[]; triangleCount: number } | null
+  /** Print recorder (docs/design/printing.md §12): what the dialog handed
+   * to the (recording) system print host, plus page inspection. */
+  print: {
+    /** Arm the recording print host: from now on Print… hands its pages to
+     * the recorder instead of the real system dialog, and Save PDF… keeps
+     * the bytes instead of opening a save dialog. OFF by default — a dev
+     * build is also what a person runs, and they want the real dialogs. */
+    arm(): void
+    /** Back to the real print host / save dialog. */
+    disarm(): void
+    /** Jobs handed to the print host so far. */
+    jobs(): { setup: PrintSetup; pageCount: number; tiles: string[]; imagePx: { w: number; h: number }[]; jobTitle: string; paperMm: { w: number; h: number } }[]
+    /** Bounding box of pixels darker than `threshold` (0-255, on the max
+     * channel) in the LAST job's page `index` bitmap, in image pixels —
+     * the scale assertion's probe. Null with no such page/pixels. */
+    pageDarkBounds(index: number, threshold: number): Promise<{ x: number; y: number; w: number; h: number; imageW: number; imageH: number } | null>
+    /** Dark span (first/last dark pixel) along one image row of the LAST
+     * job's page `index`, at `rowFrac` of the image height (0 top … 1
+     * bottom) — a probe for silhouettes between two rims. */
+    rowDarkSpan(index: number, threshold: number, rowFrac: number): Promise<{ x: number; w: number; imageW: number } | null>
+    /** How many `.hew-print-page` sections the print root holds right now. */
+    printRootPages(): number
+    /** The last Save PDF… result: byte length, the first bytes as text, the
+     * suggested name, and how many `/Type /Page` objects it holds. */
+    lastPdf(): { bytes: number; head: string; name: string; pages: number } | null
+    /** The last Save PDF… bytes (for a spec that wants to write/validate the file). */
+    lastPdfBytes(): number[] | null
+  }
   /** Import binary/ASCII STL bytes through the REAL `scene.import_stl`,
    * returning the ImportReport (object/watertight/leaky/skipped/warnings).
    * Additive, exactly like File▸Import's kernel call. Test-only. */
@@ -952,6 +998,41 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     return regions[0]
   }
 
+  // ---- print recorder (installed into App via deps.setPrintRecorder)
+  const printJobs: ReturnType<HewTestHarness['print']['jobs']> = []
+  let lastPrintPages: PrintPageModel[] = []
+  let lastPrintPlan: PrintPlan | null = null
+  let lastPdf: { bytes: number; head: string; name: string; pages: number } | null = null
+  let lastPdfBytes: Uint8Array | null = null
+  const printRecorder: PrintRecorder = {
+    savePdf: async (bytes, name) => {
+      lastPdfBytes = bytes
+      const head = String.fromCharCode(...bytes.subarray(0, 8))
+      let pages = 0
+      // Count page objects in the (mostly ASCII) structure.
+      const text = new TextDecoder('latin1').decode(bytes)
+      pages = (text.match(/\/Type \/Page[^s]/g) ?? []).length
+      lastPdf = { bytes: bytes.length, head, name, pages }
+      return true
+    },
+    host: {
+      print: async (setup) => {
+        printJobs.push({
+          setup,
+          pageCount: lastPrintPages.length,
+          tiles: lastPrintPages.map((p) => p.tile.id),
+          imagePx: lastPrintPages.map((p) => ({ w: p.tile.imagePx.w, h: p.tile.imagePx.h })),
+          jobTitle: lastPrintPlan?.jobTitle ?? '',
+          paperMm: lastPrintPlan === null ? { w: 0, h: 0 } : { w: lastPrintPlan.layout.page.paper.w, h: lastPrintPlan.layout.page.paper.h },
+        })
+      },
+    },
+    onPages: (pages, plan) => {
+      lastPrintPages = pages
+      lastPrintPlan = plan
+    },
+  }
+
   const harness: HewTestHarness = {
     // Ready = kernel scene live AND the viewport API wired. Both are needed
     // before callers drive the harness: drawBox/setCamera/pickFace go through the
@@ -1186,6 +1267,74 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     importStl: (bytes, unitScale) =>
       act((s) => s.import_stl(new Uint8Array(bytes), unitScale) as StlImportReportJs),
+
+    print: {
+      arm: () => deps.setPrintRecorder?.(printRecorder),
+      disarm: () => deps.setPrintRecorder?.(null),
+      jobs: () => printJobs.map((j) => ({ ...j })),
+      rowDarkSpan: async (index, threshold, rowFrac) => {
+        const page = lastPrintPages[index]
+        if (page === undefined || page.imageUrl === null) return null
+        const img = new Image()
+        img.src = page.imageUrl
+        await img.decode()
+        const canvas = document.createElement('canvas')
+        canvas.width = img.naturalWidth
+        canvas.height = img.naturalHeight
+        const ctx = canvas.getContext('2d')
+        if (ctx === null) return null
+        ctx.drawImage(img, 0, 0)
+        const y = Math.max(0, Math.min(canvas.height - 1, Math.round(rowFrac * canvas.height)))
+        const { data, width } = ctx.getImageData(0, y, canvas.width, 1)
+        let minX = Infinity
+        let maxX = -1
+        for (let x = 0; x < width; x++) {
+          const i = x * 4
+          if (Math.max(data[i], data[i + 1], data[i + 2]) < threshold) {
+            if (x < minX) minX = x
+            if (x > maxX) maxX = x
+          }
+        }
+        canvas.width = 0
+        return maxX < 0 ? null : { x: minX, w: maxX - minX + 1, imageW: width }
+      },
+      pageDarkBounds: async (index, threshold) => {
+        const page = lastPrintPages[index]
+        if (page === undefined || page.imageUrl === null) return null
+        const img = new Image()
+        img.src = page.imageUrl
+        await img.decode()
+        const canvas = document.createElement('canvas')
+        canvas.width = img.naturalWidth
+        canvas.height = img.naturalHeight
+        const ctx = canvas.getContext('2d')
+        if (ctx === null) return null
+        ctx.drawImage(img, 0, 0)
+        const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height)
+        let minX = Infinity
+        let minY = Infinity
+        let maxX = -1
+        let maxY = -1
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4
+            const m = Math.max(data[i], data[i + 1], data[i + 2])
+            if (m < threshold) {
+              if (x < minX) minX = x
+              if (x > maxX) maxX = x
+              if (y < minY) minY = y
+              if (y > maxY) maxY = y
+            }
+          }
+        }
+        canvas.width = 0
+        if (maxX < 0) return { x: 0, y: 0, w: 0, h: 0, imageW: width, imageH: height }
+        return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1, imageW: width, imageH: height }
+      },
+      printRootPages: () => document.querySelectorAll('#hew-print-root .hew-print-page').length,
+      lastPdf: () => lastPdf,
+      lastPdfBytes: () => (lastPdfBytes === null ? null : Array.from(lastPdfBytes)),
+    },
 
     startRecording: () => {
       scene().start_recording()

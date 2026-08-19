@@ -76,6 +76,11 @@ export interface FatSegmentsOpts {
    * reference level).
    */
   depthBias?: number
+  /**
+   * The width is already in DEVICE pixels of a specific render (a print
+   * pass's edge overlay) — `setFatLineWidthScale` leaves it alone.
+   */
+  absoluteWidth?: boolean
 }
 
 /**
@@ -101,6 +106,7 @@ export function makeFatSegments(positions: ArrayLike<number>, opts: FatSegmentsO
   })
   mat.resolution.copy(lastRes)
   registry.add(mat)
+  if (opts.absoluteWidth === true) mat.userData.absoluteWidth = true
   const line = new LineSegments2(geo, mat)
   if (opts.dashed ?? false) line.computeLineDistances()
   if (opts.renderOrder !== undefined) line.renderOrder = opts.renderOrder
@@ -129,5 +135,31 @@ export function updateFatLineResolutions(width: number, height: number): void {
   lastRes.set(width, height)
   for (const mat of registry) {
     mat.resolution.set(width, height)
+  }
+}
+
+/** The last canvas size handed to `updateFatLineResolutions` — a print pass
+ * reads it to restore after rendering at page resolution. */
+export function getFatLineResolution(): { width: number; height: number } {
+  return { width: lastRes.x, height: lastRes.y }
+}
+
+/**
+ * Multiply every registered fat-line width by `factor` (relative to the width
+ * it was CREATED with — calling this twice does not compound), skipping
+ * materials built with `absoluteWidth`. A print pass renders at 300 dpi and
+ * wants sketch/annotation/preview lines to keep their physical size (a 2.2
+ * CSS-px sketch line stays ~0.6 mm on paper), so it scales by dpi/96 for the
+ * pass and back to 1 afterwards. Factor 1 restores exactly.
+ */
+export function setFatLineWidthScale(factor: number): void {
+  for (const mat of registry) {
+    if (mat.userData.absoluteWidth === true) continue
+    let base = mat.userData.baseLinewidth as number | undefined
+    if (base === undefined) {
+      base = mat.linewidth
+      mat.userData.baseLinewidth = base
+    }
+    mat.linewidth = base * factor
   }
 }

@@ -1,0 +1,20 @@
+[package]
+name = "hlr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Hidden-line removal (docs/design/printing.md §7b): projects tessellated
+# solids onto a view plane and returns the visible line work — hard edges,
+# silhouettes of curved walls, section-cut outlines — as 2D segments, plus an
+# SVG writer. Pure geometry over `tessellate`'s buffers: no GPU, no I/O,
+# deterministic (f64, fixed traversal, named tolerances). Same dependency
+# posture as `softrender`.
+[dependencies]
+kernel.workspace = true
+tessellate.workspace = true
+
+[dev-dependencies]
+# The raster oracle for the visibility proptests: softrender's depth buffer.
+softrender.workspace = true
+proptest.workspace = true

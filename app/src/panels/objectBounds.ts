@@ -183,6 +183,42 @@ function instanceWorldBounds(scene: WasmScene, instanceId: bigint): Bounds | nul
 }
 
 /**
+ * The part an instance really is, in its own frame: the definition's
+ * axis-aligned bounds (members at their local poses) times the instance's
+ * OWN scale along each local axis — its placement's rotation and position
+ * ignored. Every unscaled instance of a definition reports the same
+ * L × W × H however it is turned in the world; an instance rescaled on its
+ * own reports its real size (the printed cut list folds on this). Null when
+ * the instance is stale or has no mesh.
+ */
+export function instanceLocalBounds(scene: WasmScene, instanceId: bigint): Bounds | null {
+  const pose = scene.instance_pose(instanceId)
+  if (pose === undefined) return null
+  const memberIds = scene.instance_expanded_members(instanceId)
+  const localPoses = scene.instance_expanded_local_poses(instanceId)
+  let bounds: Bounds | null = null
+  for (let i = 0; i < memberIds.length; i++) {
+    const local = localPoses.subarray(i * 12, i * 12 + 12)
+    bounds = unionBounds(bounds, objectMeshBounds(scene, memberIds[i], local))
+  }
+  if (bounds === null) return null
+  // The pose's column lengths are its scale along the definition's x/y/z
+  // (a row-major 3×4 affine: column j = image of local axis j).
+  const s = instancePoseScale(pose)
+  return {
+    min: [bounds.min[0] * s[0], bounds.min[1] * s[1], bounds.min[2] * s[2]],
+    max: [bounds.max[0] * s[0], bounds.max[1] * s[1], bounds.max[2] * s[2]],
+  }
+}
+
+/** Scale along the definition's x/y/z axes carried by an instance pose
+ * (row-major 3×4 affine): the lengths of its three columns. */
+export function instancePoseScale(pose: ArrayLike<number>): [number, number, number] {
+  const col = (j: number): number => Math.hypot(pose[j], pose[4 + j], pose[8 + j])
+  return [col(0), col(1), col(2)]
+}
+
+/**
  * World AABB of a selection — the union of every leaf Object's and Component
  * instance's bounds reachable from it. A Group contributes its members'
  * bounds, recursively (`treeModel.collectLeafIds` walks nested groups); a

@@ -1,7 +1,7 @@
 ---
 title: "Hew on your phone"
 description: "Shop Mode turns a phone into a touch viewer for a model you built at the desk: tap a part for its dimensions, check a cut length, work offline at the bench."
-order: 20
+order: 21
 ---
 
 Hew is a desktop and web modeler, but a model is often most useful away from the desk — at the bench, next to the material, checking a dimension before a cut. Shop Mode is a fullscreen, touch-first viewer for exactly that: open a model on your phone, orbit it, tap a part for its name and size, tap an edge for its length, and work through the whole thing with no wifi if the shop doesn't have any.
@@ -83,6 +83,12 @@ Shop Mode is built to work at a bench with no signal.
 - The app shell itself is a precached PWA: once you've loaded Shop Mode at least once, reopening it — and reopening anything already in Recents — works in airplane mode. Only fetching a brand-new model over QR or from a cloud-synced Files location needs a live connection.
 
 **Add to Home Screen**, from your phone browser's share sheet, installs Shop Mode as a fullscreen app icon with no browser chrome around it — the same PWA install the desktop web app offers ([Files, saving, and recovery](/learn/files-and-saving/) covers the equivalent for a laptop).
+
+## Printing from the phone
+
+Tap the document name pill and the document menu has a **Print…** row, next to **Save a copy**. It opens a Print Layout sheet — a bottom sheet in portrait, a centered card in landscape — with the essentials of the desktop [Print Layout](/learn/printing/): **Standard** or **Scaled**, Paper, Scale (with a **Fit** chip), Extent (Model or Current view), Style, and a strip of the pages you're about to get. Nothing in it touches the model.
+
+**Save PDF…** is the primary action here. On iOS it hands the finished PDF to the share sheet, so **Save to Files** puts it wherever you'd put any other file; elsewhere it downloads like any other export. **Print…** goes through the browser's own print, which on iOS means AirPrint — and AirPrint doesn't honor the paper size Hew composed the pages for, so pick the same paper and 100 % scale in AirPrint's own sheet, or use Save PDF… instead, which always comes out at the exact size. There's no **Selection** extent on the phone — Shop Mode never edits the model, so "what's visible" is whatever you've isolated in the viewport.
 
 ## View in AR (iOS only)
 

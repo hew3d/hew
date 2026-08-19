@@ -668,7 +668,8 @@ for, not shipped.
 | `hew.scenes` | `list`, `add`, `update`, `rename`, `describe`, `remove`, `reorder`, `apply` (§7.1) | Standard |
 | `hew.attr` | `get`, `set`, `delete` (§8) | Required |
 | `hew.history` | `undo`, `redo`, `status` (depth; top entry's label and origin) | Required |
-| `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format) | Standard (`core` grants `snapshot` specifically; `camera`/`zoom_extents`/`units` stay `app`-only — live-host-only effects) |
+| `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format), `line_drawing` (hidden-line SVG or segments, headless or live, §7.2) | Standard (`core` grants `snapshot` and `line_drawing` specifically; `camera`/`zoom_extents`/`units` stay `app`-only — live-host-only effects) |
+| `hew.print` | `pdf` (a full print job — paper/scale/tiling/marks — as a PDF, headless or live, §7.2) | Standard |
 | `hew.annotate` | dimensions, leader text | Reserved |
 | `hew.event` | notifications + `subscribe` | Reserved (§4.5) |
 
@@ -909,6 +910,59 @@ Refusals: `unknown_scene` (a malformed or since-deleted Scene id, on any
 command that takes one, including `hew.view.snapshot`'s `scene`),
 `duplicate_scene_name`/`empty_scene_name` (`add`/`rename`'s naming
 rules, mirroring the kernel's own `check_scene_name`).
+
+### 7.2 Printing and line drawings
+
+`hew.view.line_drawing` and `hew.print.pdf` are the headless counterparts
+of **File ▸ Print…** and its Export dialog's SVG format
+(docs/design/printing.md §7b, §9b): both render through
+`crates/hlr`'s hidden-line-removal pass over tessellated geometry, the
+same engine the desktop print pages and SVG export use, so a script gets
+the identical visible-edge/silhouette/section-outline/hidden-line output
+a person would see in the app.
+
+**`hew.view.line_drawing`** takes a camera, a named standard view, or a
+Scene's id (the same three mutually-exclusive forms `hew.view.snapshot`
+accepts) and returns either an SVG string — a true-size drawing in
+millimetres at a given paper/model `scale` (default 1, full size) — or
+raw 2D segments in view-plane metres, each tagged with its kind (`hard`,
+`silhouette`, `soft`, `section`, `hidden`) and the public id of the
+entity it belongs to. `include_hidden`/`include_soft` opt into hidden and
+non-silhouette curved-wall lines, both off by default. A model too
+complex for the vector pass refuses typed (`too_complex`) rather than
+hanging or silently falling back — headless callers get an honest error
+where the UI falls back to a raster page instead.
+
+**`hew.print.pdf`** composes a full print job — standard (one page, the
+view as given) or scaled (parallel projection at an exact drawing ratio,
+tiled across pages with overlap bands, crop/trim marks, a scale bar, and
+a title block) — and writes it as a PDF, exactly like the dialog's own
+**Save PDF…**. `style: "line_art"` (the default) embeds the `hlr` output
+as vector paths, refusing `too_complex` on a model the vector pass can't
+handle rather than quietly rasterizing (unlike the interactive dialog,
+which falls back to a bitmap page and says so — a headless caller gets a
+typed refusal to act on instead); `style: "shaded"` rasterizes through
+the same headless software renderer `hew.view.snapshot` uses, at lower
+fidelity (no textures or antialiasing) than the live-viewport "As shown"
+style. Bytes return base64 inline by default, or write to `path` on a
+filesystem-capable host — the same split `hew.view.snapshot` and
+`hew.doc.export` use, for the same reason.
+
+Both commands are `Host`-implemented and headless-renderable, so — like
+`hew.view.snapshot` — the `core` profile grants them even though they
+sit outside `hew.view.*`'s usual app-only rule: `hew.view.line_drawing`
+is named explicitly in `Profile::Core`'s carve-out; `hew.print.pdf` needs
+no carve-out at all, since `hew.print.*` was never `hew.view`-prefixed to
+begin with. A headless host (`hew-cli` without `--live`) renders both
+without a viewport; MCP exposes them as `hew_print_pdf` and
+`hew_line_drawing` whenever the connection's profile grants the
+underlying command (§13).
+
+Refusals: `host_capability_missing` (a host with no render path — should
+not occur for `core`/`app`, both of which always grant a render route),
+`nothing_to_render` (an empty document, or a degenerate camera),
+`too_complex` (the `hlr` vector pass, on both commands — see above),
+`save_failed` (a `path` the host couldn't write), `unknown_scene`.
 
 ## 8. Attribute dictionaries
 

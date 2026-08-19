@@ -461,6 +461,21 @@ const _composeScratch = new THREE.Matrix4()
 const _boundsBox = new THREE.Box3()
 const _boundsSphere = new THREE.Sphere()
 
+/** What `SceneRenderer.beginPrintPass` reshapes the live scene into. */
+export interface PrintPassOptions {
+  style: 'shaded' | 'lineart'
+  /** Selection extent: only these ids stay visible (null = everything visible). */
+  restrictTo: { objects: Set<bigint>; instances: Set<bigint> } | null
+  includeGuides: boolean
+  /** Device-pixel width for sketch lines during the pass (the print's edge
+   * weight — a sketch line should not print heavier than an object edge).
+   * Omit to leave sketch widths to the caller's fat-line scaling. */
+  sketchLineWidthPx?: number
+  /** Replace the hidden sets for the pass (a Scene's resolved leaf sets —
+   * authoritative, may unhide what the live view hides). */
+  hiddenOverride?: { objects: bigint[]; instances: bigint[] } | null
+}
+
 export class SceneRenderer {
   private scene: THREE.Scene
   private wasmScene: WasmScene
@@ -2679,11 +2694,17 @@ export class SceneRenderer {
    * `changed || needsRender` gate already ensures. Call once per render
    * frame, mirroring `updateGuideDashScale`.
    */
-  updateAnnotationBillboards(camera: THREE.Camera, viewportWidth: number, viewportHeight: number, theme: 'light' | 'dark'): void {
+  updateAnnotationBillboards(
+    camera: THREE.Camera,
+    viewportWidth: number,
+    viewportHeight: number,
+    theme: 'light' | 'dark',
+    opts?: { /** Raster density override — a print pass passes its dpi/96 so labels are crisp at page resolution. */ dpr?: number },
+  ): void {
     const normalColor = ANNOTATION_COLOR[theme]
     const warningColor = ANNOTATION_WARNING_COLOR[theme]
     if (this.annotationBase.size === 0) return
-    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
+    const dpr = opts?.dpr ?? (typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1)
 
     const normalPositions: number[] = []
     const detachedPositions: number[] = []
@@ -3192,6 +3213,409 @@ export class SceneRenderer {
     for (const id of this.instanceRecords.keys()) {
       this._refreshSlots(id)
     }
+  }
+
+  // ------------------------------------------------------------ print pass
+  //
+  // A print (docs/design/printing.md §7) renders the LIVE scene with a
+  // print camera into an offscreen target, after temporarily reshaping it:
+  // native 1-px `GL_LINES` edges are hidden and replaced by a fat-line
+  // overlay with a physical weight (built by the caller from
+  // `collectPrintEdgeSegments`), highlight overlays go away, "Line art"
+  // swaps every face material for flat white, and a Selection extent hides
+  // everything that isn't selected. `beginPrintPass`/`endPrintPass` bracket
+  // that; every mutation is recorded and undone in reverse, so the on-screen
+  // scene is byte-identical afterwards.
+
+  private printPassUndo: (() => void)[] | null = null
+
+  /** Selected object/instance ids as the renderer knows them (for the print
+   * dialog's Selection extent). */
+  getSelectedIds(): { objects: bigint[]; instances: bigint[] } {
+    return { objects: [...this.selectedObjectIds], instances: [...this.selectedInstanceIds] }
+  }
+
+  beginPrintPass(opts: PrintPassOptions): void {
+    // A pass already open belongs to a render in flight (they yield between
+    // pages); a second begin would silently reshape it. Fail loudly instead
+    // — the print pipeline serializes passes, so this is a bug, not a state.
+    if (this.printPassUndo !== null) throw new Error('SceneRenderer: a print pass is already active')
+    const undo: (() => void)[] = []
+    const hideObj = (o: THREE.Object3D | null): void => {
+      if (o === null) return
+      const was = o.visible
+      o.visible = false
+      undo.push(() => {
+        o.visible = was
+      })
+    }
+
+    // A Scene's hidden sets replace the live ones for the pass; a Selection
+    // extent then hides every object/instance outside the set — both through
+    // the same hidden-set machinery a real hide uses (batch slots included).
+    if (opts.restrictTo !== null || (opts.hiddenOverride !== undefined && opts.hiddenOverride !== null)) {
+      const savedObjects = this.hiddenObjectIds
+      const savedInstances = this.hiddenInstanceIds
+      const baseO = opts.hiddenOverride ? new Set(opts.hiddenOverride.objects) : savedObjects
+      const baseI = opts.hiddenOverride ? new Set(opts.hiddenOverride.instances) : savedInstances
+      const ho = new Set(baseO)
+      const hi = new Set(baseI)
+      if (opts.restrictTo !== null) {
+        for (const id of this.objectGroups.keys()) if (!opts.restrictTo.objects.has(id)) ho.add(id)
+        for (const id of this.instanceRecords.keys()) if (!opts.restrictTo.instances.has(id)) hi.add(id)
+      }
+      this.hiddenObjectIds = ho
+      this.hiddenInstanceIds = hi
+      this._applyHidden()
+      undo.push(() => {
+        this.hiddenObjectIds = savedObjects
+        this.hiddenInstanceIds = savedInstances
+        this._applyHidden()
+      })
+      if (opts.restrictTo !== null) hideObj(this.sketchGroup)
+    }
+
+    // Native edges (replaced by the caller's fat overlay) and every
+    // selection/hover overlay.
+    for (const g of this.objectGroups.values()) hideObj(g.edgesLines)
+    for (const g of this.instanceGroups.values()) for (const e of g.edgesLines) hideObj(e)
+    for (const b of this.batches.values()) hideObj(b.edges)
+    hideObj(this.guideHighlight)
+    hideObj(this.annotationHighlight)
+    hideObj(this.sketchHighlight)
+    if (!opts.includeGuides) hideObj(this.guidesGroup)
+
+    if (opts.sketchLineWidthPx !== undefined) {
+      const px = opts.sketchLineWidthPx
+      const setWidth = (line: LineSegments2 | null): void => {
+        if (line === null) return
+        const mat = line.material as LineMaterial
+        const was = mat.linewidth
+        const wasAbs = mat.userData.absoluteWidth
+        mat.linewidth = px
+        // Keep `setFatLineWidthScale` off it for the duration.
+        mat.userData.absoluteWidth = true
+        undo.push(() => {
+          mat.linewidth = was
+          if (wasAbs === undefined) delete mat.userData.absoluteWidth
+          else mat.userData.absoluteWidth = wasAbs
+        })
+      }
+      setWidth(this.sketchLines)
+      for (const d of this.defSketchGroups.values()) setWidth(d.lines)
+    }
+
+    if (opts.style === 'lineart') {
+      const cache = new Map<string, THREE.MeshBasicMaterial>()
+      const whiteFor = (src: THREE.Material): THREE.MeshBasicMaterial => {
+        const clip = src.clippingPlanes ?? null
+        const key = `${src.side}|${clip !== null && clip.length > 0 ? 'clip' : 'noclip'}`
+        let m = cache.get(key)
+        if (m === undefined) {
+          m = new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            side: src.side,
+            polygonOffset: true,
+            polygonOffsetFactor: DEPTH_BIAS.FACE,
+            polygonOffsetUnits: DEPTH_BIAS.FACE,
+            clippingPlanes: clip !== null && clip.length > 0 ? clip : null,
+          })
+          cache.set(key, m)
+        }
+        return m
+      }
+      const swap = (mesh: THREE.Mesh): void => {
+        const orig = mesh.material
+        const first = Array.isArray(orig) ? orig[0] : orig
+        if (first === undefined) return
+        mesh.material = whiteFor(first)
+        undo.push(() => {
+          mesh.material = orig
+        })
+      }
+      for (const g of this.objectGroups.values()) swap(g.facesMesh)
+      for (const g of this.instanceGroups.values()) for (const m of g.facesMeshes) swap(m)
+      for (const b of this.batches.values()) swap(b.mesh)
+      // Sketch fills off, sketch lines to ink.
+      for (const m of this.sketchRegionMeshes.values()) hideObj(m)
+      for (const d of this.defSketchGroups.values()) for (const m of d.regionMeshes.values()) hideObj(m)
+      const inkLine = (line: LineSegments2 | null): void => {
+        if (line === null) return
+        const mat = line.material as LineMaterial
+        const was = mat.color.getHex()
+        mat.color.setHex(0x000000)
+        undo.push(() => {
+          mat.color.setHex(was)
+        })
+      }
+      inkLine(this.sketchLines)
+      for (const d of this.defSketchGroups.values()) inkLine(d.lines)
+      undo.push(() => {
+        for (const m of cache.values()) m.dispose()
+      })
+    }
+
+    this.printPassUndo = undo
+  }
+
+  endPrintPass(): void {
+    const undo = this.printPassUndo
+    if (undo === null) return
+    this.printPassUndo = null
+    for (let i = undo.length - 1; i >= 0; i--) undo[i]()
+  }
+
+  /**
+   * World-space `[ax,ay,az,bx,by,bz,…]` for every VISIBLE object/instance
+   * edge (respecting hidden sets, batch slot suppression, and an active
+   * `beginPrintPass` restriction) — the input for a print pass's fat-line
+   * edge overlay (`makeFatSegments` takes exactly this layout).
+   */
+  collectPrintEdgeSegments(): Float32Array {
+    this.scene.updateMatrixWorld(true)
+    const chunks: Float32Array[] = []
+    let total = 0
+    const v = new THREE.Vector3()
+    const pushTransformed = (src: ArrayLike<number>, m: THREE.Matrix4): void => {
+      const out = new Float32Array(src.length)
+      for (let i = 0; i + 2 < src.length; i += 3) {
+        v.set(src[i], src[i + 1], src[i + 2]).applyMatrix4(m)
+        out[i] = v.x
+        out[i + 1] = v.y
+        out[i + 2] = v.z
+      }
+      chunks.push(out)
+      total += out.length
+    }
+    const positionsOf = (obj: THREE.Object3D & { geometry: THREE.BufferGeometry }): ArrayLike<number> | null => {
+      const attr = obj.geometry.getAttribute('position') as THREE.BufferAttribute | undefined
+      return attr === undefined ? null : (attr.array as ArrayLike<number>)
+    }
+    for (const g of this.objectGroups.values()) {
+      if (!g.group.visible) continue
+      const pos = positionsOf(g.edgesLines)
+      if (pos !== null) pushTransformed(pos, g.edgesLines.matrixWorld)
+    }
+    for (const g of this.instanceGroups.values()) {
+      if (!g.group.visible) continue
+      for (const e of g.edgesLines) {
+        const pos = positionsOf(e)
+        if (pos !== null) pushTransformed(pos, e.matrixWorld)
+      }
+    }
+    const slotMatrix = new THREE.Matrix4()
+    for (const b of this.batches.values()) {
+      const pos = positionsOf(b.edges)
+      if (pos === null) continue
+      const count = b.mesh.count
+      for (let slot = 0; slot < count; slot++) {
+        if (b.suppressedSlots.has(slot)) continue
+        b.mesh.getMatrixAt(slot, slotMatrix)
+        pushTransformed(pos, slotMatrix)
+      }
+    }
+    const out = new Float32Array(total)
+    let off = 0
+    for (const c of chunks) {
+      out.set(c, off)
+      off += c.length
+    }
+    return out
+  }
+
+  /**
+   * The annotations as plain world-space line work + labels, for a vector
+   * (line-art) print or SVG export (docs/design/printing.md §7b): every
+   * live annotation's fixed segments plus its raw dimension line, and its
+   * label at the base text anchor. Camera-independent by design (no gap
+   * layout — the vector page draws labels with a paper halo instead).
+   */
+  collectAnnotationDrawing(): { segments: number[]; labels: { position: [number, number, number]; text: string; detached: boolean }[] } {
+    const segments: number[] = []
+    const labels: { position: [number, number, number]; text: string; detached: boolean }[] = []
+    if (!this.annotationsGroup.visible) return { segments, labels }
+    for (const info of this.annotationBase.values()) {
+      segments.push(...info.fixed)
+      if (info.dimLine !== null) {
+        segments.push(...info.dimLine.a, ...info.dimLine.b)
+      }
+      if (info.label.trim() !== '') {
+        labels.push({ position: [info.textAnchor[0], info.textAnchor[1], info.textAnchor[2]], text: info.label, detached: info.detached })
+      }
+    }
+    return { segments, labels }
+  }
+
+  /** The renderer's current hidden leaf ids (the app's union of eye-hidden
+   * and tag-hidden), for callers that need to hand them to the kernel side. */
+  getHiddenIds(): { objects: bigint[]; instances: bigint[] } {
+    return { objects: [...this.hiddenObjectIds], instances: [...this.hiddenInstanceIds] }
+  }
+
+  /** World-space guide line segments and point-marker segments (may be
+   * empty) for a print pass that includes guides. */
+  collectGuideSegments(): { lines: Float32Array; markers: Float32Array } {
+    const grab = (obj: THREE.LineSegments | null): Float32Array => {
+      if (obj === null) return new Float32Array(0)
+      const attr = obj.geometry.getAttribute('position') as THREE.BufferAttribute | undefined
+      if (attr === undefined) return new Float32Array(0)
+      const src = attr.array as ArrayLike<number>
+      const out = new Float32Array(src.length)
+      const v = new THREE.Vector3()
+      obj.updateWorldMatrix(true, false)
+      for (let i = 0; i + 2 < src.length; i += 3) {
+        v.set(src[i], src[i + 1], src[i + 2]).applyMatrix4(obj.matrixWorld)
+        out[i] = v.x
+        out[i + 1] = v.y
+        out[i + 2] = v.z
+      }
+      return out
+    }
+    return { lines: grab(this.guideLines), markers: grab(this.guideMarkers) }
+  }
+
+  /**
+   * Visit the world-space bounding box of every visible piece of model
+   * geometry — each object, each materialized instance placement, each live
+   * batch slot — plus (optionally) the sketch and annotation groups. The
+   * print layout projects these onto the view plane to size a scaled print
+   * (docs/design/printing.md §7 "Extent math"); per-object boxes keep an
+   * oblique view's extent tight where one whole-scene AABB would not.
+   */
+  forEachVisibleWorldBox(cb: (box: THREE.Box3) => void, opts: { includeSketches: boolean; includeAnnotations: boolean }): void {
+    this.scene.updateMatrixWorld(true)
+    const box = new THREE.Box3()
+    const localBox = (geo: THREE.BufferGeometry): THREE.Box3 | null => {
+      if (geo.boundingBox === null) geo.computeBoundingBox()
+      return geo.boundingBox
+    }
+    for (const g of this.objectGroups.values()) {
+      if (!g.group.visible) continue
+      const bb = localBox(g.facesMesh.geometry)
+      if (bb === null || bb.isEmpty()) continue
+      cb(box.copy(bb).applyMatrix4(g.facesMesh.matrixWorld))
+    }
+    for (const g of this.instanceGroups.values()) {
+      if (!g.group.visible) continue
+      for (const m of g.facesMeshes) {
+        const bb = localBox(m.geometry)
+        if (bb === null || bb.isEmpty()) continue
+        cb(box.copy(bb).applyMatrix4(m.matrixWorld))
+      }
+    }
+    const slotMatrix = new THREE.Matrix4()
+    for (const b of this.batches.values()) {
+      const bb = localBox(b.mesh.geometry)
+      if (bb === null || bb.isEmpty()) continue
+      for (let slot = 0; slot < b.mesh.count; slot++) {
+        if (b.suppressedSlots.has(slot)) continue
+        b.mesh.getMatrixAt(slot, slotMatrix)
+        cb(box.copy(bb).applyMatrix4(slotMatrix))
+      }
+    }
+    if (opts.includeSketches && this.sketchGroup.visible) {
+      box.setFromObject(this.sketchGroup)
+      if (!box.isEmpty()) cb(box)
+    }
+    if (opts.includeAnnotations && this.annotationsGroup.visible) {
+      box.setFromObject(this.annotationsGroup)
+      if (!box.isEmpty()) cb(box)
+    }
+  }
+
+  /**
+   * Visit the world-space position of every vertex of visible model
+   * geometry (the same set `forEachVisibleWorldBox` covers, plus the sketch
+   * and annotation groups' own vertices when asked) — the exact silhouette
+   * a fit needs, where a bounding box over-estimates any oblique view. A
+   * whole-scene point budget (`maxPoints`, default 2 M) bounds the visit; a
+   * mesh past it contributes its box corners (never fewer points than the
+   * truth needs).
+   */
+  forEachVisibleWorldPoint(cb: (p: THREE.Vector3) => void, opts: { includeSketches: boolean; includeAnnotations: boolean; maxPoints?: number }): void {
+    this.scene.updateMatrixWorld(true)
+    // Exact vertices while the whole-scene budget lasts (a fit or an extent
+    // is a framing decision: exact where affordable); a mesh that would
+    // overrun it contributes its bounding-box corners instead — an
+    // over-estimate, never an under-estimate. Skipping vertices would risk
+    // dropping the very extreme one.
+    let remaining = opts.maxPoints ?? 2_000_000
+    const v = new THREE.Vector3()
+    const emit = (geo: THREE.BufferGeometry, m: THREE.Matrix4): void => {
+      const pos = geo.getAttribute('position')
+      if (pos === undefined) return
+      const n = pos.count
+      if (n <= remaining) {
+        remaining -= n
+        for (let i = 0; i < n; i++) {
+          v.fromBufferAttribute(pos, i).applyMatrix4(m)
+          cb(v)
+        }
+        return
+      }
+      if (geo.boundingBox === null) geo.computeBoundingBox()
+      const bb = geo.boundingBox
+      if (bb === null || bb.isEmpty()) return
+      for (let i = 0; i < 8; i++) {
+        v.set(i & 1 ? bb.max.x : bb.min.x, i & 2 ? bb.max.y : bb.min.y, i & 4 ? bb.max.z : bb.min.z).applyMatrix4(m)
+        cb(v)
+      }
+    }
+    for (const g of this.objectGroups.values()) {
+      if (!g.group.visible) continue
+      emit(g.facesMesh.geometry, g.facesMesh.matrixWorld)
+    }
+    for (const g of this.instanceGroups.values()) {
+      if (!g.group.visible) continue
+      for (const m of g.facesMeshes) emit(m.geometry, m.matrixWorld)
+    }
+    const slotMatrix = new THREE.Matrix4()
+    for (const b of this.batches.values()) {
+      for (let slot = 0; slot < b.mesh.count; slot++) {
+        if (b.suppressedSlots.has(slot)) continue
+        b.mesh.getMatrixAt(slot, slotMatrix)
+        emit(b.mesh.geometry, slotMatrix)
+      }
+    }
+    // Sketches and annotations are fat lines and billboards whose 'position'
+    // attributes are not world vertices (instanced quads); their boxes are
+    // exact enough — visit the box corners.
+    const box = new THREE.Box3()
+    const corners = (): void => {
+      for (let i = 0; i < 8; i++) {
+        v.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z)
+        cb(v)
+      }
+    }
+    if (opts.includeSketches && this.sketchGroup.visible) {
+      box.setFromObject(this.sketchGroup)
+      if (!box.isEmpty()) corners()
+    }
+    if (opts.includeAnnotations && this.annotationsGroup.visible) {
+      box.setFromObject(this.annotationsGroup)
+      if (!box.isEmpty()) corners()
+    }
+  }
+
+  /**
+   * Put every face mesh (objects, instances, batches) on `layer` (or take
+   * it off) — the print pass renders a faces-only normal/depth pass through
+   * a camera restricted to that layer to find silhouettes for Line art.
+   */
+  setFacesLayer(layer: number, on: boolean): void {
+    const set = (o: THREE.Object3D): void => {
+      if (on) o.layers.enable(layer)
+      else o.layers.disable(layer)
+    }
+    for (const g of this.objectGroups.values()) set(g.facesMesh)
+    for (const g of this.instanceGroups.values()) for (const m of g.facesMeshes) set(m)
+    for (const b of this.batches.values()) set(b.mesh)
+  }
+
+  /** The active section clip plane(s) as the face materials carry them —
+   * for an override material that must cut the same way. */
+  getSectionClipPlanes(): THREE.Plane[] {
+    return this.sectionClipPlane === null ? [] : [this.sectionClipPlane]
   }
 
   /** Apply the context fade to all objects, instances, and sketches. */

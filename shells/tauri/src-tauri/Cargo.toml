@@ -62,9 +62,28 @@ qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 # src/live.rs's module doc for why windows-sys (not tokio, already
 # transitively present via tauri/reqwest) was chosen. Target-gated so
 # macOS/Linux builds gain nothing.
+# System printing (src/print.rs, docs/design/printing.md §9): the platform
+# print operation for the webview's DOM with Hew's own page geometry. All
+# three stacks are already in the dependency tree through wry/tauri (same
+# pinned versions); listing them here only makes their APIs callable from
+# this crate. Shell-crate-only, like fontdb/qrcode above.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSGeometry", "NSObject", "NSURL", "NSDictionary", "NSValue"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPrintInfo", "NSPrintOperation", "NSWindow", "NSView", "NSResponder", "NSApplication", "NSScreen", "NSGraphics"] }
+objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-app-kit", "WKWebView"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+gtk = "0.18"
+webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
+
 [target.'cfg(windows)'.dependencies]
+webview2-com = "0.38.2"
+windows-core = "0.61"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Printing",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
     # Not used directly (no overlapped I/O here — every pipe handle is

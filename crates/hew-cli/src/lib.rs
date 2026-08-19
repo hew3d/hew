@@ -13,6 +13,7 @@
 pub mod host;
 pub mod live;
 pub mod mcp;
+pub mod print;
 pub mod run;
 
 pub use host::CliHost;

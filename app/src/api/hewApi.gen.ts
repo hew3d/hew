@@ -570,6 +570,57 @@ export interface MetaHelloResult {
 }
 
 /**
+ * `hew.print.pdf` (v1) — Print the document to a PDF the way File ▸ Print… does: standard (one page, the view as-is) or scaled (parallel projection at an exact drawing scale, tiled across pages with overlap bands, crop/trim marks, a scale bar, and a title block). Line art is vector (hidden lines removed); shaded is a software-rasterized bitmap per page. Bytes base64 inline, or written to path.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: host_capability_missing, nothing_to_render, too_complex, save_failed, unknown_scene
+ */
+export interface PrintPdfParams {
+  /** as hew.view.snapshot; scaled prints use its direction with parallel projection */
+  camera?: UnspecifiedShape
+  /** line art: dashed hidden lines */
+  include_hidden?: boolean
+  /** defaults to 12.7 (½ in) */
+  margin_mm?: number
+  /** crop/trim marks and neighbour labels; defaults to true */
+  marks?: boolean
+  /** defaults to scaled */
+  mode?: "scaled" | "standard"
+  /** defaults to auto (fewer tiles; standard follows the view's aspect) */
+  orientation?: "auto" | "portrait" | "landscape"
+  /** tile overlap band, defaults to 10; 0 for none */
+  overlap_mm?: number
+  /** "letter" | "legal" | "tabloid" | "a5" | "a4" | "a3" (default a4) or {w_mm, h_mm} */
+  paper?: string | { h_mm: number; w_mm: number }
+  /** write the PDF here instead of returning it inline */
+  path?: string
+  /** scaled: paper/model, defaults to 0.1 (1:10) */
+  scale?: number
+  /** defaults to true */
+  scale_bar?: boolean
+  /** title-block scale text; defaults to the ratio ("1:10") */
+  scale_label?: string
+  scene?: string
+  /** defaults to line_art (vector) */
+  style?: "line_art" | "shaded"
+  /** title-block document name; defaults to the document's */
+  title?: string
+  /** defaults to true */
+  title_block?: boolean
+  /** scale-bar family, defaults to metric */
+  units?: "metric" | "imperial"
+  view?: "iso" | "front" | "back" | "left" | "right" | "top" | "bottom"
+}
+
+export interface PrintPdfResult {
+  cols: number
+  pages: number
+  path?: string
+  /** present only when path was not given */
+  pdf_base64?: string
+  rows: number
+}
+
+/**
  * `hew.query.context` (v1) — The open editing-context frame stack.
  * Tier: Required · Class: read-only · Served: kernel
  * Refusals: none.
@@ -1078,6 +1129,45 @@ export interface ViewCameraParams {
 export interface ViewCameraResult {}
 
 /**
+ * `hew.view.line_drawing` (v1) — Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane metres.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: host_capability_missing, nothing_to_render, too_complex, save_failed, unknown_scene
+ */
+export interface ViewLineDrawingParams {
+  /** identical vocabulary to hew.view.snapshot's camera; mutually exclusive with view and scene */
+  camera?: UnspecifiedShape
+  /** defaults to svg */
+  format?: "svg" | "segments"
+  /** defaults to false; when true, hidden pieces are returned too (kind "hidden", dashed in SVG) */
+  include_hidden?: boolean
+  /** defaults to false; when true, non-silhouette curved-wall facet seams are returned (kind "soft") */
+  include_soft?: boolean
+  /** svg only: write the file here instead of returning it inline (hosts with filesystem access) */
+  path?: string
+  /** svg only: paper/model drawing scale, defaults to 1 (full size); the SVG's width/height are millimetres at that scale */
+  scale?: number
+  /** a Scene's id: its camera and hidden sets, as hew.view.snapshot */
+  scene?: string
+  /** a named standard view (parallel projection); mutually exclusive with camera and scene */
+  view?: "iso" | "front" | "back" | "left" | "right" | "top" | "bottom"
+}
+
+export interface ViewLineDrawingResult {
+  /** [min_x, min_y, max_x, max_y] in view-plane metres; null when empty */
+  bounds?: [number, number, number, number]
+  count: number
+  /** public id of the entity each segment belongs to */
+  ids?: string[]
+  kinds?: ("hard" | "silhouette" | "soft" | "section" | "hidden")[]
+  /** format svg with path */
+  path?: string
+  /** format segments: [ax, ay, bx, by] in view-plane metres, y up, origin at the camera target */
+  segments?: [number, number, number, number][]
+  /** format svg without path */
+  svg?: string
+}
+
+/**
  * `hew.view.snapshot` (v1) — Render the attached document to PNG, headless-rendered via a software rasterizer (a live host may render through its viewport instead) — bytes base64 by default, or a path on hosts with filesystem access.
  * Tier: Standard · Class: solitary · Served: host
  * Refusals: host_capability_missing, nothing_to_render, save_failed, unknown_scene
@@ -1233,6 +1323,10 @@ export class HewApiClient {
     hello: (params: MetaHelloParams): Promise<MetaHelloResult> => this.call('hew.meta.hello', params),
   }
 
+  readonly print = {
+    pdf: (params: PrintPdfParams): Promise<PrintPdfResult> => this.call('hew.print.pdf', params),
+  }
+
   readonly query = {
     context: (params: QueryContextParams): Promise<QueryContextResult> => this.call('hew.query.context', params),
     entity: (params: QueryEntityParams): Promise<QueryEntityResult> => this.call('hew.query.entity', params),
@@ -1283,6 +1377,7 @@ export class HewApiClient {
 
   readonly view = {
     camera: (params: ViewCameraParams): Promise<ViewCameraResult> => this.call('hew.view.camera', params),
+    lineDrawing: (params: ViewLineDrawingParams): Promise<ViewLineDrawingResult> => this.call('hew.view.line_drawing', params),
     snapshot: (params: ViewSnapshotParams): Promise<ViewSnapshotResult> => this.call('hew.view.snapshot', params),
     units: (params: ViewUnitsParams): Promise<ViewUnitsResult> => this.call('hew.view.units', params),
     zoomExtents: (params: ViewZoomExtentsParams): Promise<ViewZoomExtentsResult> => this.call('hew.view.zoom_extents', params),

@@ -130,6 +130,95 @@ pub struct SnapshotResult {
     pub id_palette: Vec<String>,
 }
 
+// ------------------------------------------ hew.view.line_drawing / hew.print.pdf
+
+/// What `hew.view.line_drawing` returns (docs/design/printing.md §9b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineDrawingFormat {
+    /// A standalone SVG document at true size (`scale`), mm units.
+    Svg,
+    /// Raw segments in view-plane metres.
+    Segments,
+}
+
+/// Typed, validated parameters for `hew.view.line_drawing`: the same
+/// camera/view/scene vocabulary as `hew.view.snapshot`, plus the drawing
+/// options. `crates/api` parses and validates; a host renders through its
+/// hidden-line engine (`hew-cli` uses `crates/hlr`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineDrawingParams {
+    pub camera: Option<SnapshotCamera>,
+    pub view: Option<StandardView>,
+    pub scene: Option<u64>,
+    /// Also return hidden pieces (kind `hidden`) — dashed hidden lines.
+    pub include_hidden: bool,
+    /// Also return non-silhouette curved-wall seams (kind `soft`).
+    pub include_soft: bool,
+    pub format: LineDrawingFormat,
+    /// Drawing scale for `Svg` (paper/model; 1.0 = full size).
+    pub scale: f64,
+    /// When given (SVG only), the file is written here instead of inline.
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineDrawingResult {
+    /// The SVG document, for `LineDrawingFormat::Svg`.
+    pub svg: Option<String>,
+    /// `[ax, ay, bx, by]` in view-plane metres (y up, origin at the camera
+    /// target), for `LineDrawingFormat::Segments`.
+    pub segments: Vec<[f64; 4]>,
+    /// One per segment: "hard" | "silhouette" | "soft" | "section" | "hidden".
+    pub kinds: Vec<&'static str>,
+    /// One per segment: the public id of the entity the line belongs to.
+    pub ids: Vec<String>,
+    /// `[min_x, min_y, max_x, max_y]`, or None when empty.
+    pub bounds: Option<[f64; 4]>,
+    pub count: usize,
+}
+
+/// Typed, validated parameters for `hew.print.pdf` (docs/design/printing.md
+/// §9b): the page setup and drawing scale the app's Print dialog offers,
+/// for a headless host.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrintPdfParams {
+    /// Portrait paper size, mm.
+    pub paper_w_mm: f64,
+    pub paper_h_mm: f64,
+    /// `None` = auto (fewer tiles / follows the aspect).
+    pub landscape: Option<bool>,
+    pub margin_mm: f64,
+    /// Scaled (parallel projection at `ratio`) vs Standard (one page).
+    pub scaled: bool,
+    /// paper / model, e.g. 0.1 for 1:10.
+    pub ratio: f64,
+    /// Scale text for the title block ("1:10", "1 in = 1 ft").
+    pub scale_label: String,
+    pub camera: Option<SnapshotCamera>,
+    pub view: Option<StandardView>,
+    pub scene: Option<u64>,
+    /// Vector line art (hidden lines removed) vs a shaded raster.
+    pub line_art: bool,
+    pub include_hidden: bool,
+    pub title_block: bool,
+    pub scale_bar: bool,
+    pub marks: bool,
+    pub overlap_mm: f64,
+    /// Scale bar / caption unit family.
+    pub metric: bool,
+    /// Title-block document name; defaults to the host's document name.
+    pub title: Option<String>,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrintPdfResult {
+    pub pdf: Vec<u8>,
+    pub pages: usize,
+    pub cols: usize,
+    pub rows: usize,
+}
+
 /// The camera `hew.view.camera` sets — the SAME vocabulary
 /// `hew.view.snapshot`'s `camera`/`view` accept ([`SnapshotCamera`],
 /// [`StandardView`] above), parsed by the one shared implementation in
@@ -236,6 +325,32 @@ pub trait Host {
     fn write_snapshot(&mut self, path: &str, bytes: &[u8]) -> Result<(), Refusal> {
         let _ = (path, bytes);
         Err(unsupported("write snapshot files"))
+    }
+
+    /// Hidden-line drawing (`hew.view.line_drawing`, docs/design/printing.md
+    /// §9b): the visible line work from a camera, as SVG or segments. A
+    /// headless host renders through `crates/hlr`; refuses `nothing_to_render`
+    /// on an empty document and `too_complex` past the engine's budget.
+    fn line_drawing(
+        &mut self,
+        doc: &kernel::Document,
+        params: &LineDrawingParams,
+    ) -> Result<LineDrawingResult, Refusal> {
+        let _ = (doc, params);
+        Err(unsupported("render line drawings"))
+    }
+
+    /// Print pages to a PDF (`hew.print.pdf`): the app's page layout
+    /// (`crate::print_layout`) with vector line art or a shaded raster per
+    /// page, written by `pdfwrite`. Bytes come back; `path` goes through
+    /// [`Host::write_snapshot`] like every other file this trait writes.
+    fn print_pdf(
+        &mut self,
+        doc: &kernel::Document,
+        params: &PrintPdfParams,
+    ) -> Result<PrintPdfResult, Refusal> {
+        let _ = (doc, params);
+        Err(unsupported("print to PDF"))
     }
 
     /// The host's open documents (`hew.meta.documents` and the `hello`

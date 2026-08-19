@@ -227,6 +227,18 @@ export function SaveCopyIcon({ size = 24, className, style }: ShopIconProps) {
   )
 }
 
+/** Document menu's "Print…" item (docs/design/printing.md §9c) — a printer:
+ *  paper in, body, paper out. */
+export function PrinterIcon({ size = 24, className, style }: ShopIconProps) {
+  return (
+    <svg width={size} height={size} aria-hidden="true" className={className} style={style} {...BASE_PROPS} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M7 9V4h10v5" />
+      <rect x="4" y="9" width="16" height="8" rx="1.5" />
+      <path d="M7 14h10v6H7z" />
+    </svg>
+  )
+}
+
 /** Overflow menu's "Use full editor" item (design §6) — an external-link
  *  glyph. */
 export function FullEditorIcon({ size = 24, className, style }: ShopIconProps) {

@@ -144,6 +144,16 @@
   --accent-tint-15: rgba(91, 140, 255, 0.15);
   --accent-tint-18: rgba(91, 140, 255, 0.18);
   --accent-border: rgba(91, 140, 255, 0.4);
+  /* Filled primary button (Print…): white on this is 4.6:1 AA where white
+     on --accent-base is only 3.5:1. accent-base stays for focus rings,
+     checkmarks, links, and the Save PDF… label in dark. */
+  --accent-strong: #3b6ae8;
+  /* Active segmented-control chip (text-primary 600 + 1 px shadow) — the
+     accent-on-tint chip fails AA at 12 px. */
+  --seg-active: #262d38;
+  /* The print preview's desk behind the paper. */
+  --surface-desk: #101318;
+  --print-text-muted: #8b95a3;
 
   /* ---- Axis colors (3D) -------------------------------------------------*/
   --axis-red: #e85a60;
@@ -262,6 +272,16 @@
   --accent-tint-15: rgba(91, 140, 255, 0.14); /* light spec has one tint value */
   --accent-tint-18: rgba(91, 140, 255, 0.14);
   --accent-border: rgba(91, 140, 255, 0.35);
+  /* Print dialog (SPEC §2): the filled Print… button and the Save PDF…
+     label. The spec's #3b6ae8 is 4.43:1 on this panel; #3462dc passes AA
+     both as a label on the panel (4.98:1) and under white (5.35:1). */
+  --accent-strong: #3462dc;
+  --seg-active: #ffffff;
+  --surface-desk: #e3e8ee;
+  /* Muted copy inside the Print dialog at 12 px (reading line, hints,
+     summary): --text-muted is 4.29:1 on the light panel; this passes AA
+     on both the panel and the desk. */
+  --print-text-muted: #5d6673;
 
   /* ---- Axis colors (light, deepened for contrast) ----------------------*/
   --axis-red: #d6454b;

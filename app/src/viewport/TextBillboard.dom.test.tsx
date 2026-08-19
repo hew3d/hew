@@ -49,12 +49,21 @@ describe('TextBillboard', () => {
     billboard.dispose()
   })
 
-  it('update() is a no-op for an orthographic camera', () => {
+  it('update() under an orthographic camera holds the same screen height: frustum-height / viewport px per CSS px', () => {
+    // Parallel projection has uniform world-per-pixel; a 26 px label on an
+    // 800 px viewport showing 2 m of frustum height is 26 * 2 / 800 m tall.
+    // (Before the print work an orthographic camera was a silent no-op,
+    // which froze dimension labels at their last perspective size under
+    // View ▸ Parallel Projection.)
     const billboard = new TextBillboard(26, 1000)
-    const before = billboard.mesh.scale.clone()
     const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100)
     billboard.update(ortho, 800)
-    expect(billboard.mesh.scale.equals(before)).toBe(true)
+    expect(billboard.mesh.scale.y).toBeCloseTo((26 * 2) / 800, 10)
+    expect(billboard.mesh.quaternion.equals(ortho.quaternion)).toBe(true)
+    // Zoom halves the visible frustum → the label halves in world size.
+    ortho.zoom = 2
+    billboard.update(ortho, 800)
+    expect(billboard.mesh.scale.y).toBeCloseTo((26 * 1) / 800, 10)
     billboard.dispose()
   })
 
@@ -101,10 +110,13 @@ describe('TextBillboard', () => {
     billboard.dispose()
   })
 
-  it('worldSize() returns null for a non-perspective camera', () => {
+  it('worldSize() answers for an orthographic camera and is null for an unsupported one', () => {
     const billboard = new TextBillboard(26, 1000)
     const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100)
-    expect(billboard.worldSize(ortho, 800)).toBeNull()
+    const size = billboard.worldSize(ortho, 800)
+    expect(size).not.toBeNull()
+    expect(size!.height).toBeCloseTo((26 * 2) / 800, 10)
+    expect(billboard.worldSize(new THREE.Camera(), 800)).toBeNull()
     billboard.dispose()
   })
 })

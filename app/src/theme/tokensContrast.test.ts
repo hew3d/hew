@@ -170,3 +170,35 @@ describe('Scenes token contrast', () => {
     expect(ratio).toBeGreaterThanOrEqual(WCAG_AA_TEXT_MIN)
   })
 })
+
+// ---------------------------------------------------------------------------
+// Print dialog tokens (docs/design/design-spec/printing SPEC.md §2 "New
+// tokens"): the filled Print… button is white on --accent-strong (4.6:1 —
+// white on --accent-base is only 3.5:1 and fails), the active segmented
+// chip is text-primary on --seg-active, and the Save PDF… label is
+// accent-strong on the panel (light) / accent-base on the panel (dark).
+describe('Print dialog token contrast', () => {
+  it.each(['dark', 'light'] as const)('%s: white on --accent-strong (filled primary button)', (theme) => {
+    const themeVars = theme === 'dark' ? darkVars! : lightVars!
+    expect(contrastRatio(WHITE, tokenValue(themeVars, 'accent-strong'))).toBeGreaterThanOrEqual(WCAG_AA_TEXT_MIN)
+  })
+
+  it.each(['dark', 'light'] as const)('%s: --text-primary on --seg-active (active segmented chip)', (theme) => {
+    const themeVars = theme === 'dark' ? darkVars! : lightVars!
+    expect(contrastRatio(tokenValue(themeVars, 'text-primary'), tokenValue(themeVars, 'seg-active'))).toBeGreaterThanOrEqual(WCAG_AA_TEXT_MIN)
+  })
+
+  it('light: --accent-strong on --surface-panel (Save PDF… label)', () => {
+    expect(contrastRatio(tokenValue(lightVars!, 'accent-strong'), tokenValue(lightVars!, 'surface-panel'))).toBeGreaterThanOrEqual(WCAG_AA_TEXT_MIN)
+  })
+
+  it('dark: --accent-base on --surface-panel (Save PDF… label)', () => {
+    expect(contrastRatio(tokenValue(darkVars!, 'accent-base'), tokenValue(darkVars!, 'surface-panel'))).toBeGreaterThanOrEqual(WCAG_AA_TEXT_MIN)
+  })
+
+  it.each(['dark', 'light'] as const)('%s: --print-text-muted on --surface-panel and on --surface-desk (reading line, hints, captions)', (theme) => {
+    const themeVars = theme === 'dark' ? darkVars! : lightVars!
+    expect(contrastRatio(tokenValue(themeVars, 'print-text-muted'), tokenValue(themeVars, 'surface-panel'))).toBeGreaterThanOrEqual(WCAG_AA_TEXT_MIN)
+    expect(contrastRatio(tokenValue(themeVars, 'print-text-muted'), tokenValue(themeVars, 'surface-desk'))).toBeGreaterThanOrEqual(WCAG_AA_TEXT_MIN)
+  })
+})

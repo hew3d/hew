@@ -1005,3 +1005,99 @@ fn snapshot_scene_refuses_unknown_scene() {
     let err = host.snapshot(&doc, &params).unwrap_err();
     assert_eq!(err.name, "unknown_scene");
 }
+
+/// `hew.print.pdf` and `hew.view.line_drawing` (docs/design/printing.md
+/// §9b) through the real CLI host: a 100 mm cube at 1:1 on Letter is one
+/// page whose SVG spans exactly 100 mm; at 1:1 a 500 × 300 mm slab tiles
+/// 2 × 2 (auto → landscape); the PDF is well-formed with one page per tile;
+/// segments come back with public ids; a bad paper name is a params error.
+#[test]
+fn run_script_print_pdf_and_line_drawing_lay_out_pages_and_draw_to_scale() {
+    let dir = scratch_dir("print-pdf");
+    let script_path = dir.join("script.json");
+    let pdf_path = dir.join("slab.pdf");
+    let svg_path = dir.join("cube.svg");
+    let cube = serde_json::json!({
+        "label": "cube",
+        "commands": [
+            { "method": "hew.sketch.draw_rect", "as": "rect", "params": { "plane": { "ground": true }, "corner_a": [0.0, 0.0, 0.0], "corner_b": [0.1, 0.1, 0.0] } },
+            { "method": "hew.solid.extrude", "params": { "region": { "$ref": "rect#/region_id" }, "distance": 0.1 } },
+        ],
+    });
+    let script = serde_json::json!([
+        { "jsonrpc": "2.0", "id": 1, "method": "hew.meta.hello", "params": { "protocol": 1 } },
+        { "jsonrpc": "2.0", "id": 2, "method": "hew.doc.new", "params": {} },
+        { "jsonrpc": "2.0", "id": 3, "method": "hew.doc.transact", "params": cube },
+        { "jsonrpc": "2.0", "id": 4, "method": "hew.view.line_drawing", "params": { "view": "top", "scale": 1.0, "path": svg_path } },
+        { "jsonrpc": "2.0", "id": 5, "method": "hew.view.line_drawing", "params": { "view": "iso", "format": "segments", "include_hidden": true } },
+        { "jsonrpc": "2.0", "id": 6, "method": "hew.print.pdf", "params": { "view": "top", "scale": 1.0, "paper": "letter" } },
+        { "jsonrpc": "2.0", "id": 7, "method": "hew.print.pdf", "params": { "paper": "napkin" } },
+    ]);
+    std::fs::write(&script_path, serde_json::to_vec(&script).unwrap()).unwrap();
+    let outcome = hew_cli::run::run_script(&script_path, None, None);
+    // Frame 7 is a deliberate params error; everything before it succeeds.
+    for r in &outcome.responses[..6] {
+        assert!(r.get("error").is_none(), "unexpected error: {r}");
+    }
+    let svg = std::fs::read_to_string(&svg_path).unwrap();
+    // A 100 mm square at 1:1 with the writer's 5 mm margin: 110 × 110 mm.
+    assert!(svg.contains("width=\"110mm\" height=\"110mm\""), "{svg}");
+    assert!(svg.contains("class=\"hard\""));
+    let segs = &outcome.responses[4]["result"];
+    // Iso cube: 9 visible + 3 hidden.
+    assert_eq!(segs["count"], 12);
+    let kinds: Vec<&str> = segs["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    assert_eq!(kinds.iter().filter(|k| **k == "hidden").count(), 3);
+    assert!(
+        segs["ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|id| id.as_str().unwrap().starts_with("obj_"))
+    );
+    let pdf = &outcome.responses[5]["result"];
+    assert_eq!(pdf["pages"], 1);
+    let bytes = base64_decode(pdf["pdf_base64"].as_str().unwrap());
+    assert!(bytes.starts_with(b"%PDF-1.4"));
+    assert!(
+        outcome.responses[6].get("error").is_some(),
+        "napkin is not a paper"
+    );
+
+    // The slab: 500 × 300 mm at 1:1 → 3 × 2 on Letter (the 10 mm overlap band
+    // is reserved inside the printable area, so tiles step 180.5 × 234
+    // portrait / 244 × 170.5 landscape; auto keeps portrait on the tie),
+    // written to a path.
+    let slab = serde_json::json!({
+        "label": "slab",
+        "commands": [
+            { "method": "hew.sketch.draw_rect", "as": "rect", "params": { "plane": { "ground": true }, "corner_a": [1.0, 0.0, 0.0], "corner_b": [1.5, 0.3, 0.0] } },
+            { "method": "hew.solid.extrude", "params": { "region": { "$ref": "rect#/region_id" }, "distance": 0.02 } },
+        ],
+    });
+    let script2 = serde_json::json!([
+        { "jsonrpc": "2.0", "id": 1, "method": "hew.meta.hello", "params": { "protocol": 1 } },
+        { "jsonrpc": "2.0", "id": 2, "method": "hew.doc.new", "params": {} },
+        { "jsonrpc": "2.0", "id": 3, "method": "hew.doc.transact", "params": slab },
+        { "jsonrpc": "2.0", "id": 4, "method": "hew.print.pdf", "params": { "view": "top", "scale": 1.0, "paper": "letter", "style": "shaded", "path": pdf_path } },
+    ]);
+    std::fs::write(&script_path, serde_json::to_vec(&script2).unwrap()).unwrap();
+    let outcome = hew_cli::run::run_script(&script_path, None, None);
+    let r = &outcome.responses[3];
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(r["result"]["pages"], 6);
+    assert_eq!(r["result"]["cols"], 3);
+    assert_eq!(r["result"]["rows"], 2);
+    let bytes = std::fs::read(&pdf_path).unwrap();
+    assert!(bytes.starts_with(b"%PDF-1.4"));
+    assert!(
+        std::str::from_utf8(&bytes[bytes.len().saturating_sub(64)..])
+            .is_ok_and(|s| s.contains("%%EOF"))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

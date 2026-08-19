@@ -103,7 +103,9 @@ impl Profile {
         match self {
             Profile::App => true,
             Profile::Core => {
-                command.name == "hew.view.snapshot" || !command.name.starts_with("hew.view.")
+                command.name == "hew.view.snapshot"
+                    || command.name == "hew.view.line_drawing"
+                    || !command.name.starts_with("hew.view.")
             }
         }
     }
@@ -649,6 +651,22 @@ impl Registry {
             Std,
             "Set the app's displayed length-unit format — a display preference, not document state.",
         );
+        // Printing (docs/design/printing.md §9b): headless-renderable like
+        // hew.view.snapshot (the same core-profile carve-out below).
+        add(
+            "hew.view.line_drawing",
+            S,
+            Host,
+            Std,
+            "Hidden-line drawing of the visible document from a camera — SVG at a drawing scale, or raw segments.",
+        );
+        add(
+            "hew.print.pdf",
+            S,
+            Host,
+            Std,
+            "Print the document to a PDF: standard (one page) or to an exact drawing scale across tiled pages, vector line art or shaded.",
+        );
 
         // The connection-lifecycle commands the dispatcher already
         // implements: the burn-down flag must tell the truth, and their
@@ -1162,6 +1180,94 @@ impl Registry {
             cmd.refusals = vec![
                 "host_capability_missing",
                 "nothing_to_render",
+                "save_failed",
+                "unknown_scene",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.view.line_drawing")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane metres.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "camera": { "type": "object", "description": "identical vocabulary to hew.view.snapshot's camera; mutually exclusive with view and scene" },
+                    "view": { "type": "string", "enum": ["iso", "front", "back", "left", "right", "top", "bottom"], "description": "a named standard view (parallel projection); mutually exclusive with camera and scene" },
+                    "scene": { "type": "string", "description": "a Scene's id: its camera and hidden sets, as hew.view.snapshot" },
+                    "include_hidden": { "type": "boolean", "description": "defaults to false; when true, hidden pieces are returned too (kind \"hidden\", dashed in SVG)" },
+                    "include_soft": { "type": "boolean", "description": "defaults to false; when true, non-silhouette curved-wall facet seams are returned (kind \"soft\")" },
+                    "format": { "type": "string", "enum": ["svg", "segments"], "description": "defaults to svg" },
+                    "scale": { "type": "number", "description": "svg only: paper/model drawing scale, defaults to 1 (full size); the SVG's width/height are millimetres at that scale" },
+                    "path": { "type": "string", "description": "svg only: write the file here instead of returning it inline (hosts with filesystem access)" }
+                },
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "svg": { "type": "string", "description": "format svg without path" },
+                    "path": { "type": "string", "description": "format svg with path" },
+                    "segments": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 }, "description": "format segments: [ax, ay, bx, by] in view-plane metres, y up, origin at the camera target" },
+                    "kinds": { "type": "array", "items": { "type": "string", "enum": ["hard", "silhouette", "soft", "section", "hidden"] } },
+                    "ids": { "type": "array", "items": { "type": "string" }, "description": "public id of the entity each segment belongs to" },
+                    "count": { "type": "integer" },
+                    "bounds": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4, "description": "[min_x, min_y, max_x, max_y] in view-plane metres; null when empty" }
+                },
+                "required": ["count"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "nothing_to_render",
+                "too_complex",
+                "save_failed",
+                "unknown_scene",
+            ];
+        }
+        {
+            let cmd = commands.get_mut("hew.print.pdf").expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Print the document to a PDF the way File ▸ Print… does: standard (one page, the view as-is) or scaled (parallel projection at an exact drawing scale, tiled across pages with overlap bands, crop/trim marks, a scale bar, and a title block). Line art is vector (hidden lines removed); shaded is a software-rasterized bitmap per page. Bytes base64 inline, or written to path.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "paper": { "description": "\"letter\" | \"legal\" | \"tabloid\" | \"a5\" | \"a4\" | \"a3\" (default a4) or {w_mm, h_mm}", "oneOf": [ { "type": "string" }, { "type": "object", "properties": { "w_mm": { "type": "number" }, "h_mm": { "type": "number" } }, "required": ["w_mm", "h_mm"] } ] },
+                    "orientation": { "type": "string", "enum": ["auto", "portrait", "landscape"], "description": "defaults to auto (fewer tiles; standard follows the view's aspect)" },
+                    "margin_mm": { "type": "number", "description": "defaults to 12.7 (½ in)" },
+                    "mode": { "type": "string", "enum": ["scaled", "standard"], "description": "defaults to scaled" },
+                    "scale": { "type": "number", "description": "scaled: paper/model, defaults to 0.1 (1:10)" },
+                    "scale_label": { "type": "string", "description": "title-block scale text; defaults to the ratio (\"1:10\")" },
+                    "camera": { "type": "object", "description": "as hew.view.snapshot; scaled prints use its direction with parallel projection" },
+                    "view": { "type": "string", "enum": ["iso", "front", "back", "left", "right", "top", "bottom"] },
+                    "scene": { "type": "string" },
+                    "style": { "type": "string", "enum": ["line_art", "shaded"], "description": "defaults to line_art (vector)" },
+                    "include_hidden": { "type": "boolean", "description": "line art: dashed hidden lines" },
+                    "title_block": { "type": "boolean", "description": "defaults to true" },
+                    "scale_bar": { "type": "boolean", "description": "defaults to true" },
+                    "marks": { "type": "boolean", "description": "crop/trim marks and neighbour labels; defaults to true" },
+                    "overlap_mm": { "type": "number", "description": "tile overlap band, defaults to 10; 0 for none" },
+                    "units": { "type": "string", "enum": ["metric", "imperial"], "description": "scale-bar family, defaults to metric" },
+                    "title": { "type": "string", "description": "title-block document name; defaults to the document's" },
+                    "path": { "type": "string", "description": "write the PDF here instead of returning it inline" }
+                },
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pdf_base64": { "type": "string", "description": "present only when path was not given" },
+                    "path": { "type": "string" },
+                    "pages": { "type": "integer" },
+                    "cols": { "type": "integer" },
+                    "rows": { "type": "integer" }
+                },
+                "required": ["pages", "cols", "rows"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "nothing_to_render",
+                "too_complex",
                 "save_failed",
                 "unknown_scene",
             ];
@@ -2896,15 +3002,18 @@ mod tests {
         }
     }
 
-    /// Core is App minus `hew.view.*`, except `hew.view.snapshot` — the one
-    /// view command with a headless render path (§10) — which core grants
-    /// too. A narrowable maximum, not a different protocol.
+    /// Core is App minus `hew.view.*`, except the view commands with a
+    /// headless render path (§10) — `hew.view.snapshot` and
+    /// `hew.view.line_drawing` — which core grants too. A narrowable
+    /// maximum, not a different protocol.
     #[test]
     fn core_profile_grants_snapshot_but_withholds_other_view_commands() {
         let reg = Registry::protocol_1();
         for cmd in reg.commands() {
             assert!(Profile::App.grants(cmd));
-            let expected = cmd.name == "hew.view.snapshot" || !cmd.name.starts_with("hew.view.");
+            let expected = cmd.name == "hew.view.snapshot"
+                || cmd.name == "hew.view.line_drawing"
+                || !cmd.name.starts_with("hew.view.");
             assert_eq!(
                 Profile::Core.grants(cmd),
                 expected,

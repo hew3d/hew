@@ -17,6 +17,10 @@ api = { workspace = true }
 kernel = { workspace = true }
 tessellate = { workspace = true }
 softrender = { workspace = true }
+# Headless printing (docs/design/printing.md §9b): hidden-line drawings and
+# the PDF writer behind hew.view.line_drawing / hew.print.pdf.
+hlr = { workspace = true }
+pdfwrite = { workspace = true }
 mesh-export = { workspace = true }
 stl-import = { workspace = true }
 gltf-import = { workspace = true }

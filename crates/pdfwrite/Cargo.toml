@@ -1,0 +1,13 @@
+[package]
+name = "pdfwrite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# A small PDF 1.4 writer for Hew's own "Save PDF…" and the headless
+# `hew.print.pdf` (docs/design/printing.md §9b): pages of JPEG/RGB images,
+# stroked paths, and Helvetica text. Bytes in, bytes out; no I/O. The one
+# dependency is a pure-Rust DEFLATE (content streams and raw RGB images are
+# Flate-encoded); JPEG passes through as DCTDecode.
+[dependencies]
+miniz_oxide = "0.8"

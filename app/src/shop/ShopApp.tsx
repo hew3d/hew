@@ -39,7 +39,10 @@ import { CAMERA_HANDOFF_TOOL_NAMES } from '../panels/cameraHandoffTools'
 import { nodeKey, type NodeRef } from '../panels/treeModel'
 import { tagPathKey } from '../panels/tagModel'
 import { makeFileHost, type OpenPick } from '../io/fileHost'
-import { anchorDownload } from '../io/webFileHost'
+import { anchorDownload, anchorDownloadAs } from '../io/webFileHost'
+import { PrintSheet } from './PrintSheet'
+import { makePrintHost } from '../print/printHost'
+import type { SceneSource } from '../print/printJob'
 import { decrypt, fromBase64Url } from '../io/shareCrypto'
 import { phoneRelayBase } from '../io/shareRelay'
 import { loadHewBytes, isSceneEmpty, seedHiddenKeysFromRegistry, seedHiddenTagPathsFromRegistry, unionHiddenLeafIds } from '../io/documentLoad'
@@ -1191,6 +1194,60 @@ export function ShopApp() {
     anchorDownload(bytes, docName)
   }, [docName])
 
+  // ---------------------------------------------------------------- Print… (docs/design/printing.md §9c)
+  const [printOpen, setPrintOpen] = useState(false)
+  const printHostRef = useRef(makePrintHost())
+  const openPrint = useCallback(() => {
+    setDocumentMenuOpen(false)
+    setPrintOpen(true)
+  }, [])
+  /** Save PDF… on the phone: the share sheet when it can take a file (iOS
+   * "Save to Files"), else the web file host's download. */
+  const savePdfBytes = useCallback(async (bytes: Uint8Array, name: string): Promise<boolean> => {
+    const file = typeof File !== 'undefined' ? new File([new Uint8Array(bytes)], `${name}.pdf`, { type: 'application/pdf' }) : null
+    const nav = typeof navigator !== 'undefined' ? navigator : null
+    if (file !== null && nav !== null && typeof nav.canShare === 'function' && nav.canShare({ files: [file] })) {
+      try {
+        await nav.share({ files: [file], title: name })
+        return true
+      } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') return false
+        // fall through to a plain download
+      }
+    }
+    // Phones have no File System Access picker; a plain download is what
+    // Safari/Chrome turn into "Save to Files" / the downloads tray.
+    anchorDownloadAs(bytes, `${name}.pdf`, 'application/pdf')
+    return true
+  }, [])
+  const printScenes = useCallback((): SceneSource[] => {
+    const scn = sceneRef.current
+    if (scn === null) return []
+    const out: SceneSource[] = []
+    for (const e of sceneEntries) {
+      let resolved
+      try {
+        resolved = scn.resolve_scene(BigInt(e.sid))
+      } catch {
+        continue
+      }
+      try {
+        const cj = resolved.camera_json()
+        const cam = cj === undefined ? undefined : parseCameraJson(JSON.parse(cj))
+        const hidden = resolved.has_hidden() ? { objects: Array.from(resolved.hidden_object_ids()), instances: Array.from(resolved.hidden_instance_ids()) } : null
+        let section: SceneSource['section'] = undefined
+        if (resolved.has_section()) {
+          const sj = resolved.section_json()
+          section = sj === undefined ? null : (parseSectionJson(JSON.parse(sj)) ?? null)
+        }
+        out.push({ sid: e.sid, name: e.name, camera: cam === undefined ? null : { projection: cam.projection, eye: cam.eye, target: cam.target, up: cam.up, fovDeg: cam.fovDeg }, hidden, section })
+      } finally {
+        resolved.free()
+      }
+    }
+    return out
+  }, [sceneEntries])
+
   // ---------------------------------------------------------------- selection / tap-to-inspect
   const handleSelect = useCallback((node: NodeRef | null, _additive: boolean) => {
     lastTapNodeRef.current = node
@@ -2076,6 +2133,7 @@ export function ShopApp() {
           onOpenScanner={openScanner}
           onOpenRecents={openRecentsSheet}
           onSaveCopy={saveCopy}
+          onPrint={openPrint}
           onUseFullEditor={useFullEditor}
           // Task 2 dropped the dock/rail AR button — this row is now its
           // only home (module doc). `showViewInAr` bundles BOTH gates the
@@ -2085,6 +2143,23 @@ export function ShopApp() {
           showViewInAr={hasDocument && isArQuickLookCandidate()}
           arBusy={arBusy}
           onViewInAr={viewInArFromDocumentMenu}
+        />
+
+        {/* Print… (docs/design/design-spec/printing SPEC.md §4): the phone
+            Print sheet — Save PDF… primary (exact pages via the share sheet
+            / Files), Print… = AirPrint. Read-only by construction: printing
+            never touches the document. */}
+        <PrintSheet
+          open={printOpen}
+          orientation={orientation}
+          getViewportApi={() => viewportApi.current}
+          getScene={() => sceneRef.current}
+          getScenes={printScenes}
+          documentName={docName === null ? 'Untitled' : docName.replace(/\.hew$/i, '')}
+          sceneName={activeSceneEntry !== null && !activeSceneDrifted ? activeSceneEntry.name : null}
+          printHost={printHostRef.current}
+          savePdf={savePdfBytes}
+          onClose={() => setPrintOpen(false)}
         />
 
         {/* Settings menu — same sibling-of-top-strip rationale as

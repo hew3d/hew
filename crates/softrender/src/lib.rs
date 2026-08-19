@@ -156,6 +156,9 @@ pub struct Rendered {
 }
 
 const BACKGROUND: [u8; 4] = [245, 246, 248, 255];
+/// The background pixel a render fills untouched pixels with (public so a
+/// print composer can recolour it to paper white).
+pub const BACKGROUND_RGBA: [u8; 4] = BACKGROUND;
 const AMBIENT: f32 = 0.35;
 const EDGE_COLOR: [u8; 4] = [40, 44, 52, 255];
 /// Depth bias pulling edges toward the viewer so they win the z-test

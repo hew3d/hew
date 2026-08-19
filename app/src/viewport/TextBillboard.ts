@@ -545,7 +545,8 @@ export class TextBillboard {
    * label's own — see `contentFrac`'s and `glyphContentFraction`'s doc
    * comments) regardless of camera distance/FOV/viewport size — call once
    * per render frame, mirroring `FollowMeTool.updateGripScale`.
-   * A no-op for a non-perspective camera or a non-positive `viewportHeight`.
+   * A no-op for a non-positive `viewportHeight` or a camera that is neither
+   * perspective nor orthographic.
    *
    * `faceQuaternion`, when given, replaces the default camera-facing
    * billboard orientation — the INLINE dimension/radial text case
@@ -555,16 +556,10 @@ export class TextBillboard {
    * behavior.
    */
   update(camera: THREE.Camera, viewportHeight: number, faceQuaternion?: THREE.Quaternion): void {
-    if (!(camera instanceof THREE.PerspectiveCamera)) return
-    if (viewportHeight <= 0) return
+    const size = this.worldSize(camera, viewportHeight)
+    if (size === null) return
     this.mesh.quaternion.copy(faceQuaternion ?? camera.quaternion)
-    const dist = camera.position.distanceTo(this.mesh.position)
-    const quadScreenPx = this.screenPxHeight / this.contentFrac
-    // `billboardWorldScale` returns a HALF-extent (see its doc comment); this
-    // mesh's `PlaneGeometry(1,1)` is diameter-native (its "1" is a full
-    // width/height), so the FULL on-screen height needs double that.
-    const worldHeight = 2 * billboardWorldScale(quadScreenPx, dist, camera.fov, viewportHeight)
-    this.mesh.scale.set(worldHeight * this.aspect, worldHeight, 1)
+    this.mesh.scale.set(size.width, size.height, 1)
   }
 
   /**
@@ -574,15 +569,30 @@ export class TextBillboard {
    * caller (the dimension-line/label gap layout, docs/design/
    * dimensions-playtest2.md §2) can measure the label BEFORE deciding where
    * to draw the line around it, without first having to move/orient the
-   * mesh. `null` for a non-perspective camera or a non-positive
+   * mesh. `null` for an unsupported camera type or a non-positive
    * `viewportHeight` (mirrors `update()`'s own no-op guard).
    */
   worldSize(camera: THREE.Camera, viewportHeight: number): { width: number; height: number } | null {
-    if (!(camera instanceof THREE.PerspectiveCamera)) return null
     if (viewportHeight <= 0) return null
-    const dist = camera.position.distanceTo(this.mesh.position)
     const quadScreenPx = this.screenPxHeight / this.contentFrac
-    const worldHeight = 2 * billboardWorldScale(quadScreenPx, dist, camera.fov, viewportHeight)
+    let worldHeight: number
+    if (camera instanceof THREE.PerspectiveCamera) {
+      const dist = camera.position.distanceTo(this.mesh.position)
+      // `billboardWorldScale` returns a HALF-extent (see its doc comment);
+      // this mesh's `PlaneGeometry(1,1)` is diameter-native (its "1" is a
+      // full width/height), so the FULL on-screen height needs double that.
+      worldHeight = 2 * billboardWorldScale(quadScreenPx, dist, camera.fov, viewportHeight)
+    } else if (camera instanceof THREE.OrthographicCamera) {
+      // Parallel projection: world-per-pixel is uniform — the visible frustum
+      // height over the viewport height (`worldPerPixelOrtho`'s formula).
+      // Before this branch an orthographic camera was a silent no-op, which
+      // left dimension labels frozen at their last perspective size (and
+      // their line gaps un-laid-out) under View ▸ Parallel Projection.
+      const frustumHeight = (camera.top - camera.bottom) / camera.zoom
+      worldHeight = (quadScreenPx * frustumHeight) / viewportHeight
+    } else {
+      return null
+    }
     return { width: worldHeight * this.aspect, height: worldHeight }
   }
 

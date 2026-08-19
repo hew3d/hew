@@ -319,6 +319,8 @@ impl McpServer {
             "hew_transact" => self.dispatch_tool("hew.doc.transact", arguments)?,
             "hew_describe_scene" => self.dispatch_tool("hew.query.scene", json!({}))?,
             "hew_snapshot" => self.dispatch_tool("hew.view.snapshot", arguments)?,
+            "hew_print_pdf" => self.dispatch_tool("hew.print.pdf", arguments)?,
+            "hew_line_drawing" => self.dispatch_tool("hew.view.line_drawing", arguments)?,
             "hew_query" => {
                 let method = arguments
                     .get("method")
@@ -503,6 +505,55 @@ pub fn generate_tools(registry: &Registry, profile: Profile) -> Vec<Value> {
             },
         }));
     }
+    if registry
+        .get("hew.print.pdf")
+        .map(|c| profile.grants(c))
+        .unwrap_or(false)
+    {
+        tools.push(json!({
+            "name": "hew_print_pdf",
+            "description": "Print the document to a PDF the way File ▸ Print… does — a drawing at an exact scale (default 1:10, parallel projection, hidden lines removed, tiled across pages with a scale bar and title block), or a one-page standard view. Pass a path; the inline bytes get large.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view": { "type": "string", "enum": ["iso", "front", "back", "left", "right", "top", "bottom"] },
+                    "camera": { "type": "object" },
+                    "paper": { "description": "letter | legal | tabloid | a5 | a4 | a3 (default a4), or {w_mm, h_mm}" },
+                    "orientation": { "type": "string", "enum": ["auto", "portrait", "landscape"] },
+                    "mode": { "type": "string", "enum": ["scaled", "standard"] },
+                    "scale": { "type": "number", "description": "paper/model, e.g. 0.1 for 1:10, 1 for full size" },
+                    "style": { "type": "string", "enum": ["line_art", "shaded"] },
+                    "include_hidden": { "type": "boolean" },
+                    "units": { "type": "string", "enum": ["metric", "imperial"] },
+                    "title": { "type": "string" },
+                    "path": { "type": "string", "description": "write the PDF here instead of returning it inline" },
+                },
+                "additionalProperties": false,
+            },
+        }));
+    }
+    if registry
+        .get("hew.view.line_drawing")
+        .map(|c| profile.grants(c))
+        .unwrap_or(false)
+    {
+        tools.push(json!({
+            "name": "hew_line_drawing",
+            "description": "A hidden-line drawing of the document from a view or camera: visible edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (pass a path) or raw 2D segments.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "view": { "type": "string", "enum": ["iso", "front", "back", "left", "right", "top", "bottom"] },
+                    "camera": { "type": "object" },
+                    "format": { "type": "string", "enum": ["svg", "segments"] },
+                    "scale": { "type": "number" },
+                    "include_hidden": { "type": "boolean" },
+                    "path": { "type": "string" },
+                },
+                "additionalProperties": false,
+            },
+        }));
+    }
     tools
 }
 
@@ -584,6 +635,8 @@ mod tests {
                 "hew_query",
                 "hew_describe_scene",
                 "hew_snapshot",
+                "hew_print_pdf",
+                "hew_line_drawing",
             ]
         );
     }
@@ -722,8 +775,8 @@ mod tests {
         let tools = v["result"]["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            5,
-            "headless core now includes hew_snapshot (headless render path)"
+            7,
+            "headless core includes hew_snapshot, hew_print_pdf, and hew_line_drawing (headless render paths)"
         );
     }
 

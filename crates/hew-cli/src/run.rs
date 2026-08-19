@@ -344,10 +344,14 @@ pub fn dispatch_file(file: &Path, method: &str, params: serde_json::Value) -> Di
         };
     }
 
-    let read_only = matches!(
-        conn.registry().get(method).map(|c| c.class),
-        Some(api::CommandClass::ReadOnly)
-    );
+    // Save back only after a command that can change the document — the
+    // registry's own `mutates_document` (a read-only query, a snapshot, a
+    // line drawing, or a print leaves the file byte-for-byte alone).
+    let read_only = conn
+        .registry()
+        .get(method)
+        .map(|c| !c.mutates_document)
+        .unwrap_or(false);
 
     let request = Request {
         jsonrpc: "2.0".to_string(),

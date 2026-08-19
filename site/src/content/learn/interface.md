@@ -68,7 +68,7 @@ The strip along the bottom always shows the active tool's name and a one-line hi
 
 ## Menus and title bar
 
-The menu bar (system bar on macOS, in-app elsewhere) organizes everything: **File** (new/open/save/import/export), **Edit** (undo, delete, group/component commands, booleans), **View** (axes, guides), **Draw**, **Tools**, **Camera**, **Window** (panels, and the open-windows list), and **Help** (Debug Log, Report Bug…).
+The menu bar (system bar on macOS, in-app elsewhere) organizes everything: **File** (new/open/save/import/export/print), **Edit** (undo, delete, group/component commands, booleans), **View** (axes, guides), **Draw**, **Tools**, **Camera**, **Window** (panels, and the open-windows list), and **Help** (Debug Log, Report Bug…).
 
 The window title shows the document name; a `•` in front of it (and an "Edited …" label next to it) means unsaved changes. There is no Save button; save with `⌘S` / `Ctrl+S`. [Files, saving, and recovery](/learn/files-and-saving/) covers how autosave has your back regardless.
 

@@ -1995,6 +1995,182 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
 
 **Refusals:** none.
 
+## hew.print
+
+### `hew.print.pdf`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+
+Print the document to a PDF the way File ▸ Print… does: standard (one page, the view as-is) or scaled (parallel projection at an exact drawing scale, tiled across pages with overlap bands, crop/trim marks, a scale bar, and a title block). Line art is vector (hidden lines removed); shaded is a software-rasterized bitmap per page. Bytes base64 inline, or written to path.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "camera": {
+      "description": "as hew.view.snapshot; scaled prints use its direction with parallel projection",
+      "type": "object"
+    },
+    "include_hidden": {
+      "description": "line art: dashed hidden lines",
+      "type": "boolean"
+    },
+    "margin_mm": {
+      "description": "defaults to 12.7 (½ in)",
+      "type": "number"
+    },
+    "marks": {
+      "description": "crop/trim marks and neighbour labels; defaults to true",
+      "type": "boolean"
+    },
+    "mode": {
+      "description": "defaults to scaled",
+      "enum": [
+        "scaled",
+        "standard"
+      ],
+      "type": "string"
+    },
+    "orientation": {
+      "description": "defaults to auto (fewer tiles; standard follows the view's aspect)",
+      "enum": [
+        "auto",
+        "portrait",
+        "landscape"
+      ],
+      "type": "string"
+    },
+    "overlap_mm": {
+      "description": "tile overlap band, defaults to 10; 0 for none",
+      "type": "number"
+    },
+    "paper": {
+      "description": "\"letter\" | \"legal\" | \"tabloid\" | \"a5\" | \"a4\" | \"a3\" (default a4) or {w_mm, h_mm}",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "properties": {
+            "h_mm": {
+              "type": "number"
+            },
+            "w_mm": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "w_mm",
+            "h_mm"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "path": {
+      "description": "write the PDF here instead of returning it inline",
+      "type": "string"
+    },
+    "scale": {
+      "description": "scaled: paper/model, defaults to 0.1 (1:10)",
+      "type": "number"
+    },
+    "scale_bar": {
+      "description": "defaults to true",
+      "type": "boolean"
+    },
+    "scale_label": {
+      "description": "title-block scale text; defaults to the ratio (\"1:10\")",
+      "type": "string"
+    },
+    "scene": {
+      "type": "string"
+    },
+    "style": {
+      "description": "defaults to line_art (vector)",
+      "enum": [
+        "line_art",
+        "shaded"
+      ],
+      "type": "string"
+    },
+    "title": {
+      "description": "title-block document name; defaults to the document's",
+      "type": "string"
+    },
+    "title_block": {
+      "description": "defaults to true",
+      "type": "boolean"
+    },
+    "units": {
+      "description": "scale-bar family, defaults to metric",
+      "enum": [
+        "metric",
+        "imperial"
+      ],
+      "type": "string"
+    },
+    "view": {
+      "enum": [
+        "iso",
+        "front",
+        "back",
+        "left",
+        "right",
+        "top",
+        "bottom"
+      ],
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "cols": {
+      "type": "integer"
+    },
+    "pages": {
+      "type": "integer"
+    },
+    "path": {
+      "type": "string"
+    },
+    "pdf_base64": {
+      "description": "present only when path was not given",
+      "type": "string"
+    },
+    "rows": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "pages",
+    "cols",
+    "rows"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `nothing_to_render`
+- `too_complex`
+- `save_failed`
+- `unknown_scene` — That Scene no longer exists — it may have been deleted.
+
 ## hew.query
 
 ### `hew.query.context`
@@ -4713,6 +4889,144 @@ Set the live desktop viewport's camera. A host effect on the view, not a documen
 **Refusals:**
 
 - `host_capability_missing`
+
+### `hew.view.line_drawing`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+
+Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane metres.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "camera": {
+      "description": "identical vocabulary to hew.view.snapshot's camera; mutually exclusive with view and scene",
+      "type": "object"
+    },
+    "format": {
+      "description": "defaults to svg",
+      "enum": [
+        "svg",
+        "segments"
+      ],
+      "type": "string"
+    },
+    "include_hidden": {
+      "description": "defaults to false; when true, hidden pieces are returned too (kind \"hidden\", dashed in SVG)",
+      "type": "boolean"
+    },
+    "include_soft": {
+      "description": "defaults to false; when true, non-silhouette curved-wall facet seams are returned (kind \"soft\")",
+      "type": "boolean"
+    },
+    "path": {
+      "description": "svg only: write the file here instead of returning it inline (hosts with filesystem access)",
+      "type": "string"
+    },
+    "scale": {
+      "description": "svg only: paper/model drawing scale, defaults to 1 (full size); the SVG's width/height are millimetres at that scale",
+      "type": "number"
+    },
+    "scene": {
+      "description": "a Scene's id: its camera and hidden sets, as hew.view.snapshot",
+      "type": "string"
+    },
+    "view": {
+      "description": "a named standard view (parallel projection); mutually exclusive with camera and scene",
+      "enum": [
+        "iso",
+        "front",
+        "back",
+        "left",
+        "right",
+        "top",
+        "bottom"
+      ],
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "bounds": {
+      "description": "[min_x, min_y, max_x, max_y] in view-plane metres; null when empty",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 4,
+      "minItems": 4,
+      "type": "array"
+    },
+    "count": {
+      "type": "integer"
+    },
+    "ids": {
+      "description": "public id of the entity each segment belongs to",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "kinds": {
+      "items": {
+        "enum": [
+          "hard",
+          "silhouette",
+          "soft",
+          "section",
+          "hidden"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "path": {
+      "description": "format svg with path",
+      "type": "string"
+    },
+    "segments": {
+      "description": "format segments: [ax, ay, bx, by] in view-plane metres, y up, origin at the camera target",
+      "items": {
+        "items": {
+          "type": "number"
+        },
+        "maxItems": 4,
+        "minItems": 4,
+        "type": "array"
+      },
+      "type": "array"
+    },
+    "svg": {
+      "description": "format svg without path",
+      "type": "string"
+    }
+  },
+  "required": [
+    "count"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `nothing_to_render`
+- `too_complex`
+- `save_failed`
+- `unknown_scene` — That Scene no longer exists — it may have been deleted.
 
 ### `hew.view.snapshot`
 

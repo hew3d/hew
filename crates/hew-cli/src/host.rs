@@ -6,7 +6,8 @@
 //! other side of it.
 
 use api::{
-    Host, Refusal, SnapshotCamera, SnapshotParams, SnapshotProjection, SnapshotResult, StandardView,
+    Host, LineDrawingParams, LineDrawingResult, PrintPdfParams, PrintPdfResult, Refusal,
+    SnapshotCamera, SnapshotParams, SnapshotProjection, SnapshotResult, StandardView,
 };
 use kernel::{Document, EntityRef, Point3};
 use std::collections::BTreeMap;
@@ -123,6 +124,28 @@ impl Host for CliHost {
     fn write_snapshot(&mut self, path: &str, bytes: &[u8]) -> Result<(), Refusal> {
         std::fs::write(path, bytes)
             .map_err(|e| Refusal::api("save_failed", &format!("{path}: {e}")))
+    }
+
+    fn line_drawing(
+        &mut self,
+        doc: &Document,
+        params: &LineDrawingParams,
+    ) -> Result<LineDrawingResult, Refusal> {
+        crate::print::line_drawing(doc, params)
+    }
+
+    fn print_pdf(
+        &mut self,
+        doc: &Document,
+        params: &PrintPdfParams,
+    ) -> Result<PrintPdfResult, Refusal> {
+        let name = self
+            .working_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Untitled".to_string());
+        crate::print::print_pdf(doc, params, &name)
     }
 }
 

@@ -19,6 +19,11 @@ inference.workspace = true
 tessellate.workspace = true
 mesh-export.workspace = true
 softrender.workspace = true
+# Hidden-line removal for vector Line-art prints and SVG export
+# (docs/design/printing.md §7b) — pure geometry, same posture as softrender.
+hlr.workspace = true
+# Hew-native PDF for Save PDF… (docs/design/printing.md §9b).
+pdfwrite.workspace = true
 dae-import.workspace = true
 gltf-import.workspace = true
 skp-import.workspace = true
