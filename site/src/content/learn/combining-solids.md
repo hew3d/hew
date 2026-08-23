@@ -9,7 +9,7 @@ Combining solids is always a command you issue. [Core concepts](/learn/core-conc
 ## Union, Subtract, Intersect
 
 1. With the Select tool, click the first object or group, then **Shift-click** the second.
-2. Choose **Edit ▸ Union**, **Edit ▸ Subtract**, or **Edit ▸ Intersect**.
+2. Choose **Object ▸ Union**, **Object ▸ Subtract**, or **Object ▸ Intersect**.
 
 ![Two overlapping boxes, both selected, ready to combine](/docs/boolean-selection.webp)
 

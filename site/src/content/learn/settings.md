@@ -4,7 +4,7 @@ description: "Units and theme, the server Open on Phone uses, plus Debug Mode an
 order: 22
 ---
 
-Open Settings with `⌘,` / `Ctrl+,`, from the menu (Hew ▸ Settings… on macOS, Window ▸ Settings… elsewhere), or from the command palette. Every control applies immediately — there's no OK button — and settings sync across windows.
+Open Settings with `⌘,` / `Ctrl+,`, the Hew ▸ Settings… menu on macOS, the gear at the right end of the menu bar elsewhere, or the command palette. Every control applies immediately — there's no OK button — and settings sync across windows.
 
 ![The Settings window on its Units pane, with System and Format selectors](/docs/settings.webp)
 

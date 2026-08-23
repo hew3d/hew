@@ -98,16 +98,16 @@ async function activateFromToolsMenu(page: Page, label: string): Promise<void> {
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur())
 }
 
-/** Reset the drawing axes to world identity via View ▸ Reset Axes. */
+/** Reset the drawing axes to world identity via View ▸ Reset Drawing Axes. */
 async function resetAxesFromMenu(page: Page): Promise<void> {
   const menuBar = page.getByTestId('menu-bar')
   await menuBar.getByRole('button', { name: /^view$/i }).click()
-  await menuBar.getByText('Reset Axes', { exact: true }).click()
+  await menuBar.getByText('Reset Drawing Axes', { exact: true }).click()
 }
 
 const WORLD_IDENTITY = [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
 
-test('Axes tool: three real clicks move the drawing axes, and a locked draw lands on the new plane', async ({
+test('Drawing Axes tool: three real clicks move the drawing axes, and a locked draw lands on the new plane', async ({
   page,
 }) => {
   const ctx = await setup(page)
@@ -122,7 +122,7 @@ test('Axes tool: three real clicks move the drawing axes, and a locked draw land
   await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
 
   const hash0 = await page.evaluate(() => window.__hew_test!.getStateHash())
-  await activateFromToolsMenu(page, 'Axes')
+  await activateFromToolsMenu(page, 'Drawing Axes')
 
   await clickWorld(page, ctx, 0, 0, 1) // origin
   await clickWorld(page, ctx, 0, 2, 1) // red (X) direction pick
@@ -176,13 +176,13 @@ test('Axes tool: three real clicks move the drawing axes, and a locked draw land
   expect(Math.abs(ny)).toBeCloseTo(1, 6)
   expect(Math.abs(nz)).toBeCloseTo(0, 6)
 
-  // View ▸ Reset Axes puts the frame back to world identity.
+  // View ▸ Reset Drawing Axes puts the frame back to world identity.
   await resetAxesFromMenu(page)
   const afterReset = await page.evaluate(() => window.__hew_test!.getDrawingAxes())
   expect(afterReset).toEqual(WORLD_IDENTITY)
 })
 
-test('Axes tool: Escape steps back one stage instead of fully cancelling', async ({ page }) => {
+test('Drawing Axes tool: Escape steps back one stage instead of fully cancelling', async ({ page }) => {
   const ctx = await setup(page)
   await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
   // Captured AFTER drawBox (itself an undoable commit) — this test's own
@@ -190,7 +190,7 @@ test('Axes tool: Escape steps back one stage instead of fully cancelling', async
   // document has no history at all.
   const hash0 = await page.evaluate(() => window.__hew_test!.getStateHash())
 
-  await activateFromToolsMenu(page, 'Axes')
+  await activateFromToolsMenu(page, 'Drawing Axes')
   await clickWorld(page, ctx, 0, 0, 1) // origin picked
   await clickWorld(page, ctx, 0, 2, 1) // X picked — awaiting the Y (green) click
 

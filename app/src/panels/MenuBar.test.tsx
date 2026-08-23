@@ -153,8 +153,8 @@ describe('MenuBar', () => {
     expect(onUndo).not.toHaveBeenCalled()
   })
 
-  // --- Edit menu: object commands (relocated here from the Outliner's
-  // per-object buttons — this menu is now their only static UI surface) ---
+  // --- Object menu: object commands (originally the Outliner's per-object
+  // buttons, then Edit-menu items; now split into their own Object menu) ---
 
   const openGates = {
     canGroup: true,
@@ -182,7 +182,7 @@ describe('MenuBar', () => {
     ]
     for (const [label, action] of commands) {
       // Each dispatch closes the dropdown (withClose), so re-open per item.
-      fireEvent.click(screen.getByRole('button', { name: /edit/i }))
+      fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
       fireEvent.mouseDown(screen.getByText(label))
       expect(onEditAction).toHaveBeenLastCalledWith(action)
     }
@@ -198,7 +198,7 @@ describe('MenuBar', () => {
         onEditAction={onEditAction}
       />,
     )
-    fireEvent.click(screen.getByRole('button', { name: /edit/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
     fireEvent.mouseDown(screen.getByText('Group'))
     expect(onEditAction).not.toHaveBeenCalled()
   })
@@ -263,41 +263,49 @@ describe('MenuBar', () => {
     }
   })
 
-  // --- Window menu: panel toggles ---
+  // --- View menu: panel toggles ---
+
+  it('Edit no longer offers the object commands (they live in the Object menu)', () => {
+    render(<MenuBar {...defaultProps} editGates={openGates} />)
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+    expect(screen.queryByText('Group')).toBeNull()
+    expect(screen.queryByText('Union')).toBeNull()
+    expect(screen.getByText('Undo')).toBeInTheDocument()
+  })
 
   it('shows a checkmark next to Model Info when showModelInfo=true', () => {
     render(<MenuBar {...defaultProps} showModelInfo={true} onToggleModelInfo={vi.fn()} />)
-    fireEvent.click(screen.getByRole('button', { name: /window/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
     const modelInfoEl = screen.getByText('Model Info')
     expect(modelInfoEl.closest('div')?.textContent).toContain('✓')
   })
 
-  it('calls onToggleModelInfo when Window > Model Info is mousedown-clicked', () => {
+  it('calls onToggleModelInfo when View > Model Info is mousedown-clicked', () => {
     const onToggleModelInfo = vi.fn()
     render(<MenuBar {...defaultProps} showModelInfo={true} onToggleModelInfo={onToggleModelInfo} />)
-    fireEvent.click(screen.getByRole('button', { name: /window/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
     fireEvent.mouseDown(screen.getByText('Model Info'))
     expect(onToggleModelInfo).toHaveBeenCalledOnce()
   })
 
-  it('calls onToggleMaterials when Window > Materials is mousedown-clicked', () => {
+  it('calls onToggleMaterials when View > Materials is mousedown-clicked', () => {
     const onToggleMaterials = vi.fn()
     render(<MenuBar {...defaultProps} showMaterials={false} onToggleMaterials={onToggleMaterials} />)
-    fireEvent.click(screen.getByRole('button', { name: /window/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
     fireEvent.mouseDown(screen.getByText('Materials'))
     expect(onToggleMaterials).toHaveBeenCalledOnce()
   })
 
-  it('omits Shop Mode from the Window menu when onEnterShopMode is not provided', () => {
+  it('omits Shop Mode from the View menu when onEnterShopMode is not provided', () => {
     render(<MenuBar {...defaultProps} />)
-    fireEvent.click(screen.getByRole('button', { name: /window/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
     expect(screen.queryByText('Shop Mode')).toBeNull()
   })
 
-  it('calls onEnterShopMode when Window > Shop Mode is mousedown-clicked', () => {
+  it('calls onEnterShopMode when View > Shop Mode is mousedown-clicked', () => {
     const onEnterShopMode = vi.fn()
     render(<MenuBar {...defaultProps} onEnterShopMode={onEnterShopMode} />)
-    fireEvent.click(screen.getByRole('button', { name: /window/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
     fireEvent.mouseDown(screen.getByText('Shop Mode'))
     expect(onEnterShopMode).toHaveBeenCalledOnce()
   })
@@ -334,7 +342,7 @@ describe('MenuBar', () => {
     expect(onToggleAxes).toHaveBeenCalledOnce()
   })
 
-  it('calls onResetAxes when View > Reset Axes is mousedown-clicked', () => {
+  it('calls onResetAxes when View > Reset Drawing Axes is mousedown-clicked', () => {
     // Reset Axes shipped as a web-only MenuBar item with no native-menu
     // counterpart, making it unreachable on macOS (finding 1, tool-parity
     // §4) — App.tsx now routes this prop through the same menuActionRef
@@ -343,7 +351,7 @@ describe('MenuBar', () => {
     const onResetAxes = vi.fn()
     render(<MenuBar {...defaultProps} onResetAxes={onResetAxes} />)
     fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
-    fireEvent.mouseDown(screen.getByText('Reset Axes'))
+    fireEvent.mouseDown(screen.getByText('Reset Drawing Axes'))
     expect(onResetAxes).toHaveBeenCalledOnce()
   })
 
@@ -364,30 +372,30 @@ describe('MenuBar', () => {
     expect(onToggleGrid).toHaveBeenCalledOnce()
   })
 
-  // --- View > Section Plane (D3, section-plane-polish) ---
+  // --- View > Section Cut (D3, section-plane-polish) ---
 
-  it('shows no checkmark for Section Plane when no section is placed (sectionPlaneChecked=false)', () => {
+  it('shows no checkmark for Section Cut when no section is placed (sectionPlaneChecked=false)', () => {
     render(<MenuBar {...defaultProps} sectionPlaneChecked={false} sectionPlaneExists={false} />)
     fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
-    const el = screen.getByText('Section Plane')
+    const el = screen.getByText('Section Cut')
     expect(el.closest('div')?.textContent).not.toContain('✓')
   })
 
-  it('shows a checkmark for Section Plane only when a section is placed AND active', () => {
+  it('shows a checkmark for Section Cut only when a section is placed AND active', () => {
     render(<MenuBar {...defaultProps} sectionPlaneChecked={true} sectionPlaneExists={true} />)
     fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
-    const el = screen.getByText('Section Plane')
+    const el = screen.getByText('Section Cut')
     expect(el.closest('div')?.textContent).toContain('✓')
   })
 
   it('a section placed but INACTIVE (dashed widget) shows unchecked, not checked', () => {
     render(<MenuBar {...defaultProps} sectionPlaneChecked={false} sectionPlaneExists={true} />)
     fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
-    const el = screen.getByText('Section Plane')
+    const el = screen.getByText('Section Cut')
     expect(el.closest('div')?.textContent).not.toContain('✓')
   })
 
-  it('calls onToggleSectionActive when View > Section Plane is mousedown-clicked while a section exists', () => {
+  it('calls onToggleSectionActive when View > Section Cut is mousedown-clicked while a section exists', () => {
     const onToggleSectionActive = vi.fn()
     render(
       <MenuBar
@@ -398,11 +406,11 @@ describe('MenuBar', () => {
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
-    fireEvent.mouseDown(screen.getByText('Section Plane'))
+    fireEvent.mouseDown(screen.getByText('Section Cut'))
     expect(onToggleSectionActive).toHaveBeenCalledOnce()
   })
 
-  it('View > Section Plane is disabled and swallows clicks when no section is placed', () => {
+  it('View > Section Cut is disabled and swallows clicks when no section is placed', () => {
     const onToggleSectionActive = vi.fn()
     render(
       <MenuBar
@@ -413,7 +421,7 @@ describe('MenuBar', () => {
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
-    fireEvent.mouseDown(screen.getByText('Section Plane'))
+    fireEvent.mouseDown(screen.getByText('Section Cut'))
     expect(onToggleSectionActive).not.toHaveBeenCalled()
   })
 
@@ -506,11 +514,95 @@ describe('MenuBar', () => {
     expect(screen.queryByRole('button', { name: /^settings$/i })).not.toBeInTheDocument()
   })
 
-  it('no longer offers Settings… in the Window menu (the gear replaced it)', () => {
+  it('offers no Settings… menu row anywhere (the gear is the only in-bar surface)', () => {
     render(<MenuBar {...defaultProps} onOpenSettings={vi.fn()} />)
-    fireEvent.click(screen.getByRole('button', { name: /window/i }))
-    expect(screen.getByText('Model Info')).toBeInTheDocument()
-    expect(screen.queryByText('Settings…')).not.toBeInTheDocument()
+    for (const menu of ['file', 'edit', 'object', 'view', 'camera', 'draw', 'tools', 'help']) {
+      fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${menu}$`, 'i') }))
+      expect(screen.queryByText('Settings…')).not.toBeInTheDocument()
+    }
+  })
+
+  // --- Window menu: window management only ---
+
+  it('hides the Window menu entirely with no Library and no windowList', () => {
+    render(<MenuBar {...defaultProps} />)
+    expect(screen.queryByRole('button', { name: /^window$/i })).toBeNull()
+  })
+
+  it('Window menu shows Library above the open-windows list, and focuses a window on click', () => {
+    const onFocusWindow = vi.fn()
+    render(
+      <MenuBar
+        {...defaultProps}
+        windowList={[
+          { label: 'main', title: 'Bench — Hew', focused: true },
+          { label: 'w2', title: 'Table — Hew', focused: false },
+        ]}
+        onFocusWindow={onFocusWindow}
+        onToggleLibrary={vi.fn()}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^window$/i }))
+    expect(screen.queryByText('Model Info')).toBeNull()
+    expect(screen.getByText('Library')).toBeInTheDocument()
+    fireEvent.mouseDown(screen.getByText('Table'))
+    expect(onFocusWindow).toHaveBeenCalledWith('w2')
+  })
+
+  it('Window menu appears with only a Library (the web build) and toggles it', () => {
+    const onToggleLibrary = vi.fn()
+    render(<MenuBar {...defaultProps} onToggleLibrary={onToggleLibrary} />)
+    fireEvent.click(screen.getByRole('button', { name: /^window$/i }))
+    fireEvent.mouseDown(screen.getByText('Library'))
+    expect(onToggleLibrary).toHaveBeenCalledOnce()
+  })
+
+  // --- Help / View one-off actions ---
+
+  it('Help > Search hands typed text to onHelpSearch and closes the menu', () => {
+    const onHelpSearch = vi.fn()
+    render(<MenuBar {...defaultProps} onHelpSearch={onHelpSearch} />)
+    fireEvent.click(screen.getByRole('button', { name: /^help$/i }))
+    const input = screen.getByLabelText('Search commands and help')
+    fireEvent.change(input, { target: { value: 'g' } })
+    expect(onHelpSearch).toHaveBeenCalledWith('g')
+    // The handoff closed the menu (the search field unmounts with it).
+    expect(screen.queryByLabelText('Search commands and help')).toBeNull()
+  })
+
+  it('Help > Search stays quiet during IME composition and hands off the composed text', () => {
+    const onHelpSearch = vi.fn()
+    render(<MenuBar {...defaultProps} onHelpSearch={onHelpSearch} />)
+    fireEvent.click(screen.getByRole('button', { name: /^help$/i }))
+    const input = screen.getByLabelText('Search commands and help')
+    fireEvent.compositionStart(input)
+    fireEvent.change(input, { target: { value: 'く' } })
+    fireEvent.change(input, { target: { value: '組' } })
+    expect(onHelpSearch).not.toHaveBeenCalled()
+    fireEvent.compositionEnd(input, { target: { value: '組' } })
+    expect(onHelpSearch).toHaveBeenCalledExactlyOnceWith('組')
+  })
+
+  it('omits the Help search field when onHelpSearch is not provided', () => {
+    render(<MenuBar {...defaultProps} />)
+    fireEvent.click(screen.getByRole('button', { name: /^help$/i }))
+    expect(screen.queryByLabelText('Search commands and help')).toBeNull()
+  })
+
+  it('calls onOpenGuide when Help > Hew Help is mousedown-clicked', () => {
+    const onOpenGuide = vi.fn()
+    render(<MenuBar {...defaultProps} onOpenGuide={onOpenGuide} />)
+    fireEvent.click(screen.getByRole('button', { name: /^help$/i }))
+    fireEvent.mouseDown(screen.getByText('Hew Help'))
+    expect(onOpenGuide).toHaveBeenCalledOnce()
+  })
+
+  it('calls onOpenPalette when View > Command Palette… is mousedown-clicked', () => {
+    const onOpenPalette = vi.fn()
+    render(<MenuBar {...defaultProps} onOpenPalette={onOpenPalette} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    fireEvent.mouseDown(screen.getByText('Command Palette…'))
+    expect(onOpenPalette).toHaveBeenCalledOnce()
   })
 
   // --- Rail <-> menu parity ---

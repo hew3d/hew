@@ -28,7 +28,7 @@ Two Objects sitting next to each other — even touching, even overlapping — s
 
 ![Two flush boxes touching edge to edge on a workbench; one is selected, showing they remain separate Objects](/docs/core-touching.webp)
 
-When you want two Objects to become one, you say so: select both and choose **Edit ▸ Union** (or Subtract, or Intersect). This single rule prevents the "accidentally welded my whole model together" problem that haunts long SketchUp projects. See [Combining and splitting solids](/learn/combining-solids/).
+When you want two Objects to become one, you say so: select both and choose **Object ▸ Union** (or Subtract, or Intersect). This single rule prevents the "accidentally welded my whole model together" problem that haunts long SketchUp projects. See [Combining and splitting solids](/learn/combining-solids/).
 
 ## Sticky geometry, inside an Object
 

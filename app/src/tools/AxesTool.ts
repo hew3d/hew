@@ -65,7 +65,7 @@ function cross(a: V3, b: V3): V3 {
 const PREVIEW_LEN = 50
 
 export class AxesTool implements Tool {
-  readonly name = 'Axes'
+  readonly name = 'Drawing Axes'
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {

@@ -94,7 +94,7 @@ const TOOL_ACTION_ID: Record<ToolName, string> = {
   'Slice': 'tool-slice',
   'Section Plane': 'tool-section-plane',
   'Edit Vertex': 'tool-edit-vertex',
-  'Axes': 'tool-axes',
+  'Drawing Axes': 'tool-axes',
   'Text': 'tool-text',
   'Orbit': 'tool-orbit',
   'Pan': 'tool-pan',
@@ -126,7 +126,7 @@ const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
   'Slice': 'Cut a solid into two separate watertight Objects.',
   'Section Plane': 'Look inside the model with a non-destructive clipping plane.',
   'Edit Vertex': 'Drag an individual vertex to reshape a face.',
-  'Axes': 'Reposition the drawing axes: click an origin, then the red and green directions.',
+  'Drawing Axes': 'Reposition the drawing axes: click an origin, then the red and green directions.',
   'Text': 'Place a leader-text annotation from a face, edge, or point.',
   'Orbit': 'Rotate the camera around the model.',
   'Pan': 'Slide the camera parallel to the view plane.',
@@ -167,6 +167,7 @@ const TOOL_SYNONYMS: Partial<Record<ToolName, string[]>> = {
   'Walk': ['walkthrough', 'first person', 'fps'],
   'Look Around': ['mouselook', 'walkthrough', 'first person'],
   'Text': ['leader', 'label', 'note', 'annotate', 'annotation'],
+  'Drawing Axes': ['axes', 'axis', 'origin', 'reorient', 'custom axes'],
 }
 
 function toolEntries(): PaletteEntry[] {
@@ -204,10 +205,10 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'edit-subtract', label: 'Subtract', description: 'Cut the second selected solid out of the first (boolean difference).', group: 'Actions', synonyms: ['boolean', 'difference', 'cut', 'carve'], gate: 'canBoolean' },
   { id: 'edit-intersect', label: 'Intersect', description: 'Keep only the volume the two selected solids share (boolean intersection).', group: 'Actions', synonyms: ['boolean', 'common', 'overlap'], gate: 'canBoolean' },
   { id: 'toggle-axes', label: 'Toggle Axes', description: 'Show or hide the world axes.', group: 'Actions' },
-  { id: 'reset-axes', label: 'Reset Axes', description: 'Reset the movable drawing axes back to world identity.', group: 'Actions', synonyms: ['drawing axes', 'origin'] },
+  { id: 'reset-axes', label: 'Reset Drawing Axes', description: 'Reset the movable drawing axes back to world identity.', group: 'Actions', synonyms: ['drawing axes', 'origin', 'reset axes'] },
   { id: 'toggle-grid', label: 'Toggle Grid', description: 'Show or hide the ground grid.', group: 'Actions' },
   { id: 'toggle-guides', label: 'Toggle Guides', description: 'Show or hide construction guides.', group: 'Actions' },
-  { id: 'toggle-section-active', label: 'Section Plane', description: 'Turn the placed section plane\'s clip on or off without removing it.', group: 'Actions', synonyms: ['section', 'cut', 'cross-section', 'active cut', 'toggle section active', 'toggle section'] },
+  { id: 'toggle-section-active', label: 'Section Cut', description: 'Turn the placed section plane\'s clip on or off without removing it.', group: 'Actions', synonyms: ['section', 'cut', 'section plane', 'cross-section', 'active cut', 'toggle section active', 'toggle section'] },
   { id: 'zoom-extents', label: 'Zoom Extents', description: 'Fit the camera to all scene geometry.', group: 'Actions', synonyms: ['zoom to fit'] },
   { id: 'toggle-parallel-projection', label: 'Parallel Projection', description: 'Toggle between perspective and parallel (orthographic) projection.', group: 'Actions', synonyms: ['orthographic', 'perspective', 'ortho'] },
   { id: 'view-top', label: 'Standard View: Top', description: 'Look straight down at the model.', group: 'Actions' },
@@ -232,6 +233,7 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'save-to-library-doc', label: 'Save to Library…', description: 'Save the whole document as a library item.', group: 'Actions', synonyms: ['library', 'component', 'model'] },
   { id: 'open-settings', label: 'Settings…', description: 'Open Hew Settings.', group: 'Actions', synonyms: ['preferences'] },
   { id: 'report-bug', label: 'Report Bug…', description: 'Assemble and save a bug-report bundle.', group: 'Actions' },
+  { id: 'open-guide', label: 'Hew Help', description: 'Open the online user guide in your browser.', group: 'Actions', synonyms: ['help', 'guide', 'documentation', 'docs', 'manual', 'learn', 'user guide'] },
 ]
 
 /**

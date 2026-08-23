@@ -10,7 +10,7 @@ Once a model outgrows a dozen objects, you stop finding things by orbiting aroun
 
 ## The Outliner
 
-The Outliner (Window ▸ Model Info, `⇧⌘I` / `Ctrl+Shift+I`) lists the document tree: every object, group (expandable), component instance, and free-standing sketch.
+The Outliner (View ▸ Model Info, `⇧⌘I` / `Ctrl+Shift+I`) lists the document tree: every object, group (expandable), component instance, and free-standing sketch.
 
 - **Click** a row to select it, `Shift`/`⌘`/`Ctrl`-click for multi-select.
 - **Double-click** a row to enter that item's editing context, exactly like double-clicking it in the viewport. The breadcrumb at the top shows your current context and steps you back out.
@@ -19,7 +19,7 @@ The Outliner (Window ▸ Model Info, `⇧⌘I` / `Ctrl+Shift+I`) lists the docum
 
 ## Object Info: names and tags
 
-Object Info (Window ▸ Object Info, `⇧⌘O` / `Ctrl+Shift+O`) shows the single selected item:
+Object Info (View ▸ Object Info, `⇧⌘O` / `Ctrl+Shift+O`) shows the single selected item:
 
 - **Name**: type a new one and press `Enter`. Clear the field to fall back to the automatic label ("Object 1", "Group 2", …). Sketches can't be renamed.
 - **Type**: Object, Group, Component, or Sketch.
@@ -34,7 +34,7 @@ With several things selected, Object Info shows the count, the selection's combi
 Tags are labels for slicing a model into toggleable categories — Structure, Hardware, Reference, whatever fits your project. Unlike groups, tags don't affect the model tree; an object can carry any number of tags no matter where it lives.
 
 - **Add a tag** in Object Info with the **+** button. Use `/` to nest: typing `Structure/Roof` creates (or reuses) a *Structure* parent with a *Roof* child.
-- **The Tags panel** (Window ▸ Tags, `⇧⌘T` / `Ctrl+Shift+T`) shows the resulting tree, with a count of tagged items on each row and an eye toggle that hides everything tagged at or under that path.
+- **The Tags panel** (View ▸ Tags, `⇧⌘T` / `Ctrl+Shift+T`) shows the resulting tree, with a count of tagged items on each row and an eye toggle that hides everything tagged at or under that path.
 - **Click a tag** to select everything that carries it (or a tag nested under it) — the same gesture as clicking a row in the Outliner, and the quickest way to grab a whole category to move, group, or re-tag it.
 - **Rename a tag** the way you rename a file: click the already-selected row a second time (a moment later, not a double-click), or double-click it, and its name opens for editing in place. Enter commits, Escape cancels. Only that segment changes — sub-tags and every item carrying the tag follow it, and the rename is undoable. A name that's already in use is refused.
 - Tag visibility **composes** with Outliner visibility — an item hidden by either stays hidden until both show it again.

@@ -333,28 +333,28 @@ test('dragging the widget sweeps the section along its normal', async ({ page })
 // solid/dashed re-style all move together.
 // ---------------------------------------------------------------------------
 
-/** The View ▸ Section Plane row's own text node, scoped to the web MenuBar
- * (the tool rail ALSO renders a "Section Plane" label for the tool radio,
- * so an unscoped lookup would be ambiguous). Opens the View dropdown first. */
-async function openViewSectionPlaneRow(page: Page) {
+/** The View ▸ Section Cut row's own text node, scoped to the web MenuBar
+ * (the row was renamed from "Section Plane" to disambiguate it from the
+ * placement TOOL of that name in Tools). Opens the View dropdown first. */
+async function openViewSectionCutRow(page: Page) {
   const menuBar = page.getByTestId('menu-bar')
   await menuBar.getByRole('button', { name: /^view$/i }).click()
   // NOT exact: when checked, the row's innermost text-bearing element reads
-  // "✓Section Plane" (the checkmark glyph shares the label's flex span), so
+  // "✓Section Cut" (the checkmark glyph shares the label's flex span), so
   // an exact match would only ever find the row while UNCHECKED.
-  return menuBar.getByText('Section Plane')
+  return menuBar.getByText('Section Cut')
 }
 
-test('View ▸ Section Plane is unchecked and disabled with no section placed', async ({ page }) => {
+test('View ▸ Section Cut is unchecked and disabled with no section placed', async ({ page }) => {
   await setup(page)
-  const row = await openViewSectionPlaneRow(page)
+  const row = await openViewSectionCutRow(page)
   await expect(row.locator('..')).not.toContainText('✓')
   // A click on the disabled row is a documented no-op — nothing to toggle.
   await row.click({ force: true })
   expect(await page.evaluate(() => window.__hew_test!.getSectionState())).toBeNull()
 })
 
-test('toggling via View ▸ Section Plane flips the cut, the checkbox, and the widget style together', async ({
+test('toggling via View ▸ Section Cut flips the cut, the checkbox, and the widget style together', async ({
   page,
 }) => {
   const ctx = await setup(page)
@@ -366,7 +366,7 @@ test('toggling via View ▸ Section Plane flips the cut, the checkbox, and the w
   expect(await page.evaluate((b) => window.__hew_test!.getSectionRenderInfo('object', b).nodeClipCount, box)).toBe(1)
 
   // Checked while active.
-  const rowOn = await openViewSectionPlaneRow(page)
+  const rowOn = await openViewSectionCutRow(page)
   await expect(rowOn.locator('..')).toContainText('✓')
 
   // Click via the real menu — not the harness shortcut — to exercise the
@@ -377,7 +377,7 @@ test('toggling via View ▸ Section Plane flips the cut, the checkbox, and the w
   expect(await page.evaluate((b) => window.__hew_test!.getSectionRenderInfo('object', b).nodeClipCount, box)).toBe(0)
 
   // Unchecked while inactive; the widget itself stays (dashed, per DESIGN).
-  const rowOff = await openViewSectionPlaneRow(page)
+  const rowOff = await openViewSectionCutRow(page)
   await expect(rowOff.locator('..')).not.toContainText('✓')
   expect(await page.evaluate((b) => window.__hew_test!.getSectionRenderInfo('object', b).widget, box)).toBe(true)
 
@@ -385,7 +385,7 @@ test('toggling via View ▸ Section Plane flips the cut, the checkbox, and the w
   await rowOff.click()
   await page.waitForFunction(() => window.__hew_test!.getSectionState()?.active === true)
   expect(await page.evaluate((b) => window.__hew_test!.getSectionRenderInfo('object', b).nodeClipCount, box)).toBe(1)
-  const rowBackOn = await openViewSectionPlaneRow(page)
+  const rowBackOn = await openViewSectionCutRow(page)
   await expect(rowBackOn.locator('..')).toContainText('✓')
 
   // Human-eyeball capture: solid outline (active) is the state left on

@@ -138,7 +138,7 @@ Hew's fundamental nature is to work with independent solids. It's why you could 
 We are starting with our bin that has a cylinder lying across it, from the previous step.
 
 1. Choose the **Select** (`Space`) tool and select the bin. Then press the `Shift` key and select the cylinder. It's critical to do it in this order and to press `Shift` since this selects both and does it in the right order.
-2. Choose the **Subtract** tool either via **Edit ▸ Subtract** or do a search in the command palette (`Cmd-/` or `Ctrl-/`) and type in "sub" to filter it down.
+2. Choose the **Subtract** tool either via **Object ▸ Subtract** or do a search in the command palette (`Cmd-/` or `Ctrl-/`) and type in "sub" to filter it down.
 
 ![The command palette filtered down to the Subtract tool](/docs/command-palette-sub.webp)
 
@@ -190,7 +190,7 @@ The phone stand now looks right, but it's on its side. This step introduces the 
 A model with four "Object N" rows is worth tidying.
 
 1. Select each part and, in **Object Info**, type a real **Name** — *Tray*, *Pen cup*, *Bin*, *Phone stand* — pressing `Enter` after each.
-2. Select all four (`⌘A` / `Ctrl+A`) and choose **Edit ▸ Group** (`⌘G` / `Ctrl+G`, or `Group` in the contextual dock). Name the group *Desk organizer*. Now the whole set moves, hides, and selects as one, while the parts stay separate inside it.
+2. Select all four (`⌘A` / `Ctrl+A`) and choose **Object ▸ Group** (`⌘G` / `Ctrl+G`, or `Group` in the contextual dock). Name the group *Desk organizer*. Now the whole set moves, hides, and selects as one, while the parts stay separate inside it.
 3. With the group selected, click **+** next to **Tags** in Object Info and type `Desk/Set`. The **Tags** panel shows the tag tree; tags slice a model into show/hide categories independent of the group structure.
 
 ![The Outliner showing the Desk organizer group expanded into its four named parts, with the Desk / Set tag applied](/docs/organizer-organized.webp)

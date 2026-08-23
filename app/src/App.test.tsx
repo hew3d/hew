@@ -556,10 +556,10 @@ describe('App — panel toggle', () => {
     )
   })
 
-  it('Window menu checkmark tracks the Model Info visibility', async () => {
+  it('View menu checkmark tracks the Model Info visibility', async () => {
     await renderAndLoad()
-    // Initially showModelInfo=true — Window > Model Info has checkmark
-    fireEvent.click(screen.getByRole('button', { name: /^window$/i }))
+    // Initially showModelInfo=true — View > Model Info has checkmark
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
     const modelInfoItem = menubar().getByText('Model Info').closest('div')
     expect(modelInfoItem?.textContent).toContain('✓')
 
@@ -567,9 +567,9 @@ describe('App — panel toggle', () => {
     fireEvent.keyDown(document, { key: 'I', ctrlKey: true, shiftKey: true })
     // Close the open dropdown first (fireEvent.mouseDown on outside element)
     fireEvent.mouseDown(document.body)
-    // Re-open Window menu
+    // Re-open View menu
     await waitFor(() => {
-      fireEvent.click(screen.getByRole('button', { name: /^window$/i }))
+      fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
       const item = menubar().getByText('Model Info').closest('div')
       expect(item?.textContent).not.toContain('✓')
     })
@@ -1359,7 +1359,7 @@ describe('App — boolean auto-explode failure surfacing (finding 2)', () => {
   })
 
   it('treats a runBoolean "mutated-failed" result as a committed mutation, not a no-op — it re-derives from the document instead of leaving the stale pre-explode state on screen', async () => {
-    // Two plain object operands so Edit ▸ Union's gate (canBoolean) opens.
+    // Two plain object operands so Object ▸ Union's gate (canBoolean) opens.
     const priorObjectIds = mockScene.object_ids
     mockScene.object_ids = vi.fn(() => BigUint64Array.from([1n, 2n]))
     // `canUndo` (Edit ▸ Undo's gate) is read directly in App's render body
@@ -1389,7 +1389,7 @@ describe('App — boolean auto-explode failure surfacing (finding 2)', () => {
 
       const callsBeforeClick = canUndoMock.mock.calls.length
 
-      fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+      fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
       fireEvent.mouseDown(screen.getByText('Union'))
 
       // A re-render happened — `setDocRev` fired, exactly as the success
@@ -1433,7 +1433,7 @@ describe('App — session-stack menu gating (docs/design/group-session.md)', () 
    *  regardless of which path the previous probe took. */
   function openEditMenu(): void {
     if (menubar().queryByText('Group') === null) {
-      fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+      fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
     }
   }
 
@@ -1966,7 +1966,7 @@ describe('App — armed-gesture guard on breadcrumb close paths (adversarial-rev
   })
 })
 
-describe('App — View > Section Plane menu state (D3, section-plane-polish)', () => {
+describe('App — View > Section Cut menu state (D3, section-plane-polish)', () => {
   // Matches every other top-level describe block in this file (e.g. `App —
   // loaded state` above): without its own reset, `vi.mocked(Viewport).mock.calls`
   // accumulates across the WHOLE file, so `latestViewportProps()` below could
@@ -2005,15 +2005,15 @@ describe('App — View > Section Plane menu state (D3, section-plane-polish)', (
   it('starts unchecked with no section placed', async () => {
     await renderAndLoad()
     fireEvent.click(menubar().getByRole('button', { name: /^view$/i }))
-    const el = menubar().getByText('Section Plane')
+    const el = menubar().getByText('Section Cut')
     expect(el.closest('div')?.textContent).not.toContain('✓')
   })
 
-  it('checks View > Section Plane after the viewport reports an active section', async () => {
+  it('checks View > Section Cut after the viewport reports an active section', async () => {
     await renderAndLoad()
     reportSectionState({ origin: [0, 0, 0], normal: [0, 0, 1], active: true })
     fireEvent.click(menubar().getByRole('button', { name: /^view$/i }))
-    const el = menubar().getByText('Section Plane')
+    const el = menubar().getByText('Section Cut')
     expect(el.closest('div')?.textContent).toContain('✓')
   })
 
@@ -2021,7 +2021,7 @@ describe('App — View > Section Plane menu state (D3, section-plane-polish)', (
     await renderAndLoad()
     reportSectionState({ origin: [0, 0, 0], normal: [0, 0, 1], active: false })
     fireEvent.click(menubar().getByRole('button', { name: /^view$/i }))
-    const el = menubar().getByText('Section Plane')
+    const el = menubar().getByText('Section Cut')
     expect(el.closest('div')?.textContent).not.toContain('✓')
   })
 
@@ -2030,16 +2030,16 @@ describe('App — View > Section Plane menu state (D3, section-plane-polish)', (
     reportSectionState({ origin: [0, 0, 0], normal: [0, 0, 1], active: true })
     reportSectionState(null)
     fireEvent.click(menubar().getByRole('button', { name: /^view$/i }))
-    const el = menubar().getByText('Section Plane')
+    const el = menubar().getByText('Section Cut')
     expect(el.closest('div')?.textContent).not.toContain('✓')
   })
 
-  it('View > Section Plane dispatches the SAME toggle-section-active command as before (D3 keeps the action id)', async () => {
+  it('View > Section Cut dispatches the SAME toggle-section-active command as before (D3 keeps the action id)', async () => {
     await renderAndLoad()
     const toggleSectionActive = vi.fn()
     reportSectionState({ origin: [0, 0, 0], normal: [0, 0, 1], active: true }, { toggleSectionActive })
     fireEvent.click(menubar().getByRole('button', { name: /^view$/i }))
-    fireEvent.mouseDown(menubar().getByText('Section Plane'))
+    fireEvent.mouseDown(menubar().getByText('Section Cut'))
     expect(toggleSectionActive).toHaveBeenCalledOnce()
   })
 })
@@ -2060,7 +2060,7 @@ describe('App — View > Reset Axes command (tool-parity §4, finding 1)', () =>
     vi.clearAllMocks()
   })
 
-  it('clicking View > Reset Axes calls viewportApi.current.resetAxes()', async () => {
+  it('clicking View > Reset Drawing Axes calls viewportApi.current.resetAxes()', async () => {
     await renderAndLoad()
     const resetAxes = vi.fn()
     const calls = vi.mocked(Viewport).mock.calls
@@ -2069,7 +2069,7 @@ describe('App — View > Reset Axes command (tool-parity §4, finding 1)', () =>
       if (apiRef !== undefined) apiRef.current = { resetAxes }
     })
     fireEvent.click(menubar().getByRole('button', { name: /^view$/i }))
-    fireEvent.mouseDown(menubar().getByText('Reset Axes'))
+    fireEvent.mouseDown(menubar().getByText('Reset Drawing Axes'))
     expect(resetAxes).toHaveBeenCalledOnce()
   })
 })

@@ -38,6 +38,26 @@ describe('CommandPalette', () => {
     expect(screen.queryByText('Select')).not.toBeInTheDocument()
   })
 
+  it('opens pre-filled when initialQuery is set (Help > Search handoff)', () => {
+    const { rerender } = render(
+      <CommandPalette open={false} onClose={vi.fn()} onRun={vi.fn()} initialQuery="rotate" />,
+    )
+    rerender(<CommandPalette open onClose={vi.fn()} onRun={vi.fn()} initialQuery="rotate" />)
+    expect(screen.getByPlaceholderText(/search tools, actions, help/i)).toHaveValue('rotate')
+    expect(screen.getByText('Rotate')).toBeInTheDocument()
+    expect(screen.queryByText('Select')).not.toBeInTheDocument()
+  })
+
+  it('a later open with an empty initialQuery resets to the clean slate', () => {
+    const { rerender } = render(
+      <CommandPalette open={false} onClose={vi.fn()} onRun={vi.fn()} initialQuery="rotate" />,
+    )
+    rerender(<CommandPalette open onClose={vi.fn()} onRun={vi.fn()} initialQuery="rotate" />)
+    rerender(<CommandPalette open={false} onClose={vi.fn()} onRun={vi.fn()} initialQuery="" />)
+    rerender(<CommandPalette open onClose={vi.fn()} onRun={vi.fn()} initialQuery="" />)
+    expect(screen.getByPlaceholderText(/search tools, actions, help/i)).toHaveValue('')
+  })
+
   it('shows a "no matches" message for a query that matches nothing', () => {
     render(<CommandPalette open onClose={vi.fn()} onRun={vi.fn()} />)
     fireEvent.change(screen.getByPlaceholderText(/search tools, actions, help/i), { target: { value: 'zzz-nope' } })

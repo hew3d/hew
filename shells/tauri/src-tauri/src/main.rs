@@ -2745,21 +2745,24 @@ fn main() {
                 .accelerator("CmdOrCtrl+W")
                 .build(handle)?;
 
+            // HIG File order (TextEdit/Pages shape): the document block
+            // (New/Open/Open Recent), then Close + the save block, then
+            // interchange (Import/Export), then sharing, with Print… last —
+            // as the platform guidelines put it.
             let file_menu = SubmenuBuilder::new(handle, "File")
                 .item(&file_new)
                 .item(&file_open)
                 .item(&open_recent_submenu)
                 .separator()
-                .item(&file_import)
-                .item(&file_export)
-                .item(&file_open_on_phone)
-                .separator()
+                .item(&file_close)
                 .item(&file_save)
                 .item(&file_save_as)
                 .item(&file_save_to_library)
                 .separator()
-                .item(&file_close)
-                // Print… sits last, as the platform guidelines put it.
+                .item(&file_import)
+                .item(&file_export)
+                .separator()
+                .item(&file_open_on_phone)
                 .separator()
                 .item(&file_print)
                 .build()?;
@@ -2861,21 +2864,36 @@ fn main() {
                 let _ = item.set_enabled(false);
             }
 
+            // Edit stays textbook HIG (undo block, delete/select block, then
+            // the specialized guide cleanup); everything object-level lives in
+            // the Object menu below.
             let edit_menu = SubmenuBuilder::new(handle, "Edit")
                 .item(&edit_undo)
                 .item(&edit_redo)
                 .separator()
-                .item(&edit_select_all)
                 .item(&edit_delete)
-                .item(&edit_delete_guides)
+                .item(&edit_select_all)
                 .separator()
+                .item(&edit_delete_guides)
+                .build()?;
+
+            // ----------------------------------------------------------------
+            // Object menu — commands that act on the selected Objects/Groups/
+            // Components (containers, component lifecycle, booleans). Split
+            // out of Edit so the HIG-standard Edit menu stays small and
+            // future object commands (mirror, flip, lock, …) have an obvious
+            // home. Item ids keep their historical `edit-` prefix — they are
+            // wire ids shared with the dispatch switch, sync_menu_state, and
+            // the palette, not user-visible text.
+            // ----------------------------------------------------------------
+            let object_menu = SubmenuBuilder::new(handle, "Object")
                 .item(&edit_group)
                 .item(&edit_ungroup)
                 .separator()
                 .item(&edit_make_component)
+                .item(&edit_make_unique)
                 .item(&edit_place_copy)
                 .item(&edit_explode)
-                .item(&edit_make_unique)
                 .separator()
                 .item(&edit_union)
                 .item(&edit_subtract)
@@ -2892,7 +2910,7 @@ fn main() {
             // directly (same shape as "edit-delete-guides" below) rather
             // than `check_item`.
             let view_reset_axes =
-                MenuItemBuilder::with_id("view-reset-axes", "Reset Axes").build(handle)?;
+                MenuItemBuilder::with_id("view-reset-axes", "Reset Drawing Axes").build(handle)?;
             let view_grid = check_item(handle, &mut checks, "view-grid", "Grid", None, None)?;
             let view_guides = check_item(handle, &mut checks, "view-guides", "Guides", None, None)?;
             // Section Plane's active (clipping) toggle — moved here from Tools
@@ -2900,11 +2918,16 @@ fn main() {
             // it always had. Checked only when a section is BOTH placed and
             // active; `sync_menu_state`'s `enabled` map (driven by the same
             // `view-section-plane` id) disables it while nothing is placed.
+            // Labelled "Section Cut", not "Section Plane": the TOOL (which
+            // places the plane) keeps that name under Tools; this toggle
+            // clips/unclips the placed cut — the same naming split SketchUp
+            // draws (View ▸ Section Cuts vs Tools ▸ Section Plane). The id
+            // stays `view-section-plane` (wire id, not user-visible).
             let view_section_plane = check_item(
                 handle,
                 &mut checks,
                 "view-section-plane",
-                "Section Plane",
+                "Section Cut",
                 None,
                 None,
             )?;
@@ -2921,6 +2944,55 @@ fn main() {
                 Some("CmdOrCtrl+/"),
             )
             .build(handle)?;
+
+            // Panel toggles — HIG puts show/hide of interface panels in the
+            // View menu (Window holds actual windows). Ids keep their
+            // historical `win-` prefix from when these lived on the Window
+            // menu — wire ids, not user-visible text.
+            let win_model_info = check_item(
+                handle,
+                &mut checks,
+                "win-model-info",
+                "Model Info",
+                Some("Shift+CmdOrCtrl+I"),
+                Some("Shift+CmdOrCtrl+I"),
+            )?;
+            let win_object_info = check_item(
+                handle,
+                &mut checks,
+                "win-object-info",
+                "Object Info",
+                Some("Shift+CmdOrCtrl+O"),
+                Some("Shift+CmdOrCtrl+O"),
+            )?;
+            let win_materials = check_item(
+                handle,
+                &mut checks,
+                "win-materials",
+                "Materials",
+                Some("Shift+CmdOrCtrl+C"),
+                Some("Shift+CmdOrCtrl+C"),
+            )?;
+            let win_tags = check_item(
+                handle,
+                &mut checks,
+                "win-tags",
+                "Tags",
+                Some("Shift+CmdOrCtrl+T"),
+                Some("Shift+CmdOrCtrl+T"),
+            )?;
+            // The Scenes panel toggle lives inside the Scenes submenu below,
+            // keeping the whole feature (panel + actions + transitions) in
+            // one place. No accelerator, same reasoning as win-debug-log: a
+            // sixth Shift+Cmd pane chord isn't worth reserving.
+            let win_scenes = check_item(
+                handle,
+                &mut checks,
+                "win-scenes",
+                "Scenes Panel",
+                None,
+                None,
+            )?;
 
             // View ▸ Scenes (docs/design/scenes.md §5): Add/Update/Next/
             // Previous plus the Scene Transitions checkmark (a SPEC.md
@@ -2962,6 +3034,8 @@ fn main() {
                 None,
             )?;
             let scenes_menu = SubmenuBuilder::new(handle, "Scenes")
+                .item(&win_scenes)
+                .item(&PredefinedMenuItem::separator(handle)?)
                 .item(&scenes_add)
                 .item(&scenes_update)
                 .item(&PredefinedMenuItem::separator(handle)?)
@@ -2977,6 +3051,11 @@ fn main() {
                 .item(&view_grid)
                 .item(&view_guides)
                 .item(&view_section_plane)
+                .item(&PredefinedMenuItem::separator(handle)?)
+                .item(&win_model_info)
+                .item(&win_object_info)
+                .item(&win_materials)
+                .item(&win_tags)
                 .item(&PredefinedMenuItem::separator(handle)?)
                 .item(&scenes_menu)
                 .item(&PredefinedMenuItem::separator(handle)?)
@@ -3021,13 +3100,6 @@ fn main() {
                 Some("A"),
             )?;
 
-            let draw_shapes = SubmenuBuilder::new(handle, "Shapes")
-                .item(&draw_rect)
-                .item(&draw_circle)
-                .item(&draw_polygon)
-                .item(&draw_arc)
-                .build()?;
-
             let draw_line = check_item(
                 handle,
                 &mut checks,
@@ -3036,10 +3108,6 @@ fn main() {
                 Some("CmdOrCtrl+L"),
                 Some("L"),
             )?;
-
-            let draw_lines = SubmenuBuilder::new(handle, "Lines")
-                .item(&draw_line)
-                .build()?;
 
             // "3D Text…" opens a dialog rather than arming a tool, so it's a
             // plain one-off item (no checked state — see `cam_zoom_extents`
@@ -3050,9 +3118,17 @@ fn main() {
             let draw_3d_text =
                 gated_item(handle, &mut gated, "draw-3d-text", "3D Text…", None, None)?;
 
+            // Flat, in two groups: stroke tools (open paths), then closed
+            // shapes — future curve tools join the first group, new
+            // primitives the second. Submenus return only if the menu ever
+            // outgrows ~10 items (the old "Lines" submenu held ONE item).
             let draw_menu = SubmenuBuilder::new(handle, "Draw")
-                .item(&draw_shapes)
-                .item(&draw_lines)
+                .item(&draw_line)
+                .item(&draw_arc)
+                .separator()
+                .item(&draw_rect)
+                .item(&draw_circle)
+                .item(&draw_polygon)
                 .separator()
                 .item(&draw_3d_text)
                 .build()?;
@@ -3168,28 +3244,37 @@ fn main() {
                 None,
                 None,
             )?;
-            let tool_axes = check_item(handle, &mut checks, "tool-axes", "Axes", None, None)?;
+            let tool_axes =
+                check_item(handle, &mut checks, "tool-axes", "Drawing Axes", None, None)?;
             let tool_text = check_item(handle, &mut checks, "tool-text", "Text", None, None)?;
 
+            // Grouped by job, so future tools have an obvious slot: select,
+            // transform (mirror/array variants land here), shape geometry
+            // (chamfer/fillet land here), measure & annotate, materials,
+            // model-space utilities.
             let tools_menu = SubmenuBuilder::new(handle, "Tools")
                 .item(&tool_select)
-                .item(&tool_paint)
-                .item(&tool_position_texture)
+                .separator()
                 .item(&tool_move)
                 .item(&tool_rotate)
                 .item(&tool_scale)
+                .separator()
                 .item(&tool_pushpull)
                 .item(&tool_follow_me)
                 .item(&tool_offset)
+                .item(&tool_slice)
+                .item(&tool_edit_vertex)
                 .separator()
                 .item(&tool_tape_measure)
-                .item(&tool_dimension)
                 .item(&tool_protractor)
-                .item(&tool_slice)
-                .item(&tool_section_plane)
-                .item(&tool_edit_vertex)
-                .item(&tool_axes)
+                .item(&tool_dimension)
                 .item(&tool_text)
+                .separator()
+                .item(&tool_paint)
+                .item(&tool_position_texture)
+                .separator()
+                .item(&tool_axes)
+                .item(&tool_section_plane)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -3313,45 +3398,16 @@ fn main() {
             // ----------------------------------------------------------------
             // Window menu
             // ----------------------------------------------------------------
-            let win_model_info = check_item(
-                handle,
-                &mut checks,
-                "win-model-info",
-                "Model Info",
-                Some("Shift+CmdOrCtrl+I"),
-                Some("Shift+CmdOrCtrl+I"),
-            )?;
-            let win_materials = check_item(
-                handle,
-                &mut checks,
-                "win-materials",
-                "Materials",
-                Some("Shift+CmdOrCtrl+C"),
-                Some("Shift+CmdOrCtrl+C"),
-            )?;
-            let win_tags = check_item(
-                handle,
-                &mut checks,
-                "win-tags",
-                "Tags",
-                Some("Shift+CmdOrCtrl+T"),
-                Some("Shift+CmdOrCtrl+T"),
-            )?;
-            // No accelerator, for the same reason as win-debug-log below: a
-            // fifth Shift+Cmd-combo pane toggle isn't worth reserving.
-            let win_scenes = check_item(handle, &mut checks, "win-scenes", "Scenes", None, None)?;
-            let win_object_info = check_item(
-                handle,
-                &mut checks,
-                "win-object-info",
-                "Object Info",
-                Some("Shift+CmdOrCtrl+O"),
-                Some("Shift+CmdOrCtrl+O"),
-            )?;
+            // Window holds actual windows (HIG): Minimize/Zoom, the Library
+            // (a real second window on desktop, unlike the View-menu panes),
+            // and the dynamic open-windows tail appended by
+            // rebuild_window_menu_tail. The pane toggles that used to sit
+            // here live in View now.
+            //
             // Bare Shift+L (the in-app bare-letter shortcut) can't be a safe
             // native accelerator — it would fire while typing in any native
             // text field — so the menu advertises the same modifier chord
-            // the other pane toggles use instead.
+            // the pane toggles use instead.
             let win_library = check_item(
                 handle,
                 &mut checks,
@@ -3360,18 +3416,10 @@ fn main() {
                 Some("Shift+CmdOrCtrl+L"),
                 Some("Shift+CmdOrCtrl+L"),
             )?;
-
             let window_menu = SubmenuBuilder::new(handle, "Window")
-                // Standard macOS window management first (HIG: the Window
-                // menu manages windows; the pane toggles follow below).
                 .item(&PredefinedMenuItem::minimize(handle, None)?)
                 .item(&PredefinedMenuItem::maximize(handle, Some("Zoom"))?)
                 .separator()
-                .item(&win_model_info)
-                .item(&win_materials)
-                .item(&win_tags)
-                .item(&win_scenes)
-                .item(&win_object_info)
                 .item(&win_library)
                 .build()?;
 
@@ -3390,13 +3438,17 @@ fn main() {
             )?;
             let help_report_bug =
                 MenuItemBuilder::with_id("help-report-bug", "Report Bug…").build(handle)?;
+            // Opens the online user guide in the default browser — dispatched
+            // to the frontend ("open-guide"), which routes through the opener
+            // plugin (the WelcomeScreen's guide-link pattern).
+            let help_guide = MenuItemBuilder::with_id("help-guide", "Hew Help").build(handle)?;
 
             let help_menu = SubmenuBuilder::new(handle, "Help")
-                .item(&win_debug_log)
+                .item(&help_guide)
                 .separator()
                 .item(&help_report_bug)
+                .item(&win_debug_log)
                 .build()?;
-
             // ----------------------------------------------------------------
             // Assemble and set the menu bar
             // ----------------------------------------------------------------
@@ -3404,10 +3456,11 @@ fn main() {
                 .item(&app_menu)
                 .item(&file_menu)
                 .item(&edit_menu)
+                .item(&object_menu)
                 .item(&view_menu)
+                .item(&camera_menu)
                 .item(&draw_menu)
                 .item(&tools_menu)
-                .item(&camera_menu)
                 .item(&window_menu)
                 .item(&help_menu)
                 .build()?;
@@ -3416,6 +3469,12 @@ fn main() {
             // app, so the app-level menu is correct there.
             #[cfg(target_os = "macos")]
             app.set_menu(menu)?;
+            // Registering as THE help menu makes macOS add its standard
+            // search field (which searches menu items and help) at the top.
+            // MUST run after set_menu: muda resolves the NSMenu through the
+            // app's attached main menu, so an earlier call silently no-ops.
+            #[cfg(target_os = "macos")]
+            help_menu.set_as_help_menu_for_nsapp()?;
             // Windows and Linux both drive the menus from the in-app HTML
             // MenuBar (the native menu is built for parity but not attached):
             // Linux settled on this after the experiments — the native GTK
@@ -3775,6 +3834,7 @@ fn main() {
                 "win-library" => "toggle-library",
                 "win-debug-log" => "toggle-debug-log",
                 "help-report-bug" => "report-bug",
+                "help-guide" => "open-guide",
                 _ => return,
             };
             emit_to_active(app, "menu-action", action);

@@ -286,9 +286,9 @@ test('nested component: drill into a sub-component, edit it, step back out', asy
  * `structuralSelection`'s real kind tags. So the real route — and the one
  * this test drives — is a real gesture: select the group and the other box
  * via the harness's `selectNodes` (the same selection-state entry point a
- * click/marquee uses), then run Edit ▸ Make Component through the actual
+ * click/marquee uses), then run Object ▸ Make Component through the actual
  * in-app menu (component-edit.spec.ts's own proven
- * `getByRole('button', { name: 'Edit' })` → menu-item-click pattern).
+ * `getByRole('button', { name: 'Object' })` → menu-item-click pattern).
  */
 test('nested component: drill into a member group, edit it, step back out', async ({ page }) => {
   const ctx = await ready(page).then(() => aim(page, CAMERA))
@@ -318,10 +318,12 @@ test('nested component: drill into a member group, edit it, step back out', asyn
   })
   const { group, groupMemberId } = setup
 
-  // ---- Make Component through the real Edit menu — the mixed group+object
+  // ---- Make Component through the real Object menu — the mixed group+object
   // selection `canMakeComponent` allows (both are top-level siblings, no
   // parent) but the harness's own `makeComponent` stub cannot express.
-  await page.getByRole('button', { name: 'Edit' }).click()
+  // Scoped + exact: a bare page-level 'Object' would also match the
+  // tray's 'Object Info' section header.
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'Object', exact: true }).click()
   await page.getByText('Make Component', { exact: true }).click()
   await page.waitForTimeout(200)
 

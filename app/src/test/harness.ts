@@ -137,7 +137,7 @@ export interface HewTestHarness {
     b: { kind: string; id: string },
   ): { kind: string; id: string }
   /**
-   * Group nodes into a merge group (the same `group_nodes` call Edit ▸ Group
+   * Group nodes into a merge group (the same `group_nodes` call Object ▸ Group
    * commits) and return the group handle. Each ref's kind is
    * `'object' | 'group' | 'instance'`.
    */
@@ -842,7 +842,7 @@ export interface HewTestHarness {
 
   /**
    * Fold objects into a shared component definition plus an identity-posed
-   * instance (Edit ▸ Make Component, without the selection side effect —
+   * instance (Object ▸ Make Component, without the selection side effect —
    * the placement renders batched, not materialized). Returns the instance
    * and definition handles as decimal strings.
    */

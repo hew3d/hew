@@ -110,6 +110,9 @@ const clampTrayWidth = (w: number): number =>
 /** Refresh interval (ms) for the "Edited/Saved <relative time>" indicator. */
 const SAVE_STATE_TICK_MS = 30000
 
+/** Help ▸ Hew Help target — the online user guide's index. */
+const USER_GUIDE_URL = 'https://hew3d.com/learn/'
+
 interface AppState {
   kernelVersion: string
   scene: Scene
@@ -163,7 +166,7 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   Slice: 'tool-slice',
   'Section Plane': 'tool-section-plane',
   'Edit Vertex': 'tool-edit-vertex',
-  Axes: 'tool-axes',
+  'Drawing Axes': 'tool-axes',
   Text: 'tool-text',
   Orbit: 'cam-orbit',
   Pan: 'cam-pan',
@@ -375,7 +378,7 @@ export default function App() {
    * pattern but populated from Viewport's `onProjectionChange` callback
    * (mount + every `toggleProjection`) rather than toggled directly here. */
   const [parallelProjection, setParallelProjection] = useState(false)
-  /** View ▸ Section Plane's check/enabled state — a RENDER CACHE of the
+  /** View ▸ Section Cut's check/enabled state — a RENDER CACHE of the
    * section manager's own truth, never toggled directly by this component.
    * Populated only by `handleSectionChanged` re-reading
    * `viewportApi.current?.getSectionState()` (D3, section-plane-polish);
@@ -393,6 +396,13 @@ export default function App() {
   const [showFluentSettings, setShowFluentSettings] = useState(false)
   /** Command palette visibility (⌘/ / Ctrl+/). */
   const [paletteOpen, setPaletteOpen] = useState(false)
+  /** Query the palette opens with — '' everywhere except Help ▸ Search,
+   *  which hands its typed text over (see MenuBar's onHelpSearch). */
+  const [paletteSeed, setPaletteSeed] = useState('')
+  const openPalette = useCallback((seed = '') => {
+    setPaletteSeed(seed)
+    setPaletteOpen(true)
+  }, [])
   /** True while the user is pointer-dragging the camera (orbit/pan/dolly) —
    * fades the contextual dock out of the way. Fed by Viewport's
    * OrbitControls start/end events; never persisted. */
@@ -1193,7 +1203,7 @@ export default function App() {
     }
   }, [activeContext, trimContextPath])
 
-  // Re-derive the View ▸ Section Plane menu state from the section
+  // Re-derive the View ▸ Section Cut menu state from the section
   // manager's own truth (`getSectionState`) — called by the viewport
   // whenever a section is placed/offset-committed/toggled/deleted, or a
   // fresh document clears it (Viewport's `onSectionChanged`). Deliberately
@@ -1334,6 +1344,22 @@ export default function App() {
   // Report Bug — assemble the bundle and tell the user what happened.
   // The write is otherwise silent (Tauri saves a file, web downloads), so
   // without a toast it looks like the menu item does nothing.
+  // Help ▸ Hew Help — the online user guide. A Tauri webview swallows a
+  // blank-target navigation, so on desktop the URL goes to the OS default
+  // browser via the opener plugin (the WelcomeScreen guide-link pattern);
+  // the web build just opens a tab.
+  const handleOpenGuide = useCallback(() => {
+    if (isTauri) {
+      void import('@tauri-apps/plugin-opener')
+        .then(({ openUrl }) => openUrl(USER_GUIDE_URL))
+        .catch(() => {
+          /* best effort — nothing useful to do if the OS can't open the URL */
+        })
+    } else {
+      window.open(USER_GUIDE_URL, '_blank', 'noopener')
+    }
+  }, [])
+
   const handleReportBug = useCallback(() => {
     const scene = sceneRef.current
     if (scene === null) {
@@ -1376,7 +1402,7 @@ export default function App() {
       .catch(() => { /* ignore */ })
   }, [])
 
-  // Window ▸ Shop Mode: the mirror of ShopApp's own "Use full editor" — pin
+  // View ▸ Shop Mode: the mirror of ShopApp's own "Use full editor" — pin
   // the override and reload so `main.tsx`'s `resolveShellMode` picks it up
   // on the next boot. Never called from the desktop shell or a fine-pointer
   // session (MenuBars's `onEnterShopMode` prop is only wired up when neither
@@ -3516,7 +3542,7 @@ export default function App() {
       case 'tool-slice':     setActiveTool('Slice'); break
       case 'tool-section-plane': setActiveTool('Section Plane'); break
       case 'tool-edit-vertex': setActiveTool('Edit Vertex'); break
-      case 'tool-axes':        setActiveTool('Axes'); break
+      case 'tool-axes':        setActiveTool('Drawing Axes'); break
       case 'tool-text':      setActiveTool('Text'); break
       case 'tool-orbit':     activateTool('Orbit'); break
       case 'tool-pan':       activateTool('Pan'); break
@@ -3549,6 +3575,7 @@ export default function App() {
       case 'view-iso':            viewportApi.current?.setStandardView('iso'); break
       case 'open-settings':       openSettingsRef.current(); break
       case 'report-bug': handleReportBug(); break
+      case 'open-guide': handleOpenGuide(); break
       case 'open-library':   openLibraryEntry(); break
       case 'toggle-library': openLibraryEntry(); break
       // Contextual dock only (needs a single selected object/group/instance)
@@ -3573,7 +3600,7 @@ export default function App() {
       case 'save-to-library-doc':
         setSaveToLibraryTarget({ kind: 'document', defaultName: documentName(docSession) })
         break
-      case 'open-palette':        setPaletteOpen(true); break
+      case 'open-palette':        openPalette(); break
       // Contextual dock only — these need the current selection, not
       // just a bare trigger, so unlike every case above they aren't also
       // reachable from a static native-menu item; the dock and (once
@@ -4148,7 +4175,7 @@ export default function App() {
       // menu owns mod-combos there) — main.rs binds the same Cmd+`/`.
       if (ev.key === '/' && !ev.shiftKey) {
         ev.preventDefault()
-        setPaletteOpen(true)
+        openPalette()
         return
       }
       // Ctrl+K stays as an unadvertised alias for the muscle memory of
@@ -4157,7 +4184,7 @@ export default function App() {
       // accelerator and keeps that job.
       if (ev.key.toLowerCase() === 'k' && !ev.shiftKey) {
         ev.preventDefault()
-        setPaletteOpen(true)
+        openPalette()
         return
       }
     }
@@ -4714,6 +4741,9 @@ export default function App() {
         parallelProjectionChecked={parallelProjection}
         onToggleParallelProjection={() => viewportApi.current?.toggleProjection()}
         onOpenSettings={openSettings}
+        onOpenGuide={handleOpenGuide}
+        onOpenPalette={() => openPalette()}
+        onHelpSearch={(q) => openPalette(q)}
         onReportBug={handleReportBug}
         onCheckForUpdates={updaterAvailable ? handleCheckForUpdates : undefined}
         onOpenOnPhone={isTauri ? () => setPhoneShareOpen(true) : undefined}
@@ -4773,7 +4803,7 @@ export default function App() {
           // menu bar, and the rest follow for consistency). One shortcut
           // everywhere now: Cmd/Ctrl+`/`, dispatched by the global keydown
           // handler above and by the native menu on the macOS desktop.
-          onOpenPalette={() => setPaletteOpen(true)}
+          onOpenPalette={() => openPalette()}
           paletteKbd={isMac ? '⌘/' : 'Ctrl /'}
           // The BROWSE entry point stays visible on every platform — the
           // dialog itself reports the web build's storage honestly
@@ -5494,6 +5524,7 @@ export default function App() {
           menu click already go through. */}
       <CommandPalette
         open={paletteOpen}
+        initialQuery={paletteSeed}
         onClose={() => setPaletteOpen(false)}
         onRun={(id) => menuActionRef.current(id)}
         extraEntries={paletteExtraEntries}

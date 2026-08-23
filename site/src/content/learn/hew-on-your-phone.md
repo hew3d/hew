@@ -17,7 +17,7 @@ Open **app.hew3d.com** on a phone and Hew checks two things: whether the pointer
 The heuristic is a default, not a lock, and it works in both directions:
 
 - **From Shop Mode**, the overflow menu (**⋯**, top right) has **Use full editor**. It reloads into the regular desktop-style UI on the same device.
-- **From the full editor**, on a touch device that didn't trip the automatic switch — a tablet, say — **Window ▸ Shop Mode** switches over by hand. (This item only appears on a touch-capable device running the web app — a mouse-driven session has no Shop Mode use case, and it's absent under the desktop app entirely, since Shop Mode is web-only.)
+- **From the full editor**, on a touch device that didn't trip the automatic switch — a tablet, say — **View ▸ Shop Mode** switches over by hand. (This item only appears on a touch-capable device running the web app — a mouse-driven session has no Shop Mode use case, and it's absent under the desktop app entirely, since Shop Mode is web-only.)
 
 Either choice is remembered, so a phone you've pinned to the full editor — or a laptop you've pinned to Shop Mode for testing — stays that way across reloads until you switch back.
 

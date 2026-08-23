@@ -119,7 +119,7 @@ const INSTANCE_VERBS: DockVerb[] = [
 ]
 
 /** Group (gated by `DockGates.canGroup`) is the natural next step after
- * sweeping up several things — the same `edit-group` action as Edit ▸ Group. */
+ * sweeping up several things — the same `edit-group` action as Object ▸ Group. */
 const MULTI_VERBS: DockVerb[] = [
   { id: 'tool-move', label: 'Move' },
   { id: 'edit-group', label: 'Group' },
@@ -161,9 +161,9 @@ export function isDockVerbEnabled(verb: DockVerb, hoverPreviewOnly: boolean): bo
  * an inapplicable verb is noise, not information).
  */
 export interface DockGates {
-  /** ≥2 distinct sibling nodes, no sketch sub-entities (Edit ▸ Group). */
+  /** ≥2 distinct sibling nodes, no sketch sub-entities (Object ▸ Group). */
   canGroup: boolean
-  /** ≥1 sibling object/group/instance, top level (Edit ▸ Make Component). */
+  /** ≥1 sibling object/group/instance, top level (Object ▸ Make Component). */
   canMakeComponent: boolean
   /** Whether the platform has a working library backend
    * (`libraryStore().available()`) — hides Save to Library when false.

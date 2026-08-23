@@ -620,7 +620,7 @@ test('component-edit parity: selected members rotate and scale through real tool
   )).toBe(1)
 })
 
-test('component-edit parity: Shift-selected members boolean through the Edit menu', async ({
+test('component-edit parity: Shift-selected members boolean through the Object menu', async ({
   page,
 }) => {
   const ctx = await ready(page).then(() => aim(page, CAMERA))
@@ -647,7 +647,9 @@ test('component-edit parity: Shift-selected members boolean through the Edit men
   await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSelection().length))
     .toBe(2)
 
-  await page.getByRole('button', { name: 'Edit' }).click()
+  // Scoped + exact: a bare page-level 'Object' would also match the
+  // tray's 'Object Info' section header.
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'Object', exact: true }).click()
   await page.getByText('Union', { exact: true }).click()
   await expect.poll(async () => page.evaluate(
     (id) => window.__hew_test!.getComponentMemberObjects(id).length,

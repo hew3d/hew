@@ -433,7 +433,7 @@ interface Props {
    * changes (place, offset-commit, toggle, delete, or a fresh document
    * clearing it) — NOT on every pointer move of a live offset-drag preview,
    * which never changes existence/active. The parent re-derives its
-   * View ▸ Section Plane check state from `getSectionState()` in response,
+   * View ▸ Section Cut check state from `getSectionState()` in response,
    * rather than tracking a shadow boolean that could drift from the section
    * manager's real state (D3, section-plane-polish). */
   onSectionChanged?: () => void
@@ -940,7 +940,7 @@ export interface ViewportApi {
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
   deleteAllGuides: () => void
   /** Reset the movable drawing axes (tool-parity §4) to world identity
-   *  (View ▸ Reset Axes) — same commit path as the Axes tool's own
+   *  (View ▸ Reset Drawing Axes) — same commit path as the Drawing Axes tool's own
    *  `set_axes`, one undo step. */
   resetAxes: () => void
   /** Delete a single picked construction guide. */
@@ -5660,7 +5660,7 @@ export default function Viewport({
 
     /**
      * Reset the movable drawing axes (tool-parity §4) to world identity —
-     * same commit path as the Axes tool's own `set_axes` gesture (one undo
+     * same commit path as the Drawing Axes tool's own `set_axes` gesture (one undo
      * step, fully recorded/replayable). The origin-axes gizmo and inference
      * both read the frame fresh every frame/query, so nothing else needs
      * refreshing beyond the usual document-changed bookkeeping + a render.
@@ -6818,7 +6818,7 @@ export default function Viewport({
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeEditVertexTool())
           break
-        case 'Axes':
+        case 'Drawing Axes':
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeAxesTool())

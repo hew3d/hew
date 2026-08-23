@@ -32,7 +32,7 @@ The search field at the top of the tool rail opens the command palette. Or press
 
 Press `↑`/`↓` to navigate, `Enter` to run, `Esc` to close. With an empty query the palette shows your recently used commands.
 
-Commands that need a particular selection — the booleans, Group, Make Component, and friends — are always listed but shown greyed out with a "needs a selection" note until the selection qualifies, the same way the Edit menu greys them.
+Commands that need a particular selection — the booleans, Group, Make Component, and friends — are always listed but shown greyed out with a "needs a selection" note until the selection qualifies, the same way the Object menu greys them.
 
 ## The contextual dock
 
@@ -51,12 +51,12 @@ Group and Make Component appear only when the selection qualifies (Group needs t
 
 ## The panels tray
 
-The right-hand tray holds four collapsible panels. Click a panel's header to expand or collapse it; drag the tray's left edge to resize it. Each can also be shown or hidden from the **Window** menu:
+The right-hand tray holds four collapsible panels. Click a panel's header to expand or collapse it; drag the tray's left edge to resize it. Each can also be shown or hidden from the **View** menu:
 
-- **Object Info** (Window ▸ Object Info, `⇧⌘O` / `Ctrl+Shift+O`) shows the selected item's name, type, solid status, bounding-box dimensions, and tags. This is where you rename things and tag them.
-- **Outliner** (Window ▸ Model Info, `⇧⌘I` / `Ctrl+Shift+I`) is the document tree: every object, group, component instance, and sketch, with per-item visibility toggles.
-- **Materials** (Window ▸ Materials, `⇧⌘C` / `Ctrl+Shift+C`) holds the document's material palette.
-- **Tags** (Window ▸ Tags, `⇧⌘T` / `Ctrl+Shift+T`) shows the tag tree, with visibility toggles per tag.
+- **Object Info** (View ▸ Object Info, `⇧⌘O` / `Ctrl+Shift+O`) shows the selected item's name, type, solid status, bounding-box dimensions, and tags. This is where you rename things and tag them.
+- **Outliner** (View ▸ Model Info, `⇧⌘I` / `Ctrl+Shift+I`) is the document tree: every object, group, component instance, and sketch, with per-item visibility toggles.
+- **Materials** (View ▸ Materials, `⇧⌘C` / `Ctrl+Shift+C`) holds the document's material palette.
+- **Tags** (View ▸ Tags, `⇧⌘T` / `Ctrl+Shift+T`) shows the tag tree, with visibility toggles per tag.
 
 On the desktop app, if you have more than one document window open, the Window menu also lists them by name at the bottom, with a checkmark beside whichever one you're in — click another to bring it to the front.
 
@@ -68,7 +68,7 @@ The strip along the bottom always shows the active tool's name and a one-line hi
 
 ## Menus and title bar
 
-The menu bar (system bar on macOS, in-app elsewhere) organizes everything: **File** (new/open/save/import/export/print), **Edit** (undo, delete, group/component commands, booleans), **View** (axes, guides), **Draw**, **Tools**, **Camera**, **Window** (panels, and the open-windows list), and **Help** (Debug Log, Report Bug…).
+The menu bar (system bar on macOS, in-app elsewhere) organizes everything: **File** (new/open/save/import/export/print), **Edit** (undo, delete, select), **Object** (group/component commands, booleans), **View** (display toggles, panels, Scenes, the command palette), **Camera**, **Draw**, **Tools**, **Window** (the Library and the open-windows list), and **Help** (the user guide, Report Bug…).
 
 The window title shows the document name. A `•` in front of it (and an "Edited …" label next to it) means unsaved changes. There is no Save button — save with `⌘S` / `Ctrl+S`. [Files, saving, and recovery](/learn/files-and-saving/) covers how autosave has your back regardless.
 

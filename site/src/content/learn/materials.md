@@ -8,7 +8,7 @@ Materials in Hew are simple and per-document: a palette of flat colors and image
 
 ## The Materials panel
 
-Expand **Materials** in the right-hand tray (or Window ▸ Materials, `⇧⌘C` / `Ctrl+Shift+C`).
+Expand **Materials** in the right-hand tray (or View ▸ Materials, `⇧⌘C` / `Ctrl+Shift+C`).
 
 ![The Materials panel expanded, showing the filter field, the Default swatch, and two named materials](/docs/materials-panel.webp)
 

@@ -45,7 +45,7 @@
  *      Note the click-move-click reality: a single physical tap on the
  *      widget only ARMS the stage; it does not resolve on its own (the
  *      `Tool` interface has no pointer-up). The dependable one-action toggle
- *      is therefore the **View ▸ Section Plane** command
+ *      is therefore the **View ▸ Section Cut** command
  *      (`toggleSectionActive`, same `toggle-section-active` action id it
  *      always had — moved out of Tools in section-plane-polish), which every
  *      doc/status-hint points users to rather than promising a single-click
@@ -162,7 +162,7 @@ export class SectionPlaneTool implements Tool {
       return 'Move to sweep the cut, click to set it — or type an exact distance. Esc reverts.'
     }
     return this.getCurrentPlane() !== null
-      ? 'Click the widget then move to sweep the cut; click a face to re-place. Delete removes it; toggle it off from View ▸ Section Plane.'
+      ? 'Click the widget then move to sweep the cut; click a face to re-place. Delete removes it; toggle it off from View ▸ Section Cut.'
       : 'Click a face to section it there, or click the ground for a horizontal cut.'
   }
 

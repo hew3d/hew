@@ -251,7 +251,7 @@ describe('isToolSwitchAllowedUnderReadOnly (shop-mode adversarial review, CRITIC
     for (const name of [
       'Rectangle', 'Circle', 'Polygon', 'Arc', 'Line', 'Push/Pull', 'Follow Me',
       'Offset', 'Paint', 'Position Texture', 'Move', 'Rotate', 'Scale', 'Dimension',
-      'Text', 'Protractor', 'Slice', 'Section Plane', 'Edit Vertex', 'Axes',
+      'Text', 'Protractor', 'Slice', 'Section Plane', 'Edit Vertex', 'Drawing Axes',
       'Position Camera', 'Look Around', 'Walk', 'Pan', 'Zoom', 'Zoom Window',
       '', 'select', 'SELECT', 'Orbitt',
     ]) {

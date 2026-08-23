@@ -1,5 +1,9 @@
 /**
- * MenuBar — top-of-screen app bar with File + Edit menus.
+ * MenuBar — the in-app menu bar (File / Edit / Object / View / Camera /
+ * Draw / Tools / Window / Help), used everywhere the OS menu bar isn't:
+ * the web build and the Windows/Linux desktop shells. Menu structure
+ * mirrors the native macOS menu built in shells/tauri/src-tauri/src/main.rs
+ * — change them together.
  *
  * Shows the document name + "Edited/Saved <relative time>" save-state
  * indicator centered in the bar, when not hidden.
@@ -121,7 +125,7 @@ export interface MenuBarProps {
   showGuides?: boolean
   /** Toggle the world axes. */
   onToggleAxes?: () => void
-  /** Reset the movable drawing axes to world identity (View ▸ Reset Axes). */
+  /** Reset the movable drawing axes to world identity (View ▸ Reset Drawing Axes). */
   onResetAxes?: () => void
   /** Toggle the ground grid. */
   onToggleGrid?: () => void
@@ -129,14 +133,14 @@ export interface MenuBarProps {
   onToggleGuides?: () => void
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
   onDeleteGuides?: () => void
-  /** View ▸ Section Plane's check state: true only when a section is BOTH
+  /** View ▸ Section Cut's check state: true only when a section is BOTH
    * placed and active — SketchUp's "Active Cut" — derived by the caller
    * from the section manager's own state (`getSectionState`), never a
    * locally-tracked shadow boolean. False (unchecked, and the item
    * disabled — see `sectionPlaneExists`) when no section is placed. */
   sectionPlaneChecked?: boolean
   /** Whether a section is placed at all, regardless of active/inactive —
-   * gates the View ▸ Section Plane item's enabled state (nothing to toggle
+   * gates the View ▸ Section Cut item's enabled state (nothing to toggle
    * with none placed). */
   sectionPlaneExists?: boolean
   /** Toggle the placed section plane's active (clipping) flag — View ▸
@@ -146,10 +150,12 @@ export interface MenuBarProps {
   onToggleSectionActive?: () => void
   /** Delete the current selection — whole Object/Group/Instance nodes only (Edit ▸ Delete). */
   onDelete?: () => void
-  /** Run an Edit-menu object command by action id (edit-group, edit-union, …)
-   *  — same dispatch ids the native macOS menu and the contextual dock use. */
+  /** Run a menu command by action id — the Object menu's object commands
+   *  (edit-group, edit-union, …; the `edit-` prefix is their historical wire
+   *  id) plus Edit ▸ Select All — same dispatch ids the native macOS menu
+   *  and the contextual dock use. */
   onEditAction?: (id: string) => void
-  /** Selection-gated availability for the Edit-menu object commands. */
+  /** Selection-gated availability for the Object-menu commands. */
   editGates?: {
     canGroup: boolean
     canUngroup: boolean
@@ -203,7 +209,7 @@ export interface MenuBarProps {
   /** Focus (raise) an open document window by its shell-assigned label. */
   onFocusWindow?: (label: string) => void
   /** Open the platform's Settings surface (the gear on the bar's trailing
-   *  edge + Window → Settings…): the Fluent in-app page on Windows, the
+   *  edge): the Fluent in-app page on Windows, the
    *  separate settings window on Linux, the modal on web. macOS reaches
    *  Settings through its native app menu instead (this bar renders nothing
    *  there). */
@@ -214,7 +220,7 @@ export interface MenuBarProps {
    *  the item hidden — on the web build and in package-manager desktop builds
    *  that compile the updater out. */
   onCheckForUpdates?: () => void
-  /** Switch to Shop Mode (Window → Shop Mode): the fullscreen touch-first
+  /** Switch to Shop Mode (View → Shop Mode): the fullscreen touch-first
    *  viewer/inspector shell (`shop/ShopApp.tsx`) — the mirror of ShopApp's
    *  own "Use full editor" entry. Omitted — and the item hidden — under
    *  Tauri (Shop Mode is web-only) and on any device that doesn't report a
@@ -223,9 +229,19 @@ export interface MenuBarProps {
    *  Same optional-prop-gates-visibility convention as `onCheckForUpdates`
    *  above. */
   onEnterShopMode?: () => void
+  /** Open the online user guide (Help → Hew Help). */
+  onOpenGuide?: () => void
+  /** Open the command palette (View → Command Palette…) — the same surface
+   *  `Cmd/Ctrl+/` opens; listed in the menu so it stays discoverable, matching
+   *  the native macOS View menu. */
+  onOpenPalette?: () => void
+  /** Help → Search: hand the typed text to the command palette (the app's
+   *  searchable index of every command). The native macOS Help menu gets the
+   *  system search field instead (set_as_help_menu_for_nsapp, main.rs). */
+  onHelpSearch?: (query: string) => void
 }
 
-type MenuId = 'file' | 'edit' | 'view' | 'draw' | 'tools' | 'camera' | 'window' | 'help' | null
+type MenuId = 'file' | 'edit' | 'object' | 'view' | 'draw' | 'tools' | 'camera' | 'window' | 'help' | null
 
 /** Shortcut display for a tool-registry entry — mac vs. the
  * Windows/Linux/Web bare-letter scheme, `undefined` when the tool has none. */
@@ -308,6 +324,10 @@ const MENU_ITEM_STYLE = (disabled: boolean): React.CSSProperties => ({
   cursor: disabled ? 'default' : 'pointer',
   fontFamily: 'var(--font-family-ui)',
   gap: '32px',
+  // Native menus never wrap a row; the dropdown widens instead (its
+  // absolutely-positioned box otherwise clamps to DROPDOWN_STYLE's minWidth
+  // and long rows like "Command Palette…" fold onto two lines).
+  whiteSpace: 'nowrap',
 })
 
 const SEPARATOR_STYLE: React.CSSProperties = {
@@ -426,8 +446,60 @@ function MenuItem({ label, shortcut, disabled = false, onClick }: MenuItemProps)
         if (!disabled) onClick()
       }}
     >
-      <span>{label}</span>
+      {/* Empty check gutter, same width as CheckMenuItem's — every row is
+          inset so labels align down the menu's left edge, whether or not
+          the row can carry a checkmark. */}
+      <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+        <span style={{ width: '12px' }} aria-hidden="true" />
+        {label}
+      </span>
       {shortcut !== undefined && <span style={SHORTCUT_STYLE}>{shortcut}</span>}
+    </div>
+  )
+}
+
+/** Help ▸ Search input — macOS-style: the first COMMITTED keystroke hands
+ * the text to the command palette (the app's searchable command index), so
+ * this stays one search, not two. Local state + composition guard: during
+ * IME composition nothing fires; the composed text hands off on
+ * compositionend. */
+function HelpSearchField({ onSearch }: { onSearch: (query: string) => void }) {
+  const [text, setText] = useState('')
+  const composing = useRef(false)
+  const handOff = (q: string) => {
+    if (q !== '') onSearch(q)
+  }
+  return (
+    <div style={{ padding: '2px 12px 6px' }}>
+      <input
+        aria-label="Search commands and help"
+        placeholder="Search"
+        autoFocus
+        value={text}
+        onCompositionStart={() => {
+          composing.current = true
+        }}
+        onCompositionEnd={(e) => {
+          composing.current = false
+          handOff((e.target as HTMLInputElement).value)
+        }}
+        onChange={(e) => {
+          setText(e.target.value)
+          if (!composing.current) handOff(e.target.value)
+        }}
+        style={{
+          width: '100%',
+          boxSizing: 'border-box',
+          padding: '3px 8px',
+          fontSize: 'var(--font-size-menu-item, 13px)',
+          fontFamily: 'var(--font-family-ui)',
+          color: 'var(--text-secondary, #ddd)',
+          background: 'var(--surface-bar, #1e1e1e)',
+          border: '1px solid var(--border-strong, #4a4a4a)',
+          borderRadius: 'var(--radius-control, 4px)',
+          outline: 'none',
+        }}
+      />
     </div>
   )
 }
@@ -447,7 +519,11 @@ function SubMenu({ label, children }: { label: string; children: React.ReactNode
           background: hovered ? 'var(--accent-tint-15, #3a5e9e)' : 'transparent',
         }}
       >
-        <span>{label}</span>
+        {/* Same empty check gutter as MenuItem — see its comment. */}
+        <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <span style={{ width: '12px' }} aria-hidden="true" />
+          {label}
+        </span>
         <span style={SHORTCUT_STYLE}>▸</span>
       </div>
       {hovered && (
@@ -464,7 +540,7 @@ interface CheckMenuItemProps {
   shortcut?: string
   checked: boolean
   /** Mirrors `MenuItem`'s `disabled` — greys the row out and swallows
-   * clicks. Used by View ▸ Section Plane while no section is placed
+   * clicks. Used by View ▸ Section Cut while no section is placed
    * (D3, section-plane-polish): toggling is a documented no-op then, so
    * disabling reads better than an always-clickable unchecked box. */
   disabled?: boolean
@@ -567,6 +643,9 @@ export function MenuBar({
   onOpenOnPhone,
   openOnPhoneDisabled = false,
   onEnterShopMode,
+  onOpenGuide,
+  onOpenPalette,
+  onHelpSearch,
   windowList,
   onFocusWindow,
 }: MenuBarProps) {
@@ -657,13 +736,13 @@ export function MenuBar({
               </SubMenu>
             )}
             <div style={SEPARATOR_STYLE} />
-            <MenuItem
-              label="Import…"
-              disabled={editGates?.canImport === false}
-              onClick={withClose(onImport)}
-            />
-            <MenuItem label="Export…" onClick={withClose(onExport)} />
-            <div style={SEPARATOR_STYLE} />
+            {/* HIG File order (mirrors the native macOS menu): Close + the
+                save block, then interchange (Import/Export), then sharing,
+                then Print… — with Exit still the absolute last item on
+                Windows/Linux. */}
+            {onClose !== undefined && (
+              <MenuItem label="Close" shortcut={`${mod}W`} onClick={withClose(onClose)} />
+            )}
             <MenuItem label="Save" shortcut={`${mod}S`} onClick={withClose(onSave)} />
             <MenuItem label="Save As…" shortcut={`${mod}⇧S`} onClick={withClose(onSaveAs)} />
             {onSaveToLibrary !== undefined && (
@@ -673,6 +752,13 @@ export function MenuBar({
                 onClick={withClose(onSaveToLibrary)}
               />
             )}
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem
+              label="Import…"
+              disabled={editGates?.canImport === false}
+              onClick={withClose(onImport)}
+            />
+            <MenuItem label="Export…" onClick={withClose(onExport)} />
             {onOpenOnPhone !== undefined && (
               <>
                 <div style={SEPARATOR_STYLE} />
@@ -683,16 +769,6 @@ export function MenuBar({
                 />
               </>
             )}
-            {onClose !== undefined && (
-              <>
-                <div style={SEPARATOR_STYLE} />
-                <MenuItem label="Close" shortcut={`${mod}W`} onClick={withClose(onClose)} />
-              </>
-            )}
-            {/* Windows/Linux: Exit must be the last item, so Print… sits
-                above it here. macOS never defines onExit (Quit lives in the
-                app menu instead), so Print… ends up last there — same rule
-                ("the platform guidelines put it"), different platforms. */}
             <div style={SEPARATOR_STYLE} />
             <MenuItem label="Print…" shortcut={`${mod}P`} onClick={withClose(onPrint)} />
             {onExit !== undefined && (
@@ -724,20 +800,34 @@ export function MenuBar({
             />
             <div style={SEPARATOR_STYLE} />
             <MenuItem
-              label="Select All"
-              shortcut={`${mod}A`}
-              onClick={withClose(() => onEditAction?.('edit-select-all'))}
-            />
-            <MenuItem
               label="Delete"
               shortcut="⌫"
               onClick={withClose(() => onDelete?.())}
             />
             <MenuItem
+              label="Select All"
+              shortcut={`${mod}A`}
+              onClick={withClose(() => onEditAction?.('edit-select-all'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem
               label="Delete Guide Lines"
               onClick={withClose(() => onDeleteGuides?.())}
             />
-            <div style={SEPARATOR_STYLE} />
+          </div>
+        )}
+      </div>
+
+      {/* Object menu — commands acting on the selected Objects/Groups/
+          Components (containers, component lifecycle, booleans). Split out
+          of Edit so the HIG-standard Edit menu stays small and future object
+          commands have an obvious home; action ids keep their historical
+          `edit-` prefix (wire ids, not user-visible text). Mirrors the
+          native macOS Object menu. */}
+      <div style={{ position: 'relative', height: '100%' }}>
+        <MenuTrigger id="object" label="Object" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
+        {openMenu === 'object' && (
+          <div style={DROPDOWN_STYLE}>
             <MenuItem
               label="Group"
               shortcut={`${mod}G`}
@@ -757,6 +847,11 @@ export function MenuBar({
               onClick={withClose(() => onEditAction?.('edit-make-component'))}
             />
             <MenuItem
+              label="Make Unique"
+              disabled={!(editGates?.canMakeUnique ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-make-unique'))}
+            />
+            <MenuItem
               label="Place Copy"
               disabled={!(editGates?.canPlaceCopy ?? false)}
               onClick={withClose(() => onEditAction?.('edit-place-copy'))}
@@ -765,11 +860,6 @@ export function MenuBar({
               label="Explode"
               disabled={!(editGates?.canExplode ?? false)}
               onClick={withClose(() => onEditAction?.('edit-explode'))}
-            />
-            <MenuItem
-              label="Make Unique"
-              disabled={!(editGates?.canMakeUnique ?? false)}
-              onClick={withClose(() => onEditAction?.('edit-make-unique'))}
             />
             <div style={SEPARATOR_STYLE} />
             <MenuItem
@@ -802,7 +892,7 @@ export function MenuBar({
               onClick={withClose(() => onToggleAxes?.())}
             />
             <MenuItem
-              label="Reset Axes"
+              label="Reset Drawing Axes"
               onClick={withClose(() => onResetAxes?.())}
             />
             <CheckMenuItem
@@ -815,14 +905,53 @@ export function MenuBar({
               checked={showGuides}
               onClick={withClose(() => onToggleGuides?.())}
             />
+            {/* "Section Cut", not "Section Plane": the TOOL that places the
+                plane keeps that name under Tools; this toggle clips/unclips
+                the placed cut — SketchUp's own View ▸ Section Cuts vs
+                Tools ▸ Section Plane naming split. */}
             <CheckMenuItem
-              label="Section Plane"
+              label="Section Cut"
               checked={sectionPlaneChecked}
               disabled={!sectionPlaneExists}
               onClick={withClose(() => onToggleSectionActive?.())}
             />
             <div style={SEPARATOR_STYLE} />
+            {/* Panel toggles — HIG puts show/hide of interface panels in the
+                View menu (Window holds actual windows). The Scenes panel
+                lives inside the Scenes submenu below, keeping that whole
+                feature in one place. */}
+            <CheckMenuItem
+              label="Model Info"
+              shortcut={`⇧${mod}I`}
+              checked={showModelInfo}
+              onClick={withClose(() => onToggleModelInfo?.())}
+            />
+            <CheckMenuItem
+              label="Object Info"
+              shortcut={`⇧${mod}O`}
+              checked={showObjectInfo}
+              onClick={withClose(() => onToggleObjectInfo?.())}
+            />
+            <CheckMenuItem
+              label="Materials"
+              shortcut={`⇧${mod}C`}
+              checked={showMaterials}
+              onClick={withClose(() => onToggleMaterials?.())}
+            />
+            <CheckMenuItem
+              label="Tags"
+              shortcut={`⇧${mod}T`}
+              checked={showTags}
+              onClick={withClose(() => onToggleTags?.())}
+            />
+            <div style={SEPARATOR_STYLE} />
             <SubMenu label="Scenes">
+              <CheckMenuItem
+                label="Scenes Panel"
+                checked={showScenes}
+                onClick={withClose(() => onToggleScenes?.())}
+              />
+              <div style={SEPARATOR_STYLE} />
               <MenuItem label="Add Scene" onClick={withClose(() => onScenesAdd?.())} />
               <MenuItem
                 label="Update Scene"
@@ -849,155 +978,19 @@ export function MenuBar({
                 onClick={withClose(() => onToggleSceneTransitions?.())}
               />
             </SubMenu>
-          </div>
-        )}
-      </div>
-
-      {/* Draw menu */}
-      <div style={{ position: 'relative', height: '100%' }}>
-        <MenuTrigger id="draw" label="Draw" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
-        {openMenu === 'draw' && (
-          <div style={DROPDOWN_STYLE}>
-            <CheckMenuItem
-              label="Rectangle"
-              shortcut={keyFor('Rectangle')}
-              checked={activeTool === 'Rectangle'}
-              onClick={withClose(() => onSelectTool?.('Rectangle'))}
-            />
-            <CheckMenuItem
-              label="Circle"
-              shortcut={keyFor('Circle')}
-              checked={activeTool === 'Circle'}
-              onClick={withClose(() => onSelectTool?.('Circle'))}
-            />
-            <CheckMenuItem
-              label="Polygon"
-              shortcut={keyFor('Polygon')}
-              checked={activeTool === 'Polygon'}
-              onClick={withClose(() => onSelectTool?.('Polygon'))}
-            />
-            <CheckMenuItem
-              label="Arc"
-              shortcut={keyFor('Arc')}
-              checked={activeTool === 'Arc'}
-              onClick={withClose(() => onSelectTool?.('Arc'))}
-            />
-            <div style={{ borderTop: '1px solid var(--border-strong)', margin: '4px 0' }} />
-            <CheckMenuItem
-              label="Line"
-              shortcut={keyFor('Line')}
-              checked={activeTool === 'Line'}
-              onClick={withClose(() => onSelectTool?.('Line'))}
-            />
-            <div style={{ borderTop: '1px solid var(--border-strong)', margin: '4px 0' }} />
-            <MenuItem
-              label="3D Text…"
-              disabled={editGates?.canDrawText === false}
-              onClick={withClose(() => onDrawText?.())}
-            />
-          </div>
-        )}
-      </div>
-
-      {/* Tools menu */}
-      <div style={{ position: 'relative', height: '100%' }}>
-        <MenuTrigger id="tools" label="Tools" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
-        {openMenu === 'tools' && (
-          <div style={DROPDOWN_STYLE}>
-            <CheckMenuItem
-              label="Select"
-              shortcut={keyFor('Select')}
-              checked={activeTool === 'Select'}
-              onClick={withClose(() => onSelectTool?.('Select'))}
-            />
-            <CheckMenuItem
-              label="Paint"
-              shortcut={keyFor('Paint')}
-              checked={activeTool === 'Paint'}
-              onClick={withClose(() => onSelectTool?.('Paint'))}
-            />
-            <CheckMenuItem
-              label="Position Texture"
-              checked={activeTool === 'Position Texture'}
-              onClick={withClose(() => onSelectTool?.('Position Texture'))}
-            />
-            <CheckMenuItem
-              label="Move"
-              shortcut={keyFor('Move')}
-              checked={activeTool === 'Move'}
-              onClick={withClose(() => onSelectTool?.('Move'))}
-            />
-            <CheckMenuItem
-              label="Rotate"
-              shortcut={keyFor('Rotate')}
-              checked={activeTool === 'Rotate'}
-              onClick={withClose(() => onSelectTool?.('Rotate'))}
-            />
-            <CheckMenuItem
-              label="Scale"
-              shortcut={keyFor('Scale')}
-              checked={activeTool === 'Scale'}
-              onClick={withClose(() => onSelectTool?.('Scale'))}
-            />
-            <CheckMenuItem
-              label="Push/Pull"
-              shortcut={keyFor('Push/Pull')}
-              checked={activeTool === 'Push/Pull'}
-              onClick={withClose(() => onSelectTool?.('Push/Pull'))}
-            />
-            <CheckMenuItem
-              label="Follow Me"
-              checked={activeTool === 'Follow Me'}
-              onClick={withClose(() => onSelectTool?.('Follow Me'))}
-            />
-            <CheckMenuItem
-              label="Offset"
-              shortcut={keyFor('Offset')}
-              checked={activeTool === 'Offset'}
-              onClick={withClose(() => onSelectTool?.('Offset'))}
-            />
-            <div style={SEPARATOR_STYLE} />
-            <CheckMenuItem
-              label="Tape Measure"
-              shortcut={keyFor('Tape Measure')}
-              checked={activeTool === 'Tape Measure'}
-              onClick={withClose(() => onSelectTool?.('Tape Measure'))}
-            />
-            <CheckMenuItem
-              label="Dimension"
-              checked={activeTool === 'Dimension'}
-              onClick={withClose(() => onSelectTool?.('Dimension'))}
-            />
-            <CheckMenuItem
-              label="Protractor"
-              checked={activeTool === 'Protractor'}
-              onClick={withClose(() => onSelectTool?.('Protractor'))}
-            />
-            <CheckMenuItem
-              label="Slice"
-              checked={activeTool === 'Slice'}
-              onClick={withClose(() => onSelectTool?.('Slice'))}
-            />
-            <CheckMenuItem
-              label="Section Plane"
-              checked={activeTool === 'Section Plane'}
-              onClick={withClose(() => onSelectTool?.('Section Plane'))}
-            />
-            <CheckMenuItem
-              label="Edit Vertex"
-              checked={activeTool === 'Edit Vertex'}
-              onClick={withClose(() => onSelectTool?.('Edit Vertex'))}
-            />
-            <CheckMenuItem
-              label="Axes"
-              checked={activeTool === 'Axes'}
-              onClick={withClose(() => onSelectTool?.('Axes'))}
-            />
-            <CheckMenuItem
-              label="Text"
-              checked={activeTool === 'Text'}
-              onClick={withClose(() => onSelectTool?.('Text'))}
-            />
+            {(onOpenPalette !== undefined || onEnterShopMode !== undefined) && (
+              <div style={SEPARATOR_STYLE} />
+            )}
+            {onOpenPalette !== undefined && (
+              <MenuItem
+                label="Command Palette…"
+                shortcut={`${mod}/`}
+                onClick={withClose(onOpenPalette)}
+              />
+            )}
+            {onEnterShopMode !== undefined && (
+              <MenuItem label="Shop Mode" onClick={withClose(() => onEnterShopMode())} />
+            )}
           </div>
         )}
       </div>
@@ -1080,83 +1073,230 @@ export function MenuBar({
         )}
       </div>
 
-      {/* Window menu */}
+      {/* Draw menu */}
       <div style={{ position: 'relative', height: '100%' }}>
-        <MenuTrigger id="window" label="Window" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
-        {openMenu === 'window' && (
+        <MenuTrigger id="draw" label="Draw" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
+        {openMenu === 'draw' && (
           <div style={DROPDOWN_STYLE}>
+            {/* Stroke tools (open paths), then closed shapes — future curve
+                tools join the first group, new primitives the second. */}
             <CheckMenuItem
-              label="Model Info"
-              shortcut={`⇧${mod}I`}
-              checked={showModelInfo}
-              onClick={withClose(() => onToggleModelInfo?.())}
+              label="Line"
+              shortcut={keyFor('Line')}
+              checked={activeTool === 'Line'}
+              onClick={withClose(() => onSelectTool?.('Line'))}
             />
             <CheckMenuItem
-              label="Materials"
-              shortcut={`⇧${mod}C`}
-              checked={showMaterials}
-              onClick={withClose(() => onToggleMaterials?.())}
+              label="Arc"
+              shortcut={keyFor('Arc')}
+              checked={activeTool === 'Arc'}
+              onClick={withClose(() => onSelectTool?.('Arc'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <CheckMenuItem
+              label="Rectangle"
+              shortcut={keyFor('Rectangle')}
+              checked={activeTool === 'Rectangle'}
+              onClick={withClose(() => onSelectTool?.('Rectangle'))}
             />
             <CheckMenuItem
-              label="Tags"
-              shortcut={`⇧${mod}T`}
-              checked={showTags}
-              onClick={withClose(() => onToggleTags?.())}
+              label="Circle"
+              shortcut={keyFor('Circle')}
+              checked={activeTool === 'Circle'}
+              onClick={withClose(() => onSelectTool?.('Circle'))}
             />
             <CheckMenuItem
-              label="Scenes"
-              checked={showScenes}
-              onClick={withClose(() => onToggleScenes?.())}
+              label="Polygon"
+              shortcut={keyFor('Polygon')}
+              checked={activeTool === 'Polygon'}
+              onClick={withClose(() => onSelectTool?.('Polygon'))}
             />
-            <CheckMenuItem
-              label="Object Info"
-              shortcut={`⇧${mod}O`}
-              checked={showObjectInfo}
-              onClick={withClose(() => onToggleObjectInfo?.())}
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem
+              label="3D Text…"
+              disabled={editGates?.canDrawText === false}
+              onClick={withClose(() => onDrawText?.())}
             />
-            <CheckMenuItem
-              label="Library"
-              shortcut={`⇧${mod}L`}
-              checked={showLibrary}
-              onClick={withClose(() => onToggleLibrary?.())}
-            />
-            {onEnterShopMode !== undefined && (
-              <>
-                <div style={SEPARATOR_STYLE} />
-                <MenuItem label="Shop Mode" onClick={withClose(() => onEnterShopMode())} />
-              </>
-            )}
-            {windowList !== undefined && windowList.length > 0 && (
-              <>
-                <div style={SEPARATOR_STYLE} />
-                {windowList.map((w) => (
-                  <CheckMenuItem
-                    key={w.label}
-                    label={windowMenuLabel(w.title)}
-                    checked={w.focused}
-                    onClick={withClose(() => onFocusWindow?.(w.label))}
-                  />
-                ))}
-              </>
-            )}
           </div>
         )}
       </div>
+
+      {/* Tools menu */}
+      <div style={{ position: 'relative', height: '100%' }}>
+        <MenuTrigger id="tools" label="Tools" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
+        {openMenu === 'tools' && (
+          <div style={DROPDOWN_STYLE}>
+            {/* Grouped by job (mirrors the native menu): select, transform,
+                shape geometry, measure & annotate, materials, model-space
+                utilities — future tools slot into their group. */}
+            <CheckMenuItem
+              label="Select"
+              shortcut={keyFor('Select')}
+              checked={activeTool === 'Select'}
+              onClick={withClose(() => onSelectTool?.('Select'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <CheckMenuItem
+              label="Move"
+              shortcut={keyFor('Move')}
+              checked={activeTool === 'Move'}
+              onClick={withClose(() => onSelectTool?.('Move'))}
+            />
+            <CheckMenuItem
+              label="Rotate"
+              shortcut={keyFor('Rotate')}
+              checked={activeTool === 'Rotate'}
+              onClick={withClose(() => onSelectTool?.('Rotate'))}
+            />
+            <CheckMenuItem
+              label="Scale"
+              shortcut={keyFor('Scale')}
+              checked={activeTool === 'Scale'}
+              onClick={withClose(() => onSelectTool?.('Scale'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <CheckMenuItem
+              label="Push/Pull"
+              shortcut={keyFor('Push/Pull')}
+              checked={activeTool === 'Push/Pull'}
+              onClick={withClose(() => onSelectTool?.('Push/Pull'))}
+            />
+            <CheckMenuItem
+              label="Follow Me"
+              checked={activeTool === 'Follow Me'}
+              onClick={withClose(() => onSelectTool?.('Follow Me'))}
+            />
+            <CheckMenuItem
+              label="Offset"
+              shortcut={keyFor('Offset')}
+              checked={activeTool === 'Offset'}
+              onClick={withClose(() => onSelectTool?.('Offset'))}
+            />
+            <CheckMenuItem
+              label="Slice"
+              checked={activeTool === 'Slice'}
+              onClick={withClose(() => onSelectTool?.('Slice'))}
+            />
+            <CheckMenuItem
+              label="Edit Vertex"
+              checked={activeTool === 'Edit Vertex'}
+              onClick={withClose(() => onSelectTool?.('Edit Vertex'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <CheckMenuItem
+              label="Tape Measure"
+              shortcut={keyFor('Tape Measure')}
+              checked={activeTool === 'Tape Measure'}
+              onClick={withClose(() => onSelectTool?.('Tape Measure'))}
+            />
+            <CheckMenuItem
+              label="Protractor"
+              checked={activeTool === 'Protractor'}
+              onClick={withClose(() => onSelectTool?.('Protractor'))}
+            />
+            <CheckMenuItem
+              label="Dimension"
+              checked={activeTool === 'Dimension'}
+              onClick={withClose(() => onSelectTool?.('Dimension'))}
+            />
+            <CheckMenuItem
+              label="Text"
+              checked={activeTool === 'Text'}
+              onClick={withClose(() => onSelectTool?.('Text'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <CheckMenuItem
+              label="Paint"
+              shortcut={keyFor('Paint')}
+              checked={activeTool === 'Paint'}
+              onClick={withClose(() => onSelectTool?.('Paint'))}
+            />
+            <CheckMenuItem
+              label="Position Texture"
+              checked={activeTool === 'Position Texture'}
+              onClick={withClose(() => onSelectTool?.('Position Texture'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <CheckMenuItem
+              label="Drawing Axes"
+              checked={activeTool === 'Drawing Axes'}
+              onClick={withClose(() => onSelectTool?.('Drawing Axes'))}
+            />
+            <CheckMenuItem
+              label="Section Plane"
+              checked={activeTool === 'Section Plane'}
+              onClick={withClose(() => onSelectTool?.('Section Plane'))}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Window menu — actual windows (HIG): the Library (visually and
+          behaviorally a window, not a tray pane — a real second window on
+          desktop) and the open-windows list pushed by the desktop shell.
+          The pane toggles that used to live here are in View now; with
+          neither a Library nor a windowList the menu vanishes entirely. */}
+      {(onToggleLibrary !== undefined || (windowList !== undefined && windowList.length > 0)) && (
+        <div style={{ position: 'relative', height: '100%' }}>
+          <MenuTrigger id="window" label="Window" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
+          {openMenu === 'window' && (
+            <div style={DROPDOWN_STYLE}>
+              {onToggleLibrary !== undefined && (
+                <CheckMenuItem
+                  label="Library"
+                  shortcut={`⇧${mod}L`}
+                  checked={showLibrary}
+                  onClick={withClose(() => onToggleLibrary())}
+                />
+              )}
+              {windowList !== undefined && windowList.length > 0 && (
+                <>
+                  {onToggleLibrary !== undefined && <div style={SEPARATOR_STYLE} />}
+                  {windowList.map((w) => (
+                    <CheckMenuItem
+                      key={w.label}
+                      label={windowMenuLabel(w.title)}
+                      checked={w.focused}
+                      onClick={withClose(() => onFocusWindow?.(w.label))}
+                    />
+                  ))}
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Help menu */}
       <div style={{ position: 'relative', height: '100%' }}>
         <MenuTrigger id="help" label="Help" openMenu={openMenu} onToggle={toggle} onActivate={activate} />
         {openMenu === 'help' && (
           <div style={DROPDOWN_STYLE}>
+            {onHelpSearch !== undefined && (
+              <>
+                <HelpSearchField
+                  onSearch={(q) => {
+                    close()
+                    onHelpSearch(q)
+                  }}
+                />
+                <div style={SEPARATOR_STYLE} />
+              </>
+            )}
+            {onOpenGuide !== undefined && (
+              <>
+                <MenuItem label="Hew Help" onClick={withClose(onOpenGuide)} />
+                <div style={SEPARATOR_STYLE} />
+              </>
+            )}
+            <MenuItem
+              label="Report Bug…"
+              onClick={withClose(() => onReportBug?.())}
+            />
             <CheckMenuItem
               label="Debug Log"
               checked={showDebugLog}
               onClick={withClose(() => onToggleDebugLog?.())}
-            />
-            <div style={SEPARATOR_STYLE} />
-            <MenuItem
-              label="Report Bug…"
-              onClick={withClose(() => onReportBug?.())}
             />
             {onCheckForUpdates !== undefined && (
               <>
@@ -1224,7 +1364,7 @@ export function MenuBar({
       <div style={{ flex: 1 }} onMouseDown={close} />
 
       {/* Settings gear on the trailing edge — the modern menu-bar convention
-          for reaching Settings. Same target as Window ▸ Settings… */}
+          for reaching Settings (macOS reaches it via the app menu). */}
       {onOpenSettings !== undefined && (
         <GearButton onClick={onOpenSettings} shortcutHint={`${mod},`} />
       )}

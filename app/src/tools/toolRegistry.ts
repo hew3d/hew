@@ -78,8 +78,8 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Protractor', macKey: '', winKey: '' },
   { name: 'Slice', macKey: '', winKey: '' },
   { name: 'Edit Vertex', macKey: '', winKey: '' },
-  // Axes: SketchUp assigns no default key either.
-  { name: 'Axes', macKey: '', winKey: '' },
+  // Drawing Axes: SketchUp assigns no default key either.
+  { name: 'Drawing Axes', macKey: '', winKey: '' },
   // Text: leader-text annotations (docs/design/dimensions-text.md) — menu/
   // palette-only, like Protractor/Slice/Edit Vertex above.
   { name: 'Text', macKey: '', winKey: '' },

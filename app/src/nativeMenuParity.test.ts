@@ -163,6 +163,8 @@ describe('native menu parity — non-tool commands', () => {
     'reset-axes': 'view-reset-axes',
     // File ▸ Print… (docs/design/printing.md §11) — ⌘P native accelerator.
     print: 'file-print',
+    // Help ▸ Hew Help — opens the online user guide via the opener plugin.
+    'open-guide': 'help-guide',
   }
 
   it('every mapped id is built as a native menu item (plain MenuItemBuilder — not checkable)', () => {

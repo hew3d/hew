@@ -31,6 +31,9 @@ export interface CommandPaletteProps {
    * has-selection flag). A gated entry whose flag is false (or missing)
    * renders disabled — listed but not runnable, like a greyed menu item. */
   gates?: Partial<Record<PaletteGate, boolean>>
+  /** Query pre-filled when the palette opens (Help ▸ Search hands its typed
+   * text over). Empty/omitted = the usual clean slate. */
+  initialQuery?: string
 }
 
 const GROUP_ORDER: PaletteGroup[] = ['Tools', 'Actions', 'Model', 'Library']
@@ -50,7 +53,7 @@ function RowIcon({ entry }: { entry: PaletteEntry }) {
   )
 }
 
-export function CommandPalette({ open, onClose, onRun, extraEntries, gates }: CommandPaletteProps) {
+export function CommandPalette({ open, onClose, onRun, extraEntries, gates, initialQuery }: CommandPaletteProps) {
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [recentIds, setRecentIds] = useState<string[]>(() => getRecent())
@@ -58,13 +61,17 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates }: Co
 
   useEffect(() => subscribeRecent(setRecentIds), [])
 
-  // Reset to a clean slate every time the palette opens, and focus the input.
+  // Reset every time the palette opens — to the seed if one was handed
+  // over (Help ▸ Search), else a clean slate — and focus the input.
+  // `initialQuery` deliberately isn't a dependency: it only matters at the
+  // moment of opening.
   useEffect(() => {
     if (!open) return
-    setQuery('')
+    setQuery(initialQuery ?? '')
     setSelectedIndex(0)
     const id = requestAnimationFrame(() => inputRef.current?.focus())
     return () => cancelAnimationFrame(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
 
   const allEntries = useMemo(

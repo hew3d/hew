@@ -211,7 +211,7 @@ below.
   the same gesture at the top level still resizes the whole model
 - Movable drawing axes: place and orient a document-level frame that axis
   locks, draw planes, inference snapping, axis colors, and the rendered
-  triad all follow, with Reset Axes to return to the world frame
+  triad all follow, with Reset Drawing Axes to return to the world frame
 
 ### Inference & precision
 

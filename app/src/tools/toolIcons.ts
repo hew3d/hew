@@ -67,7 +67,7 @@ export type ToolName =
   | 'Slice'
   | 'Section Plane'
   | 'Edit Vertex'
-  | 'Axes'
+  | 'Drawing Axes'
   | 'Text'
   | 'Orbit'
   | 'Pan'
@@ -99,7 +99,7 @@ export const TOOL_ICON_SVG: Record<ToolName, string> = {
   'Slice': contentCutSvg,
   'Section Plane': verticalSplitSvg,
   'Edit Vertex': dragPanSvg,
-  'Axes': lineAxisSvg,
+  'Drawing Axes': lineAxisSvg,
   'Text': textFieldsSvg,
   'Orbit': threeDRotationSvg,
   'Pan': panToolSvg,
@@ -134,7 +134,7 @@ const CURSOR_HOTSPOT: Record<ToolName, { x: number; y: number }> = {
   'Slice': { x: 0.1, y: 0.9 },
   'Section Plane': { x: 0.1, y: 0.9 },
   'Edit Vertex': { x: 0.5, y: 0.5 },
-  'Axes': { x: 0.1, y: 0.9 },
+  'Drawing Axes': { x: 0.1, y: 0.9 },
   'Text': { x: 0.1, y: 0.9 },
   'Orbit': { x: 0.5, y: 0.5 },
   'Pan': { x: 0.5, y: 0.5 },
