@@ -5,7 +5,7 @@ golden PNG. Everything else in `e2e/` asserts *logic* (state hashes, object
 counts) via the harness; this catches what logic can't see: shading,
 tessellation, and camera drift in the WebGL viewport.
 
-Kept deliberately tiny (docs/DEVELOPMENT.md, strategy 3 — "visual goldens, sparingly").
+Kept deliberately tiny (docs/dev/DEVELOPMENT.md, strategy 3 — "visual goldens, sparingly").
 Most regressions belong one layer down, in the harness specs.
 
 ## How it's pinned

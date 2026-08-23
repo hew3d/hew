@@ -2,13 +2,13 @@
 //   REGENERATE_API_ARTIFACTS=1 cargo test -p api --test generate_artifacts
 //
 // A typed client over a caller-supplied transport for the Hew API
-// (docs/HEW_API.md — the normative reference; §9 is this file's
+// (docs/agents/HEW_API.md — the normative reference; §9 is this file's
 // contract). Every `Params`/`Result` pair and every method below is
 // derived mechanically from the command registry in `crates/api`,
 // which is their single source of truth — this file has no
 // hand-maintained copy of a command's shape.
 
-/** One JSON-RPC 2.0 request frame (docs/HEW_API.md §4.1). `params` is
+/** One JSON-RPC 2.0 request frame (docs/agents/HEW_API.md §4.1). `params` is
  * always a single object, never positional. */
 export interface JsonRpcRequest {
   jsonrpc: '2.0'
@@ -35,7 +35,7 @@ export interface JsonRpcErrorObject {
 
 /** The transport this client dispatches every envelope through — an
  * in-process call, the desktop app's local socket, or `hew-cli`'s
- * stdio MCP adapter all satisfy this one shape (docs/HEW_API.md
+ * stdio MCP adapter all satisfy this one shape (docs/agents/HEW_API.md
  * §11). The client owns request framing (`id` assignment) and
  * result/error unwrapping; the transport owns only the wire. */
 export interface HewTransport {
@@ -87,7 +87,7 @@ export class HewApiError extends Error {
 }
 
 /** A command whose registry schema is still the scaffold placeholder
- * (an untightened `{"type": "object"}` — docs/HEW_API.md §14's
+ * (an untightened `{"type": "object"}` — docs/agents/HEW_API.md §14's
  * burn-down posture) falls back to this rather than a fabricated
  * shape. */
 export type UnspecifiedShape = Record<string, unknown>

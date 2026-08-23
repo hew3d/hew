@@ -1,4 +1,4 @@
-//! STL, 3MF, GLB, and USDZ writers for `hew.doc.export` (docs/HEW_API.md
+//! STL, 3MF, GLB, and USDZ writers for `hew.doc.export` (docs/agents/HEW_API.md
 //! §7, `format` "stl" | "3mf" | "glb" (alias "gltf") | "usdz") — shared by
 //! every host
 //! that implements the command (`crates/hew-cli`'s `CliHost`,
@@ -75,7 +75,7 @@
 //! normalized against exactly this by writing a session-closed clone
 //! instead of the live document. Every entry point below opens with
 //! `Document::session_closed` for the same reason `save_for_persistence`
-//! does — a live export must see what a live save sees (docs/HEW_API.md:
+//! does — a live export must see what a live save sees (docs/agents/HEW_API.md:
 //! "the same command produces the same file headless or live").
 
 use kernel::{Document, FaceId, MaterialId, MaterialPalette, Object, Point3, Rgba8};
@@ -533,10 +533,10 @@ fn write_binary_stl(soup: &[f64]) -> Vec<u8> {
 /// `MODEL_XMLNS`).
 const MODEL_3MF_XMLNS: &str = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02";
 
-/// Exports `doc` to a 3MF container (docs/HEW_API.md §7): one `<object>`
+/// Exports `doc` to a 3MF container (docs/agents/HEW_API.md §7): one `<object>`
 /// mesh per exported solid, vertices deduplicated per object (bit-identical
 /// positions only, never a tolerance), `unit="meter"` — Hew's own world
-/// frame (docs/HEW_API.md §4.3: "+Z up… always"), so unlike the retired
+/// frame (docs/agents/HEW_API.md §4.3: "+Z up… always"), so unlike the retired
 /// `threeMfExport.ts`'s millimeter convention there is no scale to bake and
 /// 3MF stays natively Z-up. Colors ride core-spec `<basematerials>` — see
 /// [`build_3mf_objects`] for the exact dedup/default/override rule, carried
@@ -813,7 +813,7 @@ fn write_3mf(solids: &[ExportSolid]) -> Option<Vec<u8>> {
 
 // -------------------------------------------------------------------- GLB
 
-/// Exports `doc` to binary glTF 2.0 (docs/HEW_API.md §7): hand-rolled, no
+/// Exports `doc` to binary glTF 2.0 (docs/agents/HEW_API.md §7): hand-rolled, no
 /// new dependency for the container itself — the retired `gltfExport.ts`
 /// leaned entirely on three's `GLTFExporter`, which has no headless
 /// equivalent here, so this writes the JSON + BIN chunk container directly
@@ -828,7 +828,7 @@ fn write_3mf(solids: &[ExportSolid]) -> Option<Vec<u8>> {
 /// viewport falls back to). Positions (and, for a textured primitive, UVs)
 /// are welded per primitive the same way 3MF's vertices are.
 ///
-/// Hew's world frame is +Z up (docs/HEW_API.md §4.3); glTF's convention —
+/// Hew's world frame is +Z up (docs/agents/HEW_API.md §4.3); glTF's convention —
 /// and `crates/gltf-import`'s own assumption on the way back in
 /// (`mesh_heal::y_up_to_z_up`, a +90° rotation about +X) — is +Y up. This
 /// writer applies that rotation's exact inverse, `(x, y, z) → (x, z, −y)`,

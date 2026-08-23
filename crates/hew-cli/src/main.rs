@@ -1,11 +1,11 @@
 //! `hew-cli`: standalone MCP adapter, script runner, and one-shot dispatch
-//! (docs/HEW_API.md §12). This binary is a thin argv shell — every
+//! (docs/agents/HEW_API.md §12). This binary is a thin argv shell — every
 //! subcommand's real logic lives in the `hew_cli` library
 //! (`crates/hew-cli/src/lib.rs`) so `tests/cli.rs` can call it directly.
 //!
 //! Headless is the default. `--live [--launch] [--instance <pid>]`
 //! discovers and forwards to a running desktop instance instead
-//! (docs/HEW_API.md §11.2, §12) — see [`hew_cli::live`].
+//! (docs/agents/HEW_API.md §11.2, §12) — see [`hew_cli::live`].
 
 use hew_cli::live::LiveOptions;
 use std::path::PathBuf;
@@ -65,7 +65,7 @@ ENVIRONMENT
 LEARN MORE
     hew-cli <command> --help    what each command takes, and an example
     docs/API_GUIDE.md           how to drive Hew, with worked examples
-    docs/HEW_API.md             the protocol itself
+    docs/agents/HEW_API.md             the protocol itself
 "#
 );
 
@@ -209,7 +209,7 @@ fn help_requested(args: &[String], page: &str) -> bool {
 }
 
 /// The `--live`/`--launch`/`--instance <pid>` flags, shared by all three
-/// subcommands (docs/HEW_API.md §12).
+/// subcommands (docs/agents/HEW_API.md §12).
 #[derive(Default)]
 struct LiveFlags {
     live: bool,

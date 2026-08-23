@@ -1,5 +1,5 @@
 /**
- * Canvas-driving helper (docs/DEVELOPMENT.md, strategy 2 — "pixel interaction").
+ * Canvas-driving helper (docs/dev/DEVELOPMENT.md, strategy 2 — "pixel interaction").
  *
  * The viewport is an opaque WebGL canvas, so DOM selectors cannot "click the
  * edge." The deterministic way to drive a real pixel interaction is:

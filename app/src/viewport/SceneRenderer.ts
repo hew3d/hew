@@ -1841,7 +1841,7 @@ export class SceneRenderer {
     const wasSelected = this.selectedObjectIds.includes(objectId)
 
     // Always remove the old group and rebuild — tessellation cache means this
-    // is cheap (docs/DEVELOPMENT.md B4: cache invalidated on mutation).
+    // is cheap (docs/dev/DEVELOPMENT.md B4: cache invalidated on mutation).
     if (this.objectGroups.has(objectId)) {
       this._removeObjectGroup(objectId)
     }

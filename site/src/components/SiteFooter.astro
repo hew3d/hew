@@ -4,8 +4,8 @@ const year = new Date().getFullYear();
 const navItems = [
   { label: 'Download', href: '/download' },
   { label: 'Learn', href: '/learn' },
+  { label: 'Compare', href: '/compare' },
   { label: 'FAQ', href: '/faq' },
-  { label: 'Blog', href: '/blog' },
 ];
 ---
 
@@ -23,8 +23,8 @@ const navItems = [
         <span class="brand-word">Hew</span>
       </a>
       <p class="tagline">
-        A solids-first 3D modeler with SketchUp's feel — open source, open
-        format.
+        Free, open-source 3D modeling the SketchUp way. Native on macOS,
+        Windows, and Linux, and in your browser.
       </p>
       <a class="try-link" href="https://app.hew3d.com">Try in browser →</a>
     </div>
@@ -53,6 +53,11 @@ const navItems = [
 
   <div class="container bottom">
     <p>© {year} Hew.</p>
+    <p class="legal">
+      SketchUp is a trademark of Trimble Inc. Other product names are
+      trademarks of their respective owners. Hew is an independent project
+      and is not affiliated with, sponsored by, or endorsed by any of them.
+    </p>
   </div>
 </footer>
 
@@ -135,6 +140,11 @@ const navItems = [
     border-top: 1px solid var(--color-border);
     font-size: 0.8125rem;
     color: var(--color-text-muted);
+  }
+
+  .legal {
+    margin-top: var(--space-2xs);
+    max-width: 60ch;
   }
 
   @media (max-width: 40rem) {

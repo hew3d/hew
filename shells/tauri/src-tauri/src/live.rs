@@ -1,4 +1,4 @@
-//! `--live` (docs/HEW_API.md §11.2): the desktop half of the local socket
+//! `--live` (docs/agents/HEW_API.md §11.2): the desktop half of the local socket
 //! transport. This module owns exactly the transport and the token gate —
 //! it never touches a `kernel::Document` or an `api::Connection` itself
 //! (those live in `crates/wasm-api`, inside the webview's WASM sandbox).
@@ -32,7 +32,7 @@
 //! `tauri`/`reqwest`): one accepted connection is cheap enough as an OS
 //! thread that an async runtime bridge buys nothing here, on either
 //! platform. The 256-bit discovery token is read straight from
-//! `/dev/urandom` on unix (the CSPRNG source `docs/HEW_API.md` §11.2 calls
+//! `/dev/urandom` on unix (the CSPRNG source `docs/agents/HEW_API.md` §11.2 calls
 //! out as acceptable there) and via `BCryptGenRandom` on Windows — no
 //! `rand`/`getrandom` dependency needed on either.
 //!
@@ -115,7 +115,7 @@ struct ReplyPayload {
 
 // ------------------------------------------------------------- discovery
 
-/// The runtime directory files live under (docs/HEW_API.md §11.2), mirroring
+/// The runtime directory files live under (docs/agents/HEW_API.md §11.2), mirroring
 /// `crates/hew-cli/src/live.rs`'s `runtime_dir()` exactly (field names,
 /// fallback order, and the `HEW_RUNTIME_DIR` test/dev override) — the two
 /// live independently (this crate cannot depend on `hew-cli`, and
@@ -199,7 +199,7 @@ fn instances_dir() -> PathBuf {
 }
 
 /// 256 bits of randomness from `/dev/urandom`, hex-encoded — the discovery
-/// token (docs/HEW_API.md §11.2). `/dev/urandom` is a CSPRNG on every unix
+/// token (docs/agents/HEW_API.md §11.2). `/dev/urandom` is a CSPRNG on every unix
 /// Hew targets (macOS, Linux); this is the "reading /dev/urandom directly
 /// is acceptable" case the spec names explicitly, chosen over adding a
 /// `rand`/`getrandom` dependency for one 32-byte read.
@@ -290,7 +290,7 @@ struct DiscoveryFile<'a> {
 }
 
 /// Writes `<dir>/instance-<pid>.json` (owner-only permissions, dir and
-/// file — docs/HEW_API.md §11.2). Directory permissions are (re)applied
+/// file — docs/agents/HEW_API.md §11.2). Directory permissions are (re)applied
 /// on every launch, not just at first creation, so a runtime dir that
 /// pre-existed with looser permissions (or was recreated by something
 /// else) is still tightened before anything sensitive is written into it.
@@ -312,7 +312,7 @@ fn write_discovery_file(dir: &Path, pid: u32, socket: &str, token: &str) -> std:
 }
 
 /// Removes this process's own discovery file and socket — "removes it on
-/// exit" (docs/HEW_API.md §11.2). Paths are re-derived from the current
+/// exit" (docs/agents/HEW_API.md §11.2). Paths are re-derived from the current
 /// pid rather than cached anywhere, since they are a pure function of it;
 /// a process that never got as far as `start()` succeeding (no runtime
 /// dir, bind failure) has nothing here to remove, and every call below is
@@ -444,7 +444,7 @@ pub fn start(_app: &AppHandle) {
 /// mid-session can never make an already-open connection's next mutation
 /// land in a different document than the one it started on; the
 /// multi-window "which document does a live connection belong to" story
-/// beyond that is future work (docs/HEW_API.md names only single-document
+/// beyond that is future work (docs/agents/HEW_API.md names only single-document
 /// desktop hosts today).
 #[cfg(unix)]
 fn spawn_accept_loop(app: AppHandle, listener: std::os::unix::net::UnixListener, token: String) {
@@ -548,7 +548,7 @@ fn handle_connection(
 /// `protocol` number) its own typed error. `None` for anything that fails
 /// the gate: wrong/missing method, wrong/missing token, or JSON that
 /// doesn't even parse — every one of those is "drop silently" per
-/// docs/HEW_API.md §11.2, never a written response.
+/// docs/agents/HEW_API.md §11.2, never a written response.
 fn check_and_sanitize_hello(line: &str, expected_token: &str) -> Option<String> {
     let mut value: serde_json::Value = serde_json::from_str(line.trim_end()).ok()?;
     if value.get("method").and_then(serde_json::Value::as_str) != Some("hew.meta.hello") {
@@ -711,7 +711,7 @@ fn forward_and_await(
 /// webview never answers `hew://api-reply` in time — `id` is echoed back
 /// when `request` parses well enough to have one, `null` otherwise
 /// (mirrors `api::Response`'s own "unreadable id" convention,
-/// docs/HEW_API.md §4.4).
+/// docs/agents/HEW_API.md §4.4).
 ///
 /// The message states the outcome honestly: unlike an ordinary `-32003`,
 /// which means a kernel invariant failed and the document is untouched,
@@ -738,7 +738,7 @@ fn synthesize_timeout_reply(request: &str) -> String {
 /// The Windows named-pipe name for a given pid: `\\.\pipe\hew-<pid>`. This
 /// full string is what goes in the discovery file's `socket` field (the
 /// same field unix's socket path lives in) and is the client's connect
-/// string verbatim — see docs/HEW_API.md §11.2 and
+/// string verbatim — see docs/agents/HEW_API.md §11.2 and
 /// `crates/hew-cli/src/live.rs`'s `RawConn::connect`. Pure string
 /// formatting, no Windows API involved, so it is defined unconditionally
 /// and tested on every platform this crate builds on, not only
@@ -831,7 +831,7 @@ mod windows {
 
     /// 256 bits of randomness from `BCryptGenRandom` with the system's
     /// preferred CSPRNG, hex-encoded — the discovery token
-    /// (docs/HEW_API.md §11.2), Windows' counterpart to unix's
+    /// (docs/agents/HEW_API.md §11.2), Windows' counterpart to unix's
     /// `/dev/urandom` read. No `rand`/`getrandom` dependency needed: this
     /// is the one CNG call, and `windows-sys` is already a dependency for
     /// the transport itself.
@@ -953,7 +953,7 @@ mod windows {
     /// mirroring unix's own `sweep_stale`, which likewise applies no
     /// ownership check of its own — a pre-existing limitation on both
     /// platforms, not one introduced here. See this module's top doc
-    /// comment and docs/HEW_API.md §11.2 for the same honest gap stated
+    /// comment and docs/agents/HEW_API.md §11.2 for the same honest gap stated
     /// for readers of the spec.
     fn ensure_safe_runtime_dir(dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
@@ -986,7 +986,7 @@ mod windows {
         Ok(())
     }
 
-    /// Writes `<dir>/instance-<pid>.json` (docs/HEW_API.md §11.2), after
+    /// Writes `<dir>/instance-<pid>.json` (docs/agents/HEW_API.md §11.2), after
     /// [`ensure_safe_runtime_dir`] confirms `dir` is trustworthy. Beyond
     /// that check, this still applies no explicit ACL to the file or
     /// directory the way unix's 0600/0700 does: `%LOCALAPPDATA%` is
@@ -999,7 +999,7 @@ mod windows {
     /// explicit deny-other-users ACE on this specific file the way
     /// `owner_only_security_attributes` gives the PIPE below), and
     /// documented as such in this module's top doc comment and
-    /// docs/HEW_API.md §11.2.
+    /// docs/agents/HEW_API.md §11.2.
     fn write_discovery_file(
         dir: &Path,
         pid: u32,
@@ -1019,7 +1019,7 @@ mod windows {
     }
 
     /// Removes this process's own discovery file — "removes it on exit"
-    /// (docs/HEW_API.md §11.2). There is no paired socket FILE to remove
+    /// (docs/agents/HEW_API.md §11.2). There is no paired socket FILE to remove
     /// on Windows (see `sweep_stale`'s doc comment): the pipe itself goes
     /// away when this process's last handle to it closes, which happens
     /// automatically at process exit regardless of whether this function
@@ -1054,7 +1054,7 @@ mod windows {
     /// `D:P(A;;GA;;;OW)` — discretionary ACL (`D:`), protected (`P`, so
     /// nothing broader is inherited from the parent container), one Allow
     /// ACE (`A`) granting Generic All (`GA`) to the Owner SID (`OW`).
-    /// docs/HEW_API.md §11.2 calls this the Windows analogue of unix's
+    /// docs/agents/HEW_API.md §11.2 calls this the Windows analogue of unix's
     /// 0600: it keeps every OTHER interactively logged-in user's process
     /// from opening the pipe at all — though, like unix's root, a local
     /// Administrator/SYSTEM can still bypass a DACL with sufficient

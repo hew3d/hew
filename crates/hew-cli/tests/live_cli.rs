@@ -1,4 +1,4 @@
-//! `--live` end-to-end (docs/HEW_API.md §11.2, §12): drives the real
+//! `--live` end-to-end (docs/agents/HEW_API.md §11.2, §12): drives the real
 //! `HEW_RUNTIME_DIR`-reading discovery path (`hew_cli::live::discover`,
 //! not the fixture-directory-only unit tests in `crates/hew-cli/src/live.rs`)
 //! together with a real `UnixListener` faking a desktop instance, and the
@@ -41,7 +41,7 @@ fn short_socket_path(tag: &str) -> PathBuf {
 }
 
 /// One accept -> hello -> attach-gated command loop, matching what a real
-/// desktop instance's connection handler does (docs/HEW_API.md §11.2,
+/// desktop instance's connection handler does (docs/agents/HEW_API.md §11.2,
 /// §4.2, §10): after `hello`, every command but `hew.doc.attach` is
 /// refused `-32002 no document attached` until the client sends it —
 /// exactly the gate `crates/api/src/dispatch.rs`'s `attached` flag

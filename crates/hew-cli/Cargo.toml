@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 # Standalone binary: MCP adapter, script runner, one-shot dispatch
-# (docs/HEW_API.md §12). Headless — embeds `api` + the kernel + the
+# (docs/agents/HEW_API.md §12). Headless — embeds `api` + the kernel + the
 # importer crates directly; no UI process anywhere. Not a workspace
 # dependency of anything else (nothing links a binary crate).
 [[bin]]
@@ -28,7 +28,7 @@ dae-import = { workspace = true }
 skp-import = { workspace = true }
 serde_json = { workspace = true }
 
-# Windows named-pipe transport for `--live` (docs/HEW_API.md §11.2, §12):
+# Windows named-pipe transport for `--live` (docs/agents/HEW_API.md §11.2, §12):
 # CreateFileW/ReadFile/WriteFile/WaitNamedPipeW/OpenProcess, all synchronous
 # — the client stays plain std::thread like its unix counterpart, no async
 # runtime. Target-gated so macOS/Linux builds gain nothing; see

@@ -2,7 +2,7 @@
  * Desktop smoke: the real Hew binary boots under tauri-driver, the WASM
  * kernel comes up inside WebKitGTK, and the semantic harness round-trips a
  * model. This is *desktop-wiring* proof — modeling correctness lives in the
- * kernel/harness suites, so keep this thin (docs/DEVELOPMENT.md: top of the pyramid).
+ * kernel/harness suites, so keep this thin (docs/dev/DEVELOPMENT.md: top of the pyramid).
  */
 
 // Make this file a module so the `declare global` below augments (not replaces)

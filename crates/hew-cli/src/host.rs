@@ -1,5 +1,5 @@
 //! `CliHost`: the real, file-I/O-backed implementation of `api::Host`
-//! (docs/HEW_API.md §12) — headless `hew-cli` embeds `crates/api` and the
+//! (docs/agents/HEW_API.md §12) — headless `hew-cli` embeds `crates/api` and the
 //! kernel directly, so this is the only place in the binary that touches a
 //! filesystem or an importer crate. Kernel-class purity (DEVELOPMENT.md
 //! rule 1) stops at `crates/api`'s door; this crate is the host on the
@@ -169,7 +169,7 @@ fn export_refusal(e: mesh_export::ExportError) -> Refusal {
 /// typed rather than returning a background-only image.
 fn render_snapshot(doc: &Document, params: &SnapshotParams) -> Result<SnapshotResult, Refusal> {
     // `scene` renders through the Scene's OWN resolved hidden set
-    // (docs/HEW_API.md's Scenes section) instead of the document's live
+    // (docs/agents/HEW_API.md's Scenes section) instead of the document's live
     // one — `crates/api/src/commands/scenes.rs::resolve_scene_id` already
     // validated the public id shape; an sid that no longer names a live
     // Scene answers the same `unknown_scene` refusal here, through
@@ -253,7 +253,7 @@ fn render_snapshot(doc: &Document, params: &SnapshotParams) -> Result<SnapshotRe
 }
 
 /// The camera resolution `docs/design/headless-snapshot.md` calls for,
-/// extended with `scene` (docs/HEW_API.md's Scenes section — mutually
+/// extended with `scene` (docs/agents/HEW_API.md's Scenes section — mutually
 /// exclusive with `camera`/`view`, already enforced by
 /// `crates/api/src/commands/doc.rs` before this is ever called): an
 /// explicit `camera` param, a named `view` fitted to the scene bbox, a
@@ -352,7 +352,7 @@ fn fitted_bbox(doc: &Document, hidden: &softrender::HiddenLeaves) -> (Point3, Po
 
 // -------------------------------------------------------- import unit scale
 
-/// meters-per-source-unit, keyed by the `units` param (docs/HEW_API.md §7:
+/// meters-per-source-unit, keyed by the `units` param (docs/agents/HEW_API.md §7:
 /// STL carries no units of its own). The STL/3MF/glTF/USDZ *writers*
 /// `export_document` calls above live in `crates/mesh-export` now, shared
 /// with `crates/wasm-api`'s `LiveHost`; this scale table is import-only
@@ -370,7 +370,7 @@ fn unit_scale(units: &str) -> Option<f64> {
 // ------------------------------------------------------------------ import
 
 /// Merges `path` into `doc` by file extension, honest about the one thing
-/// no importer can guess: STL units (docs/HEW_API.md §7's semantics note —
+/// no importer can guess: STL units (docs/agents/HEW_API.md §7's semantics note —
 /// STL carries none, so `hew.doc.import` refuses `units_required` rather
 /// than assume).
 fn import_by_extension(

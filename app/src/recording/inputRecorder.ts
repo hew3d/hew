@@ -1,5 +1,5 @@
 /**
- * Low-level UI-input capture — the second half of  (docs/DEVELOPMENT.md).
+ * Low-level UI-input capture — the second half of  (docs/dev/DEVELOPMENT.md).
  *
  * The high-level recorder (`wasm-api/src/recording.rs`) captures the *resolved*
  * kernel command stream (`calls`). That replays the kernel deterministically but
@@ -12,7 +12,7 @@
  * innocent.
  *
  * It lands as a **sibling `input` array in the same artifact** as the high-level
- * `calls` (see `docs/DIAGNOSTICS.md`). The kernel never sees raw input,
+ * `calls` (see `docs/dev/DIAGNOSTICS.md`). The kernel never sees raw input,
  * so this is wholly app-side; the Rust `Scene::replay` ignores the extra field.
  *
  * Capture is a module-level singleton mirroring the Rust recorder's

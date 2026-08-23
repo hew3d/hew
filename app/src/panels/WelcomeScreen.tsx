@@ -86,7 +86,7 @@ interface WelcomeScreenProps {
  * The Hew logo lockup — the open-cube mark plus the "Hew" wordmark, inlined
  * from `brand/hew-lockup-outlined.svg` (the wordmark is Hanken Grotesk
  * ExtraBold as vector outlines, since the font is deliberately not bundled
- * into the app UI — see docs/BRAND.md). The mark keeps its brand Terracotta;
+ * into the app UI — see docs/dev/BRAND.md). The mark keeps its brand Terracotta;
  * the wordmark is `currentColor` so the rail can theme it (cream on the dark
  * rail, charcoal on the light one).
  */

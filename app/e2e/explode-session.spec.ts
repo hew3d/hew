@@ -9,7 +9,7 @@ import {
 /**
  * The explode-session component-editing model — end to end with REAL
  * pointer input (feat(viewport): make the explode session a plain
- * double-click; docs/ARCHITECTURE.md 2.11). A plain double-click on a
+ * double-click; docs/agents/ARCHITECTURE.md 2.11). A plain double-click on a
  * uniformly-posed component instance now bakes its definition's members
  * into world-owned geometry (same ObjectIds, a move not a copy) so the
  * entirely unmodified tool set edits them directly — no `_in_instance`

@@ -1,9 +1,9 @@
-//! Replayable command recording (docs/DEVELOPMENT.md,  +).
+//! Replayable command recording (docs/dev/DEVELOPMENT.md,  +).
 //!
 //! A recording is the ordered stream of committed `Scene` mutations as **typed,
 //! replayable calls**. Replaying them verbatim into a fresh [`Scene`] reproduces
 //! the session, and the final [`state_hash`](crate::Scene::state_hash) is
-//! asserted against the recorded golden — the regression guarantee (docs/DEVELOPMENT.md).
+//! asserted against the recorded golden — the regression guarantee (docs/dev/DEVELOPMENT.md).
 //!
 //! ## Why verbatim replay needs no handle-remapping
 //!
@@ -18,7 +18,7 @@
 //!
 //! A recording replays into a **fresh** `Scene` (`golden_hash` is captured
 //! relative to the empty document the recording began on). The artifact JSON
-//! shape is frozen in `docs/DIAGNOSTICS.md` — the handshake for the
+//! shape is frozen in `docs/dev/DIAGNOSTICS.md` — the handshake for the
 //! Node runner and the M17 bug-report bundle.
 
 use std::cell::{Cell, RefCell};
@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bump on any breaking change to the [`Recording`] JSON shape. v2 =
 /// typed replayable calls (v1 was the log-tap hash-chain). See
-/// `docs/DIAGNOSTICS.md`.
+/// `docs/dev/DIAGNOSTICS.md`.
 ///
 /// [`RecordedCall::ApiDispatch`] did NOT bump this, matching the posture
 /// every other additive variant documents: an old recording replays on a
@@ -896,7 +896,7 @@ pub enum RecordedCall {
     },
     /// One document-mutating envelope that arrived over the live API
     /// (`Scene::api_dispatch` — an agent or script driving the open
-    /// document, docs/HEW_API.md §11.2), stored as the raw JSON-RPC
+    /// document, docs/agents/HEW_API.md §11.2), stored as the raw JSON-RPC
     /// request text.
     ///
     /// Recorded at API altitude rather than expanded into the kernel

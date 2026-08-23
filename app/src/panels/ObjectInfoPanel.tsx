@@ -889,7 +889,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onDocumentChanged,
 // axis letter colored to match the viewport's axis colors (X=red, Y=green,
 // Z=blue — Z is height) and each extent formatted with the same length
 // formatter Tape Measure / typed entry use, so it always reads in the
-// active length format (docs/DEVELOPMENT.md rule 6 — display-layer
+// active length format (docs/dev/DEVELOPMENT.md rule 6 — display-layer
 // formatting only, kernel lengths stay f64 meters throughout). Labeled
 // "Bounding Box" (not "Dimensions") so it's clear the three numbers are the
 // selection's axis-aligned extents, not e.g. a single object property.

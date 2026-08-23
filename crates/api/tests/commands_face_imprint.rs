@@ -1,5 +1,5 @@
 //! Conformance coverage for the face-imprint drawing path — plane spec
-//! `{"face": <locator>}` on `hew.sketch.draw_*` (docs/HEW_API.md §7's
+//! `{"face": <locator>}` on `hew.sketch.draw_*` (docs/agents/HEW_API.md §7's
 //! semantics notes; docs/design/api-implementation-conventions.md's
 //! testing bar). Unlike plane/sketch mode, on-face drawing never touches
 //! a sketch: it cuts the solid's face directly through

@@ -1,4 +1,4 @@
-//! Scenes: `hew.scenes.*` (docs/HEW_API.md's Scenes section;
+//! Scenes: `hew.scenes.*` (docs/agents/HEW_API.md's Scenes section;
 //! docs/design/scenes.md §3, §7). A Scene is a named, saved view of the
 //! document — the camera, the hidden-object set, the hidden-tag set, the
 //! section plane, and the editor's display toggles — captured and
@@ -301,7 +301,7 @@ fn update(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: UpdateParams = parse(params)?;
     let sid = resolve_scene_id(&p.id)?;
     // No `properties` given: re-capture exactly what this Scene already
-    // captures (docs/HEW_API.md's Scenes section) rather than defaulting
+    // captures (docs/agents/HEW_API.md's Scenes section) rather than defaulting
     // to ALL — `update` re-snapshots the current set, it does not widen
     // it the way `add`'s from-scratch default does.
     let props = match p.properties {

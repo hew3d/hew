@@ -1,4 +1,4 @@
-//! The Hew API's logical command bus (docs/HEW_API.md — the normative
+//! The Hew API's logical command bus (docs/agents/HEW_API.md — the normative
 //! reference). One pure dispatcher between the kernel and its hosts:
 //! transports (in-process, local socket, stdio MCP) are dumb pipes that
 //! carry serialized envelopes here and responses back.

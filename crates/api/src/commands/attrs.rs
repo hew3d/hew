@@ -1,4 +1,4 @@
-//! Attribute dictionaries: hew.attr.* (docs/HEW_API.md §8).
+//! Attribute dictionaries: hew.attr.* (docs/agents/HEW_API.md §8).
 
 use super::entity::unknown_entity;
 use super::{CmdError, Ctx, Handler};
@@ -17,7 +17,7 @@ pub fn handler(name: &str) -> Option<Handler> {
 }
 
 /// `{"target": "<public id>"}` or `{"target": "document"}` →
-/// `kernel::AttrTarget` (docs/HEW_API.md §8: every addressable entity,
+/// `kernel::AttrTarget` (docs/agents/HEW_API.md §8: every addressable entity,
 /// plus the document itself, plus tags via their `tag_<hex>` public id).
 fn resolve_target(ctx: &Ctx, target: &str) -> Result<AttrTarget, CmdError> {
     if target == "document" {
@@ -30,7 +30,7 @@ fn resolve_target(ctx: &Ctx, target: &str) -> Result<AttrTarget, CmdError> {
     Ok(AttrTarget::Entity(entity))
 }
 
-/// docs/HEW_API.md §8: the `hew` prefix (`"hew"`, `"hew.*"`) is reserved
+/// docs/agents/HEW_API.md §8: the `hew` prefix (`"hew"`, `"hew.*"`) is reserved
 /// for first-party use. Enforced here, at the API boundary, rather than
 /// in `Document::attr_set` — the reservation exists so Hew's own code can
 /// claim those namespaces without colliding with a client's data, which

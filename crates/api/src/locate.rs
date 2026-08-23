@@ -1,4 +1,4 @@
-//! Locator and derived-point resolution (docs/HEW_API.md §5.2, §5.3) —
+//! Locator and derived-point resolution (docs/agents/HEW_API.md §5.2, §5.3) —
 //! the API's equivalent of pointing. A solid's faces and edges have no
 //! persistent public identifiers; commands take locators, resolved at
 //! dispatch time against the document state the command actually runs in.
@@ -30,7 +30,7 @@ pub struct EdgeRef {
 }
 
 /// A resolved sketch edge reference. Unlike a solid edge, a sketch edge
-/// carries a durable public id (`ids::edge_id`, docs/HEW_API.md §5.2) — a
+/// carries a durable public id (`ids::edge_id`, docs/agents/HEW_API.md §5.2) — a
 /// client that already queried one just names it directly — but this is
 /// also reachable by the same kind of geometric locator a solid edge
 /// needs, for a client that has not queried (`resolve_sketch_edge`).

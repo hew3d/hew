@@ -1,4 +1,4 @@
-//! Generators for the two remaining docs/HEW_API.md §9 artifacts: the
+//! Generators for the two remaining docs/agents/HEW_API.md §9 artifacts: the
 //! TypeScript client SDK (`app/src/api/hewApi.gen.ts`) and the published
 //! API reference (`docs/API_REFERENCE.gen.md`). Both are driven, at
 //! runtime, off [`Registry::protocol_1`] — no TypeScript parsing, no
@@ -285,7 +285,7 @@ fn doc_comment(lines: &[&str]) -> String {
 // ------------------------------------------------------- TS SDK
 
 /// Generates `app/src/api/hewApi.gen.ts` — a typed client over a
-/// caller-supplied `HewTransport`-shaped transport (docs/HEW_API.md
+/// caller-supplied `HewTransport`-shaped transport (docs/agents/HEW_API.md
 /// §9). One `Params`/`Result` type pair per command, one typed method
 /// per command grouped by namespace on `HewApiClient`, plus the
 /// error-code constants and the canonical §4.4 refusal shape.
@@ -297,7 +297,7 @@ pub fn generate_ts_sdk(registry: &Registry) -> String {
     out.push_str("//\n");
     out.push_str(
         "// A typed client over a caller-supplied transport for the Hew API\n\
-         // (docs/HEW_API.md — the normative reference; §9 is this file's\n\
+         // (docs/agents/HEW_API.md — the normative reference; §9 is this file's\n\
          // contract). Every `Params`/`Result` pair and every method below is\n\
          // derived mechanically from the command registry in `crates/api`,\n\
          // which is their single source of truth — this file has no\n\
@@ -306,7 +306,7 @@ pub fn generate_ts_sdk(registry: &Registry) -> String {
     out.push('\n');
 
     out.push_str(&doc_comment(&[
-        "One JSON-RPC 2.0 request frame (docs/HEW_API.md §4.1). `params` is",
+        "One JSON-RPC 2.0 request frame (docs/agents/HEW_API.md §4.1). `params` is",
         "always a single object, never positional.",
     ]));
     out.push_str("export interface JsonRpcRequest {\n");
@@ -337,7 +337,7 @@ pub fn generate_ts_sdk(registry: &Registry) -> String {
     out.push_str(&doc_comment(&[
         "The transport this client dispatches every envelope through — an",
         "in-process call, the desktop app's local socket, or `hew-cli`'s",
-        "stdio MCP adapter all satisfy this one shape (docs/HEW_API.md",
+        "stdio MCP adapter all satisfy this one shape (docs/agents/HEW_API.md",
         "§11). The client owns request framing (`id` assignment) and",
         "result/error unwrapping; the transport owns only the wire.",
     ]));
@@ -395,7 +395,7 @@ pub fn generate_ts_sdk(registry: &Registry) -> String {
 
     out.push_str(&doc_comment(&[
         "A command whose registry schema is still the scaffold placeholder",
-        "(an untightened `{\"type\": \"object\"}` — docs/HEW_API.md §14's",
+        "(an untightened `{\"type\": \"object\"}` — docs/agents/HEW_API.md §14's",
         "burn-down posture) falls back to this rather than a fabricated",
         "shape.",
     ]));
@@ -514,7 +514,7 @@ pub fn generate_api_reference(registry: &Registry) -> String {
     out.push_str("# Hew API Reference\n\n");
     out.push_str(
         "This is the mechanically published form of the command registry in\n\
-         `crates/api/src/registry.rs` (docs/HEW_API.md §9: \"published from\n\
+         `crates/api/src/registry.rs` (docs/agents/HEW_API.md §9: \"published from\n\
          it\"). It is the per-command companion to HEW_API.md, which defines\n\
          the protocol every command obeys; this document lists what each one\n\
          actually is. One section per namespace, one entry per command, in\n\
@@ -544,7 +544,7 @@ pub fn generate_api_reference(registry: &Registry) -> String {
         if !cmd.implemented {
             out.push_str(
                 "> **Not yet implemented.** Every call answers the `unimplemented` \
-                 refusal (docs/HEW_API.md §14's burn-down posture).\n\n",
+                 refusal (docs/agents/HEW_API.md §14's burn-down posture).\n\n",
             );
         }
 

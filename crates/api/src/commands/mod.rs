@@ -1,4 +1,4 @@
-//! Command implementations, one module per namespace (docs/HEW_API.md
+//! Command implementations, one module per namespace (docs/agents/HEW_API.md
 //! §7). The handler table below is the dispatch surface; the registry's
 //! `implemented` flags must agree with it (a sync test enforces that),
 //! so implementing a command means adding its handler here, flipping its
@@ -10,7 +10,7 @@ use crate::ids::IdResolver;
 use crate::refusal::Refusal;
 use std::collections::BTreeMap;
 
-/// Why a command did not produce a result (docs/HEW_API.md §4.4's three
+/// Why a command did not produce a result (docs/agents/HEW_API.md §4.4's three
 /// classes, minus protocol-envelope concerns handled by dispatch).
 #[derive(Debug)]
 pub enum CmdError {
@@ -28,7 +28,7 @@ impl From<kernel::DocumentError> for CmdError {
     }
 }
 
-/// Face tokens minted inside one transaction (docs/HEW_API.md §5.2,
+/// Face tokens minted inside one transaction (docs/agents/HEW_API.md §5.2,
 /// §5.4): `label` → `key` → the face it names. Transaction-scoped;
 /// they expire with the envelope.
 pub type FaceTokens = BTreeMap<String, BTreeMap<String, (kernel::ObjectId, kernel::FaceId)>>;

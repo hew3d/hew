@@ -6,13 +6,13 @@ order: 3
 
 Hew's window has the same layout on the web, macOS, Windows, and Linux. The only difference is the chrome around it: macOS uses the system menu bar, Windows and Linux draw their own title bar, and the web app shows an in-app menu bar.
 
-![The default Hew window: menu bar, tool rail on the left, 3D viewport in the center, panels tray on the right, contextual dock at the bottom, status bar along the base](/docs/ui-default.png)
+![The default Hew window: menu bar, tool rail on the left, 3D viewport in the center, panels tray on the right, contextual dock at the bottom, status bar along the base](/docs/ui-default.webp)
 
 ## The viewport
 
 The center of the window is the 3D viewport. A ground grid sits at height zero, and the three world axes cross at the origin: **X is red, Y is green, Z is blue**. Each axis is drawn solid on its positive side and dashed on its negative side. You can hide the axes with **View ▸ Axes** and the grid with **View ▸ Grid**.
 
-The small chip row in the viewport's top-left corner offers an **Orbit** button and one-click **Top / Iso / Front** standard views. A floating readout in the top-right corner shows live measurements (distance, angle, scale factor) while a tool is **mid-gesture** — that is, partway through an operation, after the first click but before the commit. You'll meet that term throughout this manual. Anything you type also appears in this readout.
+The small chip row in the viewport's top-left corner offers an **Orbit** button and one-click **Top / Iso / Front** standard views. A floating readout in the top-right corner shows live measurements — distance, angle, scale factor — while a tool is **mid-gesture**: partway through an operation, after the first click but before the commit. You'll meet that term throughout this manual. Anything you type also appears in this readout.
 
 ## The tool rail
 
@@ -26,9 +26,9 @@ Six more tools don't have rail slots: **Protractor**, **Slice**, **Edit Vertex**
 
 ## The command palette
 
-The search field at the top of the tool rail opens the command palette, or press `⌘/` on a Mac and `Ctrl+/` everywhere else — the same key in the desktop app and the browser. Type a few letters of anything: every tool, every menu action, and the objects, groups, and tags in your current model are all searchable. Synonyms work too — typing "extrude" finds Push/Pull, "slicer" finds Export.
+The search field at the top of the tool rail opens the command palette. Or press `⌘/` on a Mac and `Ctrl+/` everywhere else — the same key in the desktop app and the browser. Type a few letters of anything: every tool, every menu action, and the objects, groups, and tags in your current model are all searchable. Synonyms work too — typing "extrude" finds Push/Pull, "slicer" finds Export.
 
-![The command palette open with a query, showing a matched tool with its shortcut](/docs/command-palette.png)
+![The command palette open with a query, showing a matched tool with its shortcut](/docs/command-palette.webp)
 
 Press `↑`/`↓` to navigate, `Enter` to run, `Esc` to close. With an empty query the palette shows your recently used commands.
 
@@ -70,7 +70,7 @@ The strip along the bottom always shows the active tool's name and a one-line hi
 
 The menu bar (system bar on macOS, in-app elsewhere) organizes everything: **File** (new/open/save/import/export/print), **Edit** (undo, delete, group/component commands, booleans), **View** (axes, guides), **Draw**, **Tools**, **Camera**, **Window** (panels, and the open-windows list), and **Help** (Debug Log, Report Bug…).
 
-The window title shows the document name; a `•` in front of it (and an "Edited …" label next to it) means unsaved changes. There is no Save button; save with `⌘S` / `Ctrl+S`. [Files, saving, and recovery](/learn/files-and-saving/) covers how autosave has your back regardless.
+The window title shows the document name. A `•` in front of it (and an "Edited …" label next to it) means unsaved changes. There is no Save button — save with `⌘S` / `Ctrl+S`. [Files, saving, and recovery](/learn/files-and-saving/) covers how autosave has your back regardless.
 
 ## Light and dark
 

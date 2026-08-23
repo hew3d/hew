@@ -1,12 +1,12 @@
 /**
- * Debug Mode setting — module-level singleton (docs/DEVELOPMENT.md).
+ * Debug Mode setting — module-level singleton (docs/dev/DEVELOPMENT.md).
  *
  * A single boolean toggle that, when enabled, turns on three independently
  * expensive diagnostics for the CURRENT session:
  *   - the rolling diagnostic-log FILE sink (`diagnosticLog.setFileLogging`).
  *   - low-level input recording (`recording/inputRecorder`).
  *   - kernel torture mode (`Scene.set_torture_mode` — extra validation + a
- *     re-tessellation self-check after every op; docs/DEVELOPMENT.md).
+ *     re-tessellation self-check after every op; docs/dev/DEVELOPMENT.md).
  *
  * This module owns ONLY the persisted boolean + its cross-window sync; it
  * never touches the kernel/recorder/log-file directly (see App.tsx, which

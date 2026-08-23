@@ -9,7 +9,7 @@ import {
 /**
  * Sketches on any plane — end-to-end (the sketch-planes design, all four
  * phases). Scripts the whole feature in one real-input journey (strategy 2,
- * docs/DEVELOPMENT.md — pixel interaction through the pinned camera):
+ * docs/dev/DEVELOPMENT.md — pixel interaction through the pinned camera):
  *
  *   1. Draw a rectangle on the ground with the REAL Rectangle tool.
  *   2. Rotate that sketch 90° onto a vertical plane — `rotateSketch` (the

@@ -232,7 +232,7 @@ test('tapping a part shows the inspect card with its dimensions', async ({ page 
 
   // Pin the camera (Shop Mode's own harness `setCamera`, delegating to the
   // SAME ViewportApi.setCamera the editor harness uses) so a known world
-  // point projects to a reliable canvas pixel — docs/DEVELOPMENT.md's
+  // point projects to a reliable canvas pixel — docs/dev/DEVELOPMENT.md's
   // "pixel interaction" strategy.
   await page.evaluate((cam) => window.__hew_shop_test!.setCamera(cam), {
     position: [PINNED_CAMERA.position.x, PINNED_CAMERA.position.y, PINNED_CAMERA.position.z],

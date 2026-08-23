@@ -212,7 +212,7 @@ export class PushPullTool implements Tool {
       this._reportMeasurement(distance)
     }
     // Hover highlight is handled via CueLayer for on-face snaps (M1 shortcut
-    // per docs/DEVELOPMENT.md: show snap marker at face location; per-face highlight
+    // per docs/dev/DEVELOPMENT.md: show snap marker at face location; per-face highlight
     // requires face→triangle table in MeshJs which is a WASM_API addendum).
   }
 

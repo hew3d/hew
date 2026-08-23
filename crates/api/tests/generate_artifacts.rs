@@ -1,4 +1,4 @@
-//! Registry-completeness's byte-identity half (docs/HEW_API.md §14): "the
+//! Registry-completeness's byte-identity half (docs/agents/HEW_API.md §14): "the
 //! generated artifacts … regenerate byte-identically in CI, so drift
 //! between registry and artifact is a build failure rather than a review
 //! hazard." This is that check for the two artifacts §9 promises beyond

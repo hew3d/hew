@@ -12,7 +12,7 @@ Three documents cover the API, and they are not interchangeable:
 | --- | --- |
 | This guide | How to connect, what a session looks like, working examples |
 | [API_REFERENCE.gen.md](API_REFERENCE.gen.md) | Every command's parameters, results, and refusals |
-| [HEW_API.md](HEW_API.md) | The normative protocol rules |
+| [HEW_API.md](agents/HEW_API.md) | The normative protocol rules |
 
 Start here, keep the reference open in another tab, and go to the spec
 when you need the exact rule rather than the working example.
@@ -33,7 +33,7 @@ and MCP configuration below reference the full path:
 
 You can also build it from source. You need the Rust toolchain and
 nothing else — the CLI needs none of the app's Node or Tauri
-prerequisites (see [DEVELOPMENT.md](DEVELOPMENT.md) for the full set).
+prerequisites (see [DEVELOPMENT.md](dev/DEVELOPMENT.md) for the full set).
 
 ```sh
 git clone https://github.com/hew3d/hew
@@ -220,15 +220,15 @@ structure, materials, tags, guides, attributes, history — and it aims
 the viewport too: `hew.view.camera`, `hew.view.zoom_extents`, and
 `hew.view.units` all take effect in the window you are looking at.
 
-`hew.doc.save` and `hew.doc.export` work as well, with one wrinkle
-worth knowing. The app has no filesystem inside its sandbox, so it
+`hew.doc.save` and `hew.doc.export` work as well, with one difference.
+The app has no filesystem inside its sandbox, so it
 serializes the document (or encodes the mesh) and hands the bytes back;
 `hew-cli` writes the file for you, so the command you type is the same
 one you would type headless and it produces the same file. Speaking the
 protocol directly rather than through `hew-cli`? Omit `path` and write
 the `bytes_base64` you get back.
 
-What genuinely refuses live is document lifecycle —
+What refuses live is document lifecycle —
 `hew.doc.new`/`open`/`import` — because opening and replacing documents
 stays in the user's hands, and `hew.view.snapshot`, which has no
 viewport handle to render through yet.
@@ -272,7 +272,7 @@ is rejected before anything runs (`-32602`). A well-formed pointer that
 finds nothing in the result it names is caught at execution and aborts
 the transaction with `ref_resolution_failed`.
 
-### Rules worth knowing before you plan a transaction
+### Rules before you plan a transaction
 
 Transactions don't nest, and there is no way to hold one open across
 envelopes. A held-open transaction would either freeze the user's

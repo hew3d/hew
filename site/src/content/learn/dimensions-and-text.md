@@ -6,6 +6,8 @@ order: 11
 
 Dimensions and leader text annotate a model without becoming part of it. They're document entities like guides: they don't affect watertightness, they don't export as geometry, and they follow the shapes they're attached to when those shapes move.
 
+![A box with two linear dimensions reading 1.8 m and 0.9 m, next to a cylinder with an R0.5 m radial dimension](/docs/dimensions.webp)
+
 ## Linear dimensions
 
 1. Activate **Dimension**.
@@ -41,4 +43,4 @@ The drawn line always shows what's being measured: a radius runs from the centre
 
 **Labels hold their size on screen** as you zoom, and turn to stay readable rather than reading backwards from the far side.
 
-**They follow the geometry.** Move, rotate, or scale something a dimension is attached to and the dimension goes with it. If an edit destroys what a dimension was measuring — deleting the object, or consuming it in a boolean — the annotation is marked detached and drawn in a warning colour rather than quietly pointing at nothing. Re-pick its anchors to reattach it.
+**They follow the geometry.** Move, rotate, or scale something a dimension is attached to and the dimension goes with it. If an edit destroys what a dimension was measuring — deleting the object, or consuming it in a boolean — the annotation is marked detached and drawn in a warning color rather than quietly pointing at nothing. Re-pick its anchors to reattach it.

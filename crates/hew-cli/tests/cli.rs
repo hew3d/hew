@@ -144,7 +144,7 @@ fn tetrahedron_stl_bytes() -> Vec<u8> {
 
 /// `hew-cli run`: a script that hellos, opens a fresh document, draws a
 /// rectangle and extrudes it (chained through a transaction's `$ref`,
-/// docs/HEW_API.md §6.2), then `--out`-saves. The resulting `.hew` file
+/// docs/agents/HEW_API.md §6.2), then `--out`-saves. The resulting `.hew` file
 /// reloads with exactly one object.
 #[test]
 fn run_script_draws_and_extrudes_and_out_saves_one_object() {
@@ -237,7 +237,7 @@ fn run_script_stops_on_the_first_refusal() {
 }
 
 /// `--out` together with `--live` is rejected up front as a usage error
-/// (docs/HEW_API.md §12) rather than attempted and left to fail on the
+/// (docs/agents/HEW_API.md §12) rather than attempted and left to fail on the
 /// script's last step: a live host keeps document persistence
 /// user-driven and refuses a remote `hew.doc.save` outright, so the old
 /// behavior (send the whole script, THEN discover a save can never
@@ -401,7 +401,7 @@ fn dispatch_export_3mf_glb_and_usdz_match_a_direct_export_byte_for_byte() {
 
         // Compare against a direct export over the exact same on-disk
         // document, not a freshly re-ingested one: the `.hew` format
-        // renumbers dense ids per save (docs/HEW_API.md §5.1), so a fresh
+        // renumbers dense ids per save (docs/agents/HEW_API.md §5.1), so a fresh
         // `box_document()` ingest need not iterate faces/vertices in the
         // same order a reloaded copy does, even though both describe the
         // same box.
@@ -449,7 +449,7 @@ fn cli_host_imports_a_tetrahedron_stl_with_units() {
 }
 
 /// STL carries no units of its own — importing without `units` refuses
-/// typed rather than guessing (docs/HEW_API.md §7's semantics note).
+/// typed rather than guessing (docs/agents/HEW_API.md §7's semantics note).
 #[test]
 fn cli_host_import_refuses_units_required_without_units() {
     let dir = scratch_dir("import-nounits");
@@ -643,7 +643,7 @@ fn run_script_snapshot_with_a_named_front_view_renders() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The whole point of `hew.view.snapshot`'s `path` parameter (docs/HEW_API.md
+/// The whole point of `hew.view.snapshot`'s `path` parameter (docs/agents/HEW_API.md
 /// §7, mirroring `hew.doc.export`): the inline base64 PNG blows past an MCP
 /// tool result's size budget at any useful resolution. Requests the
 /// resolution ceiling (2048x2048), writes to a real file through `CliHost`,

@@ -1,4 +1,4 @@
-//! The read surface: hew.query.*, hew.meta.documents (docs/HEW_API.md §7). Implemented by its wave; see
+//! The read surface: hew.query.*, hew.meta.documents (docs/agents/HEW_API.md §7). Implemented by its wave; see
 //! docs/design/api-implementation-conventions.md.
 
 use super::{CmdError, Ctx, Handler};
@@ -67,7 +67,7 @@ fn bbox_json((min, max): (Point3, Point3)) -> Value {
 }
 
 /// This entity's public id, from the document's own stable-id table
-/// (docs/HEW_API.md §5.1). `None` only for an entity the document itself
+/// (docs/agents/HEW_API.md §5.1). `None` only for an entity the document itself
 /// never assigned one to, which does not happen for anything this module
 /// enumerates from the document.
 fn public_of(ctx: &Ctx, entity: &EntityRef) -> Option<String> {
@@ -81,7 +81,7 @@ fn public_of_or_internal(ctx: &Ctx, entity: &EntityRef) -> Result<String, CmdErr
 }
 
 /// An instance's watertightness, resolved through its definition
-/// (docs/HEW_API.md §7): watertight only when every one of the
+/// (docs/agents/HEW_API.md §7): watertight only when every one of the
 /// definition's VISIBLE member objects is watertight, `false` if any is
 /// leaky, `None` when the definition itself cannot be resolved (a
 /// dangling instance, which the scene walk and `hew.query.entity` never
@@ -129,7 +129,7 @@ fn documents(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 
 // --------------------------------------------------------------- hew.query.scene
 
-/// One tree node — recursive for groups (docs/HEW_API.md §7).
+/// One tree node — recursive for groups (docs/agents/HEW_API.md §7).
 fn node_summary(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
     match node {
         NodeId::Object(id) => {
@@ -232,7 +232,7 @@ fn sketch_summary(ctx: &Ctx, sketch_id: kernel::SketchId) -> Result<Value, CmdEr
         .collect();
 
     // Edges — the scaffolding a client needs to trim a sketch after
-    // drawing it (docs/HEW_API.md §5.2): enough to tell two candidates
+    // drawing it (docs/agents/HEW_API.md §5.2): enough to tell two candidates
     // apart and pick one (id + endpoints), plus the owning curve id when
     // the edge is one curve's facet (a circle's or arc's, so erasing "the
     // circle" versus "one facet" is the client's own informed choice).
@@ -385,7 +385,7 @@ fn entity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     // `hew.solid.extrude` resolve a region id (`IdResolver::resolve_edge`)
     // rather than through `IdResolver::resolve`. A client that just
     // queried or minted an edge id will reasonably try querying it right
-    // back (docs/HEW_API.md §5.2), so this is handled here rather than
+    // back (docs/agents/HEW_API.md §5.2), so this is handled here rather than
     // left to fall through as `unknown_entity`.
     let edge = entity
         .is_none()
@@ -532,7 +532,7 @@ fn entity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 /// queried or minted an edge id (drawing a sketch, or `hew.query.resolve`
 /// against a geometric locator) will reasonably try querying it right
 /// back, so this is wired up rather than left to refuse
-/// (docs/HEW_API.md §5.2). `edge`'s presence in `sk.edges()` is re-checked
+/// (docs/agents/HEW_API.md §5.2). `edge`'s presence in `sk.edges()` is re-checked
 /// here rather than assumed from the caller's successful id-parse: the id
 /// resolver only validates the SKETCH half of a compound id (generational
 /// keys — `IdResolver::resolve_edge`'s doc comment), so a stale edge key
@@ -572,7 +572,7 @@ fn edge_entity(
 // --------------------------------------------------------------- hew.query.faces
 
 /// A single face's description — no index/token, just its geometry
-/// (docs/HEW_API.md §5.2's locators are for mutation; a query answers with
+/// (docs/agents/HEW_API.md §5.2's locators are for mutation; a query answers with
 /// values). Shared by `hew.query.faces` (every face) and `hew.query.resolve`
 /// (one face locator resolved to the same shape).
 fn face_description(ctx: &Ctx, face: locate::FaceRef) -> Result<Value, CmdError> {

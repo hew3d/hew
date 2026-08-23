@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //  headless Node replay runner — the CI regression gate for the
-// recording/replay surface (docs/DIAGNOSTICS.md). Also the
+// recording/replay surface (docs/dev/DIAGNOSTICS.md). Also the
 // bug -> test pipeline entry point (`--freeze`).
 //
 // Default mode: loads every tools/replay-runner/fixtures/*.json, replays each
@@ -64,7 +64,7 @@ async function main() {
     const fixturePath = path.join(FIXTURES_DIR, name);
     const json = await readFile(fixturePath, 'utf8');
 
-    // `golden_hash` is a u64 (docs/DIAGNOSTICS.md); values above
+    // `golden_hash` is a u64 (docs/dev/DIAGNOSTICS.md); values above
     // Number.MAX_SAFE_INTEGER lose precision through JSON.parse's double-
     // precision number type, so pull the literal digits out of the raw text
     // with a regex and hand them to BigInt directly. (Sanity-checked: e.g.

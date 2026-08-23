@@ -132,7 +132,7 @@ fn wrong_shape_valid_json() -> Vec<String> {
 /// doc comment: MCP-layer errors are distinct from a `hew.*` refusal,
 /// which never surfaces as a top-level JSON-RPC error (`tools/call`
 /// always answers `Ok`, embedding the refusal as tool-result content per
-/// docs/HEW_API.md §13 — "refusals are answers").
+/// docs/agents/HEW_API.md §13 — "refusals are answers").
 const KNOWN_MCP_ERROR_CODES: [i64; 4] = [-32700, -32601, -32602, -32603];
 
 /// Feeds one hostile line to `server` and checks it never panics and,

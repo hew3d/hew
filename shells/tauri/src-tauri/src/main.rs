@@ -26,7 +26,7 @@ use tauri::{
 // (`read_font_file` takes an opaque token, never a path).
 mod fonts;
 
-// The desktop half of `--live` (docs/HEW_API.md §11.2): the local socket
+// The desktop half of `--live` (docs/agents/HEW_API.md §11.2): the local socket
 // transport, the discovery file, and the token gate. See live.rs's
 // top-of-file doc comment for the full contract with
 // crates/wasm-api/src/live.rs (the webview-side dispatch half).
@@ -1562,7 +1562,7 @@ fn take_pending_recovery(app: tauri::AppHandle, window: tauri::WebviewWindow) ->
 }
 
 // ---------------------------------------------------------------------------
-// Diagnostic log — rolling file (docs/DEVELOPMENT.md).
+// Diagnostic log — rolling file (docs/dev/DEVELOPMENT.md).
 //
 // One file in the app log dir: diagnostic.log. On rotation (size cap
 // exceeded), it's renamed to diagnostic.1.log (replacing any prior backup)
@@ -1613,7 +1613,7 @@ fn log_rotate(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// Auto-reproducer dump (docs/DEVELOPMENT.md) — on a failure, the app
+// Auto-reproducer dump (docs/dev/DEVELOPMENT.md) — on a failure, the app
 // bundles {recorded command stream + serialized .hew + diagnostic-log tail}
 // into one JSON file under the app log dir, so "it broke" becomes "here is a
 // model + an input log that reproduces it". See app/src/log/reproducerDump.ts.
@@ -3531,7 +3531,7 @@ fn main() {
                 tauri::async_runtime::spawn(async move { updater::run_check(handle, false).await });
             }
 
-            // `--live` (docs/HEW_API.md §11.2): sweep stale discovery files
+            // `--live` (docs/agents/HEW_API.md §11.2): sweep stale discovery files
             // from a previous unclean exit, then bind this launch's own
             // socket and publish its discovery file. Best-effort — see
             // live::start's doc comment for why a failure here never blocks
@@ -3794,7 +3794,7 @@ fn main() {
                 if let Some(main_window) = app.get_webview_window("main") {
                     save_window_state(app, &main_window.as_ref().window_ref(), true);
                 }
-                // "removes it on exit" (docs/HEW_API.md §11.2) — a crash
+                // "removes it on exit" (docs/agents/HEW_API.md §11.2) — a crash
                 // (no RunEvent at all) is instead cleaned up by the NEXT
                 // launch's live::start sweeping stale discovery files.
                 live::cleanup();

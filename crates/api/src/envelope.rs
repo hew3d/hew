@@ -1,4 +1,4 @@
-//! The JSON-RPC 2.0 envelope (docs/HEW_API.md §4): requests, responses,
+//! The JSON-RPC 2.0 envelope (docs/agents/HEW_API.md §4): requests, responses,
 //! error objects, and the error-code inventory. These Rust types ARE the
 //! API; JSON is their encoding at process boundaries (§3), so an
 //! in-process caller pays no serialization at all.
@@ -99,7 +99,7 @@ impl Response {
     }
 }
 
-/// The protocol's error-code inventory (docs/HEW_API.md §4.4): the three
+/// The protocol's error-code inventory (docs/agents/HEW_API.md §4.4): the three
 /// standard JSON-RPC codes the dispatcher can answer with, plus Hew's
 /// reserved-range extensions. Pinned at protocol 1 — additive only.
 pub mod codes {

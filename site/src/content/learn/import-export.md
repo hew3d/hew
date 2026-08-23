@@ -47,7 +47,7 @@ A hollow model — one whose outer wall encloses a separate inner wall (vase-mod
 
 **File ▸ Export…** opens one dialog with a format choice:
 
-![The Export dialog with STL selected, showing the format and curve-resolution selectors](/docs/export-dialog.png)
+![The Export dialog with STL selected, showing the format and curve-resolution selectors](/docs/export-dialog.webp)
 
 ### STL — for 3D printing
 
@@ -77,4 +77,4 @@ A true-size hidden-line drawing of the model, written as an `.svg` with a millim
 
 ### What about STEP or `.skp` export?
 
-STEP/IGES interchange and `.skp` export are planned further out. For today: STL or 3MF to print, glTF to interchange, USDZ for AR, `.hew` to keep working.
+Hew doesn't import or export STEP/IGES, and it doesn't export `.skp`. For those jobs: STL or 3MF to print, glTF to interchange, USDZ for AR, `.hew` to keep working.

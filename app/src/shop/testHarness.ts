@@ -49,7 +49,7 @@ export interface ShopTestHarness {
    *  `page.evaluate` boundary, matching `test/harness.ts`'s `load`). */
   load(bytes: number[]): boolean
   /** Pin the viewport camera — needed to turn a known world point into a
-   *  reliable canvas pixel for a real pointer tap (docs/DEVELOPMENT.md's
+   *  reliable canvas pixel for a real pointer tap (docs/dev/DEVELOPMENT.md's
    *  "pixel interaction" strategy; `test/harness.ts`'s identical method,
    *  reused here since Shop Mode's tap-to-inspect gesture is exactly what
    *  such a tap needs to exercise). View-state only — not a kernel call,

@@ -1,4 +1,4 @@
-//! `hew-cli run` and `hew-cli dispatch` (docs/HEW_API.md §12): headless by
+//! `hew-cli run` and `hew-cli dispatch` (docs/agents/HEW_API.md §12): headless by
 //! default, against an embedded `crates/api` connection, a `kernel::Document`,
 //! and a [`CliHost`]; with `--live`, every envelope goes instead to a
 //! running desktop instance over [`crate::live`]'s local socket transport
@@ -26,7 +26,7 @@ pub struct RunOutcome {
 /// order. Headless (`live: None`): against a fresh embedded document
 /// through one `Connection`. Live (`live: Some(opts)`): every frame is
 /// instead forwarded to a running desktop instance over the local socket
-/// transport (docs/HEW_API.md §11.2, §12) — the script's own first frame
+/// transport (docs/agents/HEW_API.md §11.2, §12) — the script's own first frame
 /// carries the discovery handshake, and, if it means to mutate anything,
 /// a `hew.doc.attach` of its own (a live host serves an already-open
 /// document rather than creating one — see [`dispatch_live`]'s doc
@@ -167,7 +167,7 @@ fn run_script_embedded(
 
 /// Forwards every frame of a script to a live instance. The first frame
 /// must be `hew.meta.hello` — that is what carries the discovery token
-/// (docs/HEW_API.md §11.2) — everything after it is forwarded as-is (the
+/// (docs/agents/HEW_API.md §11.2) — everything after it is forwarded as-is (the
 /// script is free to include its own `hew.doc.attach`, exactly like any
 /// other command it sends). Returns `Err(exit_code)` on the first failure
 /// (malformed frame, transport error, or a refused/errored reply), having
@@ -298,7 +298,7 @@ pub struct DispatchResult {
     pub response: Option<serde_json::Value>,
 }
 
-/// `hew-cli dispatch <method> [params] --file <model.hew>` (docs/HEW_API.md
+/// `hew-cli dispatch <method> [params] --file <model.hew>` (docs/agents/HEW_API.md
 /// §12): opens `file`, dispatches exactly one envelope built from
 /// `method`/`params`, prints the reply to stdout, and — for anything but a
 /// read-only command — saves the document back in place. Internal
@@ -394,7 +394,7 @@ pub fn dispatch_file(file: &Path, method: &str, params: serde_json::Value) -> Di
     }
 }
 
-/// `hew-cli dispatch <method> [params] --live` (docs/HEW_API.md §12):
+/// `hew-cli dispatch <method> [params] --live` (docs/agents/HEW_API.md §12):
 /// connects to a running desktop instance, attaches to its document, and
 /// forwards exactly one envelope built from `method`/`params`, printing
 /// the reply. Unlike `--file`, there is no save-back step: a live edit
@@ -405,7 +405,7 @@ pub fn dispatch_file(file: &Path, method: &str, params: serde_json::Value) -> Di
 /// The attach step, and why it exists here at all: a live host serves a
 /// document the user already has open rather than creating one on
 /// connect, so a fresh connection is not bound to anything until it asks
-/// (docs/HEW_API.md §4.2's `hew.doc.attach`, §10's "document lifecycle
+/// (docs/agents/HEW_API.md §4.2's `hew.doc.attach`, §10's "document lifecycle
 /// stays user-driven"). The embedded/`--file` paths never notice this —
 /// `hew.doc.new`/`open` auto-attach on success — but a one-shot `dispatch
 /// --live` only ever sends the single envelope the caller asked for, with

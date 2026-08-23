@@ -3,7 +3,7 @@
 // JSON — what `Scene.take_recording()` emits, and what a future bug-report
 // bundle, M17, will contain) into a committed replay regression fixture.
 //
-// Flow (docs/DEVELOPMENT.md): a bug is reported with its recording -> the
+// Flow (docs/dev/DEVELOPMENT.md): a bug is reported with its recording -> the
 // recording is reproduced -> the bug is fixed -> `freeze` validates the
 // recording still replays to its own golden under the fixed kernel and, if
 // so, commits it verbatim as `fixtures/<name>.json` -> `run.mjs`/CI replays
@@ -17,7 +17,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { loadWasm, FIXTURES_DIR } from './lib.mjs';
 
-// Must match RECORDING_FORMAT_VERSION (docs/DIAGNOSTICS.md,
+// Must match RECORDING_FORMAT_VERSION (docs/dev/DIAGNOSTICS.md,
 // crates/wasm-api/src/recording.rs). v2 = typed replayable calls.
 const RECORDING_FORMAT_VERSION = 2;
 
@@ -77,7 +77,7 @@ export async function freeze(recordingPath, fixtureName, { force = false } = {})
   if (parsed.version !== RECORDING_FORMAT_VERSION) {
     throw new Error(
       `${recordingPath} has version=${parsed.version}, expected ` +
-        `${RECORDING_FORMAT_VERSION} (docs/DIAGNOSTICS.md) — refusing to freeze ` +
+        `${RECORDING_FORMAT_VERSION} (docs/dev/DIAGNOSTICS.md) — refusing to freeze ` +
         `a recording from a different format version.`,
     );
   }
@@ -85,7 +85,7 @@ export async function freeze(recordingPath, fixtureName, { force = false } = {})
     throw new Error(`${recordingPath} is missing a "calls" array`);
   }
 
-  // golden_hash is a u64 (docs/DIAGNOSTICS.md); JSON.parse silently
+  // golden_hash is a u64 (docs/dev/DIAGNOSTICS.md); JSON.parse silently
   // corrupts values above Number.MAX_SAFE_INTEGER (e.g.
   // 16685420354669910861 becomes 16685420354669910016), so pull the literal
   // digits out of the raw text via regex and hand them to BigInt directly —

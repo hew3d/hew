@@ -10,7 +10,7 @@
 use kernel::{Plane, Point3, Vec3};
 
 /// How close a client-supplied point must be to a surface (or edge) to
-/// count as "on" it for locator resolution (docs/HEW_API.md §5.2).
+/// count as "on" it for locator resolution (docs/agents/HEW_API.md §5.2).
 pub const API_SURFACE_TOL: f64 = 1e-6;
 
 /// Two locator candidates closer than this are indistinguishable — an

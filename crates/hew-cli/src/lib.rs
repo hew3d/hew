@@ -3,7 +3,7 @@
 //! `run`/`dispatch`/`mcp` code paths directly, spawn-free (no subprocess,
 //! no piping stdio).
 //!
-//! Headless is the default (docs/HEW_API.md §12): every subcommand embeds
+//! Headless is the default (docs/agents/HEW_API.md §12): every subcommand embeds
 //! `crates/api` and the kernel directly through [`host::CliHost`]. `--live`
 //! (discovering and forwarding to a running desktop instance over the
 //! local socket transport, §11.2) is implemented in [`live`]; it never

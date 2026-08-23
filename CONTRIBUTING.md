@@ -7,10 +7,12 @@ makes coordination before large changes essential.
 ## Before you start
 
 - All project spaces follow the [code of conduct](CODE_OF_CONDUCT.md).
-- Read [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). It covers setup,
+- Read [docs/dev/DEVELOPMENT.md](docs/dev/DEVELOPMENT.md). It covers setup,
   repository layout, and the project's non-negotiable engineering rules.
   Code throughout the kernel cites those rules by number.
-- Check [docs/ROADMAP.md](docs/ROADMAP.md) and the issue tracker. For
+- Check [docs/ROADMAP.md](docs/ROADMAP.md) (and
+  [docs/agents/ROADMAP.md](docs/agents/ROADMAP.md) for the detailed
+  inventory) plus the issue tracker. For
   anything larger than a small fix, open an issue first and outline your
   approach — architectural direction (kernel dependencies, the file
   format, the public WASM surface) is deliberately conservative, and
@@ -31,7 +33,7 @@ makes coordination before large changes essential.
    and property tests in the same PR; UI changes ship with component tests.
    Never weaken or delete a failing test to get green.
 4. If you touch serialization, update
-   [docs/HEW_FILE_FORMAT.md](docs/HEW_FILE_FORMAT.md) in the same commit.
+   [docs/dev/HEW_FILE_FORMAT.md](docs/dev/HEW_FILE_FORMAT.md) in the same commit.
 5. Run the verification gate and make sure it passes:
 
    ```sh
@@ -101,4 +103,4 @@ that follows from it. Every other commit has a person behind it.
 File issues at [github.com/hew3d/hew/issues](https://github.com/hew3d/hew/issues).
 The most useful reports include the `.hew` file, the debug log, and — for
 anything interactive — a session recording; see
-[docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) for where to find all three.
+[docs/dev/DIAGNOSTICS.md](docs/dev/DIAGNOSTICS.md) for where to find all three.

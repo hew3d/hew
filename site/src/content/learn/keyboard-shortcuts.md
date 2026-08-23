@@ -4,7 +4,7 @@ description: "Every default shortcut on one page, including the modifier keys th
 order: 23
 ---
 
-Tool shortcuts are plain letters, the same on every platform, and match SketchUp's defaults wherever SketchUp has one. Command shortcuts use `⌘` on macOS and `Ctrl` on Windows, Linux, and the web.
+Tool shortcuts are plain letters, the same on every platform, matching SketchUp's defaults wherever SketchUp has one. Command shortcuts use `⌘` on macOS and `Ctrl` on Windows, Linux, and the web.
 
 ## Tools
 
@@ -27,7 +27,7 @@ Tool shortcuts are plain letters, the same on every platform, and match SketchUp
 | Pan | `H` |
 | Zoom | `Z` |
 
-Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key (as in SketchUp); reach them via the Draw/Tools menu or the command palette. On macOS the menus also display `⌘`-combination accelerators beside the tools; those work too, but the letters above are the ones worth learning.
+Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key, same as in SketchUp — reach them via the Draw/Tools menu or the command palette. On macOS the menus also display `⌘`-combination accelerators beside the tools; those work too, but the letters above are the ones worth learning.
 
 ## Commands
 
@@ -56,7 +56,7 @@ Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key (
 
 ## During a gesture
 
-These keys change what the *current tool operation* does; they're covered in each tool's chapter:
+These keys change what the *current tool operation* does. Each is covered in more depth in its tool's own chapter:
 
 | Key | Effect |
 |---|---|

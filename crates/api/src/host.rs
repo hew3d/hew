@@ -1,4 +1,4 @@
-//! The typed host trait (docs/HEW_API.md §3): the narrow seam through
+//! The typed host trait (docs/agents/HEW_API.md §3): the narrow seam through
 //! which host-implemented commands (file paths, importers, rendering)
 //! reach the outside world. `crates/api` stays pure — it validates,
 //! enforces profiles, and shapes responses; the host supplies only the
@@ -18,7 +18,7 @@ fn unsupported(what: &str) -> Refusal {
 
 // ------------------------------------------------------------ hew.view.snapshot
 
-/// A named standard view (docs/HEW_API.md §7; mirrors
+/// A named standard view (docs/agents/HEW_API.md §7; mirrors
 /// `softrender::StandardView` one-to-one). Kept as its own copy here
 /// rather than a dependency on `softrender` — `crates/api` stays typed
 /// against the host boundary without pulling in a renderer (§3's layering:
@@ -60,7 +60,7 @@ pub enum SnapshotProjection {
     Parallel,
 }
 
-/// An explicit camera for `hew.view.snapshot` (docs/HEW_API.md §7):
+/// An explicit camera for `hew.view.snapshot` (docs/agents/HEW_API.md §7):
 /// `up`, `projection`, and `fov_deg` are optional in the wire params and
 /// stay optional here — a host resolves their defaults (identity up
 /// `[0,0,1]`, perspective, 35°) when building its own renderer's camera,
@@ -98,13 +98,13 @@ pub struct SnapshotParams {
     /// document's saved working camera, else a fitted isometric view —
     /// fitted to what the SCENE leaves visible, not the whole document.
     /// The Scene's section plane, if any, is NOT rendered headlessly at
-    /// 1.0 (docs/HEW_API.md's Scenes section).
+    /// 1.0 (docs/agents/HEW_API.md's Scenes section).
     pub scene: Option<u64>,
     /// When true, the result also carries a per-pixel id-buffer and the
     /// palette of public ids it indexes.
     pub include_ids: bool,
     /// When given, the PNG is written here instead of returned inline
-    /// (docs/HEW_API.md §7, mirroring `hew.doc.export`'s posture):
+    /// (docs/agents/HEW_API.md §7, mirroring `hew.doc.export`'s posture):
     /// honored by hosts with filesystem access, refused typed elsewhere.
     /// `commands/doc.rs` still calls [`Host::snapshot`] to render the
     /// bytes; it is [`Host::write_snapshot`] that a host lacking
@@ -314,7 +314,7 @@ pub trait Host {
     }
 
     /// Writes bytes produced by [`Host::snapshot`] to `path`
-    /// (`hew.view.snapshot`'s `path` parameter, docs/HEW_API.md §7):
+    /// (`hew.view.snapshot`'s `path` parameter, docs/agents/HEW_API.md §7):
     /// mirrors `export_document`'s path posture, split into its own
     /// method because `crates/api` stays pure and cannot write the file
     /// itself — the host does, to its ability. `commands/doc.rs` calls
@@ -359,7 +359,7 @@ pub trait Host {
         Vec::new()
     }
 
-    /// Set the live viewport's camera (`hew.view.camera`, docs/HEW_API.md
+    /// Set the live viewport's camera (`hew.view.camera`, docs/agents/HEW_API.md
     /// §7): the same camera vocabulary `hew.view.snapshot` accepts,
     /// applied to the actual on-screen viewport instead of rendered to
     /// bytes. This is a host effect on the VIEW, not a document edit —
@@ -376,7 +376,7 @@ pub trait Host {
     }
 
     /// Frame all visible geometry in the live viewport
-    /// (`hew.view.zoom_extents`, docs/HEW_API.md §7) — the API
+    /// (`hew.view.zoom_extents`, docs/agents/HEW_API.md §7) — the API
     /// counterpart of the app's View > Zoom Extents. Also a view
     /// effect, not a document edit: same `mutates_document = false`
     /// posture as [`Host::set_camera`]. A headless host refuses
@@ -386,7 +386,7 @@ pub trait Host {
     }
 
     /// Set the app's displayed length-unit format (`hew.view.units`,
-    /// docs/HEW_API.md §7). `format` is one of
+    /// docs/agents/HEW_API.md §7). `format` is one of
     /// `app/src/settings/units.ts`'s `LengthFormat` values (`"m"`,
     /// `"cm"`, `"mm"`, `"arch"`, `"frac_in"`, `"dec_in"`), already
     /// validated against that exact enum by `crates/api` before this is

@@ -3,7 +3,7 @@ import { settleFrame } from './helpers/render'
 
 /**
  *  — the canonical web E2E smoke flow: **launch → draw rectangle →
- * push/pull → save/reload → screenshot** (docs/DEVELOPMENT.md).
+ * push/pull → save/reload → screenshot** (docs/dev/DEVELOPMENT.md).
  *
  * It drives the semantic harness (`window.__hew_test`) for the modeling +
  * persistence logic — deterministic, no canvas-pixel math — and uses the *pixel*

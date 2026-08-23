@@ -1,4 +1,4 @@
-//! The api-owned public-id indirection (docs/HEW_API.md §5.1). Public
+//! The api-owned public-id indirection (docs/agents/HEW_API.md §5.1). Public
 //! ids are opaque strings a client may cache across saves; underneath,
 //! each is a kind prefix plus the entity's kernel stable id (manifest
 //! v14) in hex. Clients must not parse them — the format is an
@@ -39,7 +39,7 @@ pub fn curve_id(sketch_sid: u64, curve: kernel::SketchCurveId) -> String {
     format!("crv_{sketch_sid:x}_{:x}", curve.data().as_ffi())
 }
 
-/// The public id for a Scene (docs/HEW_API.md §5.1). Scenes are NOT
+/// The public id for a Scene (docs/agents/HEW_API.md §5.1). Scenes are NOT
 /// entities — they carry no [`EntityRef`], do not appear in
 /// [`Document::sids`], and are addressed by their own list
 /// (`kernel::Document::scenes`) — so this is its own top-level id shape
@@ -60,7 +60,7 @@ pub fn resolve_scene_id(public: &str) -> Option<u64> {
 }
 
 /// A compound public id for a sketch edge — minted exactly like
-/// [`region_id`]/[`curve_id`] (docs/HEW_API.md §5.2): the owning sketch's
+/// [`region_id`]/[`curve_id`] (docs/agents/HEW_API.md §5.2): the owning sketch's
 /// stable id plus the edge's session-stable slotmap key bits. Unlike a
 /// SOLID edge (never addressable — §5.2), a sketch edge is durable,
 /// user-visible scaffolding a client draws, queries, and later trims, so

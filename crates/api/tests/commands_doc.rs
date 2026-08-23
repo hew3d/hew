@@ -730,7 +730,7 @@ fn snapshot_includes_id_buffer_and_palette_when_requested() {
 
 #[test]
 fn snapshot_with_path_writes_the_file_and_omits_inline_bytes() {
-    // Mirrors hew.doc.export's own path posture (docs/HEW_API.md §7): the
+    // Mirrors hew.doc.export's own path posture (docs/agents/HEW_API.md §7): the
     // inline base64 PNG can exceed an MCP client's tool-result budget at
     // any useful resolution, so a caller that only needs the file on disk
     // asks for `path` instead.

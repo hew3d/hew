@@ -3,8 +3,10 @@ question: "How is Hew different from SketchUp?"
 order: 3
 ---
 
-Hew "feels" intentionally feels a lot like SketchUp  - the same push/pull workflow, generally the same tools, the same reliance on inference snapping, and typically the same keyboard shortcuts. Hew should feel very familiar to any experienced SketchUp user.
+Hew intentionally feels a lot like SketchUp — the same push/pull workflow, generally the same tools, the same reliance on inference snapping, and typically the same keyboard shortcuts. An experienced SketchUp user should feel at home almost immediately.
 
-The biggest difference is underneath: SketchUp models are a soup of individual "mesh" faces that weld together the moment ungrouped geometry touches, and can silently become hollow if a single face is deleted or flipped. Very frustrating. Hew's Objects are watertight solids by construction, never weld to each other by accident, and only ever combine when you explicitly ask them to!
+The practical differences are cost and reach. SketchUp no longer has a free desktop app (Hew is a native desktop app on macOS, Windows, and Linux); SketchUp's free web tier is stripped down (Hew's web app is the full modeler); and the full SketchUp product is a subscription costing hundreds of dollars a year (Hew is free and open source).
 
-Also, SketchUp no longer has a free desktop app (Hew has a desktop app for macOS, Linux, and Windows); SketchUp's free web app is limited (Hew's web app is full featured); SketchUp's full web app or desktop apps are subscription based and very expensive (Hew is free); and finally, SketchUp does have 25 years of professional development while Hew is brand-new.
+There is also a difference underneath: SketchUp models are a soup of individual mesh faces that weld together the moment ungrouped geometry touches, and can silently go hollow if a single face or the wrong line is deleted or flipped. Hew's Objects are watertight solids by construction, never weld to each other by accident, and only combine when you explicitly ask.
+
+To be fair the other way: SketchUp has 25 years of professional development and a strong community behind it. Hew is just getting started and has none of that.

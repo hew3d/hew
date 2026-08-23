@@ -1,11 +1,11 @@
 /**
- * reproducerDump — the auto-reproducer dump (docs/DEVELOPMENT.md, "the
+ * reproducerDump — the auto-reproducer dump (docs/dev/DEVELOPMENT.md, "the
  * highest-value feature"). On a failure, bundle {recorded command stream so
  * far + serialized .hew + diagnostic-log tail} to disk so "it broke" becomes
  * "here is a model + an input log that reproduces it".
  *
  * Depends on:
- *   -  recording (docs/DIAGNOSTICS.md): `scene.start_recording()` /
+ *   -  recording (docs/dev/DIAGNOSTICS.md): `scene.start_recording()` /
  *     `scene.take_recording()` — the typed Scene command stream.
  *   -  diagnosticLog: `getRecords()` / `toNDJSON()` — the unified
  *     kernel+UI log ring buffer.
@@ -35,7 +35,7 @@ export interface ReproducerBundle {
     stateHash: string
     userAgent: string
   }
-  /** The Recording JSON string (docs/DIAGNOSTICS.md), or null if unavailable. */
+  /** The Recording JSON string (docs/dev/DIAGNOSTICS.md), or null if unavailable. */
   recording: string | null
   /** The diagnostic-log tail as NDJSON. */
   log: string

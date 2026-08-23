@@ -1,5 +1,5 @@
 //! The dispatcher: one pure function from request to response, per
-//! connection (docs/HEW_API.md §1). The scaffold implements the
+//! connection (docs/agents/HEW_API.md §1). The scaffold implements the
 //! connection lifecycle — `hello` gating, profile enforcement, attachment
 //! — and answers every not-yet-implemented command with the
 //! `unimplemented` refusal, which is what makes the declared registry a
@@ -11,7 +11,7 @@ use crate::host::Host;
 use crate::registry::{CommandClass, Profile, Registry};
 use crate::transact::{self, TxError};
 
-/// The protocol version this dispatcher speaks (docs/HEW_API.md §4.2).
+/// The protocol version this dispatcher speaks (docs/agents/HEW_API.md §4.2).
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// What dispatch did with a frame.

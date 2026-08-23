@@ -30,7 +30,7 @@ pub struct Camera {
     pub projection: Projection,
 }
 
-/// A named standard view (docs/HEW_API.md §7 — `hew.view.snapshot`).
+/// A named standard view (docs/agents/HEW_API.md §7 — `hew.view.snapshot`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StandardView {
     Iso,

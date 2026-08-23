@@ -8,7 +8,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# The live desktop transport's WASM half (docs/HEW_API.md §11.2): the
+# The live desktop transport's WASM half (docs/agents/HEW_API.md §11.2): the
 # webview dispatches JSON-RPC frames straight against api::Connection, the
 # same pure dispatcher hew-cli embeds headlessly. crates/api is
 # kernel-class-pure (kernel, slotmap, serde only — DEVELOPMENT.md rule 1),

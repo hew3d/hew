@@ -2,10 +2,10 @@
  * Plain-language error messages for every operation Hew refuses.
  *
  * The wasm boundary throws stringly `"CODE: message"` errors
- * (docs/DEVELOPMENT.md B3), where CODE is the innermost typed kernel error's
+ * (docs/dev/DEVELOPMENT.md B3), where CODE is the innermost typed kernel error's
  * variant name. This module owns the CODE → user-facing copy table: what
  * happened in plain words, then a suggested next step — never a raw
- * technical error (ROADMAP: plain-language error messages).
+ * technical error (docs/agents/ROADMAP.md: plain-language error messages).
  *
  * Copy ground rules:
  *  - First sentence: what was refused, in the user's vocabulary. Hew's

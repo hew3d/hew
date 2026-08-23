@@ -118,7 +118,7 @@ fn call_ok_one_undo(
 }
 
 /// A plain (non-`transact`) model-mutating request dispatches as exactly
-/// a one-command transaction (docs/HEW_API.md §6.1); its result is the
+/// a one-command transaction (docs/agents/HEW_API.md §6.1); its result is the
 /// wrapper's `results[0]`, not the bare command result.
 fn single(result: Value) -> Value {
     result["results"][0].clone()
@@ -776,7 +776,7 @@ fn offset_unknown_region_refuses_unknown_entity() {
 // Face-imprint drawing (plane spec `{"face": <locator>}`) is covered in
 // commands_face_imprint.rs — draw_on_a_face_is_unimplemented_at_v0 lived
 // here while the face path refused typed; it's superseded now that the
-// path is implemented (docs/HEW_API.md §9: a documented refusal may
+// path is implemented (docs/agents/HEW_API.md §9: a documented refusal may
 // become a success in a later release).
 
 // =============================================================== hew.solid
@@ -1119,7 +1119,7 @@ fn follow_me_sweeps_a_square_profile_around_a_circular_path() {
     let region_id = profile_result["region_id"].as_str().unwrap().to_string();
 
     // follow_me consumes the profile's scaffolding exactly like extrude
-    // (docs/HEW_API.md §7 semantics notes) and, like extrude, now undoes
+    // (docs/agents/HEW_API.md §7 semantics notes) and, like extrude, now undoes
     // byte-identically: `Sketch::remove_edges` frees vertex/edge slots in
     // descending id order so `Sketch::restore_edges`'s LIFO slot reuse
     // lands every re-inserted vertex/edge back in its ORIGINAL slot instead

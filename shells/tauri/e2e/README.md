@@ -2,7 +2,7 @@
 
 End-to-end tests against the **real desktop binary** — the Tauri shell + WebKitGTK
 webview + WASM kernel, exactly as a user runs it. This is the top of the test
-pyramid (docs/DEVELOPMENT.md); keep it to a thin desktop-*wiring* smoke, because
+pyramid (docs/dev/DEVELOPMENT.md); keep it to a thin desktop-*wiring* smoke, because
 modeling logic is already covered deterministically by the kernel/proptest suites
 and the headless `window.__hew_test` harness.
 

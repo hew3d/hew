@@ -6,7 +6,7 @@
 // is the existing precedent for this pragma).
 
 /**
- * `liveBridge.ts` — the webview half of `--live` (docs/HEW_API.md §11.2).
+ * `liveBridge.ts` — the webview half of `--live` (docs/agents/HEW_API.md §11.2).
  *
  * `isTauri` (io/fileHost.ts) is a module-level constant resolved once from
  * `'__TAURI_INTERNALS__' in window` — the same isolation note

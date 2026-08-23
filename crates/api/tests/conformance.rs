@@ -1,4 +1,4 @@
-//! The API conformance suite (docs/HEW_API.md §14) — the contract's
+//! The API conformance suite (docs/agents/HEW_API.md §14) — the contract's
 //! teeth. Four parts:
 //!
 //! 1. **Golden transcripts** — literal request/response fixtures under
@@ -22,7 +22,7 @@
 //!    generated-artifact byte-identity checks arrive with the generators.
 //! 4. **Determinism replay** — `envelope_scripts_replay_byte_identically`.
 //!
-//! Where this suite and docs/HEW_API.md are ever found to disagree, that
+//! Where this suite and docs/agents/HEW_API.md are ever found to disagree, that
 //! is a specification bug fixed in both, in the open — never resolved
 //! silently in whichever direction is convenient (§14).
 
@@ -383,7 +383,7 @@ fn refused_transactions_leave_the_document_byte_identical() {
 // byte-identity vocabulary below, leaving only (a).
 //
 // Carve-out (a) is not a kernel GAP like the fixed ones above — it is
-// normatively specified behavior (docs/HEW_API.md §6.4's registry-state
+// normatively specified behavior (docs/agents/HEW_API.md §6.4's registry-state
 // paragraph), not an anomaly the spec merely tolerates. It is carved out
 // of the same property for the same mechanical reason the real gaps were:
 // the byte-identity vocabulary asserts exactly one undo entry per
@@ -391,7 +391,7 @@ fn refused_transactions_leave_the_document_byte_identical() {
 // none.
 
 /// Carve-out (a): `hew.material.create` / `hew.tag.create` /
-/// `hew.tag.set_visible` are the **registry-state** commands docs/HEW_API.md
+/// `hew.tag.set_visible` are the **registry-state** commands docs/agents/HEW_API.md
 /// §6.4 specifies: model-mutating for placement purposes, but recording no
 /// undo entry, because the kernel entry points behind them
 /// (`Document::add_material`, `Document::set_tag_hidden`) deliberately keep

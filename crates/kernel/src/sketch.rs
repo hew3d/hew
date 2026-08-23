@@ -6,7 +6,7 @@
 //! [`SketchRegion`]s. A region converts to a [`Profile`] — a validated closed
 //! planar polygon with holes — which is the input to
 //! `Object::from_extrusion`: extruding a Profile is THE way solids are born
-//! (solids-by-default, docs/DEVELOPMENT.md).
+//! (solids-by-default, docs/dev/DEVELOPMENT.md).
 //!
 //! Sketches are deliberately not Objects: an Object models a solid with a
 //! watertightness contract; a sketch is scaffolding. Drawing on an existing
@@ -1865,7 +1865,7 @@ impl Sketch {
     /// set can go stale while the geometry itself is exact.
     ///
     /// Public (not `pub(crate)`) because `crates/api`'s sketch-edge
-    /// locator (docs/HEW_API.md §5.2) reuses this exact geometry match for
+    /// locator (docs/agents/HEW_API.md §5.2) reuses this exact geometry match for
     /// its by-two-endpoints form, rather than duplicating the tolerant
     /// endpoint comparison at the API boundary — a read-only accessor, no
     /// new kernel behavior.

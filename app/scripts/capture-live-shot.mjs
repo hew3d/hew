@@ -21,6 +21,10 @@
  *                    always resolve to the same interface)
  *   --size WxH       CSS viewport (default 1440x900)
  *   --scale N        device pixel ratio (default 2)
+ *   --format F       png (default), jpeg, or webp. PNG is the docs standard;
+ *                    jpeg/webp are for hero/marketing shots where file size
+ *                    matters (webp shells out to cwebp — `brew install webp`)
+ *   --quality N      jpeg/webp quality 0-100 (default 90; ignored for png)
  *   --delay S        seconds to wait before each capture (default 0)
  *   --cursor         draw the mouse cursor into the shot (see below)
  *   --light          light theme instead of dark
@@ -50,7 +54,8 @@
  * are seeing double; only the drawn one lands in the PNG.
  */
 import { chromium } from '@playwright/test'
-import { mkdirSync, existsSync } from 'node:fs'
+import { mkdirSync, existsSync, rmSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline/promises'
@@ -74,11 +79,21 @@ const bool = (name) => {
 const url = flag('--url')
 const size = flag('--size') ?? '1440x900'
 const scale = Number(flag('--scale') ?? 2)
+const format = flag('--format') ?? 'png'
+const quality = Number(flag('--quality') ?? 90)
 let delay = Number(flag('--delay') ?? 0)
 let cursor = bool('--cursor')
 const light = bool('--light')
 const welcome = bool('--welcome')
 const OUT = resolve(argv[0] ?? resolve(APP_DIR, '../site/public/docs'))
+
+if (!['png', 'jpeg', 'webp'].includes(format))
+  throw new Error(`--format wants png, jpeg, or webp, got ${format}`)
+if (!Number.isFinite(quality) || quality < 0 || quality > 100)
+  throw new Error('--quality wants 0-100')
+if (format === 'webp' && spawnSync('cwebp', ['-version']).error)
+  throw new Error('--format webp needs cwebp on the PATH (brew install webp)')
+const EXT = format === 'jpeg' ? 'jpg' : format
 
 const m = /^(\d+)[xX](\d+)$/.exec(size)
 if (!m) throw new Error(`--size wants WxH, got ${size}`)
@@ -385,11 +400,11 @@ while (alive) {
     console.log('  give the first shot a name')
     continue
   }
-  name = name.replace(/\.png$/i, '')
+  name = name.replace(/\.(png|jpe?g|webp)$/i, '')
   if (repeat) {
     // Bump to the first free numeric suffix rather than overwrite.
     let n = 2
-    while (existsSync(`${OUT}/${name}-${n}.png`)) n++
+    while (existsSync(`${OUT}/${name}-${n}.${EXT}`)) n++
     name = `${name}-${n}`
   } else {
     last = name
@@ -407,8 +422,20 @@ while (alive) {
     // The pointer may have crossed into a different cursor region while we
     // waited without generating a move event we saw; re-resolve before firing.
     if (cursor) await page.evaluate(() => window.__shotCursor?.refresh())
-    await page.screenshot({ path: `${OUT}/${name}.png` })
-    console.log(`  wrote ${OUT}/${name}.png`)
+    const out = `${OUT}/${name}.${EXT}`
+    if (format === 'webp') {
+      // Playwright captures png and jpeg only; capture png, hand it to cwebp.
+      const tmp = `${OUT}/.${name}.capture.png`
+      await page.screenshot({ path: tmp })
+      const res = spawnSync('cwebp', ['-q', String(quality), '-m', '6', tmp, '-o', out])
+      rmSync(tmp, { force: true })
+      if (res.status !== 0) throw new Error(`cwebp failed: ${res.stderr}`)
+    } else if (format === 'jpeg') {
+      await page.screenshot({ path: out, type: 'jpeg', quality })
+    } else {
+      await page.screenshot({ path: out })
+    }
+    console.log(`  wrote ${out}`)
   } catch (err) {
     console.log(`  capture failed: ${err.message}`)
   }

@@ -6,7 +6,7 @@ GENERATED from crates/api registry — do not edit; regenerate with:
 # Hew API Reference
 
 This is the mechanically published form of the command registry in
-`crates/api/src/registry.rs` (docs/HEW_API.md §9: "published from
+`crates/api/src/registry.rs` (docs/agents/HEW_API.md §9: "published from
 it"). It is the per-command companion to HEW_API.md, which defines
 the protocol every command obeys; this document lists what each one
 actually is. One section per namespace, one entry per command, in

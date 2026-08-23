@@ -73,7 +73,7 @@ pub enum NodeId {
     Instance(InstanceId),
 }
 
-/// What an attribute dictionary hangs on (docs/HEW_API.md §8): a document
+/// What an attribute dictionary hangs on (docs/agents/HEW_API.md §8): a document
 /// entity, or the document itself. The key of [`Document`]'s attribute
 /// table and the `target` of [`Document::attr_set`]/[`Document::attr_get`]/
 /// [`Document::attr_delete`].
@@ -86,7 +86,7 @@ pub enum AttrTarget {
 }
 
 /// Every kind of document entity that carries a **stable id** (manifest
-/// v14+; docs/HEW_API.md §5.1) — the superset of [`NodeId`] covering
+/// v14+; docs/agents/HEW_API.md §5.1) — the superset of [`NodeId`] covering
 /// non-tree entities too. Tags are identified by their root-first path
 /// (the registry key in [`Document::tag_meta`]); everything else by its
 /// generational runtime handle. The stable id attached to an `EntityRef`
@@ -472,7 +472,7 @@ impl SessionFrame {
 
 /// Who authored a history entry: the user's own editing, or an API
 /// connection identified by the string its host assigned it (the Hew API
-/// spec's `origin` — docs/HEW_API.md §6.1). Session-scoped provenance,
+/// spec's `origin` — docs/agents/HEW_API.md §6.1). Session-scoped provenance,
 /// never serialized into `.hew` — exactly like the undo log that carries
 /// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2632,7 +2632,7 @@ pub struct Document {
     /// manifest v16+): non-undoable, persisted view state, captured by value
     /// into Scenes. `None` when no plane is placed.
     pub(crate) section_plane: Option<crate::scenes::SectionPlaneState>,
-    /// Persistent per-entity **stable ids** (manifest v14+; docs/HEW_API.md
+    /// Persistent per-entity **stable ids** (manifest v14+; docs/agents/HEW_API.md
     /// §5.1): the identity that survives save/load, undo/redo, and the
     /// dense-id renumbering every save performs (HEW_FILE_FORMAT.md §4.2).
     /// Minted once per entity by [`Document::mint_sid`] at creation and
@@ -2648,7 +2648,7 @@ pub struct Document {
     /// counter-rollback bookkeeping (an undone creation's id simply never
     /// reached the file).
     next_sid: u64,
-    /// Attribute dictionaries (docs/HEW_API.md §8; manifest v14+):
+    /// Attribute dictionaries (docs/agents/HEW_API.md §8; manifest v14+):
     /// namespaced client data per entity plus the document's own, stored
     /// and round-tripped, never interpreted. Keyed by [`AttrTarget`];
     /// entries for tombstoned entities stay in the table (like `sids`), so
@@ -2663,7 +2663,7 @@ pub struct Document {
     /// the save guard backstopping the app's own "close before saving"
     /// rule. Session-only, exactly like `pending_sketch_gesture`.
     sessions: Vec<SessionFrame>,
-    /// Torture/"paranoid" mode (docs/DEVELOPMENT.md): when on, the topology
+    /// Torture/"paranoid" mode (docs/dev/DEVELOPMENT.md): when on, the topology
     /// validator runs after **every** op even in release builds (where
     /// `check_invariants` / `debug_assert!` are compiled out), so a flaky op
     /// surfaces at the exact op instead of as a downstream glitch. Session-only
@@ -2677,7 +2677,7 @@ impl Document {
         Document::default()
     }
 
-    /// Enables/disables torture ("paranoid") mode (docs/DEVELOPMENT.md): the
+    /// Enables/disables torture ("paranoid") mode (docs/dev/DEVELOPMENT.md): the
     /// always-on topology validator after every op, even in release. A debug aid
     /// — on a violation it panics at the offending op rather than committing.
     /// (The companion re-tessellation self-check lives above the kernel, in the
@@ -2693,7 +2693,7 @@ impl Document {
 
     // -------------------------------------------------------- stable ids
 
-    /// The entity's persistent stable id (manifest v14+; docs/HEW_API.md
+    /// The entity's persistent stable id (manifest v14+; docs/agents/HEW_API.md
     /// §5.1) — the identity a client may cache across saves, unlike the
     /// file's dense ids (HEW_FILE_FORMAT.md §4.2) or the generational
     /// runtime handle inside `entity`. `None` for a handle that never
@@ -2835,7 +2835,7 @@ impl Document {
         }
     }
 
-    /// Writes one attribute key (docs/HEW_API.md §8): an ordinary,
+    /// Writes one attribute key (docs/agents/HEW_API.md §8): an ordinary,
     /// undoable mutation, one undo entry per call. The value is validated
     /// whole before anything changes (non-finite numbers refuse typed —
     /// rule 4 posture); on `Err` the document is untouched.
@@ -2989,7 +2989,7 @@ impl Document {
     }
 
     /// Copies every dictionary of `from` onto `to` — the deep-copy
-    /// semantics of docs/HEW_API.md §8 (a duplicated entity carries its
+    /// semantics of docs/agents/HEW_API.md §8 (a duplicated entity carries its
     /// source's attributes; the copy then evolves independently). No-op
     /// when the source has none.
     fn copy_attrs(&mut self, from: &EntityRef, to: EntityRef) {
@@ -3240,7 +3240,7 @@ impl Document {
     }
 
     /// A canonical, deterministic digest of the document's live state ( /
-    /// docs/DEVELOPMENT.md). The single oracle for the Road-to-Reliable phase:
+    /// docs/dev/DEVELOPMENT.md). The single oracle for the Road-to-Reliable phase:
     /// record/replay asserts against it, the diagnostic log stamps every op with
     /// it, and the determinism guard compares it.
     ///
@@ -3812,7 +3812,7 @@ impl Document {
         }
         doc.next_sid = doc.sids.values().max().map_or(0, |m| m + 1);
 
-        // ── Attribute dictionaries (manifest v14+, docs/HEW_API.md §8) ────
+        // ── Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8) ────
         // Decode already validated shapes and values; only non-empty dicts
         // enter the table (the live mutation path keeps the same tidiness,
         // so a round trip is byte-exact).
@@ -12190,7 +12190,7 @@ impl Document {
         // is divergence. A copied stamp would let a later insert of the
         // pristine item silently reuse the user's edited private geometry
         // (adversarial review S1). Client namespaces still deep-copy per
-        // docs/HEW_API.md §8.
+        // docs/agents/HEW_API.md §8.
         if let Some(dict) = self
             .attrs
             .get_mut(&AttrTarget::Entity(EntityRef::Component(new_def)))
@@ -13558,7 +13558,7 @@ impl Document {
     /// `crates/mesh-export`'s writers both call this — the fix for a
     /// defect where a live `hew.doc.export` mid-session silently dropped
     /// every hidden sibling instance while `hew.doc.save` (already routed
-    /// through the closed view) did not: docs/HEW_API.md's promise that
+    /// through the closed view) did not: docs/agents/HEW_API.md's promise that
     /// "the same command produces the same file headless or live" held for
     /// save but not export.
     pub fn session_closed(&self) -> std::borrow::Cow<'_, Document> {
@@ -14027,7 +14027,7 @@ impl Document {
 
     /// How many entries the next [`Document::undo`] could pop, one at a
     /// time. With [`Document::peek_undo_meta`], the source for the API's
-    /// `hew.history.status` (docs/HEW_API.md §7).
+    /// `hew.history.status` (docs/agents/HEW_API.md §7).
     pub fn undo_depth(&self) -> usize {
         self.undo.actions.len()
     }
@@ -14054,7 +14054,7 @@ impl Document {
     /// mutations that follow can later be committed as ONE labeled undo
     /// entry ([`Document::commit_transaction`]) or discarded wholesale
     /// ([`Document::abort_transaction`]). The Hew API's
-    /// one-envelope-one-undo guarantee (docs/HEW_API.md §6.1) is built on
+    /// one-envelope-one-undo guarantee (docs/agents/HEW_API.md §6.1) is built on
     /// this bracket; the snapshot-clone is the same checkpoint idiom
     /// compound undo itself uses.
     ///
@@ -14086,7 +14086,7 @@ impl Document {
     /// own rule-9 proof-carrying replay paths; DEVELOPMENT.md rule 9).
     /// Returns `true` when an entry was committed, `false` when the bracket
     /// recorded no mutations (a read-only transaction adds no undo entry —
-    /// the API's accounting in docs/HEW_API.md §6.4).
+    /// the API's accounting in docs/agents/HEW_API.md §6.4).
     ///
     /// Three defensive refusals, each restoring the snapshot before
     /// returning (so a refused commit IS the abort, and the document is
@@ -14107,7 +14107,7 @@ impl Document {
     ///   transaction opened a session it never closed, closed one it never
     ///   opened, or swapped a pre-existing frame for a different one at the
     ///   same depth. A dangling or swapped frame would silently change what
-    ///   the user's next stroke welds to (docs/HEW_API.md §6.3), so the
+    ///   the user's next stroke welds to (docs/agents/HEW_API.md §6.3), so the
     ///   commit refuses typed instead. (Closing and re-opening the SAME
     ///   frame inside one bracket lands identity-equal and is not detected
     ///   — the API layer's static context-balance check is the primary
@@ -17430,7 +17430,7 @@ impl Document {
     /// visible Object passes the topology validator.
     #[inline]
     fn debug_validate(&self) {
-        // Torture mode (docs/DEVELOPMENT.md): run the topology validator on every
+        // Torture mode (docs/dev/DEVELOPMENT.md): run the topology validator on every
         // visible object after every op, **always-on** (release included), so a
         // corruption that slips past an op's own backstop surfaces here at the
         // exact op. The fuller debug-only invariant battery (tree) follows
@@ -17936,7 +17936,7 @@ fn ingest_build_node(
 
 /// The attribute namespace of first-party library metadata and provenance
 /// (`hew.*` is reserved for first-party use at the API boundary —
-/// docs/HEW_API.md §8 — which is exactly what lets the kernel write it here
+/// docs/agents/HEW_API.md §8 — which is exactly what lets the kernel write it here
 /// while no external client can).
 const LIBRARY_ATTR_NS: &str = "hew.library";
 
@@ -18009,7 +18009,7 @@ fn library_copy_entity_attrs(dst: &mut Document, src: &Document, from: &EntityRe
         // blind cross-document copy would carry a stale stamp onto content
         // it no longer describes (adversarial review S1). The insert path
         // re-stamps what deserves a stamp; everything else must arrive
-        // clean. Client namespaces copy verbatim (docs/HEW_API.md §8).
+        // clean. Client namespaces copy verbatim (docs/agents/HEW_API.md §8).
         dict.remove(LIBRARY_ATTR_NS);
         if !dict.is_empty() {
             dst.attrs.insert(AttrTarget::Entity(to), dict);

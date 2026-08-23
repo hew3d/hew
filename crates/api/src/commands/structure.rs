@@ -1,5 +1,5 @@
 //! Composition + context: hew.group.*, hew.component.*, hew.context.*
-//! (docs/HEW_API.md §7, §6.3).
+//! (docs/agents/HEW_API.md §7, §6.3).
 //!
 //! Context commands are legal only inside a transaction, context-balanced
 //! (§6.3) — `transact.rs` already enforces that statically for every

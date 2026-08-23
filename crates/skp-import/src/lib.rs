@@ -6,7 +6,7 @@
 //! SketchUp 2017 (v17.3.116) files, derived solely from self-authored corpora,
 //! their COLLADA ground-truth exports, and public knowledge of MFC `CArchive`
 //! serialization. **No Trimble/SketchUp SDK material exists anywhere in this
-//! crate's dependency chain** — that is the admissibility test docs/DEVELOPMENT.md
+//! crate's dependency chain** — that is the admissibility test docs/dev/DEVELOPMENT.md
 //! rule 7 states, and it must hold for every future dependency added here.
 //!
 //! Shape mirrors `dae-import`: depends on `kernel` (builds Objects), never the

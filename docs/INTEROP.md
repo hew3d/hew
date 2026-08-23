@@ -1,9 +1,9 @@
 # Hew — Import and export
 
-Hew's native format is a documented, open zip container (`.hew` — see
-`docs/HEW_FILE_FORMAT.md`), used for saving and loading with no round-trip
-loss. Everything else — COLLADA, SketchUp, glTF, STL, 3MF — is interop: a
-way to bring outside geometry in, or send Hew models out to other tools.
+Hew's native format, `.hew`, is a documented, open zip container — see
+`docs/dev/HEW_FILE_FORMAT.md`. Save and load through it with no round-trip
+loss. Everything else — COLLADA, SketchUp, glTF, STL, 3MF — is interop:
+bring outside geometry in, or send Hew models out to other tools.
 
 ## Format matrix
 
@@ -63,16 +63,16 @@ Objects**.
    says so loudly. Anything still invalid after that is handed to the
    kernel, which refuses it and reports why.
 
-3. **Build Objects.** The healed geometry, now expressed as a
-   format-independent recipe (materials, meshes, component definitions,
-   instances, groups), is handed to the kernel's `Document::ingest`. This is
-   the same insertion path used for loading a `.hew` file: it creates
-   Objects, resolves materials into the document's palette, wires up
-   component definitions and instances, and reports which meshes became
-   watertight solids, which are open ("leaky") shells, and which were
-   skipped outright as invalid. Import is additive and undoable as a single
-   step — it never touches existing geometry, and one undo removes
-   everything an import added.
+3. **Build Objects.** The kernel's `Document::ingest` takes the healed
+   geometry, now expressed as a format-independent recipe (materials,
+   meshes, component definitions, instances, groups). This is the same
+   insertion path used for loading a `.hew` file: it creates Objects,
+   resolves materials into the document's palette, wires up component
+   definitions and instances, and reports which meshes became watertight
+   solids, which are open ("leaky") shells, and which were skipped outright
+   as invalid. Import is additive and undoable as a single step — it never
+   touches existing geometry, and one undo removes everything an import
+   added.
 
 ### What survives from each format
 
@@ -107,9 +107,9 @@ Save As ▸ SketchUp Version 2017), so this one decoded version covers
 effectively all SketchUp content in circulation.
 
 **Known limitations:**
-- Newer `.skp` versions (2018 and later) are detected but rejected with a
-  message pointing at the Save As 2017 workaround, rather than partially
-  imported.
+- Hew detects newer `.skp` versions (2018 and later) and rejects them,
+  pointing at the Save As 2017 workaround, rather than importing them
+  partially.
 - `.skp` write/export does not exist — OpenSKP is a reader only.
 - As with all imports, a mesh that is still non-manifold after healing
   imports as separate open shells with a warning; geometry the kernel

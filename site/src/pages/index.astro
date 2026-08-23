@@ -16,8 +16,7 @@ const {
   title,
   description,
   hero,
-  screenshot,
-  screenshotAlt,
+  screenshots,
   features,
   comparisonTitle,
   comparisonIntro,
@@ -39,7 +38,11 @@ const {
     )
   }
 
-  <ScreenshotFrame src={screenshot} alt={screenshotAlt} />
+  {
+    screenshots && screenshots.length > 0 && (
+      <ScreenshotFrame screenshots={screenshots} />
+    )
+  }
 
   {features && features.length > 0 && <FeatureGrid features={features} />}
 

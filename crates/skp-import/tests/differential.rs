@@ -5,7 +5,7 @@
 //! path bakes/flattens hierarchy; the `.skp` path keeps shared definitions).
 //!
 //! Import-quality gaps surfacing here get filed upstream in OpenSKP, never
-//! papered over in `skp-import` (ROADMAP).
+//! papered over in `skp-import` (docs/agents/ROADMAP.md).
 
 use std::path::Path;
 

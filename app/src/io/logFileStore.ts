@@ -10,7 +10,7 @@
  *
  * Used by the diagnostic-log sink (../log/diagnosticLog.ts) to flush newly
  * ingested NDJSON lines to a rolling file when Debug-mode file logging is
- * enabled (docs/DEVELOPMENT.md).
+ * enabled (docs/dev/DEVELOPMENT.md).
  */
 
 export interface LogFileStore {

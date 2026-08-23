@@ -43,7 +43,7 @@ import {
  * Ground truth throughout is the harness's component/object queries
  * (`getComponentMemberObjects`/`getComponentMemberSketches`/
  * `getInstancesOf`/`getObjectBounds`) — logical, not pixel, per the test
- * pyramid (docs/DEVELOPMENT.md): a member is SHARED storage, so proving an
+ * pyramid (docs/dev/DEVELOPMENT.md): a member is SHARED storage, so proving an
  * edit landed on the definition's member list is exactly proving every
  * instance sees it — there is no separate per-instance copy to diverge.
  *

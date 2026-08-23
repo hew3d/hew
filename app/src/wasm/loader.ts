@@ -31,7 +31,7 @@ function getInitPromise(): Promise<void> {
 export interface KernelApi {
   version(): string
   demo_mesh(): DemoMesh
-  /** Create a new authoritative Scene (docs/DEVELOPMENT.md B1) */
+  /** Create a new authoritative Scene (docs/dev/DEVELOPMENT.md B1) */
   newScene(): Scene
 }
 

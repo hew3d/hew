@@ -1,5 +1,5 @@
 /**
- * DebugPane — the "Debug" settings pane (docs/DEVELOPMENT.md).
+ * DebugPane — the "Debug" settings pane (docs/dev/DEVELOPMENT.md).
  *
  * A single checkbox bound to the Debug Mode singleton (settings/debugMode.ts).
  * The actual effects (file logging, input recording, kernel torture mode) are

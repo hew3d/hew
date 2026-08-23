@@ -1,0 +1,3 @@
+# The blog was retired; send old links home rather than to a 404.
+/blog/* / 301
+/rss.xml / 301

@@ -4,7 +4,7 @@
 //! always-on invariant checks, no panic tolerated — proptest surfaces a
 //! panic as a test failure on its own, so no `catch_unwind` is needed
 //! anywhere here) one layer up: `conformance.rs` pins the CONTRACT with
-//! literal examples and a small SAFE proptest vocabulary (docs/HEW_API.md
+//! literal examples and a small SAFE proptest vocabulary (docs/agents/HEW_API.md
 //! §14); this file drives the same `Connection::dispatch` with
 //! genuinely adversarial envelopes and asks only the invariants the
 //! protocol itself promises (§4.4's error-code inventory, §6.1's
@@ -134,7 +134,7 @@ fn seed_document(conn: &mut Connection, doc: &mut kernel::Document) {
     );
 }
 
-/// Every error code the protocol may answer with (docs/HEW_API.md §4.4).
+/// Every error code the protocol may answer with (docs/agents/HEW_API.md §4.4).
 const KNOWN_ERROR_CODES: [i64; 8] = [
     -32700, -32601, -32602, -32000, -32001, -32002, -32003, -32004,
 ];

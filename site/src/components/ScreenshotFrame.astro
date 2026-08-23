@@ -1,44 +1,182 @@
 ---
-interface Props {
-  src?: string;
-  alt?: string;
+// A framed screenshot under the hero. Given one image it is a plain framed
+// figure; given several it becomes a rotator: slides stack in one grid cell
+// and crossfade on a timer, with dots to jump, pause on hover/focus, and no
+// auto-advance when the visitor prefers reduced motion. Without JS the first
+// slide shows and the rest stay hidden.
+interface Shot {
+  src: string;
+  alt: string;
+  caption?: string;
 }
 
-const { src, alt = '' } = Astro.props;
+interface Props {
+  screenshots: Shot[];
+  /** Auto-advance period in milliseconds when more than one shot is given. */
+  intervalMs?: number;
+}
+
+const { screenshots, intervalMs = 7000 } = Astro.props;
+const rotating = screenshots.length > 1;
 ---
 
 <section class="screenshot-section">
   <div class="container">
-    {
-      src ? (
-        <figure class="frame">
-          <img class="shot" src={src} alt={alt} loading="lazy" />
-        </figure>
-      ) : (
-        <figure class="frame">
-          <div class="titlebar" aria-hidden="true">
-            <span class="dot" />
-            <span class="dot" />
-            <span class="dot" />
-          </div>
-          <div class="viewport">
-            <div class="placeholder">
-              <div class="placeholder-grid" aria-hidden="true" />
+    <div
+      class="frame"
+      data-rotator={rotating ? '' : undefined}
+      data-interval={intervalMs}
+    >
+      <div class="slides">
+        {
+          screenshots.map((shot, i) => (
+            <figure
+              class="slide"
+              data-slide
+              data-active={i === 0 ? '' : undefined}
+              aria-hidden={i === 0 ? undefined : 'true'}
+            >
               <img
-                src="/brand/hew-mark-terracotta.svg"
-                width="56"
-                height="56"
-                alt=""
-                class="mark"
+                class="shot"
+                src={shot.src}
+                alt={shot.alt}
+                loading={i === 0 ? 'eager' : 'lazy'}
               />
-              <p class="caption">Studio screenshots coming soon</p>
-            </div>
-          </div>
-        </figure>
+              {shot.caption && <figcaption>{shot.caption}</figcaption>}
+            </figure>
+          ))
+        }
+      </div>
+    </div>
+
+    {
+      rotating && (
+        <div class="dots" role="tablist" aria-label="Screenshots">
+          {screenshots.map((_, i) => (
+            <button
+              type="button"
+              class="dot"
+              role="tab"
+              data-dot
+              data-index={i}
+              aria-selected={i === 0 ? 'true' : 'false'}
+              tabindex={i === 0 ? 0 : -1}
+              aria-label={`Screenshot ${i + 1} of ${screenshots.length}`}
+            />
+          ))}
+        </div>
       )
     }
   </div>
 </section>
+
+<script>
+  const frames = document.querySelectorAll<HTMLElement>('[data-rotator]');
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+
+  frames.forEach((frame) => {
+    const slides = Array.from(frame.querySelectorAll<HTMLElement>('[data-slide]'));
+    const dots = Array.from(
+      frame.parentElement?.querySelectorAll<HTMLButtonElement>('[data-dot]') ?? []
+    );
+    const count = slides.length;
+    if (count < 2) return;
+
+    const interval = Number.parseInt(frame.dataset.interval ?? '', 10) || 7000;
+    let current = 0;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    function show(index: number, focusDot = false) {
+      current = ((index % count) + count) % count;
+      slides.forEach((slide, i) => {
+        const active = i === current;
+        slide.toggleAttribute('data-active', active);
+        if (active) slide.removeAttribute('aria-hidden');
+        else slide.setAttribute('aria-hidden', 'true');
+      });
+      dots.forEach((dot, i) => {
+        const active = i === current;
+        dot.setAttribute('aria-selected', active ? 'true' : 'false');
+        dot.tabIndex = active ? 0 : -1;
+        if (active && focusDot) dot.focus();
+      });
+    }
+
+    function stop() {
+      if (timer !== null) clearInterval(timer);
+      timer = null;
+    }
+
+    // Auto-advance only while nobody is looking at or working the rotator:
+    // the pointer is off the frame and focus is outside the dots.
+    let hovered = false;
+    let focused = false;
+
+    function start() {
+      if (
+        reduceMotion.matches ||
+        document.hidden ||
+        hovered ||
+        focused ||
+        timer !== null
+      )
+        return;
+      timer = setInterval(() => show(current + 1), interval);
+    }
+
+    function restart() {
+      stop();
+      start();
+    }
+
+    dots.forEach((dot) => {
+      dot.addEventListener('click', () => {
+        show(Number(dot.dataset.index));
+        restart();
+      });
+      dot.addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+          event.preventDefault();
+          show(current + 1, true);
+          restart();
+        } else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          show(current - 1, true);
+          restart();
+        }
+      });
+    });
+
+    frame.addEventListener('mouseenter', () => {
+      hovered = true;
+      stop();
+    });
+    frame.addEventListener('mouseleave', () => {
+      hovered = false;
+      start();
+    });
+    const dotsEl = dots[0]?.parentElement;
+    dotsEl?.addEventListener('focusin', () => {
+      focused = true;
+      stop();
+    });
+    dotsEl?.addEventListener('focusout', (event) => {
+      if (dotsEl.contains(event.relatedTarget as Node | null)) return;
+      focused = false;
+      start();
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) stop();
+      else start();
+    });
+    reduceMotion.addEventListener('change', () => {
+      if (reduceMotion.matches) stop();
+      else start();
+    });
+
+    start();
+  });
+</script>
 
 <style>
   .screenshot-section {
@@ -53,20 +191,28 @@ const { src, alt = '' } = Astro.props;
     box-shadow: var(--shadow-md);
   }
 
-  .titlebar {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2xs);
-    padding: var(--space-xs) var(--space-sm);
-    background: var(--color-surface);
-    border-bottom: 1px solid var(--color-border);
+  /* Every slide occupies the same grid cell, so the frame takes the height
+     of the tallest slide and the others crossfade in place without the page
+     jumping. Slides stretch to that height with the image on top and the
+     caption box filling the rest, so a short caption gets the same bar as a
+     wrapping one and the frame's bottom edge never moves. */
+  .slides {
+    display: grid;
   }
 
-  .dot {
-    width: 0.6rem;
-    height: 0.6rem;
-    border-radius: 50%;
-    background: var(--color-border-strong);
+  .slide {
+    grid-area: 1 / 1;
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 600ms var(--ease-standard);
+  }
+
+  .slide[data-active] {
+    opacity: 1;
+    pointer-events: auto;
   }
 
   /* A real screenshot carries its own window chrome — show it whole, at
@@ -77,44 +223,54 @@ const { src, alt = '' } = Astro.props;
     height: auto;
   }
 
-  .viewport {
-    position: relative;
-    aspect-ratio: 16 / 9;
-  }
-
-  .placeholder {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: var(--space-sm);
-  }
-
-  .placeholder-grid {
-    position: absolute;
-    inset: 0;
-    background-image: linear-gradient(var(--color-border) 1px, transparent 1px),
-      linear-gradient(90deg, var(--color-border) 1px, transparent 1px);
-    background-size: 32px 32px;
-    opacity: 0.6;
-  }
-
-  .mark {
-    position: relative;
-    opacity: 0.9;
-  }
-
-  .caption {
-    position: relative;
+  figcaption {
+    flex: 1;
+    padding: var(--space-xs) var(--space-md);
+    border-top: 1px solid var(--color-border);
+    background: var(--color-surface);
     color: var(--color-text-muted);
-    font-size: 0.9375rem;
+    font-size: 0.875rem;
+    text-align: center;
   }
 
-  @media (max-width: 30rem) {
-    .viewport {
-      aspect-ratio: 4 / 3;
+  .dots {
+    display: flex;
+    justify-content: center;
+    gap: var(--space-xs);
+    margin-top: var(--space-md);
+  }
+
+  .dot {
+    width: 0.625rem;
+    height: 0.625rem;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: var(--color-border-strong);
+    cursor: pointer;
+    transition:
+      background var(--duration-base) var(--ease-standard),
+      transform var(--duration-base) var(--ease-standard);
+  }
+
+  .dot:hover {
+    background: var(--color-text-muted);
+  }
+
+  .dot[aria-selected='true'] {
+    background: var(--color-accent);
+    transform: scale(1.25);
+  }
+
+  .dot:focus-visible {
+    outline: 2px solid var(--color-focus-ring);
+    outline-offset: 3px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .slide,
+    .dot {
+      transition: none;
     }
   }
 </style>

@@ -3,7 +3,7 @@
  *
  * There is no real rolling file in a browser tab, so `append`/`rotateIfNeeded`
  * are no-ops and `path()` resolves to null. The web "file" is instead the
- * in-memory ring buffer plus an on-demand download (docs/DEVELOPMENT.md) —
+ * in-memory ring buffer plus an on-demand download (docs/dev/DEVELOPMENT.md) —
  * see `downloadDiagnosticLog()` in ../log/diagnosticLog.ts.
  *
  * This module must never throw.

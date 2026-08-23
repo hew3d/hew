@@ -6,7 +6,7 @@ order: 20
 
 **File ▸ Print…** (`⌘P` / `Ctrl+P`, near the bottom of the File menu — last on macOS, just above Exit elsewhere — also in the command palette) opens **Print Layout**, which puts the model on paper or into a PDF. It covers three different jobs: printing what's on screen for a quick reference, printing a drawing at an exact scale you can measure from with a ruler, and printing a part at 1:1 across several sheets to cut out and use as a template. One dialog, a mode switch at the top — **Standard** or **Scaled** — a live page preview on the left, controls on the right, and **Save PDF…** and **Print…** at the bottom. `Return` prints; `Escape` cancels.
 
-![Print Layout in Scaled mode: the Café Table sample at 1:2 tiled across four Letter pages, with the preview on the left and the controls on the right](/docs/print-layout.png)
+![Print Layout in Scaled mode: the Café Table sample at 1:2 tiled across four Letter pages, with the preview on the left and the controls on the right](/docs/print-layout.webp)
 
 ## Print what you see (Standard)
 
@@ -30,7 +30,7 @@ Scaled mode prints a parallel-projection drawing at a ratio you choose — 1 cm 
 - **Selection** — only the selected objects; everything else is left off the page entirely, not just cropped out. Select a part, pick Top view, set 1"=1", and you have a 1:1 template of exactly that part.
 - **Current view** — exactly what the viewport frames right now (its own zoom window), which needs the current view direction: choosing it sets **View** to Current view, and choosing a standard view falls back to Model.
 
-**Paper**, **Orientation** (Auto now means *fewer pages*, ties going to portrait), **Margins**, and **Style** work as in Standard. **Include** offers Dimensions & text, Guides, Hidden lines dashed (Line art only), and Cut list page; **On the page** groups the four things that live on the sheet itself — Overlap for gluing, Marks, Scale bar, Title block.
+**Paper**, **Orientation** (here, Auto means *fewer pages*, ties going to portrait), **Margins**, and **Style** work as in Standard. **Include** offers Dimensions & text, Guides, Hidden lines dashed (Line art only), and Cut list page; **On the page** groups the four things that live on the sheet itself — Overlap for gluing, Marks, Scale bar, Title block.
 
 ## Across many pages
 
@@ -94,4 +94,4 @@ For a laser cutter, a CNC workflow, or any vector tool, **File ▸ Export…** h
 hew-cli dispatch hew.print.pdf '{"view":"top","scale":1,"paper":"letter","path":"out.pdf"}' --file model.hew
 ```
 
-See the [Hew API reference](https://github.com/hew3d/hew/blob/main/docs/HEW_API.md) for the full parameter list.
+See the [Hew API reference](https://github.com/hew3d/hew/blob/main/docs/API_REFERENCE.gen.md) for the full parameter list.

@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": " headless Node replay runner for Hew's recording/replay surface (docs/DIAGNOSTICS.md). Loads wasm-api compiled for Node, replays committed fixtures, asserts golden state_hash.",
+  "description": " headless Node replay runner for Hew's recording/replay surface (docs/dev/DIAGNOSTICS.md). Loads wasm-api compiled for Node, replays committed fixtures, asserts golden state_hash.",
   "scripts": {
     "build": "wasm-pack build ../../crates/wasm-api --target nodejs --out-dir ../../tools/replay-runner/pkg-node",
     "generate": "node run.mjs --generate",

@@ -2869,7 +2869,7 @@ impl InferenceScene {
 
         // TRACE only — `resolve` runs on every pointer move, so this is a
         // firehose filtered out by default; raise the capture level to debug a
-        // bad snap (the inference winner + candidate count — docs/DIAGNOSTICS.md).
+        // bad snap (the inference winner + candidate count — docs/dev/DIAGNOSTICS.md).
         tracing::trace!(
             target: "inference::resolve",
             candidates = candidates.len(),

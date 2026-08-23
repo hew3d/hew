@@ -1,6 +1,6 @@
 /**
  * Tool interface and supporting types for the Hew interaction layer.
- * See docs/DEVELOPMENT.md for the design.
+ * See docs/dev/DEVELOPMENT.md for the design.
  */
 
 import type * as THREE from 'three'

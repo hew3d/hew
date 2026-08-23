@@ -1,6 +1,6 @@
 /**
  * A minimal usability proof for the generated TypeScript client SDK
- * (`./hewApi.gen.ts`, docs/HEW_API.md §9): constructs a `HewApiClient`
+ * (`./hewApi.gen.ts`, docs/agents/HEW_API.md §9): constructs a `HewApiClient`
  * against a mock {@link HewTransport} and drives one call through it, on
  * both the success and refusal paths. This is deliberately NOT wiring
  * the app onto the bus — that migration is future work (HEW_API.md §16)

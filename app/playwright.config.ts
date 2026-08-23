@@ -1,7 +1,7 @@
 import { defineConfig, devices } from '@playwright/test'
 
 /**
- * Playwright config for Hew's web-build E2E (docs/DEVELOPMENT.md).
+ * Playwright config for Hew's web-build E2E (docs/dev/DEVELOPMENT.md).
  *
  * Scope today: scaffolding + a single boot smoke test. The fuller smoke
  * flow (draw → push/pull → save/reload) is and drives through the
@@ -36,7 +36,7 @@ export default defineConfig({
   // (goldens are GPU/runner-specific; see that project + e2e/visual/README.md).
   testIgnore: '**/visual/**',
   // Serial: the harness specs drive a stateful kernel + a software-GL (SwiftShader)
-  // WebGL context; multiple parallel contexts contend and flake (docs/DEVELOPMENT.md).
+  // WebGL context; multiple parallel contexts contend and flake (docs/dev/DEVELOPMENT.md).
   // The E2E suite is intentionally thin, so one worker is plenty.
   fullyParallel: false,
   workers: 1,
@@ -101,7 +101,7 @@ export default defineConfig({
     },
     //  — visual-regression goldens on a *pinned* configuration: fixed
     // viewport + DPR=1 + SwiftShader software GL, so a golden PNG is reproducible
-    // off a real GPU (docs/DEVELOPMENT.md). Runs ONLY the e2e/visual/ specs (the global
+    // off a real GPU (docs/dev/DEVELOPMENT.md). Runs ONLY the e2e/visual/ specs (the global
     // testIgnore keeps them out of the functional projects). Goldens are
     // authoritative on the pinned CI runner — see e2e/visual/README.md.
     {

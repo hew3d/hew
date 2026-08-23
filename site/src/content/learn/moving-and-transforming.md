@@ -1,6 +1,6 @@
 ---
 title: "Move, Rotate, and Scale"
-description: "Move, Rotate, or Scale with full snapping, axis locks, and typed values — or just drag an object with Select. Copying is a Move with Alt tapped — and ×N multiplies it into an array."
+description: "Move, Rotate, or Scale with full snapping, axis locks, and typed values — or drag an object straight from Select. Copying is a Move with Alt tapped — and ×N multiplies it into an array."
 order: 9
 ---
 
@@ -37,7 +37,9 @@ A quick refresher:
 - `3x` (or `x3`, or `*3` — either order works) makes **3 copies total** at that same spacing, continuing along the same line — copy something 2 m over, type `5x`, and five copies march off at 2 m intervals.
 - `3/` (or `/3`) makes **3 copies dividing the distance** — place the last fence post first, then `3/` fills the run with evenly spaced posts between.
 
-The gesture stays live until you start something else, so if `5x` turns out wrong, just type `8x` or `4/` and the array re-resolves. However many copies it made, the whole array is **one undo step**. Copies of a component are new instances of the same component; copies of plain objects and groups are independent duplicates. Arrays apply to solids, groups, and components — a sketch copy stays a single copy, so the ×N window doesn't open after one.
+![A cedar fence with six evenly spaced posts and two rails, one post shown mid-copy down the line](/docs/transform-array.webp)
+
+The gesture stays live until you start something else, so if `5x` turns out wrong, type `8x` or `4/` instead and the array re-resolves. However many copies it made, the whole array is **one undo step**. Copies of a component are new instances of the same component; copies of plain objects and groups are independent duplicates. Arrays apply to solids, groups, and components — a sketch copy stays a single copy, so the ×N window doesn't open after one.
 
 ## Rotate (`Q`)
 
@@ -55,6 +57,8 @@ The live angle snaps to 15° increments as you sweep. For any other angle, type 
 
 Scale draws a **grip gizmo** on the selection's bounding box: a grip at the center of each of the 6 faces, one at each of the 8 corners, and one at each of the 12 edge midpoints.
 
+![The Scale tool active on a box, showing the full grip gizmo; the status bar explains what each grip does](/docs/scale-grips.webp)
+
 1. **Drag a grip.**
    - A **face grip** stretches one axis only — height, width, or depth — leaving the other two untouched.
    - An **edge grip** drives the two axes it sits between, each following your drag independently — pull mostly along one axis and that axis stretches more. (A single typed value scales both proportionally instead.)
@@ -69,9 +73,9 @@ Scaling a component instance scales that instance alone — the shared definitio
 
 ## What transforms apply to
 
-Move, Rotate, and Scale act on the whole selection: an object, a group (with everything inside it), a component instance (each instance transforms independently), a free-standing sketch — or any multi-selection of these at once. Select All followed by Move relocates an entire model in one gesture, and the whole act is a single undo step. A multi-selection's Scale gizmo is built from the union of every selected object's bounding box, so grabbing a grip spreads the whole selection apart (or together) correctly around the chosen anchor, rather than resizing each object in place. A copy-move duplicates everything in the selection — solids, groups, components, and sketch shapes alike; a sketch's in-plane copies arrive as one undo step per sketch, and a copy that leaves its sketch plane lands on a new sketch on the plane it moved to — a whole sketch's shapes travel together onto that one new sketch (so a shape with a hole keeps its hole), one undo step per sketch, the original left where it was. Object copies of one commit — array copies included — undo as a single step.
+Move, Rotate, and Scale act on the whole selection: an object, a group (with everything inside it), a component instance (each instance transforms independently), a free-standing sketch — or any multi-selection of these at once. Select All followed by Move relocates an entire model in one gesture, and the whole act is a single undo step. A multi-selection's Scale gizmo is built from the union of every selected object's bounding box, so grabbing a grip spreads the whole selection apart (or together) correctly around the chosen anchor, rather than resizing each object in place. A copy-move duplicates everything in the selection — solids, groups, components, and sketch shapes alike. A sketch's in-plane copies arrive as one undo step per sketch. A copy that leaves its sketch plane lands on a new sketch on the plane it moved to — a whole sketch's shapes travel together onto that one new sketch, so a shape with a hole keeps its hole, one undo step per sketch, the original left where it was. Object copies of one commit — array copies included — undo as a single step.
 
-Sketch geometry transforms at shape granularity. Whether you selected a filled shape, one of its lines, or a drawn arc or circle, the transform moves the whole connected shape as a rigid body — an open chain of lines included. Rotation isn't confined to the sketch plane: tipping a drawn profile upright (the [Follow Me](/learn/follow-me/) setup) rotates the shape out of the ground with the same gesture as any other rotation. If the shape is the only thing in its sketch, the whole sketch tips with it; if it shares the working sketch with other drawing, the shape splits off into its own sketch on the new plane and everything else stays where it was. An in-plane move that would land one shape on top of another is still refused rather than welded.
+Sketch geometry transforms at shape granularity. Whether you selected a filled shape, one of its lines, or a drawn arc or circle, the transform moves the whole connected shape as a rigid body — an open chain of lines included. Rotation isn't confined to the sketch plane: tipping a drawn profile upright (the [Follow Me](/learn/follow-me/) setup) rotates the shape out of the ground with the same gesture as any other rotation. If the shape is the only thing in its sketch, the whole sketch tips with it; if it shares the working sketch with other drawing, the shape splits off into its own sketch on the new plane and everything else stays where it was. An in-plane move that would land one shape on top of another is refused rather than welded.
 
 ## Deleting
 

@@ -2,7 +2,7 @@
   <!-- macOS app icon: Apple HIG icon grid — 824x824 squircle centered on a
        transparent 1024 canvas (radius ~185.4), baked template drop shadow.
        Do NOT use this variant for touch/PWA icons; those must stay full-bleed
-       (the OS applies its own mask). See docs/BRAND.md. -->
+       (the OS applies its own mask). See docs/dev/BRAND.md. -->
   <defs>
     <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#D4714B"/>

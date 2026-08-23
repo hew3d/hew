@@ -8,6 +8,8 @@ Hew is a desktop and web modeler, but a model is often most useful away from the
 
 Shop Mode never edits. It issues no changes to the document — every part list, hidden part, or isolated view you set up on the phone is view-state that disappears when you close the tab. To actually change the model, you're back on the desktop.
 
+![Shop Mode's landing screen on a phone: the Hew mark, an Open a model button, and a From your desktop QR option](/docs/shop-mode-landing.webp)
+
 ## When Shop Mode activates
 
 Open **app.hew3d.com** on a phone and Hew checks two things: whether the pointer is coarse (touch, not a mouse) and whether the smaller of the screen's two dimensions is under 600 CSS pixels — phone-sized, in portrait or landscape. Meeting both boots straight into Shop Mode; a tablet or a touch-capable laptop, which fails the size check, gets the full editor.
@@ -25,16 +27,16 @@ Three ways, depending on what's already open:
 
 **Scan a QR code from the desktop.** With a model open in the desktop app, **File ▸ Open on Phone…** encrypts the document right there in the app, uploads the ciphertext to a one-shot relay, and shows a QR code.
 
-![The Open on Phone dialog showing the QR code and handoff URL](/docs/open-on-phone-dialog.png)
+![The Open on Phone dialog showing the QR code and handoff URL](/docs/open-on-phone-dialog.webp)
 
 The encryption key never leaves the QR code itself — the relay only ever handles opaque ciphertext, and it forgets it the moment your phone has fetched it once (or after ten minutes, whichever comes first). There's no account and nothing left behind on either machine afterward.
 
 Scan it from **inside Shop Mode**: open Shop Mode on your phone, tap **From your desktop…** on the empty-state screen (or **Open from desktop…** in the **⋯** menu), and point the camera at the code — Shop Mode decodes it itself and loads the model directly, no trip through the Photos or Camera app. Scanning with your phone's regular camera app still works too, but it opens the code in Safari first, which then hands off into Shop Mode a step later — the in-app scanner is faster and stays in one place, so it's the one worth reaching for by default. Either way, a couple of things worth knowing:
 
-- **Only an internet connection is required** — not the same wifi network the old LAN-based handoff needed. The desktop and the phone can be on different networks entirely, as long as both can reach the internet.
-- The dialog works from any build of the desktop app, including running it from source with `tauri dev` — it no longer depends on the packaged app bundle the way the old LAN handoff did.
+- **Only an internet connection is required.** The desktop and the phone can be on different networks entirely, as long as both can reach the internet.
+- The dialog works from any build of the desktop app, including running it from source with `tauri dev`.
 
-**Open from the Files app.** Any `.hew` file synced through iCloud Drive, Nextcloud, or another Files-integrated provider is now selectable from Shop Mode's **Open…** — the file picker used to grey out `.hew` files on iOS because it filtered by a file type the Files app didn't recognize; that filter is dropped on touch devices, so `.hew` shows up like any other file.
+**Open from the Files app.** Any `.hew` file synced through iCloud Drive, Nextcloud, or another Files-integrated provider is selectable from Shop Mode's **Open…** — on touch devices, `.hew` shows up in the file picker like any other file.
 
 **Reopen from Recents.** Once a model has been opened on the phone once — by either route above — it's saved locally and shows up in a **Recents** list on Shop Mode's empty-state screen, and under **Recent models…** in the document menu (tap the filename pill) while another model is open — no network needed at all.
 

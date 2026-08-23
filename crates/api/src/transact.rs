@@ -1,4 +1,4 @@
-//! The transaction executor (docs/HEW_API.md §6): one envelope, atomic,
+//! The transaction executor (docs/agents/HEW_API.md §6): one envelope, atomic,
 //! one labeled undo entry, riding the kernel's transaction bracket.
 //!
 //! Statically checkable defects — unknown methods, misplaced solitary

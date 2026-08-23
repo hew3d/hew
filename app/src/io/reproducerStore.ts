@@ -1,6 +1,6 @@
 /**
  * ReproducerStore — abstracts the platform's "write a reproducer bundle to
- * disk" storage (docs/DEVELOPMENT.md — the auto-reproducer dump).
+ * disk" storage (docs/dev/DEVELOPMENT.md — the auto-reproducer dump).
  *
  * Mirrors the RecoveryStore seam (./recoveryStore.ts): WebReproducerStore is
  * statically imported (always needed for the web build), while under Tauri

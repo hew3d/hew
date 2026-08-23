@@ -3,7 +3,7 @@
 Source: https://github.com/digama0/dae-parser (crates.io `dae-parser` v0.11.0),
 licensed MIT OR Apache-2.0 (see `LICENSE-MIT` / `LICENSE-APACHE`).
 
-Why vendored: docs/DEVELOPMENT.md specifies a **vendored, version-pinned**
+Why vendored: docs/dev/DEVELOPMENT.md specifies a **vendored, version-pinned**
 COLLADA parser so Hew can own fixes against a frozen format. The crates.io
 release ships a bug that makes it unusable for real SketchUp exports, so the
 fix has to live in our tree.

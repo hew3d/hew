@@ -2,10 +2,10 @@
 
 Canonical brand assets from the **Hew Brand Sheet v1 · locked**. Guidelines
 (colours, typography, usage, regeneration steps) live in
-[`../docs/BRAND.md`](../docs/BRAND.md) — read that first.
+[`../docs/dev/BRAND.md`](../docs/dev/BRAND.md) — read that first.
 
 These are the *source* assets. The shipped app icons/favicons are derived from
-them (see `docs/BRAND.md` → "Where the brand shows up"); don't hand-edit the
+them (see `docs/dev/BRAND.md` → "Where the brand shows up"); don't hand-edit the
 generated copies — regenerate from here.
 
 ## Inventory

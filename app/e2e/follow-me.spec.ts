@@ -9,7 +9,7 @@ import {
 /**
  * Follow Me E2E — the three maintainer-playtest flows that shipped broken
  * while harness-driven equivalents stayed green, each driven end to end
- * with REAL pointer/keyboard input (docs/DEVELOPMENT.md strategy 2, the
+ * with REAL pointer/keyboard input (docs/dev/DEVELOPMENT.md strategy 2, the
  * input-pipeline.spec.ts pattern). The harness (`window.__hew_test`) is
  * used ONLY to pin the camera and to observe.
  *

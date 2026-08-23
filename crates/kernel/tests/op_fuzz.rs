@@ -535,7 +535,7 @@ fn same_geometry(a: &Snapshot, b: &Snapshot) -> Result<(), String> {
 /// un-build is impossible, so it refuses typed
 /// (`InverseFailed(PushPull(NonManifoldResult))`) with the object untouched —
 /// the "undo fails typed, never corrupts" posture. The general fix
-/// (generalized step-wall recognition) is deferred (docs/ROADMAP.md,
+/// (generalized step-wall recognition) is deferred (docs/agents/ROADMAP.md,
 /// the flat-face push/pull design).
 ///
 /// The two gaps this harness once tolerated — non-quad step walls and

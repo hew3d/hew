@@ -10,7 +10,7 @@
 //! The sequence below is the proptest-shrunk minimal input, with the
 //! harness's exact selector-resolution logic inlined so the case stays a
 //! faithful, permanent reproducer. Un-ignore when the merge fix lands
-//! (docs/ROADMAP.md, deferred list).
+//! (docs/agents/ROADMAP.md, deferred list).
 
 use kernel::{BooleanOp, Document, KernelOp, ObjectId, Plane, Point3, Vec3};
 

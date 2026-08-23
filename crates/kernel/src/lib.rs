@@ -4,7 +4,7 @@
 //! validated input — operations that would produce invalid topology fail with
 //! a typed error; nothing is repaired silently.
 //!
-//! This crate is UI-free and I/O-free by rule (see docs/DEVELOPMENT.md): no rendering,
+//! This crate is UI-free and I/O-free by rule (see docs/dev/DEVELOPMENT.md): no rendering,
 //! filesystem, or network dependencies, ever. The WASM boundary lives in
 //! `crates/wasm-api`.
 //!

@@ -1107,7 +1107,7 @@ export class LineTool implements Tool {
         // review finding B): vertex welding (`find_or_plan_vertex`) and
         // region detection are strictly PER-SKETCH in the kernel — there is
         // no cross-sketch vertex graph, matching the project's "no implicit
-        // welding" invariant (docs/ARCHITECTURE.md). A chain that re-homed
+        // welding" invariant (docs/agents/ARCHITECTURE.md). A chain that re-homed
         // onto a NEW sketch (`_rehomeChain`, §2b) and then visually returns
         // to a point that belongs to an EARLIER sketch of this same chain
         // therefore creates a merely-coincident vertex THERE, not a weld —

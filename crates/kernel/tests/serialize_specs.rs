@@ -3,7 +3,7 @@
 //! the per-object geometry buffer is spec'd in `op_specs.rs` (`serialize_*`).
 //!
 //! Every test is `#[ignore]`d because `save`/`load` are `todo!()` stubs. The
-//! implementer (docs/DEVELOPMENT.md) un-ignores each in the SAME PR that makes
+//! implementer (docs/dev/DEVELOPMENT.md) un-ignores each in the SAME PR that makes
 //! it pass, and never weakens an assertion to make it green (DEVELOPMENT.md rule 5).
 //!
 //! Cross-save/load identity is judged by *structure*, never by handle value:
@@ -1947,7 +1947,7 @@ fn pre_v13_manifest_loads_with_no_annotations() {
 
 // ------------------------------------------------------------ state_hash
 //
-// `Document::state_hash` is the canonical deterministic oracle (docs/DEVELOPMENT.md):
+// `Document::state_hash` is the canonical deterministic oracle (docs/dev/DEVELOPMENT.md):
 // a digest of the canonical `save` bytes. These pin the contract everything
 // downstream (replay, log stamps, the guard) relies on.
 

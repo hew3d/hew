@@ -1,5 +1,5 @@
 /**
- * The webview half of `--live` (docs/HEW_API.md §11.2, §12): forwards
+ * The webview half of `--live` (docs/agents/HEW_API.md §11.2, §12): forwards
  * newline-delimited JSON-RPC frames the Tauri shell reads off its local
  * socket, dispatches each against the SAME live kernel `Document` the
  * viewport renders — via `Scene.api_dispatch`
@@ -115,7 +115,7 @@ function notReadyReply(frame: string): string | undefined {
  * Whether a dispatched `frame`/`reply` pair warrants a viewport refresh:
  * the method wasn't one of the read-only ones above, AND the reply
  * actually succeeded (a refusal leaves the document byte-identical,
- * docs/HEW_API.md §14 — refreshing after one would be pure waste). Pure
+ * docs/agents/HEW_API.md §14 — refreshing after one would be pure waste). Pure
  * and exported for direct unit testing; malformed input on either side
  * (should not happen — both come from this module's own dispatch call)
  * conservatively answers false rather than guess.
@@ -143,7 +143,7 @@ export function shouldRefreshAfterDispatch(scene: Scene, frame: string, reply: s
  * `zoom_extents`/`units` hand their effect to this bridge, since none of
  * them is reachable from inside the WASM sandbox on its own (no DOM
  * access). `camera`/`view`'s fields mirror `hew.view.snapshot`/
- * `hew.view.camera`'s own wire params exactly (docs/HEW_API.md §7) —
+ * `hew.view.camera`'s own wire params exactly (docs/agents/HEW_API.md §7) —
  * the same vocabulary, never a second dialect.
  */
 type ViewDirective =
@@ -163,7 +163,7 @@ type ViewDirective =
   | { kind: 'activate_scene'; sid: number }
 
 /** `hew.view.camera`'s own defaults for an explicit camera's optional
- * fields (docs/HEW_API.md §7, `crates/api/src/host.rs`'s `SnapshotCamera`
+ * fields (docs/agents/HEW_API.md §7, `crates/api/src/host.rs`'s `SnapshotCamera`
  * doc comment: "identity up `[0,0,1]`, perspective, 35°") — resolved here
  * rather than in Rust because THIS is the "host" that builds the actual
  * camera for a live connection (`crates/wasm-api`'s `LiveHost` has no

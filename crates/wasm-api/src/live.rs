@@ -1,4 +1,4 @@
-//! The live desktop transport's WASM half (docs/HEW_API.md §11.2): a
+//! The live desktop transport's WASM half (docs/agents/HEW_API.md §11.2): a
 //! per-connection [`api::Connection`] dispatched against the SAME live
 //! [`kernel::Document`] the viewport renders. The Tauri shell
 //! (`shells/tauri`) owns the socket, the discovery file, and the token
@@ -28,7 +28,7 @@ use serde::Serialize;
 ///
 /// Deliberately NOT folded into the JSON-RPC reply `api_dispatch` returns:
 /// that string is the actual wire response sent back over the socket to
-/// whatever dialed in (`hew-cli --live`, an MCP agent) per docs/HEW_API.md
+/// whatever dialed in (`hew-cli --live`, an MCP agent) per docs/agents/HEW_API.md
 /// §4 — those clients have no viewport or Settings window of their own to
 /// act on a directive with, and JSON-RPC responses are contractually
 /// `{jsonrpc, id, result|error}`, not a place to smuggle side-channel
@@ -74,7 +74,7 @@ pub enum ViewDirective {
 
 /// The wire shape `ViewDirective::Camera` hands the live bridge for an
 /// explicit camera — mirrors `hew.view.snapshot`/`hew.view.camera`'s own
-/// `camera` params shape (docs/HEW_API.md §7) so the bridge's JSON
+/// `camera` params shape (docs/agents/HEW_API.md §7) so the bridge's JSON
 /// parsing on the JS side needs exactly one shape to know, matching what
 /// it already receives on the wire from an actual `--live` client.
 #[derive(Debug, Clone, Serialize)]
@@ -129,7 +129,7 @@ impl From<&ViewCameraSpec> for ViewDirective {
 /// The `api::Host` for a live desktop connection. The webview's WASM
 /// runtime has no filesystem, no native renderer, and no viewport handle
 /// to give back to `crates/api`, so most host-implemented commands
-/// (docs/HEW_API.md §3: `hew.doc.new/open/import`, `hew.view.snapshot`)
+/// (docs/agents/HEW_API.md §3: `hew.doc.new/open/import`, `hew.view.snapshot`)
 /// are honestly refused here with `host_capability_missing` rather than
 /// faked (the registry declares that exact refusal name for every one of
 /// these — see `crates/api/src/registry.rs`'s Wave D block).
@@ -146,7 +146,7 @@ impl From<&ViewCameraSpec> for ViewDirective {
 /// today even before counting `save`/`export`.
 ///
 /// `hew.doc.new`/`hew.doc.open` are a deliberate design call, not a
-/// missing feature: docs/HEW_API.md §10 names exactly this posture — "a
+/// missing feature: docs/agents/HEW_API.md §10 names exactly this posture — "a
 /// live host that keeps document lifecycle user-driven simply withholds
 /// `hew.doc.new`/`open` from its `app` grant" — because a remote
 /// connection silently replacing the user's live, unsaved document is
@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(data["refusal"], "host_capability_missing");
     }
 
-    /// `hew.view.snapshot` is core-granted (docs/HEW_API.md §10) but
+    /// `hew.view.snapshot` is core-granted (docs/agents/HEW_API.md §10) but
     /// still refuses on `LiveHost` — the live viewport isn't wired to
     /// the API host yet, so this must not silently return a blank image.
     #[test]
@@ -548,7 +548,7 @@ mod tests {
             add_reply.error
         );
         // A plain (non-`hew.doc.transact`) mutating dispatch is exactly a
-        // one-command transaction (docs/HEW_API.md §6.1): the reply is
+        // one-command transaction (docs/agents/HEW_API.md §6.1): the reply is
         // `{"results": [...], "label": ...}`, the add's own result at
         // `results[0]`, not the bare command result.
         let add_body = add_reply.result.expect("add succeeds");

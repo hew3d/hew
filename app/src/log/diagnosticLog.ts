@@ -1,7 +1,7 @@
 /**
- * diagnosticLog — the structured diagnostic-log sink (docs/DEVELOPMENT.md,
+ * diagnosticLog — the structured diagnostic-log sink (docs/dev/DEVELOPMENT.md,
  * milestone  — the TS half of the seam; the kernel half, is the
- * wasm-api log surface documented in docs/DEVELOPMENT.md and docs/DIAGNOSTICS.md).
+ * wasm-api log surface documented in docs/dev/DEVELOPMENT.md and docs/dev/DIAGNOSTICS.md).
  *
  * Merges two streams into one unified, time-ordered ring buffer:
  *   - kernel: one JSON LogRecord string per `tracing` event, delivered via
@@ -40,7 +40,7 @@ export interface DiagRecord {
   t: number
 }
 
-/** Shape of one kernel LogRecord JSON string (docs/DIAGNOSTICS.md). */
+/** Shape of one kernel LogRecord JSON string (docs/dev/DIAGNOSTICS.md). */
 interface KernelLogRecord {
   seq: number
   corr: number | null
@@ -81,7 +81,7 @@ export function ingestKernel(json: string): void {
     parsed = JSON.parse(json) as KernelLogRecord
   } catch {
     // Malformed record from the drain — drop rather than throw (drain
-    // callbacks that throw are ignored by the kernel per docs/DEVELOPMENT.md,
+    // callbacks that throw are ignored by the kernel per docs/dev/DEVELOPMENT.md,
     // but guard anyway since this is also called directly from tests).
     return
   }

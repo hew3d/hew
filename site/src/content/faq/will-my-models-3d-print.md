@@ -1,6 +1,6 @@
 ---
-question: "Will my models 3D-print?"
-order: 5
+question: "Can I 3D-print what I model in Hew?"
+order: 7
 ---
 
-That's the point of the water-tightness guarantee: Hew Objects are solid by construction, and an operation that would open up a shell is prevented or clearly flagged rather than allowed to pass silently. When you export an STL or 3MF from a solid Object, it's manifold — no gaps, no flipped normals, no non-closed shells — which is exactly what a slicer expects. You won't discover a broken model halfway through a print.
+Yes. Hew Objects are watertight solids by construction, so when you export an STL or 3MF the mesh is manifold — no gaps, no flipped normals, no repair step in the slicer. An operation that would open up a shell is prevented or clearly flagged, never allowed to pass silently, so you won't discover a broken model halfway through a print.

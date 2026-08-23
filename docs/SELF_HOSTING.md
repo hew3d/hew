@@ -1,27 +1,24 @@
 # Self-Hosting Hew
 
-This is a step-by-step guide to running your own copy of the Hew web app —
-on a homelab container (LXC/CT), a VM, a Docker/Podman host, or any Linux
-box you control. Along with it you can, optionally, run your own copy of
-the small relay service that makes "Open on Phone" work against your own
-server instead of Hew's.
+Step-by-step guide to running your own copy of the Hew web app — on a
+homelab container (LXC/CT), a VM, a Docker/Podman host, or any Linux box
+you control. Optionally, also run your own copy of the small relay
+service that makes "Open on Phone" work against your own server instead
+of Hew's.
 
 It does not cover `app.hew3d.com`, which is Cloudflare Pages, deployed by
-CI on every release (`shells/web/README.md` covers that side, and none of
-it is something you need to reproduce here).
+CI on every release — `shells/web/README.md` covers that side, and you
+don't need to reproduce any of it here.
 
 ## What you're deploying
 
-The web app is a **static single-page app** — plain HTML/JS/CSS/wasm files,
-no backend, no database, no API server. `shells/web`'s build step just
-copies `app`'s Vite build and injects a CSP `<meta>` tag; the result is a
-folder you can serve from anything that can serve files. Releases publish
-that folder pre-built as a tarball, so self-hosting needs no Node, no Rust,
-no build toolchain at all.
+The web app is a **static single-page app** — plain HTML/JS/CSS/wasm files
+in a folder you can serve from anything that can serve files (mostly).
+Releases publish that folder pre-built as a tarball.
 
-That simplicity is also the trap: a naive "point any file server at the
-folder" setup gets a few things subtly wrong, because this app has real
-requirements a generic static site doesn't:
+There are a few specific requirements that a generic web server might get
+wrong by default. The `nginx.conf` that ships with the release tarball
+handles all this, but here's the list if you go your own way:
 
 - **Security headers.** The build's CSP is shipped as a `<meta>` tag, which
   is the portable floor for hosts you don't control — but it can't express
@@ -40,16 +37,10 @@ requirements a generic static site doesn't:
   client stuck on a stale build even after you deploy a new one.
 - **A secure context for PWA install and offline caching.** The service
   worker (install-to-home-screen, offline use) only registers over HTTPS or
-  `localhost`. The app itself works fine over plain LAN HTTP — you just
-  won't get those two features (and, if you also run the relay, the phone's
+  `localhost`. The app itself works fine over plain LAN HTTP — you won't
+  get those two features (and, if you also run the relay, the phone's
   in-app QR scanner needs a secure context too — see [HTTPS and
   certificates](#https-and-certificates)).
-
-None of this is exotic, but it's also not what you get by dropping files
-into a directory and hoping. Every release tarball carries a canonical,
-version-locked `deploy/` directory — `nginx.conf`, the relay proxy stanza,
-the relay's systemd unit — that encodes all of it, so every option below
-installs from that instead of re-deriving it by hand.
 
 ### The relay ("Open on Phone"), in one paragraph
 
@@ -61,9 +52,9 @@ ten minutes or until it's read once (whichever comes first), and never sees
 a decryption key or a plaintext byte — the desktop encrypts before
 uploading and the key rides the QR code's URL fragment, which never reaches
 any server (`workers/share-relay/README.md`'s "Security model" section is
-the full design). You don't need it to run the editor at all — skip every
-"Relay" section below if "Open on Phone" isn't something you want. If you
-do want it, the whole design rests on one rule:
+the full design). You don't need it to run the editor — skip every
+"Relay" section below if you don't want it. If you do, the whole design
+rests on one rule:
 
 > Whatever origin serves the Hew web app also serves the relay under
 > `/relay/`. The phone computes this itself
@@ -107,13 +98,10 @@ To pin a specific version instead, use the direct URL pattern:
 **`hew-web-vX.Y.Z.tar.gz`** — the self-hosting tarball. Its root (`.`) *is*
 the web root — extract it straight into whatever directory you're serving
 from. It also carries a top-level `deploy/` directory (`nginx.conf`,
-`hew.d/relay.conf`, `hew-relay.service`) so an installation is version-
-locked to the exact release it's running, not to whatever `main` says
-today. Never `curl` these configs from `main` separately — always take them
-from the tarball you actually deployed.
+`hew.d/relay.conf`, `hew-relay.service`).
 
 **`hew-relay-vX.Y.Z-linux-<arch>.tar.gz`** — the relay, only if you want
-"Open on Phone". Both architectures ship for every release:
+"Open on Phone". Linux-only but both common architectures are available:
 
 ```sh
 case "$(uname -m)" in
@@ -122,7 +110,7 @@ case "$(uname -m)" in
 esac
 ```
 
-carries `hew-relay` (a static musl binary), `hew-relay.service` (a systemd
+It carries `hew-relay` (a static musl binary), `hew-relay.service` (a systemd
 unit), and `README.md`.
 
 **`ghcr.io/hew3d/hew-relay:<version>`** (also tagged `:latest`) — the same
@@ -236,7 +224,7 @@ against your own server.
    sudo nginx -t && sudo systemctl reload nginx
    ```
 
-   (Not installing the relay? Just run the `rm -rf` line — `deploy/` has
+   (Not installing the relay? Run the `rm -rf` line since `deploy/` has
    nothing else to give you.)
 
 5. **Start it and verify, first behind loopback, then through nginx:**
@@ -613,7 +601,7 @@ operation can be driven from the Proxmox host instead:
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/hew3d/hew/main/scripts/hew-web.sh)" hew-web.sh --update 105
 ```
 
-(the `hew-web.sh` before `--update` is just a name for bash's `$0`, so the
+(the `hew-web.sh` before `--update` is only a name for bash's `$0`, so the
 arguments land where the script expects them). Or from a local copy:
 `./hew-web.sh` and `./hew-web.sh --update 105`. Use the `bash -c
 "$(curl …)"` form, not `curl … | bash` — the wizard's whiptail dialogs need
@@ -764,7 +752,7 @@ if the server is reachable beyond your own LAN. Options:
   skip that step:
   - **Desktop**: the relay client uses the operating system's own trust
     store, not a bundled list, specifically so a CA you've already trusted
-    system-wide just works. Install it in the OS keychain (Keychain Access
+    system-wide works. Install it in the OS keychain (Keychain Access
     on macOS, the Certificate Manager on Windows, your distro's CA trust
     tooling on Linux) the way you would for any other internal service.
   - **iOS**: install the CA's profile (AirDrop it, email it, or serve it

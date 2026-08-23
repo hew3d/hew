@@ -1,4 +1,4 @@
-//! Refusals: the typed "no" the API surfaces verbatim (docs/HEW_API.md
+//! Refusals: the typed "no" the API surfaces verbatim (docs/agents/HEW_API.md
 //! §2, §4.4). A refusal carries a stable machine name drawn from the
 //! kernel's typed error inventory, refusal-specific `detail`, and a
 //! plain-language `explanation`.
@@ -149,7 +149,7 @@ pub fn pascal_case(snake: &str) -> String {
 
 /// The plain-language explanation for a registry refusal *name* (e.g.
 /// `"distance_too_small"`), if the UI table has one — used by the
-/// generated API reference (docs/HEW_API.md §9) to publish refusal
+/// generated API reference (docs/agents/HEW_API.md §9) to publish refusal
 /// explanations without hand-duplicating them. Refusals the API layer
 /// mints itself (`unimplemented`, `host_capability_missing`, …) are not
 /// kernel error variants and legitimately have none.

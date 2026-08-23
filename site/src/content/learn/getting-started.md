@@ -6,7 +6,7 @@ order: 1
 
 Hew runs on your desktop as a native app (macOS, Windows, and even Linux - see [Download](/download/)) or as a web app at [app.hew3d.com](https://app.hew3d.com) (nothing to install and no account required). Both are the same application and work the same way.
 
-Rather than draw one lonely box, you'll build something you could actually 3D print: a little desk-organizer set — a tray holding a pen cup, a bin with a scooped front, and a phone stand. It should touch all of the tools you'll use in a typical Hew session in about fifteen minutes.
+Rather than draw one lonely box, you'll build a real project: a little desk-organizer set — a tray holding a pen cup, a bin with a scooped front, and a phone stand. It touches all of the tools you'll use in a typical Hew session, takes about fifteen minutes, and the same moves scale straight up to a bookshelf, a deck, or a house.
 
 ## 1. Choose centimeters on the welcome screen
 
@@ -20,7 +20,7 @@ Every step below types its unit explicitly, so any setting works — but with ce
 
 Click **Start modeling** to head into the blank document.
 
-![The welcome screen on a fresh launch: sample models, an Open card, and the Units dropdown set to Centimeters](/docs/welcome-screen.png)
+![The welcome screen on a fresh launch: sample models, an Open card, and the Units dropdown set to Centimeters](/docs/welcome-screen.webp)
 
 (Did you turn the welcome screen off earlier? The same choice lives in [Settings](/learn/settings/).)
 
@@ -28,7 +28,7 @@ Click **Start modeling** to head into the blank document.
 
 Hew is laid out roughly in three columns.
 
-![The default layout of a new Hew instance](/docs/default-hew-layout.png)
+![The default layout of a new Hew instance](/docs/default-hew-layout.webp)
 
 On the left is the **tool rail** which shows the primary available tools for quick access, along with their keyboard hot keys. The search field just above the tool rail is the **command palette** - this is a very powerful way of searching for almost anything in Hew (tools, objects, components, materials, help, and more).
 
@@ -46,7 +46,7 @@ Pick the **Rectangle** tool — click it in the tool rail on the left, press `R`
 2. Move the cursor. A live preview follows, and once the first corner is down, a measurement box appears in the top-right of the viewport tracking the width × depth.
 3. Click again to set the opposite corner at roughly **24cm x 14cm**.
 
-![A rectangle mid-draw with blue preview outline; VCB reading 24cm,14cm; status bar "Click the opposite corner"](/docs/tray-sketch.png)
+![A rectangle mid-draw with blue preview outline; VCB reading 24cm,14cm; status bar "Click the opposite corner"](/docs/tray-sketch.webp)
 
 As you draw, notice the colored dot and label at the cursor - that's Hew calling out endpoints, midpoints, and axis alignments. That's essential for many Hew actions.
 
@@ -66,7 +66,7 @@ Switch to **Push/Pull** (`P`):
 2. Move the cursor up and away; a live preview of the extrusion follows.
 3. Click to set the height, or type `1.5cm` and press `Enter`.
 
-![Creating the tray Object by Push/Pull on the Sketch](/docs/tray-pushpull.png)
+![Creating the tray Object by Push/Pull on the Sketch](/docs/tray-pushpull.webp)
 
 Congratulations - you made your first watertight solid Object in Hew! Press `Space` for the **Select** tool and click the tray. The **Object Info** pane now fills in the info about it and confirms that it's **Solid**.
 
@@ -93,7 +93,7 @@ We'll learn two new moves here: drawing a circle and hollowing a solid by pushin
 3. Hollow it. Drawing works directly on a solid's face: with the **Circle** tool (`C`), click the center of the cylinder's top face (the cursor will snap to the center if you get close) and type `2.4cm`; then take **Push/Pull** (`P`) and push that inner disk *down* `7.5cm` (eyeballing it or type it in).
 4. Switch to **Select** (`Space`) and simply **drag** the cup onto the tray. Or, for more precision, pressing `M` changes to the **Move** tool with the ability to click to a specific location (and to copy, but not now).
 
-![The tray with the hollowed pen cup being moved into place](/docs/tray-with-cup.png)
+![The tray with the hollowed pen cup being moved into place](/docs/tray-with-cup.webp)
 
 Drawing a shape on a solid and then pushing into the solid is a very common way of hollowing a part out. If you go all the way through, then you have a hole (or a pipe, if a cylinder) but if you stop before the end, you have a cup.
 
@@ -129,7 +129,7 @@ Drawing on the "right" face means locking to the **red / X-plane** (which is per
 2. Click the upper left corner of the right face as the circle center and enter a radius of `2cm`. We now have a disk Sketch on the right face of the bin, rather than on the ground
 3. Choose **Push/Pull** (`P`) to create a cylinder the entire length of the bin (`7cm` or just choose a point on the far edge)
 
-![The bin with a right face disk being extruded into a cylinder](/docs/bin-with-cutter.png)
+![The bin with a right face disk being extruded into a cylinder](/docs/bin-with-cutter.webp)
 
 ## 9. Cut a curve out of the bin
 
@@ -140,11 +140,11 @@ We are starting with our bin that has a cylinder lying across it, from the previ
 1. Choose the **Select** (`Space`) tool and select the bin. Then press the `Shift` key and select the cylinder. It's critical to do it in this order and to press `Shift` since this selects both and does it in the right order.
 2. Choose the **Subtract** tool either via **Edit ▸ Subtract** or do a search in the command palette (`Cmd-/` or `Ctrl-/`) and type in "sub" to filter it down.
 
-![The command palette filtered down to the Subtract tool](/docs/command-palette-sub.png)
+![The command palette filtered down to the Subtract tool](/docs/command-palette-sub.webp)
 
 The end result of the **Subtract** is a bin with a cut-out the shape of our cutter (since a **Subtract** removes any part of the initial solid that is shared with the second solid.)
 
-![The bin with a curved cutout from the cutter](/docs/bin-with-cutout.png)
+![The bin with a curved cutout from the cutter](/docs/bin-with-cutout.webp)
 
 Move the bin to the tray using your favorite method.
 
@@ -161,11 +161,11 @@ The stand is a wedge: a tall back, a slope for the phone to lean on, and a `1cm`
 3. Still on **Tape Measure**, click the rectangle's right line/edge then move left. Type `1cm` again and press `Enter`. You now have two guide lines perpendicular to each other and each 1cm off of an edge.
 4. With the **Line** tool (`L`), draw one line from the rectangle's back top corner to the point where the two guide lines cross - watch for the amber **Intersection** snap - and then continue it to the right edge. This splits the rectangle into two angled sections.
 
-![The stand profile Sketch: a 6 by 8 rectangle with two dashed guide lines 1 cm off the base and right edges and a Line splitting it into two regions](/docs/stand-sketch-with-lines.png)
+![The stand profile Sketch: a 6 by 8 rectangle with two dashed guide lines 1 cm off the base and right edges and a Line splitting it into two regions](/docs/stand-sketch-with-lines.webp)
 
 5. Switch to **Select** (`Space`) and delete the two lines you no longer need: click the rectangle's top edge and press `Delete`, then click the short piece of the right edge above the diagonal and press `Delete`. Each deletion updates the sketch — what's left filled in is the wedge profile.
 
-![The stand profile Sketch with the top line already deleted and the right line selected to be deleted](/docs/stand-sketch-editing.png)
+![The stand profile Sketch with the top line already deleted and the right line selected to be deleted](/docs/stand-sketch-editing.webp)
 
 6. **Edit ▸ Delete Guide Lines** clears the guide, its job done.
 7. **Push/Pull** (`P`) the wedge region `5cm` wide.
@@ -178,12 +178,12 @@ The phone stand now looks right, but it's on its side. This step introduces the 
 2. Press `Q` for **Rotate** and hover over the left face and press the `Shift` key. The cursor representation turns **red** to show that it's locked to the X-axis.
 3. Select the lower right point on the left face as the pivot point, then select the top right point on the same face as the rotate radius point. Freely move around or type in `-90` to rotate the base down to the ground.
 
-![Rotating the phone stand solid to move off its side onto its base](/docs/stand-solid-rotating.png)
+![Rotating the phone stand solid to move off its side onto its base](/docs/stand-solid-rotating.webp)
 
 4. You can optionally do another rotate along the blue / Z-axis (hint: press `Shift` while the cursor is on the ground to lock to the blue axis) to turn the phone stand to face the same direction as the other parts.
 5. **Move** (`M`) or drag the phone stand onto the tray
 
-![The finished gray set — tray, hollow pen cup, scooped bin, and the wedge phone stand](/docs/organizer-set.png)
+![The finished gray set — tray, hollow pen cup, scooped bin, and the wedge phone stand](/docs/organizer-set.webp)
 
 ## 12. Name it, group it, tag it
 
@@ -193,7 +193,7 @@ A model with four "Object N" rows is worth tidying.
 2. Select all four (`⌘A` / `Ctrl+A`) and choose **Edit ▸ Group** (`⌘G` / `Ctrl+G`, or `Group` in the contextual dock). Name the group *Desk organizer*. Now the whole set moves, hides, and selects as one, while the parts stay separate inside it.
 3. With the group selected, click **+** next to **Tags** in Object Info and type `Desk/Set`. The **Tags** panel shows the tag tree; tags slice a model into show/hide categories independent of the group structure.
 
-![The Outliner showing the Desk organizer group expanded into its four named parts, with the Desk / Set tag applied](/docs/organizer-organized.png)
+![The Outliner showing the Desk organizer group expanded into its four named parts, with the Desk / Set tag applied](/docs/organizer-organized.webp)
 
 [Organizing your model](/learn/organizing/) goes deeper on the Outliner, tags, and visibility.
 
@@ -203,7 +203,7 @@ Save the Hew document with `⌘S` / `Ctrl+S` (or **File ▸ Save**). The native 
 
 To print, choose **File ▸ Export…**, pick **STL binary (.stl)**, and click Export.
 
-![The Export dialog with STL binary selected](/docs/export-dialog.png)
+![The Export dialog with STL binary selected](/docs/export-dialog.webp)
 
 Because every Object is watertight by construction, the STL is manifold — no gaps, flipped normals, or open shells for your slicer to repair. If anything in the model *weren't* solid, Hew would warn you and name it rather than hand you a broken file. The mesh exports in millimeters, ready for any slicer.
 

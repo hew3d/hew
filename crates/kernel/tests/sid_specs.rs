@@ -1,5 +1,5 @@
 //! Executable specs for per-entity **stable ids** (manifest v14+;
-//! docs/HEW_API.md §5.1, HEW_FILE_FORMAT.md §4.2) — the identity that
+//! docs/agents/HEW_API.md §5.1, HEW_FILE_FORMAT.md §4.2) — the identity that
 //! survives save/load, undo/redo, and dense-id renumbering, minted once
 //! per entity and never re-minted.
 //!
@@ -269,7 +269,7 @@ fn undo_redo_of_a_creation_keeps_the_sid() {
 }
 
 /// Deleting an entity and undoing the delete restores the same sid — the
-/// public-id contract behind docs/HEW_API.md §5.1 (delete retires an id;
+/// public-id contract behind docs/agents/HEW_API.md §5.1 (delete retires an id;
 /// undoing the deletion restores it).
 #[test]
 fn delete_then_undo_restores_the_sid() {

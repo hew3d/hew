@@ -431,7 +431,7 @@ fn context_enter_and_exit_balanced_inside_one_transaction_commits() {
     );
 }
 
-/// docs/HEW_API.md §6.3: context commands are legal only inside a
+/// docs/agents/HEW_API.md §6.3: context commands are legal only inside a
 /// transaction. A BARE `hew.context.enter` is a model-mutating plain
 /// request, which dispatch.rs auto-wraps as a one-command transaction —
 /// which is then unbalanced (one `enter`, no `exit`) and rejected
@@ -1082,7 +1082,7 @@ fn attr_set_refuses_a_too_deep_value() {
     assert_eq!(data["refusal"], "attr_value_too_deep");
 }
 
-/// docs/HEW_API.md §8: the `hew` prefix is reserved for first-party use,
+/// docs/agents/HEW_API.md §8: the `hew` prefix is reserved for first-party use,
 /// on writes through the API. Both spellings the spec names — bare `hew`
 /// and anything under `hew.` — refuse, from `set` and from `delete`.
 #[test]
@@ -1116,7 +1116,7 @@ fn attr_writes_refuse_the_reserved_hew_namespace() {
         assert_eq!(data["refusal"], "reserved_attr_namespace", "delete ns={ns}");
     }
 
-    // A refusal leaves the document untouched (docs/HEW_API.md §4.4):
+    // A refusal leaves the document untouched (docs/agents/HEW_API.md §4.4):
     // no undo entry, and the serialized bytes are the ones we started
     // with — not merely unreached code, but pinned.
     assert_eq!(doc.undo_depth(), depth_before, "a refusal added an entry");

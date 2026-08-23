@@ -6,9 +6,9 @@
 //! the geometry buffer codec, the manifest DTO structs, and the zip framing
 //! helpers used by `Document::save`/`load` in `document.rs`.
 //!
-//! See `docs/HEW_FILE_FORMAT.md` for the authoritative spec. Every constant and
+//! See `docs/dev/HEW_FILE_FORMAT.md` for the authoritative spec. Every constant and
 //! layout here must match that document; the spec is updated in the SAME commit
-//! as any serialization change (docs/DEVELOPMENT.md file-format rule).
+//! as any serialization change (docs/dev/DEVELOPMENT.md file-format rule).
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek, Write};
@@ -33,7 +33,7 @@ use crate::topo::Object;
 use crate::transform::Transform;
 
 /// Version of the geometry buffer layout. Bump on any layout change and
-/// extend `docs/HEW_FILE_FORMAT.md` plus the golden-file tests in the same
+/// extend `docs/dev/HEW_FILE_FORMAT.md` plus the golden-file tests in the same
 /// commit.
 ///
 /// v1 → v2: per-face optional `UvFrame` added after the material u32
@@ -58,7 +58,7 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 
 /// Version of the `.hew` container / `manifest.json` shape (independent of the
 /// geometry buffer version). Bump on any manifest-shape change and extend
-/// `docs/HEW_FILE_FORMAT.md` plus the golden files in the same commit.
+/// `docs/dev/HEW_FILE_FORMAT.md` plus the golden files in the same commit.
 ///
 /// v2 (): added optional `name` fields to object/group/component/
 /// instance entries. The fields are `#[serde(default)]`, so v1 files still load
@@ -168,7 +168,7 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 ///   side collection outside the node tree. The field is
 ///   `#[serde(default, skip_serializing_if = "Vec::is_empty")]`, so v1-v12
 ///   files still load (no annotations) — back-compatible. See
-///   `docs/HEW_FILE_FORMAT.md` §4.8 for the DTO shape.
+///   `docs/dev/HEW_FILE_FORMAT.md` §4.8 for the DTO shape.
 ///
 /// Geometry buffer unchanged by any of these fields (`GEOMETRY_FORMAT_VERSION`
 /// stays 6).
@@ -182,7 +182,7 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// `ANNOTATIONS_MANIFEST_VERSION` below), never by the shared manifest
 /// version alone, so multiple fields coexisting under one version number is
 /// intentional, not a collision to design around.
-/// **v14** (stable ids, docs/HEW_API.md §5.1): every serialized entity —
+/// **v14** (stable ids, docs/agents/HEW_API.md §5.1): every serialized entity —
 /// materials, objects, sketches, guides, components, instances, groups,
 /// and tag registry entries — carries a persistent `sid: u64`, the
 /// identity that survives save/load where dense ids do not
@@ -212,7 +212,7 @@ pub const MANIFEST_FORMAT_VERSION: u32 = 16;
 pub(crate) const SCENES_MIN_VERSION: u32 = 16;
 
 /// The manifest version at which per-entity stable ids (`sid`) were
-/// introduced (docs/HEW_API.md §5.1). Version-gated both ways: a file
+/// introduced (docs/agents/HEW_API.md §5.1). Version-gated both ways: a file
 /// declaring an OLDER version that carries any `sid` field is malformed
 /// for its own declared version and rejected (reject-not-repair, the
 /// [`SKETCH_OWNER_MIN_VERSION`] posture), and a file AT or above it must
@@ -231,7 +231,7 @@ pub(crate) const SID_MIN_VERSION: u32 = 14;
 pub(crate) const NESTED_MEMBERS_MIN_VERSION: u32 = 15;
 
 /// The manifest version at which attribute dictionaries (`attrs` — on
-/// entities and at the manifest top level; docs/HEW_API.md §8) were
+/// entities and at the manifest top level; docs/agents/HEW_API.md §8) were
 /// introduced. Version-gated like every sibling field: presence below
 /// this version is a smuggled field and rejected. Unlike `sid`, `attrs`
 /// is OPTIONAL at v14+ — absence simply means "no dictionaries", which
@@ -1554,7 +1554,7 @@ pub(crate) struct Manifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<AnnotationDto>,
     /// The DOCUMENT's own attribute dictionaries (manifest v14+,
-    /// docs/HEW_API.md §8) — same shape and gating as the per-entity
+    /// docs/agents/HEW_API.md §8) — same shape and gating as the per-entity
     /// `attrs` fields.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attrs: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
@@ -1659,13 +1659,13 @@ pub(crate) const CAMERA_PROJECTION_PARALLEL: &str = "parallel";
 pub(crate) struct TagDto {
     /// Root-first tag path segments.
     pub path: Vec<String>,
-    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// Persistent stable id (manifest v14+, docs/agents/HEW_API.md §5.1): the
     /// identity that survives save/load, unlike the dense `id` above.
     /// Required at v14+ (absence is a malformed manifest); its presence in
     /// an older file is a smuggled field and rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sid: Option<u64>,
-    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8):
     /// namespace → key → JSON value. Absent/empty means none — an
     /// attribute-free entity writes no key at all. Presence in a pre-v14
     /// file is a smuggled field and rejected.
@@ -1680,13 +1680,13 @@ pub(crate) struct TagDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct GuideDto {
     pub id: u32,
-    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// Persistent stable id (manifest v14+, docs/agents/HEW_API.md §5.1): the
     /// identity that survives save/load, unlike the dense `id` above.
     /// Required at v14+ (absence is a malformed manifest); its presence in
     /// an older file is a smuggled field and rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sid: Option<u64>,
-    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8):
     /// namespace → key → JSON value. Absent/empty means none — an
     /// attribute-free entity writes no key at all. Presence in a pre-v14
     /// file is a smuggled field and rejected.
@@ -1779,13 +1779,13 @@ pub(crate) const RADIAL_KIND_DIAMETER: &str = "diameter";
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct MaterialDto {
     pub id: u32,
-    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// Persistent stable id (manifest v14+, docs/agents/HEW_API.md §5.1): the
     /// identity that survives save/load, unlike the dense `id` above.
     /// Required at v14+ (absence is a malformed manifest); its presence in
     /// an older file is a smuggled field and rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sid: Option<u64>,
-    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8):
     /// namespace → key → JSON value. Absent/empty means none — an
     /// attribute-free entity writes no key at all. Presence in a pre-v14
     /// file is a smuggled field and rejected.
@@ -1813,13 +1813,13 @@ pub(crate) struct TextureDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ObjectDto {
     pub id: u32,
-    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// Persistent stable id (manifest v14+, docs/agents/HEW_API.md §5.1): the
     /// identity that survives save/load, unlike the dense `id` above.
     /// Required at v14+ (absence is a malformed manifest); its presence in
     /// an older file is a smuggled field and rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sid: Option<u64>,
-    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8):
     /// namespace → key → JSON value. Absent/empty means none — an
     /// attribute-free entity writes no key at all. Presence in a pre-v14
     /// file is a smuggled field and rejected.
@@ -1844,13 +1844,13 @@ pub(crate) struct ObjectDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct GroupDto {
     pub id: u32,
-    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// Persistent stable id (manifest v14+, docs/agents/HEW_API.md §5.1): the
     /// identity that survives save/load, unlike the dense `id` above.
     /// Required at v14+ (absence is a malformed manifest); its presence in
     /// an older file is a smuggled field and rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sid: Option<u64>,
-    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8):
     /// namespace → key → JSON value. Absent/empty means none — an
     /// attribute-free entity writes no key at all. Presence in a pre-v14
     /// file is a smuggled field and rejected.
@@ -1878,13 +1878,13 @@ pub(crate) struct GroupDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct ComponentDto {
     pub id: u32,
-    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// Persistent stable id (manifest v14+, docs/agents/HEW_API.md §5.1): the
     /// identity that survives save/load, unlike the dense `id` above.
     /// Required at v14+ (absence is a malformed manifest); its presence in
     /// an older file is a smuggled field and rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sid: Option<u64>,
-    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8):
     /// namespace → key → JSON value. Absent/empty means none — an
     /// attribute-free entity writes no key at all. Presence in a pre-v14
     /// file is a smuggled field and rejected.
@@ -1906,13 +1906,13 @@ pub(crate) struct ComponentDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct InstanceDto {
     pub id: u32,
-    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// Persistent stable id (manifest v14+, docs/agents/HEW_API.md §5.1): the
     /// identity that survives save/load, unlike the dense `id` above.
     /// Required at v14+ (absence is a malformed manifest); its presence in
     /// an older file is a smuggled field and rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sid: Option<u64>,
-    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8):
     /// namespace → key → JSON value. Absent/empty means none — an
     /// attribute-free entity writes no key at all. Presence in a pre-v14
     /// file is a smuggled field and rejected.
@@ -1942,13 +1942,13 @@ pub(crate) struct InstanceDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SketchDto {
     pub id: u32,
-    /// Persistent stable id (manifest v14+, docs/HEW_API.md §5.1): the
+    /// Persistent stable id (manifest v14+, docs/agents/HEW_API.md §5.1): the
     /// identity that survives save/load, unlike the dense `id` above.
     /// Required at v14+ (absence is a malformed manifest); its presence in
     /// an older file is a smuggled field and rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sid: Option<u64>,
-    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    /// Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8):
     /// namespace → key → JSON value. Absent/empty means none — an
     /// attribute-free entity writes no key at all. Presence in a pre-v14
     /// file is a smuggled field and rejected.
@@ -2171,11 +2171,11 @@ pub(crate) struct DocSaveData {
     pub camera: Option<CameraState>,
     /// Movable drawing axes (manifest v13+, tool-parity design §4).
     pub axes: AxesFrame,
-    /// Per-entity stable ids (manifest v14+, docs/HEW_API.md §5.1) — the
+    /// Per-entity stable ids (manifest v14+, docs/agents/HEW_API.md §5.1) — the
     /// document's whole table; `encode_document` looks up only the live
     /// rows above, so tombstoned/orphaned entries never serialize.
     pub sids: std::collections::BTreeMap<crate::document::EntityRef, u64>,
-    /// Attribute dictionaries (manifest v14+, docs/HEW_API.md §8) — the
+    /// Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8) — the
     /// whole table, same live-rows-only lookup posture as `sids`.
     pub attrs: std::collections::BTreeMap<crate::document::AttrTarget, crate::attr::AttrDict>,
     /// Saved views (manifest v16+, docs/design/scenes.md). Encoding PRUNES
@@ -2838,7 +2838,7 @@ pub(crate) struct DocLoadRaw {
     /// Movable drawing axes (manifest v13+; [`AxesFrame::IDENTITY`] for
     /// older files or a v13+ file that never moved them).
     pub axes: AxesFrame,
-    /// Per-entity stable ids (manifest v14+, docs/HEW_API.md §5.1), each
+    /// Per-entity stable ids (manifest v14+, docs/agents/HEW_API.md §5.1), each
     /// vector parallel to its entity collection in dense order; tag sids
     /// parallel to `tag_meta`. ALL EMPTY for pre-v14 files (the loader
     /// mints dense-order ids instead); at v14+ decode has already enforced
@@ -3070,7 +3070,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     let instance_tags: Vec<Vec<Vec<String>>> =
         manifest.instances.iter().map(|i| i.tags.clone()).collect();
 
-    // Stable ids (manifest v14+, docs/HEW_API.md §5.1) are version-gated
+    // Stable ids (manifest v14+, docs/agents/HEW_API.md §5.1) are version-gated
     // both ways: smuggled below SID_MIN_VERSION is rejected exactly like a
     // smuggled sketch owner, and at v14+ every entity must carry a globally
     // unique sid — absence or a duplicate is a malformed manifest, never
@@ -3160,7 +3160,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         tag_sids.extend(take_sid("tag", i, t.sid)?);
     }
 
-    // Attribute dictionaries (manifest v14+, docs/HEW_API.md §8):
+    // Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8):
     // smuggled below ATTRS_MIN_VERSION is rejected like every other
     // version-gated field; at v14+ they are optional, validated to the
     // same rules the live mutation path enforces.

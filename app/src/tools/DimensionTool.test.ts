@@ -1073,7 +1073,7 @@ describe('DimensionTool — wasm refusal toasts route through friendlyErrorText'
   // that skipped the plain-language mapping every sibling annotation call
   // site (Viewport.tsx's annotation handlers) already goes through. A
   // genuine `"CODE: message"` throw, exactly like the wasm boundary emits
-  // (docs/DEVELOPMENT.md B3), must come out the OTHER end mapped to its
+  // (docs/dev/DEVELOPMENT.md B3), must come out the OTHER end mapped to its
   // `DESCRIPTIONS` copy, not the raw code/message.
 
   it('a linear-dimension refusal toasts the mapped copy, not the raw wasm message', () => {

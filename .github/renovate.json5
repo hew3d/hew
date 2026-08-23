@@ -12,7 +12,7 @@
 // including the toolchains, and Renovate proposes each bump as its own PR that
 // the full gate proves before it lands. A bad update is one commit to revert.
 //
-// See docs/DEVELOPMENT.md §8 for the human-facing summary.
+// See docs/dev/DEVELOPMENT.md §8 for the human-facing summary.
 {
   $schema: 'https://docs.renovatebot.com/renovate-schema.json',
 

@@ -18,7 +18,7 @@ import {
  *     axis snap is the source; the clamped render geometry is irrelevant).
  *
  * Everything here drives real pointer events on the canvas; the harness is
- * used only to pin the camera and read state back (docs/DEVELOPMENT.md §6:
+ * used only to pin the camera and read state back (docs/dev/DEVELOPMENT.md §6:
  * raw pointer tests exist precisely for screen-to-world wiring).
  */
 

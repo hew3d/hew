@@ -1,5 +1,5 @@
 //! Appearance + organization: hew.material.*, hew.tag.*, hew.guide.*
-//! (docs/HEW_API.md §7).
+//! (docs/agents/HEW_API.md §7).
 //!
 //! `hew.material.create`/`hew.tag.create`/`hew.tag.set_visible` call
 //! kernel entry points that are deliberately **not undoable**

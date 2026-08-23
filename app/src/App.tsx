@@ -1254,7 +1254,7 @@ export default function App() {
     })
   }, [])
 
-  // The desktop half of `--live` (docs/HEW_API.md §11.2): wires the Tauri
+  // The desktop half of `--live` (docs/agents/HEW_API.md §11.2): wires the Tauri
   // shell's local-socket JSON-RPC frames to this document's own live
   // Scene, exactly like installTestHarness above — a no-op outside Tauri
   // (isTauri gate lives inside installLiveBridge itself).

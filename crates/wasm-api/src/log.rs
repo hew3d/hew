@@ -1,4 +1,4 @@
-//! The wasm→shell logging seam (docs/DEVELOPMENT.md).
+//! The wasm→shell logging seam (docs/dev/DEVELOPMENT.md).
 //!
 //! The kernel runs as WASM and rule 1 forbids it any I/O, so **the shell owns the
 //! sink** — exactly like the `FileHost` / `RecoveryStore` seams. This
@@ -12,10 +12,10 @@
 //! ```
 //!
 //! The record schema is the **stub-first handshake** for  (the TS sink) and
-//! is documented in `docs/DIAGNOSTICS.md`. The kernel emits plain `tracing` events
+//! is documented in `docs/dev/DIAGNOSTICS.md`. The kernel emits plain `tracing` events
 //! (op name + params); this layer stamps the cross-stream **monotonic seq#** and
 //! the per-gesture **correlation id** that let the kernel stream and the TS stream
-//! merge into one timeline (docs/DEVELOPMENT.md). Correlation ids are managed here
+//! merge into one timeline (docs/dev/DEVELOPMENT.md). Correlation ids are managed here
 //! (`begin_gesture`/`end_gesture`) rather than via `tracing` spans, so a minimal
 //! event-only `Subscriber` suffices and the WASM bundle stays lean.
 
@@ -27,7 +27,7 @@ use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Metadata, Subscriber, span};
 
 /// One structured diagnostic record — the JSON shape the TS sink consumes
-/// (`docs/DIAGNOSTICS.md`). One per `tracing` event.
+/// (`docs/dev/DIAGNOSTICS.md`). One per `tracing` event.
 #[derive(Debug, Clone, Serialize)]
 pub struct LogRecord {
     /// Monotonic sequence number across the whole session — the merge key shared
@@ -40,7 +40,7 @@ pub struct LogRecord {
     pub level: &'static str,
     /// The event target — the emitting module path, e.g. `"kernel::cmd"`.
     pub target: String,
-    /// Structured key/value payload. Well-known keys (see docs/DIAGNOSTICS.md):
+    /// Structured key/value payload. Well-known keys (see docs/dev/DIAGNOSTICS.md):
     /// `message`, `op` (command name), `state_hash` (post-op [`Document`] digest).
     /// Keys are sorted (serde_json default `Map` = `BTreeMap`) so a record
     /// serializes deterministically.

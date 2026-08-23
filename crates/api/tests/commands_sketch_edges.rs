@@ -1,4 +1,4 @@
-//! Conformance coverage for addressable sketch edges (docs/HEW_API.md
+//! Conformance coverage for addressable sketch edges (docs/agents/HEW_API.md
 //! §5.2's compound `"edg_…"` id, `hew.query.entity`'s edge listing/direct
 //! query, `hew.entity.delete`'s edge branch, and the sketch-edge locator
 //! §5.3's derived points reuse) — the gap the "Getting started" tutorial
@@ -185,7 +185,7 @@ fn sketch_query_lists_edges_and_entity_answers_an_edge_id_directly() {
 
     // Pick the bottom edge (0,0,0)-(2,0,0) and query it directly by id —
     // a client that just listed an edge will reasonably query it right
-    // back (docs/HEW_API.md §5.2).
+    // back (docs/agents/HEW_API.md §5.2).
     let bottom_id = edge_id_at(&edges, [0.0, 0.0, 0.0], [2.0, 0.0, 0.0]);
     let direct = call_ok(
         &mut conn,
@@ -309,7 +309,7 @@ fn resolve_edge_locator_refuses_ambiguous_when_the_point_sits_on_a_shared_vertex
     let sketch = draw_rect(&mut conn, &mut doc, 2, [0.0, 0.0, 0.0], [2.0, 1.0, 0.0]);
 
     // A point exactly on a shared corner is equidistant (zero) from both
-    // incident edges — refused typed, never guessed (docs/HEW_API.md
+    // incident edges — refused typed, never guessed (docs/agents/HEW_API.md
     // §5.2's ambiguity rule, API_AMBIGUITY_TOL).
     let refusal = call_err(
         &mut conn,
@@ -472,7 +472,7 @@ fn delete_refuses_a_stale_sketch_edge_id_and_touches_nothing() {
 /// (A,E,C,D). Deleting the "top" edge (C-D) and the short upper fragment
 /// of the split edge (E-C) leaves the wedge as the sketch's only region —
 /// exactly what a client that has never queried a sketch edge before now
-/// has the vocabulary to do (docs/HEW_API.md §5.2).
+/// has the vocabulary to do (docs/agents/HEW_API.md §5.2).
 #[test]
 fn tutorial_trim_leaves_a_single_wedge_region_of_the_expected_area() {
     let mut doc = Document::new();

@@ -1,7 +1,7 @@
 //! Executable specs for the stubbed kernel operations (DEVELOPMENT.md rule 3).
 //!
 //! Every test here is `#[ignore]`d because the op it exercises is a `todo!()`
-//! stub. The contract for implementers (see docs/DEVELOPMENT.md):
+//! stub. The contract for implementers (see docs/dev/DEVELOPMENT.md):
 //!
 //! - Un-ignore a test in the SAME PR that implements its operation.
 //! - Never weaken an assertion or delete a test to make it pass (rule 5);
@@ -2834,7 +2834,7 @@ fn tapered_tool(z0: f64, z1: f64) -> Object {
 /// even a pull past the old apex height validates. The recorded inverse
 /// restores it. (This is the tapered-hole PULL; the deferred P4 case is a
 /// different gesture — pushing an outer edge INTO/PAST a hole — see
-/// docs/ROADMAP.md.)
+/// docs/agents/ROADMAP.md.)
 #[test]
 fn push_pull_tapered_hole_ring_builds_walls_and_rides_rigidly() {
     let cube = unit_cube();
@@ -3099,7 +3099,7 @@ fn hex_prism_and_facet() -> (Object, FaceId, Vec3) {
 // `push_pull_slanted_neighbor_returns_non_manifold_result`, which holds for a
 // genuinely slanted neighbor only until the re-spec above is
 // implemented). These are the acceptance criteria for the K2
-// kernel lane; un-ignore each in the PR that implements it (docs/DEVELOPMENT.md).
+// kernel lane; un-ignore each in the PR that implements it (docs/dev/DEVELOPMENT.md).
 
 /// Mean x of a face's outer-loop vertices — picks a specific sub-face when
 /// `split_face`'s `new_faces` order isn't guaranteed.

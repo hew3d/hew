@@ -1,4 +1,4 @@
-//! Host-effect document lifecycle: hew.doc.new/open/save/export/import, hew.view.snapshot (docs/HEW_API.md §7). Implemented by its wave; see
+//! Host-effect document lifecycle: hew.doc.new/open/save/export/import, hew.view.snapshot (docs/agents/HEW_API.md §7). Implemented by its wave; see
 //! docs/design/api-implementation-conventions.md.
 //!
 //! Every command here is `Served::Host` (registry.rs): this module owns no
@@ -126,7 +126,7 @@ fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 struct ImportParams {
     path: String,
     /// Meters-per-source-unit hint. Formats that carry no units of their
-    /// own (STL) refuse typed without it (docs/HEW_API.md §7's semantics
+    /// own (STL) refuse typed without it (docs/agents/HEW_API.md §7's semantics
     /// note); formats that do (glTF, COLLADA, `.skp`) ignore it.
     #[serde(default)]
     units: Option<String>,
@@ -149,8 +149,8 @@ fn import_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 /// resolution) turns it into a typed [`SnapshotParams`]. `camera`/`view`
 /// are the shared vocabulary `camera.rs` parses — the same one
 /// `hew.view.camera` (view.rs) accepts, so there is exactly one camera
-/// spec in the protocol (docs/HEW_API.md §7). `scene` is a Scene's public
-/// id (docs/HEW_API.md's Scenes section) — mutually exclusive with both.
+/// spec in the protocol (docs/agents/HEW_API.md §7). `scene` is a Scene's public
+/// id (docs/agents/HEW_API.md's Scenes section) — mutually exclusive with both.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSnapshotParams {
@@ -214,7 +214,7 @@ fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         .snapshot(ctx.doc, &snapshot_params)
         .map_err(CmdError::Refusal)?;
 
-    // Mirrors `hew.doc.export`'s posture (docs/HEW_API.md §7): bytes
+    // Mirrors `hew.doc.export`'s posture (docs/agents/HEW_API.md §7): bytes
     // base64 by default; a `path` is honored by hosts with filesystem
     // access and refused typed elsewhere (`write_snapshot`'s own default).
     // The inline PNG (and, worse, the id-buffer) can exceed an MCP

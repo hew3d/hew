@@ -54,7 +54,7 @@ fontdb = "0.24.0"
 # that used to back it (LAN-server session tokens) is gone too.
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 
-# Windows named-pipe transport for `--live` (docs/HEW_API.md §11.2):
+# Windows named-pipe transport for `--live` (docs/agents/HEW_API.md §11.2):
 # CreateNamedPipeW/ConnectNamedPipe/ReadFile/WriteFile, a per-user security
 # descriptor (Win32_Security_Authorization), BCryptGenRandom for the
 # discovery token, and OpenProcess for the stale-discovery-file sweep. All

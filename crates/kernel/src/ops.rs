@@ -19,7 +19,7 @@
 //!
 //! No operation in this module can *produce* an `Open` object from a
 //! `Watertight` one: anything that would open the shell is a typed error
-//! instead (docs/DEVELOPMENT.md: "operations that would open a shell are prevented").
+//! instead (docs/dev/DEVELOPMENT.md: "operations that would open a shell are prevented").
 //! `Open` objects exist only via construction from open soup
 //! (`Object::from_polygons`) or import, and the only ops valid on them are
 //! the surface-local sticky ones (`split_face`/`merge_faces`).
@@ -2817,7 +2817,7 @@ impl Object {
             // consumed by an intervening op that undo did not restore
             // exactly). The exact un-build is impossible: refuse typed,
             // object untouched — the documented "undo fails typed, never
-            // corrupts" posture (docs/ROADMAP.md), reached here instead of
+            // corrupts" posture (docs/agents/ROADMAP.md), reached here instead of
             // through `find_collapse_plans`.
             return Err(PushPullError::NonManifoldResult);
         }

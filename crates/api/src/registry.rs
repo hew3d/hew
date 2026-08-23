@@ -1,5 +1,5 @@
 //! The command registry — the single source of truth for the API's
-//! per-command contracts (docs/HEW_API.md §9). Every command is declared
+//! per-command contracts (docs/agents/HEW_API.md §9). Every command is declared
 //! once, here: name, version, class, tier, where it is served, summary,
 //! parameter/result schemas, and refusal inventory. MCP tool definitions,
 //! the TypeScript SDK, and the published reference are generated from
@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 /// What a command does to the document — governs envelope placement
-/// (docs/HEW_API.md §6.4).
+/// (docs/agents/HEW_API.md §6.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandClass {
     /// Transaction payload; the one-envelope-one-undo accounting applies.
@@ -26,7 +26,7 @@ pub enum CommandClass {
     Solitary,
 }
 
-/// Who executes the command's effect (docs/HEW_API.md §3): the pure
+/// Who executes the command's effect (docs/agents/HEW_API.md §3): the pure
 /// dispatcher, or a host through the typed host trait (file I/O,
 /// importers, rendering). Either way this crate owns the contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,7 @@ pub enum Served {
     Host,
 }
 
-/// Command tier at protocol 1 (docs/HEW_API.md §7).
+/// Command tier at protocol 1 (docs/agents/HEW_API.md §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     /// Exists at 1.0; the minimum for the agent-modeling vision.
@@ -124,7 +124,7 @@ fn obj() -> serde_json::Value {
 }
 
 impl Registry {
-    /// Builds the protocol-1 inventory (docs/HEW_API.md §7).
+    /// Builds the protocol-1 inventory (docs/agents/HEW_API.md §7).
     pub fn protocol_1() -> Registry {
         let mut commands = BTreeMap::new();
         let mut add = |name: &'static str,
@@ -520,7 +520,7 @@ impl Registry {
             "Add an angular construction guide.",
         );
         add("hew.guide.clear", M, Kernel, Std, "Delete all guides.");
-        // hew.scenes — named, saved views (docs/HEW_API.md's Scenes
+        // hew.scenes — named, saved views (docs/agents/HEW_API.md's Scenes
         // section; docs/design/scenes.md §3, §7). Every command but
         // `list` is `ModelMutating` (may ride a transaction,
         // `mutates_document = true`) but NONE of it is undoable — same
@@ -1275,7 +1275,7 @@ impl Registry {
         {
             // hew.view.camera — sets the live viewport's camera. Same
             // camera/view vocabulary as hew.view.snapshot (one spec, not
-            // two, per docs/HEW_API.md §7), minus snapshot's rendering
+            // two, per docs/agents/HEW_API.md §7), minus snapshot's rendering
             // parameters (width/height/include_ids/path) which have no
             // meaning here. Unlike snapshot, EXACTLY one of camera/view
             // is required — a live camera-set command given neither has
@@ -2015,7 +2015,7 @@ impl Registry {
             cmd.refusals = Vec::new();
         }
         {
-            // hew.scenes.* — named, saved views (docs/HEW_API.md's Scenes
+            // hew.scenes.* — named, saved views (docs/agents/HEW_API.md's Scenes
             // section). `camera_schema`/`display_schema`/`properties_schema`
             // are the wire shapes `crates/api/src/commands/scenes.rs`
             // parses, shared across `add`/`update`/`list`'s result.
@@ -2442,7 +2442,7 @@ impl Registry {
                 },
                 "required": ["sketch", "region_ids"]
             });
-            // The face-imprint result shape (docs/HEW_API.md §5.2, §5.4):
+            // The face-imprint result shape (docs/agents/HEW_API.md §5.2, §5.4):
             // on-face drawing never touches a sketch, so its result is just
             // the reshaped solid's public id — a face has no public id of
             // its own, so whichever faces the cut produced are addressed
@@ -2939,7 +2939,7 @@ impl Registry {
 mod tests {
     use super::*;
 
-    /// Registry completeness (docs/HEW_API.md §14): every declared command
+    /// Registry completeness (docs/agents/HEW_API.md §14): every declared command
     /// carries schemas, a summary, and a non-empty refusal inventory; names
     /// are namespaced and well-formed; versions start at 1.
     #[test]

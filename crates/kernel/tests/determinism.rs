@@ -1,4 +1,4 @@
-//! Determinism guard (docs/DEVELOPMENT.md): a random document-op sequence
+//! Determinism guard (docs/dev/DEVELOPMENT.md): a random document-op sequence
 //! run **twice** must yield an identical [`Document::state_hash`] *and*
 //! byte-identical [`Document::save`] output.
 //!

@@ -6,6 +6,8 @@ order: 7
 
 Follow Me sweeps a closed profile along a path and answers with a new watertight solid. It's the tool for everything push/pull can't reach in one straight stroke: a pipe that turns corners, a molding run around a tabletop, a picture frame, a rounded or chamfered edge strip.
 
+![A circle drawn on the ground for the path, with a flat goblet profile sketched beside it, not yet swept](/docs/follow-me-setup.webp)
+
 ## The gesture
 
 1. Select the path with the Select tool — a drawn line, curve, or any connected run of sketch edges. One click on one line is enough: Follow Me takes the whole connected run it belongs to. Once picked, the path highlights boldly along its whole length, so it's obvious what you're about to sweep.
@@ -22,15 +24,15 @@ Whatever is selected when you activate the tool becomes the path — including a
 
 Press on the profile and drag along the highlighted path instead of just clicking, and Follow Me stops the sweep partway through the run. A marker rides along the path as you drag, with a live length readout tracking how far you've gone; release to build the sweep, capped with a flat end where you stopped.
 
-A plain click — no dragging — still sweeps the whole path, exactly as before. For a precise length without eyeballing it, type the number and press `Enter` instead of dragging; that works whether or not you've started dragging yet. `Esc` cancels the drag and drops back to the profile stage — the path stays picked, ready to try again.
+A plain click, without dragging, sweeps the whole path. For a precise length without eyeballing it, type the number and press `Enter` instead of dragging; that works whether or not you've started dragging. `Esc` cancels the drag and drops back to the profile stage — the path stays picked, ready to try again.
 
 ## Setting up the profile
 
-The profile should sit **square across the path where the sweep starts** — a slice of the result, standing perpendicular to the direction the sweep travels. That's still the placement to aim for, but you no longer have to get it exact by hand first: draw the profile lying flat, right next to the path, and click it — Hew stands it upright for you automatically before sweeping, hinged wherever it actually touches the path. This is the classic first attempt (draw a circle for the path, draw the profile flat beside it) working on the first try, not a special case.
+The profile should sit **square across the path where the sweep starts** — a slice of the result, standing perpendicular to the direction the sweep travels. You don't have to get that exact by hand: draw the profile lying flat, right next to the path, and click it — Hew stands it upright automatically before sweeping, hinged wherever it actually touches the path. The classic first attempt — draw a circle for the path, draw the profile flat beside it — works on the first try, not as a special case.
 
 Hover a profile before you click and Hew tells you up front what will happen: an outline and a colored marker appear on the profile, and the status bar spells out the verdict — ready to sweep as drawn, will be stood upright automatically, refused (with the reason and what to change), or too close to call. You get that reading before you commit, not a refusal after the fact.
 
-Standing the profile up by hand still works exactly as before, if you'd rather place it precisely yourself: draw it flat on the ground, select it, and stand it upright with [Rotate](/learn/moving-and-transforming/), placing it across the path's first segment. If the profile shares the working sketch with other drawing — the path, say — standing it upright splits it into its own sketch and leaves the rest where it was.
+You can also stand the profile up by hand, if you'd rather place it precisely yourself: draw it flat on the ground, select it, and stand it upright with [Rotate](/learn/moving-and-transforming/), placing it across the path's first segment. If the profile shares the working sketch with other drawing — the path, say — standing it upright splits it into its own sketch and leaves the rest where it was.
 
 The profile doesn't have to land exactly on an open path's end, either. Set it down near the end — square to the path, or left flat and let auto-orientation square it up — but not quite touching, and Hew carries the path's shape over to wherever the profile actually stands and sweeps from there. So a profile that's a hair off the end still works; the sweep just starts where the profile is, not where the path's own end vertex sits.
 
@@ -39,6 +41,8 @@ The profile doesn't have to be centered on the path — a molding offset from it
 ## Closed paths
 
 A path that closes into a loop — a circle, a rectangle, any drawn ring — sweeps into a closed ring solid with no end caps: a frame, a gasket, a torus. Sweep a profile around a drawn circle and you have a lathe: bottle rims, wheels, round handles.
+
+![A mitered walnut picture-frame molding swept around a drawn rectangle](/docs/follow-me-frame.webp)
 
 For a loop of straight lines — a rectangle, any drawn ring of lines — the profile can start in the *middle* of a run, or right at a **corner**. At a corner it seams into a clean miter, as long as it's stood past the corner rather than hanging back over the edge leading into it — picture-frame moldings, mitered corners included, are buildable starting right at the corner this way. A profile that does hang back over that incoming edge folds into its own material on the first stretch of the sweep, and Hew refuses; slide it fully past the corner and try again.
 
@@ -50,7 +54,11 @@ Let the profile reach the circle's axis — the center line the lathe turns abou
 
 The sphere is the headline case. Draw a circle for the path. Draw a second circle the same size standing upright *through* the axis — its own center on the path circle's center — so it crosses the axis at a top and a bottom point. Follow Me the upright circle around the path: Hew revolves one half of it and closes both crossings into poles, giving you a clean sphere. (Draw the path circle from its center, then draw the profile circle from that same center with the rotation locked upright, and the two points snap exact.)
 
+![A terracotta sphere lathed from an upright circle profile revolved around a circle path, the path circle visible at the equator](/docs/follow-me-sphere.webp)
+
 A profile that only touches the axis — a goblet's outline resting on the center line, a cone's slant running up to a tip — closes the same way, a pole wherever the outline meets the axis.
+
+![A brass goblet lathed from a profile outline resting on the axis](/docs/follow-me-goblet.webp)
 
 Poles need a **drawn circle** path. On a straight-line loop, or any ring Hew doesn't read as a true circle, a profile reaching the center has no clean revolution to close on and refuses — keep it clear of the axis there.
 
@@ -58,11 +66,13 @@ Poles need a **drawn circle** path. On a straight-line loop, or any ring Hew doe
 
 Instead of a drawn path, run the sweep around a **face of a solid**: click the flat face whose rim you want the molding to follow — a tabletop's top for crown molding around its edge, a lid's top for a lip. The sweep runs around *that* face's outer boundary. By default the result is a separate new solid and the original is untouched — union them to make it one piece, or subtract it to carve it away (a chamfer or a groove); see [Combining solids](/learn/combining-solids/) and the merge gesture below, which does the subtract-or-union for you in one step.
 
+![A terracotta crown molding swept around the top rim of a slate cabinet](/docs/follow-me-molding.webp)
+
 Click the face itself, squarely. Unlike a drawn path, a solid's face can't be preselected — selecting the whole object gives Follow Me no path — so with the tool active you point at the face and click it directly. Hover it first: the rim that will be swept lights up before you click, so you can see which face you're about to pick. Aim at a clear part of the flat face, not *through* the standing profile — the profile sits in front of whatever's behind it, and a click that reaches past it picks the face beyond. If a click lands on nothing followable, the tool says so ("Click the flat face to run the profile around it") rather than sitting silent.
 
 Stand the profile up beside the solid and Move it onto the rim; the midpoint and edge snaps land it exactly, and it can hang off the edge for a molding that sits proud. It doesn't have to be exact — as with a drawn path, a profile that isn't square to the face's rim yet is folded upright automatically before the sweep runs. What still refuses is a face too narrow to hold the folded profile ("that face is thinner than the profile is deep") — Hew names the wrong face instead of quietly shrinking the profile to fit it. Pick a wider face, or use a shallower profile.
 
-A face reached through a component instance works as a path too — molding around one placement of a repeated part doesn't need exploding it first. A face that belongs to a grouped object needs you to open the group first (double-click into it), the same as any other edit inside a group; a face reached while editing a component's own definition isn't a valid path target yet — step back out first.
+A face reached through a component instance works as a path too — molding around one placement of a repeated part doesn't need exploding it first. A face that belongs to a grouped object needs you to open the group first (double-click into it), the same as any other edit inside a group; a face reached while editing a component's own definition is not a valid path target — step out first.
 
 ## A solid face as the profile
 

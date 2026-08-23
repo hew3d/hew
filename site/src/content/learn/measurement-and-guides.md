@@ -4,11 +4,11 @@ description: "Everything about exact dimensions: display units, the typed-input 
 order: 10
 ---
 
-Models made in Hew tend to get manufactured: 3D printed, cut, assembled. So exact dimensions are first-class, and they come from typed input on every tool, from the display units you choose, and from construction guides that extend the snapping system.
+Models made in Hew tend to get manufactured: 3D printed, cut, assembled. Exact dimensions are first-class. They come from typed input on every tool, from the display units you choose, and from construction guides that extend the snapping system.
 
 ## Units
 
-Model geometry is always stored in meters internally; **Settings ▸ Units** controls how lengths are *displayed and interpreted*:
+Model geometry is always stored in meters internally. **Settings ▸ Units** controls how lengths are *displayed and interpreted*:
 
 | System | Format | Example |
 |---|---|---|
@@ -37,15 +37,36 @@ The Tape Measure does two jobs, chosen by where your *first* click lands:
 
 **Measure a distance.** Click any point, move, and read the live distance; click again to finish. If the second click lands on empty space, Hew drops a **guide point** there and — when the two points aren't the same — an infinite **guide line** through both of them, the same pair SketchUp drops. If the second click lands on real geometry, you get only the measurement; nothing is created. Hold `⌘`/`Ctrl` through either kind of click to measure without dropping anything, for whenever you only want the readout.
 
-**Drop a parallel guide.** Click on an **edge** — of a solid, a sketch you've drawn, a group member, or a component instance — then move sideways: a guide line parallel to that edge follows at the offset shown in the readout. Click to place it, or type an exact offset and press `Enter`. This is the classic SketchUp workflow for laying out a design before drawing it. A **world axis** works as the source edge too: click anywhere along the red, green, or blue axis (the On Axis cue confirms the pick) and pull sideways. So does an existing guide line — one guide can father a whole ladder of parallels.
+**Drop a parallel guide.** Click on an **edge** — of a solid, a sketch you've drawn, a group member, or a component instance — then move sideways. A guide line parallel to that edge follows at the offset shown in the readout. Click to place it, or type an exact offset and press `Enter`. This is the classic SketchUp workflow for laying out a design before drawing it. A **world axis** works as the source edge too: click anywhere along the red, green, or blue axis (the On Axis cue confirms the pick) and pull sideways. So does an existing guide line — one guide can father a whole ladder of parallels.
 
-Neither job is stuck on the ground plane. Starting from a hovered sketch keeps the guide or measurement in that sketch's plane, the same as the draw tools; with nothing hovered, press an arrow key while the tool is idle to lock the next click to a world-axis plane (`→`/`←`/`↑` for red/green/blue, `↓` or the same arrow again to release) — useful for measuring across, or guiding off, a face that isn't the ground and has nothing else to hover first. For a parallel guide whose source edge doesn't lie flat in whatever plane applies, Hew derives the nearest plane that *does* contain the edge, rather than dropping the constraint outright. Absent a hovered sketch or plane lock, clicking an edge that also sits on a face offers that face's own plane instead — but only for as long as the cursor stays over that same face; drag off it and the guide falls back to the plain sideways offset, rather than staying locked to whichever face happened to be under your very first click. And once a plane is locked (from any of these sources), a guide or measurement can still reach a point that sits slightly off it — an endpoint or midpoint that doesn't lie exactly in the plane — instead of refusing it: a measurement projects that point onto the plane, and a parallel guide keeps only the point's component along the guide's own direction; the inference chip marks the snap "projected" either way, so you know it isn't landing on the point's literal position.
+### Working off the ground plane
 
-Arrow keys also lock the guide or measurement's own direction, mid-gesture. For a parallel guide, `→`/`←`/`↑` locks the offset to red/green/blue (`↓` releases); an axis that runs along the source edge itself is refused, with a status-bar note explaining why, rather than silently doing nothing. For a plain measurement, every axis is fair game, since there's no edge to run along. `Shift` does the same job without committing to it: held mid-gesture, it latches onto whichever axis the guide or measurement is *currently* running closest to, and lets go again the moment you release it — an arrow-key lock, once set, survives a Shift tap the same way. Whichever axis is active, the measurement preview colors to match it — and for a parallel guide, so does the connector line back to the source edge, though the guide line itself stays neutral, since it always runs parallel to the edge rather than to the locked axis. Either way, the lock reads at a glance instead of off the numbers.
+Neither job is stuck on the ground plane:
 
-The corner widget keeps showing your last reading after you finish a measurement or place a guide — it doesn't clear until you switch to a different tool, so there's time to actually read the number instead of catching it out of the corner of your eye. And you don't have to type the target length while the gesture is still live: measure two real points normally, look at the finished distance sitting in the widget, and *then* type a new length and press `Enter` — Hew offers the same "resize the model?" confirmation this produces mid-drag, just triggered after the fact instead of during. `Esc` at that point drops the typed number and puts the original reading back, without disturbing anything; typing again still offers to resize against the same two points.
+- **Hover a sketch first** and the guide or measurement stays in that sketch's plane, the same as the draw tools.
+- **Nothing hovered?** Press an arrow key while the tool is idle to lock the next click to a world-axis plane — `→`/`←`/`↑` for red/green/blue, `↓` or the same arrow again to release. Handy for measuring across, or guiding off, a face that isn't the ground and has nothing else to hover first.
+- **Source edge doesn't lie flat in the active plane?** Hew derives the nearest plane that *does* contain the edge, rather than dropping the constraint outright.
+- **Clicking an edge that also sits on a face**, with no hovered sketch or plane lock, offers that face's own plane instead — but only while the cursor stays over that same face. Drag off it and the guide falls back to the plain sideways offset.
 
-If a group or component is open for editing when you arm that confirmation, it resizes just that container instead of the whole model: the dialog names it ("Resize Group 1?", "Resize Door?") rather than asking about the model, and the resize is anchored at the *first* point you measured from, so that point doesn't move. A component resize reaches every placement of it, since they share one definition; a group resize touches only that group's contents. Either way, geometry outside the open container stays put, and so does the camera — only the whole-model resize at the top level moves the view to match. Step out (`Esc`) with the new size in place, same as any other edit made inside a group or component.
+Once a plane is locked, from any of these sources, a guide or measurement can still reach a point that sits slightly off it — an endpoint or midpoint that doesn't lie exactly in the plane. A measurement projects that point onto the plane; a parallel guide keeps only the point's component along the guide's own direction. Either way, the inference chip marks the snap "projected," so you know it isn't landing on the point's literal position.
+
+### Locking the direction mid-gesture
+
+Arrow keys also lock the guide or measurement's own direction while you're drawing it:
+
+- **Parallel guide:** `→`/`←`/`↑` locks the offset to red/green/blue (`↓` releases). An axis that runs along the source edge itself is refused, with a status-bar note explaining why.
+- **Plain measurement:** every axis is fair game, since there's no edge to run along.
+- **`Shift`** does the same job without committing to it. Held mid-gesture, it latches onto whichever axis the guide or measurement is *currently* running closest to, and lets go the moment you release it. An arrow-key lock, once set, survives a `Shift` tap the same way.
+
+Whichever axis is active, the measurement preview colors to match it — and for a parallel guide, so does the connector line back to the source edge (the guide line itself stays neutral, since it always runs parallel to the edge rather than to the locked axis). The lock reads at a glance instead of off the numbers.
+
+### Reading and resizing after the fact
+
+The corner widget keeps showing your last reading after you finish a measurement or place a guide. It doesn't clear until you switch to a different tool, so there's time to actually read the number instead of catching it out of the corner of your eye.
+
+You don't have to type the target length while the gesture is still live. Measure two real points normally, look at the finished distance sitting in the widget, then type a new length and press `Enter`. Hew offers the same "resize the model?" confirmation this produces mid-drag, only triggered after the fact instead of during. `Esc` at that point drops the typed number and puts the original reading back, without disturbing anything; typing again still offers to resize against the same two points.
+
+If a group or component is open for editing when you confirm that resize, it resizes just that container instead of the whole model. The dialog names it ("Resize Group 1?", "Resize Door?") rather than asking about the model, and the resize is anchored at the *first* point you measured from, so that point doesn't move. A component resize reaches every placement of it, since they share one definition; a group resize touches only that group's contents. Geometry outside the open container stays put either way, and so does the camera — only a whole-model resize moves the view to match. Step out (`Esc`) with the new size in place, same as any other edit made inside a group or component.
 
 ## Protractor
 
@@ -60,9 +81,9 @@ The result is a guide line through the apex at that angle.
 
 ## Working with guides
 
-![A box with construction guide lines and a guide point placed around it](/docs/guides.png)
+![A box with construction guide lines and a guide point placed around it](/docs/guides.webp)
 
-Guides are construction geometry: dashed lines and point markers that are never part of your solids, never export, but always snap. Use them to pre-plan positions, then draw to them.
+Guides are construction geometry — dashed lines and point markers that are never part of your solids and never export, but always snap. Use them to pre-plan positions, then draw to them.
 
 - The purple "On Guide" snap cue appears whenever the cursor is on a guide.
 - Where a guide **crosses** an edge, a sketch line, or another guide, the amber Intersection cue appears — click there to land exactly on the crossing, which is usually the whole reason the guide exists.

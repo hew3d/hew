@@ -1,0 +1,83 @@
+---
+import { getCollection, render } from 'astro:content';
+import type { InferGetStaticPropsType } from 'astro';
+import ProseLayout from '../../layouts/ProseLayout.astro';
+import Button from '../../components/Button.astro';
+
+export async function getStaticPaths() {
+  const entries = await getCollection('compare');
+  return entries.map((entry) => ({
+    params: { slug: entry.id },
+    props: { entry },
+  }));
+}
+
+type Props = InferGetStaticPropsType<typeof getStaticPaths>;
+
+const { entry } = Astro.props as Props;
+const { Content } = await render(entry);
+---
+
+<ProseLayout
+  title={entry.data.title}
+  description={entry.data.description}
+  eyebrow={`Coming from ${entry.data.package}`}
+>
+  <Content />
+
+  <aside class="see-for-yourself">
+    <p>
+      The fastest way to check any of this is to open the <a
+        href="https://app.hew3d.com"
+      >web app</a> and push/pull something — no install, no account. The <a
+        href="/learn/getting-started/"
+      >Getting started guide</a> is a fifteen-minute tour.
+    </p>
+    <div class="actions">
+      <Button href="https://app.hew3d.com" variant="secondary" size="md">
+        Try Hew in your browser
+      </Button>
+      <Button href="/download" variant="primary" size="md">
+        Download for desktop
+      </Button>
+    </div>
+  </aside>
+
+  <p class="back-link"><a href="/compare/">&larr; All comparisons</a></p>
+</ProseLayout>
+
+<style>
+  .see-for-yourself {
+    margin-top: var(--space-2xl);
+    padding: var(--space-lg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    background: var(--color-surface);
+  }
+
+  .see-for-yourself p {
+    color: var(--color-text-muted);
+    max-width: 60ch;
+  }
+
+  .see-for-yourself .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    margin-top: var(--space-md);
+  }
+
+  .back-link {
+    margin-top: var(--space-lg);
+  }
+
+  .back-link a {
+    color: var(--color-accent-text);
+    text-decoration: none;
+    font-weight: var(--font-weight-semibold);
+  }
+
+  .back-link a:hover {
+    color: var(--color-accent);
+  }
+</style>

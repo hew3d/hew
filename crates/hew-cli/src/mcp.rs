@@ -1,4 +1,4 @@
-//! `hew-cli mcp` (docs/HEW_API.md §11.3, §13): a hand-rolled MCP stdio
+//! `hew-cli mcp` (docs/agents/HEW_API.md §11.3, §13): a hand-rolled MCP stdio
 //! server — newline-delimited JSON-RPC, one message per line, which is
 //! what the MCP stdio transport (2024-11-05 revision) actually specifies
 //! (no LSP-style `Content-Length` framing). Headless by default: each
@@ -66,7 +66,7 @@ enum Backend {
 /// One long-lived MCP session. Embedded: a `Connection` hello'd and
 /// attached to its own fresh document at construction, so the first
 /// `tools/call` an agent makes already has a working document
-/// (docs/HEW_API.md §13's intended loop: describe → plan → transact →
+/// (docs/agents/HEW_API.md §13's intended loop: describe → plan → transact →
 /// look). Live: hello'd against a discovered running instance instead —
 /// the document is whatever the user already has open.
 pub struct McpServer {
@@ -79,7 +79,7 @@ pub struct McpServer {
     /// authority.
     registry: Registry,
     /// The granted profile — `Core` embedded, whatever the remote's hello
-    /// reported when live (docs/HEW_API.md §12: live is always `app`, but
+    /// reported when live (docs/agents/HEW_API.md §12: live is always `app`, but
     /// this reads it back rather than assuming).
     profile: Profile,
 }
@@ -170,7 +170,7 @@ hew.view.zoom_extents so they can see it.
 
 impl McpServer {
     /// Headless: `hello` (protocol 1) then `hew.doc.new`, both internal —
-    /// `hew.doc.new` auto-attaches on success (docs/HEW_API.md §4.2), so no
+    /// `hew.doc.new` auto-attaches on success (docs/agents/HEW_API.md §4.2), so no
     /// separate `attach` round-trip is needed either.
     pub fn new() -> McpServer {
         let profile = Profile::Core;
@@ -210,7 +210,7 @@ impl McpServer {
 
     /// Live: discovers (and, with `opts.launch`, starts) a running desktop
     /// instance, hello's it with the discovery token, then attaches to its
-    /// document (docs/HEW_API.md §11.2, §12). The attach step matters
+    /// document (docs/agents/HEW_API.md §11.2, §12). The attach step matters
     /// because a live host serves a document the user already has open
     /// rather than creating one on connect — unlike [`McpServer::new`]
     /// above, whose embedded `hew.doc.new` auto-attaches for free, a live
@@ -355,7 +355,7 @@ impl McpServer {
 
     /// Dispatches one `hew.*` envelope — embedded, through the session's
     /// own `Connection`; live, forwarded over the socket to the remote app
-    /// (docs/HEW_API.md §12: "every envelope the embedded path would
+    /// (docs/agents/HEW_API.md §12: "every envelope the embedded path would
     /// dispatch locally is instead written to the socket") — and returns
     /// the whole JSON-RPC response (result or refusal) as a `Value`. An MCP
     /// tool call always succeeds at the JSON-RPC layer even when the
@@ -418,7 +418,7 @@ impl Default for McpServer {
     }
 }
 
-/// The MCP tool inventory (docs/HEW_API.md §13): a small set of chunky
+/// The MCP tool inventory (docs/agents/HEW_API.md §13): a small set of chunky
 /// tools generated from the registry rather than one tool per command.
 /// `hew_snapshot` is included whenever the connection's profile grants
 /// `hew.view.snapshot` — true for both profiles today, since core grants
@@ -648,7 +648,7 @@ mod tests {
         assert!(tools.iter().any(|t| t["name"] == "hew_snapshot"));
     }
 
-    /// `path` is a passthrough parameter (docs/HEW_API.md §7): the tool
+    /// `path` is a passthrough parameter (docs/agents/HEW_API.md §7): the tool
     /// schema must expose it or an MCP client has no way to ask for it —
     /// this is the whole fix for the inline-PNG size problem, so its
     /// absence here would silently undo it.

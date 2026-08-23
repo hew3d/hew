@@ -130,7 +130,7 @@
  * projection changes WHERE the point lands, not whether the thing it was
  * snapped to was real geometry.
  *
- * Explicitly OUT of scope for this slice (see ROADMAP):
+ * Explicitly OUT of scope for this slice (see docs/agents/ROADMAP.md):
  *   - Protractor (angle guides) —, a separate tool.
  *
  * Parallel guides from an edge on INSTANCED geometry (a component-instance

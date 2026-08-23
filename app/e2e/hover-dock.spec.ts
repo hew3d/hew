@@ -20,7 +20,7 @@ import { worldToPagePixel, type Mat4, type CanvasRect } from './helpers/projectW
  *       separate wedge to chase.
  *
  * Drives real `pointermove` events (`page.mouse.move`) over projected world
- * points under a pinned top-down camera (docs/DEVELOPMENT.md strategy 2), reading
+ * points under a pinned top-down camera (docs/dev/DEVELOPMENT.md strategy 2), reading
  * the dock's context from `data-dock-context` (ContextualDock.tsx).
  */
 

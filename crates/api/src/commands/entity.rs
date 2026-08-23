@@ -1,4 +1,4 @@
-//! Entity lifecycle + transforms: hew.entity.* (docs/HEW_API.md §7).
+//! Entity lifecycle + transforms: hew.entity.* (docs/agents/HEW_API.md §7).
 //!
 //! Rename/delete dispatch on the resolved [`kernel::EntityRef`]'s kind;
 //! the transform trio (move/rotate/scale) share the pivot/anchor
@@ -99,7 +99,7 @@ fn delete(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let resolver = ctx.resolver();
     let entity = resolver.resolve(&p.id);
     // A sketch edge is a compound id (not a top-level `EntityRef` kind —
-    // docs/HEW_API.md §5.2), resolved the same way a region or curve id
+    // docs/agents/HEW_API.md §5.2), resolved the same way a region or curve id
     // is: `IdResolver::resolve_edge`, tried only once the ordinary
     // resolve comes up empty.
     let edge = entity
@@ -255,7 +255,7 @@ fn move_(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 
 /// Shared move/rotate execution over resolved nodes: plain transform, or
 /// (with `copy`) `duplicate_node`/`duplicate_nodes_array` at the same
-/// step (docs/HEW_API.md §7's move semantics, reused by rotate).
+/// step (docs/agents/HEW_API.md §7's move semantics, reused by rotate).
 fn apply_node_transform(
     ctx: &mut Ctx,
     nodes: &[NodeId],

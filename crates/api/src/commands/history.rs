@@ -1,4 +1,4 @@
-//! Shared history: hew.history.* (docs/HEW_API.md §7 semantics notes).
+//! Shared history: hew.history.* (docs/agents/HEW_API.md §7 semantics notes).
 //!
 //! All three run SOLITARY — bare, never inside a transaction (§6.4): the
 //! registry classes them `Solitary`, so dispatch never brackets them with

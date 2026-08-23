@@ -7,21 +7,20 @@ const ctaSchema = z.object({
   href: z.string(),
 });
 
-const blog = defineCollection({
-  loader: glob({ pattern: '**/*.md', base: './src/content/blog' }),
-  schema: z.object({
-    title: z.string(),
-    description: z.string(),
-    pubDate: z.coerce.date(),
-    updatedDate: z.coerce.date().optional(),
-    draft: z.boolean().default(false),
-  }),
-});
-
 const learn = defineCollection({
   loader: glob({ pattern: '**/*.md', base: './src/content/learn' }),
   schema: z.object({
     title: z.string(),
+    description: z.string(),
+    order: z.number(),
+  }),
+});
+
+const compare = defineCollection({
+  loader: glob({ pattern: '**/*.md', base: './src/content/compare' }),
+  schema: z.object({
+    title: z.string(),
+    package: z.string(),
     description: z.string(),
     order: z.number(),
   }),
@@ -49,8 +48,15 @@ const pages = defineCollection({
         secondaryCta: ctaSchema.optional(),
       })
       .optional(),
-    screenshot: z.string().optional(),
-    screenshotAlt: z.string().optional(),
+    screenshots: z
+      .array(
+        z.object({
+          src: z.string(),
+          alt: z.string(),
+          caption: z.string().optional(),
+        })
+      )
+      .optional(),
     features: z
       .array(
         z.object({
@@ -90,4 +96,4 @@ const pages = defineCollection({
   }),
 });
 
-export const collections = { blog, learn, faq, pages };
+export const collections = { learn, compare, faq, pages };

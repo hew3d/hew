@@ -16,6 +16,8 @@ order: 8
    Individual letters come out shorter than the Height you type, because a font distributes that measurement across ascenders, descenders, and the space around them. A capital O at 150 mm Height stands about 108 mm tall in Onest, and a different font will land somewhere else. If you need a letter to be an exact size, place it and measure it, then scale.
 5. Click **OK**, then click where you want it. The text places on whatever face you click, or on the ground plane.
 
+![An extruded "HEW" placed on the ground and selected: Object Info and the Outliner both show it as a 3D Text component](/docs/text-3d.webp)
+
 The result is a single component instance named after the text, so `3D Text "OPEN"` shows up in the Outliner under that name. One `Esc` cancels before placement; one undo removes it after.
 
 ## Choosing a font
@@ -24,7 +26,7 @@ The font list has up to three sections:
 
 **Bundled** — the families that ship with Hew, available everywhere including the browser. They were screened to extrude cleanly.
 
-**System** — the fonts installed on your machine. On the desktop apps this list appears on its own. In a browser it needs your permission first: click **Use my system fonts…** and accept the prompt. Some browsers don't offer this at all, in which case the section doesn't appear and you can still load a font file by hand.
+**System** — the fonts installed on your machine. On the desktop apps this list appears on its own. In a browser it needs your permission first: click **Use my system fonts…** and accept the prompt. Some browsers don't offer this at all, in which case the section doesn't appear and you can load a font file by hand instead.
 
 **Loaded** — any `.ttf` or `.otf` you've opened yourself this session. Loaded fonts last until you reload; the document stores the resulting geometry, never the font, so a file you send someone else opens fine without it.
 

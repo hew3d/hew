@@ -9,12 +9,12 @@ import {
 /**
  * Input-pipeline E2E — the first tests that drive Hew the way a user does:
  * real keyboard shortcuts, real pointer events on the WebGL canvas (through
- * raycast + snap), and real typed-VCB entry. This is docs/DEVELOPMENT.md strategy 2
+ * raycast + snap), and real typed-VCB entry. This is docs/dev/DEVELOPMENT.md strategy 2
  * ("pixel interaction") made live: `harness.setCamera` pins the app camera
  * to CAMERA below, `buildViewProjection` + `worldToPagePixel` project known
  * world points to page pixels, and `page.mouse` clicks land there.
  *
- * Scope discipline (the pyramid, docs/DEVELOPMENT.md): geometry correctness stays in
+ * Scope discipline (the pyramid, docs/dev/DEVELOPMENT.md): geometry correctness stays in
  * kernel tests, and per-op behavior in tools.spec.ts's semantic layer. What
  * ONLY this file proves is the wiring between them — that a keypress
  * activates the tool, a canvas click reaches the right world point, and the

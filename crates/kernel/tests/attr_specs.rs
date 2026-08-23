@@ -1,4 +1,4 @@
-//! Executable specs for attribute dictionaries (docs/HEW_API.md §8;
+//! Executable specs for attribute dictionaries (docs/agents/HEW_API.md §8;
 //! manifest v14+): namespaced client data the kernel stores, round-trips,
 //! and never interprets. Writes are ordinary, undoable mutations; values
 //! are JSON minus non-finite numbers; dictionaries follow their entity

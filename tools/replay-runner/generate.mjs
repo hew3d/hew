@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Generate mode for the replay runner: drives a fresh Scene through a
 // representative model, records the committed call stream, and writes the
-// result as a fixture JSON (docs/DIAGNOSTICS.md) under fixtures/.
+// result as a fixture JSON (docs/dev/DIAGNOSTICS.md) under fixtures/.
 //
 // Can be run directly (`node generate.mjs [name]`) or via `node run.mjs
 // --generate`, which dynamically imports `generate()` below.
@@ -41,7 +41,7 @@ function groundUnitSquare(scene) {
  * Builds the representative fixture model: two overlapping unit boxes
  * (drawn as 4 ground segments each, then extruded), one transformed to
  * overlap the other, unioned, then the union sliced in half. Exercises every
- * recorded method in docs/DIAGNOSTICS.md except delete_node.
+ * recorded method in docs/dev/DIAGNOSTICS.md except delete_node.
  */
 function buildTwoBoxesUnionSlice(scene) {
   scene.start_recording();
@@ -234,7 +234,7 @@ export async function generate(name = 'two-boxes-union-slice') {
   await mkdir(FIXTURES_DIR, { recursive: true });
   const outPath = path.join(FIXTURES_DIR, `${name}.json`);
   // Write take_recording()'s JSON verbatim — NOT round-tripped through
-  // JSON.parse/JSON.stringify. golden_hash is a u64 (docs/DIAGNOSTICS.md)
+  // JSON.parse/JSON.stringify. golden_hash is a u64 (docs/dev/DIAGNOSTICS.md)
   // and JS's JSON.parse silently loses precision above
   // Number.MAX_SAFE_INTEGER (e.g. 16685420354669910861 becomes
   // 16685420354669910016), which would bake a corrupted golden into the

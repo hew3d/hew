@@ -3,9 +3,10 @@
 </p>
 
 <p align="center">
-  The intuitive, Open Source, cross-platform, solids-first 3D modeler,
-  pairing SketchUp-style direct modeling with watertight solid objects.
-  And it's free!
+  The free, open-source, cross-platform 3D modeler for people who learned
+  on SketchUp — the same draw-and-push/pull way of working, rebuilt on
+  watertight solid objects. Native on macOS, Windows, and Linux, and the
+  same app in your browser.
 </p>
 
 <p align="center">
@@ -37,7 +38,7 @@ it on top of a stricter foundation:
   with a typed error instead of quietly "fixing" your model.
 - **An open native format.** `.hew` files are a documented zip container —
   JSON manifest plus binary geometry buffers. See
-  [docs/HEW_FILE_FORMAT.md](docs/HEW_FILE_FORMAT.md).
+  [docs/dev/HEW_FILE_FORMAT.md](docs/dev/HEW_FILE_FORMAT.md).
 
 ## Get Hew
 
@@ -68,7 +69,7 @@ planned.
   tiled across sheets with trim marks and a scale bar, as a bitmap or as
   vector line art; headless too
 - Autosave and crash recovery, structured debug logging, and deterministic
-  session record/replay ([docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md))
+  session record/replay ([docs/dev/DIAGNOSTICS.md](docs/dev/DIAGNOSTICS.md))
 
 ## Architecture in one paragraph
 
@@ -79,7 +80,7 @@ desktop included. The UI is a single TypeScript + React codebase rendering
 through three.js on a WebGL2 baseline. The desktop shell is Tauri; the web
 shell is a static build of the same app. The full picture, including the
 data model and the reasoning behind these choices, is in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+[docs/agents/ARCHITECTURE.md](docs/agents/ARCHITECTURE.md).
 
 ## Building from source
 
@@ -108,17 +109,37 @@ wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
 
 ## Documentation
 
+The `docs/` tree is organized by audience: the top level is for users,
+`docs/dev/` for people working on Hew or its formats, and `docs/agents/`
+holds the exhaustive references AI agents work from.
+
+**For users:**
+
 | Document | What it covers |
 | --- | --- |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | What works now and where Hew is going |
+| [docs/INTEROP.md](docs/INTEROP.md) | Import/export formats and their limits |
+| [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md) | Running your own Hew web app and relay |
 | [docs/API_GUIDE.md](docs/API_GUIDE.md) | Driving Hew from a program or an AI agent — start here |
 | [docs/API_REFERENCE.gen.md](docs/API_REFERENCE.gen.md) | Every API command: parameters, results, refusals |
-| [docs/HEW_API.md](docs/HEW_API.md) | The API protocol specification |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Data model, kernel design, crate topology |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Contributor guide: setup, rules, testing |
-| [docs/HEW_FILE_FORMAT.md](docs/HEW_FILE_FORMAT.md) | The open `.hew` file format specification |
-| [docs/INTEROP.md](docs/INTEROP.md) | Import/export formats and their limits |
-| [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) | Debug logs, session recording, bug reports |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Shipped features and planned work |
+
+**For developers:**
+
+| Document | What it covers |
+| --- | --- |
+| [docs/dev/DEVELOPMENT.md](docs/dev/DEVELOPMENT.md) | Contributor guide: setup, rules, testing |
+| [docs/dev/ARCHITECTURE.md](docs/dev/ARCHITECTURE.md) | Architecture orientation: data model, crates, invariants |
+| [docs/dev/HEW_FILE_FORMAT.md](docs/dev/HEW_FILE_FORMAT.md) | The open `.hew` file format specification |
+| [docs/dev/DIAGNOSTICS.md](docs/dev/DIAGNOSTICS.md) | Debug logs, session recording, bug reports |
+| [docs/dev/BRAND.md](docs/dev/BRAND.md) | The mark, wordmark, and color system |
+
+**For AI agents** (exhaustive references; code cites them by section):
+
+| Document | What it covers |
+| --- | --- |
+| [docs/agents/ARCHITECTURE.md](docs/agents/ARCHITECTURE.md) | Data model, kernel design, crate topology — in full |
+| [docs/agents/HEW_API.md](docs/agents/HEW_API.md) | The API protocol specification |
+| [docs/agents/ROADMAP.md](docs/agents/ROADMAP.md) | The detailed feature inventory behind the roadmap |
 
 ## Contributing
 
@@ -137,4 +158,4 @@ copyleft, including over network use; the plugin ecosystem is open to
 commercial authors.
 
 SketchUp is a trademark of Trimble Inc. This project is independent of
-and not affiliated with Trimble in any possible way
+and not affiliated with Trimble in any possible way.

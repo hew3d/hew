@@ -1,7 +1,7 @@
 # Replay Runner
 
 Headless Node consumer of Hew's record/replay surface
-(`docs/DIAGNOSTICS.md`, decision). Loads the kernel's `wasm-api`
+(`docs/dev/DIAGNOSTICS.md`, decision). Loads the kernel's `wasm-api`
 compiled for Node, replays committed recording fixtures into a fresh `Scene`,
 and asserts the resulting `state_hash` matches each fixture's golden — the
 regression guarantee for `crates/wasm-api/src/recording.rs`.
@@ -82,7 +82,7 @@ side as a thrown `"REPLAY: …"` string).
 
 ## Bug → test pipeline (freeze)
 
-The mechanical version of `docs/DEVELOPMENT.md`'s loop: *reported bug →
+The mechanical version of `docs/dev/DEVELOPMENT.md`'s loop: *reported bug →
 reproduce from its captured recording → fix → freeze `{recording + golden}`
 as a committed fixture → CI replays it forever.*
 
@@ -101,7 +101,7 @@ node run.mjs --freeze <recording.json> <fixture-name> [--force]
 
 1. Reads the recording JSON at `<recording.json>`.
 2. Validates its shape: `version` must equal the current
-   `RECORDING_FORMAT_VERSION` (2 — `docs/DIAGNOSTICS.md`), and it must
+   `RECORDING_FORMAT_VERSION` (2 — `docs/dev/DIAGNOSTICS.md`), and it must
    have a `calls` array and a `golden_hash`.
 3. Replays it into a fresh `Scene` and compares the resulting `state_hash` to
    the recording's own declared `golden_hash`.

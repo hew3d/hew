@@ -1,9 +1,9 @@
 /**
- * `window.__hew_test` — the semantic test harness (docs/DEVELOPMENT.md).
+ * `window.__hew_test` — the semantic test harness (docs/dev/DEVELOPMENT.md).
  *
  * Debug/test builds only. It lets a driver (Playwright in, or the console)
  * issue **semantic** actions and read state *by logic, not canvas pixels* — the
- * answer to "the viewport is an opaque WebGL canvas" (docs/DEVELOPMENT.md). Most E2E
+ * answer to "the viewport is an opaque WebGL canvas" (docs/dev/DEVELOPMENT.md). Most E2E
  * tests should drive through this rather than synthesize pointer events.
  *
  * Design:

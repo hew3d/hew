@@ -1,5 +1,5 @@
 //! Printing: `hew.view.line_drawing` and `hew.print.pdf`
-//! (docs/design/printing.md §9b, docs/HEW_API.md §7). Both are
+//! (docs/design/printing.md §9b, docs/agents/HEW_API.md §7). Both are
 //! `Served::Host` like `hew.view.snapshot`: this module owns parameter
 //! validation and result shaping; the host renders (`hew-cli` through
 //! `crates/hlr`, `crates/softrender`, and `crates/pdfwrite`) or answers

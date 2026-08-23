@@ -7,13 +7,15 @@ combining Objects is always explicit.
 
 Start with these documents — they are the source of truth:
 
-- `docs/DEVELOPMENT.md` — setup, commands, repository layout, and the
+- `docs/dev/DEVELOPMENT.md` — setup, commands, repository layout, and the
   **non-negotiable rules**. Code comments across the kernel cite these as
   "DEVELOPMENT.md rule N". Read them before changing anything.
-- `docs/ARCHITECTURE.md` — the data model and crate topology.
-- `docs/HEW_FILE_FORMAT.md` — the native format spec; it must be updated
+- `docs/agents/ARCHITECTURE.md` — the data model and crate topology.
+- `docs/dev/HEW_FILE_FORMAT.md` — the native format spec; it must be updated
   in the same commit as any serialization change.
-- `docs/ROADMAP.md` — what exists and what's planned.
+- `docs/agents/ROADMAP.md` — the exhaustive inventory of what exists
+  and what's planned; code comments cite it by section. (The thin
+  `docs/ROADMAP.md` is the human-readable summary for users.)
 
 ## Quick reference
 

@@ -14,7 +14,7 @@
  * also resets app-shell-only state (the welcome screen, `docSession`'s
  * dirty/currentRef bookkeeping, the autosave-suppression ref, the recovery
  * snapshot) that has no Shop Mode equivalent — Shop Mode never dirties a
- * document (docs/DEVELOPMENT.md's kernel-mutation rules don't apply to a
+ * document (docs/dev/DEVELOPMENT.md's kernel-mutation rules don't apply to a
  * shell that issues none) and tracks no save state at all. Pulling only
  * this much out — rather than the whole function — keeps App.tsx's own
  * behavior untouched (it still owns every one of those app-shell resets;

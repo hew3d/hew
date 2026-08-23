@@ -1,7 +1,7 @@
 /**
  * Length-unit setting — module-level singleton.
  *
- * The kernel's base length unit is always f64 METERS (see docs/DEVELOPMENT.md). This
+ * The kernel's base length unit is always f64 METERS (see docs/dev/DEVELOPMENT.md). This
  * module owns ONLY a display-layer preference: which **format** the UI
  * formats lengths in. It never touches kernel state.
  *

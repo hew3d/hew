@@ -6,7 +6,7 @@ import { connect } from 'node:net'
 
 /**
  * WebdriverIO + tauri-driver config for the **real desktop binary** (
- * docs/DEVELOPMENT.md). tauri-driver is Tauri's official WebDriver intermediary; it
+ * docs/dev/DEVELOPMENT.md). tauri-driver is Tauri's official WebDriver intermediary; it
  * shims a W3C session onto the platform webview driver — on Linux that's
  * `WebKitWebDriver` (apt: `webkit2gtk-driver`). **macOS is unsupported** (WKWebView
  * has no WebDriver), which is fine: CI is Linux. See e2e/README.md for the

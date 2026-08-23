@@ -162,7 +162,7 @@ fn call_err(
 
 /// Asserts the envelope just dispatched added exactly ONE undo entry, and
 /// that undoing it restores `doc` to `bytes_before` byte-identically
-/// (docs/HEW_API.md §6.1, §14).
+/// (docs/agents/HEW_API.md §6.1, §14).
 fn assert_one_undo_and_clean_undo(doc: &mut Document, depth_before: usize, bytes_before: &[u8]) {
     assert_eq!(
         doc.undo_depth(),

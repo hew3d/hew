@@ -277,6 +277,40 @@ small {
   letter-spacing: 0.04em;
 }
 
+/* Collapsible sections (the Compare pages' grouped tables). */
+.prose details {
+  margin-block: var(--space-md);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.prose details summary {
+  padding: var(--space-sm) var(--space-md);
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.prose details summary:hover {
+  color: var(--color-accent-text);
+}
+
+.prose details[open] summary {
+  border-bottom: 1px solid var(--color-border);
+}
+
+.prose details > *:not(summary) {
+  margin-inline: var(--space-md);
+}
+
+.prose details > p:first-of-type {
+  margin-top: var(--space-sm);
+}
+
+.prose details table {
+  margin-block: var(--space-sm);
+}
+
 /* ---------- Focus & motion ---------- */
 
 :focus-visible {

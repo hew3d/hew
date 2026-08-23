@@ -1,7 +1,7 @@
 # Hew web E2E (Playwright)
 
 End-to-end tests for the **web build** of the app. Strategy and rationale:
-`docs/DEVELOPMENT.md` (the test pyramid) and decision ****. This directory is
+`docs/dev/DEVELOPMENT.md` (the test pyramid) and decision ****. This directory is
 the *top* of the pyramid — keep it thin; most interaction-logic regression
 belongs in Vitest (`src/**/*.test.ts`) and, once it lands, the headless
 replay/semantic layer.
@@ -41,7 +41,7 @@ Playwright `webServer` just `vite preview` the existing `dist` (no rebuild).
 Firefox is omitted from the default set to keep CI lean; add it when a
 regression warrants it.
 
-## The canvas problem (docs/DEVELOPMENT.md)
+## The canvas problem (docs/dev/DEVELOPMENT.md)
 
 The viewport is an opaque WebGL `<canvas>` — DOM selectors can't "click the
 edge." Three strategies, in priority order:

@@ -1,6 +1,6 @@
 //! Executable specs for the labeled compound history entry — the kernel
 //! prerequisite for the Hew API's one-envelope-one-undo guarantee
-//! (docs/HEW_API.md §6.1).
+//! (docs/agents/HEW_API.md §6.1).
 //!
 //! The contract under test: [`Document::begin_transaction`] /
 //! [`Document::commit_transaction`] / [`Document::abort_transaction`]

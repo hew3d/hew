@@ -1,4 +1,4 @@
-# Determinism guard (docs/DEVELOPMENT.md, Road to Reliable).
+# Determinism guard (docs/dev/DEVELOPMENT.md, Road to Reliable).
 #
 # Ban the iteration-order-dependent collections in the kernel crates. The
 # "worked twice, failed the third time" flakiness class is rooted in HashMap /

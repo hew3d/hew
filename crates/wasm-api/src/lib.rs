@@ -8,7 +8,7 @@
 //! The WASM boundary: the only crate allowed to know about JS
 //! (DEVELOPMENT.md rule 1).
 //!
-//! Surface design and decision record: `docs/DEVELOPMENT.md` (rule 8 sign-off
+//! Surface design and decision record: `docs/dev/DEVELOPMENT.md` (rule 8 sign-off
 //! trail). Summary: the authoritative model is the kernel [`Document`]; [`Scene`]
 //! is its FFI shim, adding only the inference scene and render-mesh caches (the
 //! concerns the kernel may not depend on). The UI holds opaque `u64` handles
@@ -107,7 +107,7 @@ pub fn version() -> String {
 // The wasm half of the log seam (see `log.rs`): install the kernel-side
 // `tracing` subscriber, route its JSON records to a JS drain (Tauri rolling file
 // / web ring buffer), and bracket a user gesture with a correlation id.
-// Rule-8 surface; recorded in docs/DEVELOPMENT.md.
+// Rule-8 surface; recorded in docs/dev/DEVELOPMENT.md.
 
 /// Installs the structured-logging subscriber once and sets the capture level
 /// (`"trace"|"debug"|"info"|"warn"|"error"`). Idempotent: a second call only
@@ -174,7 +174,7 @@ pub const MAX_ARRAY_COUNT: u32 = 1000;
 
 // ------------------------------------------------------------------ errors
 
-/// Boundary error: stringly `"CODE: message"` per docs/DEVELOPMENT.md B3.
+/// Boundary error: stringly `"CODE: message"` per docs/dev/DEVELOPMENT.md B3.
 #[derive(Debug)]
 pub struct ApiError(String);
 
@@ -1092,7 +1092,7 @@ fn node_js(node: NodeId) -> NodeJs {
 // ----------------------------------------------------------------- buffers
 
 /// Flat-shaded render buffers for one Object (copied out per call,
-/// docs/DEVELOPMENT.md B4).
+/// docs/dev/DEVELOPMENT.md B4).
 #[wasm_bindgen]
 pub struct MeshJs {
     mesh: RenderMesh,
@@ -1888,7 +1888,7 @@ impl SnapJs {
 // ------------------------------------------------------------------- scene
 
 /// The WASM boundary shim over the authoritative [`Document`]
-/// (docs/DEVELOPMENT.md B1). The model — Sketches, Objects, per-Object undo, and
+/// (docs/dev/DEVELOPMENT.md B1). The model — Sketches, Objects, per-Object undo, and
 /// the document command log — lives in the kernel `Document`. `Scene` keeps only
 /// what the kernel may not depend on (DEVELOPMENT.md rule 1): the inference scene and
 /// per-Object render-mesh caches. Every mutation delegates to `doc`, then
@@ -1912,7 +1912,7 @@ pub struct Scene {
     /// scoped avoids duplicate/ghost inference at sibling placements.
     active_inference_instance: Option<InstanceId>,
     active_inference_sketches: Vec<SketchId>,
-    /// Open live API connections (docs/HEW_API.md §11.2), keyed by the id
+    /// Open live API connections (docs/agents/HEW_API.md §11.2), keyed by the id
     /// [`Scene::api_connection_open`] minted. Each holds its own
     /// `api::Connection` dispatch state (granted profile, hello/attach
     /// lifecycle) — session-only, like `hidden_objects` above, never
@@ -2032,7 +2032,7 @@ impl Scene {
         // fires once per committed mutation (the universal post-mutation hook),
         // so the `kernel::op` event the kernel emitted at the start of the op and
         // this `kernel::cmd` event share a correlation id and bracket the command
-        // with its name+params and its resulting state digest (docs/DEVELOPMENT.md).
+        // with its name+params and its resulting state digest (docs/dev/DEVELOPMENT.md).
         // The single full serialization per gesture is negligible vs. per-frame work.
         tracing::info!(
             target: "kernel::cmd",
@@ -2043,7 +2043,7 @@ impl Scene {
         self.torture_self_check(change);
     }
 
-    /// Torture-mode (docs/DEVELOPMENT.md) re-tessellation self-check.
+    /// Torture-mode (docs/dev/DEVELOPMENT.md) re-tessellation self-check.
     /// When the Document's torture flag is on, re-tessellate every touched
     /// visible world object after the op and emit a loud `kernel::torture` error
     /// marker if any fails — so a flake surfaces at the **exact** op instead of
@@ -2363,7 +2363,7 @@ impl Scene {
     // -------------------------------------------------------------- live API
 
     /// Opens a new live API connection against this scene's document,
-    /// granted `Profile::App` (docs/HEW_API.md §10, §11.2). Returns the
+    /// granted `Profile::App` (docs/agents/HEW_API.md §10, §11.2). Returns the
     /// connection id the caller must pass to every subsequent
     /// [`Scene::api_dispatch`]/[`Scene::api_connection_close`] call. The
     /// Tauri shell opens exactly one of these per accepted socket
@@ -2386,7 +2386,7 @@ impl Scene {
         self.api_connections.remove(&conn_id);
     }
 
-    /// Dispatches one newline-delimited JSON-RPC frame (docs/HEW_API.md
+    /// Dispatches one newline-delimited JSON-RPC frame (docs/agents/HEW_API.md
     /// §4, §11.2) against `conn_id`'s connection and this scene's live
     /// document. Returns the serialized JSON-RPC response frame to send
     /// back, or `None` when the frame carried no reply: a malformed-JSON
@@ -2399,7 +2399,7 @@ impl Scene {
     /// A successful non-read-only dispatch reconciles the scene's derived
     /// caches (inference, mesh cache) exactly as every other `Scene`
     /// mutator does via [`Scene::reconcile`], so the change is visible in
-    /// the live viewport immediately — docs/HEW_API.md §12's "in front of
+    /// the live viewport immediately — docs/agents/HEW_API.md §12's "in front of
     /// the user's eyes" requirement for `--live`. `crates/api` hands back
     /// no `DocChange` (it stays kernel-only per DEVELOPMENT.md rule 1, so
     /// it cannot know about `inference`/`tessellate` caches), so this
@@ -2628,7 +2628,7 @@ impl Scene {
     /// - `Singular` — the instance's pose (or the mapped plane) failed to
     ///   invert; unreachable for a live instance in practice (see the kernel
     ///   doc comment).
-    // Scalar xyz args are deliberate boundary ergonomics (docs/DEVELOPMENT.md).
+    // Scalar xyz args are deliberate boundary ergonomics (docs/dev/DEVELOPMENT.md).
     #[allow(clippy::too_many_arguments)]
     pub fn begin_sketch_on_plane_in_instance(
         &mut self,
@@ -2702,7 +2702,7 @@ impl Scene {
     }
 
     /// Inserts a segment with full sticky semantics (see `kernel::sketch`).
-    // Scalar xyz args are deliberate boundary ergonomics (docs/DEVELOPMENT.md).
+    // Scalar xyz args are deliberate boundary ergonomics (docs/dev/DEVELOPMENT.md).
     #[allow(clippy::too_many_arguments)]
     pub fn sketch_add_segment(
         &mut self,
@@ -6295,7 +6295,7 @@ impl Scene {
     /// commit into one frozen plane must leave it unset, or they would
     /// report a snap position they cannot commit. Omitted/`None` is `false`
     /// (the pre-existing filter, unchanged).
-    // Scalar xyz args are deliberate boundary ergonomics (docs/DEVELOPMENT.md).
+    // Scalar xyz args are deliberate boundary ergonomics (docs/dev/DEVELOPMENT.md).
     #[allow(clippy::too_many_arguments)]
     pub fn snap(
         &self,
@@ -7030,7 +7030,7 @@ impl Scene {
     /// per face and laid out in face order — see `RenderMesh`'s doc comment).
     /// `undefined` if `object`/`face` is stale. Lets the Position Texture
     /// tool patch just this face's `uv` attribute range in place while
-    /// dragging (docs/DEVELOPMENT.md B4-style targeted refresh) instead of
+    /// dragging (docs/dev/DEVELOPMENT.md B4-style targeted refresh) instead of
     /// re-tessellating the whole object on every pointer move — the frame
     /// isn't committed to the document until the gesture ends, so there is
     /// nothing for a real re-tessellation to reflect yet anyway. Computed
@@ -8242,7 +8242,7 @@ impl Scene {
     }
 
     /// A canonical, deterministic digest of the document's live state
-    /// ([`Document::state_hash`],  / docs/DEVELOPMENT.md). Read-only — the oracle
+    /// ([`Document::state_hash`],  / docs/dev/DEVELOPMENT.md). Read-only — the oracle
     /// for record/replay, the diagnostic-log op stamps, and the determinism
     /// guard. Two scenes share a hash iff they serialize identically.
     ///
@@ -8251,7 +8251,7 @@ impl Scene {
         self.doc.state_hash()
     }
 
-    /// Enable/disable kernel **torture mode** (docs/DEVELOPMENT.md): the
+    /// Enable/disable kernel **torture mode** (docs/dev/DEVELOPMENT.md): the
     /// Debug Mode toggle (Settings) flips it. When on, the topology validator
     /// runs on every visible object after every op **even in release WASM**
     /// (where the debug `check_invariants` compiles out —), and this Scene
@@ -8271,9 +8271,9 @@ impl Scene {
     // -------------------------------------------------- recording / replay
 
     /// Begins recording the committed `Scene` command stream as replayable typed
-    /// calls (docs/DEVELOPMENT.md). Begin on a fresh `Scene` so the recording
+    /// calls (docs/dev/DEVELOPMENT.md). Begin on a fresh `Scene` so the recording
     /// replays from `Scene::new`. Replaces any prior in-progress recording.
-    /// See `docs/DIAGNOSTICS.md`.
+    /// See `docs/dev/DIAGNOSTICS.md`.
     pub fn start_recording(&self) {
         recording::start();
     }
@@ -8290,7 +8290,7 @@ impl Scene {
     }
 
     /// Takes the recording so far as a JSON [`Recording`] artifact
-    /// (`docs/DIAGNOSTICS.md`): the captured calls plus this document's
+    /// (`docs/dev/DIAGNOSTICS.md`): the captured calls plus this document's
     /// current `state_hash` as the replay golden. Clears the recorder's buffer.
     /// The reproducer you attach to a bug and, once fixed, freeze as a CI replay
     /// fixture.
@@ -8305,7 +8305,7 @@ impl Scene {
         serde_json::to_string(&rec).unwrap_or_else(|_| "{}".to_string())
     }
 
-    /// Replays a [`Recording`] JSON (`docs/DIAGNOSTICS.md`) by re-issuing
+    /// Replays a [`Recording`] JSON (`docs/dev/DIAGNOSTICS.md`) by re-issuing
     /// each captured call verbatim into **this** scene, then returns the final
     /// `state_hash`. Run on a fresh `Scene` and compare the result to the
     /// recording's `golden_hash`: equality is the regression guarantee.
@@ -9335,7 +9335,7 @@ impl Scene {
 // --------------------------------------------------------------- M0 demo
 
 /// Render buffers for the M0 demo tetrahedron. Retires when the viewport
-/// migrates to `Scene::object_mesh` (pre-approved in docs/DEVELOPMENT.md).
+/// migrates to `Scene::object_mesh` (pre-approved in docs/dev/DEVELOPMENT.md).
 #[wasm_bindgen]
 pub struct DemoMesh {
     mesh: RenderMesh,

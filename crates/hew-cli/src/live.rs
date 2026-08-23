@@ -1,4 +1,4 @@
-//! `--live` (docs/HEW_API.md §11.2, §12): the client side of the local
+//! `--live` (docs/agents/HEW_API.md §11.2, §12): the client side of the local
 //! socket transport. `hew-cli` never listens — it discovers a running
 //! desktop instance's discovery file, connects, sends the mandatory
 //! token-bearing `hew.meta.hello` as the very first wire frame, and from
@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// How long a raw socket connect is allowed to take (docs/HEW_API.md §12
+/// How long a raw socket connect is allowed to take (docs/agents/HEW_API.md §12
 /// implies this is a client concern; connecting to a local Unix socket is
 /// normally instantaneous, so this mostly guards against a wedged/never-
 /// accepting listener).
@@ -37,7 +37,7 @@ pub struct LiveOptions {
     pub instance: Option<u32>,
 }
 
-/// One discovery file's contents (docs/HEW_API.md §11.2): the socket path,
+/// One discovery file's contents (docs/agents/HEW_API.md §11.2): the socket path,
 /// a per-launch token, the app's pid, and its version — parsed leniently,
 /// ignoring unknown fields (§4.1's posture applied to discovery too).
 #[derive(Debug, Clone)]
@@ -113,7 +113,7 @@ impl LiveError {
 
 // ------------------------------------------------------------- discovery
 
-/// The runtime directory files live under (docs/HEW_API.md §11.2):
+/// The runtime directory files live under (docs/agents/HEW_API.md §11.2):
 /// `$XDG_RUNTIME_DIR` (falling back to `/tmp`) on Linux, `~/Library/
 /// Application Support/Hew/run` on macOS, `%LOCALAPPDATA%\Hew\run` on
 /// Windows — or `HEW_RUNTIME_DIR`, an env override honored on every
@@ -233,7 +233,7 @@ fn is_local_pipe_path(socket: &str) -> bool {
 /// runtime directory or its files (unix's actual uid-ownership
 /// equivalent) — a `%LOCALAPPDATA%` an administrator has made writable
 /// to other users would not be caught here. See this module's residual-
-/// gap note and docs/HEW_API.md §11.2 for the same caveat stated for
+/// gap note and docs/agents/HEW_API.md §11.2 for the same caveat stated for
 /// readers of the spec.
 #[cfg(windows)]
 fn owned_by_us(path: &Path) -> bool {
@@ -273,7 +273,7 @@ fn owned_by_us(_path: &Path) -> bool {
 }
 
 /// `<runtime-dir>/hew`, the directory discovery files actually live in
-/// (docs/HEW_API.md §11.2).
+/// (docs/agents/HEW_API.md §11.2).
 fn instances_dir() -> PathBuf {
     runtime_dir().join("hew")
 }
@@ -842,7 +842,7 @@ mod transport {
 pub struct LiveSession {
     conn: transport::RawConn,
     pub instance: Instance,
-    /// The remote's `hew.meta.hello` reply, verbatim (docs/HEW_API.md
+    /// The remote's `hew.meta.hello` reply, verbatim (docs/agents/HEW_API.md
     /// §4.2's app profile, protocol, documents, ...).
     pub hello_response: Response,
 }
@@ -887,7 +887,7 @@ impl LiveSession {
         })
     }
 
-    /// The profile the remote granted this connection (docs/HEW_API.md
+    /// The profile the remote granted this connection (docs/agents/HEW_API.md
     /// §12: live connections are always `app`-granted by the application),
     /// read back from the hello reply rather than assumed, so a future
     /// remote answering something else is still reflected honestly.

@@ -1,5 +1,5 @@
 //! Live-viewport and app-display effects: `hew.view.camera`,
-//! `hew.view.zoom_extents`, `hew.view.units` (docs/HEW_API.md §7).
+//! `hew.view.zoom_extents`, `hew.view.units` (docs/agents/HEW_API.md §7).
 //!
 //! Like `hew.view.snapshot` (doc.rs), all three are `Served::Host` — this
 //! module owns no effect of its own, only parameter validation and result

@@ -1,5 +1,5 @@
 //! The camera vocabulary shared by `hew.view.snapshot` (doc.rs) and
-//! `hew.view.camera` (view.rs) — docs/HEW_API.md §7 is explicit that
+//! `hew.view.camera` (view.rs) — docs/agents/HEW_API.md §7 is explicit that
 //! there is exactly ONE camera spec in the protocol, not two: an explicit
 //! `{eye, target, up?, projection?, fov_deg?}` or a named `view`, mutually
 //! exclusive. This module is that spec's single parsing implementation,

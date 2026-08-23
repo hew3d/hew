@@ -6,6 +6,8 @@ order: 5
 
 Hew's five drawing tools create 2D profiles. On the empty ground plane, a closed profile becomes a **sketch region** ready to extrude. Drawn directly on a solid's face, the same tools **split the face**, carving regions you can push in or pull out. The tool decides which mode to use from what's under your cursor; there is no explicit switch.
 
+![Four filled sketch regions on the ground: a rectangle, a circle, a hexagon, and a closed arc segment](/docs/drawing-shapes.webp)
+
 The five tools share one working sketch on the ground, so shapes drawn with different tools combine: draw an arc, switch to Line, and close it with a chord — the face forms the moment the circuit closes, exactly as if one tool had drawn it all. An arch profile, for instance, is three Line segments topped with an Arc, extruded once.
 
 Layered shapes edit like a drawing, too. Where two closed shapes share a line, that line splits them into separate regions; select it with the Select tool and press `Delete`, and the regions merge into one larger face. Draw a rectangle, cap it with an arc, delete the line between them — one arch-shaped region, one pull.
@@ -78,6 +80,8 @@ A two-point arc, like SketchUp's:
 ## Drawing on a face
 
 Point any drawing tool at a solid's face and it works there instead of on the ground: edges cut the face, and closed shapes (a rectangle, circle, polygon, or closed line/arc loop) split it into regions. The new regions are immediately push/pullable — recesses, through-holes, and raised bosses all start this way. At the top level, any plain object's face is drawable directly — objects are immediately editable, just as they are with Push/Pull. Faces inside a **group or component** are the exception: double-click in first, and drawing is then scoped to what you entered.
+
+![A box with a circular boss pulled out and a circular recess pushed in, both drawn directly on its front face](/docs/drawing-on-face.webp)
 
 ## Offset (`F`)
 

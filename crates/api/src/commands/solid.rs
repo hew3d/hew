@@ -1,4 +1,4 @@
-//! Solid operations: hew.solid.* (docs/HEW_API.md §7, §7 semantics
+//! Solid operations: hew.solid.* (docs/agents/HEW_API.md §7, §7 semantics
 //! notes; the kernel-surface recipes are api-kernel-map.md §1.3/§1.4).
 //!
 //! `push_pull` reproduces the wasm boundary's three-way branch exactly
@@ -83,7 +83,7 @@ fn resolve_node(ctx: &Ctx, public: &str) -> Result<NodeId, CmdError> {
 /// alone, every push/pull refusal — `ObjectNotSolid`, `WouldVanish`,
 /// `NonManifoldResult`, … — would surface under the same generic
 /// `"push_pull"` machine name, losing exactly the distinction
-/// docs/HEW_API.md §4.4 promises. Unwrapped here, locally, one level
+/// docs/agents/HEW_API.md §4.4 promises. Unwrapped here, locally, one level
 /// deeper, without touching the shared `refusal` module another wave
 /// owns; `DocumentError`'s own `Display` (used for the explanation) was
 /// never affected — only the machine `name` was.
@@ -116,7 +116,7 @@ pub(super) fn extrude(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> 
 
     let (object, _change) = ctx.doc.extrude_region(sketch, region, p.distance)?;
 
-    // Face tokens (docs/HEW_API.md §5.4, normative here): the cap facing
+    // Face tokens (docs/agents/HEW_API.md §5.4, normative here): the cap facing
     // the sketch's own normal is "top", the opposite cap "base", the
     // rest "side.<n>" in face-iteration order. Defined by alignment with
     // the ORIGINAL sketch normal, not by the sign of `distance` — a

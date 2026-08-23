@@ -1,4 +1,4 @@
-//! Attribute dictionaries (docs/HEW_API.md §8; manifest v14+,
+//! Attribute dictionaries (docs/agents/HEW_API.md §8; manifest v14+,
 //! HEW_FILE_FORMAT.md): named, namespaced bags of client data the kernel
 //! stores, round-trips, and never interprets — the persistence extension
 //! point for API clients, plugins, and overlays.

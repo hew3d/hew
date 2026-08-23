@@ -125,7 +125,7 @@ side, not here:
   `.hew` parser every other open path in the app uses
   (`app/src/io/documentLoad.ts`'s `loadHewBytes`) — malformed or
   adversarially-crafted content is refused the same way a corrupt file
-  opened from disk would be, per docs/DEVELOPMENT.md's "no silent geometry
+  opened from disk would be, per docs/dev/DEVELOPMENT.md's "no silent geometry
   repair" rule. Nothing about the relay or the receive flow grants a drop's
   bytes any more trust than a file the user picked themselves.
 

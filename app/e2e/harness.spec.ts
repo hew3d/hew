@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test'
 
 /**
  * Semantic harness E2E. Drives the app through `window.__hew_test` —
- * logic, not canvas pixels (docs/DEVELOPMENT.md) — proving the harness is wired to the
+ * logic, not canvas pixels (docs/dev/DEVELOPMENT.md) — proving the harness is wired to the
  * live kernel + app reconcile. This is the substrate 's smoke flow builds
  * on. The harness installs only in debug/test builds; we run against the Vite
  * dev server (`import.meta.env.DEV`), see playwright.config.ts.

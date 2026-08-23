@@ -1,7 +1,7 @@
-//! Drawing commands: hew.sketch.* (docs/HEW_API.md §7, §7 semantics
+//! Drawing commands: hew.sketch.* (docs/agents/HEW_API.md §7, §7 semantics
 //! notes; the kernel-surface recipes are api-kernel-map.md §1.1/§1.2).
 //!
-//! Every drawing command resolves a plane spec (docs/HEW_API.md §7) into
+//! Every drawing command resolves a plane spec (docs/agents/HEW_API.md §7) into
 //! one of three targets: a fresh sketch (`{"ground": true}` /
 //! `{origin, normal}`), an existing one (`{"sketch": id}`), or a solid's
 //! face (`{"face": <locator>}` — the face-imprint path, drawing directly
@@ -100,7 +100,7 @@ fn sketch_err(e: kernel::SketchError) -> CmdError {
     CmdError::from(kernel::DocumentError::Sketch(e))
 }
 
-/// Commits a resolved plane spec (docs/HEW_API.md §7) to a concrete
+/// Commits a resolved plane spec (docs/agents/HEW_API.md §7) to a concrete
 /// sketch: mints a fresh one for `NewPlane` (the first gesture folds its
 /// creation into one undo step — api-kernel-map.md §1.1), looks up an
 /// existing one for `Sketch`. Callers branch on `PlaneTarget::Face`
@@ -228,7 +228,7 @@ fn require_strictly_inside_face(
     Ok(())
 }
 
-/// The face-imprint creation result (docs/HEW_API.md §5.4): a solid's
+/// The face-imprint creation result (docs/agents/HEW_API.md §5.4): a solid's
 /// faces have no public id of their own (§5.2), so — unlike sketch
 /// mode's `{sketch, region_ids, …}` — this is just the object's public
 /// id; whichever faces the cut produced are addressed through the face
@@ -340,7 +340,7 @@ fn arc_points(
 /// components in `plane`'s own frame — on-plane by construction; `a`/`b`
 /// themselves pass through untouched, so an off-plane input still
 /// surfaces the kernel's own refusal rather than being silently
-/// projected (docs/HEW_API.md §7 semantics notes). Returns all four
+/// projected (docs/agents/HEW_API.md §7 semantics notes). Returns all four
 /// corners in loop order, NOT closed back to `a` — plane mode appends
 /// that closing repeat itself for its `add_segment` chain; a face-mode
 /// loop path takes the four unique vertices as-is.
@@ -378,7 +378,7 @@ fn plane_basis(plane: &Plane) -> (Vec3, Vec3) {
 /// Nets a run of [`kernel::SegmentAdded`] reports down to the regions
 /// that exist now and did not before the command started — a region
 /// created then invalidated by a later segment in the same command never
-/// appears (docs/HEW_API.md §5.4: "which faces/regions" is normative,
+/// appears (docs/agents/HEW_API.md §5.4: "which faces/regions" is normative,
 /// not a raw dump of every intermediate report).
 fn net_created_regions(reports: &[kernel::SegmentAdded]) -> Vec<SketchRegionId> {
     let mut created: Vec<SketchRegionId> = Vec::new();
@@ -393,7 +393,7 @@ fn net_created_regions(reports: &[kernel::SegmentAdded]) -> Vec<SketchRegionId> 
     created
 }
 
-/// The creation-result shape (docs/HEW_API.md §5.4, §6.1): the sketch's
+/// The creation-result shape (docs/agents/HEW_API.md §5.4, §6.1): the sketch's
 /// public id, the honest full `region_ids` list, plus a convenience
 /// singular `region_id` when exactly one region resulted — the §6.1
 /// example chains `draw_circle` into `extrude` through exactly that

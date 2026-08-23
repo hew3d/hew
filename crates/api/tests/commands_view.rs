@@ -1,5 +1,5 @@
 //! Conformance coverage for `hew.view.camera`, `hew.view.zoom_extents`,
-//! and `hew.view.units` (docs/HEW_API.md §7's units/camera section) —
+//! and `hew.view.units` (docs/agents/HEW_API.md §7's units/camera section) —
 //! the live-viewport/app-display effects alongside `hew.view.snapshot`
 //! (covered by `commands_doc.rs`). All three are `Served::Host`
 //! (registry.rs): `crates/api` owns envelope validation, profile

@@ -10,7 +10,7 @@ Materials in Hew are simple and per-document: a palette of flat colors and image
 
 Expand **Materials** in the right-hand tray (or Window ▸ Materials, `⇧⌘C` / `Ctrl+Shift+C`).
 
-![The Materials panel expanded, showing the filter field, the Default swatch, and two named materials](/docs/materials-panel.png)
+![The Materials panel expanded, showing the filter field, the Default swatch, and two named materials](/docs/materials-panel.webp)
 
 The panel contains:
 
@@ -25,7 +25,7 @@ The panel contains:
 
 Every material has an opacity, from fully opaque (100%) down to fully transparent (0%) — 255 shades either way. Select the swatch you want to change, then drag the **Opacity** slider underneath the swatch list. The percentage next to it tracks where you are.
 
-![The Materials panel with the Slate swatch selected and its Opacity slider dragged down to 67%, visibly lightening the slate base object in the viewport](/docs/materials-opacity.png)
+![The Materials panel with the Slate swatch selected and its Opacity slider dragged down to 67%, visibly lightening the slate base object in the viewport](/docs/materials-opacity.webp)
 
 The change applies to every face and object currently painted with that material, updates the viewport immediately, and is undoable like any other edit.
 
@@ -33,7 +33,7 @@ The change applies to every face and object currently painted with that material
 
 Click the swatch you want — that makes it the current material and switches you to the **Paint** tool automatically (you can also pick Paint yourself with `B`). Then:
 
-- **Click a face** to paint just that face.
+- **Click a face** to paint only that face.
 - **`⌘`/`Ctrl`-click** to set the whole object's **base material** in one go.
 
 The hovered face highlights so you can see what you're about to paint. To un-paint, select the **Default** swatch and paint again.
