@@ -1266,6 +1266,22 @@ fn clip_ring(
                 continue;
             }
 
+            // Sliver candidates disable pruning for THIS candidate: when the
+            // ear's own apex sits within [`must_containment_test`]'s band of
+            // its chord, the triangle is numerically degenerate and the
+            // strict cross-product signs `point_in_triangle_2d` computes are
+            // rounding noise — a vertex nowhere near the true triangle (even
+            // beyond its hull, so outside the grid's padded query box) can
+            // test "strictly inside". The reference path consults that noisy
+            // test for every vertex; equality of outputs therefore requires
+            // scanning exactly the same set with the same predicate, so the
+            // scan below falls back to the reference behavior: every
+            // remaining vertex, full predicate, no grid. Exact-collinear
+            // lattice walls are where this fires (the proptest seed in
+            // proptest-regressions/lib.txt pinned a convex far-off blocker
+            // that reflex-only pruning skipped).
+            let sliver = prune && must_containment_test(a, b, c);
+
             // Is any other polygon vertex strictly inside the triangle
             // (a, b, c), or strictly on one of its OPEN sides? The interior
             // half of the predicate is needed only for interior-test-set
@@ -1291,7 +1307,14 @@ fn clip_ring(
                     || point_on_segment_2d(b, c, p)
             };
             let mut blocked = false;
-            if let (true, Some(grid)) = (prune, &grid) {
+            if sliver {
+                for &other in &indices {
+                    if test_one(other, true) {
+                        blocked = true;
+                        break;
+                    }
+                }
+            } else if let (true, Some(grid)) = (prune, &grid) {
                 let pad = grid_query_pad(a, c)
                     .max(grid_query_pad(a, b))
                     .max(grid_query_pad(b, c));
