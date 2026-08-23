@@ -82,6 +82,9 @@ explains in plain language and leaves your geometry untouched.
 - A single-file embedded model viewer — one self-contained HTML file
   carrying the model and a read-only viewer, for dropping into any web
   page or sending as an attachment
+- A bring-your-own-cloud Library — point the browser's Library at a
+  WebDAV server you control (Nextcloud, a NAS) so it follows you
+  without any Hew account or Hew server involved
 - "Play" mode with object constraints
 
 ### Longer-term

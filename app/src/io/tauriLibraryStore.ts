@@ -146,7 +146,7 @@ export function makeTauriLibraryStore(): LibraryStore {
       }
     },
 
-    capabilities: () => ({ canReveal: true, canChooseFolder: true }),
+    capabilities: () => ({ canReveal: true, canChooseFolder: true, canDownload: false }),
 
     subscribe(listener: () => void): () => void {
       listeners.add(listener)

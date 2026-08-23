@@ -76,7 +76,7 @@ Because the two are so alike, whether Hew works *for you* comes down to whether 
 | Tags | Tags with folders | Nested tag paths (`Desk/Set`), multiple tags per object, per-tag visibility, select-by-tag, rename in place |
 | Outliner | Desktop and paid tiers only — the free web tier has none | Yes, everywhere the app runs — double-click drills into any level, breadcrumb steps back out |
 | Scenes | Saved views plus slideshow/animation export | Scenes save camera, visibility, and the section cut, with animated transitions in the app; no animation export |
-| 3D Warehouse | Enormous | Nothing like it — a personal Library of your own components, materials, and models (desktop app only) |
+| 3D Warehouse | Enormous | Nothing like it — a personal Library of your own components, materials, and models, on desktop and in the browser |
 
 </details>
 

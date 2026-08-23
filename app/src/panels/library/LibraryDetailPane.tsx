@@ -48,6 +48,9 @@ export interface LibraryDetailPaneProps {
   collections: CollectionNode[]
   placementCount: number
   canReveal: boolean
+  /** Web: browser storage has no Reveal — offer a plain file download of
+   * the item's `.hew` bytes instead (the data's escape hatch). */
+  canDownload: boolean
   inPalette: boolean
   nowMs: number
   /** One-line message from the last failed manage mutation (rename/keyword/
@@ -70,6 +73,7 @@ export interface LibraryDetailPaneProps {
   onOpenAsDocument: () => void
   onReRenderThumbnail: () => void
   onReveal: () => void
+  onDownload: () => void
   onRequestDelete: () => void
   onConfirmDelete: () => void
   onCancelDelete: () => void
@@ -84,6 +88,7 @@ export function LibraryDetailPane({
   collections,
   placementCount,
   canReveal,
+  canDownload,
   inPalette,
   nowMs,
   actionError,
@@ -98,6 +103,7 @@ export function LibraryDetailPane({
   onOpenAsDocument,
   onReRenderThumbnail,
   onReveal,
+  onDownload,
   onRequestDelete,
   onConfirmDelete,
   onCancelDelete,
@@ -399,6 +405,11 @@ export function LibraryDetailPane({
         {canReveal && (
           <button type="button" className={btnClass('hwlib__btn-secondary')} onClick={onReveal}>
             {revealLabel}
+          </button>
+        )}
+        {canDownload && (
+          <button type="button" className={btnClass('hwlib__btn-secondary')} onClick={onDownload}>
+            Download…
           </button>
         )}
         <button type="button" className={btnClass('hwlib__btn-danger')} onClick={onRequestDelete}>

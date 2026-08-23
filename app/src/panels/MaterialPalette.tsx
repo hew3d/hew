@@ -505,7 +505,9 @@ export function MaterialPalette({
         </span>
       </div>
 
-      {/* Save to Library — real (non-sentinel) material only, desktop only. */}
+      {/* Save to Library — real (non-sentinel) material only, and only
+          with a working library backend (desktop, or a browser with
+          origin-private storage). */}
       {selectedMaterialInfo !== undefined && onSaveToLibrary !== undefined && libraryStore().available() && (
         <button style={BTN_STYLE} onClick={() => onSaveToLibrary(currentMaterialId)}>
           Save to Library

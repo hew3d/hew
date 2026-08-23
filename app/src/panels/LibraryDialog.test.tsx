@@ -107,6 +107,13 @@ const fx = vi.hoisted(() => ({
   // path (surfacing `actionError` instead of an unhandled rejection) is
   // exercised for real.
   failWrite: false,
+  // Web-store knobs (webLibraryStore's optional surface).
+  canDownload: false,
+  needsReconnect: false,
+  reconnectResult: true,
+  reconnectCalls: 0,
+  // Forces list() itself to reject — the load-level (not per-item) failure.
+  failList: false,
 }))
 
 function bytesFor(marker: string): Uint8Array {
@@ -121,12 +128,14 @@ vi.mock('../io/libraryStore', () => ({
     available: () => fx.available,
     folderInfo: async () => ({ path: fx.folderPath }),
     chooseFolder: async () => null,
-    list: async () =>
-      Array.from(fx.files.entries()).map(([fileName, bytes]) => ({
+    list: async () => {
+      if (fx.failList) throw new Error('storage exploded')
+      return Array.from(fx.files.entries()).map(([fileName, bytes]) => ({
         fileName,
         size: bytes.length,
         mtimeMs: 1_700_000_000_000,
-      })),
+      }))
+    },
     read: async (fileName: string) => {
       const bytes = fx.files.get(fileName)
       if (!bytes) throw new Error('not found')
@@ -147,7 +156,13 @@ vi.mock('../io/libraryStore', () => ({
     reveal: async (fileName: string) => {
       fx.revealed.push(fileName)
     },
-    capabilities: () => ({ canReveal: fx.canReveal, canChooseFolder: true }),
+    capabilities: () => ({ canReveal: fx.canReveal, canChooseFolder: true, canDownload: fx.canDownload }),
+    webStorage: async () => ({ mode: 'browser', needsReconnect: fx.needsReconnect }),
+    reconnect: async () => {
+      fx.reconnectCalls += 1
+      if (fx.reconnectResult) fx.needsReconnect = false
+      return fx.reconnectResult
+    },
     subscribe: (l: () => void) => {
       fx.listeners.add(l)
       return () => fx.listeners.delete(l)
@@ -309,6 +324,11 @@ beforeEach(() => {
   fx.removed = []
   fx.mutationCounter = 0
   fx.failWrite = false
+  fx.canDownload = false
+  fx.needsReconnect = false
+  fx.reconnectResult = true
+  fx.reconnectCalls = 0
+  fx.failList = false
   gridMeasureFx.columns = 3
   localStorage.removeItem('hew.library.view')
   localStorage.removeItem('hew.library.listCols')
@@ -454,7 +474,47 @@ describe('LibraryDialog', () => {
   it('shows an unavailable state when the store reports unavailable (web build)', async () => {
     fx.available = false
     render(<LibraryDialog {...baseProps()} />)
-    await screen.findByText(/isn.t available in the browser build yet/i)
+    await screen.findByText(/isn.t available in this browser/i)
+  })
+
+  it('shows the Reconnect state when the bound web folder lost permission, and reloads after a successful reconnect', async () => {
+    seedDefault()
+    fx.needsReconnect = true
+    render(<LibraryDialog {...baseProps()} />)
+    await screen.findByText(/needs permission again/i)
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
+    expect(fx.reconnectCalls).toBe(1)
+    // reconnect() cleared the flag — the reload lists the items again.
+    await within(grid()).findByText('Theater Chair')
+  })
+
+  it('a denied Reconnect explains itself instead of silently no-oping', async () => {
+    fx.needsReconnect = true
+    fx.reconnectResult = false
+    render(<LibraryDialog {...baseProps()} />)
+    await screen.findByText(/needs permission again/i)
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }))
+    await screen.findByText(/denied access/i)
+    // Still in the reconnect state — the click did not fake a success.
+    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument()
+  })
+
+  it('a rejecting list() shows a read error, not a false empty-library invitation', async () => {
+    fx.failList = true
+    render(<LibraryDialog {...baseProps()} />)
+    await screen.findByText(/couldn.t read the library/i)
+    expect(screen.queryByText(/save a selection with/i)).toBeNull()
+  })
+
+  it('offers Download… in the detail pane when the store reports canDownload (web)', async () => {
+    seedDefault()
+    fx.canDownload = true
+    fx.canReveal = false
+    render(<LibraryDialog {...baseProps()} />)
+    await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
+    expect(await screen.findByRole('button', { name: 'Download…' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /reveal in|show in/i })).toBeNull()
   })
 
   it('shows an empty-search state distinct from the empty-library state', async () => {

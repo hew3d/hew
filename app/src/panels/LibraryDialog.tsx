@@ -251,6 +251,11 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+/** "1 item" / "N items" — the footer count. */
+function itemCountLabel(n: number): string {
+  return n === 1 ? '1 item' : `${n} items`
+}
+
 export function LibraryDialog({
   open,
   onClose,
@@ -265,6 +270,16 @@ export function LibraryDialog({
   const [items, setItems] = useState<LibraryItem[]>([])
   const [loading, setLoading] = useState(true)
   const [unavailable, setUnavailable] = useState(false)
+  // A bound web folder waiting on a permission re-grant (webLibraryStore's
+  // needsReconnect): the grid shows a Reconnect button whose click is the
+  // user gesture requestPermission needs.
+  const [needsReconnect, setNeedsReconnect] = useState(false)
+  // The Reconnect click was refused (browser denied the re-grant) — shown
+  // under the button so the click never silently no-ops.
+  const [reconnectDenied, setReconnectDenied] = useState(false)
+  // The listing itself failed (storage rejected, not just empty) — shown in
+  // the grid instead of a false "save something to get started".
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [reloadToken, setReloadToken] = useState(0)
   const [folderPath, setFolderPath] = useState<string | null>(null)
 
@@ -364,6 +379,11 @@ export function LibraryDialog({
       if (!cancelled) setUnavailable(false)
       try {
         const entries = await store.list()
+        const ws = await store.webStorage?.()
+        if (!cancelled) {
+          setNeedsReconnect(ws?.needsReconnect ?? false)
+          setLoadError(null)
+        }
         const built: LibraryItem[] = []
         for (const file of entries) {
           try {
@@ -377,6 +397,15 @@ export function LibraryDialog({
           }
         }
         if (!cancelled) setItems(built)
+      } catch (err) {
+        // list()/webStorage() themselves rejected (storage failure, a lazy
+        // backend that couldn't load) — an empty grid would misreport this
+        // as "no items yet", and an uncaught rejection would trip the
+        // global reproducer handler.
+        if (!cancelled) {
+          setItems([])
+          setLoadError(describeError(err))
+        }
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -386,6 +415,25 @@ export function LibraryDialog({
       cancelled = true
     }
   }, [open, reloadToken])
+
+  // --- Mid-session permission loss ---------------------------------------
+  // A failed manage mutation may mean the bound folder's permission was
+  // revoked while the dialog sat open on stale items; re-probe so the grid
+  // swaps to the Reconnect state instead of an error message that points
+  // at a button that isn't on screen.
+  useEffect(() => {
+    if (actionError === null) return
+    let cancelled = false
+    void libraryStore()
+      .webStorage?.()
+      .then((ws) => {
+        if (!cancelled) setNeedsReconnect(ws.needsReconnect)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [actionError])
 
   // --- Reload on external library-folder changes ------------------------
   useEffect(() => {
@@ -480,7 +528,14 @@ export function LibraryDialog({
           if (!bytes) continue
           png = await renderItemThumbnail(bytes, 256)
           if (cancelled) return
-          if (png !== null) await store.writeThumbnail(item.contentHash, png)
+          if (png !== null) {
+            try {
+              await store.writeThumbnail(item.contentHash, png)
+            } catch {
+              /* the thumbnail cache is optional — a failed write (lost
+                 folder permission, storage pressure) costs a re-render */
+            }
+          }
         }
         // Re-check right before creating the URL: `store.writeThumbnail`
         // above is an `await` this loop can be cancelled underneath (reload,
@@ -787,6 +842,23 @@ export function LibraryDialog({
       setActionError(`Couldn't save changes: ${describeError(err)}`)
     }
   }
+  /** Web: hand the item's bytes to the user as a plain `.hew` download —
+   * browser storage has no Reveal, and this is how items escape the
+   * origin-private file system. */
+  function handleDownload(item: LibraryItem) {
+    const bytes = bytesRef.current.get(item.file.fileName)
+    if (bytes === undefined) return
+    const blob = new Blob([new Uint8Array(bytes)], { type: 'application/octet-stream' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${item.displayName.replace(/[\\/:]/g, '-')}.hew`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
   async function handleReveal(item: LibraryItem) {
     try {
       await libraryStore().reveal(item.file.fileName)
@@ -1031,6 +1103,7 @@ export function LibraryDialog({
   if (!open) return null
 
   const canReveal = libraryStore().capabilities().canReveal
+  const canDownload = libraryStore().capabilities().canDownload
 
   /** The search field — the header's only surviving row for the `'modal'`
    * variant (finding #1), and the sidebar's TOP row for `'window'` (finding
@@ -1223,9 +1296,40 @@ export function LibraryDialog({
               aria-activedescendant={selectedItem ? tileElementId(selectedItem.file.fileName) : undefined}
             >
               {unavailable ? (
-                <div className="hwlib__empty">The library isn&rsquo;t available in the browser build yet.</div>
+                <div className="hwlib__empty">The library isn&rsquo;t available in this browser.</div>
               ) : loading ? (
                 <div className="hwlib__empty">Loading…</div>
+              ) : needsReconnect ? (
+                <div className="hwlib__empty">
+                  <div>Your library folder needs permission again.</div>
+                  <button
+                    type="button"
+                    className="hwlib__btn-secondary"
+                    style={{ marginTop: '10px' }}
+                    onClick={() => {
+                      void libraryStore()
+                        .reconnect?.()
+                        .then((ok) => {
+                          if (ok) {
+                            setReconnectDenied(false)
+                            setReloadToken((t) => t + 1)
+                          } else {
+                            setReconnectDenied(true)
+                          }
+                        })
+                    }}
+                  >
+                    Reconnect
+                  </button>
+                  {reconnectDenied && (
+                    <div style={{ marginTop: '10px' }}>
+                      The browser denied access. Pick the folder again under Settings ▸ Folders, or
+                      switch back to browser storage there.
+                    </div>
+                  )}
+                </div>
+              ) : loadError !== null ? (
+                <div className="hwlib__empty">Couldn&rsquo;t read the library: {loadError}</div>
               ) : items.length === 0 ? (
                 <div className="hwlib__empty">Save a selection with &ldquo;Save to Library&rdquo; to get started.</div>
               ) : displayItems.length === 0 ? (
@@ -1310,6 +1414,7 @@ export function LibraryDialog({
             collections={allCollections}
             placementCount={placementCountOf(selectedItem)}
             canReveal={canReveal}
+            canDownload={canDownload}
             inPalette={selectedItem ? (inPaletteMap[selectedItem.file.fileName] ?? false) : false}
             nowMs={nowMs}
             actionError={actionError}
@@ -1324,6 +1429,7 @@ export function LibraryDialog({
             onOpenAsDocument={() => selectedItem && handleOpenAsDocument(selectedItem)}
             onReRenderThumbnail={() => selectedItem && void handleRerenderThumbnail(selectedItem)}
             onReveal={() => selectedItem && void handleReveal(selectedItem)}
+            onDownload={() => selectedItem && handleDownload(selectedItem)}
             onRequestDelete={() => selectedItem && void requestDelete(selectedItem)}
             onConfirmDelete={() => selectedItem && void handleDelete(selectedItem)}
             onCancelDelete={() => setDeleteConfirmFor(null)}
@@ -1336,7 +1442,7 @@ export function LibraryDialog({
             {selectedItem ? otherActionLabel(selectedItem) : 'Open'} · <kbd>Esc</kbd> Close
           </div>
           <div className="hwlib__footer-path">
-            {!unavailable && (folderPath !== null ? `${folderPath} · ${items.length} items` : `${items.length} items`)}
+            {!unavailable && (folderPath !== null ? `${folderPath} · ${itemCountLabel(items.length)}` : itemCountLabel(items.length))}
           </div>
         </footer>
 
@@ -1346,6 +1452,7 @@ export function LibraryDialog({
             anchor={menuFor.anchor}
             errored={menuItem.error !== undefined}
             canReveal={canReveal}
+            canDownload={canDownload}
             hasSourceInfo={menuItem.category !== 'model' && menuItem.meta.sourceDoc !== undefined}
             onClose={() => setMenuFor(null)}
             onOpenAsDocument={() => handleOpenAsDocument(menuItem)}
@@ -1354,6 +1461,7 @@ export function LibraryDialog({
             onRerenderThumbnail={() => void handleRerenderThumbnail(menuItem)}
             onRemoveSourceInfo={() => handleRemoveSourceInfo(menuItem)}
             onReveal={() => void handleReveal(menuItem)}
+            onDownload={() => handleDownload(menuItem)}
             onDeleteRequest={() => {
               setSelectedFileName(menuItem.file.fileName)
               setDeleteConfirmFor(menuItem.file.fileName)

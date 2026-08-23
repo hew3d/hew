@@ -360,9 +360,18 @@ below.
   alike
 - Command-palette quick insert: typing an item's name offers *Insert
   "…"* straight into cursor placement, without opening the browser
-- Desktop-first: the browser build reports the library honestly
-  unavailable until an origin-private storage backend lands (the storage
-  seam is already platform-abstracted)
+- Browser storage: the web build keeps the library in the origin-private
+  file system (same folder layout as the desktop store, `.hew` files plus
+  a content-hash thumbnail cache), requests durable storage on first
+  write, and offers per-item Download as the escape hatch; Chromium-family
+  browsers can instead bind a real folder via `showDirectoryPicker` — the
+  handle persists in IndexedDB, permission re-grants surface as a
+  Reconnect button in the dialog, and binding migrates existing
+  browser-storage items into the folder (existing files win, nothing
+  overwritten). A bound folder uses the same layout as the desktop
+  library folder, so the two are interchangeable — including a
+  cloud-synced folder. A browser without origin-private storage still
+  reports the library honestly unavailable
 
 ### Annotations
 

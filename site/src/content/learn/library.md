@@ -10,7 +10,15 @@ Open it with **Window ▸ Library**, the Library entry at the bottom of the tool
 
 ## What a library item is
 
-Every item in the library is an ordinary `.hew` file in a folder you control — nothing is locked away in a private database. The default folder is `Hew Library` in your home directory; change it under **Settings ▸ Folders**. Because items are plain files, sharing your library between machines (or people) is as simple as syncing or sending the folder, and any item can be opened as a document in its own right.
+Every item in the library is an ordinary `.hew` file — nothing is locked away in a private database. Because items are plain files, sharing your library between machines (or people) is as simple as syncing or sending them, and any item can be opened as a document in its own right.
+
+## Where items live
+
+**On the desktop**, the library is a folder on disk — `Hew Library` in your home directory by default; change it under **Settings ▸ Folders**. Put that folder inside a synced one (Dropbox, Google Drive, iCloud Drive, Syncthing) and your library follows you to every machine.
+
+**In the browser**, items are kept by the browser itself, on this device — private to this browser profile, and gone if you clear the site's data. The item detail pane's **Download…** hands any item back as a plain `.hew` file whenever you want one out.
+
+**In a browser with the folder-picker API** (Chrome and Edge; Brave ships it turned off, but `brave://flags` → "File System Access API" enables it), you can do better: **Settings ▸ Folders ▸ Change…** binds the library to a real folder on disk. Items become ordinary files you can see and back up — the same layout the desktop app uses, so the two can share one folder — and a cloud-synced folder makes the browser library follow you too. The browser may re-ask permission for the folder after a restart; the Library window shows a **Reconnect** button when it does.
 
 Items come in three kinds, which the browser sorts into categories:
 
@@ -49,6 +57,5 @@ Items remember which model they were saved from. If you're sharing an item and w
 ## Limits
 
 - A model item's loose sketches and dimension annotations aren't carried along by an insert (its solids, components, materials, tags, and guides are). Hew tells you when it skips them.
-- The library is a desktop feature; the web app doesn't have one.
 - Inserting is refused, with an explanation, while a component is open for editing — close the session first.
 - Inserting is refused if it would multiply a document's rendered component parts past one million. That's a guard against runaway or hostile files, not a ceiling a real model approaches — a full theater model expands to a few thousand parts.

@@ -53,7 +53,16 @@ interface FileSystemDirectoryHandle {
   entries(): AsyncIterableIterator<[string, FileSystemHandle]>
   getFileHandle(name: string, options?: { create?: boolean }): Promise<FileSystemFileHandle>
   getDirectoryHandle(name: string, options?: { create?: boolean }): Promise<FileSystemDirectoryHandle>
+  removeEntry(name: string, options?: { recursive?: boolean }): Promise<void>
+  queryPermission(descriptor?: FileSystemHandlePermissionDescriptor): Promise<'granted' | 'denied' | 'prompt'>
+  requestPermission(descriptor?: FileSystemHandlePermissionDescriptor): Promise<'granted' | 'denied' | 'prompt'>
   [Symbol.asyncIterator](): AsyncIterableIterator<[string, FileSystemHandle]>
+}
+
+// Origin-private file system entry point (StorageManager.getDirectory is
+// still missing from some lib.dom versions).
+interface StorageManager {
+  getDirectory(): Promise<FileSystemDirectoryHandle>
 }
 
 interface FileSystemHandle {

@@ -24,6 +24,9 @@ export interface LibraryMenuProps {
    * entries are hidden rather than silently no-oping. */
   errored?: boolean
   canReveal: boolean
+  /** Web: offer the item's bytes as a plain download (no Reveal there).
+   * Hidden for errored items — there are no bytes to hand over. */
+  canDownload: boolean
   /** Whether `meta.sourceDoc` is set — gates the "Remove Source Info" row
    * the same way the detail pane gates its own copy of this action. */
   hasSourceInfo: boolean
@@ -34,6 +37,7 @@ export interface LibraryMenuProps {
   onRerenderThumbnail: () => void
   onRemoveSourceInfo: () => void
   onReveal: () => void
+  onDownload: () => void
   onDeleteRequest: () => void
 }
 
@@ -42,6 +46,7 @@ export function LibraryMenu({
   anchor,
   errored = false,
   canReveal,
+  canDownload,
   hasSourceInfo,
   onClose,
   onOpenAsDocument,
@@ -50,6 +55,7 @@ export function LibraryMenu({
   onRerenderThumbnail,
   onRemoveSourceInfo,
   onReveal,
+  onDownload,
   onDeleteRequest,
 }: LibraryMenuProps) {
   // Popover pinned just under the anchor button, left-aligned; both axes
@@ -98,7 +104,8 @@ export function LibraryMenu({
           </>
         )}
         {canReveal && item(revealLabel, onReveal)}
-        {(!errored || canReveal) && <div className="hwlib__menu-divider" />}
+        {canDownload && !errored && item('Download…', onDownload)}
+        {(!errored || canReveal || canDownload) && <div className="hwlib__menu-divider" />}
         {item('Delete from library…', onDeleteRequest, { danger: true })}
       </div>
     </>

@@ -31,8 +31,10 @@ export interface ToolRailProps {
    * desktop, 'Ctrl K' on Windows/Linux/Web). */
   paletteKbd?: string
   /** When set, a LIBRARY section is drawn at the bottom of the rail with one
-   * "Library" row — desktop only (`libraryStore().available()`), so this is
-   * omitted entirely on the web build rather than shown disabled. */
+   * "Library" row — every platform with a working backend
+   * (`libraryStore().available()`: desktop, and browsers with
+   * origin-private storage); omitted entirely elsewhere rather than shown
+   * disabled. */
   onOpenLibrary?: () => void
   /** Whether the Library dialog is currently open — drives the row's
    * `aria-pressed`/highlight, same posture as a tool's active state even

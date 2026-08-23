@@ -1,15 +1,16 @@
 import { test, expect } from '@playwright/test'
 
 /**
- * Library chrome spec — the browser-reachable half of the Library feature,
- * driven with real events. The web build's storage backend is honestly
- * unavailable (desktop-only for now), so this file proves the CHROME:
- * every entry point opens the browser dialog, the dialog reports the
- * unavailable state instead of a broken one, and Escape closes it without
- * leaking into the viewport's own Escape handling. The full save/insert
- * loop is covered by kernel specs (`crates/kernel/tests/library_specs.rs`),
- * the wasm record/replay test, and the LibraryDialog component tests —
- * this spec pins the wiring between them and the shell.
+ * Library spec — the browser half of the Library feature, driven with real
+ * events. Chromium (this suite's browser) has a real origin-private file
+ * system, so alongside the CHROME (every entry point opens the dialog,
+ * Escape closes it without leaking into the viewport) this now proves the
+ * real browser STORE: save a selection, see it listed, survive a full page
+ * reload, and delete it — against actual OPFS, not a mock. The
+ * bound-folder (File System Access) mode can't be driven here — its picker
+ * needs a real user gesture — and is covered by webLibraryStore.test.ts
+ * against fake handles instead. Kernel-side save/insert invariants stay in
+ * `crates/kernel/tests/library_specs.rs`.
  *
  * Assertions go through ARIA state, matching ui-chrome.spec.ts.
  */
@@ -65,11 +66,53 @@ test('keyboard: Shift+L toggles the dialog; Escape closes it without reaching th
   await page.keyboard.press('Escape')
 })
 
-test('web build: the dialog reports the library honestly unavailable', async ({ page }) => {
+test('web build: an empty library invites a first save (no unavailable state)', async ({ page }) => {
   await page.keyboard.press('Shift+L')
   const dialog = page.getByRole('dialog', { name: 'Library' })
   await expect(dialog).toBeVisible()
-  await expect(dialog.getByText(/isn.t available in the browser/i)).toBeVisible()
+  await expect(dialog.getByText(/save a selection/i)).toBeVisible()
+  await expect(dialog.getByText(/isn.t available/i)).toHaveCount(0)
+  // The footer names the storage backend honestly.
+  await expect(dialog.getByText(/browser storage/i)).toBeVisible()
+})
+
+test('web build: save to the library, survive a reload, download offered, delete', async ({ page }) => {
+  // A box, selected — the dock's "Save to Library" verb needs a selection.
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    const box = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    h.selectNodes([{ kind: 'object', id: box }])
+  })
+  await page.getByRole('button', { name: 'Save to Library' }).click()
+  const prompt = page.getByRole('dialog', { name: 'Save to Library' })
+  await expect(prompt).toBeVisible()
+  await prompt.getByRole('textbox').fill('E2E Test Box')
+  await prompt.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(prompt).not.toBeVisible()
+
+  // Listed in the dialog, with the item's bytes in real OPFS.
+  await page.keyboard.press('Shift+L')
+  const dialog = page.getByRole('dialog', { name: 'Library' })
+  await expect(dialog.getByText('E2E Test Box').first()).toBeVisible()
+
+  // A full page reload proves persistence (same origin, same OPFS).
+  await page.reload()
+  await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, { timeout: 15_000 })
+  await page.keyboard.press('Shift+L')
+  await expect(dialog).toBeVisible()
+  const tile = dialog.getByText('E2E Test Box').first()
+  await expect(tile).toBeVisible()
+
+  // Selecting it offers Download… (the web escape hatch; no Reveal here).
+  await tile.click()
+  await expect(dialog.getByRole('button', { name: 'Download…' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: /reveal|show in/i })).toHaveCount(0)
+
+  // Delete, confirm, and the library is empty again.
+  await dialog.getByRole('button', { name: 'Delete from library…' }).click()
+  await dialog.getByRole('button', { name: /^Delete$/ }).click()
+  await expect(dialog.getByText('E2E Test Box')).toHaveCount(0)
+  await expect(dialog.getByText(/save a selection/i)).toBeVisible()
 })
 
 test('command palette: Library entry opens the dialog', async ({ page }) => {
