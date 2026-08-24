@@ -27,7 +27,7 @@ use http_body_util::BodyExt;
 use subtle::ConstantTimeEq;
 use tower_http::timeout::TimeoutLayer;
 
-use crate::store::{PutError, Store, is_valid_token};
+use crate::store::{Store, is_valid_token};
 
 /// The relay contract version reported by the identity route. Bumped only
 /// for an incompatible change; the Worker reports the same number.
@@ -301,6 +301,25 @@ fn relay_full() -> Response {
 /// cap (503) — both BEFORE the body is read — then the body itself, capped
 /// while streaming so an oversized or lying upload never buffers past
 /// `max_bytes`, then the same two checks against the real length.
+/// Holds this upload's claim on the store's global byte budget while its
+/// body streams in. Dropped (releasing the claim) on any early return —
+/// oversize, bad frame, empty body — and defused with `mem::forget` only on
+/// the success path, where `put_reserved` consumes the claim into stored
+/// bytes instead. This is what stops N concurrent bodies from collectively
+/// buffering past `max_total_bytes` (audit sec-relay).
+struct Reservation<'a> {
+    store: &'a crate::store::Store,
+    held: usize,
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        if self.held > 0 {
+            self.store.release(self.held);
+        }
+    }
+}
+
 async fn put(state: &AppState, req: Request) -> (Response, usize) {
     if !upload_authorized(req.headers(), state.upload_key.as_deref()) {
         let response = json(
@@ -339,6 +358,12 @@ async fn put(state: &AppState, req: Request) -> (Response, usize) {
     let mut body = req.into_body();
     let mut buf: Vec<u8> =
         Vec::with_capacity(declared.map_or(0, |d| d as usize).min(state.max_bytes));
+    // Global-budget claim for THIS upload, grown frame by frame. Released on
+    // every early return below (its Drop), consumed by put_reserved on success.
+    let mut reservation = Reservation {
+        store: &state.store,
+        held: 0,
+    };
     loop {
         match body.frame().await {
             None => break,
@@ -351,6 +376,13 @@ async fn put(state: &AppState, req: Request) -> (Response, usize) {
                         );
                         return (reject_early(response, body, state.max_bytes), 0);
                     }
+                    // Claim these bytes against the global cap before buffering
+                    // them — concurrent uploads share one budget, so this is
+                    // what a per-request cap alone cannot enforce.
+                    if !state.store.reserve(data.len()) {
+                        return (reject_early(relay_full(), body, state.max_bytes), 0);
+                    }
+                    reservation.held += data.len();
                     buf.extend_from_slice(data);
                 }
             }
@@ -376,13 +408,16 @@ async fn put(state: &AppState, req: Request) -> (Response, usize) {
         );
     }
     let size = bytes.len();
-    match state.store.put(bytes) {
-        Ok(token) => (
-            json(StatusCode::OK, serde_json::json!({ "token": token })),
-            size,
-        ),
-        Err(PutError::Full) => (relay_full(), 0),
-    }
+    // Consume the reservation into stored bytes: the space was held for the
+    // whole stream, so this cannot hit the cap. Defuse the guard so its Drop
+    // doesn't also release what put_reserved just converted.
+    let held = reservation.held;
+    std::mem::forget(reservation);
+    let token = state.store.put_reserved(bytes, held);
+    (
+        json(StatusCode::OK, serde_json::json!({ "token": token })),
+        size,
+    )
 }
 
 /// `GET /drop/<token>` — one-shot; unknown, taken, and expired all read as

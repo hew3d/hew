@@ -28,7 +28,6 @@
 //!    closed circuit of edges bounds exactly one region; a circuit strictly
 //!    inside another region's boundary makes a hole in it.
 //!
-//! M0 status: storage and types are real; algorithms are `todo!()` stubs.
 //! The executable contract lives in `crates/kernel/tests/op_specs.rs`.
 
 use slotmap::{SlotMap, new_key_type};

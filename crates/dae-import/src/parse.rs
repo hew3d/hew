@@ -85,6 +85,7 @@ pub fn parse_dae(dae_bytes: &[u8], images: &ImageMap) -> Result<DaeScene, DaeErr
             &lib_nodes,
             &mut meshes,
             &mut warnings,
+            &mut HashSet::new(),
         );
         if !meshes.is_empty() {
             // The library node's `name` attribute carries the friendly component
@@ -1076,6 +1077,7 @@ fn build_sym_to_dense(
 /// the rest of the def. `DefRecipe` has no nested-`Instance` concept, so a
 /// nested `<instance_node>` is flattened here rather than represented as its
 /// own `ImportNode::Instance`.
+#[allow(clippy::too_many_arguments)] // internal recursive collector; a params struct would obscure it
 fn collect_meshes_from_node(
     node: &Node,
     acc: &Transform,
@@ -1084,6 +1086,13 @@ fn collect_meshes_from_node(
     lib_nodes: &HashMap<String, Node>,
     meshes: &mut Vec<MeshRecipe>,
     warnings: &mut SplitWarnings,
+    // <instance_node> ids currently on the recursion path. A hostile or
+    // broken .dae can make library nodes reference each other cyclically
+    // (A → B → A); without this guard the recursion never terminates and
+    // overflows the stack. Legitimate diamond reuse (two branches placing
+    // the same def) still works — an id is only blocked while it is an
+    // ancestor of itself. Mirrors the skp importer's own cycle guard.
+    visiting: &mut HashSet<String>,
 ) {
     for ig in &node.instance_geometry {
         let geom_id = url_as_str(&ig.url).to_string();
@@ -1148,8 +1157,12 @@ fn collect_meshes_from_node(
     // visual-scene tree, but `DefRecipe` has no nested-Instance slot to hold
     // it, so flattening is the only way to preserve the geometry.
     for inst_node in &node.instance_node {
-        let node_ref_id = url_as_str(&inst_node.url);
-        if let Some(target) = lib_nodes.get(node_ref_id) {
+        let node_ref_id = url_as_str(&inst_node.url).to_string();
+        if let Some(target) = lib_nodes.get(node_ref_id.as_str()) {
+            // Skip a reference that is already an ancestor of itself.
+            if !visiting.insert(node_ref_id.clone()) {
+                continue;
+            }
             let target_local = compose_node_local(target);
             let target_acc = target_local.then(acc);
             collect_meshes_from_node(
@@ -1160,7 +1173,9 @@ fn collect_meshes_from_node(
                 lib_nodes,
                 meshes,
                 warnings,
+                visiting,
             );
+            visiting.remove(&node_ref_id);
         }
     }
 
@@ -1178,6 +1193,7 @@ fn collect_meshes_from_node(
             lib_nodes,
             meshes,
             warnings,
+            visiting,
         );
     }
 }

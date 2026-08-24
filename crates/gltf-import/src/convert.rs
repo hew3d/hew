@@ -61,7 +61,7 @@ pub fn build_scene(
     // Pass 1: count node references to each mesh (instancing signal).
     let mut refcount: HashMap<usize, usize> = HashMap::new();
     for node in scene_roots(gltf) {
-        count_meshes(&node, &mut refcount);
+        count_meshes(&node, &mut refcount, &mut HashSet::new());
     }
 
     // Pass 2: shared meshes (refcount ≥ 2) become component definitions.
@@ -99,7 +99,12 @@ pub fn build_scene(
     };
     let mut roots: Vec<ImportNode> = Vec::new();
     for node in scene_roots(gltf) {
-        if let Some(n) = ctx.convert_node(&node, &Transform::IDENTITY, &mut warnings) {
+        if let Some(n) = ctx.convert_node(
+            &node,
+            &Transform::IDENTITY,
+            &mut warnings,
+            &mut HashSet::new(),
+        ) {
             roots.push(n);
         }
     }
@@ -137,7 +142,18 @@ impl Ctx<'_> {
         node: &Node,
         acc: &Transform,
         warnings: &mut SplitWarnings,
+        // Node indices currently on the recursion path. The glTF spec
+        // requires an acyclic node hierarchy, but the `gltf` crate's
+        // validation never checks for cycles — a hostile/broken file can
+        // declare nodes[0].children=[1], nodes[1].children=[0] and pass
+        // validation, so without this guard convert_node recurses forever
+        // and overflows the stack. A node already an ancestor of itself is
+        // dropped; legitimate reuse across sibling branches is unaffected.
+        visiting: &mut HashSet<usize>,
     ) -> Option<ImportNode> {
+        if !visiting.insert(node.index()) {
+            return None;
+        }
         let node_world = node_transform(node).then(acc);
 
         // This node's own geometry (instance of a shared def, or a baked object).
@@ -182,8 +198,10 @@ impl Ctx<'_> {
 
         let children: Vec<ImportNode> = node
             .children()
-            .filter_map(|c| self.convert_node(&c, &node_world, warnings))
+            .filter_map(|c| self.convert_node(&c, &node_world, warnings, visiting))
             .collect();
+        // Leave the path so a sibling branch may legitimately reuse this node.
+        visiting.remove(&node.index());
 
         match (self_node, children.is_empty()) {
             (Some(sn), true) => Some(sn),
@@ -517,13 +535,21 @@ fn scene_roots(gltf: &Gltf) -> Vec<Node<'_>> {
     }
 }
 
-fn count_meshes(node: &Node, map: &mut HashMap<usize, usize>) {
+fn count_meshes(node: &Node, map: &mut HashMap<usize, usize>, visiting: &mut HashSet<usize>) {
+    // Same cycle guard as convert_node: the glTF node graph may be cyclic
+    // (the `gltf` crate does not validate against it), and this mesh-refcount
+    // pre-pass recurses through children too, so it needs the same protection
+    // against unbounded recursion.
+    if !visiting.insert(node.index()) {
+        return;
+    }
     if let Some(mesh) = node.mesh() {
         *map.entry(mesh.index()).or_default() += 1;
     }
     for child in node.children() {
-        count_meshes(&child, map);
+        count_meshes(&child, map, visiting);
     }
+    visiting.remove(&node.index());
 }
 
 /// Build a kernel `Transform` from a glTF node's column-major 4×4 local matrix.

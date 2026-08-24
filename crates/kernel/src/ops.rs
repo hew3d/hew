@@ -1,11 +1,10 @@
 //! Solid operations: birth (extrusion), modification (push/pull, sticky face
 //! split/merge), and explicit combination (booleans).
 //!
-//! M0 status: complete public contracts, `todo!()` bodies. The executable
-//! contract (property tests, `#[ignore]`d until implemented) lives in
-//! `crates/kernel/tests/op_specs.rs`. Implementations must follow the
-//! mutation pattern in `validate.rs`: do the work, then `check_invariants()`
-//! as the last step before returning `Ok`.
+//! The executable contract (property tests) lives in
+//! `crates/kernel/tests/op_specs.rs`. Every mutation follows the pattern in
+//! `validate.rs`: do the work, then `check_invariants()` as the last step
+//! before returning `Ok`.
 //!
 //! # Watertightness transitions (the state machine)
 //!
@@ -2414,7 +2413,7 @@ impl Object {
         if !self.faces.contains_key(face) {
             return Err(PushPullError::UnknownFace);
         }
-        if distance.abs() < tol::POINT_MERGE {
+        if !distance.is_finite() || distance.abs() < tol::POINT_MERGE {
             return Err(PushPullError::DistanceTooSmall);
         }
 
@@ -3632,7 +3631,7 @@ impl Object {
         if self.watertight != WatertightState::Watertight {
             return Err(PushPullError::ObjectNotSolid);
         }
-        if distance.abs() < tol::POINT_MERGE {
+        if !distance.is_finite() || distance.abs() < tol::POINT_MERGE {
             return Err(PushPullError::DistanceTooSmall);
         }
         let (parent, _hole_loop, h_sub, h_hole) = self
@@ -5102,7 +5101,7 @@ impl Object {
         if !self.faces.contains_key(face) {
             return Err(PushPullError::UnknownFace);
         }
-        if distance.abs() < tol::POINT_MERGE {
+        if !distance.is_finite() || distance.abs() < tol::POINT_MERGE {
             return Err(PushPullError::DistanceTooSmall);
         }
         let profile = self
@@ -8767,5 +8766,41 @@ mod tests {
         assert_eq!(err, StickyError::EndpointNotOnBoundary { which: 1 });
         // Strong guarantee: cube is unchanged.
         cube.validate().unwrap();
+    }
+
+    /// A non-finite push/pull distance (NaN or infinity) must be refused
+    /// typed, not accepted — every geometric predicate downstream compares
+    /// with `>`/`<`, which IEEE-754 evaluates false against NaN, so an
+    /// accepted NaN would sail through validation as "on its plane" and
+    /// commit corrupt geometry (audit q-kernel-correctness, critical).
+    #[test]
+    fn push_pull_refuses_non_finite_distance() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut cube = unit_cube();
+            let top = face_with_normal(&cube, Vec3::new(0.0, 0.0, 1.0));
+            assert_eq!(
+                cube.push_pull(top, bad),
+                Err(PushPullError::DistanceTooSmall),
+                "distance {bad} must be refused"
+            );
+            // Strong guarantee: the cube is untouched and still valid.
+            cube.validate().unwrap();
+        }
+    }
+
+    /// The validator itself is the backstop: a vertex forced non-finite by
+    /// any path must fail `validate()` typed, rather than pass because every
+    /// planarity comparison is false against NaN.
+    #[test]
+    fn validate_rejects_a_non_finite_vertex() {
+        let mut cube = unit_cube();
+        cube.validate().unwrap();
+        // Poke a NaN into one vertex position through the test-only mutator.
+        let vid = cube.vertices().iter().next().map(|(id, _)| id).unwrap();
+        cube.debug_set_vertex_position(vid, Point3::new(f64::NAN, 0.0, 0.0));
+        assert_eq!(
+            cube.validate(),
+            Err(crate::error::TopologyError::VertexNotFinite { vertex: vid })
+        );
     }
 }

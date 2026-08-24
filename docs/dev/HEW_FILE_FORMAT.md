@@ -366,7 +366,7 @@ array — one shared id space, not a buffer-local one.
 ```
 offset  type                field
 0       u8[4]               magic = "HEWG" (0x48 0x45 0x57 0x47)
-4       u32                 version (currently 5)
+4       u32                 version (currently 6)
 8       u8                  watertight: 0 = Open (leaky), 1 = Watertight
 9       u32                 base_material id (0xFFFFFFFF = none)
 13      u8                  imported flag: 0 = strict native tolerance, 1 = imported tolerance

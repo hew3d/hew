@@ -26,6 +26,19 @@ impl Object {
     /// half-edges agree; every face is in exactly one shell; and the
     /// watertightness flag matches the actual topology.
     pub fn validate(&self) -> Result<(), TopologyError> {
+        // Finiteness first. Every geometric predicate below (planarity,
+        // hole containment, curve radius, plane normalization) is a `>`/`<`
+        // comparison, which IEEE-754 evaluates false against NaN — so they
+        // all fail OPEN on a non-finite coordinate and would wave garbage
+        // through. Rejecting non-finite vertices up front is the invariant
+        // that lets the rest of the validator trust its arithmetic.
+        for (v, vert) in &self.vertices {
+            let p = vert.position;
+            if !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite() {
+                return Err(TopologyError::VertexNotFinite { vertex: v });
+            }
+        }
+
         let mut is_origin: SecondaryMap<_, ()> = SecondaryMap::new();
 
         // Half-edge link integrity.

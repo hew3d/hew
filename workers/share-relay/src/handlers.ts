@@ -298,6 +298,43 @@ export function handleIdentity(env: DropEnv): Response {
  *  `Content-Length` first (fails fast, before reading anything) and again
  *  against the actually-read byte count (a missing or lying
  *  `Content-Length` can't be trusted alone). */
+/** Sentinel returned by `readBodyCapped` when the body exceeds the cap. */
+const TOO_LARGE = Symbol('too-large')
+
+/** Read a request body chunk by chunk, aborting as soon as the running total
+ *  exceeds `maxBytes` so an oversized or unlabelled (chunked) upload never
+ *  buffers past the cap in Worker memory. Returns the assembled bytes, or
+ *  `TOO_LARGE`. A body-less request yields an empty array (the caller's
+ *  empty-body 400 handles it). */
+async function readBodyCapped(
+  request: Request,
+  maxBytes: number,
+): Promise<Uint8Array | typeof TOO_LARGE> {
+  const reader = request.body?.getReader()
+  if (!reader) return new Uint8Array(0)
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (value) {
+      total += value.byteLength
+      if (total > maxBytes) {
+        await reader.cancel()
+        return TOO_LARGE
+      }
+      chunks.push(value)
+    }
+  }
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return out
+}
+
 export async function handlePutDrop(request: Request, env: DropEnv): Promise<Response> {
   // Auth first, before the size checks and long before the body is read: an
   // unauthorized upload should cost the relay nothing but a header read.
@@ -313,16 +350,22 @@ export async function handlePutDrop(request: Request, env: DropEnv): Promise<Res
     }
   }
 
-  const body = await request.arrayBuffer()
-  if (body.byteLength === 0) {
-    return jsonResponse(400, { error: 'empty body' })
-  }
-  if (body.byteLength > MAX_BYTES) {
+  // Stream the body with a running cap instead of buffering it whole: a
+  // request with no (or a lying) Content-Length — trivially produced with
+  // Transfer-Encoding: chunked — would otherwise sail past the pre-check
+  // above and have `arrayBuffer()` buffer the entire payload before any size
+  // check ran. This mirrors the Rust relay's frame-by-frame cap.
+  const capped = await readBodyCapped(request, MAX_BYTES)
+  if (capped === TOO_LARGE) {
     return jsonResponse(413, { error: 'payload too large' })
   }
+  if (capped.byteLength === 0) {
+    return jsonResponse(400, { error: 'empty body' })
+  }
+  const body = capped
 
   const token = generateToken()
-  const chunks = chunkBytes(new Uint8Array(body), CHUNK_BYTES)
+  const chunks = chunkBytes(body, CHUNK_BYTES)
   const id = env.SHARE_DROP.idFromName(token)
   const stub = env.SHARE_DROP.get(id)
   // Batched: one RPC call may not carry more than 32 MiB of arguments, and a

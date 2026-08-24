@@ -330,6 +330,13 @@ export default function App() {
   const componentFrameOpen = innermostSessionNode?.kind === 'instance'
   /** Bumped on any document change so the tree re-queries entity lists. */
   const [docRev, setDocRev] = useState(0)
+  // Bumped once per document LOAD (open/new/recover/library-open — every
+  // path funnels through applyLoadedBytes), never on an in-document edit.
+  // Panels that cache blob URLs keyed by a wasm handle use this to drop the
+  // cache across loads: a fresh document restarts its SlotMap key versions,
+  // so material #1 of document B collides with the cached handle of material
+  // #1 of document A (audit q-web-robustness).
+  const [docGeneration, setDocGeneration] = useState(0)
   /** Currently selected material id for the Paint tool. */
   const [currentMaterialId, setCurrentMaterialId] = useState<bigint>(MATERIAL_SENTINEL)
   // Picking a material makes it current AND activates the Paint tool, so the
@@ -1658,6 +1665,7 @@ export default function App() {
     // is still awaiting its recovery check must also veto the offer it makes
     // at the end (the state setters alone can't — the later one wins).
     documentLoadedRef.current = true
+    setDocGeneration((g) => g + 1)
     setWelcomeOpen(false)
     setSelectedIds([])
     setActiveContext([])
@@ -5172,6 +5180,7 @@ export default function App() {
             <MaterialPalette
               scene={state.scene}
               docRev={docRev}
+              docGeneration={docGeneration}
               currentMaterialId={currentMaterialId}
               onSelectMaterial={handleSelectMaterial}
               onMaterialCreated={setCurrentMaterialId}

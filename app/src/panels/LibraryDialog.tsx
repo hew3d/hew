@@ -364,6 +364,12 @@ export function LibraryDialog({
   // --- Load the listing ------------------------------------------------
   useEffect(() => {
     if (!open) return
+    // Drop any texture previews cached in a PRIOR open: they are keyed by
+    // file name, and an external edit made while the dialog was closed (the
+    // subscribe-driven revoke only runs while open) can reuse a name for new
+    // content — so a stale preview would otherwise survive into this open
+    // (audit q-web-robustness). Revoking here makes every open re-read.
+    clearTextureCache()
     let cancelled = false
     async function load() {
       setLoading(true)

@@ -147,7 +147,7 @@ pub(crate) fn execute(
     if faces.is_empty() {
         return Err(BooleanError::EmptyResult);
     }
-    let mut result = assemble(faces)?;
+    let mut result = assemble(faces, a.planarity_tol.max(b.planarity_tol))?;
     // The result inherits operand A's base material ( follow-up), so a
     // subtract's carved walls from an unpainted cutter resolve to the carved
     // solid's color, and a union keeps the primary operand's base.
@@ -778,7 +778,7 @@ fn point_segment_distance(p: Point3, a: Point3, b: Point3) -> f64 {
 
 /// Welds the kept faces into a watertight Object, then splits a disconnected
 /// result into one shell per connected component.
-fn assemble(faces: Vec<OrientedFace>) -> Result<Object, BooleanError> {
+fn assemble(faces: Vec<OrientedFace>, planarity_tol: f64) -> Result<Object, BooleanError> {
     let mut positions: Vec<Point3> = Vec::new();
     let has_holes = faces.iter().any(|f| !f.holes.is_empty());
 
@@ -811,6 +811,15 @@ fn assemble(faces: Vec<OrientedFace>) -> Result<Object, BooleanError> {
             .collect();
         Object::from_faces_with_holes(&positions, &with_holes)
     };
+
+    // The result is no more planar than its loosest operand: imported
+    // geometry is flat only to `IMPORT_PLANE_DIST`, and boolean faces
+    // copied through from such an operand carry those same vertices. The
+    // built object defaults to strict `PLANE_DIST`, so without this the
+    // validate() backstop below would reject a perfectly good boolean over
+    // imported geometry (audit q-kernel-correctness). Never TIGHTENS the
+    // default — only loosens toward whatever the operands already tolerated.
+    obj.planarity_tol = obj.planarity_tol.max(planarity_tol);
 
     if obj.watertight() != WatertightState::Watertight {
         return Err(BooleanError::DegenerateContact);
@@ -937,6 +946,29 @@ mod tests {
 
     fn overlapping(shift: Vec3) -> (Object, Object, Transform) {
         (unit_cube(), unit_cube(), Transform::translation(shift))
+    }
+
+    /// A boolean over an operand carrying the loose import planarity
+    /// tolerance must propagate that tolerance to its result — otherwise the
+    /// result defaults to strict `PLANE_DIST` and its own validate() backstop
+    /// spuriously refuses import-flat faces copied through from the operand
+    /// (audit q-kernel-correctness). The result tolerance is the loosest of
+    /// the two operands, never tighter than the default.
+    #[test]
+    fn boolean_propagates_the_loosest_operand_planarity_tol() {
+        let mut a = unit_cube();
+        a.planarity_tol = crate::tol::IMPORT_PLANE_DIST;
+        let b = unit_cube();
+        let t = Transform::translation(Vec3::new(0.5, 0.5, 0.5));
+        let r = Object::boolean(BooleanOp::Union, &a, &b, &t).unwrap();
+        r.validate().unwrap();
+        assert_eq!(r.planarity_tol, crate::tol::IMPORT_PLANE_DIST);
+
+        // Two strict operands keep the strict default (never loosened for free).
+        let c = unit_cube();
+        let d = unit_cube();
+        let r2 = Object::boolean(BooleanOp::Union, &c, &d, &t).unwrap();
+        assert_eq!(r2.planarity_tol, crate::tol::PLANE_DIST);
     }
 
     #[test]

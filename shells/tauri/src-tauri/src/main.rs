@@ -2119,8 +2119,33 @@ async fn library_confirm(
         .map_err(|e| e.to_string())
 }
 
+/// True only for an existing regular file whose name ends `.hew` (case-
+/// insensitive), with symlinks resolved. Gate for what may enter or stay in
+/// the recents list: recents are auto-approved (read+write) at launch, and
+/// their path — unlike every other `ApprovedPaths` input — originates from
+/// persisted state / a JS `push_recent` argument, not a native picker. This
+/// keeps a compromised webview from persisting an arbitrary path (a launch
+/// agent, `~/.zshrc`, `/etc/...`) that the next launch would then approve.
+fn is_recentable_hew_file(path: &str) -> bool {
+    let Ok(canon) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    canon.is_file()
+        && canon
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("hew"))
+}
+
 #[tauri::command]
 fn push_recent(path: String, app: tauri::AppHandle) -> Result<(), String> {
+    // A recent must be a real .hew document — never an arbitrary path a
+    // compromised webview could plant for the launch-time auto-approval to
+    // pick up (audit sec-desktop). Silently ignore anything else: a genuine
+    // just-opened/just-saved .hew always qualifies, so this never rejects a
+    // legitimate call.
+    if !is_recentable_hew_file(&path) {
+        return Ok(());
+    }
     let state = app.state::<Mutex<RecentState>>();
     let mut guard = state.lock().map_err(|e| e.to_string())?;
     // Dedup: remove existing entry for this path, then prepend.
@@ -3513,8 +3538,16 @@ fn main() {
             app.manage(relay_client::RelayState::new(relay_client::load_setting(
                 handle,
             )));
+            // Recents are read+write approved so opening one and saving back
+            // works with no dialog, exactly as before — but ONLY when the
+            // entry still resolves to a real .hew file. Combined with
+            // push_recent's own gate, this keeps the auto-approval from ever
+            // covering a non-document path (a launch agent, a shell rc file),
+            // even if recents.json was hand-edited on disk (audit sec-desktop).
             for path in &recents {
-                approve_file(handle, Path::new(path), true);
+                if is_recentable_hew_file(path) {
+                    approve_file(handle, Path::new(path), true);
+                }
             }
             if let Some(path) = &argv_path {
                 approve_file(handle, Path::new(path), true);

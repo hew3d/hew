@@ -290,6 +290,16 @@ impl Object {
         &self.vertices
     }
 
+    /// Test-only: force a vertex position, to exercise the validator's own
+    /// invariants (e.g. the non-finite-coordinate backstop) without a real
+    /// operation that would already refuse the bad input at its entry.
+    #[cfg(test)]
+    pub(crate) fn debug_set_vertex_position(&mut self, v: VertexId, p: crate::math::Point3) {
+        if let Some(vert) = self.vertices.get_mut(v) {
+            vert.position = p;
+        }
+    }
+
     /// Half-edge storage (read-only).
     pub fn half_edges(&self) -> &SlotMap<HalfEdgeId, HalfEdge> {
         &self.half_edges

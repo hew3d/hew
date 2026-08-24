@@ -30,6 +30,11 @@ import { libraryStore } from '../io/libraryStore'
 interface Props {
   scene: WasmScene
   docRev: number
+  /** Document-load generation from App — a change means a NEW document, so
+   *  the handle-keyed thumbnail cache (whose keys collide across loads) must
+   *  be revoked and rebuilt. Optional (defaults 0) for tests that don't
+   *  exercise cross-load behavior. */
+  docGeneration?: number
   currentMaterialId: bigint
   /** The user picked a swatch — make it current AND pick up the Paint tool. */
   onSelectMaterial: (id: bigint) => void
@@ -146,6 +151,7 @@ function SubPaneHeader({
 export function MaterialPalette({
   scene,
   docRev,
+  docGeneration = 0,
   currentMaterialId,
   onSelectMaterial,
   onMaterialCreated,
@@ -156,6 +162,26 @@ export function MaterialPalette({
   // Suppress the docRev-triggers-re-render lint — we intentionally use it to
   // re-query material_ids from the WASM scene on each document change.
   void docRev
+  const thumbCacheRef = useRef<Map<string, string>>(new Map())
+  const thumbGenRef = useRef(docGeneration)
+  // Drop the cache SYNCHRONOUSLY on a document load, before the render below
+  // reads it: a fresh document reuses the same material handles for different
+  // textures, so a stale entry would otherwise paint the wrong thumbnail on
+  // the very first post-load render (an effect-time clear runs too late).
+  if (thumbGenRef.current !== docGeneration) {
+    for (const url of thumbCacheRef.current.values()) URL.revokeObjectURL(url)
+    thumbCacheRef.current.clear()
+    thumbGenRef.current = docGeneration
+  }
+  // Revoke on unmount too, so the URLs never leak for the tab's lifetime
+  // (audit q-web-robustness).
+  useEffect(() => {
+    const cache = thumbCacheRef.current
+    return () => {
+      for (const url of cache.values()) URL.revokeObjectURL(url)
+      cache.clear()
+    }
+  }, [])
 
   const materialIds = Array.from(scene.material_ids())
 
@@ -324,9 +350,10 @@ export function MaterialPalette({
     }
   }
 
-  // Texture thumbnail cache: object URLs keyed by material id (as string).
-  // We hold them in module-level state to avoid re-creating blobs on re-render.
-  const thumbCache = getThumbCache()
+  // Texture thumbnail cache: object URLs keyed by material handle, held in a
+  // mount-scoped ref (not module-global) so it can't outlive the palette and
+  // leak, and is dropped wholesale on a document load — see the effect below.
+  const thumbCache = thumbCacheRef.current
 
   return (
     <div style={PANEL_STYLE}>
@@ -656,8 +683,3 @@ export function MaterialPalette({
   )
 }
 
-// Module-level thumbnail URL cache so object URLs survive React re-renders.
-const _thumbCache = new Map<string, string>()
-function getThumbCache(): Map<string, string> {
-  return _thumbCache
-}

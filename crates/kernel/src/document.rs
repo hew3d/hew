@@ -10364,11 +10364,14 @@ impl Document {
             return Err(DocumentError::UnknownGroup);
         }
         let leaves = self.leaf_objects_under(NodeId::Group(group));
-        // TODO(components): also compose `t` into `leaf_instances_under`
-        // (instance poses, never baked) and extend `DocAction::Transform` to
-        // carry their prior poses for an exact undo. Unreachable until the
-        // instance ops below land (no instance can be a group member yet), so
-        // baking world leaves here stays correct for the current model.
+        // A group can hold component instances as members (`group_nodes`
+        // accepts `NodeId::Instance`), so the transform must also compose
+        // into their poses — instance poses are never baked, unlike leaf
+        // object geometry. This records a `TransformSelection` action (which
+        // already carries object snapshots AND prior instance poses for an
+        // exact undo) rather than the instance-blind `Transform`; before this
+        // fix an instance member silently stayed put while its group moved.
+        let instances = self.leaf_instances_under(NodeId::Group(group));
 
         // Snapshot every leaf's PRE-transform state before mutating anything
         // (rule 9 posture: undo restores this verbatim, never a recomputed
@@ -10403,13 +10406,27 @@ impl Document {
         // node) is carried by `t` exactly as one anchored to a leaf object
         // would be. Include every group in the subtree, not just `group`
         // itself, so a nested subgroup anchor re-anchors too.
+        // Compose `t` into instance poses last — cannot fail once `t` is
+        // known invertible, so no rollback is reachable past this point
+        // (same posture as `transform_selection`).
+        let mut instance_prevs: Vec<(InstanceId, Transform)> = Vec::with_capacity(instances.len());
+        for &inst in &instances {
+            let rec = &mut self.instances[inst];
+            let prev = rec.pose;
+            rec.pose = prev.then(t);
+            instance_prevs.push((inst, prev));
+        }
+
         let mut touched: Vec<NodeId> = leaves.iter().map(|&o| NodeId::Object(o)).collect();
+        touched.extend(instances.iter().map(|&i| NodeId::Instance(i)));
         let mut subgroups = Vec::new();
         self.collect_groups(NodeId::Group(group), &mut subgroups);
         touched.extend(subgroups.iter().map(|&g| NodeId::Group(g)));
         let reanchored = self.reanchor_touched(&touched, t);
-        self.undo.push(DocAction::Transform {
+        self.undo.push(DocAction::TransformSelection {
             objects: pre_objects,
+            sketches: Vec::new(),
+            instances: instance_prevs,
             forward: *t,
             reanchored,
         });
@@ -10420,7 +10437,7 @@ impl Document {
             objects_touched: leaves,
             sketches_touched: Vec::new(),
             groups_touched: vec![group],
-            instances_touched: Vec::new(),
+            instances_touched: instances,
             components_touched: Vec::new(),
             guides_touched: Vec::new(),
         })
@@ -19341,5 +19358,45 @@ mod tests {
              for every region runs before anything commits, including before the gesture \
              is even looked at"
         );
+    }
+
+    /// Regression: a group containing a component instance must transform the
+    /// instance's pose along with its object members. Before the fix,
+    /// transform_group baked only leaf objects and silently left instance
+    /// members untouched (audit q-kernel-correctness / release-readiness).
+    #[test]
+    fn transform_group_moves_instance_members_too() {
+        let mut doc = Document::new();
+        // An instance (a boxed component) and a plain object, both top level.
+        let boxed = extrude_unit_box(&mut doc);
+        let (_comp, inst, _) = doc
+            .make_component(&[NodeId::Object(boxed)])
+            .expect("fold into a definition");
+        let other = extrude_unit_box(&mut doc);
+        let (group, _) = doc
+            .group_nodes(&[NodeId::Instance(inst), NodeId::Object(other)])
+            .expect("group an instance with an object");
+
+        let pose_before = doc.instances[inst].pose;
+        let shift = Transform::translation(Vec3::new(3.0, 0.0, 0.0));
+        doc.transform_group(group, &shift).expect("group transform");
+
+        // The instance pose composed the shift; the object moved with it.
+        assert_eq!(doc.instances[inst].pose, pose_before.then(&shift));
+        let moved = doc.object(other).expect("object still live");
+        let min_x = moved
+            .vertices()
+            .values()
+            .map(|v| v.position.x)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            min_x >= 2.5,
+            "object member should have shifted +3 in x, min.x = {min_x}"
+        );
+
+        // Undo restores the instance pose exactly (verbatim, not a recomputed
+        // inverse) and the object.
+        doc.undo().expect("undo the group transform");
+        assert_eq!(doc.instances[inst].pose, pose_before);
     }
 }

@@ -61,9 +61,20 @@ struct Inner {
     /// Sum of `bytes.len()` over `drops` — maintained on every insert/remove
     /// so `remaining` is O(1).
     total: usize,
+    /// Bytes claimed by uploads still streaming in but not yet stored. Both
+    /// `total` and `reserved` count against `max_total_bytes`, so N
+    /// concurrent in-flight PUT bodies can never collectively buffer past
+    /// the global cap — the memory-exhaustion hole a per-request cap alone
+    /// leaves open (audit sec-relay). Grown by `reserve` as body frames
+    /// arrive, released by `Reservation`'s drop, and converted into `total`
+    /// by `put_reserved` on success.
+    reserved: usize,
 }
 
-/// Why a `put` was refused.
+/// Why a `put` was refused. Test-only: production uploads go through
+/// [`Store::reserve`] + [`Store::put_reserved`], which hold space for the
+/// whole stream and so cannot hit the cap at store time.
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum PutError {
     /// Storing this drop would exceed the total memory cap. Fail closed:
@@ -83,6 +94,7 @@ impl Store {
             inner: Mutex::new(Inner {
                 drops: HashMap::new(),
                 total: 0,
+                reserved: 0,
             }),
             max_total_bytes,
             ttl,
@@ -105,12 +117,68 @@ impl Store {
     /// is checked against before a body is read.
     pub fn remaining(&self) -> usize {
         let inner = self.lock();
-        self.max_total_bytes.saturating_sub(inner.total)
+        self.max_total_bytes
+            .saturating_sub(inner.total)
+            .saturating_sub(inner.reserved)
+    }
+
+    /// Claim `n` more in-flight bytes against the global budget for a body
+    /// currently streaming in. Returns `false` (claim nothing) when the
+    /// stored plus already-reserved bytes leave no room — the caller then
+    /// answers 503 and aborts the upload. Sweeps expired drops first, so a
+    /// store full only of dead drops still admits a new upload. Pair every
+    /// successful reserve with exactly one release (via [`Reservation`]) or
+    /// a [`Store::put_reserved`] that consumes it.
+    pub fn reserve(&self, n: usize) -> bool {
+        let mut inner = self.lock();
+        Self::sweep_locked(&mut inner, Instant::now());
+        if inner.total.saturating_add(inner.reserved).saturating_add(n) > self.max_total_bytes {
+            return false;
+        }
+        inner.reserved += n;
+        true
+    }
+
+    /// Release `n` reserved bytes without storing them (an aborted or failed
+    /// upload). Idempotent-safe via saturating subtraction.
+    pub fn release(&self, n: usize) {
+        let mut inner = self.lock();
+        inner.reserved = inner.reserved.saturating_sub(n);
+    }
+
+    /// Store `bytes` whose length was already reserved via [`Store::reserve`]:
+    /// move `reserved_bytes` out of the reservation and into `total`, then
+    /// insert under a fresh token. Cannot fail on the cap (the space was held
+    /// the whole time the body streamed), so — unlike [`Store::put`] — it
+    /// returns the token directly.
+    pub fn put_reserved(&self, bytes: Vec<u8>, reserved_bytes: usize) -> String {
+        let now = Instant::now();
+        let mut inner = self.lock();
+        Self::sweep_locked(&mut inner, now);
+        inner.reserved = inner.reserved.saturating_sub(reserved_bytes);
+        let token = loop {
+            let t = generate_token();
+            if !inner.drops.contains_key(&t) {
+                break t;
+            }
+        };
+        inner.total += bytes.len();
+        inner.drops.insert(
+            token.clone(),
+            Entry {
+                bytes,
+                expires_at: now + self.ttl,
+            },
+        );
+        token
     }
 
     /// Stores `bytes` under a fresh token; `Err(Full)` if it would exceed
-    /// the cap. Expired entries are swept first so a full-looking store that
-    /// is only holding dead drops still accepts.
+    /// the cap. Test-only convenience that bundles the cap check and the
+    /// insert — production splits these into [`Store::reserve`] (before the
+    /// body streams) and [`Store::put_reserved`] (after) so concurrent
+    /// in-flight bodies share the budget.
+    #[cfg(test)]
     pub fn put(&self, bytes: Vec<u8>) -> Result<String, PutError> {
         let now = Instant::now();
         let mut inner = self.lock();
@@ -253,6 +321,30 @@ mod tests {
         store.delete(&token);
         store.delete("nope");
         assert_eq!(store.remaining(), 1024);
+    }
+
+    #[test]
+    fn reservations_count_against_the_global_cap() {
+        // Simulates concurrent in-flight uploads: their reserved bytes must
+        // reduce `remaining` and block a further reservation past the cap,
+        // even though nothing has been stored yet (audit sec-relay).
+        let store = Store::new(10, Duration::from_secs(60));
+        assert!(store.reserve(6));
+        assert_eq!(store.remaining(), 4);
+        assert!(store.reserve(4));
+        assert_eq!(store.remaining(), 0);
+        // A third in-flight body finds no room and is rejected.
+        assert!(!store.reserve(1));
+
+        // One upload completes: its reservation converts to stored bytes,
+        // leaving the total unchanged and freeing nothing extra.
+        let token = store.put_reserved(vec![0; 6], 6);
+        assert_eq!(store.remaining(), 0);
+        // The other aborts: releasing its reservation frees that space.
+        store.release(4);
+        assert_eq!(store.remaining(), 4);
+        assert_eq!(store.take(&token).map(|v| v.len()), Some(6));
+        assert_eq!(store.remaining(), 10);
     }
 
     #[test]

@@ -720,3 +720,36 @@ fn scaled_node_cube_welds_to_a_watertight_solid() {
     );
     assert_eq!(report.leaky, 0, "no leaky shell");
 }
+
+/// A `.gltf` whose node graph contains a cycle (node 0 → child 1 → child 0).
+/// The glTF spec forbids this, but the `gltf` crate's validation does not
+/// check for it, so a hostile file can pass validation and — without a cycle
+/// guard — drive the importer's node recursion into a stack overflow
+/// (audit sec-web-untrusted). Same cube buffers as `cube_gltf`, different
+/// node graph.
+fn cyclic_node_gltf() -> Vec<u8> {
+    let base = String::from_utf8(cube_gltf()).unwrap();
+    // Swap the single-node scene for a two-node cycle rooted at 0.
+    base.replace(
+        r#""scenes": [{ "nodes": [0] }],
+  "nodes": [{ "mesh": 0, "name": "Cube" }],"#,
+        r#""scenes": [{ "nodes": [0] }],
+  "nodes": [
+    { "mesh": 0, "name": "A", "children": [1] },
+    { "mesh": 0, "name": "B", "children": [0] }
+  ],"#,
+    )
+    .into_bytes()
+}
+
+#[test]
+fn cyclic_node_graph_terminates_instead_of_overflowing() {
+    let bytes = cyclic_node_gltf();
+    // The only requirement is that this RETURNS at all (no stack overflow /
+    // infinite recursion). A cycle-broken import still yields the cube once.
+    let result = gltf_import::import(&bytes);
+    assert!(
+        result.is_ok(),
+        "cyclic-node import should terminate with a scene"
+    );
+}

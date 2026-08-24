@@ -415,6 +415,33 @@ describe('handlePutDrop', () => {
     assert.equal(res.status, 413)
   })
 
+  test('rejects an oversized CHUNKED body (no Content-Length) via the streaming cap', async () => {
+    // A ReadableStream body sends no Content-Length, so the fast pre-check is
+    // skipped — the streaming cap is the only thing standing between the
+    // Worker and buffering the whole payload. Emit > MAX_BYTES across chunks.
+    const env = makeEnv()
+    const chunk = new Uint8Array(1024 * 1024) // 1 MiB
+    let sent = 0
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent > MAX_BYTES) {
+          controller.close()
+          return
+        }
+        controller.enqueue(chunk)
+        sent += chunk.byteLength
+      },
+    })
+    const request = new Request('https://share.hew3d.com/drop', {
+      method: 'PUT',
+      body,
+      // @ts-expect-error — duplex is required for a stream body in undici/workers.
+      duplex: 'half',
+    })
+    const res = await handlePutDrop(request, env)
+    assert.equal(res.status, 413)
+  })
+
   test('rejects fast via Content-Length before reading an oversized declared body', async () => {
     const env = makeEnv()
     const request = new Request('https://share.hew3d.com/drop', {

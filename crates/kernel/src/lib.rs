@@ -8,11 +8,10 @@
 //! filesystem, or network dependencies, ever. The WASM boundary lives in
 //! `crates/wasm-api`.
 //!
-//! Module map: implemented — `math`, `tol`, `ids`, `topo`, `error`,
-//! `transform`, plus construction (`build`) and the validator (`validate`).
-//! Contract stubs with `todo!()` bodies pending M1–M3 — `sketch`, `ops`,
-//! `history`, `serialize`; their executable specs live in
-//! `tests/op_specs.rs`.
+//! Module map: `math`, `tol`, `ids`, `topo`, `error`, `transform`,
+//! construction (`build`), the validator (`validate`), and the fully
+//! implemented `sketch`, `ops`, `history`, and `serialize`. Executable
+//! specs live in `tests/op_specs.rs`.
 
 mod boolean;
 mod build;

@@ -78,6 +78,17 @@ pub enum TopologyError {
         /// The offending loop.
         loop_id: LoopId,
     },
+    /// A vertex holds a non-finite coordinate (NaN or infinity). Committed
+    /// geometry is always finite; this is the backstop that keeps a
+    /// non-finite value introduced anywhere (a NaN/Inf operation parameter,
+    /// a degenerate division) from surviving `validate()` — every geometric
+    /// predicate below (planarity, containment, normalization) compares with
+    /// `>`/`<`, which IEEE-754 evaluates false against NaN, so they all fail
+    /// OPEN on a non-finite input and must never be reached with one.
+    VertexNotFinite {
+        /// The offending vertex.
+        vertex: VertexId,
+    },
     /// A face has a boundary vertex farther than `tol::PLANE_DIST` from its
     /// stored plane.
     FaceGeometryNotPlanar {
@@ -170,6 +181,12 @@ impl std::fmt::Display for TopologyError {
             }
             LoopFaceMismatch { loop_id } => {
                 write!(f, "loop {loop_id:?} disagrees with its face")
+            }
+            VertexNotFinite { vertex } => {
+                write!(
+                    f,
+                    "vertex {vertex:?} has a non-finite (NaN/infinite) coordinate"
+                )
             }
             FaceGeometryNotPlanar { face } => {
                 write!(f, "face {face:?} has vertices off its stored plane")
