@@ -80,7 +80,7 @@
           "protocol": 1,
           "app": {
             "name": "hew",
-            "version": "0.10.0"
+            "version": "1.0.0"
           },
           "profile": "core",
           "encoding": "json",

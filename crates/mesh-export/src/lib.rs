@@ -1813,7 +1813,10 @@ mod tests {
     fn export_stl_produces_a_well_formed_binary_stl_with_twelve_triangles() {
         let doc = box_document();
         let bytes = export_stl(&doc, 0, true).expect("a solid box exports");
-        assert_eq!(&bytes[0..5], b"Hew 0");
+        // Version-agnostic: the header is "Hew <version> binary STL…", so
+        // assert the stable signature prefix, not a version digit (a version
+        // bump must not break this).
+        assert_eq!(&bytes[0..4], b"Hew ");
         let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap());
         assert_eq!(count, 12, "a box triangulates to 12 triangles (2 per face)");
         assert_eq!(bytes.len(), 80 + 4 + 12 * 50);

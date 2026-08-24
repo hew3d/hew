@@ -31,7 +31,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.10.0"
+version = "1.0.0"
 edition = "2024"
 # AGPL-3.0-only plus an additional permission for closed-source plugins that
 # use only the documented Plugin API — see LICENSE and LICENSE-EXCEPTION.
