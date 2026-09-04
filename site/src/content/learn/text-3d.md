@@ -6,6 +6,8 @@ order: 8
 
 3D Text turns typed characters into real solids: watertight, printable, and made of the same geometry as anything else you model. Counters — the enclosed spaces in letters like **o**, **a**, and **B** — come out as genuine through-holes, not painted-on shapes.
 
+<docs-video theme="dark" slug="text-3d" label="text 3d demonstration"></docs-video>
+
 ## The gesture
 
 1. Open **Draw ▸ 3D Text…**, or search "text" in the command palette.

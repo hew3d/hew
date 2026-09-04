@@ -2,6 +2,8 @@
 import { getCollection, render } from 'astro:content';
 import type { InferGetStaticPropsType } from 'astro';
 import ProseLayout from '../../layouts/ProseLayout.astro';
+import DocsVideoRuntime from '../../components/DocsVideoRuntime.astro';
+import docsVideoManifest from '../../data/videos.json';
 
 export async function getStaticPaths() {
   const entries = await getCollection('learn');
@@ -23,6 +25,7 @@ const { Content } = await render(entry);
 ---
 
 <ProseLayout title={entry.data.title} description={entry.data.description}>
+  {entry.id in docsVideoManifest.videos && <DocsVideoRuntime />}
   <Content />
 
   <nav class="guide-nav" aria-label="Guide navigation">

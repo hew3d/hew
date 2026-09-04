@@ -6,6 +6,8 @@ order: 12
 
 Combining solids is always a command you issue. [Core concepts](/learn/core-concepts/) explains why Hew never does it for you. Every input to these commands is a watertight solid, and so is every result.
 
+<docs-video theme="dark" slug="combining-solids" label="combining solids demonstration"></docs-video>
+
 ## Union, Subtract, Intersect
 
 1. With the Select tool, click the first object or group, then **Shift-click** the second.

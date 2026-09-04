@@ -6,6 +6,8 @@ order: 6
 
 Push/Pull (`P`) is the tool that moves your model between 2D and 3D. It does three jobs with one gesture: extrudes a sketch region into a new solid, reshapes an existing solid by moving one of its faces, and cuts holes straight through.
 
+<docs-video theme="dark" slug="push-pull" label="push pull demonstration"></docs-video>
+
 ## The gesture
 
 1. Click a face — either a filled sketch region or a face of an existing solid.

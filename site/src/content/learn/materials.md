@@ -6,6 +6,8 @@ order: 14
 
 Materials in Hew are simple and per-document: a palette of flat colors and image textures that you paint onto faces or assign to whole objects.
 
+<docs-video theme="dark" slug="materials" label="materials demonstration"></docs-video>
+
 ## The Materials panel
 
 Expand **Materials** in the right-hand tray (or View ▸ Materials, `⇧⌘C` / `Ctrl+Shift+C`).

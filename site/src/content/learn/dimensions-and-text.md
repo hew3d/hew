@@ -6,6 +6,8 @@ order: 11
 
 Dimensions and leader text annotate a model without becoming part of it. They're document entities like guides: they don't affect watertightness, they don't export as geometry, and they follow the shapes they're attached to when those shapes move.
 
+<docs-video theme="dark" slug="dimensions-and-text" label="dimensions and text demonstration"></docs-video>
+
 ![A box with two linear dimensions reading 1.8 m and 0.9 m, next to a cylinder with an R0.5 m radial dimension](/docs/dimensions.webp)
 
 ## Linear dimensions

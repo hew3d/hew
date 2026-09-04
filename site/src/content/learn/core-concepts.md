@@ -6,6 +6,8 @@ order: 2
 
 If you know SketchUp, your first session in Hew will feel familiar. Sooner or later, though, something you expect to happen won't: two touching boxes refuse to weld, or an operation stops with an error instead of producing something questionable. Those moments are this chapter. A few deliberate rules make Hew behave differently once your model gets complicated — understanding them will save you more time than memorizing any tool.
 
+<docs-video theme="dark" slug="core-concepts" label="core concepts demonstration"></docs-video>
+
 ## Objects
 
 An **Object** is Hew's unit of "a solid thing." Extruding a closed 2D profile creates one automatically; there's no "group it" step to remember. Each Object is its own island of geometry: a name, an optional material and tags, and its own watertightness state. Objects can be organized into groups and turned into components (shared definitions with independent instances), but the Object stays the atom everything else is built from.

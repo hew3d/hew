@@ -6,6 +6,8 @@ order: 9
 
 Move, Rotate, and Scale all work on the current selection — but they don't demand one. With nothing selected, clicking an object with any of the three selects it and starts the gesture in the same click, so moving something is one fluid motion, not Select-then-Move. With a selection already made, the click places the first reference point as usual.
 
+<docs-video theme="dark" slug="moving-and-transforming" label="moving and transforming demonstration"></docs-video>
+
 The fastest move doesn't even need the Move tool: with **Select** active, press on an object and **drag** it. Past a few pixels the drag becomes a real move — full snapping, axis locks, Alt-copy, typed distances — and releasing the button commits it. The tool stays Select throughout, like dragging an icon on your desktop. Dragging a member of a multi-selection drags the whole selection.
 
 All three transform tools show a live ghost preview of the result and a live readout, and all three accept typed exact values mid-gesture.

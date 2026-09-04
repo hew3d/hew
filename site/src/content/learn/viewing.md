@@ -6,6 +6,8 @@ order: 4
 
 Camera navigation never interrupts your work. With any tool active, at any moment, you can orbit, pan, or zoom, even halfway through drawing a line.
 
+<docs-video theme="dark" slug="viewing" label="viewing demonstration"></docs-video>
+
 ## With the mouse
 
 | Action | Input |

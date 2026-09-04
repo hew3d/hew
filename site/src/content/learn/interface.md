@@ -6,6 +6,8 @@ order: 3
 
 Hew's window has the same layout on the web, macOS, Windows, and Linux. The only difference is the chrome around it: macOS uses the system menu bar, Windows and Linux draw their own title bar, and the web app shows an in-app menu bar.
 
+<docs-video theme="dark" slug="interface" label="interface demonstration"></docs-video>
+
 ![The default Hew window: menu bar, tool rail on the left, 3D viewport in the center, panels tray on the right, contextual dock at the bottom, status bar along the base](/docs/ui-default.webp)
 
 ## The viewport

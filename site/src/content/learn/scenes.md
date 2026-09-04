@@ -6,6 +6,8 @@ order: 17
 
 A Scene is a saved view of your model: where the camera sits, which objects and tags are hidden, whether and where the section plane cuts, and whether the grid, axes, and guides show. Activate a Scene and all of that comes back in one step. Set up "Assembled", "Cut layout on the sheet", and "Section through the tenons" once at the desk, then flip between them at the bench.
 
+<docs-video theme="dark" slug="scenes" label="scenes demonstration"></docs-video>
+
 ![The Scenes section of the tray with three Scenes; the active one shows a drift ring and an Update button, and its details are expanded](/docs/scenes-tray.webp)
 
 Scenes are saved in the `.hew` file, so they travel with the model — to another machine, to the Library, and to [Shop Mode on your phone](/learn/hew-on-your-phone/#scenes-on-the-phone).

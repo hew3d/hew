@@ -31,3 +31,4 @@ docs/design/
 # wrangler local dev state / secrets (workers/share-relay)
 .wrangler/
 .dev.vars
+site/public/videos/

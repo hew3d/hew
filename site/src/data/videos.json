@@ -1,0 +1,335 @@
+{
+  "base": "https://media.hew3d.com",
+  "videos": {
+    "combining-solids": {
+      "webm": {
+        "key": "docs/combining-solids-75765b5376.webm",
+        "url": "https://media.hew3d.com/docs/combining-solids-75765b5376.webm",
+        "bytes": 5108053,
+        "sha256": "75765b537605acf656bb24c1a4054cabab87ee2c8e0e44ddc6b78be7922f74c6"
+      },
+      "mp4": {
+        "key": "docs/combining-solids-ba49ca0d08.mp4",
+        "url": "https://media.hew3d.com/docs/combining-solids-ba49ca0d08.mp4",
+        "bytes": 8699184,
+        "sha256": "ba49ca0d08e6f379540fecfdca17b08c43ee3b6f30e95091d6f35528edce8ad2"
+      },
+      "poster": {
+        "key": "docs/combining-solids-d73e781f97.jpg",
+        "url": "https://media.hew3d.com/docs/combining-solids-d73e781f97.jpg",
+        "bytes": 149594,
+        "sha256": "d73e781f973df66d6d485896416c12579b83afd1642de3bb0eb0e98f5b51dc62"
+      },
+      "seconds": 53.4,
+      "theme": "dark"
+    },
+    "core-concepts": {
+      "webm": {
+        "key": "docs/core-concepts-192035aca0.webm",
+        "url": "https://media.hew3d.com/docs/core-concepts-192035aca0.webm",
+        "bytes": 3385882,
+        "sha256": "192035aca056bba17d9c75915c277dd051dff9339dbe70127d0aa6920ad26ddf"
+      },
+      "mp4": {
+        "key": "docs/core-concepts-19a0f04e77.mp4",
+        "url": "https://media.hew3d.com/docs/core-concepts-19a0f04e77.mp4",
+        "bytes": 5420303,
+        "sha256": "19a0f04e770fef4c708c1c88be34d7e14a39b187af8a74cea5b2e84d6db36a6d"
+      },
+      "poster": {
+        "key": "docs/core-concepts-49e711ff40.jpg",
+        "url": "https://media.hew3d.com/docs/core-concepts-49e711ff40.jpg",
+        "bytes": 146553,
+        "sha256": "49e711ff40bd046cc1f5600fba2ed3358c371417b396ed02b79b80dbbb98fa04"
+      },
+      "seconds": 43.3,
+      "theme": "dark"
+    },
+    "dimensions-and-text": {
+      "webm": {
+        "key": "docs/dimensions-and-text-d2e64b555a.webm",
+        "url": "https://media.hew3d.com/docs/dimensions-and-text-d2e64b555a.webm",
+        "bytes": 3960926,
+        "sha256": "d2e64b555a0a159d59068f03352854419796654f48d601d92c9fb952c7eda2c5"
+      },
+      "mp4": {
+        "key": "docs/dimensions-and-text-c3bb7f1abc.mp4",
+        "url": "https://media.hew3d.com/docs/dimensions-and-text-c3bb7f1abc.mp4",
+        "bytes": 5880896,
+        "sha256": "c3bb7f1abc2922480930f5df6521ab14f05398114b0ae05f4400dd86aebd6041"
+      },
+      "poster": {
+        "key": "docs/dimensions-and-text-c18fedda89.jpg",
+        "url": "https://media.hew3d.com/docs/dimensions-and-text-c18fedda89.jpg",
+        "bytes": 154714,
+        "sha256": "c18fedda89ec9f16afd99a476f2401f1dafc0bc34c000d8ccbe5b44b86074197"
+      },
+      "seconds": 39.6,
+      "theme": "dark"
+    },
+    "drawing": {
+      "webm": {
+        "key": "docs/drawing-7a1c3ef664.webm",
+        "url": "https://media.hew3d.com/docs/drawing-7a1c3ef664.webm",
+        "bytes": 3299174,
+        "sha256": "7a1c3ef66419dbe4ba4f94de11214001d1151a56a54d146ff68f715e3556ee65"
+      },
+      "mp4": {
+        "key": "docs/drawing-5f83eb2584.mp4",
+        "url": "https://media.hew3d.com/docs/drawing-5f83eb2584.mp4",
+        "bytes": 5025973,
+        "sha256": "5f83eb25844c04eca78a5c948235710edcc08a1c8820af5e340281e026910261"
+      },
+      "poster": {
+        "key": "docs/drawing-d75ee6730a.jpg",
+        "url": "https://media.hew3d.com/docs/drawing-d75ee6730a.jpg",
+        "bytes": 151946,
+        "sha256": "d75ee6730ad5389577e2da3b26b2b2ab90b19487474beaab87be1e3755e0e63a"
+      },
+      "seconds": 39.9,
+      "theme": "dark"
+    },
+    "follow-me": {
+      "webm": {
+        "key": "docs/follow-me-ed22cd912b.webm",
+        "url": "https://media.hew3d.com/docs/follow-me-ed22cd912b.webm",
+        "bytes": 3248042,
+        "sha256": "ed22cd912bdea00e9ef09e6d706c15870f24dfca768576b28e4769388f7ac430"
+      },
+      "mp4": {
+        "key": "docs/follow-me-64173b1299.mp4",
+        "url": "https://media.hew3d.com/docs/follow-me-64173b1299.mp4",
+        "bytes": 5201851,
+        "sha256": "64173b1299f2b8c56416f76b795fb7e69a135b9f588a6981cf13bd7c61efa8e2"
+      },
+      "poster": {
+        "key": "docs/follow-me-441ca0d82c.jpg",
+        "url": "https://media.hew3d.com/docs/follow-me-441ca0d82c.jpg",
+        "bytes": 154594,
+        "sha256": "441ca0d82c6c13463ca17bdf37658b9fb19cd2e6950e3a5cbb778ab7cd05b038"
+      },
+      "seconds": 37.8,
+      "theme": "dark"
+    },
+    "interface": {
+      "webm": {
+        "key": "docs/interface-dc8cec2737.webm",
+        "url": "https://media.hew3d.com/docs/interface-dc8cec2737.webm",
+        "bytes": 3127277,
+        "sha256": "dc8cec273770cae2abb3f41ba2da077bb573094a96a0d749953eff99f4c653bc"
+      },
+      "mp4": {
+        "key": "docs/interface-a85ad366ad.mp4",
+        "url": "https://media.hew3d.com/docs/interface-a85ad366ad.mp4",
+        "bytes": 4273984,
+        "sha256": "a85ad366ad74bf6201e5cc71af184762763c28341b4cf9e5cc2c79a598349644"
+      },
+      "poster": {
+        "key": "docs/interface-793cef2b2d.jpg",
+        "url": "https://media.hew3d.com/docs/interface-793cef2b2d.jpg",
+        "bytes": 172870,
+        "sha256": "793cef2b2d39e2c89a17fd2da675bce653c4d01a84ab25e07cfd87c4b319f742"
+      },
+      "seconds": 47.3,
+      "theme": "dark"
+    },
+    "materials": {
+      "webm": {
+        "key": "docs/materials-774f674087.webm",
+        "url": "https://media.hew3d.com/docs/materials-774f674087.webm",
+        "bytes": 2365077,
+        "sha256": "774f674087c7a010009f61b6d2525ea3539ebbdb77427dedfef5cbcf54bf073d"
+      },
+      "mp4": {
+        "key": "docs/materials-c61fa0b3e8.mp4",
+        "url": "https://media.hew3d.com/docs/materials-c61fa0b3e8.mp4",
+        "bytes": 3635994,
+        "sha256": "c61fa0b3e8d1360e20cacbf961a4df55e878756d87712efac7818cdb122ab269"
+      },
+      "poster": {
+        "key": "docs/materials-848cf550b1.jpg",
+        "url": "https://media.hew3d.com/docs/materials-848cf550b1.jpg",
+        "bytes": 162546,
+        "sha256": "848cf550b19b1ee7c91ba62fb06d2a8cda69c63db76ec6662634098a100b28d2"
+      },
+      "seconds": 26.3,
+      "theme": "dark"
+    },
+    "measurement-and-guides": {
+      "webm": {
+        "key": "docs/measurement-and-guides-afb697f9fe.webm",
+        "url": "https://media.hew3d.com/docs/measurement-and-guides-afb697f9fe.webm",
+        "bytes": 1265906,
+        "sha256": "afb697f9fe6b7d85bb7675d2405b3e884d3b606990e5c57157a3f4a112398fc9"
+      },
+      "mp4": {
+        "key": "docs/measurement-and-guides-7bd7c1a969.mp4",
+        "url": "https://media.hew3d.com/docs/measurement-and-guides-7bd7c1a969.mp4",
+        "bytes": 2026845,
+        "sha256": "7bd7c1a969aee4652b11bc6c4192b175878924048c10f794f8955cebbab69334"
+      },
+      "poster": {
+        "key": "docs/measurement-and-guides-e10105dcee.jpg",
+        "url": "https://media.hew3d.com/docs/measurement-and-guides-e10105dcee.jpg",
+        "bytes": 106488,
+        "sha256": "e10105dcee78a545892dcd94a59f22d813a9da7eeca4bd3e5f76615eeedbb5a8"
+      },
+      "seconds": 35.7,
+      "theme": "dark"
+    },
+    "moving-and-transforming": {
+      "webm": {
+        "key": "docs/moving-and-transforming-e556a29839.webm",
+        "url": "https://media.hew3d.com/docs/moving-and-transforming-e556a29839.webm",
+        "bytes": 3714486,
+        "sha256": "e556a29839934907f6f8669e7397664ef90cd1d0124fc170a87aacc7ea955563"
+      },
+      "mp4": {
+        "key": "docs/moving-and-transforming-039734ba5a.mp4",
+        "url": "https://media.hew3d.com/docs/moving-and-transforming-039734ba5a.mp4",
+        "bytes": 5354135,
+        "sha256": "039734ba5a8aa01b6bd4b16056a57d1e112b091d3ccda5597797440f4120c67b"
+      },
+      "poster": {
+        "key": "docs/moving-and-transforming-0073ab4687.jpg",
+        "url": "https://media.hew3d.com/docs/moving-and-transforming-0073ab4687.jpg",
+        "bytes": 148183,
+        "sha256": "0073ab4687de6420d4a5af87262bd6cd814fc1884153919d1a4e417ff0d75c1a"
+      },
+      "seconds": 40.1,
+      "theme": "dark"
+    },
+    "organizing": {
+      "webm": {
+        "key": "docs/organizing-48fca75b5f.webm",
+        "url": "https://media.hew3d.com/docs/organizing-48fca75b5f.webm",
+        "bytes": 3381375,
+        "sha256": "48fca75b5f0229c1b7073863cdcaed89e875767cd9f2eb6e993777ce42d6d8b0"
+      },
+      "mp4": {
+        "key": "docs/organizing-32e1825d56.mp4",
+        "url": "https://media.hew3d.com/docs/organizing-32e1825d56.mp4",
+        "bytes": 5440651,
+        "sha256": "32e1825d56d5c39d18d5bce6403d46652befae09298cd60354778bd4b10d505a"
+      },
+      "poster": {
+        "key": "docs/organizing-1cf2e751ea.jpg",
+        "url": "https://media.hew3d.com/docs/organizing-1cf2e751ea.jpg",
+        "bytes": 154469,
+        "sha256": "1cf2e751ea016623be944c5727471f7d351ef278f7bcfd036cf9c3fd8be83080"
+      },
+      "seconds": 42.4,
+      "theme": "dark"
+    },
+    "printing": {
+      "webm": {
+        "key": "docs/printing-419de3e4f9.webm",
+        "url": "https://media.hew3d.com/docs/printing-419de3e4f9.webm",
+        "bytes": 3099064,
+        "sha256": "419de3e4f9489d686b207f8328fae28794620ed95a60c2ffa0c0c7adac839cf4"
+      },
+      "mp4": {
+        "key": "docs/printing-856d5a9c18.mp4",
+        "url": "https://media.hew3d.com/docs/printing-856d5a9c18.mp4",
+        "bytes": 4749147,
+        "sha256": "856d5a9c18faac4d63768099a396b128bd90ce8151c319f7e7d7ef357c5337ee"
+      },
+      "poster": {
+        "key": "docs/printing-b2a691ae33.jpg",
+        "url": "https://media.hew3d.com/docs/printing-b2a691ae33.jpg",
+        "bytes": 165210,
+        "sha256": "b2a691ae3323f61b1dd462c8586254b545b0aedb283b60d7a637663b8eae97c1"
+      },
+      "seconds": 41.8,
+      "theme": "dark"
+    },
+    "push-pull": {
+      "webm": {
+        "key": "docs/push-pull-c1c23ee4dd.webm",
+        "url": "https://media.hew3d.com/docs/push-pull-c1c23ee4dd.webm",
+        "bytes": 3098259,
+        "sha256": "c1c23ee4dd0871f18ddfce57620e1fed6c6d7ecf4c01f026c4fdb1e5ee908a17"
+      },
+      "mp4": {
+        "key": "docs/push-pull-6eb1feac27.mp4",
+        "url": "https://media.hew3d.com/docs/push-pull-6eb1feac27.mp4",
+        "bytes": 4900455,
+        "sha256": "6eb1feac27388e32bb1fb098740903e85c32be1eb4cb96910b9a770982ce0646"
+      },
+      "poster": {
+        "key": "docs/push-pull-bc3fca3773.jpg",
+        "url": "https://media.hew3d.com/docs/push-pull-bc3fca3773.jpg",
+        "bytes": 150199,
+        "sha256": "bc3fca3773cd7c6b012afb47a9cc1c9280270681712291178d2f5d9d88b4c565"
+      },
+      "seconds": 44.0,
+      "theme": "dark"
+    },
+    "scenes": {
+      "webm": {
+        "key": "docs/scenes-6e798f15b0.webm",
+        "url": "https://media.hew3d.com/docs/scenes-6e798f15b0.webm",
+        "bytes": 2859753,
+        "sha256": "6e798f15b0b10c8f2c4a222f419c58de0527e93753473a7d90ed3792a5b187c8"
+      },
+      "mp4": {
+        "key": "docs/scenes-aad7b64d65.mp4",
+        "url": "https://media.hew3d.com/docs/scenes-aad7b64d65.mp4",
+        "bytes": 4548728,
+        "sha256": "aad7b64d651f85a1c44236ac390c7c7336226df1a86ee592e4a09aaced6a5a5a"
+      },
+      "poster": {
+        "key": "docs/scenes-f682610502.jpg",
+        "url": "https://media.hew3d.com/docs/scenes-f682610502.jpg",
+        "bytes": 168546,
+        "sha256": "f682610502e3049d8a04ab523dede0e6b42455bcabb52da27b3f89ccfb239192"
+      },
+      "seconds": 33.2,
+      "theme": "dark"
+    },
+    "text-3d": {
+      "webm": {
+        "key": "docs/text-3d-cfe884bc33.webm",
+        "url": "https://media.hew3d.com/docs/text-3d-cfe884bc33.webm",
+        "bytes": 3816775,
+        "sha256": "cfe884bc33426bff203b540a940fc609e2f19d807f649db00ea108c096d27c15"
+      },
+      "mp4": {
+        "key": "docs/text-3d-e1fc52875c.mp4",
+        "url": "https://media.hew3d.com/docs/text-3d-e1fc52875c.mp4",
+        "bytes": 5852182,
+        "sha256": "e1fc52875ca3181b7decbe4e8470dede0caf3331c06baf06b7525c3b21babad0"
+      },
+      "poster": {
+        "key": "docs/text-3d-4d6eae48f9.jpg",
+        "url": "https://media.hew3d.com/docs/text-3d-4d6eae48f9.jpg",
+        "bytes": 89467,
+        "sha256": "4d6eae48f9ab7c6ed79c40f50b28a4add681b29d5f64e4c44362c23a65952b9d"
+      },
+      "seconds": 36.2,
+      "theme": "dark"
+    },
+    "viewing": {
+      "webm": {
+        "key": "docs/viewing-ab6f977756.webm",
+        "url": "https://media.hew3d.com/docs/viewing-ab6f977756.webm",
+        "bytes": 3245648,
+        "sha256": "ab6f97775614c832ec4e76c61f088371c01b864875eed1cabf33c138c14b0ac0"
+      },
+      "mp4": {
+        "key": "docs/viewing-2b95c7c5e1.mp4",
+        "url": "https://media.hew3d.com/docs/viewing-2b95c7c5e1.mp4",
+        "bytes": 5304267,
+        "sha256": "2b95c7c5e1ebff380105ca401474f3b6bd479a9302a48617661dada14824a07d"
+      },
+      "poster": {
+        "key": "docs/viewing-38c983efe8.jpg",
+        "url": "https://media.hew3d.com/docs/viewing-38c983efe8.jpg",
+        "bytes": 167293,
+        "sha256": "38c983efe8dd5c5e9aaad614273d74dfdf58eb87d9f21273087acef21ee6c893"
+      },
+      "seconds": 31.7,
+      "theme": "dark"
+    }
+  }
+}

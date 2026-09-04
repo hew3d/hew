@@ -6,6 +6,8 @@ order: 16
 
 Once a model outgrows a dozen objects, you stop finding things by orbiting around looking for them. The right-hand tray is the answer: the **Outliner** shows everything, **Object Info** names and tags the selected thing, and **Tags** toggles whole categories on and off.
 
+<docs-video theme="dark" slug="organizing" label="organizing demonstration"></docs-video>
+
 ![A named group with a tag: Object Info shows the name and tag chip, the Outliner shows the group row, and the Tags panel shows the tag tree with counts](/docs/organization.webp)
 
 ## The Outliner

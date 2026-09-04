@@ -6,6 +6,8 @@ order: 7
 
 Follow Me sweeps a closed profile along a path and answers with a new watertight solid. It's the tool for everything push/pull can't reach in one straight stroke: a pipe that turns corners, a molding run around a tabletop, a picture frame, a rounded or chamfered edge strip.
 
+<docs-video theme="dark" slug="follow-me" label="follow me demonstration"></docs-video>
+
 ![A circle drawn on the ground for the path, with a flat goblet profile sketched beside it, not yet swept](/docs/follow-me-setup.webp)
 
 ## The gesture

@@ -6,6 +6,8 @@ order: 10
 
 Models made in Hew tend to get manufactured: 3D printed, cut, assembled. Exact dimensions are first-class. They come from typed input on every tool, from the display units you choose, and from construction guides that extend the snapping system.
 
+<docs-video theme="dark" slug="measurement-and-guides" label="measurement and guides demonstration"></docs-video>
+
 ## Units
 
 Model geometry is always stored in meters internally. **Settings ▸ Units** controls how lengths are *displayed and interpreted*:

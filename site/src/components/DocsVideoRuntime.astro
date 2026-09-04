@@ -1,0 +1,145 @@
+---
+// The <docs-video> runtime: the slug->media manifest plus the custom-element
+// definition. Included only by Learn chapter pages that actually carry a
+// clip (learn/[...slug].astro checks the manifest), so the rest of the site
+// ships none of this.
+import docsVideoManifest from '../data/videos.json';
+---
+
+<script is:inline define:vars={{ docsVideoMedia: Object.fromEntries(
+  Object.entries(docsVideoManifest.videos).map(([slug, v]) => [slug, {
+    webm: v.webm.url, mp4: v.mp4.url, poster: v.poster.url,
+  }])) }}>
+  // slug -> published media URLs (content-hashed keys pinned by the
+  // committed manifest, site/src/data/videos.json)
+  window.__hewDocsVideos = docsVideoMedia;
+</script>
+<script is:inline>
+  // <docs-video slug="push-pull"> — muted-autoplay docs clip resolved
+  // through the committed manifest to its content-hashed media URLs
+  // (a base="/videos/clip" attribute is the local-preview escape
+  // hatch: it loads {base}-{theme}.{webm,mp4} straight from the site)
+  // Lightweight controls: click to pause/resume, hover strip with
+  // play/scrub/fullscreen; follows data-theme flips live when the
+  // media is not theme-pinned, preserving position.
+  (function () {
+    if (customElements.get('docs-video')) return;
+    var css = document.createElement('style');
+    css.textContent = [
+      'docs-video{display:block;position:relative;border-radius:10px;overflow:hidden;aspect-ratio:16/9;',
+      ' border:1px solid var(--color-border,#DED5C4);line-height:0}',
+      'docs-video video{width:100%;display:block;cursor:pointer}',
+      'docs-video .dv-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;',
+      ' gap:10px;padding:8px 12px;background:linear-gradient(transparent,rgba(27,26,23,.72));',
+      ' opacity:0;transition:opacity .2s;line-height:normal}',
+      'docs-video:hover .dv-bar,docs-video.dv-paused .dv-bar{opacity:1}',
+      'docs-video .dv-btn{background:none;border:0;padding:2px;cursor:pointer;color:#F3EDE3;',
+      ' display:inline-flex;align-items:center}',
+      'docs-video .dv-btn svg{width:20px;height:20px;fill:currentColor}',
+      'docs-video .dv-track{flex:1;height:4px;border-radius:2px;background:rgba(243,237,227,.35);',
+      ' cursor:pointer;position:relative}',
+      'docs-video .dv-fill{height:100%;width:0;border-radius:2px;background:#C45D3C}',
+      'docs-video:fullscreen{border:0;border-radius:0;background:#000;display:flex;align-items:center}',
+      'docs-video:fullscreen video{max-height:100vh}',
+    ].join('');
+    document.head.appendChild(css);
+    var PLAY = '<svg viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5z"/></svg>';
+    var PAUSE = '<svg viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>';
+    var FULL = '<svg viewBox="0 0 24 24"><path d="M4 9V4h5v2H6v3zM15 4h5v5h-2V6h-3zM18 15h2v5h-5v-2h3zM9 20H4v-5h2v3h3z"/></svg>';
+    class DocsVideo extends HTMLElement {
+      connectedCallback() {
+        this.build();
+        this.observer = new MutationObserver(this.retheme.bind(this));
+        this.observer.observe(document.documentElement, {
+          attributes: true, attributeFilter: ['data-theme'],
+        });
+      }
+      disconnectedCallback() { if (this.observer) this.observer.disconnect(); }
+      theme() {
+        // a fixed theme attribute pins the clip (docs media is dark by
+        // convention, matching the screenshot fleet); otherwise follow
+        // the site theme
+        var pinned = this.getAttribute('theme');
+        if (pinned === 'dark' || pinned === 'light') return pinned;
+        return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+      }
+      build() {
+        var self = this;
+        var slug = this.getAttribute('slug');
+        var base = this.getAttribute('base');
+        var entry = slug && (window.__hewDocsVideos || {})[slug];
+        var t = this.theme();
+        if ((slug && !entry) || (!slug && !base)) {
+          console.error('[docs-video] ' + (slug
+            ? 'slug "' + slug + '" is not in the videos.json manifest'
+            : 'needs a slug or base attribute'));
+          this.style.display = 'none'; this.replaceChildren(); return;
+        }
+        var media = entry || {
+          webm: base + '-' + t + '.webm',
+          mp4: base + '-' + t + '.mp4',
+          poster: base + '-' + t + '.jpg',
+        };
+        var v = document.createElement('video');
+        v.muted = true; v.autoplay = true; v.loop = true;
+        v.playsInline = true; v.preload = 'metadata';
+        v.poster = media.poster;
+        v.setAttribute('aria-label', this.getAttribute('label') || 'demonstration video');
+        [['webm', 'video/webm; codecs="av01.0.08M.08"'],
+         ['mp4', 'video/mp4; codecs="avc1.640028"']].forEach(function (f) {
+          var s = document.createElement('source');
+          s.src = media[f[0]]; s.type = f[1];
+          v.appendChild(s);
+        });
+        var bar = document.createElement('div'); bar.className = 'dv-bar';
+        var play = document.createElement('button');
+        play.className = 'dv-btn'; play.setAttribute('aria-label', 'Play or pause');
+        var track = document.createElement('div'); track.className = 'dv-track';
+        var fill = document.createElement('div'); fill.className = 'dv-fill';
+        track.appendChild(fill);
+        var fs = document.createElement('button');
+        fs.className = 'dv-btn'; fs.setAttribute('aria-label', 'Full screen');
+        fs.innerHTML = FULL;
+        bar.append(play, track, fs);
+        function paint() {
+          play.innerHTML = v.paused ? PLAY : PAUSE;
+          self.classList.toggle('dv-paused', v.paused);
+        }
+        function toggle() { if (v.paused) v.play(); else v.pause(); }
+        v.addEventListener('click', toggle);
+        play.addEventListener('click', toggle);
+        v.addEventListener('play', paint);
+        v.addEventListener('pause', paint);
+        v.addEventListener('timeupdate', function () {
+          if (v.duration) fill.style.width = (v.currentTime / v.duration) * 100 + '%';
+        });
+        track.addEventListener('click', function (e) {
+          var r = track.getBoundingClientRect();
+          if (v.duration) v.currentTime = ((e.clientX - r.left) / r.width) * v.duration;
+        });
+        fs.addEventListener('click', function () {
+          if (document.fullscreenElement === self) document.exitFullscreen();
+          else if (self.requestFullscreen) self.requestFullscreen();
+          else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen(); // iPhone: native player
+        });
+        this.currentTheme = t;
+        this.replaceChildren(v, bar);
+        this.video = v;
+        paint();
+      }
+      retheme() {
+        var t = this.theme();
+        if (t === this.currentTheme || !this.video) return;
+        var at = this.video.currentTime;
+        var wasPaused = this.video.paused;
+        this.build();
+        var v = this.video;
+        v.addEventListener('loadedmetadata', function () {
+          try { v.currentTime = at; } catch (e) {}
+          if (wasPaused) v.pause(); else v.play().catch(function () {});
+        }, { once: true });
+      }
+    }
+    customElements.define('docs-video', DocsVideo);
+  })();
+</script>
