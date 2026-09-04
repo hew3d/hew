@@ -1,0 +1,121 @@
+{
+  "fps": 30,
+  "out": "../../site/public/videos/reel",
+  "poster_at": 1.0,
+  "shots": [
+    {
+      "shot": "ui-tour",
+      "in": "start",
+      "in_off": 0.3,
+      "out": "recess",
+      "out_off": 0.9,
+      "speed": 2.4,
+      "readme": true
+    },
+    {
+      "shot": "ui-scenes",
+      "in": "start",
+      "in_off": -0.3,
+      "out": "tag-shown",
+      "out_off": 0.4,
+      "speed": 2.0
+    },
+    {
+      "shot": "carve",
+      "in": "box",
+      "in_off": 1.2,
+      "out": "hole",
+      "out_off": 0.5,
+      "speed": 2.6,
+      "readme": true
+    },
+    {
+      "shot": "offset-tray",
+      "in": "slab",
+      "in_off": 0.8,
+      "out": "tray",
+      "out_off": 0.6,
+      "speed": 2.6
+    },
+    {
+      "shot": "cylinder-radius",
+      "in": "cylinder",
+      "in_off": 0.6,
+      "out": "thinner",
+      "out_off": 0.5,
+      "speed": 2.6
+    },
+    {
+      "shot": "subtract",
+      "in": "subtract",
+      "in_off": -2.0,
+      "out": "subtract",
+      "out_off": 3.0,
+      "speed": 2.4
+    },
+    {
+      "shot": "lathe",
+      "in": "setup",
+      "in_off": -1.0,
+      "out": "sphere",
+      "out_off": 2.0,
+      "speed": 2.2
+    },
+    {
+      "shot": "array",
+      "in": "box",
+      "in_off": 0.3,
+      "out": "array",
+      "out_off": 1.2,
+      "speed": 2.2
+    },
+    {
+      "shot": "hero-desk-set",
+      "in": "start",
+      "out": "orbited",
+      "out_off": 0.0,
+      "speed": 2.0,
+      "readme": true
+    },
+    {
+      "shot": "inference",
+      "in": "on-face",
+      "in_off": 1.0,
+      "out": "cup-midpoint",
+      "out_off": 0.6,
+      "speed": 2.2
+    },
+    {
+      "shot": "paint",
+      "in": "painted",
+      "in_off": -2.2,
+      "out": "painted",
+      "out_off": 0.9,
+      "speed": 2.0
+    },
+    {
+      "shot": "section",
+      "in": "placed",
+      "in_off": -1.0,
+      "out": "sweep-end",
+      "out_off": 0.4,
+      "speed": 2.2
+    },
+    {
+      "shot": "hero-theater",
+      "in": "start",
+      "out": "orbited",
+      "out_off": 0.0,
+      "speed": 2.0
+    },
+    {
+      "shot": "hero-framing",
+      "in": "start",
+      "out": "lap-end",
+      "out_off": 0.2,
+      "speed": 1.8,
+      "readme": true,
+      "in_off": 0.2
+    }
+  ]
+}

@@ -48,6 +48,12 @@ const pages = defineCollection({
         secondaryCta: ctaSchema.optional(),
       })
       .optional(),
+    reel: z
+      .object({
+        label: z.string(),
+        caption: z.string().optional(),
+      })
+      .optional(),
     screenshots: z
       .array(
         z.object({

@@ -2,12 +2,18 @@
 import { getEntry } from 'astro:content';
 import BaseLayout from '../layouts/BaseLayout.astro';
 import Hero from '../components/Hero.astro';
+import ReelFrame from '../components/ReelFrame.astro';
+import { resolveReel } from '../lib/reel';
 import ScreenshotFrame from '../components/ScreenshotFrame.astro';
 import FeatureGrid from '../components/FeatureGrid.astro';
 import Comparison from '../components/Comparison.astro';
 import CtaBand from '../components/CtaBand.astro';
 
 const entry = await getEntry('pages', 'landing');
+// The reel sits under the hero once it is published (or when previewing a
+// local render); the screenshot rotator keeps its own place further down,
+// above the comparison.
+const reelMedia = resolveReel();
 if (!entry) {
   throw new Error('Missing content/pages/landing.md entry');
 }
@@ -16,6 +22,7 @@ const {
   title,
   description,
   hero,
+  reel,
   screenshots,
   features,
   comparisonTitle,
@@ -38,13 +45,15 @@ const {
     )
   }
 
+  {reel && reelMedia && <ReelFrame media={reelMedia} label={reel.label} caption={reel.caption} />}
+
+  {features && features.length > 0 && <FeatureGrid features={features} />}
+
   {
     screenshots && screenshots.length > 0 && (
       <ScreenshotFrame screenshots={screenshots} />
     )
   }
-
-  {features && features.length > 0 && <FeatureGrid features={features} />}
 
   {
     comparisonTitle && comparison && comparison.length > 0 && (

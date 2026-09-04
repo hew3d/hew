@@ -17,9 +17,12 @@
 </p>
 
 <p align="center">
-  <img src="site/public/screenshots/hew-theater.jpg"
-       alt="The Hew desktop app showing a home-theater room model with framing, seating, and a tagged object tree"
-       width="720">
+  <picture>
+    <source type="image/webp" srcset="https://media.hew3d.com/reel/readme-2b58ce23b1.webp">
+    <img src="https://media.hew3d.com/reel/readme-09a60871b9.gif"
+         alt="Hew drawing a rectangle and pulling it into a solid, then the app's tool rail, panels, and Outliner appearing around it; carving a recess and a hole into a block; orbiting a finished desk set; and orbiting a whole-house framing model"
+         width="720">
+  </picture>
 </p>
 
 ---

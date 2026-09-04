@@ -11,6 +11,8 @@ hero:
   secondaryCta:
     label: "Try it in your browser"
     href: "https://app.hew3d.com"
+reel:
+  label: "Hew drawing and pulling a box, carving it, subtracting a cylinder, sweeping a sphere, painting, cutting a section, and orbiting finished models — captured from the web app"
 screenshots:
   - src: "/screenshots/trestle-table-measure.webp"
     alt: "The Hew desktop app on macOS dark theme, showing a 3D model of a trestle table, measurement, object info, outliner, and scenes"
