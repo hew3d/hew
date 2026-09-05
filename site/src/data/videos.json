@@ -331,5 +331,38 @@
       "seconds": 31.7,
       "theme": "dark"
     }
+  },
+  "reel": {
+    "webm": {
+      "key": "reel/reel-f7abf80ac8.webm",
+      "url": "https://media.hew3d.com/reel/reel-f7abf80ac8.webm",
+      "bytes": 7621370,
+      "sha256": "f7abf80ac8d6737d7f71bef31ff6573c369f380ac28d05010ec2fd97f8d83130"
+    },
+    "mp4": {
+      "key": "reel/reel-c457fbc53e.mp4",
+      "url": "https://media.hew3d.com/reel/reel-c457fbc53e.mp4",
+      "bytes": 12313498,
+      "sha256": "c457fbc53e5e5dfa60df1523189eb6386967819ea752efb822ec0b5fe3fff5cb"
+    },
+    "poster": {
+      "key": "reel/reel-619feb5be5.jpg",
+      "url": "https://media.hew3d.com/reel/reel-619feb5be5.jpg",
+      "bytes": 151614,
+      "sha256": "619feb5be5a77a06763c63545e3876cf6298421f87253ea5b346ac58d9c26202"
+    },
+    "readme_webp": {
+      "key": "reel/readme-2b58ce23b1.webp",
+      "url": "https://media.hew3d.com/reel/readme-2b58ce23b1.webp",
+      "bytes": 1611634,
+      "sha256": "2b58ce23b10dc10a8a1957e18bacb282a7f7046e22c0359df1b0083592ce608d"
+    },
+    "readme_gif": {
+      "key": "reel/readme-09a60871b9.gif",
+      "url": "https://media.hew3d.com/reel/readme-09a60871b9.gif",
+      "bytes": 9091183,
+      "sha256": "09a60871b99bbe3231a9d81d4aff652bd48c3126f8108fd393e25dbd6307d82a"
+    },
+    "seconds": 48.5
   }
 }
