@@ -18,9 +18,9 @@
 
 <p align="center">
   <picture>
-    <source type="image/webp" srcset="https://media.hew3d.com/reel/readme-2b58ce23b1.webp">
-    <img src="https://media.hew3d.com/reel/readme-09a60871b9.gif"
-         alt="Hew drawing a rectangle and pulling it into a solid, then the app's tool rail, panels, and Outliner appearing around it; carving a recess and a hole into a block; orbiting a finished desk set; and orbiting a whole-house framing model"
+    <source type="image/webp" srcset="https://media.hew3d.com/reel/readme-6b25ffa5f2.webp">
+    <img src="https://media.hew3d.com/reel/readme-1a8f02de57.gif"
+         alt="Hew drawing a rectangle and pulling it into a solid, then the app's tool rail and panels appearing around it; carving a recess and a hole into a block; a trestle table switching between saved scenes, its parts listed in the Outliner, and a tag hidden and shown; orbiting a finished desk set; and a lap around a whole-house framing model"
          width="720">
   </picture>
 </p>

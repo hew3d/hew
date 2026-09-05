@@ -18,7 +18,8 @@
       "in_off": -0.3,
       "out": "tag-shown",
       "out_off": 0.4,
-      "speed": 2.0
+      "speed": 2.0,
+      "readme": true
     },
     {
       "shot": "carve",
@@ -114,8 +115,12 @@
       "out": "lap-end",
       "out_off": 0.2,
       "speed": 1.8,
+      "in_off": 0.2,
       "readme": true,
-      "in_off": 0.2
+      "readme_in": "lap",
+      "readme_in_off": 0.0,
+      "readme_out": "lap-end",
+      "readme_out_off": 0.0
     }
   ]
 }

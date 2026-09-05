@@ -352,16 +352,16 @@
       "sha256": "619feb5be5a77a06763c63545e3876cf6298421f87253ea5b346ac58d9c26202"
     },
     "readme_webp": {
-      "key": "reel/readme-2b58ce23b1.webp",
-      "url": "https://media.hew3d.com/reel/readme-2b58ce23b1.webp",
-      "bytes": 1611634,
-      "sha256": "2b58ce23b10dc10a8a1957e18bacb282a7f7046e22c0359df1b0083592ce608d"
+      "key": "reel/readme-6b25ffa5f2.webp",
+      "url": "https://media.hew3d.com/reel/readme-6b25ffa5f2.webp",
+      "bytes": 1203956,
+      "sha256": "6b25ffa5f250bb4b5780900174e4e9f4fde7cb4e5a3e7ca08a98f5ba564e69b9"
     },
     "readme_gif": {
-      "key": "reel/readme-09a60871b9.gif",
-      "url": "https://media.hew3d.com/reel/readme-09a60871b9.gif",
-      "bytes": 9091183,
-      "sha256": "09a60871b99bbe3231a9d81d4aff652bd48c3126f8108fd393e25dbd6307d82a"
+      "key": "reel/readme-1a8f02de57.gif",
+      "url": "https://media.hew3d.com/reel/readme-1a8f02de57.gif",
+      "bytes": 5142300,
+      "sha256": "1a8f02de577ce7ef6002b4cd38eb1217a246889f8ce5b6a19cc40727b9bc0c88"
     },
     "seconds": 48.5
   }

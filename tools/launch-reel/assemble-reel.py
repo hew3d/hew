@@ -18,7 +18,10 @@ Outputs, next to reel.json unless --out is given:
   <out>.mp4    H.264 (CRF via --h264-crf), the Safari fallback
   <out>.jpg    poster frame
   <out>-readme.gif / .webp   the README excerpt: the shots flagged
-               "readme": true, at --readme-width px, looping
+               "readme": true, at --readme-width px, looping. A shot can
+               carry its own README cut ("readme_in"/"readme_out" plus
+               "readme_in_off"/"readme_out_off") when the excerpt wants a
+               shorter piece of it than the reel does.
 
   assemble-reel.py [--only SHOT] [--readme-only] [--h264-crf 20]
 """
@@ -30,8 +33,11 @@ ap.add_argument("--reel", default=os.path.join(HERE, "reel.json"))
 ap.add_argument("--out", default=None, help="output basename (default: reel.json's \"out\")")
 ap.add_argument("--only", help="build a single shot as <out>-<shot>.mp4 for review")
 ap.add_argument("--h264-crf", type=int, default=23)
-ap.add_argument("--readme-width", type=int, default=720)
-ap.add_argument("--readme-fps", type=int, default=15)
+# 560 px at 12 fps decodes in real time on ordinary machines; a 720 px
+# 15 fps excerpt stalled on long pans (animated images delay frames when
+# decoding falls behind rather than dropping them)
+ap.add_argument("--readme-width", type=int, default=560)
+ap.add_argument("--readme-fps", type=int, default=12)
 ap.add_argument("--readme-only", action="store_true")
 a = ap.parse_args()
 
@@ -49,14 +55,16 @@ def duration(path):
     return float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
                                  "-of", "csv=p=0", path], capture_output=True, text=True).stdout)
 
-def cut(entry, dest):
+def cut(entry, dest, key=""):
+    """Cut one shot; key="readme_" reads the README-specific bounds when set."""
     meta_path = os.path.join(HERE, "out", entry["shot"], "capture-meta.json")
     meta = json.load(open(meta_path))
     video, marks = meta["video"], meta["marks"]
     dur = duration(video)
     off = dur - marks["end"]
-    t_in = marks[entry.get("in", "start")] + off + entry.get("in_off", 0.0)
-    t_out = marks[entry.get("out", "end")] + off + entry.get("out_off", 0.0)
+    g = lambda name, default: entry.get(key + name, entry.get(name, default)) if key else entry.get(name, default)
+    t_in = marks[g("in", "start")] + off + g("in_off", 0.0)
+    t_out = marks[g("out", "end")] + off + g("out_off", 0.0)
     speed = entry.get("speed", 1.0)
     # ffmpeg's trim silently clamps an out-of-range start to 0 and produces a
     # shorter, shifted clip with a zero exit code — refuse instead.
@@ -80,11 +88,12 @@ if a.only:
 tmp = tempfile.mkdtemp(prefix="hew-reel-")
 try:
     parts, total = [], 0.0
-    for i, entry in enumerate(shots):
-        dest = os.path.join(tmp, f"{i:02d}-{entry['shot']}.mp4")
-        total += cut(entry, dest)
-        parts.append((entry, dest))
-    print(f"  total {total:.1f}s over {len(parts)} shots")
+    if not a.readme_only:
+        for i, entry in enumerate(shots):
+            dest = os.path.join(tmp, f"{i:02d}-{entry['shot']}.mp4")
+            total += cut(entry, dest)
+            parts.append((entry, dest))
+        print(f"  total {total:.1f}s over {len(parts)} shots")
 
     def concat(entries, dest):
         lst = os.path.join(tmp, "list.txt")
@@ -100,9 +109,9 @@ try:
         print("wrote", dest)
         sys.exit(0)
 
-    master = os.path.join(tmp, "master.mp4")
-    concat(parts, master)
     if not a.readme_only:
+        master = os.path.join(tmp, "master.mp4")
+        concat(parts, master)
         run(["ffmpeg", "-y", "-v", "error", "-i", master, "-an",
              "-c:v", "libsvtav1", "-crf", "38", "-preset", "8", "-g", str(fps * 5),
              f"{out_base}.webm"])
@@ -113,8 +122,13 @@ try:
              "-frames:v", "1", "-q:v", "3", f"{out_base}.jpg"])
         print("wrote", f"{out_base}.webm", f"{out_base}.mp4", f"{out_base}.jpg")
 
-    readme_parts = [p for p in parts if p[0].get("readme")]
+    readme_parts, rtotal = [], 0.0
+    for i, entry in enumerate(e for e in shots if e.get("readme")):
+        dest = os.path.join(tmp, f"readme-{i:02d}-{entry['shot']}.mp4")
+        rtotal += cut(entry, dest, key="readme_")
+        readme_parts.append((entry, dest))
     if readme_parts:
+        print(f"  README excerpt {rtotal:.1f}s over {len(readme_parts)} shots")
         excerpt = os.path.join(tmp, "readme.mp4")
         concat(readme_parts, excerpt)
         w = a.readme_width
