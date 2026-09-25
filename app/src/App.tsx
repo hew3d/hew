@@ -5984,7 +5984,9 @@ export default function App() {
               scene={state.scene}
               docRev={docRev}
               selectedIds={selectedIds}
-              onDocumentChanged={handleDocumentChanged}
+              // Segments rebuilds a circle's chords, so this panel needs the
+              // repaint path like every other tray panel that edits geometry.
+              onDocumentChanged={refreshAfterPanelMutation}
               onSelectMany={handleReplaceSelection}
               onToast={handleToast}
             />
