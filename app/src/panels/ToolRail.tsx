@@ -16,6 +16,11 @@ import { TOOL_ICON_SVG } from '../tools/toolIcons'
 import { RAIL_GROUPS, toolsInGroup, shortcutFor, type ToolName } from '../tools/toolRegistry'
 import { isMac } from '../platform'
 import libraryBooksSvg from '@material-symbols/svg-400/outlined/library_books.svg?raw'
+import chevronLeftSvg from '@material-symbols/svg-400/outlined/chevron_left.svg?raw'
+import chevronRightSvg from '@material-symbols/svg-400/outlined/chevron_right.svg?raw'
+
+export const RAIL_WIDE_WIDTH = 172
+export const RAIL_NARROW_WIDTH = 34
 
 export interface ToolRailProps {
   activeTool: ToolName
@@ -40,6 +45,12 @@ export interface ToolRailProps {
    * `aria-pressed`/highlight, same posture as a tool's active state even
    * though this isn't a tool (no ToolName of its own). */
   libraryOpen?: boolean
+  /** Icons-only mode: rows lose their name and shortcut chip, the palette
+   * field is absent, group headings become hairline dividers. The rail
+   * stays visible and every tool stays one click away; the row's `title`
+   * carries the name as a tooltip. */
+  narrow?: boolean
+  onToggleNarrow?: () => void
 }
 
 /** Resting command-palette field for the top of the rail (all platforms —
@@ -90,8 +101,8 @@ function RailSearchField({ onOpen, kbd }: { onOpen: () => void; kbd: string }) {
  * source SVGs carry no `fill` attribute, so `fill="currentColor"` is spliced
  * onto the root `<svg>` tag here — letting the row's `color` style (active
  * vs. idle) drive icon color without a stylesheet. */
-function ToolIcon({ name, size = 16 }: { name: ToolName; size?: number }) {
-  const svg = TOOL_ICON_SVG[name]
+export function InlineIcon({ svg, size = 16 }: { svg: string; size?: number }) {
+  const sized = svg
     .replace(/\swidth="[^"]*"/, '')
     .replace(/\sheight="[^"]*"/, '')
     .replace('<svg ', `<svg fill="currentColor" width="${size}" height="${size}" `)
@@ -99,8 +110,66 @@ function ToolIcon({ name, size = 16 }: { name: ToolName; size?: number }) {
     <span
       aria-hidden="true"
       style={{ width: `${size}px`, height: `${size}px`, display: 'block', overflow: 'hidden', flexShrink: 0 }}
-      dangerouslySetInnerHTML={{ __html: svg }}
+      dangerouslySetInnerHTML={{ __html: sized }}
     />
+  )
+}
+
+function ToolIcon({ name, size = 16 }: { name: ToolName; size?: number }) {
+  return <InlineIcon svg={TOOL_ICON_SVG[name]} size={size} />
+}
+
+function RailWidthToggle({ narrow, onToggle }: { narrow: boolean; onToggle: () => void }) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      type="button"
+      aria-label={narrow ? 'Expand tool rail' : 'Collapse tool rail'}
+      title={narrow ? 'Expand tool rail' : 'Collapse tool rail'}
+      onClick={onToggle}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        alignSelf: narrow ? 'center' : 'flex-end',
+        display: 'flex',
+        padding: '2px',
+        borderRadius: 'var(--radius-control)',
+        border: 'none',
+        cursor: 'pointer',
+        color: 'var(--text-faint, #888)',
+        background: hovered ? 'rgba(255,255,255,0.04)' : 'transparent',
+        marginBottom: narrow ? 0 : 'var(--space-3, 8px)',
+      }}
+    >
+      <InlineIcon svg={narrow ? chevronRightSvg : chevronLeftSvg} size={18} />
+    </button>
+  )
+}
+
+function GroupHeading({ label, narrow }: { label: string; narrow: boolean }) {
+  if (narrow) {
+    return (
+      <div
+        role="separator"
+        aria-label={label}
+        style={{ borderTop: '1px solid var(--border-hairline)', margin: '8px var(--space-4)' }}
+      />
+    )
+  }
+  return (
+    <div
+      style={{
+        fontFamily: 'var(--font-family-mono)',
+        fontSize: 'var(--font-size-section-header)',
+        fontWeight: 600,
+        textTransform: 'uppercase',
+        letterSpacing: '0.12em',
+        color: 'var(--text-section)',
+        padding: '12px var(--space-4) 6px',
+      }}
+    >
+      {label}
+    </div>
   )
 }
 
@@ -129,10 +198,12 @@ function KbdChip({ shortcut, active }: { shortcut: string; active: boolean }) {
 function ToolRow({
   name,
   active,
+  narrow,
   onSelect,
 }: {
   name: ToolName
   active: boolean
+  narrow: boolean
   onSelect: () => void
 }) {
   const [hovered, setHovered] = useState(false)
@@ -167,8 +238,12 @@ function ToolRow({
       }}
     >
       <ToolIcon name={name} />
-      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
-      <KbdChip shortcut={shortcut} active={active} />
+      {!narrow && (
+        <>
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+          <KbdChip shortcut={shortcut} active={active} />
+        </>
+      )}
     </button>
   )
 }
@@ -178,12 +253,8 @@ function ToolRow({
  * `ToolName` — the Library dialog is a viewport-level modal, not a
  * registry-driven tool, so it can't reuse `ToolRow`'s `TOOL_ICON_SVG` lookup
  * or `shortcutFor`. */
-function LibraryRow({ active, onSelect }: { active: boolean; onSelect: () => void }) {
+function LibraryRow({ active, narrow, onSelect }: { active: boolean; narrow: boolean; onSelect: () => void }) {
   const [hovered, setHovered] = useState(false)
-  const svg = libraryBooksSvg
-    .replace(/\swidth="[^"]*"/, '')
-    .replace(/\sheight="[^"]*"/, '')
-    .replace('<svg ', '<svg fill="currentColor" width="16" height="16" ')
   return (
     <button
       type="button"
@@ -211,24 +282,33 @@ function LibraryRow({ active, onSelect }: { active: boolean; onSelect: () => voi
         boxShadow: active ? 'inset 2px 0 0 var(--accent-base)' : 'none',
       }}
     >
-      <span
-        aria-hidden="true"
-        style={{ width: '16px', height: '16px', display: 'block', overflow: 'hidden', flexShrink: 0 }}
-        dangerouslySetInnerHTML={{ __html: svg }}
-      />
-      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Library</span>
-      <KbdChip shortcut="⇧L" active={active} />
+      <InlineIcon svg={libraryBooksSvg} />
+      {!narrow && (
+        <>
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Library</span>
+          <KbdChip shortcut="⇧L" active={active} />
+        </>
+      )}
     </button>
   )
 }
 
-export function ToolRail({ activeTool, onSelectTool, onOpenPalette, paletteKbd, onOpenLibrary, libraryOpen = false }: ToolRailProps) {
+export function ToolRail({
+  activeTool,
+  onSelectTool,
+  onOpenPalette,
+  paletteKbd,
+  onOpenLibrary,
+  libraryOpen = false,
+  narrow = false,
+  onToggleNarrow,
+}: ToolRailProps) {
   return (
     <div
       role="radiogroup"
       aria-label="Tools"
       style={{
-        width: '172px',
+        width: `${narrow ? RAIL_NARROW_WIDTH : RAIL_WIDE_WIDTH}px`,
         flexShrink: 0,
         background: 'var(--surface-panel)',
         borderRight: '1px solid var(--border-hairline)',
@@ -239,29 +319,19 @@ export function ToolRail({ activeTool, onSelectTool, onOpenPalette, paletteKbd, 
         overflowY: 'auto',
       }}
     >
-      {onOpenPalette !== undefined && (
+      {onToggleNarrow !== undefined && <RailWidthToggle narrow={narrow} onToggle={onToggleNarrow} />}
+      {onOpenPalette !== undefined && !narrow && (
         <RailSearchField onOpen={onOpenPalette} kbd={paletteKbd ?? 'Ctrl K'} />
       )}
       {RAIL_GROUPS.map((group) => (
         <div key={group}>
-          <div
-            style={{
-              fontFamily: 'var(--font-family-mono)',
-              fontSize: 'var(--font-size-section-header)',
-              fontWeight: 600,
-              textTransform: 'uppercase',
-              letterSpacing: '0.12em',
-              color: 'var(--text-section)',
-              padding: '12px var(--space-4) 6px',
-            }}
-          >
-            {group}
-          </div>
+          <GroupHeading label={group} narrow={narrow} />
           {toolsInGroup(group).map((t) => (
             <ToolRow
               key={t.name}
               name={t.name}
               active={activeTool === t.name}
+              narrow={narrow}
               onSelect={() => onSelectTool(t.name)}
             />
           ))}
@@ -269,20 +339,8 @@ export function ToolRail({ activeTool, onSelectTool, onOpenPalette, paletteKbd, 
       ))}
       {onOpenLibrary !== undefined && (
         <div>
-          <div
-            style={{
-              fontFamily: 'var(--font-family-mono)',
-              fontSize: 'var(--font-size-section-header)',
-              fontWeight: 600,
-              textTransform: 'uppercase',
-              letterSpacing: '0.12em',
-              color: 'var(--text-section)',
-              padding: '12px var(--space-4) 6px',
-            }}
-          >
-            Library
-          </div>
-          <LibraryRow active={libraryOpen} onSelect={onOpenLibrary} />
+          <GroupHeading label="Library" narrow={narrow} />
+          <LibraryRow active={libraryOpen} narrow={narrow} onSelect={onOpenLibrary} />
         </div>
       )}
     </div>
