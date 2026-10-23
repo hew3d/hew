@@ -42,6 +42,10 @@ export default defineConfig({
           name: 'jsdom',
           environment: 'jsdom',
           include: ['src/**/*.test.tsx'],
+          // The component suites render the whole App; on a loaded machine
+          // (a full verify run next to a cargo build) the 5 s default
+          // timed out otherwise-passing tests.
+          testTimeout: 20_000,
           environmentOptions: { jsdom: { url: 'http://localhost/' } },
           setupFiles: ['src/test/setup.ts'],
         },

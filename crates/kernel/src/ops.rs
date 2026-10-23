@@ -10674,6 +10674,35 @@ mod tests {
         }
     }
 
+    // ------------------------------------------- footprints_overlap tolerance
+
+    fn xy_rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Point3> {
+        vec![
+            Point3::new(x0, y0, 0.0),
+            Point3::new(x1, y0, 0.0),
+            Point3::new(x1, y1, 0.0),
+            Point3::new(x0, y1, 0.0),
+        ]
+    }
+
+    /// Scale-independence guard, not a regression test for the crossing fix:
+    /// a bar crossing another with neither bar's corners or sampled interior
+    /// point inside the other, so only the proper-crossing test sees it, at
+    /// every scale. Old and new crossing code agree here; the old/new
+    /// difference is reachable only through the validator caller (see the
+    /// `hole_vertex_*` tests in `build.rs`), because this function's
+    /// inside-checks catch every hairline case first.
+    #[test]
+    fn footprints_overlap_sees_a_crossing_at_every_scale() {
+        let z = Vec3::new(0.0, 0.0, 1.0);
+        for k in [1e-3, 1.0, 100.0] {
+            let a = xy_rect(0.0, 0.0, 10.0 * k, k);
+            let b = xy_rect(8.9 * k, -3.0 * k, 9.9 * k, 6.0 * k);
+            assert!(footprints_overlap(&a, &b, z), "scale {k}");
+            assert!(footprints_overlap(&b, &a, z), "scale {k} swapped");
+        }
+    }
+
     // ---------------------------------------------------------------- helpers
 
     /// Build a unit cube (1×1×1) as a watertight Object.

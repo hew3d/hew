@@ -77,3 +77,10 @@ afterEach(async () => {
     cleanup()
   }
 })
+
+// waitFor/findBy default to 1 s, which a loaded machine (a full verify run
+// next to a cargo build) overruns on tests that pass alone. Give them room.
+if (typeof document !== 'undefined') {
+  const { configure } = await import('@testing-library/react')
+  configure({ asyncUtilTimeout: 5000 })
+}

@@ -253,7 +253,9 @@ impl Object {
             // assignment produces, while a vertex grazing the outer boundary
             // within tolerance must not fail legitimate geometry. (A
             // partially displaced hole cannot arise from valid operations at
-            // all: cut paths are refused if they cross hole territory.) The
+            // all: cut paths are refused if they cross hole territory; the
+            // proper-crossing test in `hole_leaves_outer` below catches the
+            // one that slips through.) The
             // on-ring clause matters: an imported hole whose every vertex
             // sits on the outer ring (SketchUp draws them) is a boundary
             // case for the strict ray test, whose verdict on such points

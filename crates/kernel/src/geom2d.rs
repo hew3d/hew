@@ -2,6 +2,10 @@
 //!
 //! These are used by both `sketch` (profile validation) and `ops` (hole
 //! reassignment during `split_face`).  Nothing here is public API.
+//!
+//! Segment contact is decided by exact orientation signs for crossings and a
+//! metric `tol::POINT_MERGE` distance for touches (DEVELOPMENT.md rule 6);
+//! no test compares a squared quantity against the metre tolerance.
 
 use crate::math::{Point3, Vec3};
 use crate::tol;
@@ -80,30 +84,26 @@ pub(crate) fn point_inside_polygon(pt: Point3, poly: &[Point3], normal: Vec3) ->
 /// Whether two segments cross at a single interior point of both — a
 /// PROPER crossing: touching at an endpoint, sharing a point of one with the
 /// interior of the other, or lying along each other all answer false.
+///
+/// Decided in two parts, neither scaling with segment length: the crossing
+/// itself is exact (the orientation signs of [`segments_cross_exactly`]),
+/// and any contact within [`tol::POINT_MERGE`] metres of an end
+/// ([`segments_touch`]) disqualifies it. (An earlier form compared
+/// orientation cross products — square metres — against the metre
+/// tolerance, so its dead band grew and shrank with the segments.) The
+/// tolerance is the kernel's one length tolerance (DEVELOPMENT.md rule 6).
 pub(crate) fn segments_cross_properly(p: Point3, q: Point3, r: Point3, s: Point3) -> bool {
+    segments_cross_exactly(p, q, r, s) && !segments_touch(p, q, r, s)
+}
+
+/// Whether an end of either segment lies within [`tol::POINT_MERGE`] of the
+/// other segment (an end touching, or the two running along each other).
+fn segments_touch(p: Point3, q: Point3, r: Point3, s: Point3) -> bool {
     let eps = tol::POINT_MERGE;
-    // The four orientation cross products of coplanar points all lie along
-    // the plane's normal; each is measured along ONE common axis (the
-    // longest of them), so their signs compare. (Taking each one's own
-    // dominant component flips signs on a face whose normal splits evenly
-    // between two axes.)
-    let c = [
-        (s - r).cross(p - r),
-        (s - r).cross(q - r),
-        (q - p).cross(r - p),
-        (q - p).cross(s - p),
-    ];
-    let axis = c
-        .iter()
-        .copied()
-        .max_by(|a, b| a.length_squared().total_cmp(&b.length_squared()))
-        .expect("four products");
-    let Ok(n) = axis.normalized() else {
-        return false; // all four ends on one line: no proper crossing
-    };
-    let [d1, d2, d3, d4] = c.map(|v| v.dot(n));
-    ((d1 > eps && d2 < -eps) || (d1 < -eps && d2 > eps))
-        && ((d3 > eps && d4 < -eps) || (d3 < -eps && d4 > eps))
+    point_near_segment(p, r, s, eps)
+        || point_near_segment(q, r, s, eps)
+        || point_near_segment(r, p, q, eps)
+        || point_near_segment(s, p, q, eps)
 }
 
 /// Whether segments `p–q` and `r–s` (coplanar) share a point: they cross,
@@ -120,15 +120,7 @@ pub(crate) fn segments_cross_properly(p: Point3, q: Point3, r: Point3, s: Point3
 /// the tolerance every other contact gate in the kernel uses — so nothing
 /// is reported that is neither a crossing nor a touch.
 pub(crate) fn segments_intersect(p: Point3, q: Point3, r: Point3, s: Point3) -> bool {
-    let eps = tol::POINT_MERGE;
-    if point_near_segment(p, r, s, eps)
-        || point_near_segment(q, r, s, eps)
-        || point_near_segment(r, p, q, eps)
-        || point_near_segment(s, p, q, eps)
-    {
-        return true;
-    }
-    segments_cross_exactly(p, q, r, s)
+    segments_touch(p, q, r, s) || segments_cross_exactly(p, q, r, s)
 }
 
 /// Whether coplanar segments `p–q` and `r–s` cross at a point interior to
@@ -1225,6 +1217,173 @@ mod tests {
             assert!(reference(p, q, r, s), "the reference sees the crossing");
             assert!(segments_intersect(p, q, r, s), "{p:?} {q:?} / {r:?} {s:?}");
             assert!(segments_intersect(r, s, p, q), "symmetric");
+        }
+    }
+
+    fn pt2(x: f64, y: f64) -> Point3 {
+        Point3::new(x, y, 0.0)
+    }
+
+    /// Every argument order and pair swap must answer alike.
+    fn proper_all_orders(p: Point3, q: Point3, r: Point3, s: Point3) -> bool {
+        let v = segments_cross_properly(p, q, r, s);
+        assert_eq!(v, segments_cross_properly(q, p, r, s), "reverse first");
+        assert_eq!(v, segments_cross_properly(p, q, s, r), "reverse second");
+        assert_eq!(v, segments_cross_properly(r, s, p, q), "swap pair");
+        v
+    }
+
+    /// 1 mm segments crossing with one end 10 nm past the other: a real
+    /// crossing, beyond `POINT_MERGE`. (The product-against-length form called it
+    /// a touch: its dead band was ~1 um at this scale.)
+    #[test]
+    fn millimetre_crossing_ten_nanometres_from_an_end_is_proper() {
+        let (p, q) = (pt2(0.0, 0.0), pt2(1e-3, 0.0));
+        // r sits 10 nm past the first segment, s a millimetre the other way.
+        let (r, s) = (pt2(5e-4, -1e-8), pt2(5e-4, 1e-3));
+        assert!(proper_all_orders(p, q, r, s));
+        assert!(segments_intersect(p, q, r, s));
+    }
+
+    /// 100 m segments, an end 0.5 nm from the other segment while the body
+    /// crosses: a touch (within `POINT_MERGE`), not a proper crossing.
+    #[test]
+    fn long_segment_end_half_a_nanometre_away_is_a_touch() {
+        let (p, q) = (pt2(0.0, 0.0), pt2(100.0, 0.0));
+        let (r, s) = (pt2(50.0, -0.5e-9), pt2(50.0, 50.0));
+        assert!(!proper_all_orders(p, q, r, s));
+        assert!(segments_intersect(p, q, r, s));
+        assert!(segments_intersect(r, s, p, q));
+    }
+
+    #[test]
+    fn contacts_are_not_proper_crossings() {
+        let (p, q) = (pt2(0.0, 0.0), pt2(2.0, 0.0));
+        // End on end.
+        assert!(!proper_all_orders(p, q, pt2(2.0, 0.0), pt2(3.0, 1.0)));
+        // T-touch: an end exactly on the other's body.
+        assert!(!proper_all_orders(p, q, pt2(1.0, 0.0), pt2(1.0, 1.0)));
+        // Collinear overlap.
+        assert!(!proper_all_orders(p, q, pt2(1.0, 0.0), pt2(3.0, 0.0)));
+        // Shared endpoint.
+        assert!(!proper_all_orders(p, q, pt2(0.0, 0.0), pt2(1.0, 1.0)));
+        // A plain X still crosses.
+        assert!(proper_all_orders(p, q, pt2(1.0, -1.0), pt2(1.0, 1.0)));
+    }
+
+    /// Hand-checked pairs `(p, q, r, s, proper, touch)`, expectations written
+    /// as literals so the touch half is not checked only against itself.
+    #[test]
+    fn hand_checked_contact_table() {
+        let cases = [
+            // Plain X.
+            ([0.0, 0.0], [2.0, 2.0], [0.0, 2.0], [2.0, 0.0], true, false),
+            // T: end on the other's body.
+            ([0.0, 0.0], [2.0, 0.0], [1.0, 0.0], [1.0, 1.0], false, true),
+            // Shared endpoint.
+            ([0.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 1.0], false, true),
+            // Collinear overlap.
+            ([0.0, 0.0], [2.0, 0.0], [1.0, 0.0], [3.0, 0.0], false, true),
+            // Disjoint.
+            ([0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0], false, false),
+            // End 1 um short of the other's line: neither crossing nor touch.
+            (
+                [0.0, 0.0],
+                [2.0, 0.0],
+                [1.0, 1e-6],
+                [1.0, 1.0],
+                false,
+                false,
+            ),
+            // End past the other's far end, on its line: the nearest point
+            // of a segment is its end, not the foot on its line.
+            ([0.0, 0.0], [1.0, 0.0], [1.5, 0.0], [1.5, 1.0], false, false),
+            // End half a nanometre off the other's body: a touch.
+            (
+                [0.0, 0.0],
+                [2.0, 0.0],
+                [1.0, 0.5e-9],
+                [1.0, 1.0],
+                false,
+                true,
+            ),
+            // End three nanometres off: not a touch.
+            (
+                [0.0, 0.0],
+                [2.0, 0.0],
+                [1.0, 3e-9],
+                [1.0, 1.0],
+                false,
+                false,
+            ),
+        ];
+        for (p, q, r, s, proper, touch) in cases {
+            let [p, q, r, s] = [p, q, r, s].map(|c| pt2(c[0], c[1]));
+            assert_eq!(
+                segments_cross_properly(p, q, r, s),
+                proper,
+                "{p:?} {q:?} {r:?} {s:?}"
+            );
+            assert_eq!(segments_touch(p, q, r, s), touch, "{p:?} {q:?} {r:?} {s:?}");
+            assert_eq!(segments_intersect(p, q, r, s), proper || touch);
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(20000))]
+
+        /// `segments_cross_properly` is "exact proper crossing and no touch"
+        /// and `segments_intersect` is "proper crossing or touch", at every
+        /// scale from a micron to ten kilometres.
+        #[test]
+        fn proper_crossing_and_contact_decompose_exactly(
+            exp in -6i32..5,
+            far in 0.0f64..4000.0,
+            ox in -1.0f64..1.0,
+            oy in -1.0f64..1.0,
+            ang in 0.0f64..PI,
+            tilt in -1e-3f64..1e-3,
+            t in -0.2f64..1.2,
+            nudge in -3.0f64..3.0,
+            shape in 0u8..3,
+            turn in 0.01f64..3.1,
+        ) {
+            let scale = 10f64.powi(exp);
+            let base = Point3::new(far + ox * scale, far * 0.5 + oy * scale, 0.0);
+            let dir = Vec3::new(ang.cos(), ang.sin(), 0.0);
+            let nrm = Vec3::new(-dir.y, dir.x, 0.0);
+            let p = base;
+            let q = base + dir * scale;
+            let (r, s) = match shape {
+                0 => {
+                    let d2 = (dir + nrm * tilt).normalized().expect("direction");
+                    let r = p + nrm * (nudge * 1e-9) + dir * (t * scale);
+                    (r, r + d2 * scale)
+                }
+                1 => {
+                    let foot = p + dir * (t * scale) + nrm * (nudge * 1e-9);
+                    (foot, foot + nrm * scale)
+                }
+                _ => {
+                    let d2 = Vec3::new((ang + turn).cos(), (ang + turn).sin(), 0.0);
+                    let x = p + dir * (t.clamp(0.05, 0.95) * scale);
+                    (x - d2 * (scale * 0.5), x + d2 * (scale * 0.5 + nudge * 1e-9))
+                }
+            };
+            let proper_exact = exact_orient(r, s, p) * exact_orient(r, s, q) < 0
+                && exact_orient(p, q, r) * exact_orient(p, q, s) < 0;
+            let m = tol::POINT_MERGE;
+            let touch = point_near_segment(p, r, s, m)
+                || point_near_segment(q, r, s, m)
+                || point_near_segment(r, p, q, m)
+                || point_near_segment(s, p, q, m);
+            let proper = segments_cross_properly(p, q, r, s);
+            prop_assert_eq!(proper, proper_exact && !touch, "{:?} {:?} / {:?} {:?}", p, q, r, s);
+            prop_assert_eq!(
+                segments_intersect(p, q, r, s),
+                proper || touch,
+                "{:?} {:?} / {:?} {:?}", p, q, r, s
+            );
         }
     }
 

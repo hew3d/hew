@@ -1046,6 +1046,67 @@ mod tests {
         assert_eq!(obj.watertight(), WatertightState::Open);
     }
 
+    /// A square face with a triangular hole whose first vertex sits `off`
+    /// outside the outer ring's left edge (negative: inside), at edge
+    /// length `k`; the rest of the hole is well inside.
+    fn square_with_poking_hole(k: f64, off: f64) -> Result<Object, TopologyError> {
+        let positions = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(k, 0.0, 0.0),
+            Point3::new(k, k, 0.0),
+            Point3::new(0.0, k, 0.0),
+            Point3::new(-off, 0.5 * k, 0.0),
+            Point3::new(0.4 * k, 0.2 * k, 0.0),
+            Point3::new(0.4 * k, 0.8 * k, 0.0),
+        ];
+        // Outer is counter-clockwise; the hole winds the other way.
+        let mut obj = Object::from_polygons_with_holes_import(
+            &positions,
+            &[vec![0, 1, 2, 3]],
+            &[vec![vec![4, 6, 5]]],
+            &[None],
+            &[None],
+        )?;
+        // Judged as native geometry: an import's planarity tolerance admits a
+        // hole that grazes its ring by that much (`geom2d::hole_leaves_outer`),
+        // which would hide the nanometre-scale rule these cases pin.
+        obj.planarity_tol = crate::tol::PLANE_DIST;
+        obj.validate()?;
+        Ok(obj)
+    }
+
+    /// A hole vertex 10 nm outside a 1 mm outer edge leaves the face: the
+    /// hole edges cross the ring beyond `POINT_MERGE`. (The crossing test
+    /// once measured square metres against a metre tolerance, so at this
+    /// size a 1 um dead band accepted it.)
+    #[test]
+    fn hole_vertex_ten_nanometres_outside_a_millimetre_edge_is_refused() {
+        let err = square_with_poking_hole(1e-3, 1e-8).unwrap_err();
+        assert!(
+            matches!(err, TopologyError::HoleOutsideFace { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// A micron outside the same edge is refused too, and a hole vertex
+    /// exactly on the edge is a touch and loads.
+    #[test]
+    fn hole_vertex_a_micron_outside_is_refused_and_one_on_the_edge_loads() {
+        let err = square_with_poking_hole(1e-3, 1e-6).unwrap_err();
+        assert!(
+            matches!(err, TopologyError::HoleOutsideFace { .. }),
+            "got {err:?}"
+        );
+        square_with_poking_hole(1e-3, 0.0).expect("a vertex on the edge is a touch");
+    }
+
+    /// The same vertex half a nanometre outside a 100 m edge is a touch
+    /// (within `POINT_MERGE`), not a crossing, and loads.
+    #[test]
+    fn hole_vertex_half_a_nanometre_outside_a_long_edge_is_a_touch() {
+        square_with_poking_hole(100.0, 0.5e-9).expect("a touch is not a crossing");
+    }
+
     /// A hole vertex off the face plane is rejected like any non-planar face.
     #[test]
     fn import_hole_vertex_off_plane_is_rejected() {
