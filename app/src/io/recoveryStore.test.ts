@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { i18n } from '@lingui/core'
 import { formatRecoveryTime, normalizeRecoveryMeta, shouldPromptRecovery } from './recoveryStore'
 import type { RecoveryListing, RecoveryMeta } from './recoveryStore'
 import { INITIAL_SESSION } from './documentSession'
@@ -43,11 +44,18 @@ describe('formatRecoveryTime', () => {
     expect(formatRecoveryTime(0, 23 * 60 * 60_000)).toBe('23 hours ago')
   })
 
-  it('falls back to a date string beyond ~24h', () => {
+  it('falls back to a date string beyond ~24h, in the app locale rather than the system one', () => {
     const savedAt = 0
     const now = 25 * 60 * 60_000
-    const result = formatRecoveryTime(savedAt, now)
-    expect(result).toBe(new Date(savedAt).toLocaleString())
+    // test/setup.ts activates `en`, whatever the machine's LANG.
+    expect(formatRecoveryTime(savedAt, now)).toBe(new Date(savedAt).toLocaleString('en'))
+    try {
+      i18n.load('de', {})
+      i18n.activate('de')
+      expect(formatRecoveryTime(savedAt, now)).toBe(new Date(savedAt).toLocaleString('de'))
+    } finally {
+      i18n.activate('en')
+    }
   })
 
   it('treats negative deltas (clock skew) as "just now" rather than throwing', () => {
