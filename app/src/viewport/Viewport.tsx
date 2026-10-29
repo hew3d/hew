@@ -107,7 +107,7 @@ import {
 } from './math'
 import { dynamicClipPlanes, groundHitIsUsable, targetAtDepth, zoomFloorFor } from './cameraDepth'
 import { CameraRig, type Projection, isBehindCamera, turnedEyePosition } from './cameraRig'
-import { guideSpanOf, stretchToUse } from './guideWindow'
+import { guideLinePickPx, segmentPickPx } from './screenPick'
 import { fovReadoutText, activeCameraToolForName } from './fovReadout'
 import { parseFovEntry } from './fovUnits'
 import {
@@ -9258,9 +9258,6 @@ export default function Viewport({
     // --- construction-guide picking ---------------------------------
     const GUIDE_PICK_PX = 8
     const ANNOTATION_PICK_PX = 8
-    // The drawn stretch follows the view (SceneRenderer.updateGuideExtents);
-    // a click can only land where the line is on screen, which it always spans.
-    const GUIDE_LINE_SAMPLE_HALF = 50
 
     function worldToPixels(p: THREE.Vector3): { x: number; y: number; behind: boolean } {
       const v = p.clone().project(camera)
@@ -9270,18 +9267,6 @@ export default function Viewport({
       // camera-space z — the old NDC `v.z > 1` check was a perspective-only
       // heuristic that inverts under orthographic projection (see its doc).
       return { x: (v.x * 0.5 + 0.5) * w, y: (-v.y * 0.5 + 0.5) * h, behind: isBehindCamera(p, camera) }
-    }
-
-    function pointSegPx(
-      px: number, py: number,
-      ax: number, ay: number, bx: number, by: number,
-    ): number {
-      const dx = bx - ax, dy = by - ay
-      const len2 = dx * dx + dy * dy
-      if (len2 < 1e-9) return Math.hypot(px - ax, py - ay)
-      let t = ((px - ax) * dx + (py - ay) * dy) / len2
-      t = Math.max(0, Math.min(1, t))
-      return Math.hypot(px - (ax + t * dx), py - (ay + t * dy))
     }
 
     /** Nearest construction guide within GUIDE_PICK_PX of the NDC click, or null.
@@ -9300,34 +9285,10 @@ export default function Viewport({
         if (kind === undefined || geom === undefined) continue
         let d: number
         if (kind === 'line') {
-          const [ox, oy, oz, dx, dy, dz] = geom
-          const len = Math.hypot(dx, dy, dz)
-          if (len < 1e-9) continue
-          const ux = dx / len, uy = dy / len, uz = dz / len
-          // Sample along the line and measure pixel distance segment-by-segment
-          // between consecutive IN-FRONT samples, over the part of the guide's
-          // own span within the sample range. (Projecting the bare ±50 m
-          // endpoints breaks when one is behind the camera — its projection is
-          // garbage — so a near guide could never be picked.)
-          const N = 64
-          const { lo, hi } = guideSpanOf(geom)
-          const sampled = stretchToUse(-GUIDE_LINE_SAMPLE_HALF, GUIDE_LINE_SAMPLE_HALF, lo, hi)
-          if (sampled === null) continue
-          d = Infinity
-          let prev: { x: number; y: number; behind: boolean } | null = null
-          for (let i = 0; i <= N; i++) {
-            const t = sampled[0] + (sampled[1] - sampled[0]) * (i / N)
-            const p = worldToPixels(new THREE.Vector3(ox + ux * t, oy + uy * t, oz + uz * t))
-            if (!p.behind) {
-              const dp = Math.hypot(p.x - clickX, p.y - clickY)
-              if (dp < d) d = dp
-              if (prev !== null && !prev.behind) {
-                const ds = pointSegPx(clickX, clickY, prev.x, prev.y, p.x, p.y)
-                if (ds < d) d = ds
-              }
-            }
-            prev = p
-          }
+          // Clipped at the near plane, not sampled: zoomed in on a guide
+          // running into depth, its whole stretch on screen lies next to
+          // the camera (screenPick.ts).
+          d = guideLinePickPx(camera, w, h, geom, clickX, clickY)
           if (!Number.isFinite(d)) continue
         } else if (kind === 'point') {
           const [x, y, z] = geom
@@ -9349,9 +9310,9 @@ export default function Viewport({
      * (docs/design/dimensions-text.md — "annotations are pickable via
      * screen-space distance"). Tests the segment a real user would actually
      * click: the dimension line for a linear dimension, the leader for a
-     * radial dimension or leader text — the same segment-sampling technique
-     * `pickGuide` uses above, just against the annotation's own two key
-     * points instead of a sampled infinite line. */
+     * radial dimension or leader text — measured like a guide line in
+     * `pickGuide` above (screenPick.ts), just against the annotation's own
+     * two key points instead of a stretch of an infinite line. */
     function pickAnnotation(ndcX: number, ndcY: number): bigint | null {
       const w = renderer.domElement.clientWidth
       const h = renderer.domElement.clientHeight
@@ -9384,12 +9345,7 @@ export default function Viewport({
           p0 = [anchor[0], anchor[1], anchor[2]]
           p1 = [anchor[0] + offset[0], anchor[1] + offset[1], anchor[2] + offset[2]]
         }
-        const a2 = worldToPixels(new THREE.Vector3(p0[0], p0[1], p0[2]))
-        const b2 = worldToPixels(new THREE.Vector3(p1[0], p1[1], p1[2]))
-        let d = Infinity
-        if (!a2.behind) d = Math.min(d, Math.hypot(a2.x - clickX, a2.y - clickY))
-        if (!b2.behind) d = Math.min(d, Math.hypot(b2.x - clickX, b2.y - clickY))
-        if (!a2.behind && !b2.behind) d = Math.min(d, pointSegPx(clickX, clickY, a2.x, a2.y, b2.x, b2.y))
+        const d = segmentPickPx(camera, w, h, p0, p1, clickX, clickY)
         if (d < bestDist) {
           bestDist = d
           best = id
