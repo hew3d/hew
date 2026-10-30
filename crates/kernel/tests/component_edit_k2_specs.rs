@@ -1618,7 +1618,7 @@ fn slice_def_member_round_trips_through_a_rotated_scaled_pose() {
     };
     let local_plane =
         Plane::from_point_normal(Point3::new(2.0, 1.0, 0.5), Vec3::new(1.0, 0.0, 0.0)).unwrap();
-    let world_plane = pose.apply_plane(&local_plane).unwrap();
+    let world_plane = pose.apply_plane_keeping_side(&local_plane).unwrap();
     let ((world_pos, world_neg), _) = doc
         .slice_node(world_box, &local_plane)
         .expect("world slice");
@@ -1666,7 +1666,7 @@ fn slice_def_member_round_trips_through_a_mirrored_pose() {
     };
     let local_plane =
         Plane::from_point_normal(Point3::new(2.0, 1.0, 0.5), Vec3::new(1.0, 0.0, 0.0)).unwrap();
-    let world_plane = pose.apply_plane(&local_plane).unwrap();
+    let world_plane = pose.apply_plane_keeping_side(&local_plane).unwrap();
     let ((world_pos, world_neg), _) = doc
         .slice_node(world_box, &local_plane)
         .expect("world slice");
@@ -1737,7 +1737,7 @@ fn slice_def_member_round_trips_through_a_non_uniform_pose() {
     };
     let local_plane =
         Plane::from_point_normal(Point3::new(2.0, 1.0, 0.5), Vec3::new(1.0, 0.0, 0.0)).unwrap();
-    let world_plane = pose.apply_plane(&local_plane).unwrap();
+    let world_plane = pose.apply_plane_keeping_side(&local_plane).unwrap();
     let ((world_pos, world_neg), _) = doc
         .slice_node(world_box, &local_plane)
         .expect("world slice");
@@ -1997,11 +1997,12 @@ fn transform_def_member_bakes_correctly_through_a_mirrored_pose() {
     }
 }
 
-/// A REFLECTING world gesture refuses regardless of the instance's own
-/// pose — mirrored or not — exactly like `transform_object` refuses a
-/// reflecting `t` in world space.
+/// A REFLECTING world gesture bakes regardless of the instance's own
+/// pose — mirrored or not — exactly like `transform_object` bakes a
+/// reflecting `t` in world space: the member stays valid, watertight, and
+/// outward-facing in the definition frame.
 #[test]
-fn transform_def_member_refuses_a_reflecting_gesture_regardless_of_pose() {
+fn transform_def_member_bakes_a_reflecting_gesture_regardless_of_pose() {
     let reflect = Transform::scale(Vec3::new(1.0, 1.0, -1.0));
     assert!(reflect.determinant() < 0.0);
 
@@ -2015,14 +2016,12 @@ fn transform_def_member_refuses_a_reflecting_gesture_regardless_of_pose() {
         let mut doc = Document::new();
         let (_comp, inst, member) = boxed_component(&mut doc);
         doc.transform_instance(inst, &pose).unwrap();
-        assert_eq!(
-            doc.transform_def_member(inst, member, &reflect),
-            Err(DocumentError::Transform(kernel::TransformError::Reflection))
-        );
-        assert!(
-            doc.object(member).is_some(),
-            "a refused bake touches nothing"
-        );
+        doc.transform_def_member(inst, member, &reflect)
+            .expect("a reflecting gesture is baked");
+        let o = doc.object(member).expect("member still live");
+        assert!(o.validate().is_ok());
+        assert_eq!(o.watertight(), kernel::WatertightState::Watertight);
+        assert!(o.signed_volume() > 0.0, "definition member stays outward");
     }
 }
 

@@ -150,14 +150,16 @@ pub enum KernelOp {
         /// The raised sub-face to flatten.
         sub_face: FaceId,
     },
-    /// `Object::transform_sub_face(sub_face, xf)` — slide, turn, or scale
-    /// an imprint on its face in place. Its own inverse with the inverse
-    /// transform, pinning whatever the forward move adopted; no heuristic
-    /// guards.
+    /// `Object::transform_sub_face(sub_face, xf)` — slide, turn, scale, or
+    /// mirror an imprint on its face in place. Its own inverse with the
+    /// inverse transform, pinning whatever the forward move adopted; no
+    /// heuristic guards.
     TransformSubFace {
         /// The imprint sub-face to move (handle-stable across the op).
         sub_face: FaceId,
-        /// An in-plane similarity of the parent face.
+        /// A similarity that maps the parent face's plane onto itself: an
+        /// in-plane move, turn, scale, or mirror, with the normal kept or
+        /// turned over.
         xf: Transform,
         /// Rings (vertex positions) of holes inside the shape that stay put
         /// and are re-homed afterwards — the shapes, bosses, or holes a

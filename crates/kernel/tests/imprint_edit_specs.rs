@@ -416,17 +416,21 @@ fn scale_maps_the_circle_claim() {
 }
 
 #[test]
-fn off_plane_mirrored_and_non_uniform_transforms_refuse_typed() {
+fn off_plane_and_non_uniform_transforms_refuse_typed() {
     let mut cube = unit_cube();
     let t = top(&cube);
     let sf = imprint(&mut cube, t, &square(0.3, 0.3, 0.2));
     let before = cube.clone();
     let lift = Transform::translation(Vec3::new(0.0, 0.0, 0.1));
     let tilt = Transform::rotation(Vec3::new(1.0, 0.0, 0.0), 0.3).unwrap();
-    let mirror = Transform::scale(Vec3::new(-1.0, 1.0, 1.0));
     let stretch = Transform::scale(Vec3::new(1.5, 1.0, 1.0));
+    let shear = Transform::from_affine(&[
+        1.0, 0.5, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0,
+    ]);
     let flat = Transform::scale(Vec3::new(1.0, 1.0, 0.0));
-    for xf in [lift, tilt, mirror, stretch, flat] {
+    for xf in [lift, tilt, stretch, shear, flat] {
         assert_eq!(
             cube.transform_sub_face(sf, &xf),
             Err(StickyError::NotInPlane)
@@ -436,6 +440,264 @@ fn off_plane_mirrored_and_non_uniform_transforms_refuse_typed() {
         objects_equivalent(&before, &cube),
         "refusals leave the object untouched"
     );
+}
+
+/// The mirror across the top face's own plane (z = 1): every point of the
+/// face stays put, but the face's normal is turned over.
+fn mirror_across_the_top() -> Transform {
+    let c = Vec3::new(0.0, 0.0, 1.0);
+    Transform::translation(c * -1.0)
+        .then(&Transform::scale(Vec3::new(1.0, 1.0, -1.0)))
+        .then(&Transform::translation(c))
+}
+
+/// The mirror across the vertical line x = `x0` of the top face: a
+/// reflection whose mirror plane contains the face normal.
+fn mirror_across_x(x0: f64) -> Transform {
+    let c = Vec3::new(x0, 0.0, 0.0);
+    Transform::translation(c * -1.0)
+        .then(&Transform::scale(Vec3::new(-1.0, 1.0, 1.0)))
+        .then(&Transform::translation(c))
+}
+
+/// Twice the signed area of `ring` seen from `n` (Newell): positive when the
+/// ring winds counter-clockwise about `n`.
+fn signed_area_about(ring: &[Point3], n: Vec3) -> f64 {
+    let mut sum = Vec3::ZERO;
+    for (i, &a) in ring.iter().enumerate() {
+        let b = ring[(i + 1) % ring.len()];
+        sum = sum + a.to_vec().cross(b.to_vec());
+    }
+    sum.dot(n)
+}
+
+/// Every face's outer loop winds counter-clockwise about its plane normal
+/// and every hole clockwise — the orientation invariant a mirrored loop
+/// must keep.
+fn every_loop_wound_about_its_face(obj: &Object) -> bool {
+    obj.faces().values().all(|f| {
+        let n = f.plane.normal();
+        let ring = |l| obj.loop_positions(l).collect::<Vec<_>>();
+        signed_area_about(&ring(f.outer_loop), n) > 0.0
+            && f.inner_loops
+                .iter()
+                .all(|&l| signed_area_about(&ring(l), n) < 0.0)
+    })
+}
+
+/// An asymmetric quadrilateral on z = 1 (dyadic coordinates, so a mirror
+/// across x = 0.5 is exact), counter-clockwise seen from +z.
+fn kite() -> Vec<Point3> {
+    vec![
+        Point3::new(0.125, 0.25, 1.0),
+        Point3::new(0.375, 0.25, 1.0),
+        Point3::new(0.375, 0.5, 1.0),
+        Point3::new(0.25, 0.75, 1.0),
+    ]
+}
+
+/// A mirror across a line in the face reverses the imprint's winding seen
+/// from the face normal; the moved loops (and the holes they are twinned
+/// with) are run the other way, so the solid validates with every loop
+/// counter-clockwise about its face, a nested imprint moves along, every
+/// handle survives, and the same mirror applied again restores every
+/// position and every loop's vertex order bit for bit.
+#[test]
+fn an_in_plane_mirror_of_an_imprint_keeps_it_counter_clockwise() {
+    let mut cube = unit_cube();
+    let t = top(&cube);
+    let sf = imprint(&mut cube, t, &kite());
+    let inner_ring = vec![
+        Point3::new(0.25, 0.3125, 1.0),
+        Point3::new(0.3125, 0.3125, 1.0),
+        Point3::new(0.3125, 0.375, 1.0),
+        Point3::new(0.25, 0.375, 1.0),
+    ];
+    let inner = imprint(&mut cube, sf, &inner_ring);
+    let before = cube.clone();
+    let mirror = mirror_across_x(0.5);
+
+    let rep = cube.transform_sub_face(sf, &mirror).unwrap();
+    assert_eq!((rep.sub_face, rep.parent), (sf, t));
+    cube.validate().unwrap();
+    assert_eq!(cube.watertight(), WatertightState::Watertight);
+    assert!(
+        every_loop_wound_about_its_face(&cube),
+        "the mirrored loops stay counter-clockwise about the parent normal"
+    );
+    assert!(
+        cube.faces().contains_key(sf) && cube.faces().contains_key(inner),
+        "handles survive"
+    );
+    let mirrored = |ring: &[Point3]| -> Vec<Point3> {
+        ring.iter().rev().map(|&p| mirror.apply_point(p)).collect()
+    };
+    let feats = sub_faces(&cube);
+    let outer_feat = feats.iter().find(|f| f.0 == sf).unwrap();
+    assert!(cyclic_match(&outer_feat.2, &mirrored(&kite())));
+    assert_eq!(outer_feat.4, vec![inner], "the nested imprint moved along");
+    let inner_feat = feats.iter().find(|f| f.0 == inner).unwrap();
+    assert!(cyclic_match(&inner_feat.2, &mirrored(&inner_ring)));
+
+    // A mirror is its own inverse: applying it again restores the solid
+    // exactly — every position, and every loop's vertex order.
+    cube.transform_sub_face(sf, &mirror).unwrap();
+    for (v, vert) in before.vertices() {
+        assert_eq!(
+            cube.vertices()[v].position,
+            vert.position,
+            "bit-exact positions"
+        );
+    }
+    let cycle = |obj: &Object, l| -> Vec<kernel::VertexId> {
+        obj.loop_half_edges(l)
+            .map(|h| obj.half_edges()[h].origin)
+            .collect()
+    };
+    for (l, _) in before.loops() {
+        let (a, b) = (cycle(&before, l), cycle(&cube, l));
+        assert!(
+            a.len() == b.len()
+                && (0..a.len()).any(|k| a
+                    .iter()
+                    .enumerate()
+                    .all(|(i, v)| *v == b[(i + k) % b.len()])),
+            "loop {l:?} runs the same way again"
+        );
+    }
+    cube.validate().unwrap();
+}
+
+/// A mirror of an imprint replays through history like any other move:
+/// undo restores the shape, redo mirrors it again, and both validate.
+#[test]
+fn an_imprint_mirror_undoes_and_redoes_through_history() {
+    let mut cube = unit_cube();
+    let t = top(&cube);
+    let mut history = History::new();
+    let rep = history
+        .apply(
+            &mut cube,
+            KernelOp::SplitFaceInner {
+                face: t,
+                loop_path: kite(),
+                restore: None,
+                curves: Vec::new(),
+                edge_attrs: Vec::new(),
+            },
+        )
+        .unwrap();
+    let KernelOpReport::FaceSplitInner(r) = rep else {
+        unreachable!()
+    };
+    let imprinted = cube.clone();
+    history
+        .apply(
+            &mut cube,
+            KernelOp::TransformSubFace {
+                sub_face: r.sub_face,
+                xf: mirror_across_x(0.5).then(&slide(-0.125, 0.0)),
+                pinned: vec![],
+            },
+        )
+        .unwrap();
+    let moved = cube.clone();
+    assert!(!objects_equivalent(&imprinted, &moved));
+    assert!(every_loop_wound_about_its_face(&moved));
+    history.undo(&mut cube).unwrap();
+    assert!(objects_equivalent(&imprinted, &cube), "undo puts it back");
+    assert!(every_loop_wound_about_its_face(&cube));
+    history.redo(&mut cube).unwrap();
+    assert!(objects_equivalent(&moved, &cube), "redo mirrors it again");
+    cube.validate().unwrap();
+}
+
+/// A mirror across the face's own plane turns the normal over but keeps
+/// the plane: on the face it is the identity, so it is accepted as a
+/// harmless move that leaves the imprint's loop exactly where it was.
+#[test]
+fn a_mirror_across_the_face_plane_itself_is_a_no_op_move() {
+    let mut cube = unit_cube();
+    let t = top(&cube);
+    let sf = imprint(&mut cube, t, &kite());
+    let before = cube.clone();
+    let cycle = |obj: &Object, l| -> Vec<kernel::VertexId> {
+        obj.loop_half_edges(l)
+            .map(|h| obj.half_edges()[h].origin)
+            .collect()
+    };
+    let rep = cube
+        .transform_sub_face(sf, &mirror_across_the_top())
+        .expect("a plane-keeping map is a move on the face");
+    assert_eq!((rep.sub_face, rep.parent), (sf, t));
+    cube.validate().unwrap();
+    assert!(every_loop_wound_about_its_face(&cube));
+    for (v, vert) in before.vertices() {
+        assert_eq!(cube.vertices()[v].position, vert.position, "nothing moved");
+    }
+    for (l, _) in before.loops() {
+        assert_eq!(cycle(&before, l), cycle(&cube, l), "no loop reversed");
+    }
+}
+
+/// The uniform scale by -1 about a point of the face is a point
+/// reflection: on the face it is the half turn about that point. The loop
+/// lands where rotating it by pi would put it, still counter-clockwise
+/// about the parent normal; applying it again, or undoing it through
+/// history, restores every position bit for bit, and redo repeats it.
+#[test]
+fn uniform_minus_one_about_a_plane_point_equals_rotate_pi() {
+    let negate = grow(0.5, 0.5, -1.0);
+    let mut a = unit_cube();
+    let t = top(&a);
+    let sf = imprint(&mut a, t, &kite());
+    let before = a.clone();
+    let mut b = before.clone();
+
+    a.transform_sub_face(sf, &negate).unwrap();
+    b.transform_sub_face(sf, &spin(0.5, 0.5, std::f64::consts::PI))
+        .unwrap();
+    a.validate().unwrap();
+    assert!(every_loop_wound_about_its_face(&a));
+    assert!(
+        objects_equivalent(&a, &b),
+        "the point reflection lands as the half turn does"
+    );
+    let feats = sub_faces(&a);
+    let want: Vec<Point3> = kite().iter().map(|&p| negate.apply_point(p)).collect();
+    assert!(cyclic_match(&feats[0].2, &want), "no reversal");
+
+    // Applied twice: back to the start, bit for bit (the dyadic kite and
+    // the dyadic center make every step exact).
+    a.transform_sub_face(sf, &negate).unwrap();
+    for (v, vert) in before.vertices() {
+        assert_eq!(a.vertices()[v].position, vert.position);
+    }
+
+    // Through history: undo restores, redo repeats.
+    let mut c = before.clone();
+    let mut history = History::new();
+    history
+        .apply(
+            &mut c,
+            KernelOp::TransformSubFace {
+                sub_face: sf,
+                xf: negate,
+                pinned: vec![],
+            },
+        )
+        .unwrap();
+    let moved = c.clone();
+    history.undo(&mut c).unwrap();
+    for (v, vert) in before.vertices() {
+        assert_eq!(c.vertices()[v].position, vert.position, "undo is exact");
+    }
+    history.redo(&mut c).unwrap();
+    for (v, vert) in moved.vertices() {
+        assert_eq!(c.vertices()[v].position, vert.position, "redo is exact");
+    }
+    assert!(every_loop_wound_about_its_face(&c));
+    c.validate().unwrap();
 }
 
 #[test]
@@ -1529,27 +1791,36 @@ fn area_on_plane(pts: &[Point3]) -> f64 {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(64))]
 
-    /// Any in-plane similarity that keeps the loop inside round-trips
-    /// exactly through its inverse, keeps the solid watertight, and
-    /// scales the imprint's area by s².
+    /// Any in-plane similarity that keeps the loop inside — a mirror
+    /// across a line of the face included — round-trips exactly through its
+    /// inverse, keeps the solid watertight with every loop wound about its
+    /// face, and scales the imprint's area by s².
     #[test]
     fn in_plane_similarity_round_trips(
         dx in -0.25..0.25f64,
         dy in -0.25..0.25f64,
         angle in -3.0..3.0f64,
         scale in 0.5..1.6f64,
+        mirrored in any::<bool>(),
     ) {
         let mut cube = unit_cube();
         let t = top(&cube);
         let sf = imprint(&mut cube, t, &square(0.4, 0.4, 0.2));
         let before = cube.clone();
-        let xf = spin(0.5, 0.5, angle)
+        let flip = if mirrored {
+            mirror_across_x(0.5)
+        } else {
+            Transform::IDENTITY
+        };
+        let xf = flip
+            .then(&spin(0.5, 0.5, angle))
             .then(&grow(0.5, 0.5, scale))
             .then(&slide(dx, dy));
         match cube.transform_sub_face(sf, &xf) {
             Ok(rep) => {
                 prop_assert_eq!(cube.watertight(), WatertightState::Watertight);
                 prop_assert!(cube.validate().is_ok());
+                prop_assert!(every_loop_wound_about_its_face(&cube));
                 let moved = sub_faces(&cube)[0].2.clone();
                 prop_assert!((area_on_plane(&moved) - 0.04 * scale * scale).abs() < 1e-9);
                 cube.transform_sub_face(sf, &rep.inverse).unwrap();

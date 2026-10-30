@@ -127,7 +127,7 @@
  * outright (its geometry is stored in definition-local space); it is now a
  * legal PATH — `follow_me_around_instance_face` (design §2e) takes the
  * instance handle too and poses the loop into world space kernel-side, a
- * reflected placement refusing typed — but never a legal PROFILE through
+ * reflected placement bakes like any other — but never a legal PROFILE through
  * THAT entry point (no world `follow_me_face_*` variant takes an instance).
  *
  * A face reached while EDITING a component INSTANCE's shared DEFINITION

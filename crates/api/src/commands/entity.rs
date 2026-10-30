@@ -508,9 +508,9 @@ fn scale(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     if p.ids.is_empty() {
         return Err(kernel::DocumentError::EmptySelection.into());
     }
-    if p.factors.iter().any(|f| !f.is_finite() || *f <= 0.0) {
+    if p.factors.iter().any(|f| !f.is_finite() || *f == 0.0) {
         return Err(CmdError::Params(
-            "scale factors must be finite and positive".into(),
+            "scale factors must be finite and nonzero".into(),
         ));
     }
     let anchor = locate::resolve_point(ctx, &p.anchor)?;

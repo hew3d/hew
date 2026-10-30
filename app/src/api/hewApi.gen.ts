@@ -522,7 +522,7 @@ export interface EntityRotateResult {
 }
 
 /**
- * `hew.entity.scale` (v1) — Scale about an anchor with per-axis factors.
+ * `hew.entity.scale` (v1) — Scale about an anchor with per-axis factors; a negative factor mirrors.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: unknown_entity, mixed_selection_unsupported, empty_selection, unknown_object, unknown_group, unknown_instance, unknown_sketch
  */
@@ -740,7 +740,7 @@ export interface LibraryDescribeResult {
 /**
  * `hew.library.insert` (v1) — Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement; a material item goes into the palette instead, recording no undo entry (§6.4).
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: host_capability_missing, unknown_library_item, load_failed, component_expansion_exceeded, singular, degenerate_axis, reflection, explode_session_scope
+ * Refusals: host_capability_missing, unknown_library_item, load_failed, component_expansion_exceeded, singular, degenerate_axis, explode_session_scope
  */
 export interface LibraryInsertParams {
   /** a translation applied to the item's world roots; identity when omitted */
@@ -1826,13 +1826,13 @@ export interface SolidRotateImprintResult {
 }
 
 /**
- * `hew.solid.scale_imprint` (v1) — Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane; hew.sketch.scale is the general form.
+ * `hew.solid.scale_imprint` (v1) — Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane (a negative factor turns it 180 degrees about the anchor and scales it by |factor|); hew.sketch.scale is the general form, and a mirror about a world axis of an axis-aligned drawing plane is hew.sketch.scale with a negative per-axis factor.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: not_in_plane, not_an_imprint, draft_boundary_edge_touched, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, no_such_point
  */
 export interface SolidScaleImprintParams {
   about: [number, number, number] | UnspecifiedShape
-  /** uniform scale factor */
+  /** uniform scale factor, finite and nonzero; a negative factor turns the shape 180 degrees about `about` and scales it by |factor| (a mirror about a world axis of an axis-aligned drawing plane is hew.sketch.scale with a negative per-axis factor) */
   factor: number
   /** HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {"$face":"label#key"}) naming a sub-face; {object,at} also picks a CHORD when the point lies on one of its lines (a chord is tried first, then the sub-face containing the point) */
   imprint: UnspecifiedShape

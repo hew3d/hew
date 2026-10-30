@@ -4402,8 +4402,9 @@ fn push_through_then_split_severs_into_two_solids() {
 // `Document::transform_object` / `transform_group` / `transform_selection`
 // all bottom out (see their doc comments) — one spec here pins the math for
 // all three. The trap: a face's plane must be refit from where its boundary
-// LANDED (Newell over the moved points — exactly what `Transform::apply_plane`
-// does internally by mapping three points and refitting), never by
+// LANDED (Newell over the moved points — exactly what
+// `Transform::apply_plane_following_winding` does internally by mapping
+// three points and refitting), never by
 // transforming the stored normal like an ordinary vector — that only agrees
 // with the correct inverse-transpose answer for similarities (uniform scale,
 // rotation), and silently drifts under anisotropic non-uniform scale.
@@ -4504,27 +4505,41 @@ proptest! {
     }
 }
 
-/// A reflecting affine is refused typed even when it is also non-uniform (the
-/// class the UI's per-axis clamp exists to keep the kernel from ever seeing),
-/// and a merely-singular one (one axis at exactly zero) is refused as
-/// `Singular` rather than `Reflection` — both leave the object byte-identical
-/// (the strong exception guarantee), never half-transformed.
+/// An anisotropic reflecting affine is baked (faces turned over, so the wedge
+/// stays valid, watertight, and positive-volume, and its volume scales by
+/// |det|), while a merely-singular one (one axis at exactly zero) is refused
+/// as `Singular` and leaves the object byte-identical (the strong exception
+/// guarantee), never half-transformed.
 #[test]
-fn transform_refuses_anisotropic_reflection_and_singular_leaving_object_untouched() {
+fn transform_bakes_anisotropic_reflection_and_refuses_singular_leaving_object_untouched() {
     let mut wedge = sliced_wedge();
     let before = exact_snapshot(&wedge);
+    let vol0 = wedge.signed_volume();
+    assert!(vol0 > 0.0);
 
+    let singular_target = wedge.clone();
+    let mut probe = singular_target;
     assert_eq!(
-        wedge
-            .apply_transform(&Transform::scale(Vec3::new(-2.0, 1.0, 3.0)))
+        probe
+            .apply_transform(&Transform::scale(Vec3::new(0.0, 1.0, 3.0)))
             .unwrap_err(),
-        TransformError::Reflection
+        TransformError::Singular
     );
-    assert_eq!(
-        exact_snapshot(&wedge),
-        before,
-        "refused reflection leaves geometry untouched"
+    assert_eq!(exact_snapshot(&probe), before);
+
+    wedge
+        .apply_transform(&Transform::scale(Vec3::new(-2.0, 1.0, 3.0)))
+        .expect("an anisotropic reflection is baked");
+    assert!(wedge.validate().is_ok());
+    assert_eq!(wedge.watertight(), kernel::WatertightState::Watertight);
+    assert!(wedge.signed_volume() > 0.0, "faces turned over: outward");
+    assert!(
+        (wedge.signed_volume() - vol0 * 6.0).abs() < 1e-9 * vol0.max(1.0),
+        "volume scales by |det| = 6"
     );
+    assert_ne!(exact_snapshot(&wedge), before, "geometry actually moved");
+    let mut wedge = sliced_wedge();
+    let before = exact_snapshot(&wedge);
 
     assert_eq!(
         wedge

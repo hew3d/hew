@@ -640,9 +640,13 @@ fn arb_axis() -> impl Strategy<Value = (f64, f64, f64)> {
 /// `CannotExplodeNonUniformScale`), so both paths are fuzz-reachable.
 fn arb_scale() -> impl Strategy<Value = Vec3> {
     let comp = || 0.3..3.0f64;
+    // A signed component: a negative one mirrors the pose (poses may
+    // reflect; sessions and explodes bake the mirror).
+    let signed = || prop_oneof![4 => comp(), 1 => comp().prop_map(|s| -s)];
     prop_oneof![
         2 => comp().prop_map(|s| Vec3::new(s, s, s)),
         3 => (comp(), comp(), comp()).prop_map(|(x, y, z)| Vec3::new(x, y, z)),
+        1 => signed().prop_map(|s| Vec3::new(s, s.abs(), s.abs())),
     ]
 }
 
@@ -860,6 +864,10 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         }),
         2 => (any::<usize>(), (0.2..3.0f64, 0.2..3.0f64, 0.2..3.0f64)).prop_map(
             |(obj_sel, factors)| DocOp::NonUniformScale { obj_sel, factors }
+        ),
+        // A reflection baked into a visible object (negative x factor).
+        1 => (any::<usize>(), (0.2..3.0f64, 0.2..3.0f64, 0.2..3.0f64)).prop_map(
+            |(obj_sel, f)| DocOp::NonUniformScale { obj_sel, factors: (-f.0, f.1, f.2) }
         ),
         4 => (any::<usize>(), any::<usize>(), 0.0..std::f64::consts::TAU).prop_map(
             |(obj_sel, face_sel, turn)| DocOp::OwnSketch { obj_sel, face_sel, turn }
@@ -1314,6 +1322,16 @@ fn check_doc(doc: &Document, step: usize, what: &str) -> Result<(), TestCaseErro
             obj.watertight(),
             kernel::WatertightState::Watertight,
             "step {} ({}): object {:?} opened up",
+            step,
+            what,
+            oid
+        );
+        // The validator ignores shell orientation, so a baked reflection
+        // that failed to turn its faces over would pass every check above;
+        // a right-side-out closed shell has positive signed volume.
+        prop_assert!(
+            obj.signed_volume() > 0.0,
+            "step {} ({}): object {:?} is inside out",
             step,
             what,
             oid

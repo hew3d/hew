@@ -481,8 +481,8 @@ struct ExplodeSession {
     /// The definition whose members are on loan to the world tree.
     component: ComponentId,
     /// Definition-local → world, captured at open (`instance`'s pose at that
-    /// moment). Guaranteed a similarity with positive determinant (the pose
-    /// gate) — see [`Document::open_explode_session`].
+    /// moment). Guaranteed a similarity (the pose
+    /// gate; a mirror is allowed) — see [`Document::open_explode_session`].
     pose: Transform,
     pose_inv: Transform,
     /// Live members at open time, in `ComponentDef.members` order.
@@ -2245,7 +2245,7 @@ fn count_label(n: usize, noun: &str) -> String {
 
 /// Classifies an affine transform for a history label: a pure
 /// translation is a "Move", a rigid change of orientation a "Rotate",
-/// anything that changes lengths a "Scale". Tolerances are the kernel's
+/// anything that changes lengths or flips handedness a "Scale". Tolerances are the kernel's
 /// own; a label never needs to be tighter than that.
 fn transform_verb(t: &Transform) -> &'static str {
     let m = t.to_affine();
@@ -2265,8 +2265,12 @@ fn transform_verb(t: &Transform) -> &'static str {
     if linear_is_identity {
         return "Move";
     }
+    // A mirror of unit scale is isometric but not a rotation: it reads as
+    // a "Scale" (a flip), the same as a mirror that also resizes.
     match t.similarity_scale() {
-        Some(scale) if (scale - 1.0).abs() <= tol::AXES_ORTHONORMAL => "Rotate",
+        Some(scale) if (scale - 1.0).abs() <= tol::AXES_ORTHONORMAL && t.determinant() > 0.0 => {
+            "Rotate"
+        }
         _ => "Scale",
     }
 }
@@ -2758,9 +2762,7 @@ pub enum FollowMePath {
     /// The outer boundary loop of a face reached THROUGH a component
     /// instance (design §2e): the definition member's loop mapped through
     /// the instance's pose into world space. The instance and its
-    /// definition are untouched; a reflected pose (determinant < 0) is
-    /// refused typed — the mirrored loop would sweep with inverted
-    /// winding.
+    /// definition are untouched; a reflected pose is accepted.
     InstanceFaceLoop {
         /// The placed instance the face was picked through.
         instance: InstanceId,
@@ -3094,11 +3096,6 @@ pub enum DocumentError {
     EmptySelection,
     /// `make_component` was called with no nodes selected.
     EmptyComponent,
-    /// `explode_instance` was called on an instance whose pose mirrors
-    /// (determinant < 0): baking a reflection into a solid would invert its
-    /// winding, which `Object::apply_transform` refuses. Use
-    /// `make_unique` instead, or unmirror the instance first.
-    CannotExplodeReflected,
     /// `explode_instance` was called on an instance whose definition holds a
     /// live def-owned sketch (component-edit-parity.md phase K1 follow-up),
     /// but the instance's pose is not a similarity (non-uniform scale).
@@ -3106,8 +3103,7 @@ pub enum DocumentError {
     /// would force `Sketch::apply_transform`'s map-or-drop contract to DROP
     /// every curve's analytic identity (a circle would become an
     /// unrepresentable ellipse) — explode refuses typed instead of silently
-    /// degrading a profile's fidelity. Unmirror is not the issue here (see
-    /// `CannotExplodeReflected` for that); the fix is to even out the
+    /// degrading a profile's fidelity. The fix is to even out the
     /// instance's scale first, or extrude/finish the sketch before exploding.
     CannotExplodeNonUniformScale,
     /// `group_nodes` was given the same node twice.
@@ -3151,7 +3147,7 @@ pub enum DocumentError {
     /// A slice failed (non-solid source, plane missing the solid, degenerate
     /// or tangent cut) —.
     Slice(SliceError),
-    /// A move/rotate/scale failed (singular or orientation-flipping transform).
+    /// A move/rotate/scale failed (singular transform).
     Transform(TransformError),
     /// A per-Object op failed to apply.
     Op(KernelOpError),
@@ -3265,14 +3261,11 @@ pub enum DocumentError {
     /// `close_explode_session` was called with no session open.
     ExplodeSessionNotOpen,
     /// `open_explode_session` was given an instance whose pose is not a
-    /// similarity with a positive determinant. A similarity is exactly the
+    /// similarity (a mirror is fine). A similarity is exactly the
     /// class of maps that keep a circle a circle
     /// ([`Transform::similarity_scale`]), which is what lets analytic
     /// curve/surface metadata survive the bake/unbake round trip instead of
-    /// being dropped; a negative determinant (a mirrored pose) would invert
-    /// winding when baked, which [`Object::apply_transform`] refuses
-    /// outright. Refused typed rather than degrading fidelity or baking an
-    /// inside-out solid.
+    /// being dropped. Refused typed rather than degrading fidelity.
     ExplodeSessionPoseUnsupported,
     /// The operation cannot run while an explode session is open — it would
     /// either restructure the document tree or mutate poses out from under
@@ -3400,12 +3393,6 @@ impl std::fmt::Display for DocumentError {
             DocumentError::EmptyComponent => {
                 write!(f, "cannot make a component from an empty selection")
             }
-            DocumentError::CannotExplodeReflected => {
-                write!(
-                    f,
-                    "cannot explode a mirrored instance (would invert winding)"
-                )
-            }
             DocumentError::CannotExplodeNonUniformScale => write!(
                 f,
                 "cannot explode an instance with a live in-progress sketch through a \
@@ -3523,8 +3510,8 @@ impl std::fmt::Display for DocumentError {
             DocumentError::ExplodeSessionNotOpen => write!(f, "no explode session is open"),
             DocumentError::ExplodeSessionPoseUnsupported => write!(
                 f,
-                "instance pose is not a similarity with positive determinant \
-                 (non-uniform scale or a mirror), which an explode session requires"
+                "instance pose is not a similarity (it is scaled unevenly or sheared), \
+                 which an explode session requires"
             ),
             DocumentError::ExplodeSessionScope => write!(
                 f,
@@ -3633,7 +3620,7 @@ pub struct LibraryProvenance {
 pub struct InsertOptions {
     /// The placement transform applied to the item's world roots: baked into
     /// copied world objects ([`Object::apply_transform`] — so it must be
-    /// invertible and orientation-preserving) and composed onto copied
+    /// invertible; a reflection bakes a mirrored copy) and composed onto copied
     /// instance poses. [`Transform::IDENTITY`] inserts the item exactly
     /// where its own coordinates put it.
     pub pose: Transform,
@@ -6993,10 +6980,9 @@ impl Document {
     ///   insert is fine and folds into the open group at close, exactly like
     ///   an import).
     /// - [`DocumentError::Transform`] — `options.pose` is singular
-    ///   ([`TransformError::Singular`]) or orientation-flipping
-    ///   ([`TransformError::Reflection`]). Refused before anything mutates
-    ///   (the strong guarantee): a reflection cannot bake into world
-    ///   objects.
+    ///   ([`TransformError::Singular`]). Refused before anything mutates
+    ///   (the strong guarantee). A reflecting pose bakes a mirrored copy
+    ///   (every face is turned over; see `Object::apply_transform`).
     pub fn insert_document(
         &mut self,
         item: &Document,
@@ -7005,9 +6991,6 @@ impl Document {
         info!(target: "kernel::op", op = "insert_document");
         self.refuse_during_component_session()?;
         options.pose.inverse().map_err(DocumentError::Transform)?;
-        if options.pose.determinant() < 0.0 {
-            return Err(DocumentError::Transform(TransformError::Reflection));
-        }
         // Every world solid of the item bakes the pose: one that would
         // leave a face too small to reopen refuses the insert, typed,
         // before anything is copied.
@@ -7758,7 +7741,13 @@ impl Document {
     ///   live instance's pose was validated invertible when it was created or
     ///   last transformed ([`Document::place_instance`] /
     ///   [`Document::transform_instance`] both reject a singular pose), and
-    ///   [`Transform::apply_plane`] only fails on a singular transform.
+    ///   [`Transform::apply_plane_keeping_side`] only fails on a singular
+    ///   transform.
+    ///
+    /// The plane maps keeping its side ([`Transform::apply_plane_keeping_side`]):
+    /// under a mirrored pose the local normal is the pose-inverse image of
+    /// the user's up, not the opposite side a winding-following refit
+    /// would give.
     pub fn begin_sketch_on_plane_in_instance(
         &mut self,
         instance: InstanceId,
@@ -7771,8 +7760,13 @@ impl Document {
             .ok_or(DocumentError::UnknownInstance)?;
         let component = rec.def;
         let pose_inv = rec.pose.inverse().map_err(DocumentError::Transform)?;
+        // Side-keeping: the plane's normal is the user's up. Rendered back
+        // through this instance's pose (mirrored or not) the local normal
+        // lands on that same up, so a positive extrusion goes where the
+        // user pointed; through every other placement the sketch's side is
+        // that placement's map of one well-defined local normal.
         let local_plane = pose_inv
-            .apply_plane(&plane)
+            .apply_plane_keeping_side(&plane)
             .map_err(DocumentError::Transform)?;
 
         let id = self.insert_sketch_record(Sketch::on_plane(local_plane));
@@ -9909,7 +9903,9 @@ impl Document {
             };
             let obj = &rec.object;
             for face in obj.faces().values() {
-                let Ok(plane) = pose.apply_plane(&face.plane) else {
+                // Either plane map serves: the hit depth and the
+                // even-odd inside test do not depend on the normal's sign.
+                let Ok(plane) = pose.apply_plane_following_winding(&face.plane) else {
                     continue;
                 };
                 let n = plane.normal();
@@ -12527,15 +12523,11 @@ impl Document {
             } => {
                 // The member is definition-owned (NOT world); its loop is
                 // definition-local and rides the instance's pose into
-                // world space (design §2e). A reflected pose would hand
-                // the sweep a mirrored winding — refused typed, matching
-                // the explode gate.
+                // world space (design §2e). A reflected pose bakes like any
+                // other; the sweep orients from the face, not the winding.
                 let pose = self
                     .instance_pose(*instance)
                     .ok_or(DocumentError::UnknownInstance)?;
-                if pose.determinant() < 0.0 {
-                    return Err(DocumentError::Transform(TransformError::Reflection));
-                }
                 let rec = self
                     .objects
                     .get(*object)
@@ -12889,8 +12881,10 @@ impl Document {
             let part = if riding.len() == sk.edges().len() {
                 RidePart::Whole
             } else {
+                // The riding part lands on the face's new outward side,
+                // which is the side the sketch faced before the move.
                 let moved_plane = forward
-                    .apply_plane(&plane)
+                    .apply_plane_keeping_side(&plane)
                     .map_err(DocumentError::Transform)?;
                 let fresh = sk
                     .rebuild_edges_transformed(&riding, &forward, moved_plane)
@@ -13592,13 +13586,13 @@ impl Document {
     /// definition-local space through the instance's pose⁻¹ (a plane maps
     /// unambiguously through ANY invertible pose — rotation, mirror, or
     /// non-uniform scale — so unlike a typed scalar this never refuses on
-    /// scale; see [`Transform::apply_plane`]). The source member is hidden
-    /// (tombstone); the two watertight pieces become new members of the
-    /// SAME definition, seen by every instance at once.
+    /// scale; see [`Transform::apply_plane_keeping_side`]). The source
+    /// member is hidden (tombstone); the two watertight pieces become new
+    /// members of the SAME definition, seen by every instance at once.
     ///
-    /// Returns `((positive, negative), DocChange)` — the piece on the
-    /// plane's (local-mapped) normal side first, exactly like
-    /// [`Document::slice_node`].
+    /// Returns `((positive, negative), DocChange)` — the piece on the WORLD
+    /// plane's normal side first, exactly like [`Document::slice_node`],
+    /// under a mirrored pose too (the plane maps keeping its side).
     ///
     /// # Errors
     /// - [`DocumentError::UnknownInstance`] — `instance` is stale/hidden.
@@ -13621,8 +13615,12 @@ impl Document {
         info!(target: "kernel::op", op = "slice_def_member", nx = n.x, ny = n.y, nz = n.z);
         let (component, pose) = self.instance_component(instance)?;
         let pose_inv = pose.inverse().map_err(DocumentError::Transform)?;
+        // Side-keeping: the positive piece is the one on the WORLD plane's
+        // normal side, so the local plane's normal must be the pose-inverse
+        // image of that side (a winding-following refit would swap the
+        // pieces under a mirrored pose).
         let local_plane = pose_inv
-            .apply_plane(plane)
+            .apply_plane_keeping_side(plane)
             .map_err(DocumentError::Transform)?;
         let rec = self
             .objects
@@ -14078,7 +14076,7 @@ impl Document {
     /// Undo restores the recorded pre-transform snapshot verbatim (rule 9
     /// posture — see [`DocAction::Transform`]'s doc comment); the object
     /// keeps its handle. `Err` if the object is unknown/hidden or `t` is
-    /// singular or orientation-flipping — nothing changes in that case (the
+    /// singular — nothing changes in that case (the
     /// op's strong guarantee).
     pub fn transform_object(
         &mut self,
@@ -14152,10 +14150,10 @@ impl Document {
     /// det(pose)·det(t)·det(pose⁻¹) = det(t)`, independent of the pose
     /// entirely — a proper (non-reflecting) world gesture conjugates to a
     /// proper local one through ANY invertible pose, mirrored instances
-    /// included, and a reflecting `t` is refused by
-    /// [`Object::apply_transform`] exactly as it would be in world space.
+    /// included, and a reflecting `t` bakes through
+    /// [`Object::apply_transform`] exactly as it would in world space.
     /// So this refuses ONLY where [`Document::transform_object`] would —
-    /// singular or orientation-flipping `t` — never on account of the
+    /// singular `t` — never on account of the
     /// instance's own scale; there is no typed-scalar rule to trip here (the
     /// design's "only refuse where the typed-scalar rule applies" resolves
     /// to "nowhere" for a full affine).
@@ -14164,7 +14162,7 @@ impl Document {
     /// - [`DocumentError::UnknownInstance`] — `instance` is stale/hidden.
     /// - [`DocumentError::Transform`] — the instance's pose fails to invert
     ///   (unreachable for a live instance in practice), or `t` (equivalently
-    ///   `local_t`) is singular or orientation-flipping.
+    ///   `local_t`) is singular.
     /// - [`DocumentError::UnknownObject`] — `object` is stale, hidden, or
     ///   not a member of `instance`'s own definition.
     ///
@@ -14389,7 +14387,7 @@ impl Document {
     ///
     /// # Errors
     /// - [`DocumentError::UnknownSketch`] — stale or hidden (deleted) sketch.
-    /// - [`DocumentError::Transform`] — singular or orientation-flipping map;
+    /// - [`DocumentError::Transform`] — singular map;
     ///   the sketch is left untouched (transactional).
     pub fn transform_sketch(
         &mut self,
@@ -14470,7 +14468,7 @@ impl Document {
     /// - [`DocumentError::Sketch`] — a stale island
     ///   ([`SketchError::UnknownIsland`]), or a replay the sticky machinery
     ///   refuses (a tolerance-collapsing transform).
-    /// - [`DocumentError::Transform`] — singular or orientation-flipping
+    /// - [`DocumentError::Transform`] — singular
     ///   map.
     ///
     /// Every error leaves the document untouched (strong guarantee).
@@ -14484,9 +14482,6 @@ impl Document {
         // `transform_object`/`transform_sketch`); undo restores the
         // snapshot below verbatim, so the inverse itself is not stored.
         t.inverse().map_err(DocumentError::Transform)?;
-        if t.determinant() < 0.0 {
-            return Err(DocumentError::Transform(TransformError::Reflection));
-        }
         if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
@@ -14558,9 +14553,6 @@ impl Document {
         t: &Transform,
     ) -> Result<(), DocumentError> {
         t.inverse().map_err(DocumentError::Transform)?;
-        if t.determinant() < 0.0 {
-            return Err(DocumentError::Transform(TransformError::Reflection));
-        }
         if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
@@ -14571,9 +14563,10 @@ impl Document {
             Err(SketchError::PointOffPlane { .. }) => {
                 // Out-of-plane arms: whole-sketch bake needs only the
                 // already-validated transform; detach additionally needs the
-                // islands to replay onto the mapped plane.
+                // islands to replay onto the mapped plane, mapped keeping
+                // its side exactly as the detach does.
                 let plane = t
-                    .apply_plane(&s.plane())
+                    .apply_plane_keeping_side(&s.plane())
                     .map_err(DocumentError::Transform)?;
                 if self.islands_cover_sketch(sketch, islands) {
                     return Ok(());
@@ -14590,7 +14583,8 @@ impl Document {
     /// rebuilds the islands with `t` baked in as ONE new sketch on the mapped
     /// plane, removes their edges from `source`, and records
     /// [`DocAction::DetachedSketchIsland`]. The caller has already vetted
-    /// `t` (invertible, det > 0) and that `source` is live. The detached
+    /// `t` (invertible; a reflection keeps the plane's normal side) and that
+    /// `source` is live. The detached
     /// sketch is built COMPLETELY before anything mutates, so every typed
     /// failure leaves the document untouched.
     fn detach_transformed_islands(
@@ -14601,7 +14595,7 @@ impl Document {
     ) -> Result<DocChange, DocumentError> {
         let src = &self.sketches[source];
         let plane = t
-            .apply_plane(&src.plane())
+            .apply_plane_keeping_side(&src.plane())
             .map_err(DocumentError::Transform)?;
         let fresh = src
             .rebuild_islands_transformed(islands, t, plane)
@@ -14678,7 +14672,7 @@ impl Document {
     /// - [`DocumentError::Sketch`] — any stale island
     ///   ([`SketchError::UnknownIsland`]), or a replay the sticky machinery
     ///   refuses (e.g. a tolerance-collapsing scale).
-    /// - [`DocumentError::Transform`] — singular or orientation-flipping map.
+    /// - [`DocumentError::Transform`] — singular map.
     ///
     /// The copy is built completely before anything mutates, so every error
     /// leaves the document untouched (strong guarantee).
@@ -14689,15 +14683,12 @@ impl Document {
         t: &Transform,
     ) -> Result<(SketchId, DocChange), DocumentError> {
         t.inverse().map_err(DocumentError::Transform)?;
-        if t.determinant() < 0.0 {
-            return Err(DocumentError::Transform(TransformError::Reflection));
-        }
         if !self.sketches.contains_key(source) || self.sketch_tombstoned(&source) {
             return Err(DocumentError::UnknownSketch);
         }
         let src = &self.sketches[source];
         let plane = t
-            .apply_plane(&src.plane())
+            .apply_plane_keeping_side(&src.plane())
             .map_err(DocumentError::Transform)?;
         let fresh = src
             .rebuild_islands_transformed(islands, t, plane)
@@ -15204,7 +15195,7 @@ impl Document {
     /// leaf's recorded pre-transform snapshot verbatim (rule 9 posture — see
     /// [`DocAction::Transform`]'s doc comment); all handles stay stable.
     /// `Err` (document untouched) if the group is unknown/hidden or `t` is
-    /// singular or orientation-flipping.
+    /// singular.
     pub fn transform_group(
         &mut self,
         group: GroupId,
@@ -15319,9 +15310,8 @@ impl Document {
     /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
     ///   [`DocumentError::UnknownInstance`] / [`DocumentError::UnknownSketch`]
     ///   — a listed handle is stale or hidden.
-    /// - [`DocumentError::Transform`] — `t` is singular, or it reflects and
-    ///   the selection contains a baked target (an object or sketch), which
-    ///   [`Object::apply_transform`] refuses.
+    /// - [`DocumentError::Transform`] — `t` is singular, or a shrink would leave
+    ///   a baked target's face too small to reopen.
     ///
     /// On `Err` the document is untouched (the strong guarantee).
     pub fn transform_selection(
@@ -15431,7 +15421,7 @@ impl Document {
             .collect();
 
         // Bake into copies of the objects and sketches, then commit them all:
-        // any target refusing (a reflecting `t`, or a shrink that would leave
+        // any target refusing (a singular `t`, or a shrink that would leave
         // a face too small to reopen) leaves every target as it was — the
         // strong guarantee without a computed-inverse rollback.
         let (baked_objects, baked_sketches) = self.scaled_copies(&objects, &sketch_targets, t)?;
@@ -16899,9 +16889,6 @@ impl Document {
     ///
     /// # Errors
     /// - [`DocumentError::UnknownInstance`] — the instance is stale/hidden.
-    /// - [`DocumentError::CannotExplodeReflected`] — the pose mirrors
-    ///   (determinant < 0); baking it would invert winding. Use
-    ///   [`Document::make_unique`] then edit instead, or unmirror first.
     /// - [`DocumentError::CannotExplodeNonUniformScale`] — the definition
     ///   holds a live def-owned sketch and the pose is not a similarity
     ///   (non-uniform scale): the sketch's curve identity cannot map
@@ -16926,10 +16913,6 @@ impl Document {
             Some(rec) if !rec.hidden && rec.owner_def.is_none() => (rec.def, rec.pose, rec.parent),
             _ => return Err(DocumentError::UnknownInstance),
         };
-        // Baking a reflection would invert winding: refuse before mutating.
-        if pose.determinant() < 0.0 {
-            return Err(DocumentError::CannotExplodeReflected);
-        }
         let member_nodes: Vec<NodeId> = match self.components.get(def) {
             Some(c) if !c.hidden => c
                 .members
@@ -16969,8 +16952,8 @@ impl Document {
         }
 
         // Clone each member and bake the pose into the copy as an independent
-        // world object in the instance's container. `pose` is invertible and
-        // orientation-preserving, so `apply_transform` cannot fail. The clone
+        // world object in the instance's container. `pose` is invertible (a mirror bakes
+        // with every face turned over), so `apply_transform` cannot fail. The clone
         // keeps the member's own tags (preserved on the member since before
         // it was folded in); for a single-member definition its name is the
         // identity the UI displays for the instance — instance name, else the
@@ -17044,8 +17027,8 @@ impl Document {
 
         // Copy each live def-owned sketch into an independent WORLD sketch,
         // baking the same pose (guaranteed a similarity by the guard above,
-        // and invertible/non-reflected by the checks above, so this cannot
-        // fail). NOT registered in `def_sketches` — it is genuinely
+        // and invertible by the checks above, so this cannot
+        // fail; a reflecting pose mirrors the sketch with its normal kept). NOT registered in `def_sketches` — it is genuinely
         // world-owned from here, exactly like a baked member is genuinely
         // world-owned; the definition's own sketch is left exactly as it
         // was for any sibling instance.
@@ -17790,7 +17773,7 @@ impl Document {
     /// - [`DocumentError::ExplodeSessionOpen`] — the instance's definition
     ///   is already on loan to an open frame.
     /// - [`DocumentError::ExplodeSessionPoseUnsupported`] — the instance's
-    ///   pose is not a similarity with positive determinant (see the pose
+    ///   pose is not a similarity (see the pose
     ///   gate rationale on that error variant).
     ///
     /// On `Err` the document is untouched.
@@ -17812,7 +17795,7 @@ impl Document {
         if self.defs_on_loan().contains(&component) {
             return Err(DocumentError::ExplodeSessionOpen);
         }
-        if pose.similarity_scale().is_none() || pose.determinant() <= 0.0 {
+        if pose.similarity_scale().is_none() {
             return Err(DocumentError::ExplodeSessionPoseUnsupported);
         }
         // A group-nested placement refuses — the ENTERED instance or ANY
@@ -19085,9 +19068,9 @@ impl Document {
     /// # Errors
     /// - [`DocumentError::UnknownObject`] / `UnknownGroup` / `UnknownInstance` —
     ///   the source node is stale or hidden.
-    /// - [`DocumentError::Transform`] — `placement` is singular, or it reflects an
-    ///   Object/Group leaf (baking would invert winding, as in
-    ///   [`Document::transform_object`]).
+    /// - [`DocumentError::Transform`] — `placement` is singular, or it shrinks an
+    ///   Object/Group leaf's faces below what a saved file could reopen (a
+    ///   reflection bakes a mirrored copy, as in [`Document::transform_object`]).
     ///
     /// On `Err` the document is untouched (a partial clone is rolled back).
     pub fn duplicate_node(
@@ -19110,8 +19093,8 @@ impl Document {
             });
         }
         self.refuse_expansion_growth(&[node], 1)?;
-        // Validate invertibility up front; a reflecting `placement` is re-rejected
-        // by `apply_transform` per object leaf during the clone.
+        // Validate invertibility up front; a reflecting `placement` bakes a mirrored
+        // copy per object leaf during the clone.
         placement.inverse().map_err(DocumentError::Transform)?;
 
         let parent = self.node_parent(node);
@@ -19263,8 +19246,8 @@ impl Document {
                 });
             }
         }
-        // Validate invertibility up front; a reflecting placement is
-        // re-rejected by `apply_transform` per object leaf during the clone.
+        // Validate invertibility up front; a reflecting placement bakes
+        // mirrored copies per object leaf during the clone.
         for placement in placements {
             placement.inverse().map_err(DocumentError::Transform)?;
         }

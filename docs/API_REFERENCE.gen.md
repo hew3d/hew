@@ -413,7 +413,7 @@ Bake an instance into world geometry.
 
 - `unknown_entity`
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
-- `cannot_explode_reflected` — A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead.
+- `cannot_explode_reflected`
 
 ### `hew.component.flip_instance`
 
@@ -719,7 +719,7 @@ Open a group/component editing frame (transaction-balanced only).
 - `unknown_entity`
 - `explode_session_open` — This component is already open for editing further out. Step back out to it (Escape) instead of opening it again — and close the editor before saving.
 - `explode_session_nested_group` — This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one.
-- `explode_session_pose_unsupported` — This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first.
+- `explode_session_pose_unsupported` — This instance is scaled unevenly, so it can't be opened for direct editing. Even out its scale first.
 - `explode_session_grouped_instance` — A placement of this component sits inside a group, so it opens in the in-context editing mode instead.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
@@ -2245,7 +2245,7 @@ Rotate about a pivot and axis by an angle.
 - **Served:** kernel
 - **Permission:** model.write
 
-Scale about an anchor with per-axis factors.
+Scale about an anchor with per-axis factors; a negative factor mirrors.
 
 **Params schema:**
 
@@ -3314,7 +3314,6 @@ Insert a library item into the attached document, wired for idempotent re-insert
 - `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
 - `singular` — That transform would scale the object down to nothing, so it was refused.
 - `degenerate_axis` — The rotation axis needs two distinct points. Pick a second point further from the first.
-- `reflection` — This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.library.list`
@@ -9678,7 +9677,7 @@ Kept for compatibility: turn a drawn shape about its plane's normal through a pi
 - **Served:** kernel
 - **Permission:** model.write
 
-Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane; hew.sketch.scale is the general form.
+Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane (a negative factor turns it 180 degrees about the anchor and scales it by |factor|); hew.sketch.scale is the general form, and a mirror about a world axis of an axis-aligned drawing plane is hew.sketch.scale with a negative per-axis factor.
 
 **Params schema:**
 
@@ -9702,8 +9701,7 @@ Kept for compatibility: uniformly scale a drawn shape about an anchor in its pla
       ]
     },
     "factor": {
-      "description": "uniform scale factor",
-      "exclusiveMinimum": 0,
+      "description": "uniform scale factor, finite and nonzero; a negative factor turns the shape 180 degrees about `about` and scales it by |factor| (a mirror about a world axis of an axis-aligned drawing plane is hew.sketch.scale with a negative per-axis factor)",
       "type": "number"
     },
     "imprint": {

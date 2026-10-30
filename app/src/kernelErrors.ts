@@ -197,8 +197,6 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   Singular: msg`That transform would scale the object down to nothing, so it was refused.`,
   DegenerateAxis:
     msg`The rotation axis needs two distinct points. Pick a second point further from the first.`,
-  Reflection:
-    msg`This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead.`,
   DegenerateTextureFrame:
     msg`That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch.`,
   InvalidRescaleFactor:
@@ -222,8 +220,6 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`That would nest components deeper than Hew supports. Flatten one of the levels — explode an instance, or make it unique — before placing this one.`,
   ComponentExpansionExceeded:
     msg`That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.`,
-  CannotExplodeReflected:
-    msg`A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead.`,
   CannotExplodeNonUniformScale:
     msg`This instance has an unfinished sketch inside it, and its scale isn't even across all three axes, so the sketch's circles and arcs can't be baked exactly. Even out the instance's scale first, or finish (extrude) the sketch before exploding.`,
   DuplicateMember: msg`The same object is in the selection twice. Reselect and try again.`,
@@ -280,7 +276,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`This component is already open for editing further out. Step back out to it (Escape) instead of opening it again — and close the editor before saving.`,
   ExplodeSessionNotOpen: msg`No component is currently open for editing.`,
   ExplodeSessionPoseUnsupported:
-    msg`This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first.`,
+    msg`This instance is scaled unevenly, so it can't be opened for direct editing. Even out its scale first.`,
   ExplodeSessionScope:
     msg`That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.`,
   ExplodeSessionGroupedInstance:
@@ -294,7 +290,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   // asking the kernel, since a pose/grouped-instance refusal on the SAME
   // instance would otherwise fall back to K1 silently.
   NestedComponentInContext:
-    msg`This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts.`,
+    msg`This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts.`,
 
   // ---------------------------------------------------------- history
   NothingToUndo: msg`Nothing to undo.`,

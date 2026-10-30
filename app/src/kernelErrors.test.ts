@@ -350,7 +350,7 @@ describe('kernelErrorMessage — coverage', () => {
     for (const code of [
       'WouldVanish', 'NonManifoldResult', 'RadiusVanishes', 'DistanceTooSmall',
       'EndpointNotOnBoundary', 'DegenerateContact', 'PlaneMissesSolid',
-      'MixedParents', 'CannotExplodeReflected', 'WouldRetopologize',
+      'MixedParents', 'ExplodeSessionPoseUnsupported', 'WouldRetopologize',
       'RestoreConflicts', 'WallNeighborNonPlanar',
     ]) {
       const sentences = kernelErrorMessage(code, '').match(/[.!?](\s|$)/g) ?? []

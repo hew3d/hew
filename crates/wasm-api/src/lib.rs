@@ -2772,8 +2772,24 @@ impl Scene {
                         Some(SketchCurveRim {
                             curve: rim.curve,
                             center: pose.apply_point(rim.center),
-                            axis: pose.apply_plane(&source.plane()).ok()?.normal(),
+                            // The placed sketch's up, as a world sketch's
+                            // rim axis is its plane normal.
+                            axis: pose
+                                .apply_plane_keeping_side(&source.plane())
+                                .ok()?
+                                .normal(),
                             radius: rim.radius * scale,
+                            // The basis maps as plain vectors, so under a
+                            // mirror it is left-handed about `axis`. That is
+                            // deliberate: `coverage` holds angles measured in
+                            // the definition's (u, v), and every consumer
+                            // (quadrant points, tangent angles, `covers`)
+                            // parametrizes the rim as center + r(cos t u +
+                            // sin t v) in that same basis, which maps a
+                            // covered angle to the image of the same point.
+                            // `axis` is only used to project onto the plane,
+                            // where its sign does not matter. Re-orienting
+                            // the basis would invalidate the coverage.
                             basis_u: pose.apply_vector(rim.basis_u).normalized().ok()?,
                             basis_v: pose.apply_vector(rim.basis_v).normalized().ok()?,
                             coverage: rim.coverage,
@@ -2789,7 +2805,10 @@ impl Scene {
                 .collect();
             self.inference
                 .add_sketch_polygon_centers(sid, &polygon_centers);
-            let Some(plane) = pose.apply_plane(&source.plane()).ok() else {
+            // Side-keeping, like a world sketch's region faces: the plane's
+            // normal is the placed sketch's up, which a mirrored pose must
+            // not turn over.
+            let Some(plane) = pose.apply_plane_keeping_side(&source.plane()).ok() else {
                 continue;
             };
             let faces: Vec<SketchRegionFace> = source
@@ -5375,7 +5394,7 @@ impl Scene {
     /// # Errors
     /// - `BadAffine` — `affine` is not 12 floats.
     /// - `UnknownSketch` — stale or hidden (deleted) handle.
-    /// - `Transform` — singular or orientation-flipping (e.g. negative scale).
+    /// - `Transform` — singular.
     pub fn transform_sketch(&mut self, sketch: u64, affine: &[f64]) -> Result<(), ApiError> {
         self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
@@ -6062,7 +6081,7 @@ impl Scene {
     }
 
     /// "Explode": bakes an instance's pose into independent world objects,
-    /// returning their handles. A mirrored instance errors (`CannotExplodeReflected`).
+    /// returning their handles. A mirrored instance explodes like any other.
     pub fn explode_instance(&mut self, instance: u64) -> Result<Vec<u64>, ApiError> {
         self.ensure_not_busy()?;
         let (created, change) = self
@@ -6095,8 +6114,7 @@ impl Scene {
     /// `explode_instance`'s copy) and hides every live instance of that
     /// definition, so the app's ordinary, unmodified tool set can edit them.
     /// `close_explode_session` folds them back. Refuses typed if a session
-    /// is already open, or if the instance's pose is not a similarity with
-    /// positive determinant.
+    /// is already open, or if the instance's pose is not a similarity (uneven scale).
     pub fn open_explode_session(&mut self, instance: u64) -> Result<(), ApiError> {
         self.ensure_not_busy()?;
         let change = self
@@ -16452,7 +16470,7 @@ mod tests {
     }
 
     #[test]
-    fn transform_object_rejects_bad_affine_and_reflection() {
+    fn transform_object_rejects_bad_affine_and_bakes_reflection() {
         let mut scene = Scene::new();
         let (s, r) = ground_unit_square(&mut scene);
         let o = scene.extrude_region(s, r, 1.0).unwrap();
@@ -16465,14 +16483,26 @@ mod tests {
                 .0
                 .starts_with("BadAffine")
         );
-        // Negative scale on every axis flips orientation → refused.
+        // Negative scale on every axis flips orientation → baked: the faces
+        // are turned over, so the solid stays watertight and outward-facing.
         let reflect = [
             -1.0, 0.0, 0.0, 0.0, //
             0.0, -1.0, 0.0, 0.0, //
             0.0, 0.0, -1.0, 0.0,
         ];
-        let err = scene.transform_object(o, &reflect).unwrap_err();
-        assert!(err.0.starts_with("Reflection"), "got {}", err.0);
+        scene
+            .transform_object(o, &reflect)
+            .expect("a reflection is baked, not refused");
+        let obj = scene.doc.object(object_id(o)).expect("object live");
+        assert!(obj.signed_volume() > 0.0, "got {}", obj.signed_volume());
+        assert!(scene.object_watertight(o).unwrap());
+        let zero = [
+            0.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        let err = scene.transform_object(o, &zero).unwrap_err();
+        assert!(err.0.starts_with("Singular"), "got {}", err.0);
     }
 
     /// After extruding one of two wall-sharing squares, the surviving
@@ -16715,7 +16745,7 @@ mod tests {
     }
 
     #[test]
-    fn transform_sketch_rejects_bad_affine_and_reflection() {
+    fn transform_sketch_rejects_bad_affine_and_accepts_reflection() {
         let mut scene = Scene::new();
         let (s, _r) = ground_unit_square(&mut scene);
 
@@ -16732,8 +16762,22 @@ mod tests {
             0.0, -1.0, 0.0, 0.0, //
             0.0, 0.0, -1.0, 0.0,
         ];
-        let err = scene.transform_sketch(s, &reflect).unwrap_err();
-        assert!(err.0.starts_with("Reflection"), "got {}", err.0);
+        scene
+            .transform_sketch(s, &reflect)
+            .expect("a reflection is baked, not refused");
+        // The mirrored unit square still bounds one extrudable region, and
+        // extruding it yields a positive-volume solid.
+        let r = scene.sketch_regions(s).expect("sketch live")[0];
+        let o = scene.extrude_region(s, r, 1.0).expect("extrude mirrored");
+        let obj = scene.doc.object(object_id(o)).expect("object live");
+        assert!(obj.signed_volume() > 0.0, "got {}", obj.signed_volume());
+        let zero = [
+            0.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        let err = scene.transform_sketch(s, &zero).unwrap_err();
+        assert!(err.0.starts_with("Singular"), "got {}", err.0);
     }
 
     #[test]
@@ -17878,7 +17922,21 @@ mod tests {
         curve: Option<([f64; 3], f64, usize)>,
     ) -> Result<u64, ApiError> {
         draft_loop(scene, instance, obj, face, pts, curve)?;
-        Ok(draft_loop_region_face(scene, instance, pts))
+        // The face's outward side in world space: its local normal mapped
+        // through the instance pose (a mirrored pose keeps the side).
+        let local = scene.doc.object(object_id(obj)).unwrap().faces()
+            [kernel::FaceId::from(KeyData::from_ffi(face))]
+        .plane
+        .normal();
+        let outward = match instance {
+            Some(i) => scene
+                .doc
+                .instance_pose(instance_id(i))
+                .unwrap()
+                .apply_normal(local),
+            None => local,
+        };
+        Ok(draft_loop_region_face(scene, instance, pts, outward))
     }
 
     /// The drawing half of [`draft_loop_on_face`]: opens the face draft,
@@ -17921,8 +17979,15 @@ mod tests {
     }
 
     /// The face of the object covered by the region of the drawn loop
-    /// `pts`, from `plane_units_json`.
-    fn draft_loop_region_face(scene: &Scene, instance: Option<u64>, pts: &[f64]) -> u64 {
+    /// `pts`, from `plane_units_json`, read on the plane context facing
+    /// `outward` (the face's world outward side; the loop's own winding
+    /// does not say which side that is — a mirrored pose reverses it).
+    fn draft_loop_region_face(
+        scene: &Scene,
+        instance: Option<u64>,
+        pts: &[f64],
+        outward: kernel::Vec3,
+    ) -> u64 {
         let n = pts.len() / 3;
         let p = |i: usize| &pts[(i % n) * 3..(i % n) * 3 + 3];
         // The drawn region: pick the loop's vertex centroid straight down
@@ -17930,6 +17995,11 @@ mod tests {
         let v = |i: usize| kernel::Vec3::new(p(i)[0], p(i)[1], p(i)[2]);
         let nrm = (v(1) - v(0)).cross(v(2) - v(0));
         let nrm = nrm * (1.0 / nrm.length());
+        let nrm = if nrm.dot(outward) < 0.0 {
+            nrm * -1.0
+        } else {
+            nrm
+        };
         let cen = (0..n).fold([0.0; 3], |mut c, i| {
             for (k, ck) in c.iter_mut().enumerate() {
                 *ck += p(i)[k] / n as f64;

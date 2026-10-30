@@ -779,8 +779,8 @@ msgid "A line needs a length. Type a length other than 0."
 msgstr ""
 
 #: src/kernelErrors.ts
-msgid "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
-msgstr ""
+#~ msgid "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
+#~ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis."
@@ -8247,13 +8247,17 @@ msgstr ""
 msgid "This instance is scaled unevenly across its axes, so a single typed distance can't map onto it without ambiguity. Drag to the exact size instead of typing a length."
 msgstr ""
 
+#: src/kernelErrors.ts
+msgid "This instance is scaled unevenly, so it can't be opened for direct editing. Even out its scale first."
+msgstr ""
+
 #: src/panels/ObjectInfoPanel.tsx
 msgid "This instance only — leave empty to show the definition name"
 msgstr ""
 
 #: src/kernelErrors.ts
-msgid "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
-msgstr ""
+#~ msgid "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
+#~ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid."
@@ -8284,7 +8288,11 @@ msgid "This model is too large for Hew to open"
 msgstr ""
 
 #: src/kernelErrors.ts
-msgid "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
+#~ msgid "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
+#~ msgstr ""
+
+#: src/kernelErrors.ts
+msgid "This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts."
 msgstr ""
 
 #: src/health/healthBatch.ts
@@ -8384,8 +8392,8 @@ msgid "This throws away everything you changed since the last save."
 msgstr ""
 
 #: src/kernelErrors.ts
-msgid "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
-msgstr ""
+#~ msgid "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
+#~ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "Those points don't define a plane. Pick three points that aren't in a line."

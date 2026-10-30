@@ -178,7 +178,13 @@ impl Scene {
         let (plane, frame, pose) = match instance {
             Some(i) => {
                 let (def, pose) = self.draft_instance_pose(i)?;
-                let local = pose.inv.apply_plane(&plane).map_err(|e| api_err(&e, &e))?;
+                // Side-keeping, as `begin_sketch_on_plane_in_instance`
+                // maps it: the local plane's normal is the pose-inverse
+                // image of the user's up, under a mirrored pose too.
+                let local = pose
+                    .inv
+                    .apply_plane_keeping_side(&plane)
+                    .map_err(|e| api_err(&e, &e))?;
                 (local, Some(def), Some(pose))
             }
             None => (plane, None, None),
@@ -1911,6 +1917,32 @@ mod tests {
             scene
                 .draft_begin_face_in_instance(inst + 1000, member, f, "x")
                 .is_err()
+        );
+    }
+
+    /// A plane draft opened through a MIRRORED instance on the world plane
+    /// of a member's top face lands on that face: the context plane maps
+    /// into the definition keeping its side, so it matches the face's
+    /// outward normal and the face takes part in the draft.
+    #[test]
+    fn a_plane_draft_through_a_mirrored_instance_lands_on_the_member_face() {
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let inst = scene.make_component(&[0], &[b]).unwrap();
+        let def = scene.instance_def(inst).unwrap();
+        // Mirror x, then shift: the box covers x in [3, 5].
+        let mirror = [-1.0, 0.0, 0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scene.transform_instance(inst, &mirror).unwrap();
+        let member = scene.component_member_objects(def)[0];
+        let d = scene
+            .draft_begin_plane_in_instance(inst, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, "Rectangle")
+            .unwrap();
+        rect(&mut scene, d, 3.5, 0.5, 4.5, 1.5, 1.0);
+        let report = json(&scene.draft_end(d).unwrap());
+        assert_eq!(
+            report["objects"],
+            serde_json::json!([member]),
+            "the member's top face took the drawing: {report}"
         );
     }
 

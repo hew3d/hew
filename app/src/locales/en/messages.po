@@ -779,8 +779,8 @@ msgid "A line needs a length. Type a length other than 0."
 msgstr "A line needs a length. Type a length other than 0."
 
 #: src/kernelErrors.ts
-msgid "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
-msgstr "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
+#~ msgid "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
+#~ msgstr "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
 
 #: src/kernelErrors.ts
 msgid "A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis."
@@ -8251,13 +8251,17 @@ msgstr "This instance has an unfinished sketch inside it, and its scale isn't ev
 msgid "This instance is scaled unevenly across its axes, so a single typed distance can't map onto it without ambiguity. Drag to the exact size instead of typing a length."
 msgstr "This instance is scaled unevenly across its axes, so a single typed distance can't map onto it without ambiguity. Drag to the exact size instead of typing a length."
 
+#: src/kernelErrors.ts
+msgid "This instance is scaled unevenly, so it can't be opened for direct editing. Even out its scale first."
+msgstr "This instance is scaled unevenly, so it can't be opened for direct editing. Even out its scale first."
+
 #: src/panels/ObjectInfoPanel.tsx
 msgid "This instance only — leave empty to show the definition name"
 msgstr "This instance only — leave empty to show the definition name"
 
 #: src/kernelErrors.ts
-msgid "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
-msgstr "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
+#~ msgid "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
+#~ msgstr "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
 
 #: src/kernelErrors.ts
 msgid "This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid."
@@ -8288,8 +8292,12 @@ msgid "This model is too large for Hew to open"
 msgstr "This model is too large for Hew to open"
 
 #: src/kernelErrors.ts
-msgid "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
-msgstr "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
+#~ msgid "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
+#~ msgstr "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
+
+#: src/kernelErrors.ts
+msgid "This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts."
+msgstr "This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts."
 
 #: src/health/healthBatch.ts
 msgid "This object is no longer in the model."
@@ -8388,8 +8396,8 @@ msgid "This throws away everything you changed since the last save."
 msgstr "This throws away everything you changed since the last save."
 
 #: src/kernelErrors.ts
-msgid "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
-msgstr "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
+#~ msgid "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
+#~ msgstr "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
 
 #: src/kernelErrors.ts
 msgid "Those points don't define a plane. Pick three points that aren't in a line."

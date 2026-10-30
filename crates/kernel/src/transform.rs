@@ -21,11 +21,6 @@ pub enum TransformError {
     /// A rotation axis too short to define a direction
     /// (below [`tol::NORMALIZE_MIN_LENGTH`]).
     DegenerateAxis,
-    /// The linear part flips orientation (determinant < 0, e.g. a negative
-    /// scale). Baking it into a solid would invert every face's winding /
-    /// outward normal, so it is refused rather than silently producing an
-    /// inside-out object.
-    Reflection,
     /// The map would leave some face's texture frame (its
     /// [`crate::material::UvFrame`]) degenerate: an extreme stretch or
     /// squash that shrinks a gradient past what the frame can hold, or
@@ -40,9 +35,6 @@ impl std::fmt::Display for TransformError {
             TransformError::Singular => write!(f, "transform is singular"),
             TransformError::DegenerateAxis => {
                 write!(f, "rotation axis too short to define a direction")
-            }
-            TransformError::Reflection => {
-                write!(f, "transform flips orientation (negative determinant)")
             }
             TransformError::DegenerateTextureFrame => {
                 write!(f, "transform would squash a face's texture frame")
@@ -83,8 +75,9 @@ impl Transform {
     }
 
     /// Uniform scale about the origin. A `factor` of 0 constructs fine but is
-    /// singular: [`Transform::inverse`] and [`Transform::apply_plane`] will
-    /// fail on it.
+    /// singular: [`Transform::inverse`] and both plane maps
+    /// ([`Transform::apply_plane_keeping_side`] and its winding-following
+    /// twin) fail on it.
     pub fn uniform_scale(factor: f64) -> Transform {
         Transform::scale(Vec3::new(factor, factor, factor))
     }
@@ -185,7 +178,8 @@ impl Transform {
     /// Maps a displacement/direction: `L·v` (no translation).
     ///
     /// NOT for surface normals — normals must go through
-    /// [`Transform::apply_plane`] (inverse-transpose).
+    /// [`Transform::apply_normal`] or
+    /// [`Transform::apply_plane_keeping_side`] (inverse-transpose).
     pub fn apply_vector(&self, v: Vec3) -> Vec3 {
         let l = &self.linear;
         Vec3::new(
@@ -231,12 +225,26 @@ impl Transform {
         )
     }
 
-    /// Maps a plane so that transformed points stay on the transformed plane.
+    /// Maps a plane so that transformed points stay on the transformed
+    /// plane, with the normal following the mapped WINDING.
     ///
     /// Internally maps three points spanning the plane and refits, which is
-    /// equivalent to the inverse-transpose normal rule and also keeps the
-    /// orientation convention (winding) consistent under reflections.
-    pub fn apply_plane(&self, plane: &Plane) -> Result<Plane, TransformError> {
+    /// equivalent to the inverse-transpose normal rule up to sign. Under a
+    /// reflection (negative determinant) the mapped triangle winds the other
+    /// way, so the refit normal points to the OPPOSITE side of the surface
+    /// from [`Transform::apply_normal`]: this is the plane of a mapped loop
+    /// whose vertex order was kept as is.
+    ///
+    /// Right only where that is what the caller wants: a face plane stored
+    /// next to its mapped loop that the caller then reverses (as
+    /// [`crate::topo::Object::apply_transform`] does, turning plane and
+    /// loop over together), or a use where the sign cancels (an unsigned
+    /// distance, a projection onto the plane). A plane mapped for its
+    /// normal — a sketch's up, a face's outward side, a split's positive
+    /// half-space, a hit normal — must use
+    /// [`Transform::apply_plane_keeping_side`] instead. The two agree when
+    /// the determinant is positive.
+    pub fn apply_plane_following_winding(&self, plane: &Plane) -> Result<Plane, TransformError> {
         if self.determinant().abs() < tol::NORMALIZE_MIN_LENGTH {
             return Err(TransformError::Singular);
         }
@@ -252,6 +260,27 @@ impl Transform {
             self.apply_point(anchor + v),
         ];
         Plane::from_polygon(&triangle).map_err(|_| TransformError::Singular)
+    }
+
+    /// Maps a plane so that transformed points stay on the transformed
+    /// plane, with the normal on the SAME side of the surface it was on
+    /// before the map: its direction is [`Transform::apply_normal`]'s.
+    ///
+    /// This is the map for a plane carried for its normal: a sketch's up
+    /// (the side it extrudes toward), a face's outward side, the positive
+    /// half-space of a split, a hit normal handed to a caller. Under a
+    /// reflection the three-point refit of
+    /// [`Transform::apply_plane_following_winding`] follows the reversed
+    /// winding, so it is turned over here; the two are equal when the
+    /// determinant is positive. A loop drawn on the returned plane must be
+    /// reversed to stay counter-clockwise about its normal.
+    pub fn apply_plane_keeping_side(&self, plane: &Plane) -> Result<Plane, TransformError> {
+        let mapped = self.apply_plane_following_winding(plane)?;
+        Ok(if self.determinant() < 0.0 {
+            mapped.flipped()
+        } else {
+            mapped
+        })
     }
 
     /// The uniform scale factor of this map when its linear part is a
@@ -444,7 +473,7 @@ mod tests {
         let plane = Plane::from_polygon(&polygon).unwrap();
         let t = Transform::scale(Vec3::new(1.0, 2.0, 4.0))
             .then(&Transform::translation(Vec3::new(0.5, 0.0, -3.0)));
-        let mapped = t.apply_plane(&plane).unwrap();
+        let mapped = t.apply_plane_following_winding(&plane).unwrap();
         for p in polygon {
             let d = mapped.signed_distance(t.apply_point(p));
             assert!(d.abs() < TEST_EPS, "point left its plane by {d}");
@@ -465,7 +494,7 @@ mod tests {
         .unwrap();
         let squash = Transform::scale(Vec3::new(1.0, 1.0, 0.0));
         assert_eq!(
-            squash.apply_plane(&plane).unwrap_err(),
+            squash.apply_plane_keeping_side(&plane).unwrap_err(),
             TransformError::Singular
         );
     }

@@ -263,9 +263,6 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "DegenerateAxis" => {
             "The rotation axis needs two distinct points. Pick a second point further from the first."
         }
-        "Reflection" => {
-            "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
-        }
         "DegenerateTextureFrame" => {
             "That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch."
         }
@@ -288,9 +285,6 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "ComponentExpansionExceeded" => {
             "That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again."
-        }
-        "CannotExplodeReflected" => {
-            "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
         }
         "CannotExplodeNonUniformScale" => {
             "This instance has an unfinished sketch inside it, and its scale isn't even across all three axes, so the sketch's circles and arcs can't be baked exactly. Even out the instance's scale first, or finish (extrude) the sketch before exploding."
@@ -365,7 +359,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "ExplodeSessionNotOpen" => "No component is currently open for editing.",
         "ExplodeSessionPoseUnsupported" => {
-            "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
+            "This instance is scaled unevenly, so it can't be opened for direct editing. Even out its scale first."
         }
         "ExplodeSessionScope" => {
             "That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again."
@@ -377,7 +371,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one."
         }
         "NestedComponentInContext" => {
-            "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
+            "This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts."
         }
         "NothingToUndo" => "Nothing to undo.",
         "NothingToRedo" => "Nothing to redo.",

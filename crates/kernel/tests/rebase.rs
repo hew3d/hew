@@ -503,8 +503,8 @@ fn rebase_carries_def_owned_sketches() {
     }
 }
 
-/// A copy that fails part way (the second placement reflects, which a
-/// baked object refuses) leaves the document exactly as it was: the first
+/// A copy that fails part way (the second placement squashes the box's faces
+/// below what a saved file can reopen) leaves the document exactly as it was: the first
 /// placement's object copy AND the copy of its owned sketch are removed
 /// with their stable ids, owner links, and tags, and the stable-id counter
 /// is rewound.
@@ -528,7 +528,9 @@ fn a_failed_placement_rolls_back_owned_sketch_copies_too() {
     let depth = doc.undo_depth();
     let placements = [
         Transform::translation(Vec3::new(3.0, 0.0, 0.0)),
-        Transform::scale(Vec3::new(-1.0, 1.0, 1.0)),
+        // Invertible, but it squashes the box's faces below what a saved
+        // file could reopen, so the bake refuses mid-way through the copies.
+        Transform::scale(Vec3::new(1e-7, 1e-7, 1e3)),
     ];
     assert!(matches!(
         doc.duplicate_nodes_placements(&[NodeId::Object(a)], &placements),

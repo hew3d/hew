@@ -1178,15 +1178,18 @@ pub(super) fn scale_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdE
         about: Value,
     }
     let p: P = parse_params(params)?;
-    if !p.factor.is_finite() || p.factor <= 0.0 {
+    if !p.factor.is_finite() || p.factor == 0.0 {
         return Err(CmdError::Params(
-            "scale factor must be finite and positive".into(),
+            "scale factor must be finite and nonzero".into(),
         ));
     }
     let about = locate::resolve_point(ctx, &p.about)?;
     let target = resolve_imprint(ctx, &p.imprint)?;
     // Uniform scale about `about`; the draft refuses `not_in_plane` when
-    // `about` is off the drawing plane (the result would leave it).
+    // `about` is off the drawing plane (the result would leave it). A
+    // negative factor is the point reflection through `about` scaled by
+    // |factor|, which in the plane is a half turn: the drawing is replayed
+    // where it lands, so its regions re-derive as drawn there.
     let s = Transform::scale(Vec3::new(p.factor, p.factor, p.factor));
     apply_transform(ctx, target, "Scale", about_point(about, &s))
 }

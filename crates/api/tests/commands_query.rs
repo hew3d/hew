@@ -885,6 +885,55 @@ fn raycast_prefers_a_nearer_instance_hit_over_a_farther_world_object() {
     assert_eq!(hit["normal"], json!([0.0, 0.0, 1.0]));
 }
 
+/// A hit on a MIRRORED instance reports the face's outward normal: the
+/// definition's face plane maps through the pose keeping its side, so the
+/// normal faces back along the ray rather than into the solid.
+#[test]
+fn raycast_on_a_mirrored_instance_reports_the_outward_normal() {
+    let mut doc = Document::new();
+    let member = build_box(&mut doc, 0.0);
+    let (_component, instance, _change) = doc
+        .make_component(&[NodeId::Object(member)])
+        .expect("fold into a component + instance");
+    // Mirror x about the origin, then lift clear of anything else: the box
+    // covers x in [-1, 0], z in [5, 5.5].
+    doc.transform_instance(
+        instance,
+        &kernel::Transform::scale(kernel::Vec3::new(-1.0, 1.0, 1.0)).then(
+            &kernel::Transform::translation(kernel::Vec3::new(0.0, 0.0, 5.0)),
+        ),
+    )
+    .expect("mirror the instance");
+    let mut conn = Connection::new(Grant::core(), "test");
+    hello_attach(&mut conn, &mut doc);
+
+    for (id, origin, dir) in [
+        (2, [-0.5, 0.5, 10.0], [0.0, 0.0, -1.0]),
+        (3, [-5.0, 0.5, 5.25], [1.0, 0.0, 0.0]),
+        (4, [5.0, 0.25, 5.25], [-1.0, 0.0, 0.0]),
+    ] {
+        let hit = call_ok(
+            &mut conn,
+            &mut doc,
+            id,
+            "hew.query.raycast",
+            json!({ "origin": origin, "dir": dir }),
+        );
+        assert_eq!(hit["kind"], "instance");
+        let n: Vec<f64> = hit["normal"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_f64().unwrap())
+            .collect();
+        let facing = -(n[0] * dir[0] + n[1] * dir[1] + n[2] * dir[2]);
+        assert!(
+            facing > 0.99,
+            "the normal {n:?} faces back along the ray {dir:?}"
+        );
+    }
+}
+
 #[test]
 fn raycast_skips_a_user_hidden_instance_and_falls_through_to_the_world_object_beneath_it() {
     let mut doc = Document::new();

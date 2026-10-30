@@ -21,10 +21,15 @@
  *                     default, or the box CENTER if Ctrl's durable toggle is
  *                     on (see below).
  *   2. Move         : per driven axis, `s_axis = (cursor − pivot)·axis /
- *                     (grab − pivot)·axis`, clamped to `MIN_SCALE` — dragging
- *                     a grip past its anchor clamps rather than reflecting
- *                     (the kernel refuses reflection typed; mirroring is a
- *                     separate future tool). A corner grip's "axis" is the
+ *                     (grab − pivot)·axis`. Dragging a grip through the
+ *                     anchor to the far side yields a NEGATIVE factor and
+ *                     mirrors, as SketchUp's does (the kernel bakes the
+ *                     reflection). The magnitude is floored at `MIN_SCALE`
+ *                     with its sign kept; a factor of exactly zero (the
+ *                     cursor ON the anchor) is a skipped frame — the
+ *                     previous preview stays and a click there is ignored,
+ *                     so a singular transform never reaches the kernel. A
+ *                     corner grip's "axis" is the
  *                     pivot→grab diagonal, driving sx=sy=sz by one shared
  *                     ratio (uniform). Updates a THREE.js ghost preview.
  *   3. Second click : commit the scale (one node → the per-kind transform; a
@@ -89,9 +94,22 @@ export type OnMeasurement = (text: string) => void
 
 type Vec3 = [number, number, number]
 
-/** Never let a driven axis reach or cross zero (reflection/singular) — the
- * same floor the kernel's typed refusal exists to keep the UI away from. */
+/** Floor on a driven axis's factor MAGNITUDE: a factor may be negative (a
+ * mirror) but never reaches zero (singular). */
 const MIN_SCALE = 0.01
+
+/**
+ * Sign-preserving magnitude floor for a raw scale factor. Returns `null` for
+ * a factor that is zero (or non-finite) — the kernel would refuse the
+ * singular transform, so callers skip the frame / treat entry as incomplete.
+ * Otherwise `|f|` is raised to at least `MIN_SCALE` keeping the sign, so a
+ * drag through the anchor mirrors (negative) instead of clamping.
+ * @internal exported for unit tests
+ */
+export function floorScaleFactor(raw: number): number | null {
+  if (!Number.isFinite(raw) || Math.abs(raw) < 1e-9) return null
+  return Math.sign(raw) * Math.max(Math.abs(raw), MIN_SCALE)
+}
 
 /** A grip on the gizmo box: its world position, the grip that anchors it by
  * default (the geometric opposite), and which axes it drives. `axisIndex`
@@ -456,6 +474,9 @@ export class ScaleTool implements Tool {
       if (cursor !== null) this.stage.lastCursor = cursor
       const { nodes, axisIndex, axisIndex2, boxExtent } = this.stage
       let factors = this._currentFactors()
+      // The cursor sits exactly on the anchor (factor 0): a singular scale
+      // must not commit. Ignore the click and keep dragging.
+      if (factors === null) return
       // A free pick commits the DISPLAYED per-axis factors (×f.toFixed(2)),
       // exactly as if typed. A typed buffer still wins, and a hard snap or a
       // factor that would display as 0 keeps the raw value.
@@ -970,27 +991,28 @@ export class ScaleTool implements Tool {
    * driven axis reads only its own component: a face grip drives one axis, an
    * edge grip drives its two INDEPENDENTLY (SketchUp's edge grips scale their
    * two axes independently; Shift-to-lock-proportional is out of scope, as is
-   * comma-separated per-axis VCB). Clamped to `MIN_SCALE` — dragging past the
-   * anchor clamps, never reflects.
+   * comma-separated per-axis VCB). Dragging through the
+   * anchor goes negative (a mirror); see `floorScaleFactor`. `null` = the
+   * cursor is exactly on the anchor (skip).
    */
-  private _perAxisRatio(pivot: Vec3, grab: Vec3, cursor: Vec3, axis: 0 | 1 | 2): number {
+  private _perAxisRatio(pivot: Vec3, grab: Vec3, cursor: Vec3, axis: 0 | 1 | 2): number | null {
     const denom = grab[axis] - pivot[axis]
     if (Math.abs(denom) < 1e-9) return 1 // zero-extent box on this axis — no-op
-    return Math.max((cursor[axis] - pivot[axis]) / denom, MIN_SCALE)
+    return floorScaleFactor((cursor[axis] - pivot[axis]) / denom)
   }
 
   /**
    * The uniform ratio a CORNER grip resolves to: one shared scalar along the
    * pivot→grab 3D diagonal, applied to all three axes, which is what keeps a
-   * corner drag proportional (SketchUp's corner default). Clamped to
-   * `MIN_SCALE`.
+   * corner drag proportional (SketchUp's corner default). Negative past the
+   * anchor (a point mirror); `null` = exactly on the anchor (skip).
    */
-  private _diagonalRatio(pivot: Vec3, grab: Vec3, cursor: Vec3): number {
+  private _diagonalRatio(pivot: Vec3, grab: Vec3, cursor: Vec3): number | null {
     const dx = grab[0] - pivot[0], dy = grab[1] - pivot[1], dz = grab[2] - pivot[2]
     const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
     if (len < 1e-9) return 1 // degenerate (zero-extent) box — no-op
     const numer = (cursor[0] - pivot[0]) * dx + (cursor[1] - pivot[1]) * dy + (cursor[2] - pivot[2]) * dz
-    return Math.max(numer / (len * len), MIN_SCALE)
+    return floorScaleFactor(numer / (len * len))
   }
 
   /** [sx,sy,sz] for driving `axisIndex`/`axisIndex2` (or all three, for a
@@ -1011,8 +1033,9 @@ export class ScaleTool implements Tool {
    * parses to a valid factor/dimension; otherwise the last resolved cursor
    * position drives the ratio. Face/edge grips scale each driven axis
    * INDEPENDENTLY (per-axis ratio); a corner grip scales all three by one
-   * uniform diagonal ratio. */
-  private _currentFactors(): Vec3 {
+   * uniform diagonal ratio. `null` when a driven axis sits exactly on the
+   * anchor (factor 0): the frame is skipped and the click ignored. */
+  private _currentFactors(): Vec3 | null {
     if (this.stage.kind !== 'dragging') return [1, 1, 1]
     const typedFactors = this._parseTypedFactors()
     if (typedFactors !== null) return typedFactors
@@ -1023,13 +1046,17 @@ export class ScaleTool implements Tool {
     if (axisIndex === null) {
       // Corner: one uniform ratio along the pivot→grab diagonal.
       const s = this._diagonalRatio(pivot, grab, lastCursor)
-      return [s, s, s]
+      return s === null ? null : [s, s, s]
     }
     // Face (one axis) or edge (two axes), each driven axis independent.
     const f: Vec3 = [1, 1, 1]
-    f[axisIndex] = this._perAxisRatio(pivot, grab, lastCursor, axisIndex)
+    const a = this._perAxisRatio(pivot, grab, lastCursor, axisIndex)
+    if (a === null) return null
+    f[axisIndex] = a
     if (axisIndex2 !== null) {
-      f[axisIndex2] = this._perAxisRatio(pivot, grab, lastCursor, axisIndex2)
+      const b = this._perAxisRatio(pivot, grab, lastCursor, axisIndex2)
+      if (b === null) return null
+      f[axisIndex2] = b
     }
     return f
   }
@@ -1050,15 +1077,17 @@ export class ScaleTool implements Tool {
 
     if (this._isBareFactor(this.typed)) {
       const n = parseDistance(this.typed)
-      if (n === null || n <= 0) return null
-      return this._factorsForScalar(axisIndex, axisIndex2, Math.max(n, MIN_SCALE))
+      if (n === null) return null
+      const s = floorScaleFactor(n)
+      return s === null ? null : this._factorsForScalar(axisIndex, axisIndex2, s)
     }
 
     const meters = parseLengthToMeters(this.typed, getLengthUnit())
-    if (meters === null || meters <= 0) return null
+    if (meters === null) return null
     const extent = this._referenceExtent(axisIndex, axisIndex2, boxExtent)
     if (extent < 1e-9) return null
-    return this._factorsForScalar(axisIndex, axisIndex2, Math.max(meters / extent, MIN_SCALE))
+    const s = floorScaleFactor(meters / extent)
+    return s === null ? null : this._factorsForScalar(axisIndex, axisIndex2, s)
   }
 
   /** The extent a typed target dimension divides against: a face grip's
@@ -1081,6 +1110,8 @@ export class ScaleTool implements Tool {
   private _renderDrag(): void {
     if (this.stage.kind !== 'dragging') return
     const factors = this._currentFactors()
+    // Exactly on the anchor: keep the previous preview and readout.
+    if (factors === null) return
     if (this.stage.previewMesh !== null) {
       this._applyPreviewScale(this.stage.previewMesh, this._pivot(), factors)
     }
@@ -1141,7 +1172,7 @@ export class ScaleTool implements Tool {
   }
 
   /** Commit the scale from the typed VCB buffer, then reset to idle. A typed
-   * buffer that doesn't yet parse to a positive factor/dimension is a no-op
+   * buffer that doesn't yet parse to a nonzero factor/dimension (0 included) is a no-op
    * (Enter is ignored, matching Move/Rotate's incomplete-entry behavior). */
   private _commitFromTyped(): void {
     if (this.stage.kind !== 'dragging') return
@@ -1200,14 +1231,16 @@ export class ScaleTool implements Tool {
   private _factorsFor(buf: string, axisIndex: 0 | 1 | 2 | null, axisIndex2: 0 | 1 | 2 | null, boxExtent: Vec3): Vec3 | null {
     if (this._isBareFactor(buf)) {
       const n = parseDistance(buf)
-      if (n === null || n <= 0) return null
-      return this._factorsForScalar(axisIndex, axisIndex2, Math.max(n, MIN_SCALE))
+      if (n === null) return null
+      const s = floorScaleFactor(n)
+      return s === null ? null : this._factorsForScalar(axisIndex, axisIndex2, s)
     }
     const meters = parseLengthToMeters(buf, getLengthUnit())
-    if (meters === null || meters <= 0) return null
+    if (meters === null) return null
     const extent = this._referenceExtent(axisIndex, axisIndex2, boxExtent)
     if (extent < 1e-9) return null
-    return this._factorsForScalar(axisIndex, axisIndex2, Math.max(meters / extent, MIN_SCALE))
+    const s = floorScaleFactor(meters / extent)
+    return s === null ? null : this._factorsForScalar(axisIndex, axisIndex2, s)
   }
 
   /** True when a non-identity scale reached the kernel (false = identity, or

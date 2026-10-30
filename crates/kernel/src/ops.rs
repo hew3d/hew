@@ -206,8 +206,9 @@ pub struct FaceMergeInnerReport {
     pub edge_attrs: Vec<crate::attr::AttrDict>,
 }
 
-/// What `transform_sub_face` changed: an imprint slid, turned, or scaled on
-/// its face in place. (`xf` carries f64s, so `PartialEq` but not `Eq`.)
+/// What `transform_sub_face` changed: an imprint slid, turned, scaled, or
+/// mirrored on its face in place. (`xf` carries f64s, so `PartialEq` but
+/// not `Eq`.)
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransformSubFaceReport {
     /// The moved sub-face (handle unchanged).
@@ -472,10 +473,13 @@ pub enum StickyError {
     /// `merge_inner_face`: the face is not an imprinted sub-face (its boundary is
     /// not a single closed loop twinned entirely with one parent's hole loop).
     NotAnInnerFace,
-    /// `transform_sub_face`: the transform is not an in-plane similarity of
-    /// the parent face — it tilts the imprint off its face, mirrors it,
-    /// scales it non-uniformly, or is singular. An imprint only slides,
-    /// turns, and scales ON the face it was drawn on.
+    /// `transform_sub_face`: the transform does not map the parent face's
+    /// plane onto itself as a similarity — it tilts or lifts the imprint
+    /// off its face, scales or shears it non-uniformly, or is singular. A
+    /// map that turns the normal over but keeps the plane (a mirror across
+    /// the face's own plane, a point reflection through a point of it) is
+    /// accepted: an imprint slides, turns, scales, and mirrors ON the face
+    /// it was drawn on.
     NotInPlane,
     /// `transform_sub_face`: a hole of the imprint is not itself a flat
     /// nested imprint (a boss or recess was raised inside it), so the loop
@@ -765,7 +769,12 @@ impl std::fmt::Display for StickyError {
                 write!(f, "face is not an imprinted sub-face")
             }
             StickyError::NotInPlane => {
-                write!(f, "transform is not an in-plane similarity of the face")
+                write!(
+                    f,
+                    "transform is not a similarity that keeps the face's plane \
+                     (an in-plane move, turn, scale, or mirror, with the normal \
+                     kept or turned over)"
+                )
             }
             StickyError::NestedNotFlat => {
                 write!(
@@ -827,18 +836,25 @@ impl std::error::Error for BooleanError {}
 impl Object {
     /// Bakes an affine `transform` into this object's geometry: every vertex is
     /// moved by `transform` and every face plane is remapped (the
-    /// inverse-transpose rule via [`Transform::apply_plane`]), in place.
+    /// inverse-transpose rule via
+    /// [`Transform::apply_plane_following_winding`]), in place.
     ///
     /// Topology is untouched — no element is added or removed — so all handles
     /// stay valid and the watertightness state is preserved. This is what
     /// move/rotate/scale commit, and how a boolean brings an operand into a
     /// shared frame.
     ///
+    /// A reflection (determinant < 0, e.g. a negative scale) bakes like any
+    /// other map: the geometry is mirrored and then every face is turned
+    /// over (see [`Object::reverse_all_faces`]), because a reflection
+    /// reverses every loop's winding and mapping vertices alone would leave
+    /// an inside-out shell. Twin pairing, handles and per-face attributes
+    /// are kept, so the solid stays right side out.
+    ///
     /// Validated up front so the mutation is transactional (the strong
-    /// guarantee): a singular linear part is [`TransformError::Singular`] and an
-    /// orientation-flipping one (determinant < 0, e.g. a negative scale) is
-    /// [`TransformError::Reflection`] — both refused before any vertex moves, so
-    /// the object is never left half-transformed or inside-out. A shrink that
+    /// guarantee): a singular linear part is [`TransformError::Singular`],
+    /// refused before any vertex moves, so
+    /// the object is never left half-transformed. A shrink that
     /// would leave some face too small for a saved file to recompute its
     /// plane (twice its area under 1e-12 m²) is singular at this geometry's
     /// scale and refused [`TransformError::Singular`] the same way, as is an
@@ -869,8 +885,18 @@ impl Object {
             e.curve = map_curve(e.curve, transform, scale);
             e.polygon = map_curve(e.polygon, transform, scale);
         }
+        if transform.determinant() < 0.0 {
+            self.turn_faces_over_after_reflection();
+        }
         self.check_invariants();
         Ok(())
+    }
+
+    /// Turns every face over after a reflection mapped the vertices, so the
+    /// loops wind counter-clockwise seen from the outward normal again.
+    fn turn_faces_over_after_reflection(&mut self) {
+        let all: std::collections::BTreeSet<FaceId> = self.faces.keys().collect();
+        self.reverse_faces(&all);
     }
 
     /// Whether [`Object::apply_transform`] would accept `transform`, without
@@ -883,7 +909,7 @@ impl Object {
 
     /// The validation half of [`Object::apply_transform`]: every face's
     /// plane under `transform`, in face order, or the refusal. A singular
-    /// linear part, an orientation flip, a face ring too small afterwards
+    /// linear part, a face ring too small afterwards
     /// for a saved file to recompute its plane, a plane the map squashes
     /// to no direction (an invertible but extremely anisotropic scale), or
     /// a texture frame it squashes (checked with the ring, so a session's
@@ -898,12 +924,9 @@ impl Object {
         transform: &Transform,
         reopen_check: bool,
     ) -> Result<Vec<Plane>, TransformError> {
-        // `inverse()` fails iff the linear part is singular; a negative
-        // determinant would invert every face's winding.
+        // `inverse()` fails iff the linear part is singular. A negative
+        // determinant is accepted: `apply_transform` turns the faces over.
         transform.inverse()?;
-        if transform.determinant() < 0.0 {
-            return Err(TransformError::Reflection);
-        }
         let mut planes = Vec::with_capacity(self.faces.len());
         for face in self.faces.values() {
             if reopen_check {
@@ -925,7 +948,11 @@ impl Object {
                     return Err(TransformError::DegenerateTextureFrame);
                 }
             }
-            planes.push(transform.apply_plane(&face.plane)?);
+            // Winding-following on purpose: each plane is stored next to
+            // its mapped loop, and under a reflection `apply_transform`
+            // then turns face, plane and loop over together, which lands
+            // the plane on the outward side.
+            planes.push(transform.apply_plane_following_winding(&face.plane)?);
         }
         Ok(planes)
     }
@@ -939,14 +966,15 @@ impl Object {
     /// run the full [`Object::check_transform`] first and refuse typed.
     ///
     /// A similarity with a non-singular determinant (at least 1e-12, so a
-    /// scale of at least 1e-4) maps every plane to one with a direction,
-    /// and keeps orientation, so this cannot fail for one; it panics on
+    /// scale of at least 1e-4) maps every plane to one with a direction, so
+    /// this cannot fail for one; a reflecting pose turns every face over as
+    /// [`Object::apply_transform`] does. It panics on
     /// anything else (a caller bug — the pose was validated a similarity
     /// when the session opened).
     pub(crate) fn apply_session_pose(&mut self, pose: &Transform) {
         let planes = self
             .transformed_planes_impl(pose, false)
-            .expect("a non-singular orientation-keeping similarity maps every plane");
+            .expect("a non-singular similarity maps every plane");
         for v in self.vertices.values_mut() {
             v.position = pose.apply_point(v.position);
         }
@@ -959,6 +987,9 @@ impl Object {
         for e in self.edges.values_mut() {
             e.curve = map_curve(e.curve, pose, scale);
             e.polygon = map_curve(e.polygon, pose, scale);
+        }
+        if pose.determinant() < 0.0 {
+            self.turn_faces_over_after_reflection();
         }
         self.check_invariants();
     }
@@ -4240,26 +4271,36 @@ impl Object {
         Ok(adopted)
     }
 
-    /// Slide, turn, or scale an imprint on its face, in place: every vertex
-    /// of `sub_face`'s outer loop — and, recursively, of every flat imprint
-    /// nested inside it — moves by `xf`; no handle changes, so a selection
-    /// of the sub-face survives the edit. `Edge::curve` claims on the moved
-    /// loops map with it (center as a point, radius by the scale), so a
-    /// moved circle still pushes through as a smooth cylinder.
+    /// Slide, turn, scale, or mirror an imprint on its face, in place: every
+    /// vertex of `sub_face`'s outer loop — and, recursively, of every flat
+    /// imprint nested inside it — moves by `xf`; no handle changes, so a
+    /// selection of the sub-face survives the edit. `Edge::curve` claims on
+    /// the moved loops map with it (center as a point, radius by the
+    /// scale), so a moved circle still pushes through as a smooth cylinder.
     ///
-    /// `xf` must be an in-plane similarity of the parent face — translation
-    /// in the plane, rotation about the normal, uniform positive scale, or
-    /// any composition — else [`StickyError::NotInPlane`]. The moved outer
-    /// loop must still sit strictly inside the parent and clear of its
-    /// boundary ([`StickyError::LoopNotStrictlyInside`]). Another shape,
-    /// boss, recess, or hole on the parent that the moved shape comes to
-    /// fully ENCLOSE is adopted — it becomes a hole of the innermost moved
-    /// shape around it, exactly as drawing around it would — while one it
-    /// would cross, touch, or land inside refuses
-    /// [`StickyError::LoopNotStrictlyInside`]. A hole of the imprint holding
-    /// anything but a flat nested imprint refuses [`StickyError::NestedNotFlat`]
-    /// (a shape holding a boss cannot slide). Not an imprint at all:
-    /// [`StickyError::NotAnInnerFace`].
+    /// `xf` must be a similarity that maps the parent face's plane onto
+    /// itself — translation in the plane, rotation about the normal,
+    /// uniform scale about a point of the plane, a mirror across a line in
+    /// the plane, and also a map that turns the normal over while keeping
+    /// the plane (a mirror across the face's own plane, a point reflection
+    /// through a point of it, a half turn about a line in it), or any
+    /// composition — else [`StickyError::NotInPlane`]. Only the loop's
+    /// orientation in the plane matters: when
+    /// `det(xf) · (moved normal · normal) < 0` (an in-plane mirror) the
+    /// moved loops are run the other way afterwards and stay
+    /// counter-clockwise about the parent's normal; otherwise (a point
+    /// reflection, a mirror across the face plane) nothing is reversed.
+    /// Handles are kept either way. The moved outer loop must still sit
+    /// strictly inside the parent and clear of its boundary
+    /// ([`StickyError::LoopNotStrictlyInside`]). Another shape, boss,
+    /// recess, or hole on the parent that the moved shape comes to fully
+    /// ENCLOSE is adopted — it becomes a hole of the innermost moved shape
+    /// around it, exactly as drawing around it would — while one it would
+    /// cross, touch, or land inside refuses
+    /// [`StickyError::LoopNotStrictlyInside`]. A hole of the imprint
+    /// holding anything but a flat nested imprint refuses
+    /// [`StickyError::NestedNotFlat`] (a shape holding a boss cannot
+    /// slide). Not an imprint at all: [`StickyError::NotAnInnerFace`].
     ///
     /// Reversed by the same op with [`TransformSubFaceReport::inverse`],
     /// pinning [`TransformSubFaceReport::adopted`].
@@ -4298,18 +4339,31 @@ impl Object {
             .imprint_parent(sub_face)
             .ok_or(StickyError::NotAnInnerFace)?;
         let scale = xf.similarity_scale().ok_or(StickyError::NotInPlane)?;
-        if xf.determinant() <= 0.0 {
-            return Err(StickyError::NotInPlane);
-        }
         let inverse = xf.inverse().map_err(|_| StickyError::NotInPlane)?;
         let plane = self.faces[parent].plane;
         let normal = plane.normal();
-        // The plane must map onto itself: normal preserved (up to the
-        // similarity's scale), and the moved loop still on it.
+        // The plane must map onto itself: the normal kept or turned over
+        // (up to the similarity's scale), and the moved loop still on it
+        // (checked below). Turning the normal over is no refusal: a map
+        // that keeps the plane — a mirror across the face's own plane, a
+        // point reflection through a point of it, a half turn about a line
+        // in it — acts on the loop as a move within the plane.
         let moved_normal = xf.apply_vector(normal) * (1.0 / scale);
-        if (moved_normal - normal).length() >= tol::NORMAL_DIRECTION {
+        if (moved_normal - normal).length() >= tol::NORMAL_DIRECTION
+            && (moved_normal + normal).length() >= tol::NORMAL_DIRECTION
+        {
             return Err(StickyError::NotInPlane);
         }
+        // What matters for the loop is its orientation IN the plane: seen
+        // from the normal, the moved loops' winding reverses exactly when
+        // the map's orientation and its action on the normal disagree
+        // (det(xf) · (moved_normal · normal) < 0) — an in-plane mirror, or
+        // a half turn about an in-plane line. A point reflection or a
+        // mirror across the face plane flips both and reverses nothing.
+        // Reversed loops are run the other way after the move so they stay
+        // counter-clockwise about the parent's normal; the face planes do
+        // not change.
+        let reverses = xf.determinant() * moved_normal.dot(normal) < 0.0;
         // Resolve each pinned ring to the hole loop it names. A ring that
         // names no live hole is a recorded-inverse mismatch — a kernel bug by
         // the history contract — refused typed rather than guessed.
@@ -4406,6 +4460,26 @@ impl Object {
         for &v in &verts {
             let p = obj.vertices[v].position;
             obj.vertices[v].position = xf.apply_point(p);
+        }
+        if reverses {
+            // Every loop whose vertices moved: each moved face's outer loop
+            // and the hole loop it is twinned with (the parent's own hole
+            // for the imprint, a moved face's hole for a nested one). The
+            // set is closed under twinning, and a pinned hole, which did
+            // not move, is not in it.
+            let mut flipped: Vec<LoopId> = Vec::with_capacity(loops.len() * 2);
+            for &l in &loops {
+                let first = obj
+                    .loop_half_edges(l)
+                    .next()
+                    .ok_or(StickyError::WouldCorrupt)?;
+                let twin = obj.half_edges[first]
+                    .twin
+                    .ok_or(StickyError::WouldCorrupt)?;
+                flipped.push(l);
+                flipped.push(obj.half_edges[twin].loop_id);
+            }
+            obj.reverse_loops(&flipped);
         }
         for &e in &edges {
             if let Some(g) = obj.edges[e].curve {

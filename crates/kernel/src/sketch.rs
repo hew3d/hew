@@ -1163,7 +1163,8 @@ impl Sketch {
     /// Move a SET of islands together by one in-plane transform. The
     /// transform must keep every vertex on the sketch plane
     /// ([`SketchError::PointOffPlane`] otherwise); the caller (the document
-    /// layer) has already vetted invertibility and rejected reflections.
+    /// layer) has already vetted invertibility; an in-plane mirror reshapes
+    /// its islands (their regions are re-traced with new ids).
     ///
     /// A moved shape lands exactly as the same shape DRAWN there would
     /// (unified-drafting decision 4): where it touches, crosses, or overlaps
@@ -1773,9 +1774,13 @@ impl Sketch {
     /// no region is gained or lost. This is what move/rotate/scale on a
     /// free-standing sketch commit (Phase D), mirroring [`Object::apply_transform`].
     ///
+    /// A reflection (determinant < 0) gives the plane the mapped normal
+    /// ([`Transform::apply_plane_keeping_side`]) and reverses every
+    /// region's stored cycles, because the map reverses their winding seen
+    /// from that normal; region ids are kept.
+    ///
     /// Validated up front so the mutation is transactional: a singular linear
-    /// part is [`TransformError::Singular`] and an orientation-flipping one
-    /// (determinant < 0) is [`TransformError::Reflection`] — both refused
+    /// part is [`TransformError::Singular`], refused
     /// before any vertex moves, so the sketch is never left half-transformed.
     ///
     /// [`Object::apply_transform`]: crate::Object::apply_transform
@@ -1784,15 +1789,15 @@ impl Sketch {
         transform: &crate::Transform,
     ) -> Result<(), crate::TransformError> {
         // Reject before mutating. `inverse()` fails iff the linear part is
-        // singular; a negative determinant would flip the plane normal and the
-        // perceived winding of every region.
+        // singular.
         transform.inverse()?;
-        if transform.determinant() < 0.0 {
-            return Err(crate::TransformError::Reflection);
-        }
         // The plane first: an invertible but extremely anisotropic map can
         // still squash it to no direction, refused before anything moves.
-        let plane = transform.apply_plane(&self.plane)?;
+        // The sketch's normal is its up (the side it extrudes toward and
+        // the side a riding sketch shares with its face), so the plane maps
+        // keeping its side: under a reflection the winding-following refit
+        // would turn it over.
+        let plane = transform.apply_plane_keeping_side(&self.plane)?;
         // Curve geometry maps when the transform is an in-plane similarity
         // (center through the point map, radius by the uniform factor) and is
         // DROPPED otherwise — a non-uniform in-plane scale turns the circle
@@ -1813,12 +1818,45 @@ impl Sketch {
                 _ => None,
             };
         }
-        // Remap the plane, then move every vertex onto it.
+        // Remap the plane, then move every vertex onto it. The cycles,
+        // whose winding a reflection reverses about the kept normal, are
+        // reversed below.
+        let reflects = transform.determinant() < 0.0;
         self.plane = plane;
         for v in self.vertices.values_mut() {
             v.position = transform.apply_point(v.position);
         }
+        if reflects {
+            self.reverse_region_cycles();
+            debug_assert!(
+                self.regions_match_a_fresh_trace(),
+                "a reflected sketch's stored regions must equal a fresh trace"
+            );
+        }
         Ok(())
+    }
+
+    /// Reverses every region's outer and hole cycles in place, keeping the
+    /// region ids (the winding flip a reflection causes).
+    fn reverse_region_cycles(&mut self) {
+        for r in self.regions.values_mut() {
+            r.outer.reverse();
+            for h in &mut r.holes {
+                h.reverse();
+            }
+        }
+    }
+
+    /// Whether the stored regions are exactly a fresh trace's (same outer
+    /// cycles up to rotation, same orientation).
+    fn regions_match_a_fresh_trace(&self) -> bool {
+        let fresh = self.compute_all_regions();
+        fresh.len() == self.regions.len()
+            && fresh.iter().all(|f| {
+                self.regions
+                    .values()
+                    .any(|r| cycles_equal(&r.outer, &f.outer))
+            })
     }
 
     /// Inserts the segment `from -> to`, applying the sticky rules in the

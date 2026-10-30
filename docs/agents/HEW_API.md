@@ -1161,8 +1161,11 @@ Semantics notes, normative:
   point on a plain face) refuses `not_an_imprint`. `move_imprint` takes an
   `offset` translation; `rotate_imprint` an `angle` (radians) about the
   plane's normal through a pivot point; `scale_imprint` a uniform `factor`
-  about an anchor point — every point parameter accepting a derived-point
-  locator (§5.3). Each of the four is one drafting gesture on the unit's
+  (finite and nonzero; a negative factor turns the shape 180 degrees about
+  the anchor and scales it by its magnitude; a mirror about a world axis of
+  an axis-aligned drawing plane is `hew.sketch.scale` with a negative
+  per-axis factor) about an anchor point — every
+  point parameter accepting a derived-point locator (§5.3). Each of the four is one drafting gesture on the unit's
   whole island (one undo entry), so a move landing on other drawing or
   past the face's edge is accepted and lands as the same shape drawn
   there would. A landing off the plane (a move with a normal component,
@@ -1184,7 +1187,7 @@ Semantics notes, normative:
 - The transform commands are contract-shaped as: `move` takes a
   translation vector or a from→to point pair; `rotate` takes a pivot
   point, an axis direction, and an angle; `scale` takes an anchor point
-  and per-axis factors — every point-typed parameter accepting a
+  and per-axis factors (finite and nonzero; a negative factor mirrors) — every point-typed parameter accepting a
   derived-point locator (§5.3). `move` and `rotate` copy with `copy`;
   exact schemas live in the registry. `copy: {count: n}` (the UI's
   array form) makes `n` copies at the committed step and its multiples:

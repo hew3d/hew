@@ -351,8 +351,8 @@ below.
   8 corner grips scale uniformly, and 12 edge-midpoint grips scale two axes
   — about a chosen anchor (the grabbed grip's opposite by default, the box
   center with a durable Ctrl toggle), with typed exact factors or target
-  dimensions. Dragging a grip past its anchor clamps rather than reflects
-  (mirroring is a separate future tool). Move, Rotate, and Scale all extend
+  dimensions. Dragging a grip past its anchor mirrors the selection,
+  as SketchUp's does; a mirrored solid stays right side out. Move, Rotate, and Scale all extend
   to a whole mixed selection — one Object, a Group, a component instance,
   or any combination — as one shared transform and one undo step; a scaled
   component instance carries the (possibly non-uniform) scale in its own
@@ -441,8 +441,8 @@ below.
   entry paths — viewport drill-down and Outliner double-click — produce
   the same breadcrumb, with every level on it marked as editing. A
   component session requires the instance's pose to be a similarity
-  (uniform scale, no mirror); a group-nested placement now opens through
-  its group's session, and a non-uniformly-scaled, mirrored, or
+  (uniform scale; a mirror is allowed); a group-nested placement now opens through
+  its group's session, and a non-uniformly-scaled or
   elsewhere-grouped-sibling placement falls back to the previous
   in-context editing model (the component-edit-parity machinery, still
   fully supported for those cases). Session open/close are ordinary undo

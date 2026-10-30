@@ -86,16 +86,18 @@ enum FuzzOp {
     CollapseSubFace {
         face_sel: usize,
     },
-    /// Slide/turn/scale the `face_sel`-th face on its parent if it is an
-    /// imprint (usually rejected typed — a non-imprint, or a move that
-    /// leaves the parent — exercising the strong guarantee); an accepted
-    /// move is handle-stable and its own inverse under undo.
+    /// Slide/turn/scale — and, with `mirror`, first mirror across a line of
+    /// the face — the `face_sel`-th face on its parent if it is an imprint
+    /// (usually rejected typed — a non-imprint, or a move that leaves the
+    /// parent — exercising the strong guarantee); an accepted move is
+    /// handle-stable and its own inverse under undo.
     TransformSubFace {
         face_sel: usize,
         du: f64,
         dv: f64,
         angle: f64,
         scale: f64,
+        mirror: bool,
     },
     Undo,
     Redo,
@@ -131,15 +133,24 @@ fn arb_fuzz_op() -> impl Strategy<Value = FuzzOp> {
         }),
         1 => any::<usize>().prop_map(|face_sel| FuzzOp::MergeInnerFace { face_sel }),
         1 => any::<usize>().prop_map(|face_sel| FuzzOp::CollapseSubFace { face_sel }),
-        2 => (any::<usize>(), -0.4..0.4f64, -0.4..0.4f64, -3.2..3.2f64, 0.6..1.5f64).prop_map(
-            |(face_sel, du, dv, angle, scale)| FuzzOp::TransformSubFace {
-                face_sel,
-                du,
-                dv,
-                angle,
-                scale,
-            }
-        ),
+        2 => (
+            any::<usize>(),
+            -0.4..0.4f64,
+            -0.4..0.4f64,
+            -3.2..3.2f64,
+            0.6..1.5f64,
+            any::<bool>()
+        )
+            .prop_map(|(face_sel, du, dv, angle, scale, mirror)| {
+                FuzzOp::TransformSubFace {
+                    face_sel,
+                    du,
+                    dv,
+                    angle,
+                    scale,
+                    mirror,
+                }
+            }),
         2 => Just(FuzzOp::Undo),
         1 => Just(FuzzOp::Redo),
     ]
@@ -606,6 +617,7 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
             dv,
             angle,
             scale,
+            mirror,
         } => {
             let n = object.faces().len();
             let sub_face = object.faces().keys().nth(face_sel % n)?;
@@ -627,7 +639,28 @@ fn resolve(object: &Object, op: &FuzzOp) -> Option<KernelOp> {
             // scale, then slide within the plane.
             let to_origin = Transform::translation(c.to_vec() * -1.0);
             let back = Transform::translation(c.to_vec() + u * *du + v * *dv);
+            // The mirror across the line along `u` (I - 2·v·vᵀ): it keeps
+            // the normal, so it is a move on the face.
+            let flip = if *mirror {
+                Transform::from_affine(&[
+                    1.0 - 2.0 * v.x * v.x,
+                    -2.0 * v.x * v.y,
+                    -2.0 * v.x * v.z,
+                    0.0,
+                    -2.0 * v.y * v.x,
+                    1.0 - 2.0 * v.y * v.y,
+                    -2.0 * v.y * v.z,
+                    0.0,
+                    -2.0 * v.z * v.x,
+                    -2.0 * v.z * v.y,
+                    1.0 - 2.0 * v.z * v.z,
+                    0.0,
+                ])
+            } else {
+                Transform::IDENTITY
+            };
             let xf = to_origin
+                .then(&flip)
                 .then(&Transform::rotation(normal, *angle).ok()?)
                 .then(&Transform::uniform_scale(*scale))
                 .then(&back);
@@ -800,7 +833,45 @@ fn check_state(object: &Object, step: usize, what: &str) -> Result<(), TestCaseE
         step,
         what
     );
+    // Winding oracle: every outer loop runs counter-clockwise about its
+    // face's stored normal and every hole clockwise (the validator does not
+    // check this), so a mirror that forgot to reverse its loops fails here.
+    for (fid, face) in object.faces() {
+        let n = face.plane.normal();
+        let outer = newell(object, face.outer_loop).dot(n);
+        prop_assert!(
+            outer > 0.0,
+            "step {} ({}): face {:?}'s outer loop winds against its normal ({})",
+            step,
+            what,
+            fid,
+            outer
+        );
+        for &hole in &face.inner_loops {
+            let h = newell(object, hole).dot(n);
+            prop_assert!(
+                h < 0.0,
+                "step {} ({}): a hole of face {:?} winds with its normal ({})",
+                step,
+                what,
+                fid,
+                h
+            );
+        }
+    }
     Ok(())
+}
+
+/// Twice the area vector of a loop (Newell): its direction is the side the
+/// loop winds counter-clockwise about.
+fn newell(object: &Object, l: kernel::LoopId) -> Vec3 {
+    let pts: Vec<Point3> = object.loop_positions(l).collect();
+    let mut sum = Vec3::new(0.0, 0.0, 0.0);
+    for (i, &a) in pts.iter().enumerate() {
+        let b = pts[(i + 1) % pts.len()];
+        sum = sum + a.to_vec().cross(b.to_vec());
+    }
+    sum
 }
 
 proptest! {

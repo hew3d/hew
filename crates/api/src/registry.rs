@@ -842,7 +842,7 @@ impl Registry {
             M,
             Kernel,
             Std,
-            "Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane; hew.sketch.scale is the general form.",
+            "Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane (a negative factor turns it 180 degrees about the anchor and scales it by |factor|); hew.sketch.scale is the general form, and a mirror about a world axis of an axis-aligned drawing plane is hew.sketch.scale with a negative per-axis factor.",
         );
         add(
             "hew.solid.delete_imprint",
@@ -873,7 +873,7 @@ impl Registry {
             M,
             Kernel,
             Req,
-            "Scale about an anchor with per-axis factors.",
+            "Scale about an anchor with per-axis factors; a negative factor mirrors.",
         );
         add(
             "hew.entity.set_frame",
@@ -2764,7 +2764,6 @@ impl Registry {
                 "component_expansion_exceeded",
                 "singular",
                 "degenerate_axis",
-                "reflection",
                 "explode_session_scope",
             ];
         }
@@ -5294,7 +5293,7 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "imprint": imprint_locator_schema.clone(),
-                    "factor": { "type": "number", "exclusiveMinimum": 0, "description": "uniform scale factor" },
+                    "factor": { "type": "number", "description": "uniform scale factor, finite and nonzero; a negative factor turns the shape 180 degrees about `about` and scales it by |factor| (a mirror about a world axis of an axis-aligned drawing plane is hew.sketch.scale with a negative per-axis factor)" },
                     "about": point_or_derived_schema.clone()
                 },
                 "required": ["imprint", "factor", "about"]

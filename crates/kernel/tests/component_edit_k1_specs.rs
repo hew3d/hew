@@ -254,19 +254,13 @@ fn extrude_region_in_instance_round_trips_through_a_rotated_scaled_pose() {
 }
 
 /// The same shape, drawn and extruded through a MIRRORED instance (negative
-/// determinant, still a uniform-scale similarity): `Transform::apply_plane`
-/// and the distance mapping must both handle the reflection.
-///
-/// Unlike the rotated/scaled spec above, this one does NOT compare against
-/// an independently-built "same positive world distance" solid: a mirror
-/// genuinely flips WHICH world side a positive local distance sweeps
-/// toward (the same real quirk every 3D app's mirrored-component push/pull
-/// has — not a bug to paper over). What must hold regardless of that sign
-/// convention is the actual pose⁻¹ CONTRACT: the profile's own corners —
-/// mapped through pose⁻¹ to draw, then back through pose after extruding —
-/// round-trip EXACTLY to the original world corners, and the swept volume's
-/// MAGNITUDE matches the typed world distance exactly (scaled by the pose's
-/// determinant, here 1).
+/// determinant, still a uniform-scale similarity): the sketch plane maps
+/// keeping its side (`Transform::apply_plane_keeping_side`) and the distance
+/// maps through the pose's uniform scale, so a positive distance sweeps
+/// toward the side the user pointed at — the world up of the plane they
+/// drew on — exactly as through an unmirrored instance. The member, mapped
+/// forward through the pose, reproduces the box a plain world
+/// `extrude_region` builds from the same rectangle and distance.
 #[test]
 fn extrude_region_in_instance_round_trips_through_a_mirrored_pose() {
     let mut doc = Document::new();
@@ -296,9 +290,21 @@ fn extrude_region_in_instance_round_trips_through_a_mirrored_pose() {
         .expect("extrude in instance through a mirrored pose");
     let member = doc.object(member_id).unwrap().clone();
 
-    // The base profile's corners round-trip EXACTLY through pose⁻¹-then-pose
-    // (this is the actual pose⁻¹ contract; extrusion direction is not part
-    // of it).
+    // The expected shape: the SAME world rectangle extruded in plain world
+    // space, independent of the instance machinery.
+    let ws = doc.add_sketch(ground());
+    let world_region = draw_rect(&mut doc, ws, corners);
+    let (expected_id, _) = doc
+        .extrude_region(ws, world_region, world_distance)
+        .expect("world extrude");
+    let expected = doc.object(expected_id).unwrap().clone();
+    assert!(
+        mapped_vertices_match(&member, &pose, &expected),
+        "through a mirrored pose a positive distance sweeps toward the \
+         user's up: the mapped member is the plain world extrusion"
+    );
+
+    // The base profile's corners round-trip EXACTLY through pose⁻¹-then-pose.
     let mapped: Vec<Point3> = vertex_positions(&member)
         .into_iter()
         .map(|p| pose.apply_point(p))
@@ -312,7 +318,7 @@ fn extrude_region_in_instance_round_trips_through_a_mirrored_pose() {
 
     // The swept volume's magnitude matches the typed world distance, scaled
     // by the pose's determinant (1 here) — the same invariant the
-    // rotated/scaled spec checks, independent of extrusion side.
+    // rotated/scaled spec checks.
     assert!(
         (abs_volume(&member) * pose.determinant().abs() - area * world_distance).abs() < 1e-6,
         "volume magnitude matches the typed world distance under a mirror"
@@ -322,7 +328,7 @@ fn extrude_region_in_instance_round_trips_through_a_mirrored_pose() {
 /// A non-uniformly-scaled instance cannot map a typed WORLD-space distance
 /// unambiguously (which axis's scale would it be?), so
 /// `extrude_region_in_instance` refuses typed — the document untouched —
-/// even though the SKETCH PLANE itself maps through `apply_plane` just fine
+/// even though the SKETCH PLANE itself maps through the plane map just fine
 /// under non-uniform scale (no ambiguity for a plane/point mapping, only for
 /// a bare scalar length).
 #[test]

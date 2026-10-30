@@ -627,7 +627,7 @@ impl Object {
 
     /// Turn `faces` over — a set closed under twinning (whole islands), so
     /// every twin pair still runs opposite afterwards.
-    fn reverse_faces(&mut self, faces: &BTreeSet<FaceId>) {
+    pub(crate) fn reverse_faces(&mut self, faces: &BTreeSet<FaceId>) {
         let loops: Vec<LoopId> = faces
             .iter()
             .flat_map(|&f| {
@@ -635,6 +635,20 @@ impl Object {
                 std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied())
             })
             .collect();
+        self.reverse_loops(&loops);
+        for &f in faces {
+            let face = &mut self.faces[f];
+            face.plane = face.plane.flipped();
+        }
+    }
+
+    /// Runs each of `loops` the other way, leaving every face plane as it
+    /// is: the half of turning a face over that a map which mirrors a loop
+    /// IN its plane needs (the loop's vertices moved; its face still faces
+    /// the same side). The set must be closed under twinning, so every twin
+    /// pair still runs opposite afterwards. Handles, edges and twins are
+    /// kept.
+    pub(crate) fn reverse_loops(&mut self, loops: &[LoopId]) {
         let hs: Vec<HalfEdgeId> = loops
             .iter()
             .flat_map(|&l| self.loop_half_edges(l).collect::<Vec<_>>())
@@ -657,10 +671,6 @@ impl Object {
             if self.half_edges[vert.outgoing].origin != v {
                 vert.outgoing = leaving[&v];
             }
-        }
-        for &f in faces {
-            let face = &mut self.faces[f];
-            face.plane = face.plane.flipped();
         }
     }
 
@@ -830,8 +840,9 @@ impl Object {
     }
 
     /// Divergence-theorem signed volume over every loop (holes wind
-    /// opposite and subtract): positive for a right-side-out closed shell.
-    pub(crate) fn signed_volume(&self) -> f64 {
+    /// opposite and subtract): positive for a right-side-out closed shell,
+    /// negative for an inside-out one.
+    pub fn signed_volume(&self) -> f64 {
         let mut six_v = 0.0;
         for f in self.faces.values() {
             for lid in std::iter::once(f.outer_loop).chain(f.inner_loops.iter().copied()) {

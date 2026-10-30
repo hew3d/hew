@@ -2017,9 +2017,9 @@ export function applyEditContext(tool: Tool, ctx: EditContext): void {
  * single-compound mechanism covers this sequence — `DocAction::Compound` is
  * scoped to `place_text` alone), so `steps` on EVERY outcome — success or
  * failure — reports exactly how many landed. Delta-review finding 1: a
- * mirrored/reflected-pose instance (legal via import/load) passes
- * `make_unique` and only then fails `explode_instance`
- * (`CannotExplodeReflected`) — and `group_nodes` can likewise fail after
+ * non-uniformly scaled instance whose definition holds a live def-owned
+ * sketch passes `make_unique` and only then fails `explode_instance`
+ * (`CannotExplodeNonUniformScale`) — and `group_nodes` can likewise fail after
  * `explode_instance` already committed. Both leave `steps > 0` with the
  * operand never replaced; a caller that reads a bare failure as "nothing
  * happened" loses track of a real, undoable document mutation.
@@ -5224,7 +5224,7 @@ export default function Viewport({
     /**
      * The double-click gesture's own open attempt: a plain double-click on a
      * component instance opens an explode session; if the kernel gates it —
-     * `ExplodeSessionPoseUnsupported` (non-uniform scale or a mirror) or
+     * `ExplodeSessionPoseUnsupported` (non-uniform scale) or
      * `ExplodeSessionGroupedInstance` (a placement of the definition is
      * nested in a group, which a session's hide-every-placement bake cannot
      * honor) — fall back SILENTLY to the ordinary "enter this instance's
@@ -9928,7 +9928,7 @@ export default function Viewport({
               // A component instance opens an explode session — silently
               // falling back to the ordinary "enter this instance's edit
               // context" gesture (K1/K2) when the instance's pose can't
-              // support one (non-uniform scale or a mirror), or a sibling
+              // support one (non-uniform scale), or a sibling
               // placement sits inside a group. Works with a group session
               // already open beneath it now too — only ANOTHER component
               // frame already open (always innermost) refuses.

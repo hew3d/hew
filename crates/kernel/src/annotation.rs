@@ -224,8 +224,15 @@ impl Annotation {
                     a.point = t.apply_point(a.point);
                     b.point = t.apply_point(b.point);
                     *offset = t.apply_vector(*offset);
+                    // A free-standing plane with no loop of its own: it
+                    // keeps its side, like a sketch plane does. The sign of
+                    // a stored linear-dimension plane's normal carries no
+                    // meaning (consumers take the side from `offset`, and
+                    // skp-export re-derives it), so this rigid path and the
+                    // one-anchor path below (normal along the a-b line
+                    // crossed with the offset) may disagree in sign.
                     *plane = t
-                        .apply_plane(plane)
+                        .apply_plane_keeping_side(plane)
                         .expect("t was already validated invertible before this call");
                     return Some(true);
                 }
@@ -282,8 +289,10 @@ impl Annotation {
                         *leader_dir = t.apply_vector(*leader_dir);
                         curve.center = t.apply_point(curve.center);
                         curve.radius *= scale;
+                        // Side-keeping, like the sketch plane the circle
+                        // was captured from.
                         curve.plane = t
-                            .apply_plane(&curve.plane)
+                            .apply_plane_keeping_side(&curve.plane)
                             .expect("t was already validated invertible before this call");
                         Some(true)
                     }

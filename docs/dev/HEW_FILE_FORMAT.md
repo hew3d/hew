@@ -649,9 +649,9 @@ contents do not describe valid geometry.
   vector (twice the enclosed area) shorter than 1e-12 m² — or whose vertices
   stray from it beyond tolerance (gated by `imported`). The kernel's
   validator holds every live face to the same predicate, so no operation
-  commits a face, however small, that a saved file could not reopen. This is safe because a baked object's transform is always
-  orientation-preserving (), so the recomputed plane's normal always
-  matches how the geometry was authored.
+  commits a face, however small, that a saved file could not reopen. This is safe because a baked reflection reverses every
+  face's loops (), so the recomputed plane's normal always matches how the
+  geometry was authored.
 - **Watertightness cross-check.** The stored `watertight` byte must equal
   what the reader's own topology reconstruction computes — a mismatch is a
   fatal error (cheap tamper detection), never silently corrected.
@@ -744,11 +744,12 @@ member of exactly one component definition (`components[].members`), or
 reachable from the world tree (directly in `roots`, or nested inside a
 `groups[].members` chain) — never both at once.
 
-Object transforms baked into a buffer's vertex positions are always
-orientation-preserving (determinant positive — reflections are never baked
-into geometry). A mirrored placement exists only as a component **instance**
-pose, never as baked-in geometry — this is what lets the geometry decoder
-recompute face-plane orientation from winding alone ().
+A transform baked into a buffer's vertex positions may be a reflection
+(determinant negative). A baked reflection reverses every face's loops, so
+the loops still wind counter-clockwise seen from the outward normal —
+this is what lets the geometry decoder recompute face-plane orientation
+from winding alone (). A mirrored placement may also exist as a component
+**instance** pose.
 
 ### 4.4 Groups, components, instances
 
@@ -795,8 +796,8 @@ recompute face-plane orientation from winding alone ().
   `[m00,m01,m02,tx, m10,m11,m12,ty, m20,m21,m22,tz]`, read as `world_point =
   linear * local_point + translation` (`linear` the 3×3 block, `translation`
   the vector `(tx,ty,tz)`). Unlike baked object geometry, a pose **may** be
-  reflective or non-uniformly scaled, since poses are never baked into the
-  definition's geometry. Each instance carries its own optional name
+  non-uniformly scaled, and may be reflective without turning any face
+  over, since poses are not baked into the definition's geometry. Each instance carries its own optional name
   (falling back to the definition's name if absent) and optional tags.
 
   An instance may carry its own `material` (v23+, optional): a dense

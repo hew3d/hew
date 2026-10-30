@@ -171,10 +171,10 @@ pub(crate) fn execute(
 /// A copy of `obj` with `t` baked into every vertex position and face plane.
 ///
 /// Connectivity is unchanged, so the result is structurally valid whenever the
-/// input is. A singular or orientation-flipping `t` is refused as
-/// [`BooleanError::SingularTransform`] (operands must map by a proper frame
-/// change); boolean callers pass a rigid `b_to_a`, so this never fires in
-/// practice.
+/// input is. A singular `t` is refused as
+/// [`BooleanError::SingularTransform`]; boolean callers pass a rigid
+/// `b_to_a`, so this never fires in practice. A reflecting `t` would bake a
+/// mirrored operand (every face turned over), still right side out.
 fn transformed_object(obj: &Object, t: &Transform) -> Result<Object, BooleanError> {
     let mut out = obj.clone();
     out.apply_transform(t)

@@ -257,7 +257,10 @@ degenerate ("zero-thickness") solid Object, for two reasons:
 
 A Sketch has one of three owners: the world (a **free** sketch, drawn over
 no face), a component definition (in definition-local coordinates, reaching
-the scene through its instances), or an **Object** (an *owned* sketch, kept
+the scene through its instances; its plane is the drawing instance's
+pose-inverse applied to the world plane keeping its side, so through that
+instance, mirrored or not, the sketch faces the user's up and a positive
+extrusion goes where they pointed), or an **Object** (an *owned* sketch, kept
 in `object_sketches`). An owned sketch holds exactly the drawing over the
 owner's faces that cannot be face topology (loose chains, sliver regions); it is expressed in the owner's frame and is in exactly one of the
 three states, never two. Its liveness is derived from the owner, so every
@@ -499,12 +502,13 @@ definition's top level, and they are listed as direct members of the
 definition at close. Every placement of the definition then shows the
 result.
 
-This works only when the instance's pose is a **similarity with a positive
-determinant** — uniform scale, no mirror (`Transform::similarity_scale`).
+This works only when the instance's pose is a **similarity** — a rotation,
+uniform scale, and optionally a mirror (`Transform::similarity_scale`).
 Similarities are exactly the transforms that keep a circle a circle, which
 is what lets analytic curve and surface metadata (2.6) survive the
-bake/unbake round trip intact; baking a mirrored pose directly would invert
-winding and produce an inside-out solid. Group nesting gates a session the
+bake/unbake round trip intact. A mirrored pose bakes like any other: the
+geometry is mirrored and every face is turned over, so the solid stays
+right side out. Group nesting gates a session the
 same way: the bake produces top-level world objects and must hide every
 placement of the definition, neither of which a group-nested placement can
 survive coherently (splicing baked members into a containing group is not
@@ -513,7 +517,7 @@ dissolves the common case of that gate: an instance inside a Group is
 genuinely top-level while its group's frame is open, so drilling in
 through the group opens its explode session normally — only a
 same-definition placement grouped *elsewhere* still trips it. An instance
-that fails either gate — a non-uniform scale, a mirror, or a sibling
+that fails either gate — a non-uniform scale, or a sibling
 placement nested inside some other group — falls back to the previous
 in-context editing model instead: the tool set operates on the
 definition's members directly, through the pose, without baking or
