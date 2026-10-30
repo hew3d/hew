@@ -11,7 +11,7 @@
 
 use crate::host::CliHost;
 use crate::live::{self, LiveOptions};
-use api::{Connection, DispatchOutcome, Host, Profile, Request, RequestId};
+use api::{Connection, DispatchOutcome, Grant, Host, Registry, Request, RequestId};
 use kernel::Document;
 use std::path::Path;
 
@@ -108,7 +108,8 @@ fn run_script_embedded(
     out_path: Option<&Path>,
     mut responses: Vec<serde_json::Value>,
 ) -> RunOutcome {
-    let mut conn = Connection::new(Profile::Core, "hew-cli:run");
+    let mut conn = Connection::new(Grant::core(), "hew-cli:run");
+    let registry = Registry::protocol_1();
     let mut doc = Document::new();
     let mut host = CliHost::new();
 
@@ -123,7 +124,13 @@ fn run_script_embedded(
                 };
             }
         };
-        match conn.dispatch(&mut doc, &mut host, request) {
+        match conn.dispatch(&registry, &mut doc, &mut host, request) {
+            DispatchOutcome::Forward(forward) => {
+                unreachable!(
+                    "hew-cli registers no plugins, yet {} forwarded",
+                    forward.method
+                )
+            }
             DispatchOutcome::Dropped => {
                 // A client-originated notification (no id) — dropped
                 // unexecuted, per §4.1; nothing to print.
@@ -244,7 +251,9 @@ fn run_script_live(
         request.params = Some(params);
         let method = request.method.clone();
         match session.dispatch(request) {
-            Ok(DispatchOutcome::Dropped) => {}
+            // A live session reads replies off the socket; it never
+            // forwards.
+            Ok(DispatchOutcome::Dropped | DispatchOutcome::Forward(_)) => {}
             Ok(DispatchOutcome::Reply(response)) => {
                 let value = serde_json::to_value(&response).expect("Response serializes");
                 if response.error.is_some() {
@@ -361,7 +370,8 @@ pub struct DispatchResult {
 /// `hello`/`open` plumbing is silent; only the requested command's reply
 /// (or a plumbing failure) reaches stdout/stderr.
 pub fn dispatch_file(file: &Path, method: &str, params: serde_json::Value) -> DispatchResult {
-    let mut conn = Connection::new(Profile::Core, "hew-cli:dispatch");
+    let mut conn = Connection::new(Grant::core(), "hew-cli:dispatch");
+    let registry = Registry::protocol_1();
     let mut doc = Document::new();
     let mut host = CliHost::new();
 
@@ -403,8 +413,7 @@ pub fn dispatch_file(file: &Path, method: &str, params: serde_json::Value) -> Di
     // Save back only after a command that can change the document — the
     // registry's own `mutates_document` (a read-only query, a snapshot, a
     // line drawing, or a print leaves the file byte-for-byte alone).
-    let read_only = conn
-        .registry()
+    let read_only = registry
         .get(method)
         .map(|c| !c.mutates_document)
         .unwrap_or(false);
@@ -416,7 +425,8 @@ pub fn dispatch_file(file: &Path, method: &str, params: serde_json::Value) -> Di
         method: method.to_string(),
         params: Some(params),
     };
-    let DispatchOutcome::Reply(response) = conn.dispatch(&mut doc, &mut host, request) else {
+    let DispatchOutcome::Reply(response) = conn.dispatch(&registry, &mut doc, &mut host, request)
+    else {
         eprintln!(
             "hew-cli dispatch: {method} is a notification-shaped request internally — this is a bug"
         );
@@ -602,7 +612,9 @@ pub fn dispatch_live(
                 response: Some(value),
             }
         }
-        Ok(DispatchOutcome::Dropped) => unreachable!("dispatch's request always carries an id"),
+        Ok(DispatchOutcome::Dropped | DispatchOutcome::Forward(_)) => {
+            unreachable!("a live session answers an id-carrying request with a reply")
+        }
         Err(e) => {
             eprintln!("hew-cli dispatch --live: {e}");
             DispatchResult {
@@ -835,12 +847,98 @@ pub fn list_documents_live(opts: &LiveOptions) -> DispatchResult {
                 response: Some(value),
             }
         }
-        Ok(DispatchOutcome::Dropped) => unreachable!("the request carries an id"),
+        Ok(DispatchOutcome::Dropped | DispatchOutcome::Forward(_)) => {
+            unreachable!("the request carries an id, and a live session never forwards")
+        }
         Err(e) => {
             eprintln!("hew-cli documents --live: {e}");
             DispatchResult {
                 exit_code: 1,
                 response: None,
+            }
+        }
+    }
+}
+
+/// `hew-cli events --live` (docs/agents/HEW_API.md §4.5, §12): connects,
+/// attaches (to `opts.document`, else the front window), subscribes to
+/// `filter` (every event name when `None`), prints the subscribe reply to
+/// stderr, then prints every frame that arrives, compact JSON one per line,
+/// to stdout until the app closes the connection. Exit 0 when it does, 1 on
+/// any other failure.
+pub fn events_live(opts: &LiveOptions, filter: Option<Vec<String>>) -> i32 {
+    let hello_request = live::build_hello_request("hew-cli:events");
+    let mut session = match live::connect_live(opts, hello_request) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("hew-cli events --live: {e}");
+            return 1;
+        }
+    };
+    let mut out = std::io::stdout().lock();
+    events_session(&mut session, opts.document.as_deref(), filter, &mut out)
+}
+
+/// [`events_live`] once connected: what it does with the session, writing
+/// frames to `out`.
+pub fn events_session(
+    session: &mut live::LiveSession,
+    document: Option<&str>,
+    filter: Option<Vec<String>>,
+    out: &mut dyn std::io::Write,
+) -> i32 {
+    if let Err(msg) = attach_live(session, document) {
+        eprintln!("hew-cli events --live: {msg}");
+        return 1;
+    }
+    let events: Vec<String> = filter.unwrap_or_else(|| {
+        api::events::EVENT_NAMES
+            .iter()
+            .map(|n| (*n).to_string())
+            .collect()
+    });
+    let request = Request {
+        document: None,
+        jsonrpc: "2.0".to_string(),
+        id: Some(RequestId::Text("live-subscribe".to_string())),
+        method: "hew.event.subscribe".to_string(),
+        params: Some(serde_json::json!({ "events": events })),
+    };
+    match session.dispatch(request) {
+        Ok(DispatchOutcome::Reply(response)) => {
+            let value = serde_json::to_value(&response).expect("Response serializes");
+            eprintln!("{value}");
+            if response.error.is_some() {
+                return 1;
+            }
+        }
+        Ok(DispatchOutcome::Dropped | DispatchOutcome::Forward(_)) => {
+            unreachable!("the request carries an id, and a live session never forwards")
+        }
+        Err(e) => {
+            eprintln!("hew-cli events --live: {e}");
+            return 1;
+        }
+    }
+    let print = |out: &mut dyn std::io::Write, frame: &serde_json::Value| -> bool {
+        writeln!(out, "{frame}").and_then(|()| out.flush()).is_ok()
+    };
+    for frame in session.take_events() {
+        if !print(out, &frame) {
+            return 1;
+        }
+    }
+    loop {
+        match session.read_frame(None) {
+            Ok(frame) => {
+                if !print(out, &frame) {
+                    return 1;
+                }
+            }
+            Err(live::LiveError::Closed) => return 0,
+            Err(e) => {
+                eprintln!("hew-cli events --live: {e}");
+                return 1;
             }
         }
     }
@@ -886,8 +984,8 @@ pub(crate) fn attach_live(
                 ))
             }
         },
-        Ok(DispatchOutcome::Dropped) => {
-            unreachable!("attach's request always carries an id")
+        Ok(DispatchOutcome::Dropped | DispatchOutcome::Forward(_)) => {
+            unreachable!("attach's request always carries an id, and a live session never forwards")
         }
         Err(e) => Err(format!("hew.doc.attach: {e}")),
     }
@@ -909,7 +1007,9 @@ fn run_silently(
         method: method.to_string(),
         params: Some(params),
     };
-    let DispatchOutcome::Reply(response) = conn.dispatch(doc, host, request) else {
+    let DispatchOutcome::Reply(response) =
+        conn.dispatch(&Registry::protocol_1(), doc, host, request)
+    else {
         return Some("dropped unexpectedly".to_string());
     };
     response.error.map(|e| {

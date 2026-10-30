@@ -696,7 +696,7 @@ fn scenes_round_trip_byte_identical_with_every_property_shape() {
 
     let bytes = f.doc.save();
     let m = manifest_json(&bytes);
-    assert_eq!(m["format_version"], 22);
+    assert_eq!(m["format_version"], 25);
     assert_eq!(m["scenes"].as_array().unwrap().len(), 3);
     assert_eq!(m["scenes"][0]["name"], "Cam only");
     assert!(

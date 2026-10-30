@@ -40,6 +40,18 @@ const menubar = () => within(screen.getByTestId('menu-bar'))
 // A minimal mock Scene sufficient for App to start and render its full UI.
 // Shared across all tests in this file; vi.clearAllMocks() resets call counts.
 const mockScene = {
+  // Events (docs/agents/HEW_API.md §4.5): the units mirror and the
+  // document lifecycle notes.
+  set_display_units: vi.fn(),
+  // Selection and view state (docs/agents/HEW_API.md §7): the mirrors the
+  // bus reads.
+  set_ui_selection: vi.fn(),
+  set_ui_isolation: vi.fn(),
+  note_tool_changed: vi.fn(),
+  note_document_event: vi.fn(),
+  document_id: vi.fn(() => undefined),
+  ensure_document_id: vi.fn(() => '00000000-0000-4000-8000-000000000000'),
+  busy: () => false,
   object_ids: () => new BigUint64Array(),
   group_ids: () => new BigUint64Array(),
   instance_ids: () => new BigUint64Array(),
@@ -114,6 +126,7 @@ const mockScene = {
   // Object Info's Materials row: nothing painted by default.
   object_materials: () => new BigUint64Array(),
   instance_expanded_members: () => new BigUint64Array(),
+  instance_expanded_inherited: () => new BigUint64Array(),
   set_hidden: vi.fn(),
   group_members: () => [] as { kind: string; id: bigint }[],
   component_name: () => undefined as string | undefined,
@@ -199,6 +212,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: tauriCore.invoke }))
 // runner App hands it, so a test can drive a live `revert` the way the shell does.
 const liveBridge = vi.hoisted(() => ({
   runOp: null as null | ((op: string, args: Record<string, unknown>) => Promise<{ ok: boolean; refusal?: string; message?: string }>),
+  deps: null as unknown,
 }))
 vi.mock('./api/liveBridge', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api/liveBridge')>()
@@ -206,6 +220,7 @@ vi.mock('./api/liveBridge', async (importOriginal) => {
     ...actual,
     installLiveBridge: vi.fn((deps: { runOp?: typeof liveBridge.runOp }) => {
       liveBridge.runOp = deps.runOp ?? null
+      liveBridge.deps = deps
       return () => {}
     }),
   }
@@ -315,6 +330,93 @@ async function renderAndLoad() {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe('App — the bus view mirrors', () => {
+  it('selection effect mirrors into the scene', async () => {
+    vi.clearAllMocks()
+    await renderAndLoad()
+    // Mount mirrors the empty selection and the active tool.
+    expect(mockScene.set_ui_selection).toHaveBeenLastCalledWith('[]')
+    expect(mockScene.note_tool_changed).toHaveBeenLastCalledWith('Select')
+    const props = (): {
+      onSelectMany: (nodes: { kind: string; id: bigint }[], mode: string) => void
+    } => {
+      const calls = vi.mocked(Viewport).mock.calls
+      return calls[calls.length - 1][0] as never
+    }
+    act(() => {
+      props().onSelectMany(
+        [
+          { kind: 'object', id: 4n },
+          { kind: 'instance', id: 9007199254740993n },
+        ],
+        'replace',
+      )
+    })
+    await waitFor(() =>
+      expect(mockScene.set_ui_selection).toHaveBeenLastCalledWith(
+        '[{"kind":"object","id":"4"},{"kind":"instance","id":"9007199254740993"}]',
+      ),
+    )
+    // Clearing the selection mirrors an empty one.
+    act(() => {
+      props().onSelectMany([], 'replace')
+    })
+    await waitFor(() => expect(mockScene.set_ui_selection).toHaveBeenLastCalledWith('[]'))
+  })
+})
+
+describe('App — a bus hide re-reads the hidden state', () => {
+  afterEach(() => {
+    vi.mocked(Viewport).mockImplementation((() => null) as never)
+    mockScene.user_hidden_kinds = () => new Uint8Array()
+    mockScene.user_hidden_ids = () => new BigUint64Array()
+  })
+
+  it('hidden_changed with something already hidden pushes the fresh set, not the last render\'s', async () => {
+    vi.clearAllMocks()
+    // A viewport that remembers what it was told to hide.
+    let hidden: { objects: bigint[]; instances: bigint[] } = { objects: [], instances: [] }
+    const setHidden = vi.fn((objects: bigint[], instances: bigint[]) => {
+      hidden = { objects: [...objects], instances: [...instances] }
+    })
+    const api: Record<string, unknown> = {
+      setHidden,
+      getHiddenIds: () => hidden,
+      getEffectiveHiddenIds: () => hidden,
+    }
+    const proxy = new Proxy(api, {
+      get: (t, k) => {
+        if (typeof k === 'string' && !(k in t)) t[k] = vi.fn()
+        return t[k as string]
+      },
+    })
+    vi.mocked(Viewport).mockImplementation(((props: { apiRef?: { current: unknown } }) => {
+      if (props.apiRef !== undefined) props.apiRef.current = proxy
+      return null
+    }) as never)
+    await renderAndLoad()
+    const { applyPendingViewDirectives, directiveTargets } = await import('./api/liveBridge')
+    const deps = liveBridge.deps as Parameters<typeof directiveTargets>[0]
+    const busHide = (ids: bigint[]) => {
+      mockScene.user_hidden_kinds = () => new Uint8Array(ids.length)
+      mockScene.user_hidden_ids = () => BigUint64Array.from(ids)
+      // The bridge's `hidden_changed` arm: re-seed, then reconcile, in one tick.
+      act(() => {
+        applyPendingViewDirectives('[{"kind":"hidden_changed"}]', directiveTargets(deps))
+      })
+    }
+    // obj 1 is hidden already (say through the Outliner), then a bus hide
+    // adds obj 2: both stay hidden.
+    busHide([1n])
+    expect(hidden.objects).toEqual([1n])
+    busHide([1n, 2n])
+    expect([...hidden.objects].sort()).toEqual([1n, 2n])
+    // A bus show of obj 1: only obj 2 stays hidden.
+    busHide([2n])
+    expect(hidden.objects).toEqual([2n])
+  })
+})
 
 describe('App — loading state', () => {
   it('shows "Loading kernel…" before the kernel resolves', () => {
@@ -2220,6 +2322,23 @@ describe('App — unified Open dialog', () => {
         expect(screen.queryByRole('dialog', { name: 'Open report' })).not.toBeInTheDocument()
       })
 
+      it('announces the opened .skp once, with its name and path, not the blank placeholder', async () => {
+        vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
+          kind: 'skp',
+          name: 'house.skp',
+          bytes: new Uint8Array([8, 8]),
+          handle: '/tmp/house.skp',
+        })
+        await renderAndLoad()
+        vi.mocked(mockScene.note_document_event).mockClear()
+        triggerOpen()
+        await screen.findByRole('dialog', { name: 'Open report' })
+        const opened = vi
+          .mocked(mockScene.note_document_event)
+          .mock.calls.filter(([kind]) => kind === 'opened')
+        expect(opened).toEqual([['opened', 'house.skp', '/tmp/house.skp', undefined]])
+      })
+
       it('refuses with a toast while another .skp open is still stepping', async () => {
         vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
           kind: 'skp',
@@ -2455,6 +2574,14 @@ describe('App — unified Open dialog', () => {
           expect(tauriCore.invoke).toHaveBeenCalledWith('push_recent', { path: '/tmp/my-house.hew' }),
         )
         expect(recoveryState.clear).toHaveBeenCalled()
+        // The replacement is announced with the file's path, like the
+        // `document_closed` before it.
+        expect(mockScene.note_document_event).toHaveBeenCalledWith(
+          'opened',
+          'my-house.hew',
+          '/tmp/my-house.hew',
+          undefined,
+        )
       })
     })
 
@@ -4026,6 +4153,8 @@ describe('App — the native save panel chooses the format', () => {
     expect(savePanel.pickSaveTarget).toHaveBeenCalledWith('Save As', expect.any(String), savePanel.SAVE_PANEL_FORMATS, 'hew')
     expect((mockScene as Record<string, unknown>).save_skp).toHaveBeenCalledWith('skp2017', expect.any(String))
     expect(fakeFileHost.writeTo).toHaveBeenCalledWith('/tmp/m.skp', written, 'skp2017')
+    // A save mints the document's persistent id before writing.
+    expect(mockScene.ensure_document_id).toHaveBeenCalled()
     // No in-app format step, no second picker.
     expect(screen.queryByRole('dialog', { name: /^save as$/i })).not.toBeInTheDocument()
     expect(fakeFileHost.saveAs).not.toHaveBeenCalled()

@@ -81,10 +81,13 @@ name = "api"
 version = "1.3.1"
 dependencies = [
  "kernel",
+ "mesh-export",
+ "plugin-manifest",
  "proptest",
  "serde",
  "serde_json",
  "slotmap",
+ "tessellate",
 ]
 
 [[package]]
@@ -537,6 +540,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
+name = "headless-render"
+version = "1.3.1"
+dependencies = [
+ "api",
+ "hlr",
+ "kernel",
+ "serde_json",
+ "softrender",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -548,13 +562,16 @@ version = "1.3.1"
 dependencies = [
  "api",
  "dae-import",
+ "getrandom 0.3.4",
  "gltf-import",
+ "headless-render",
  "hlr",
  "image-import",
  "kernel",
  "library",
  "mesh-export",
  "pdfwrite",
+ "plugin-manifest",
  "serde_json",
  "skp-export",
  "skp-import",
@@ -960,6 +977,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "plugin-manifest"
+version = "1.3.1"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "png"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1149,6 +1175,16 @@ dependencies = [
  "quick-error",
  "tempfile",
  "wait-timeout",
+]
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -1586,6 +1622,7 @@ dependencies = [
  "api",
  "dae-import",
  "gltf-import",
+ "headless-render",
  "hlr",
  "image-import",
  "inference",
@@ -1593,6 +1630,7 @@ dependencies = [
  "kernel",
  "mesh-export",
  "pdfwrite",
+ "plugin-manifest",
  "serde",
  "serde_json",
  "sha2",

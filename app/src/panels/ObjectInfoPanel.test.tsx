@@ -581,6 +581,7 @@ describe('ObjectInfoPanel — Materials row', () => {
       component_name: () => 'Def',
       instances_of: () => [5n],
       instance_expanded_members: () => [1n, 4n],
+      instance_expanded_inherited: () => [0xffff_ffff_ffff_ffffn, 0xffff_ffff_ffff_ffffn],
       instance_pose: () => undefined,
       object_materials: (id: bigint) => objectMats[String(id)] ?? [],
       material_info: (id: bigint) => {

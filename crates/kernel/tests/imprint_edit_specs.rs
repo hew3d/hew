@@ -597,6 +597,7 @@ fn move_imprint_undoes_and_redoes_through_history() {
                 loop_path: square(0.3, 0.3, 0.2),
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .unwrap();
@@ -647,6 +648,7 @@ fn move_then_boss_then_undo_all_the_way() {
                 loop_path: square(0.3, 0.3, 0.2),
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .unwrap()
@@ -963,6 +965,7 @@ fn moving_a_shape_around_another_adopts_it_and_undo_gives_it_back() {
                 loop_path: square(0.05, 0.05, 0.5),
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .unwrap()
@@ -977,6 +980,7 @@ fn moving_a_shape_around_another_adopts_it_and_undo_gives_it_back() {
                 loop_path: square(0.7, 0.7, 0.1),
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .unwrap()
@@ -1061,6 +1065,7 @@ fn moving_a_shape_around_a_boss_adopts_it_and_undo_releases_it() {
                 loop_path: square(0.7, 0.7, 0.1),
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .unwrap()
@@ -1084,6 +1089,7 @@ fn moving_a_shape_around_a_boss_adopts_it_and_undo_releases_it() {
                 loop_path: square(0.05, 0.05, 0.5),
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .unwrap()

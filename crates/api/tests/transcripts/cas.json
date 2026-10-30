@@ -1,0 +1,199 @@
+{
+  "profile": "core",
+  "frames": [
+    {
+      "note": "the handshake",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "result": {
+          "protocol": 1,
+          "app": {
+            "name": "hew",
+            "version": "1.3.1"
+          },
+          "profile": "core",
+          "encoding": "json",
+          "documents": []
+        }
+      }
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "note": "a rectangle on the ground: the first commit moves the history generation",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "hew.doc.transact",
+        "params": {
+          "label": "Profile",
+          "commands": [
+            {
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "plane": {
+                  "ground": true
+                },
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  0.5,
+                  0.3,
+                  0.0
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "compare": "/result/label",
+      "response": "Profile"
+    },
+    {
+      "note": "compare-and-swap against a stale generation: refused generation_moved before any command runs, with what was expected and what the document holds",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "hew.doc.transact",
+        "params": {
+          "expect_generation": 0,
+          "commands": [
+            {
+              "method": "hew.attr.set",
+              "params": {
+                "target": "document",
+                "ns": "com.example.t",
+                "key": "width",
+                "value": 1
+              }
+            }
+          ]
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "error": {
+          "code": -32000,
+          "message": "refused",
+          "data": {
+            "refusal": "generation_moved",
+            "failed_index": 0,
+            "failed_method": "hew.doc.transact",
+            "detail": {
+              "expected": 0,
+              "actual": 2
+            },
+            "explanation": "The document changed since this envelope was computed. Read it again and resend."
+          }
+        }
+      }
+    },
+    {
+      "note": "compare-and-swap against the current generation (two pushes: the rectangle's gesture and the transaction's entry) commits, opening a coalescing run under key k",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "hew.doc.transact",
+        "params": {
+          "expect_generation": 2,
+          "coalesce": "k",
+          "commands": [
+            {
+              "method": "hew.attr.set",
+              "params": {
+                "target": "document",
+                "ns": "com.example.t",
+                "key": "width",
+                "value": 2
+              }
+            }
+          ]
+        }
+      },
+      "compare": "/result/label",
+      "response": "hew.attr.set"
+    },
+    {
+      "note": "a second commit under the same key by the same connection extends the top entry instead of pushing one",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "hew.doc.transact",
+        "params": {
+          "coalesce": "k",
+          "commands": [
+            {
+              "method": "hew.attr.set",
+              "params": {
+                "target": "document",
+                "ns": "com.example.t",
+                "key": "depth",
+                "value": 3
+              }
+            }
+          ]
+        }
+      },
+      "compare": "/result/label",
+      "response": "hew.attr.set"
+    },
+    {
+      "note": "two entries: the rectangle and the coalesced run",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "hew.history.status",
+        "params": {}
+      },
+      "compare": "/result/undo_depth",
+      "response": 2
+    },
+    {
+      "note": "query results carry the history generation: every push counts (each command's own entry and the transaction's), and the coalesced commit moved it although it pushed no entry",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "hew.query.context",
+        "params": {}
+      },
+      "compare": "/result/generation",
+      "response": 6
+    },
+    {
+      "note": "and the document epoch, which never runs backwards",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "hew.query.context",
+        "params": {}
+      },
+      "compare": "/result/epoch",
+      "response": 6
+    }
+  ]
+}

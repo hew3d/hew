@@ -2712,7 +2712,7 @@ fn annotation_tags_are_gated_at_v18() {
         .ingest(scene(vec![vec![vec!["Notes".into()]]]), Vec::new())
         .unwrap();
     let bytes = tagged.save();
-    assert_eq!(version(&bytes), 22);
+    assert_eq!(version(&bytes), 25);
     assert!(Document::load(&bytes).is_ok());
     let smuggled = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(17));
     assert!(Document::load(&smuggled).is_err());
@@ -2773,7 +2773,7 @@ fn sketch_tags_are_gated_at_v20() {
         .ingest(scene(vec![vec!["Site".into()]]), Vec::new())
         .unwrap();
     let bytes = tagged.save();
-    assert_eq!(version(&bytes), 22);
+    assert_eq!(version(&bytes), 25);
     let loaded = Document::load(&bytes).unwrap();
     let s = loaded.sketch_ids()[0];
     assert_eq!(loaded.sketch_tags(s), [vec!["Site".to_string()]]);
@@ -2982,7 +2982,7 @@ fn guide_stretches_round_trip_and_are_gated_at_v22() {
     assert_eq!(before.len(), 3);
     let bytes = doc.save();
     let m = manifest_json(&bytes);
-    assert_eq!(m["format_version"], 22);
+    assert_eq!(m["format_version"], 25);
     let written: Vec<(serde_json::Value, serde_json::Value)> = m["guides"]
         .as_array()
         .unwrap()

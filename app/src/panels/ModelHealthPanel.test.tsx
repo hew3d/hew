@@ -17,6 +17,7 @@ vi.mock('./objectBounds', () => ({
   worldBoundsForSelection: vi.fn(() => ({ min: [0, 0, 0], max: [2, 2, 2] })),
 }))
 import { worldBoundsForSelection } from './objectBounds'
+import { taggedDispatch } from '../test/taggedDispatch'
 
 const RIM = { role: 'outer', planar: true, closed: true, cappable: true, perimeter: 4, extent: 1, edges: 4 }
 
@@ -520,7 +521,7 @@ describe('ModelHealthPanel — Stage 3 batches', () => {
       api_connection_open: vi.fn(() => 3),
       api_connection_close: vi.fn(),
       object_public_ids: vi.fn((ids: BigUint64Array) => Array.from(ids, (id) => `obj_${id}`)),
-      api_dispatch: vi.fn((_c: number, raw: string) => {
+      api_dispatch: vi.fn(taggedDispatch((_c: number, raw: string) => {
         const req = JSON.parse(raw) as { id: number } & Sent
         sent.push(req)
         if (req.method !== 'hew.doc.transact') return JSON.stringify({ jsonrpc: '2.0', id: req.id, result: {} })
@@ -530,7 +531,7 @@ describe('ModelHealthPanel — Stage 3 batches', () => {
             ? { jsonrpc: '2.0', id: req.id, result: {} }
             : { jsonrpc: '2.0', id: req.id, error: { code: -32000, message: 'refused', data: { refusal: 'X', failed_index: r.index, explanation: r.explanation } } },
         )
-      }),
+      })),
     })
     const typed = scene as typeof scene & { api_dispatch: ReturnType<typeof vi.fn> }
     return { scene: typed, sent, transacts: () => sent.filter((s) => s.method === 'hew.doc.transact') }

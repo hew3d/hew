@@ -5352,6 +5352,7 @@ fn replacing_ops_refuse_a_grouped_leaf_and_leave_the_document_untouched() {
                 ],
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .expect("imprint sub-face")
@@ -5431,6 +5432,7 @@ fn push_through_sub_face_punches_hole_and_round_trips() {
                 ],
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .expect("imprint sub-face")

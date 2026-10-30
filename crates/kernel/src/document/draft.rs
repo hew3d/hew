@@ -494,15 +494,18 @@ impl Document {
                             .twin
                             .map(|t| obj.loops()[obj.half_edges()[t].loop_id].face);
                         // An edge between two faces on the plane is drawing,
-                        // unless they are painted differently or the edge is
-                        // soft: that split is the solid's content (the paint
-                        // boundary, a source's smoothed seam — a terrain's
-                        // flat triangles), kept like its own edges.
+                        // unless they are painted differently, carry different
+                        // attribute dictionaries, or the edge is soft: that
+                        // split is the solid's content (the paint or
+                        // dictionary boundary, a source's smoothed seam — a
+                        // terrain's flat triangles), kept like its own edges,
+                        // as boolean seam cleanup keeps it.
                         if !obj.edges()[he.edge].soft
                             && other.is_some_and(|g| {
                                 on.contains(&g)
                                     && obj.faces()[g].material == face.material
                                     && obj.faces()[g].back_material == face.back_material
+                                    && obj.face_attrs_eq(g, f)
                             })
                         {
                             stored.push(StoredEdge {
@@ -1385,6 +1388,7 @@ impl Document {
             meta: Some(CompoundMeta {
                 label: pending.label.clone(),
                 origin: HistoryOrigin::User,
+                coalesce: None,
             }),
         });
         self.commit_new_action();
@@ -2234,6 +2238,7 @@ impl Document {
                                     && face_on_plane(obj, g, &plane)
                                     && obj.faces()[g].material == face.material
                                     && obj.faces()[g].back_material == face.back_material
+                                    && obj.face_attrs_eq(g, f)
                             })
                 });
             if split {

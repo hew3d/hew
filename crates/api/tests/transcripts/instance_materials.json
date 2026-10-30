@@ -1,0 +1,391 @@
+{
+  "frames": [
+    {
+      "compare": "/result/profile",
+      "note": "the handshake",
+      "request": {
+        "id": 0,
+        "jsonrpc": "2.0",
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": "core"
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "compare": "/result/label",
+      "note": "a board, to become a component",
+      "request": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  0.4,
+                  0.2,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.018,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "board"
+        }
+      },
+      "response": "board"
+    },
+    {
+      "compare": "/result/results/0",
+      "note": "a component from the board",
+      "request": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "method": "hew.component.create",
+        "params": {
+          "members": [
+            "obj_1"
+          ]
+        }
+      },
+      "response": {
+        "component": "cmp_2",
+        "instance": "ins_3"
+      }
+    },
+    {
+      "compare": "/result/results/0",
+      "note": "a second placement, a meter along x",
+      "request": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "method": "hew.component.place",
+        "params": {
+          "component": "cmp_2",
+          "pose": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      },
+      "response": {
+        "instance": "ins_4"
+      }
+    },
+    {
+      "compare": "/result/results/0",
+      "note": "red",
+      "request": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "method": "hew.material.create",
+        "params": {
+          "color": [
+            200,
+            30,
+            30
+          ],
+          "name": "Red"
+        }
+      },
+      "response": {
+        "material": "mat_5"
+      }
+    },
+    {
+      "compare": "/result/results/0",
+      "note": "blue",
+      "request": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "method": "hew.material.create",
+        "params": {
+          "color": [
+            30,
+            30,
+            200
+          ],
+          "name": "Blue"
+        }
+      },
+      "response": {
+        "material": "mat_6"
+      }
+    },
+    {
+      "compare": "/result/label",
+      "note": "paint the first placement",
+      "request": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "method": "hew.material.paint",
+        "params": {
+          "id": "ins_3",
+          "material": "mat_5"
+        }
+      },
+      "response": "hew.material.paint"
+    },
+    {
+      "compare": "/result/material",
+      "note": "the painted placement carries red",
+      "request": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "method": "hew.query.entity",
+        "params": {
+          "id": "ins_3"
+        }
+      },
+      "response": "mat_5"
+    },
+    {
+      "compare": "/result/material",
+      "note": "the other placement carries none",
+      "request": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "method": "hew.query.entity",
+        "params": {
+          "id": "ins_4"
+        }
+      },
+      "response": null
+    },
+    {
+      "compare": "/result/occurrences",
+      "note": "the leaf under the painted placement shows red, the other nothing",
+      "request": {
+        "id": 10,
+        "jsonrpc": "2.0",
+        "method": "hew.query.occurrences",
+        "params": {
+          "kinds": [
+            "object"
+          ]
+        }
+      },
+      "response": [
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 1,
+          "hidden": false,
+          "id": "obj_1",
+          "kind": "object",
+          "material": null,
+          "material_effective": "mat_5",
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_3"
+          ],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 1,
+          "hidden": false,
+          "id": "obj_1",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_4"
+          ],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      ]
+    },
+    {
+      "compare": "/result/label",
+      "note": "paint the definition: every member's base",
+      "request": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "method": "hew.material.paint",
+        "params": {
+          "id": "cmp_2",
+          "material": "mat_6"
+        }
+      },
+      "response": "hew.material.paint"
+    },
+    {
+      "compare": "/result/occurrences",
+      "note": "a painted base beats the placement's red in both leaves",
+      "request": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "method": "hew.query.occurrences",
+        "params": {
+          "kinds": [
+            "object"
+          ]
+        }
+      },
+      "response": [
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 1,
+          "hidden": false,
+          "id": "obj_1",
+          "kind": "object",
+          "material": "mat_6",
+          "material_effective": "mat_6",
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_3"
+          ],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 1,
+          "hidden": false,
+          "id": "obj_1",
+          "kind": "object",
+          "material": "mat_6",
+          "material_effective": "mat_6",
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_4"
+          ],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      ]
+    },
+    {
+      "compare": "/error/code",
+      "note": "a definition takes only the definition scope",
+      "request": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "method": "hew.material.paint",
+        "params": {
+          "id": "cmp_2",
+          "material": "mat_5",
+          "scope": "instance"
+        }
+      },
+      "response": -32602
+    }
+  ],
+  "profile": "core"
+}

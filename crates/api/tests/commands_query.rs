@@ -3,9 +3,13 @@
 //! success path and a failure path per command, and proof that every
 //! read-only dispatch adds no undo entry.
 
-use api::{Connection, DispatchOutcome, NoHost, Profile, Request, RequestId, Response, codes};
+use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
 use kernel::{CurveGeom, Document, Material, NodeId, ObjectId, Plane, Point3, Rgba8, SketchId};
 use serde_json::{Value, json};
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // --------------------------------------------------------------- fixtures
 
@@ -108,6 +112,7 @@ fn req(id: i64, method: &str, params: Value) -> Request {
 /// needs an attached document.
 fn hello_attach(conn: &mut Connection, doc: &mut Document) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(0, "hew.meta.hello", json!({ "protocol": 1 })),
@@ -115,9 +120,12 @@ fn hello_attach(conn: &mut Connection, doc: &mut Document) {
         panic!("hello replies")
     };
     assert!(r.error.is_none(), "hello failed: {:?}", r.error);
-    let DispatchOutcome::Reply(r) =
-        conn.dispatch(doc, &mut NoHost, req(1, "hew.doc.attach", json!({})))
-    else {
+    let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
+        doc,
+        &mut NoHost,
+        req(1, "hew.doc.attach", json!({})),
+    ) else {
         panic!("attach replies")
     };
     assert!(r.error.is_none(), "attach failed: {:?}", r.error);
@@ -130,7 +138,9 @@ fn call(
     method: &str,
     params: Value,
 ) -> Response {
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, &mut NoHost, req(id, method, params)) else {
+    let DispatchOutcome::Reply(r) =
+        conn.dispatch(&REGISTRY, doc, &mut NoHost, req(id, method, params))
+    else {
         panic!("{method} replies")
     };
     r
@@ -173,7 +183,7 @@ fn call_err(
 
 #[test]
 fn documents_lists_the_hosts_open_documents_and_adds_no_undo_entry() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
@@ -189,7 +199,7 @@ fn documents_lists_the_hosts_open_documents_and_adds_no_undo_entry() {
 
 #[test]
 fn documents_rejects_unknown_params() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let r = call(
@@ -207,7 +217,7 @@ fn documents_rejects_unknown_params() {
 #[test]
 fn scene_reports_the_tree_and_the_top_level_lists() {
     let mut doc = rich_doc();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
 
@@ -339,7 +349,7 @@ fn scene_reports_usage_for_materials_and_components() {
     doc.place_instance(inner, kernel::Transform::IDENTITY)
         .expect("place a SECOND, world instance of `inner` (on top of the nested one)");
 
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let scene = call_ok(&mut conn, &mut doc, 2, "hew.query.scene", json!({}));
 
@@ -385,7 +395,7 @@ fn scene_reports_usage_for_materials_and_components() {
 
 #[test]
 fn scene_rejects_unknown_params() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let r = call(
@@ -403,7 +413,7 @@ fn scene_rejects_unknown_params() {
 #[test]
 fn entity_describes_every_entity_kind_and_refuses_an_unknown_id() {
     let mut doc = rich_doc();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let scene = call_ok(&mut conn, &mut doc, 2, "hew.query.scene", json!({}));
@@ -464,7 +474,10 @@ fn entity_describes_every_entity_kind_and_refuses_an_unknown_id() {
         json!({ "id": component_id }),
     );
     assert_eq!(component["kind"], "component");
+    assert_eq!(component["member_objects"].as_array().unwrap().len(), 1);
     assert_eq!(component["members"].as_array().unwrap().len(), 1);
+    assert_eq!(component["members"][0]["kind"], "object");
+    assert!(component["bounds_local"]["min"].is_array());
     assert_eq!(component["instances"].as_array().unwrap().len(), 1);
 
     let instance = call_ok(
@@ -604,7 +617,7 @@ fn leaky_instance_doc() -> Document {
 #[test]
 fn an_instance_is_not_watertight_when_its_definitions_sole_member_is_leaky() {
     let mut doc = leaky_instance_doc();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let scene = call_ok(&mut conn, &mut doc, 2, "hew.query.scene", json!({}));
@@ -654,7 +667,7 @@ fn a_tombstoned_definition_member_does_not_make_the_instance_leaky() {
     doc.delete_def_member(component, member)
         .expect("tombstone the second member");
 
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let scene = call_ok(&mut conn, &mut doc, 2, "hew.query.scene", json!({}));
@@ -704,7 +717,8 @@ fn a_tombstoned_definition_member_does_not_make_the_instance_leaky() {
             "hew.query.entity",
             json!({ "id": component_id }),
         );
-        let members = comp["members"].as_array().expect("members array");
+        let members = comp["member_objects"].as_array().expect("members array");
+        assert_eq!(comp["members"].as_array().map(Vec::len), Some(1));
         assert_eq!(
             members.len(),
             1,
@@ -719,7 +733,7 @@ fn a_tombstoned_definition_member_does_not_make_the_instance_leaky() {
 fn faces_lists_every_face_with_plane_area_and_centroid_and_refuses_an_unknown_object() {
     let mut doc = Document::new();
     build_box(&mut doc, 0.0);
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
 
@@ -773,7 +787,7 @@ fn faces_lists_every_face_with_plane_area_and_centroid_and_refuses_an_unknown_ob
 fn raycast_hits_the_nearest_face_and_refuses_a_miss() {
     let mut doc = Document::new();
     build_box(&mut doc, 0.0);
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
 
@@ -805,7 +819,7 @@ fn raycast_refuses_an_exact_tie_between_two_coincident_faces() {
     let mut doc = Document::new();
     build_box(&mut doc, 0.0);
     build_box(&mut doc, 0.0); // an exact duplicate: its top face coincides with the first's
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let ambiguous = call_err(
@@ -840,7 +854,7 @@ fn raycast_prefers_a_nearer_instance_hit_over_a_farther_world_object() {
     let mut doc = Document::new();
     build_box(&mut doc, 0.0); // world box: top face at z=0.5, distance 9.5 — farther
     build_raised_instance(&mut doc); // instance: top face at z=5.5, distance 4.5 — nearer
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let scene = call_ok(&mut conn, &mut doc, 2, "hew.query.scene", json!({}));
@@ -878,7 +892,7 @@ fn raycast_skips_a_user_hidden_instance_and_falls_through_to_the_world_object_be
     let instance = build_raised_instance(&mut doc);
     doc.set_node_user_hidden(NodeId::Instance(instance), true);
 
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let hit = call_ok(
@@ -897,7 +911,7 @@ fn raycast_skips_a_user_hidden_instance_and_falls_through_to_the_world_object_be
 
 #[test]
 fn measure_reports_distance_and_delta_and_refuses_an_unknown_locator() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
@@ -933,7 +947,7 @@ fn measure_reports_distance_and_delta_and_refuses_an_unknown_locator() {
 fn resolve_answers_point_face_and_edge_locators_and_refuses_a_miss() {
     let mut doc = Document::new();
     build_box(&mut doc, 0.0);
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
 
@@ -997,7 +1011,7 @@ fn context_reports_the_open_session_stack_and_direct_members() {
     let mut doc = Document::new();
     let a = build_box(&mut doc, 0.0);
     let (group, _) = doc.group_nodes(&[NodeId::Object(a)]).expect("group");
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let empty = call_ok(&mut conn, &mut doc, 2, "hew.query.context", json!({}));
@@ -1024,7 +1038,7 @@ fn context_reports_the_open_session_stack_and_direct_members() {
 
 #[test]
 fn context_rejects_unknown_params() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let r = call(
@@ -1045,7 +1059,7 @@ fn raycast_skips_a_user_hidden_world_object() {
     let obj = build_box(&mut doc, 0.0);
     doc.set_node_user_hidden(NodeId::Object(obj), true);
 
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let refusal = call_err(

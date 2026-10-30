@@ -99,6 +99,21 @@ export default defineConfig({
       name: 'webkit',
       use: { ...devices['Desktop Safari'] },
     },
+    // Plugin realm probe on Firefox (stage P0). On demand only: set
+    // HEW_PROBE_FIREFOX=1 and select it with `--project firefox` after
+    // `pnpm --dir app exec playwright install firefox`; the default run and CI
+    // never include it. Playwright has no per-project opt-out, and worker
+    // processes reload this config without the parent's argv, so the project is
+    // gated on an environment variable (inherited by workers) instead.
+    ...(process.env.HEW_PROBE_FIREFOX === '1'
+      ? [
+          {
+            name: 'firefox',
+            testDir: './e2e/plugin-realm',
+            use: { ...devices['Desktop Firefox'] },
+          },
+        ]
+      : []),
     //  — visual-regression goldens on a *pinned* configuration: fixed
     // viewport + DPR=1 + SwiftShader software GL, so a golden PNG is reproducible
     // off a real GPU (docs/dev/DEVELOPMENT.md). Runs ONLY the e2e/visual/ specs (the global

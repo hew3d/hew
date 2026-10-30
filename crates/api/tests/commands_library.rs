@@ -7,13 +7,16 @@
 //! proving the geometry and provenance actually round-trip.
 
 use api::{
-    Connection, DispatchOutcome, Host, LibraryItemEntry, LibraryListing, LibraryReadResult,
-    LibraryWriteResult, LibraryWriteTarget, NoHost, Profile, Refusal, Request, RequestId, Response,
-    codes,
+    Connection, DispatchOutcome, Grant, Host, LibraryItemEntry, LibraryListing, LibraryReadResult,
+    LibraryWriteResult, LibraryWriteTarget, NoHost, Refusal, Request, RequestId, Response, codes,
 };
 use kernel::{AttrTarget, Document, EntityRef, NodeId};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // ----------------------------------------------------------------- fixtures
 
@@ -29,6 +32,7 @@ fn req(id: i64, method: &str, params: Value) -> Request {
 
 fn hello_attach(conn: &mut Connection, doc: &mut Document, host: &mut dyn Host) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         host,
         req(0, "hew.meta.hello", json!({ "protocol": 1 })),
@@ -36,7 +40,8 @@ fn hello_attach(conn: &mut Connection, doc: &mut Document, host: &mut dyn Host) 
         panic!("hello replies")
     };
     assert!(r.error.is_none(), "hello failed: {:?}", r.error);
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, host, req(1, "hew.doc.attach", json!({})))
+    let DispatchOutcome::Reply(r) =
+        conn.dispatch(&REGISTRY, doc, host, req(1, "hew.doc.attach", json!({})))
     else {
         panic!("attach replies")
     };
@@ -51,7 +56,8 @@ fn call(
     method: &str,
     params: Value,
 ) -> Response {
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, host, req(id, method, params)) else {
+    let DispatchOutcome::Reply(r) = conn.dispatch(&REGISTRY, doc, host, req(id, method, params))
+    else {
         panic!("{method} replies")
     };
     r
@@ -91,7 +97,7 @@ fn call_err(
 }
 
 fn new_conn() -> Connection {
-    Connection::new(Profile::Core, "test")
+    Connection::new(Grant::core(), "test")
 }
 
 fn ground_rect(corner_a: [f64; 3], corner_b: [f64; 3]) -> Value {
@@ -794,6 +800,31 @@ fn save_with_no_selection_saves_the_whole_document_as_a_model_item() {
     );
     let path = result["path"].as_str().unwrap();
     assert!(path.starts_with("Models/"), "{path}");
+}
+
+/// A model item is a separate document: it never carries the source
+/// document's id, so documents opened from it do not share that identity.
+#[test]
+fn a_model_item_carries_no_document_id() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    build_box(&mut conn, &mut doc);
+    doc.ensure_document_id([0x7e; 16]);
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.save",
+        json!({"name": "Whole Doc"}),
+    );
+    let (_, bytes) = host.write_log.last().expect("the item was written");
+    let item = Document::load(bytes).expect("the item loads");
+    assert_eq!(item.document_id(), None);
+    assert!(doc.document_id().is_some(), "the source keeps its own");
 }
 
 #[test]

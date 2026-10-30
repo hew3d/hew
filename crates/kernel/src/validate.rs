@@ -26,7 +26,8 @@ impl Object {
     /// conservatively: a hole with NO vertex inside the ring is invalid);
     /// vertices and their `outgoing`
     /// half-edges agree; every face is in exactly one shell; and the
-    /// watertightness flag matches the actual topology.
+    /// watertightness flag matches the actual topology; every face and edge
+    /// attribute slot names a non-empty dictionary in this Object's table.
     pub fn validate(&self) -> Result<(), TopologyError> {
         // Finiteness first. Every geometric predicate below (planarity,
         // hole containment, curve radius, plane normalization) is a `>`/`<`
@@ -39,6 +40,27 @@ impl Object {
             if !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite() {
                 return Err(TopologyError::VertexNotFinite { vertex: v });
             }
+        }
+
+        // Attribute slots (face and edge dictionaries) point into this
+        // Object's own table, at a dictionary that holds something: an
+        // empty one is spelled `AttrSlot::NONE`, never a slot.
+        let slot_ok = |slot: crate::topo::AttrSlot| {
+            slot.is_none()
+                || self
+                    .attr_dicts
+                    .get(slot.0 as usize)
+                    .is_some_and(|d| !d.is_empty())
+        };
+        if !self.faces.values().all(|f| slot_ok(f.attrs)) {
+            return Err(TopologyError::DanglingHandle {
+                context: "face attribute slot",
+            });
+        }
+        if !self.edges.values().all(|e| slot_ok(e.attrs)) {
+            return Err(TopologyError::DanglingHandle {
+                context: "edge attribute slot",
+            });
         }
 
         let mut is_origin: SecondaryMap<_, ()> = SecondaryMap::new();

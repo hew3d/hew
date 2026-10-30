@@ -18,6 +18,7 @@ import { ThickenDialog } from './ThickenDialog'
 import { BANNED_RE, readableText } from '../health/bannedWords'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { ImportReport } from '../io/fileHost'
+import { taggedDispatch } from '../test/taggedDispatch'
 
 const RIM = { role: 'outer', planar: true, closed: true, cappable: true, sheet_edge: false, shared: false, perimeter: 4, extent: 1, edges: 4 }
 const SEAM = { ...RIM, shared: true }
@@ -71,7 +72,7 @@ function makeScene(refuse = false) {
     api_connection_open: vi.fn(() => 3),
     api_connection_close: vi.fn(),
     object_public_ids: vi.fn((ids: BigUint64Array) => Array.from(ids, (id) => `obj_${id}`)),
-    api_dispatch: vi.fn((_c: number, raw: string) => {
+    api_dispatch: vi.fn(taggedDispatch((_c: number, raw: string) => {
       const req = JSON.parse(raw) as { id: number; method: string }
       if (req.method !== 'hew.doc.transact') return JSON.stringify({ jsonrpc: '2.0', id: req.id, result: {} })
       if (refuse && !applied) {
@@ -84,7 +85,7 @@ function makeScene(refuse = false) {
       }
       applied = true
       return JSON.stringify({ jsonrpc: '2.0', id: req.id, result: {} })
-    }),
+    })),
   } as unknown as WasmScene
 }
 

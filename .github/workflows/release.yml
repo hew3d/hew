@@ -72,8 +72,8 @@ jobs:
       - name: Parse and guard the tag
         id: version
         run: |
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Tag '$TAG' is not vMAJOR.MINOR.PATCH — refusing to release."
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-pre\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))?$ ]]; then
+            echo "::error::Tag '$TAG' is not vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-pre.LABEL (a number or a name such as plugin-m1) — refusing to release."
             exit 1
           fi
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
@@ -519,8 +519,22 @@ jobs:
             exit 0
           fi
           cp shells/web/_headers shells/web/dist/_headers
+          # A pre-release tag must never replace production: deploy it to
+          # the `preview` branch, which Pages serves at its own URL.
+          branch=main
+          if [[ "$TAG" == *-pre.* ]]; then
+            branch=preview
+          fi
           npx wrangler@4 pages deploy shells/web/dist \
-            --project-name=hew-app --branch=main --commit-dirty=true
+            --project-name=hew-app --branch="$branch" --commit-dirty=true
+          if [ "$branch" = preview ]; then
+            {
+              echo "### Pre-release web preview"
+              echo
+              echo "Deployed to the Pages \`preview\` branch, not production:"
+              echo "https://preview.hew3d.com (needs the custom domain on the hew-app Pages project; the always-available URL is https://preview.hew-app.pages.dev)"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # The self-hostable relay: a static musl binary per Linux architecture,
   # each built NATIVELY (the arm64 leg on the arm64 runner, as the desktop
@@ -633,12 +647,17 @@ jobs:
           IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/hew-relay"
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker buildx create --use --name hew-relay-builder
+          # A pre-release gets only its own version tag, never :latest.
+          TAGS_EXTRA="--tag $IMAGE:latest"
+          if [[ "$TAG" == *-pre.* ]]; then
+            TAGS_EXTRA=""
+          fi
           # COPY-only Dockerfile: both platforms build without emulation.
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --file crates/hew-relay/Dockerfile \
             --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:latest" \
+            $TAGS_EXTRA \
             --push \
             .
 
@@ -755,6 +774,24 @@ jobs:
           # Capture the body first: `gh | grep -q` under pipefail can report
           # SIGPIPE as failure on an early match, reading "table present" as
           # "table absent" — exactly the clobber this guard exists to stop.
+          # The publisher reminder goes out first so it also appears on a
+          # re-run that finds the table already written.
+          if [[ "$TAG" == *-pre.* ]]; then
+            LEAD="_Pre-release: not for general use, plugin API preview._"
+            {
+              echo "### Publish as a pre-release"
+              echo
+              echo "Tick **Set as a pre-release** when publishing \`$TAG\`."
+              echo "Leaving it unticked marks this build as the latest release,"
+              echo "which the updater and the package channels would pick up."
+              echo
+              echo "Cut pre-release tags from the \`feature/plugin-system\` integration"
+              echo "branch; \`main\` is for real releases only."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            LEAD="_Draft: replace this line with release highlights before publishing._"
+          fi
+
           body="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq '.body')"
           if grep -q '## Downloads' <<<"$body"; then
             echo "::notice::Body already carries a download table — leaving it untouched."
@@ -791,7 +828,7 @@ jobs:
           fi
 
           cat > body.md <<EOF
-          _Draft: replace this line with release highlights before publishing._
+          $LEAD
 
           ## Downloads
 

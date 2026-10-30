@@ -13,17 +13,31 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
+/// A query handler whose result also carries the document's clock
+/// ([`super::with_clock`]): `generation` and `epoch` on every
+/// `hew.query.*` result (docs/agents/HEW_API.md §7).
+macro_rules! clocked {
+    ($handler:ident) => {{
+        fn clocked(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+            let result = $handler(ctx, params)?;
+            Ok(super::with_clock(ctx.doc, result))
+        }
+        clocked as Handler
+    }};
+}
+
 /// This namespace's slice of the handler table.
 pub fn handler(name: &str) -> Option<Handler> {
     match name {
         "hew.meta.documents" => Some(documents),
-        "hew.query.scene" => Some(scene),
-        "hew.query.entity" => Some(entity),
-        "hew.query.faces" => Some(faces),
-        "hew.query.raycast" => Some(raycast),
-        "hew.query.measure" => Some(measure),
-        "hew.query.resolve" => Some(resolve),
-        "hew.query.context" => Some(context),
+        "hew.query.scene" => Some(clocked!(scene)),
+        "hew.query.entity" => Some(clocked!(entity)),
+        "hew.query.faces" => Some(clocked!(faces)),
+        "hew.query.raycast" => Some(clocked!(raycast)),
+        "hew.query.measure" => Some(clocked!(measure)),
+        "hew.query.resolve" => Some(clocked!(resolve)),
+        "hew.query.context" => Some(clocked!(context)),
+        "hew.query.changes_since" => Some(clocked!(changes_since)),
         _ => None,
     }
 }
@@ -147,21 +161,53 @@ fn node_ref_json(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
 
 fn documents(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let _: EmptyParams = parse(params)?;
-    Ok(json!({ "documents": ctx.host.documents(ctx.doc) }))
+    Ok(json!({ "documents": ctx.grant.filter_documents(ctx.host.documents(ctx.doc)) }))
 }
 
 // --------------------------------------------------------------- hew.query.scene
 
+/// The members every tree node carries (docs/agents/HEW_API.md §7): view
+/// state, its material (an object's base, an instance's own), and its
+/// containing group.
+fn node_common(ctx: &Ctx, node: NodeId) -> Result<serde_json::Map<String, Value>, CmdError> {
+    let material = match node {
+        NodeId::Object(id) => ctx.doc.object(id).and_then(|o| o.default_material()),
+        NodeId::Instance(id) => ctx.doc.instance_material(id).flatten(),
+        NodeId::Group(_) => None,
+    }
+    .and_then(|m| public_of(ctx, &EntityRef::Material(m)));
+    let parent = match ctx.doc.node_parent(node) {
+        Some(g) => Some(public_of_or_internal(ctx, &EntityRef::Group(g))?),
+        None => None,
+    };
+    let mut m = serde_json::Map::new();
+    m.insert("user_hidden".into(), json!(ctx.doc.node_user_hidden(node)));
+    m.insert(
+        "hidden".into(),
+        json!(ctx.doc.node_effectively_hidden(node)),
+    );
+    m.insert("material".into(), json!(material));
+    m.insert("parent".into(), json!(parent));
+    Ok(m)
+}
+
+fn with_common(ctx: &Ctx, node: NodeId, mut v: Value) -> Result<Value, CmdError> {
+    if let Some(map) = v.as_object_mut() {
+        map.extend(node_common(ctx, node)?);
+    }
+    Ok(v)
+}
+
 /// One tree node — recursive for groups (docs/agents/HEW_API.md §7).
 fn node_summary(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
-    match node {
+    let v = match node {
         NodeId::Object(id) => {
             let entity = EntityRef::Object(id);
             let obj = ctx
                 .doc
                 .object(id)
                 .ok_or_else(|| CmdError::Internal("dangling object in tree walk".into()))?;
-            Ok(json!({
+            json!({
                 "id": public_of_or_internal(ctx, &entity)?,
                 "kind": "object",
                 "name": ctx.doc.object_name(id),
@@ -169,7 +215,7 @@ fn node_summary(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
                 "health": object_health(obj),
                 "bbox": locate::entity_bbox(ctx, &entity).map(bbox_json),
                 "tags": ctx.doc.node_tags(node),
-            }))
+            })
         }
         NodeId::Group(id) => {
             let entity = EntityRef::Group(id);
@@ -178,7 +224,7 @@ fn node_summary(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
             for m in members {
                 kids.push(node_summary(ctx, m)?);
             }
-            Ok(json!({
+            json!({
                 "id": public_of_or_internal(ctx, &entity)?,
                 "kind": "group",
                 "name": ctx.doc.group_name(id),
@@ -187,7 +233,7 @@ fn node_summary(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
                 "bbox": locate::entity_bbox(ctx, &entity).map(bbox_json),
                 "tags": ctx.doc.node_tags(node),
                 "members": kids,
-            }))
+            })
         }
         NodeId::Instance(id) => {
             let entity = EntityRef::Instance(id);
@@ -200,7 +246,8 @@ fn node_summary(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
                 Some(d) => Some(public_of_or_internal(ctx, &EntityRef::Component(d))?),
                 None => None,
             };
-            Ok(json!({
+            let pose = ctx.doc.instance_pose(id);
+            json!({
                 "id": public_of_or_internal(ctx, &entity)?,
                 "kind": "instance",
                 "name": name,
@@ -209,9 +256,12 @@ fn node_summary(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
                 "bbox": locate::entity_bbox(ctx, &entity).map(bbox_json),
                 "tags": ctx.doc.node_tags(node),
                 "def": def_id,
-            }))
+                "pose": pose.map(|p| p.to_affine().to_vec()),
+                "mirrored": pose.is_some_and(|p| p.determinant() < 0.0),
+            })
         }
-    }
+    };
+    with_common(ctx, node, v)
 }
 
 fn sketch_summary(ctx: &Ctx, sketch_id: kernel::SketchId) -> Result<Value, CmdError> {
@@ -554,11 +604,26 @@ fn entity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             for i in ctx.doc.instances_of(cid) {
                 instance_ids.push(public_of_or_internal(ctx, &EntityRef::Instance(i))?);
             }
+            // Every member node (objects, groups, nested instances), live
+            // ones only, in member order.
+            let mut member_nodes = Vec::new();
+            for m in ctx.doc.def_member_nodes(cid).unwrap_or_default() {
+                let live = match m {
+                    NodeId::Object(o) => ctx.doc.object(o).is_some(),
+                    NodeId::Group(g) => ctx.doc.group_members(g).is_some(),
+                    NodeId::Instance(i) => ctx.doc.instance_def(i).is_some(),
+                };
+                if live {
+                    member_nodes.push(node_ref_json(ctx, m)?);
+                }
+            }
             Ok(json!({
                 "kind": "component",
                 "id": p.id,
                 "name": ctx.doc.component_name(cid),
-                "members": member_ids,
+                "member_objects": member_ids,
+                "members": member_nodes,
+                "bounds_local": ctx.doc.definition_bounds(cid).map(bbox_json),
                 "instances": instance_ids,
             }))
         }
@@ -576,14 +641,29 @@ fn entity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 .instance_name(iid)
                 .map(str::to_string)
                 .or_else(|| ctx.doc.component_name(def).map(str::to_string));
+            let material = ctx
+                .doc
+                .instance_material(iid)
+                .flatten()
+                .and_then(|m| public_of(ctx, &EntityRef::Material(m)));
             Ok(json!({
                 "kind": "instance",
                 "id": p.id,
                 "def": public_of_or_internal(ctx, &EntityRef::Component(def))?,
                 "pose": pose.to_affine().to_vec(),
+                "mirrored": pose.determinant() < 0.0,
                 "name": name,
                 "watertight": instance_watertight(ctx, Some(def)),
                 "health": instance_health(ctx, Some(def)),
+                "bbox": locate::entity_bbox(ctx, &EntityRef::Instance(iid)).map(bbox_json),
+                "tags": ctx.doc.node_tags(NodeId::Instance(iid)),
+                "bounds_local": ctx.doc.definition_bounds(def).map(bbox_json),
+                "material": material,
+                // An id names no path: a world instance's effective material
+                // is its own (nothing encloses it), and a nested placement's
+                // depends on the path it is reached by, which
+                // `hew.query.occurrences` reports per row.
+                "material_effective": material,
             }))
         }
         EntityRef::Guide(gid) => {
@@ -768,32 +848,73 @@ fn face_description(ctx: &Ctx, face: locate::FaceRef) -> Result<Value, CmdError>
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FacesParams {
-    object: String,
+    #[serde(default)]
+    object: Option<String>,
+    /// An occurrence path ending at the object (docs/agents/HEW_API.md
+    /// §5.2): the faces then also report `material_effective` through it.
+    #[serde(default)]
+    path: Option<Vec<String>>,
 }
 
 fn faces(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: FacesParams = parse(params)?;
-    let Some(EntityRef::Object(oid)) = ctx.resolver().resolve(&p.object) else {
-        return Err(unknown_entity(&p.object));
+    let (oid, object_id, inherited) = match (p.object, p.path) {
+        (Some(id), None) => {
+            let Some(EntityRef::Object(oid)) = ctx.resolver().resolve(&id) else {
+                return Err(unknown_entity(&id));
+            };
+            (oid, id, None)
+        }
+        (None, Some(path)) => {
+            let occ = locate::resolve_occurrence_path(ctx, &path)?;
+            let NodeId::Object(oid) = occ.node else {
+                let leaf = path.last().cloned().unwrap_or_default();
+                return Err(unknown_entity(&leaf));
+            };
+            let id = public_of_or_internal(ctx, &EntityRef::Object(oid))?;
+            (oid, id, Some(ctx.doc.inherited_material(&occ.path)))
+        }
+        _ => {
+            return Err(CmdError::Params(
+                "give exactly one of \"object\" or \"path\"".into(),
+            ));
+        }
     };
-    let face_ids: Vec<FaceId> = ctx
+    let obj = ctx
         .doc
         .object(oid)
-        .ok_or_else(|| unknown_entity(&p.object))?
+        .ok_or_else(|| unknown_entity(&object_id))?;
+    let base = obj.default_material();
+    let faces: Vec<(FaceId, Option<kernel::MaterialId>)> = obj
         .faces()
-        .keys()
+        .iter()
+        .map(|(fid, f)| (fid, f.material))
         .collect();
-    let mut out = Vec::with_capacity(face_ids.len());
-    for fid in face_ids {
-        out.push(face_description(
+    let mut out = Vec::with_capacity(faces.len());
+    for (fid, own) in faces {
+        let mut v = face_description(
             ctx,
             locate::FaceRef {
                 object: oid,
                 face: fid,
             },
-        )?);
+        )?;
+        // Through a path, the face's effective material: its own, else
+        // the object's base, else the nearest painted instance above it.
+        if let Some(inherited) = inherited {
+            let effective = own
+                .or(base)
+                .or(inherited)
+                .and_then(|m| public_of(ctx, &EntityRef::Material(m)));
+            v["material_effective"] = json!(effective);
+        }
+        // The face's attribute dictionary (docs/agents/HEW_API.md §8), `{}`
+        // for none.
+        v["attrs"] =
+            super::attrs::element_attrs_json(ctx.doc.object(oid).and_then(|o| o.face_attrs(fid)));
+        out.push(v);
     }
-    Ok(json!({ "object": p.object, "faces": out }))
+    Ok(json!({ "object": object_id, "faces": out }))
 }
 
 // ------------------------------------------------------------- hew.query.raycast
@@ -817,58 +938,84 @@ fn locator_ambiguous() -> CmdError {
 struct RaycastParams {
     origin: Value,
     dir: Value,
+    #[serde(default)]
+    all: bool,
+    #[serde(default)]
+    max_distance: Option<f64>,
+    #[serde(default)]
+    exclude: Option<Vec<Value>>,
+    #[serde(default)]
+    include_hidden: bool,
 }
 
-/// What a raycast candidate hit belongs to.
-#[derive(Debug, Clone, Copy)]
-enum RaycastHit {
-    World(kernel::ObjectId),
-    Instance(kernel::InstanceId),
+/// The most hits an `all: true` raycast lists.
+const MAX_RAY_HITS: usize = 1_000;
+
+/// The most `exclude` entries one raycast takes.
+const MAX_RAY_EXCLUDES: usize = 64;
+
+/// One face crossing of the ray, reduced to world-space numbers so ties
+/// and "nearest wins" are decided in one common, physically meaningful
+/// unit whatever frame the face was intersected in.
+struct RayCandidate {
+    /// World-space distance along the ray.
+    distance: f64,
+    point: Point3,
+    /// World-space face normal.
+    normal: Vec3,
+    /// The leaf placement's path (instances, world down), without the leaf.
+    path: Vec<kernel::InstanceId>,
+    leaf: kernel::ObjectId,
+    /// The hit in the leaf Object's own frame (a face locator's `at`).
+    at: Point3,
+    hidden: bool,
 }
 
-/// `(world-space distance along the ray, what was hit, world hit point,
-/// world-space face normal)`. Every candidate — world object or instance
-/// member — is reduced to this shape before comparison so ties and
-/// "nearest wins" are decided in one common, physically meaningful unit.
-type RayCandidate = (f64, RaycastHit, Point3, Vec3);
-
-/// Folds one more candidate into the running nearest/tie state. A closer
-/// candidate replaces; a candidate within [`geom::API_AMBIGUITY_TOL`] of
-/// the current best is a tie (refused, never guessed — §5.2); anything
-/// farther is dropped.
-fn consider_hit(best: &mut Option<RayCandidate>, tie: &mut bool, candidate: RayCandidate) {
+/// Folds one more candidate distance into the running nearest/tie state.
+/// A closer candidate replaces; a candidate within
+/// [`geom::API_AMBIGUITY_TOL`] of the current best is a tie (refused, never
+/// guessed — §5.2); anything farther is dropped.
+fn consider_hit(best: &mut Option<f64>, tie: &mut bool, distance: f64) {
     match best {
         None => {
-            *best = Some(candidate);
+            *best = Some(distance);
             *tie = false;
         }
-        Some((bt, ..)) if candidate.0 < *bt - geom::API_AMBIGUITY_TOL => {
-            *best = Some(candidate);
+        Some(bt) if distance < *bt - geom::API_AMBIGUITY_TOL => {
+            *best = Some(distance);
             *tie = false;
         }
-        Some((bt, ..)) if (candidate.0 - *bt).abs() <= geom::API_AMBIGUITY_TOL => {
+        Some(bt) if (distance - *bt).abs() <= geom::API_AMBIGUITY_TOL => {
             *tie = true;
         }
         _ => {}
     }
 }
 
-/// Whether `node`, or any group above it, is user-hidden (SketchUp
-/// "Hide" — view state a raycast must respect just as rendering does).
-/// `crates/api` cannot depend on `hew-cli`, so this is a local copy of
-/// the same walk `hew-cli/src/host.rs`'s headless snapshot uses.
-fn node_or_ancestor_hidden(doc: &kernel::Document, node: NodeId) -> bool {
-    if doc.node_user_hidden(node) {
-        return true;
-    }
-    let mut cursor = doc.node_parent(node);
-    while let Some(group) = cursor {
-        if doc.node_user_hidden(NodeId::Group(group)) {
-            return true;
-        }
-        cursor = doc.node_parent(NodeId::Group(group));
-    }
-    false
+/// The occurrence JSON members of a raycast hit.
+fn ray_hit_json(ctx: &Ctx, hit: &RayCandidate) -> Result<Value, CmdError> {
+    let leaf = public_of_or_internal(ctx, &EntityRef::Object(hit.leaf))?;
+    let path = hit
+        .path
+        .iter()
+        .map(|&i| public_of_or_internal(ctx, &EntityRef::Instance(i)))
+        .collect::<Result<Vec<_>, _>>()?;
+    // The legacy members: the top-level thing the ray hit.
+    let (object, kind) = match path.first() {
+        Some(first) => (first.clone(), "instance"),
+        None => (leaf.clone(), "object"),
+    };
+    Ok(json!({
+        "object": object,
+        "kind": kind,
+        "point": point_json(hit.point),
+        "distance": hit.distance,
+        "normal": vec3_json(hit.normal),
+        "path": path,
+        "leaf": leaf,
+        "face": { "object": leaf, "at": point_json(hit.at) },
+        "hidden": hit.hidden,
+    }))
 }
 
 fn raycast(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -876,142 +1023,132 @@ fn raycast(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let origin = locate::parse_xyz(&p.origin)?;
     let dir = locate::parse_dir(&p.dir)?;
     // A world-space unit direction to measure every candidate's distance
-    // along, regardless of which frame (world, or a definition mapped
-    // back through an instance's pose) it was actually intersected in —
-    // a local-space parameter is meaningless to compare against a
-    // world-space one when the instance's pose scales (docs/design/
-    // api-kernel-map.md §1.5's Transform).
+    // along, regardless of which frame (world, or a leaf mapped back
+    // through its placement's pose) it was actually intersected in — a
+    // local-space parameter is meaningless to compare against a
+    // world-space one when the pose scales (docs/design/api-kernel-map.md
+    // §1.5's Transform).
     let dir_n = dir
         .normalized()
         .map_err(|_| CmdError::Params("dir must be non-zero".into()))?;
+    if let Some(max) = p.max_distance
+        && !(max.is_finite() && max > 0.0)
+    {
+        return Err(CmdError::Params(
+            "max_distance must be a finite number above zero".into(),
+        ));
+    }
 
-    let mut best: Option<RayCandidate> = None;
-    let mut tie = false;
-
-    // Every visible WORLD object.
-    for oid in ctx.doc.visible_object_ids() {
-        // User-hidden objects (or ones inside a user-hidden group) fall
-        // through to what is beneath — matching the instance loop below
-        // and the headless snapshot's treatment.
-        if node_or_ancestor_hidden(ctx.doc, kernel::NodeId::Object(oid)) {
-            continue;
+    // Excluded placements: each entry and everything under it.
+    let mut excluded: BTreeSet<(Vec<kernel::InstanceId>, NodeId)> = BTreeSet::new();
+    if let Some(entries) = &p.exclude {
+        if entries.len() > MAX_RAY_EXCLUDES {
+            return Err(CmdError::Params(format!(
+                "exclude takes at most {MAX_RAY_EXCLUDES} entries"
+            )));
         }
-        let Some(obj) = ctx.doc.object(oid) else {
+        let mut roots = Vec::with_capacity(entries.len());
+        for v in entries {
+            let occ = locate::resolve_occurrence_locator(ctx, v)?;
+            roots.push((occ.path, occ.node));
+        }
+        if !roots.is_empty() {
+            for row in ctx.doc.occurrences(Some(&roots), true)? {
+                excluded.insert((row.path, row.node));
+            }
+        }
+    }
+
+    // Every leaf placement, once, under its composed world pose. A pose
+    // that cannot be inverted (poses are invertible by construction) skips
+    // that one placement rather than refusing the whole query.
+    let mut candidates: Vec<RayCandidate> = Vec::new();
+    for row in ctx.doc.occurrences(None, p.include_hidden)? {
+        let NodeId::Object(leaf) = row.node else {
             continue;
         };
+        if excluded.contains(&(row.path.clone(), row.node)) {
+            continue;
+        }
+        let Some(obj) = ctx.doc.object(leaf) else {
+            continue;
+        };
+        let Ok(inv) = row.pose.inverse() else {
+            continue;
+        };
+        let local_origin = inv.apply_point(origin);
+        let local_dir = inv.apply_vector(dir);
         for (_fid, f) in obj.faces() {
-            let Some(t) = geom::ray_plane_t(origin, dir, &f.plane) else {
+            let Some(t) = geom::ray_plane_t(local_origin, local_dir, &f.plane) else {
                 continue;
             };
-            let hit = origin + dir * t;
+            let at = local_origin + local_dir * t;
             let outer: Vec<Point3> = obj.loop_positions(f.outer_loop).collect();
             let holes: Vec<Vec<Point3>> = f
                 .inner_loops
                 .iter()
                 .map(|&l| obj.loop_positions(l).collect())
                 .collect();
-            if !geom::face_contains(&outer, &holes, f.plane.normal(), hit) {
+            if !geom::face_contains(&outer, &holes, f.plane.normal(), at) {
                 continue;
             }
-            let distance = (hit - origin).dot(dir_n);
-            consider_hit(
-                &mut best,
-                &mut tie,
-                (distance, RaycastHit::World(oid), hit, f.plane.normal()),
-            );
+            let point = row.pose.apply_point(at);
+            // World-space distance, NOT the local `t` above (§ comment on
+            // `dir_n`): (hit - origin)·dir_n.
+            let distance = (point - origin).dot(dir_n);
+            if distance < 0.0 || p.max_distance.is_some_and(|max| distance > max) {
+                continue;
+            }
+            // The face's outward normal in world space: the inverse
+            // transpose of the pose, which keeps pointing the same side
+            // of the surface under a reflection (a plane refit through
+            // mapped points would flip it, since the winding reverses).
+            let Ok(normal) = row.pose.apply_normal(f.plane.normal()).normalized() else {
+                continue;
+            };
+            // `+ 0.0` turns a negative zero into a plain one.
+            let normal = Vec3::new(normal.x + 0.0, normal.y + 0.0, normal.z + 0.0);
+            candidates.push(RayCandidate {
+                distance,
+                point,
+                normal,
+                path: row.path.clone(),
+                leaf,
+                at,
+                hidden: row.hidden,
+            });
         }
     }
 
-    // Every visible instance's definition members: the ray is mapped into
-    // definition space by the instance's inverse pose, and any hit is
-    // mapped back. Poses are invertible by construction (every
-    // `Document` constructor either checks this or composes only
-    // invertible poses); a non-invertible one skips that one instance
-    // rather than refusing the whole query.
-    for instance in ctx.doc.instance_ids() {
-        if node_or_ancestor_hidden(ctx.doc, NodeId::Instance(instance)) {
-            continue;
+    if p.all {
+        // Stable: ties keep occurrence order.
+        candidates.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+        let capped = candidates.len() > MAX_RAY_HITS;
+        candidates.truncate(MAX_RAY_HITS);
+        let hits = candidates
+            .iter()
+            .map(|c| ray_hit_json(ctx, c))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut out = json!({ "hits": hits });
+        if capped {
+            out["raycast_hits_capped"] = json!(true);
         }
-        let Some(def) = ctx.doc.instance_def(instance) else {
-            continue;
-        };
-        let Some(pose) = ctx.doc.instance_pose(instance) else {
-            continue;
-        };
-        // Nested members included: the ray maps through each leaf
-        // placement's fully composed inverse pose.
-        for (member, local) in ctx.doc.expanded_def_placements(def) {
-            let composed = local.then(&pose);
-            let Ok(inv) = composed.inverse() else {
-                continue;
-            };
-            let local_origin = inv.apply_point(origin);
-            let local_dir = inv.apply_vector(dir);
-            let Some(obj) = ctx.doc.object(member) else {
-                continue;
-            };
-            for (_fid, f) in obj.faces() {
-                let Some(t) = geom::ray_plane_t(local_origin, local_dir, &f.plane) else {
-                    continue;
-                };
-                let hit_local = local_origin + local_dir * t;
-                let outer: Vec<Point3> = obj.loop_positions(f.outer_loop).collect();
-                let holes: Vec<Vec<Point3>> = f
-                    .inner_loops
-                    .iter()
-                    .map(|&l| obj.loop_positions(l).collect())
-                    .collect();
-                if !geom::face_contains(&outer, &holes, f.plane.normal(), hit_local) {
-                    continue;
-                }
-                let hit_world = composed.apply_point(hit_local);
-                // World-space distance, NOT the definition-space `t`
-                // above (§ comment on `dir_n`): (hit - origin)·dir_n.
-                let distance = (hit_world - origin).dot(dir_n);
-                // `composed` is already known invertible (checked above),
-                // and `apply_plane` is singular under exactly the same
-                // determinant gate `inverse` is — so this cannot fail.
-                let normal_world = composed
-                    .apply_plane(&f.plane)
-                    .expect("pose invertible implies its plane map is too")
-                    .normal();
-                consider_hit(
-                    &mut best,
-                    &mut tie,
-                    (
-                        distance,
-                        RaycastHit::Instance(instance),
-                        hit_world,
-                        normal_world,
-                    ),
-                );
-            }
-        }
+        return Ok(out);
     }
 
-    match best {
-        Some(_) if tie => Err(locator_ambiguous()),
-        Some((distance, source, hit, normal)) => {
-            let (object, kind) = match source {
-                RaycastHit::World(oid) => (
-                    public_of_or_internal(ctx, &EntityRef::Object(oid))?,
-                    "object",
-                ),
-                RaycastHit::Instance(iid) => (
-                    public_of_or_internal(ctx, &EntityRef::Instance(iid))?,
-                    "instance",
-                ),
-            };
-            Ok(json!({
-                "object": object,
-                "kind": kind,
-                "point": point_json(hit),
-                "distance": distance,
-                "normal": vec3_json(normal),
-            }))
-        }
-        None => Err(locator_missed()),
+    let mut best: Option<f64> = None;
+    let mut tie = false;
+    for c in &candidates {
+        consider_hit(&mut best, &mut tie, c.distance);
     }
+    if best.is_some() && tie {
+        return Err(locator_ambiguous());
+    }
+    let nearest = candidates
+        .iter()
+        .min_by(|a, b| a.distance.total_cmp(&b.distance))
+        .ok_or_else(locator_missed)?;
+    ray_hit_json(ctx, nearest)
 }
 
 // ------------------------------------------------------------- hew.query.measure
@@ -1019,18 +1156,102 @@ fn raycast(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MeasureParams {
-    from: Value,
-    to: Value,
+    #[serde(default)]
+    from: Option<Value>,
+    #[serde(default)]
+    to: Option<Value>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    path: Option<Vec<String>>,
 }
 
 fn measure(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: MeasureParams = parse(params)?;
-    let from = locate::resolve_point(ctx, &p.from)?;
-    let to = locate::resolve_point(ctx, &p.to)?;
-    let delta = to - from;
+    let pair = p.from.is_some() || p.to.is_some();
+    if usize::from(pair) + usize::from(p.id.is_some()) + usize::from(p.path.is_some()) != 1 {
+        return Err(CmdError::Params(
+            "hew.query.measure needs exactly one of {from, to}, {id}, or {path}".into(),
+        ));
+    }
+    if pair {
+        let (Some(from), Some(to)) = (&p.from, &p.to) else {
+            return Err(CmdError::Params(
+                "\"from\" and \"to\" are given together".into(),
+            ));
+        };
+        let from = locate::resolve_point(ctx, from)?;
+        let to = locate::resolve_point(ctx, to)?;
+        let delta = to - from;
+        return Ok(json!({
+            "distance": delta.length(),
+            "delta": vec3_json(delta),
+        }));
+    }
+    let occ = match (&p.id, &p.path) {
+        (Some(id), None) => locate::resolve_world_node(ctx, id)?,
+        (None, Some(path)) => locate::resolve_occurrence_path(ctx, path)?,
+        _ => unreachable!("exactly one subject form"),
+    };
+    measure_solid(ctx, occ)
+}
+
+/// Volume, area, and world-axis bounding box of one placement and
+/// everything under it. A hidden part still measures (a measure is not a
+/// view).
+fn measure_solid(ctx: &Ctx, occ: kernel::Occurrence) -> Result<Value, CmdError> {
+    let leaves = ctx
+        .doc
+        .render_root_leaves(&locate::RenderRoot::Occurrence(occ), true)?;
+    let mut volume: Option<f64> = None;
+    let mut area = 0.0;
+    let mut open_leaves = 0usize;
+    let mut points: Vec<Point3> = Vec::new();
+    for (oid, pose, _path) in &leaves {
+        let Some(obj) = ctx.doc.object(*oid) else {
+            continue;
+        };
+        match obj.volume() {
+            Some(v) => *volume.get_or_insert(0.0) += v * pose.determinant().abs(),
+            None => open_leaves += 1,
+        }
+        // Per face, from the posed rings: exact for planar faces under any
+        // affine pose, mirrored included (`apply_transform` refuses a
+        // reflection).
+        for (_fid, f) in obj.faces() {
+            let outer: Vec<Point3> = obj
+                .loop_positions(f.outer_loop)
+                .map(|pt| pose.apply_point(pt))
+                .collect();
+            let holes: Vec<Vec<Point3>> = f
+                .inner_loops
+                .iter()
+                .map(|&l| {
+                    obj.loop_positions(l)
+                        .map(|pt| pose.apply_point(pt))
+                        .collect()
+                })
+                .collect();
+            area += geom::face_area(&outer, &holes);
+        }
+        points.extend(
+            obj.vertices()
+                .values()
+                .map(|v| pose.apply_point(v.position)),
+        );
+    }
+    let Some((min, max)) = geom::bbox(points.into_iter()) else {
+        return Err(CmdError::Params(
+            "that entity has no geometry to measure".into(),
+        ));
+    };
     Ok(json!({
-        "distance": delta.length(),
-        "delta": vec3_json(delta),
+        "volume": volume,
+        "area": area,
+        "bbox": { "min": point_json(min), "max": point_json(max) },
+        "extents": vec3_json(max - min),
+        "leaf_count": leaves.len(),
+        "open_leaves": open_leaves,
     }))
 }
 
@@ -1045,18 +1266,35 @@ struct ResolveParams {
     face: Option<Value>,
     #[serde(default)]
     edge: Option<Value>,
+    #[serde(default)]
+    occurrence: Option<Value>,
 }
 
 fn resolve(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: ResolveParams = parse(params)?;
-    let present = [p.point.is_some(), p.face.is_some(), p.edge.is_some()]
-        .into_iter()
-        .filter(|b| *b)
-        .count();
+    let present = [
+        p.point.is_some(),
+        p.face.is_some(),
+        p.edge.is_some(),
+        p.occurrence.is_some(),
+    ]
+    .into_iter()
+    .filter(|b| *b)
+    .count();
     if present != 1 {
         return Err(CmdError::Params(
-            "hew.query.resolve needs exactly one of \"point\", \"face\", \"edge\"".into(),
+            "hew.query.resolve needs exactly one of \"point\", \"face\", \"edge\", \"occurrence\""
+                .into(),
         ));
+    }
+    if let Some(v) = p.occurrence {
+        if v.is_string() {
+            return Err(CmdError::Params(
+                "an occurrence locator is {\"path\": [...]}".into(),
+            ));
+        }
+        let occ = locate::resolve_occurrence_locator(ctx, &v)?;
+        return Ok(json!({ "occurrence": super::parts::occurrence_json(ctx, &occ)? }));
     }
     if let Some(v) = p.point {
         let point = locate::resolve_point(ctx, &v)?;
@@ -1095,24 +1333,31 @@ fn resolve(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     }
 }
 
+// -------------------------------------------------------- hew.query.changes_since
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangesSinceParams {
+    generation: u64,
+}
+
+/// What changed since a client saw `generation` (docs/agents/HEW_API.md
+/// §4.5): the union of the change sets since then, or `full` when the
+/// history no longer covers it.
+fn changes_since(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: ChangesSinceParams = parse(params)?;
+    Ok(json!({
+        "from": p.generation,
+        "changes": crate::events::changes_since_json(ctx.doc, p.generation),
+    }))
+}
+
 // ------------------------------------------------------------- hew.query.context
 
 fn context(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let _: EmptyParams = parse(params)?;
 
-    let mut stack = Vec::new();
-    for frame in ctx.doc.session_stack() {
-        let (kind, entity) = match frame {
-            NodeId::Group(g) => ("group", EntityRef::Group(g)),
-            NodeId::Instance(i) => ("component", EntityRef::Instance(i)),
-            NodeId::Object(_) => {
-                return Err(CmdError::Internal(
-                    "session frame collapsed to an object, which never opens a session".into(),
-                ));
-            }
-        };
-        stack.push(json!({ "kind": kind, "id": public_of_or_internal(ctx, &entity)? }));
-    }
+    let stack = context_stack_json(ctx.doc).map_err(CmdError::Internal)?;
 
     let direct_members = match ctx.doc.session_direct_members() {
         Some(members) => {
@@ -1126,4 +1371,27 @@ fn context(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     };
 
     Ok(json!({ "stack": stack, "direct_members": direct_members }))
+}
+
+/// `hew.query.context`'s `stack`: the open editing frames, outermost
+/// first, each `{kind, id}`. Shared with the `context_changed` event so
+/// the two shapes cannot drift.
+pub(crate) fn context_stack_json(doc: &kernel::Document) -> Result<Value, String> {
+    let mut stack = Vec::new();
+    for frame in doc.session_stack() {
+        let (kind, entity) = match frame {
+            NodeId::Group(g) => ("group", EntityRef::Group(g)),
+            NodeId::Instance(i) => ("component", EntityRef::Instance(i)),
+            NodeId::Object(_) => {
+                return Err(
+                    "session frame collapsed to an object, which never opens a session".into(),
+                );
+            }
+        };
+        let sid = doc
+            .sid_of(&entity)
+            .ok_or_else(|| "entity carries no stable id".to_string())?;
+        stack.push(json!({ "kind": kind, "id": ids::public_id(&entity, sid) }));
+    }
+    Ok(Value::Array(stack))
 }

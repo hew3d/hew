@@ -118,7 +118,7 @@ import {
   type FovDragState,
 } from './fovDrag'
 import { shouldSkipToolSwitch } from './toolSwitchGuard'
-import { effectiveHidden, isPickHidden, isolationBaseline, resolveIsolation, sameTargets, sameView, type IsolationBaseline, type IsolationTarget, type IsolationView } from './isolation'
+import { effectiveHidden, isPickHidden, isolationBaseline, resolveIsolation, sameTargets, sameView, type IsolationBaseline, type IsolationScene, type IsolationTarget, type IsolationView } from './isolation'
 import { worldBoundsForSelection } from '../panels/objectBounds'
 import type { Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
@@ -488,6 +488,12 @@ interface Props {
    *  isolation ended (`ViewportApi.isolate` / `clearIsolation`, Escape, a
    *  document change that removed every target). */
   onIsolationChange?: (shown: number | null) => void
+  /** The isolation's targets changed: the targets now isolated, or null when
+   *  isolation ended. Called at every change of the viewport's isolation
+   *  state (`createIsolationController`), so a mirror of it never goes
+   *  stale — the app mirrors it into the Scene for the bus's
+   *  `hew.view.hidden`. */
+  onIsolationTargetsChange?: (targets: IsolationTarget[] | null) => void
   /** Request clearing the WHOLE context path back to the top level — the
    *  undo/redo reconcile uses this when the kernel reports an explode
    *  session re-opened by a history step while the app still stands inside
@@ -1195,6 +1201,13 @@ export interface ViewportApi {
    */
   getAnnotationLabel: (id: bigint) => string | null
   /**
+   * Test/E2E: the material each rendered placement of instance `id`
+   * inherits (the renderer's own record, `u64::MAX` for none), or `null`
+   * when the instance is not rendered — proves a placement repaints
+   * without reading pixels.
+   */
+  getInstanceRenderedInherited: (id: bigint) => bigint[] | null
+  /**
    * Test/E2E: the current world-space position of annotation `id`'s text
    * billboard (the same point the double-click-to-edit gesture projects to
    * place the in-viewport editor), or `null` if `id` isn't live/rendered.
@@ -1846,6 +1859,106 @@ export function keyboardBelongsToFieldOrDialog(target: EventTarget | null): bool
   return document.querySelector('[role="dialog"]:not([aria-modal="false"])') !== null
 }
 
+/** The viewport's isolation: the targets asked for, how they resolved, and
+ *  what existed when isolation began. */
+export interface IsolationState {
+  targets: IsolationTarget[]
+  view: IsolationView
+  baseline: IsolationBaseline
+}
+
+/** What the isolation controller reaches in the viewport around it. */
+export interface IsolationControllerDeps {
+  scene: IsolationScene
+  /** The user's own hidden leaves (the Outliner eye and hidden tags). */
+  baseHidden: () => { objects: bigint[]; instances: bigint[] }
+  /** Pushes the hidden and faded sets to the renderer. */
+  applyHidden: () => void
+  /** Frames the isolated targets. */
+  frame: (targets: IsolationTarget[]) => void
+  /** How many objects are shown, or null when isolation ended. */
+  onCountChange: (shown: number | null) => void
+  /** The isolated targets, or null when isolation ended: called at every
+   *  change of the state, so a mirror of it is never stale. */
+  onTargetsChange: (targets: IsolationTarget[] | null) => void
+}
+
+/**
+ * The viewport's view-only isolation (docs/design/import-health.md,
+ * "Isolation") as a small state machine: the one place its state changes,
+ * so every change reports the targets (`onTargetsChange`).
+ */
+export function createIsolationController(deps: IsolationControllerDeps): {
+  state: () => IsolationState | null
+  isolate: (targets: IsolationTarget[], opts?: { frame?: boolean }) => number
+  clear: () => void
+  refresh: () => boolean
+  rebase: () => void
+} {
+  let state: IsolationState | null = null
+  const assign = (next: IsolationState | null): void => {
+    state = next
+    deps.onTargetsChange(next === null ? null : [...next.targets])
+  }
+
+  function clear(): void {
+    if (state === null) return
+    assign(null)
+    deps.applyHidden()
+    deps.onCountChange(null)
+  }
+
+  /** Isolates `targets`, replacing any isolation on; 0 (and none) when no
+   *  target exists. */
+  function isolate(targets: IsolationTarget[], opts?: { frame?: boolean }): number {
+    const baseline = isolationBaseline(deps.scene)
+    const view = resolveIsolation(deps.scene, targets, baseline, deps.baseHidden())
+    if (view === null) {
+      clear()
+      return 0
+    }
+    assign({ targets: view.targets, view, baseline })
+    deps.applyHidden()
+    deps.onCountChange(view.count)
+    if (opts?.frame !== false) deps.frame(view.targets)
+    return view.count
+  }
+
+  /** Re-resolves against the live document; true when what draws or hides
+   *  changed. */
+  function refresh(): boolean {
+    if (state === null) return false
+    const view = resolveIsolation(deps.scene, state.targets, state.baseline, deps.baseHidden())
+    if (view === null) {
+      clear()
+      return true
+    }
+    if (sameView(view, state.view)) return false
+    const countChanged = !sameTargets(view.targets, state.targets) || view.count !== state.view.count
+    assign({ targets: view.targets, view, baseline: state.baseline })
+    // Objects made while isolated are not in the baseline: they stay shown.
+    deps.applyHidden()
+    if (countChanged) deps.onCountChange(view.count)
+    return true
+  }
+
+  /** The user's own hidden leaves changed (they are never drawn as faded
+   *  context): re-resolves without pushing to the renderer, which the
+   *  caller does next. */
+  function rebase(): void {
+    if (state === null) return
+    const view = resolveIsolation(deps.scene, state.targets, state.baseline, deps.baseHidden())
+    if (view === null) {
+      assign(null)
+      deps.onCountChange(null)
+    } else {
+      assign({ targets: view.targets, view, baseline: state.baseline })
+    }
+  }
+
+  return { state: () => state, isolate, clear, refresh, rebase }
+}
+
 /**
  * The single editing-context channel (component-edit-parity.md phase A1):
  * reduce the app's `activeContext: NodeRef[]` breadcrumb path to the one
@@ -2284,6 +2397,7 @@ export default function Viewport({
   onEnterContext,
   onExitContext,
   onIsolationChange,
+  onIsolationTargetsChange,
   onExitAllContexts,
   onSessionChange,
   onDocumentChanged,
@@ -2337,6 +2451,8 @@ export default function Viewport({
   onExitContextRef.current = onExitContext
   const onIsolationChangeRef = useRef(onIsolationChange)
   onIsolationChangeRef.current = onIsolationChange
+  const onIsolationTargetsChangeRef = useRef(onIsolationTargetsChange)
+  onIsolationTargetsChangeRef.current = onIsolationTargetsChange
   const onExitAllContextsRef = useRef(onExitAllContexts)
   onExitAllContextsRef.current = onExitAllContexts
   const onSessionChangeRef = useRef(onSessionChange)
@@ -3240,7 +3356,7 @@ export default function Viewport({
     function dispatchSelectPick(ndcX: number, ndcY: number, ray: Ray): void {
       const { snap: rawSnap } = snapService.resolve(
         ray, el.clientHeight, apertureBasis(),
-        undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, undefined, undefined,
         readOnlyRef.current ? 1 : undefined,
         undefined, true,
       )
@@ -3286,7 +3402,7 @@ export default function Viewport({
         ? (tool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
         : null
       const { snap, fromKernel } = snapService.resolve(
-        ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints,
+        ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.lockDirection, constraint?.constraintPlane, constraint?.offPlanePoints,
         undefined, constraint?.facesOnly, undefined, constraint?.seeThroughPoints,
       )
       loupePressSnap = snap
@@ -3301,7 +3417,7 @@ export default function Viewport({
       // only by the clear-face isolate decision at engage. A selection pick
       // (`pick`), so points get no drawing-tool reach past that radius.
       loupePressFaceSnap = snapService.resolve(
-        ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, 1,
+        ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.lockDirection, constraint?.constraintPlane, constraint?.offPlanePoints, 1,
         undefined, true,
       ).snap
       loupeState = loupePress(px, py, performance.now())
@@ -3457,7 +3573,7 @@ export default function Viewport({
     function pickTransformableUnderCursor(ray: Ray): NodeRef | null {
       const { snap } = snapService.resolve(
         ray, el.clientHeight, apertureBasis(),
-        undefined, undefined, undefined, undefined, undefined, undefined, true,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, true,
       )
       return resolveSelectableRef(snap, ray, selectionDeps())
     }
@@ -5269,7 +5385,7 @@ export default function Viewport({
       deferredTapDrag = null
       // Isolation targets name the outgoing document's ids — and so does the
       // hidden base it was layered on (the app re-seeds it right after a load).
-      if (isolation !== null) {
+      if (isolationCtl.state() !== null) {
         baseHidden = { objects: [], instances: [] }
         clearIsolation()
       }
@@ -5779,7 +5895,7 @@ export default function Viewport({
       const override = opts.hiddenOverride ?? null
       // Isolation never reaches a print: measure the document as the person
       // hid it, which `beginPrintPass` restores for the walk.
-      if (opts.restrictTo === null && override === null && isolation === null) return computeViewPlaneExtent(sceneRenderer, dir, up, opts)
+      if (opts.restrictTo === null && override === null && isolationCtl.state() === null) return computeViewPlaneExtent(sceneRenderer, dir, up, opts)
       // Selection extent / a Scene's hidden set: measure with the pass's
       // visibility applied (begun and ended around the walk — no render).
       sceneRenderer.beginPrintPass({ style: 'shaded', restrictTo: opts.restrictTo, includeGuides: true, hiddenOverride: override })
@@ -6177,13 +6293,24 @@ export default function Viewport({
     // the live view-only isolation on top. The renderer, the pick filters and
     // (through `getEffectiveHiddenIds`) the kernel all see the merge.
     let baseHidden: { objects: bigint[]; instances: bigint[] } = { objects: [], instances: [] }
-    let isolation: { targets: IsolationTarget[]; view: IsolationView; baseline: IsolationBaseline } | null = null
+    // Every change of the isolation goes through this controller, which
+    // reports the targets each time (the app mirrors them into the Scene).
+    const isolationCtl = createIsolationController({
+      scene: wasmScene,
+      baseHidden: () => baseHidden,
+      applyHidden: () => applyHidden(),
+      frame: (targets) => frameIsolation(targets),
+      onCountChange: (shown) => onIsolationChangeRef.current?.(shown),
+      onTargetsChange: (targets) => onIsolationTargetsChangeRef.current?.(targets),
+    })
+    const isolationView = (): IsolationView | null => isolationCtl.state()?.view ?? null
 
     function applyHidden(opts?: { fadeMs?: number }): void {
-      const eff = effectiveHidden(baseHidden, isolation === null ? null : isolation.view)
+      const isolation = isolationView()
+      const eff = effectiveHidden(baseHidden, isolation)
       hiddenObjectIdsRef.current = new Set(eff.objects)
       hiddenInstanceIdsRef.current = new Set(eff.instances)
-      sceneRenderer.setIsolationFade(isolation === null ? null : isolation.view.fade, {
+      sceneRenderer.setIsolationFade(isolation === null ? null : isolation.fade, {
         objects: baseHidden.objects,
         instances: baseHidden.instances,
       })
@@ -6200,20 +6327,12 @@ export default function Viewport({
       baseHidden = { objects: [...objectIds], instances: [...instanceIds] }
       // The user's own hidden leaves are never drawn as faded context, so a
       // change to them changes what the isolation fades.
-      if (isolation !== null) {
-        const view = resolveIsolation(wasmScene, isolation.targets, isolation.baseline, baseHidden)
-        if (view === null) {
-          isolation = null
-          onIsolationChangeRef.current?.(null)
-        } else {
-          isolation = { targets: view.targets, view, baseline: isolation.baseline }
-        }
-      }
+      isolationCtl.rebase()
       applyHidden(opts)
     }
 
     function getEffectiveHiddenIds(): { objects: bigint[]; instances: bigint[] } {
-      return effectiveHidden(baseHidden, isolation === null ? null : isolation.view)
+      return effectiveHidden(baseHidden, isolationView())
     }
 
     /** Frame the isolated set (a member target frames its whole instance). */
@@ -6249,43 +6368,18 @@ export default function Viewport({
     }
 
     function isolate(targets: IsolationTarget[], opts?: { frame?: boolean }): number {
-      const baseline = isolationBaseline(wasmScene)
-      const view = resolveIsolation(wasmScene, targets, baseline, baseHidden)
-      if (view === null) {
-        clearIsolation()
-        return 0
-      }
-      isolation = { targets: view.targets, view, baseline }
-      applyHidden()
-      onIsolationChangeRef.current?.(view.count)
-      if (opts?.frame !== false) frameIsolation(view.targets)
-      return view.count
+      return isolationCtl.isolate(targets, opts)
     }
 
     function clearIsolation(): void {
-      if (isolation === null) return
-      isolation = null
-      applyHidden()
-      onIsolationChangeRef.current?.(null)
+      isolationCtl.clear()
     }
 
     /** Re-resolve against the live document. True when what draws or hides
      *  changed (the caller then re-pushes the kernel's hidden set); an edit
      *  that leaves the resolved view alone costs no renderer or kernel work. */
     function refreshIsolation(): boolean {
-      if (isolation === null) return false
-      const view = resolveIsolation(wasmScene, isolation.targets, isolation.baseline, baseHidden)
-      if (view === null) {
-        clearIsolation()
-        return true
-      }
-      if (sameView(view, isolation.view)) return false
-      const countChanged = !sameTargets(view.targets, isolation.targets) || view.count !== isolation.view.count
-      isolation = { targets: view.targets, view, baseline: isolation.baseline }
-      // Objects made while isolated are not in the baseline: they stay shown.
-      applyHidden()
-      if (countChanged) onIsolationChangeRef.current?.(view.count)
-      return true
+      return isolationCtl.refresh()
     }
 
     function setAxesVisible(visible: boolean): void {
@@ -6662,7 +6756,10 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => {
+        const isolation = isolationCtl.state()
+        return isolation === null ? null : [...isolation.targets]
+      }, collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getInstanceRenderedInherited: (id: bigint) => sceneRenderer.debugInstanceInherited(id), getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -6906,6 +7003,18 @@ export default function Viewport({
           } else {
             handleSceneRefresh()
           }
+        },
+        // The open editing frames: a placement being edited paints face by
+        // face, not as a whole.
+        () => sessionStackRef.current,
+        // A painted placement: only the world placements drawing it re-key
+        // on the new material (every outer one, for a nested placement).
+        (instanceIds) => {
+          handleSceneRefresh({ instanceIds })
+        },
+        // Outline the placement a click would paint.
+        (instanceId) => {
+          sceneRenderer.setHoveredInstance(instanceId)
         },
       )
     }
@@ -8549,7 +8658,7 @@ export default function Viewport({
           : null
         const { snap: rawSnap } = isRawDragTool
           ? { snap: null }
-          : snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
+          : snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.lockDirection, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
         // Same Select-only axis exclusion as the pointer-move path — see
         // `excludeAxisSnapForSelect`'s doc.
         const snap = toolController.activeToolName === 'Select' ? excludeAxisSnapForSelect(rawSnap) : rawSnap
@@ -9126,7 +9235,7 @@ export default function Viewport({
         : null
       const resolved = isRawDragTool
         ? { snap: null, fromKernel: false }
-        : snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
+        : snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.lockDirection, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
       const rawSnap = resolved.snap
       // Select-only axis-kind exclusion under `readOnly` (shop-mode round-3
       // playtest finding 2) — see `excludeAxisSnapForSelect`'s doc. A no-op
@@ -9407,6 +9516,10 @@ export default function Viewport({
       lastPointerClient.x = ev.clientX
       lastPointerClient.y = ev.clientY
       if (ev.button !== 0) return
+      // A plugin command holds the document (docs/agents/PLUGINS.md
+      // "Compounds"): no gesture starts. The busy notice explains why once
+      // the command has run a quarter second.
+      if (wasmScene.busy()) return
       // Adversarial-review finding 4: a second finger's own press must not
       // disturb a readOnly gesture (the tape loupe, or its Select-tool
       // `deferredTapDrag` stand-in) already armed by a DIFFERENT pointer —
@@ -9644,7 +9757,7 @@ export default function Viewport({
       const constraint = 'snapConstraint' in activeTool
         ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
         : null
-      const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
+      const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.lockDirection, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
       // The press is the first click, as always; the gate (dragCommit.ts)
       // only watches the tool's stage either side of it. Never under
       // `readOnly`: Shop Mode's only drawing-side tool, Tape Measure, has its
@@ -9749,7 +9862,7 @@ export default function Viewport({
       if (toolController.activeToolName === 'Select' && !isModifiedSelectPress(ev)) {
         const { snap: rawSnap } = snapService.resolve(
           ray, el.clientHeight, apertureBasis(),
-          undefined, undefined, undefined, undefined, undefined, undefined, true,
+          undefined, undefined, undefined, undefined, undefined, undefined, undefined, true,
         )
         const picked = resolveSelectableRef(excludeAxisSnapForSelect(rawSnap), ray, selectionDeps())
         const whole = picked !== null ? widenCurveRef(wasmScene, picked) : null
@@ -9770,7 +9883,7 @@ export default function Viewport({
         const constraint = 'snapConstraint' in activeTool
           ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
           : null
-        const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
+        const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.lockDirection, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
         const handled = (activeTool as { onDoubleClick(snap: Snap | null, ray: Ray): boolean }).onDoubleClick(snap, ray)
         if (handled) {
           scheduleRender()
@@ -9851,6 +9964,8 @@ export default function Viewport({
 
     // ------------------------------------------------------------------ keyboard
     function onKeyDown(ev: KeyboardEvent): void {
+      // A plugin command holds the document: no tool key acts on it.
+      if (wasmScene.busy()) return
       // Keystrokes inside an input-method composition are not commands
       // and must never reach a tool's typed buffer or its Enter/Escape
       // handling (docs/LOCALIZATION.md "Keyboard and input methods").
@@ -9925,7 +10040,7 @@ export default function Viewport({
       // gesture is armed, which consumes the key first (below). Isolation
       // outranks popping an editing context: it is the outermost, most
       // recently asked-for view state.
-      if (ev.key === 'Escape' && isolation !== null && !toolHasArmedGesture(toolController.activeTool)) {
+      if (ev.key === 'Escape' && isolationCtl.state() !== null && !toolHasArmedGesture(toolController.activeTool)) {
         clearIsolation()
         return
       }
@@ -9998,7 +10113,7 @@ export default function Viewport({
             const constraint = 'snapConstraint' in activeTool
               ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(cached.ray)
               : null
-            const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, undefined, constraint?.seeThroughPoints)
+            const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.lockDirection, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, undefined, constraint?.seeThroughPoints)
             activeTool.onPointerMove(snap, cached.ray)
             // Only Tape Measure's VCB reaches this under `readOnly` (Select
             // has none) — `suppressAxisLine` keeps its on-axis snap fully
@@ -10187,7 +10302,7 @@ export default function Viewport({
           const constraint = 'snapConstraint' in activeTool
             ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
             : null
-          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
+          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.lockDirection, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
           ;(activeTool as { onPointerUp(snap: Snap | null, ray: Ray): void }).onPointerUp(snap, ray)
           scheduleRender()
         }
@@ -10207,7 +10322,7 @@ export default function Viewport({
           const constraint = 'snapConstraint' in activeTool
             ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
             : null
-          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
+          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.lockDirection, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
           activeTool.onPointerDown(snap, ray)
         })
         releaseDragCommitControls()
@@ -10260,7 +10375,7 @@ export default function Viewport({
             const constraint = 'snapConstraint' in tool
               ? (tool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
               : null
-            const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, undefined, constraint?.seeThroughPoints)
+            const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.lockDirection, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, undefined, constraint?.seeThroughPoints)
             tool.onPointerDown(snap, ray)
           }
           // (If the tool is no longer mid-gesture — a VCB Enter or Esc ended
@@ -10558,7 +10673,7 @@ export default function Viewport({
       const constraint = 'snapConstraint' in activeTool
         ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
         : null
-      const { snap: rawSnap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
+      const { snap: rawSnap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.lockDirection, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
       const snap = toolController.activeToolName === 'Select' ? excludeAxisSnapForSelect(rawSnap) : rawSnap
       activeTool.onPointerMove(snap, ray)
       const cueSnap = toolSnapForCues(snap, activeTool)

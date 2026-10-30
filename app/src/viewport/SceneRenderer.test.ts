@@ -30,7 +30,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest'
 import * as THREE from 'three'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { EDGE_COLOR_SEE_THROUGH_DARK, EDGE_COLOR_SELECTED, SceneRenderer, edgeColorFor, toggledRenderMode, type SectionWidgetCoverage } from './SceneRenderer'
+import { EDGE_COLOR_HOVER, EDGE_COLOR_SEE_THROUGH_DARK, EDGE_COLOR_SELECTED, SceneRenderer, edgeColorFor, toggledRenderMode, type SectionWidgetCoverage } from './SceneRenderer'
 import { facePlaneBasis } from './geoHelpers'
 import { buildInstancePreviewClone } from '../tools/transformPreview'
 import { buildSelectionPreview } from '../tools/transformSelection'
@@ -67,6 +67,9 @@ function makeMesh(watertight: boolean) {
  * separately named const so each reads clearly at its own call sites. */
 const IDENTITY_LOCAL_POSE = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
 
+/** `u64::MAX`, the kernel's "no material" sentinel. */
+const NO_MATERIAL = 0xffff_ffff_ffff_ffffn
+
 /** One definition member an instance places — `localPose` is the row-major
  * 3×4 DEF-LOCAL pose (identity for a flat definition's members; a nested
  * definition's own internal placement otherwise). Repeats are legal: the
@@ -95,6 +98,9 @@ function makeScene(opts: {
     memberIds: bigint[]
     memberWatertight: Record<string, boolean>
     placements?: MockPlacement[]
+    /** The material each placement inherits (`instance_expanded_inherited`),
+     * parallel to the placements; omitted, none. */
+    inherited?: bigint[]
   }>
 }): WasmScene {
   const objects = opts.objects ?? {}
@@ -135,6 +141,21 @@ function makeScene(opts: {
       if (inst === undefined) return new Uint8Array()
       return Uint8Array.from(placementsOf(inst).map((p) => (p.hidden === true ? 0 : 1)))
     },
+    instance_expanded_inherited: (id: bigint) => {
+      const inst = instances[id.toString()]
+      if (inst === undefined) return new BigUint64Array()
+      return BigUint64Array.from(placementsOf(inst).map((_, i) => inst.inherited?.[i] ?? NO_MATERIAL))
+    },
+    // A member drawn under an inherited material (a painted placement):
+    // its baked colors are black, so a test can tell the variants apart.
+    member_mesh: vi.fn((id: bigint, _inherited: bigint) => {
+      for (const inst of Object.values(instances)) {
+        if (inst.memberIds.includes(id)) {
+          return { ...makeMesh(inst.memberWatertight[id.toString()]), colors: () => new Float32Array(9) }
+        }
+      }
+      throw new Error(`unexpected member_mesh(${id})`)
+    }),
     // No def-owned sketches by default — overridden by callers that seed
     // `defSketches` (see `makeSceneWithDefSketches` in the def-sketch
     // rendering describe block below).
@@ -2932,3 +2953,92 @@ describe('SceneRenderer — whole-model render mode (X-ray / Wireframe)', () => 
     expect(m.depthWrite).toBe(false)
   })
 })
+
+describe('SceneRenderer — instance materials (inherited by members)', () => {
+  function sceneWith(inherited: Record<string, bigint[]>) {
+    const instances: Parameters<typeof makeScene>[0]['instances'] = {
+      '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true }, inherited: inherited['10'] },
+      '11': { def: 100n, pose: [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true }, inherited: inherited['11'] },
+      '12': { def: 101n, pose: IDENTITY_POSE, memberIds: [2n], memberWatertight: { '2': true }, inherited: inherited['12'] },
+    }
+    return { scene: makeScene({ instances }), instances }
+  }
+  const memberMeshSpy = (scene: WasmScene) =>
+    (scene as unknown as { member_mesh: ReturnType<typeof vi.fn> }).member_mesh
+
+  it('two placements of one member with different inherited materials build two batches', () => {
+    const { scene } = sceneWith({ '10': [30n] })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    const forMember1 = instancedBatches(renderer.instancesGroup).filter((b) => b.name.startsWith('InstanceBatch_1_'))
+    expect(forMember1).toHaveLength(2)
+    expect(forMember1.map((b) => b.count).sort()).toEqual([1, 1])
+    expect(forMember1.some((b) => b.name.endsWith('_30'))).toBe(true)
+    // Only the painted placement's variant crossed through member_mesh.
+    expect(memberMeshSpy(scene)).toHaveBeenCalledWith(1n, 30n)
+    expect(memberMeshSpy(scene)).toHaveBeenCalledTimes(1)
+    expect(renderer.debugInstanceInherited(10n)).toEqual([30n])
+    expect(renderer.debugInstanceInherited(11n)).toEqual([NO_MATERIAL])
+  })
+
+  it("changing one instance's material rebuilds only that member's batches", () => {
+    const { scene, instances } = sceneWith({})
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    const before = instancedBatches(renderer.instancesGroup)
+    const member2Before = before.find((b) => b.name.startsWith('InstanceBatch_2_'))
+    const member1Before = before.find((b) => b.name.startsWith('InstanceBatch_1_'))
+    expect(member1Before?.count).toBe(2)
+
+    instances!['11'].inherited = [40n]
+    renderer.refreshTouched({ instanceIds: [11n] })
+
+    const after = instancedBatches(renderer.instancesGroup)
+    const member1After = after.filter((b) => b.name.startsWith('InstanceBatch_1_'))
+    expect(member1After).toHaveLength(2)
+    expect(member1After.find((b) => b.name.endsWith('_40'))?.count).toBe(1)
+    expect(member1After).not.toContain(member1Before)
+    // The other member's batch is the very same object.
+    expect(after.find((b) => b.name.startsWith('InstanceBatch_2_'))).toBe(member2Before)
+  })
+
+  it('a materialized placement draws the geometry of its own inherited material', () => {
+    const { scene } = sceneWith({ '10': [30n] })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    memberMeshSpy(scene).mockClear()
+    meshSpy(scene).mockClear()
+    renderer.setSelectedInstances([10n])
+    // Served from the per-(member, inherited) cache: no fresh pull, and the
+    // plain variant was never asked for this placement.
+    expect(meshSpy(scene)).not.toHaveBeenCalled()
+    const group = materializedGroups(renderer.instancesGroup).find((g) => g.name === 'Instance_10')
+    expect(group).toBeDefined()
+    expect(renderer.debugInstanceInherited(10n)).toEqual([30n])
+    // The group's face geometry is the inherited variant (black), not the
+    // plain one instance 11 draws (white) — the plain variant is cached too,
+    // so a wrong id would be served silently without this check.
+    const faces = group!.children.find((c) => c instanceof THREE.Mesh) as THREE.Mesh
+    const colors = faces.geometry.getAttribute('color').array as Float32Array
+    expect(Array.from(colors).every((c) => c === 0)).toBe(true)
+    renderer.setSelectedInstances([11n])
+    const plain = materializedGroups(renderer.instancesGroup).find((g) => g.name === 'Instance_11')
+    const plainFaces = plain!.children.find((c) => c instanceof THREE.Mesh) as THREE.Mesh
+    expect(Array.from(plainFaces.geometry.getAttribute('color').array as Float32Array).every((c) => c > 0)).toBe(true)
+  })
+
+  it('the Paint hover outlines the whole placement and clears', () => {
+    const { scene } = sceneWith({})
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setHoveredInstance(11n)
+    expect(renderer.getHoveredInstance()).toBe(11n)
+    const group = materializedGroups(renderer.instancesGroup).find((g) => g.name === 'Instance_11')
+    expect(group).toBeDefined()
+    const edges = group!.children.filter((c) => c instanceof THREE.LineSegments) as THREE.LineSegments[]
+    expect((edges[0].material as THREE.LineBasicMaterial).color.getHex()).toBe(EDGE_COLOR_HOVER)
+    renderer.setHoveredInstance(null)
+    expect(materializedGroups(renderer.instancesGroup).find((g) => g.name === 'Instance_11')).toBeUndefined()
+  })
+})
+

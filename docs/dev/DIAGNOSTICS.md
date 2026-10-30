@@ -95,6 +95,11 @@ Well-known `fields` keys:
   serialization of the document, so on one of more than 50,000 faces the
   record carries `state_hash_skipped_faces` instead; the recording's
   `golden_hash` at stop still checks the whole replay.
+  The serialization hashed carries a fixed `app_version` and a fixed
+  manifest `format_version` (22), not the writer's own, so neither a
+  release nor a format bump that adds an optional field moves the digest
+  of a document that does not use the field; hashes frozen into replay
+  fixtures and recordings stay valid.
 - `message` — free-text, when present.
 - `winner`, `candidates` — inference/snapping diagnostics.
 
@@ -134,6 +139,18 @@ may be a whole transaction whose grouping into a single undo entry is part
 of what a faithful reproducer has to preserve. Read-only API traffic — an
 agent polling the scene — is not recorded.
 
+A forwarded plugin command (docs/agents/PLUGINS.md "Compounds") records
+differently, because no plugin runs at replay time. The forwarded call
+itself is never recorded. While its compound is open, every call that
+would be recorded (the plugin's own envelopes, and anything that records
+itself, such as an import) is held in a buffer instead; when the compound
+ends, the buffered calls are recorded as one `plugin_compound` entry, and
+when it aborts they are dropped, so an aborted command leaves no trace. A
+plugin command that calls another nests: the inner command's
+`plugin_compound` is one of the outer's buffered calls. A crash while a
+compound is open still reproduces: the crash snapshot carries the
+buffered calls after the recorded ones.
+
 Adding this entry did not bump the format version, following the same
 rule every other added call follows: a recording that never used the new
 entry replays on an older build unchanged, and one that does fails to
@@ -169,7 +186,11 @@ A recording is one JSON object.
       "affine": [1,0,0,0.5, 0,1,0,0, 0,0,1,0] },
     { "method": "delete_node", "kind": 0, "id": 4 },
     { "method": "api_dispatch",
-      "frame": "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"hew.solid.extrude\",\"params\":{}}" }
+      "frame": "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"hew.solid.extrude\",\"params\":{}}" },
+    { "method": "plugin_compound", "plugin": "com.example.parts",
+      "label": "Cut list", "grant": { "ceiling": "core", "permissions": ["model.write"],
+        "plugin": "com.example.parts", "app": null, "document": null },
+      "calls": [ { "method": "api_dispatch", "frame": "…" } ] }
   ],
   "golden_hash": 5678,       // u64. Document state digest after the last
                              //   call — the replay oracle.
@@ -188,6 +209,7 @@ longer replay.
 | `method` | Arguments | Effect |
 |---|---|---|
 | `api_dispatch` | `frame` | re-dispatch one document-mutating live-API request, verbatim (HEW_API.md §11.2) |
+| `plugin_compound` | `plugin`, `label`, `grant`, `calls[]` | one forwarded plugin command's compound: open a connection holding `grant` (identity `plugin:<plugin>`), open a compound labeled `label` with that origin, replay `calls` in order (their `api_dispatch` frames on that connection; a nested `plugin_compound` the same way, recursively), end the compound, and close the connection. Lands as one undo entry, as it did live. A call refused inside it fails the replay |
 | `begin_ground_sketch` | — | begin a ground-plane sketch |
 | `begin_sketch_on_plane` | `px`,`py`,`pz`,`nx`,`ny`,`nz` | begin a sketch on an arbitrary plane (point + normal, normalized) — the idle plane lock's first-click mint (sketches-on-any-plane design §5) |
 | `sketch_begin_gesture` / `sketch_end_gesture` | `sketch` | bracket one multi-segment commit as a single undo step |
@@ -247,6 +269,8 @@ longer replay.
 | `set_material_alpha` | `material`, `alpha` | set a palette material's opacity |
 | `paint_face` | `object`, `face`, `material` (`u64::MAX` = unpaint) | paint one face |
 | `set_object_material` | `object`, `material` (`u64::MAX` = clear) | set an object's base material |
+| `set_instance_material` | `instance`, `material` (`u64::MAX` = clear) | set a component placement's own material |
+| `set_definition_material` | `component`, `material` (`u64::MAX` = clear) | set the base material of every object a definition owns, as one undo entry |
 | `add_guide_line` | `origin[3]`, `dir[3]` | add a construction line |
 | `add_guide_point` | `p[3]` | add a construction point |
 | `delete_guide` | `guide` | delete one construction guide |

@@ -204,6 +204,7 @@ export class SnapService {
     basis: ApertureBasis,
     anchorArr: Float64Array | null,
     lockAxis: 0 | 1 | 2 | undefined,
+    lockDirection: Float64Array | null,
     constraintPlaneArr: Float64Array | null,
     offPlanePoints: boolean,
     softAxisApertureScale?: number,
@@ -228,6 +229,7 @@ export class SnapService {
         offPlanePoints,
         pick ?? false,
         seeThroughPoints ?? false,
+        lockDirection,
       )
       return result !== undefined ? snapJsToSnap(result) : null
     } catch (err) {
@@ -264,6 +266,9 @@ export class SnapService {
     basis: ApertureBasis,
     anchor?: [number, number, number],
     lockAxis?: 0 | 1 | 2,
+    /** A direction lock through `anchor`; wins over `lockAxis` (the kernel
+     * normalizes it and ignores a zero or non-finite one). */
+    lockDirection?: [number, number, number] | null,
     constraintPlane?: { point: [number, number, number]; normal: [number, number, number] },
     offPlanePoints?: boolean,
     /**
@@ -315,6 +320,7 @@ export class SnapService {
     seeThroughPoints?: boolean,
   ): { snap: Snap | null; fromKernel: boolean } {
     const anchorArr = anchor !== undefined ? new Float64Array(anchor) : null
+    const lockDirectionArr = lockDirection != null ? new Float64Array(lockDirection) : null
     const constraintPlaneArr =
       constraintPlane !== undefined
         ? new Float64Array([...constraintPlane.point, ...constraintPlane.normal])
@@ -329,7 +335,7 @@ export class SnapService {
     //    would let a corner/edge chip win the hover or get resurrected by
     //    the hysteresis step below.
     let acquired = this.query(
-      ray, SNAP_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
+      ray, SNAP_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, lockDirectionArr, constraintPlaneArr,
       offPlanePoints ?? false, undefined, pick, seeThroughPoints,
     )
     if (facesOnly && acquired !== null && acquired.kind !== 'on-face') {
@@ -352,7 +358,7 @@ export class SnapService {
     //    result while facesOnly is asked for.
     if (!facesOnly && this.lastSnap !== null && STICKY_KINDS.has(this.lastSnap.kind)) {
       const held = this.query(
-        ray, SNAP_BREAK_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
+        ray, SNAP_BREAK_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, lockDirectionArr, constraintPlaneArr,
         offPlanePoints ?? false,
         SOFT_AXIS_BREAK_APERTURE_SCALE,
         pick,

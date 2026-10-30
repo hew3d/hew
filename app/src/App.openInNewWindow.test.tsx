@@ -35,6 +35,17 @@ const menubar = () => within(screen.getByTestId('menu-bar'))
 // ---------------------------------------------------------------------------
 
 const mockScene = {
+  // Events (docs/agents/HEW_API.md §4.5): the units mirror and the
+  // document lifecycle notes.
+  set_display_units: vi.fn(),
+  // Selection and view state (docs/agents/HEW_API.md §7): the mirrors the
+  // bus reads.
+  set_ui_selection: vi.fn(),
+  set_ui_isolation: vi.fn(),
+  note_tool_changed: vi.fn(),
+  note_document_event: vi.fn(),
+  document_id: vi.fn(() => undefined),
+  ensure_document_id: vi.fn(() => '00000000-0000-4000-8000-000000000000'),
   object_ids: () => new BigUint64Array(),
   group_ids: () => new BigUint64Array(),
   instance_ids: () => new BigUint64Array(),
@@ -113,6 +124,7 @@ vi.mock('./viewport/Viewport', () => ({
 
 const openAnyMock = vi.fn()
 const openForImportMock = vi.fn()
+const writeToMock = vi.fn()
 vi.mock('./io/fileHost', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./io/fileHost')>()
   return {
@@ -124,6 +136,7 @@ vi.mock('./io/fileHost', async (importOriginal) => {
       openForImport: openForImportMock,
       openAny: openAnyMock,
       exportBinary: vi.fn(),
+      writeTo: writeToMock,
     }),
   }
 })
@@ -288,6 +301,25 @@ describe('App — File ▸ Open onto a non-pristine window (Tauri)', () => {
     expect(await screen.findByText('my-house.hew')).toBeInTheDocument()
     expect(mockScene.load).toHaveBeenCalledTimes(1)
     expect(invokeMock).not.toHaveBeenCalledWith('open_in_new_window', expect.anything())
+  })
+
+  it('announces a picked .hew as opened, with its path', async () => {
+    await renderAndLoad()
+    vi.mocked(mockScene.note_document_event).mockClear()
+    openAnyMock.mockResolvedValueOnce({
+      kind: 'hew',
+      name: 'my-house.hew',
+      bytes: new Uint8Array([7, 7, 7]),
+      handle: '/tmp/my-house.hew',
+    })
+    triggerOpen()
+    expect(await screen.findByText('my-house.hew')).toBeInTheDocument()
+    expect(mockScene.note_document_event).toHaveBeenCalledWith(
+      'opened',
+      'my-house.hew',
+      '/tmp/my-house.hew',
+      undefined,
+    )
   })
 
   it('an import pick (no .hew handle) onto a non-pristine window routes through its `path` field', async () => {
@@ -490,5 +522,49 @@ describe('App — native drag-drop follows the pristine-else-new-window rule (Ta
     await new Promise((r) => setTimeout(r, 0))
     expect(mockScene.load).not.toHaveBeenCalled()
     expect(invokeMock).not.toHaveBeenCalledWith('open_in_new_window', expect.anything())
+  })
+})
+
+describe('App — the document id reaches the shell with the save (Tauri)', () => {
+  it('Save As reports the minted document id before the save is announced', async () => {
+    const id = '3f2c9107-5ed4-40a8-806b-1ec297405d83'
+    const scene = mockScene as Record<string, unknown>
+    scene.set_skp_source = vi.fn()
+    scene.commit_skp_save = vi.fn()
+    vi.mocked(mockScene.document_id).mockReturnValue(id as never)
+    invokeMock.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case 'get_recents':
+        case 'list_windows':
+          return []
+        case 'pick_save_target':
+          return { path: '/tmp/m.hew', format: 'hew', options: {} } as unknown as ArrayBuffer
+        case 'take_pending_recovery':
+        case 'take_pending_window_open':
+        case 'take_pending_open':
+        case 'updater_available':
+          return null
+        default:
+          return undefined
+      }
+    })
+    writeToMock.mockResolvedValue({ name: 'm.hew', format: 'hew', handle: '/tmp/m.hew' })
+    await renderAndLoad()
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('Save As…'))
+    await waitFor(() =>
+      expect(mockScene.note_document_event).toHaveBeenCalledWith('saved', 'm.hew', expect.anything(), 'hew'),
+    )
+    expect(mockScene.ensure_document_id).toHaveBeenCalled()
+    const reportCall = (invokeMock.mock.calls as unknown as [string, { id?: string } | undefined][]).findIndex(
+      ([cmd, args]) => cmd === 'set_document_id' && args?.id === id,
+    )
+    expect(reportCall).toBeGreaterThanOrEqual(0)
+    const reportOrder = invokeMock.mock.invocationCallOrder[reportCall]
+    const savedCall = vi
+      .mocked(mockScene.note_document_event)
+      .mock.calls.findIndex(([kind]) => kind === 'saved')
+    const savedOrder = vi.mocked(mockScene.note_document_event).mock.invocationCallOrder[savedCall]
+    expect(reportOrder).toBeLessThan(savedOrder)
   })
 })

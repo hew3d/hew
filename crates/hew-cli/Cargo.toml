@@ -20,6 +20,7 @@ softrender = { workspace = true }
 # Headless printing (docs/design/printing.md §9b): hidden-line drawings and
 # the PDF writer behind hew.view.line_drawing / hew.print.pdf.
 hlr = { workspace = true }
+headless-render = { workspace = true }
 pdfwrite = { workspace = true }
 mesh-export = { workspace = true }
 stl-import = { workspace = true }
@@ -33,6 +34,10 @@ skp-export = { workspace = true }
 # atomic list/read/write/remove, shared with the Tauri shell.
 library = { workspace = true }
 serde_json = { workspace = true }
+# OS randomness for minting a document id on save (HEW_FILE_FORMAT.md §2
+# `document_id`): the same version `hew-relay` already uses, so the lock
+# gains no new crate.
+getrandom = "0.3"
 
 # Windows named-pipe transport for `--live` (docs/agents/HEW_API.md §11.2, §12):
 # CreateFileW/ReadFile/WriteFile/WaitNamedPipeW/OpenProcess, all synchronous
@@ -50,3 +55,7 @@ windows-sys = { version = "0.61", features = [
     # this client always passes null for it.
     "Win32_Security",
 ] }
+
+[dev-dependencies]
+# Plugin command declarations for the MCP provider-labeling tests.
+plugin-manifest = { workspace = true }

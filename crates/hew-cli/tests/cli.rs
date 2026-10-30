@@ -333,7 +333,7 @@ fn cli_host_exports_a_box_to_well_formed_binary_stl() {
     let doc = box_document();
     let mut host = CliHost::new();
     let bytes = host
-        .export_document(&doc, "stl", None, 0, None)
+        .export_document(&doc, "stl", None, 0, None, None)
         .expect("a solid box exports")
         .expect("no path given — bytes come back inline");
 
@@ -360,7 +360,7 @@ fn cli_host_export_with_a_path_writes_the_file_and_returns_no_bytes() {
     let mut host = CliHost::new();
 
     let result = host
-        .export_document(&doc, "stl", Some(out.to_str().unwrap()), 0, None)
+        .export_document(&doc, "stl", Some(out.to_str().unwrap()), 0, None, None)
         .expect("export succeeds");
     assert!(
         result.is_none(),
@@ -379,7 +379,7 @@ fn cli_host_export_refuses_nothing_to_export_on_an_empty_document() {
     let doc = Document::new();
     let mut host = CliHost::new();
     let err = host
-        .export_document(&doc, "stl", None, 0, None)
+        .export_document(&doc, "stl", None, 0, None, None)
         .unwrap_err();
     assert_eq!(err.name, "nothing_to_export");
 }
@@ -417,7 +417,7 @@ fn dispatch_export_3mf_glb_and_usdz_match_a_direct_export_byte_for_byte() {
         let reloaded = Document::load(&std::fs::read(&path).unwrap()).expect("reloads");
         let mut host = CliHost::new();
         let direct_bytes = host
-            .export_document(&reloaded, format, None, 0, None)
+            .export_document(&reloaded, format, None, 0, None, None)
             .unwrap_or_else(|e| panic!("{format}: direct export succeeds: {e:?}"))
             .unwrap_or_else(|| panic!("{format}: bytes returned inline"));
 
@@ -437,13 +437,13 @@ fn dispatch_export_3mf_glb_and_usdz_match_a_direct_export_byte_for_byte() {
 /// file refuses `load_failed`.
 #[test]
 fn cli_host_reads_a_texture_path_for_material_create() {
-    use api::{Connection, DispatchOutcome, Profile, Request, RequestId};
+    use api::{Connection, DispatchOutcome, Grant, Request, RequestId};
     let dir = scratch_dir("texture");
     let file = dir.join("grain.jpg");
     let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
     std::fs::write(&file, jpeg).unwrap();
 
-    let mut conn = Connection::new(Profile::Core, "t");
+    let mut conn = Connection::new(Grant::core(), "t");
     let mut doc = Document::new();
     let mut host = CliHost::new();
     let mut call = |id: i64, method: &str, params: serde_json::Value, doc: &mut Document| {
@@ -454,9 +454,9 @@ fn cli_host_reads_a_texture_path_for_material_create() {
             params: Some(params),
             document: None,
         };
-        match conn.dispatch(doc, &mut host, request) {
+        match conn.dispatch(&api::Registry::protocol_1(), doc, &mut host, request) {
             DispatchOutcome::Reply(r) => r,
-            DispatchOutcome::Dropped => unreachable!(),
+            DispatchOutcome::Dropped | DispatchOutcome::Forward(_) => unreachable!(),
         }
     };
     call(
@@ -919,6 +919,8 @@ fn snapshot_respects_user_hidden_state() {
         depth_bits: 8,
         include_normals: false,
         path: None,
+        selection: None,
+        background: softrender::BACKGROUND_RGBA,
     };
     let result = host.snapshot(&doc, &params).expect("renders");
     let public = |id: kernel::ObjectId| {
@@ -998,6 +1000,8 @@ fn snapshot_scene_renders_through_the_scenes_own_resolved_state() {
         depth_bits: 8,
         include_normals: false,
         path: None,
+        selection: None,
+        background: softrender::BACKGROUND_RGBA,
     };
     let result = host.snapshot(&doc, &params).expect("renders");
     let public = |id: kernel::ObjectId| {
@@ -1069,6 +1073,8 @@ fn snapshot_camera_only_scene_keeps_the_documents_live_hidden_state() {
         depth_bits: 8,
         include_normals: false,
         path: None,
+        selection: None,
+        background: softrender::BACKGROUND_RGBA,
     };
     let result = host.snapshot(&doc, &params).expect("renders");
     let public = |id: kernel::ObjectId| {
@@ -1115,6 +1121,8 @@ fn snapshot_scene_refuses_unknown_scene() {
         depth_bits: 8,
         include_normals: false,
         path: None,
+        selection: None,
+        background: softrender::BACKGROUND_RGBA,
     };
     let err = host.snapshot(&doc, &params).unwrap_err();
     assert_eq!(err.name, "unknown_scene");
@@ -1416,8 +1424,8 @@ fn library_save_list_insert_round_trips_geometry_through_a_real_library_folder()
 /// pass lands in its own sidecar file.
 #[test]
 fn snapshot_depth_and_normals_passes_inline_and_as_sidecars() {
-    use api::{Connection, DispatchOutcome, Profile, Request, RequestId};
-    let mut conn = Connection::new(Profile::Core, "t");
+    use api::{Connection, DispatchOutcome, Grant, Request, RequestId};
+    let mut conn = Connection::new(Grant::core(), "t");
     let mut doc = Document::new();
     let mut host = CliHost::new();
     let mut id = 0;
@@ -1434,9 +1442,9 @@ fn snapshot_depth_and_normals_passes_inline_and_as_sidecars() {
             params: Some(params),
             document: None,
         };
-        match conn.dispatch(doc, host, request) {
+        match conn.dispatch(&api::Registry::protocol_1(), doc, host, request) {
             DispatchOutcome::Reply(r) => r,
-            DispatchOutcome::Dropped => unreachable!(),
+            DispatchOutcome::Dropped | DispatchOutcome::Forward(_) => unreachable!(),
         }
     };
     call(
@@ -1909,3 +1917,157 @@ fn skp_display_units_follow_the_app_save_rules_or_a_named_unit() {
     assert_eq!(unit(&p("named.skp")), 3, "named over the file's own: cm");
     assert_eq!(unit(&p("new.skp")), 4, "a new file: meters");
 }
+
+/// `hew.view.line_drawing`'s `selection` through the real CLI host: with
+/// two boxes in the document, a drawing of one reports segments only from
+/// that one, and fewer than the whole document's.
+#[test]
+fn a_line_drawing_of_a_selection_reports_segments_only_from_it() {
+    use kernel::{EntityRef, NodeId, Plane, RenderRoot};
+    let mut doc = Document::new();
+    let ground = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let mut objects = Vec::new();
+    for x0 in [0.0, 3.0] {
+        let s = doc.add_sketch(ground);
+        let sk = doc.sketch_mut(s).unwrap();
+        let c = [
+            Point3::new(x0, 0.0, 0.0),
+            Point3::new(x0 + 1.0, 0.0, 0.0),
+            Point3::new(x0 + 1.0, 1.0, 0.0),
+            Point3::new(x0, 1.0, 0.0),
+        ];
+        for k in 0..4 {
+            sk.add_segment(c[k], c[(k + 1) % 4]).unwrap();
+        }
+        let regions = doc.extrudable_regions(s).unwrap();
+        objects.push(doc.extrude_region(s, regions[0], 1.0).unwrap().0);
+    }
+    let public = |o| {
+        let e = EntityRef::Object(o);
+        api::ids::public_id(&e, doc.sid_of(&e).unwrap())
+    };
+    let mut host = CliHost::new();
+    let mut params = api::LineDrawingParams {
+        camera: None,
+        view: Some(api::StandardView::Iso),
+        scene: None,
+        include_hidden: false,
+        include_soft: false,
+        format: api::LineDrawingFormat::Segments,
+        scale: 1.0,
+        path: None,
+        selection: None,
+    };
+    let whole = host.line_drawing(&doc, &params).unwrap();
+    let occ = doc.occurrence_at(&[], NodeId::Object(objects[1])).unwrap();
+    params.selection = Some(vec![RenderRoot::Occurrence(occ)]);
+    let one = host.line_drawing(&doc, &params).unwrap();
+    assert!(one.count > 0 && one.count < whole.count);
+    let picked = public(objects[1]);
+    assert!(one.ids.iter().all(|id| *id == picked), "{:?}", one.ids);
+    assert!(whole.ids.contains(&public(objects[0])));
+    // A placement two entries reach is drawn once.
+    let occ = doc.occurrence_at(&[], NodeId::Object(objects[1])).unwrap();
+    params.selection = Some(vec![
+        RenderRoot::Occurrence(occ.clone()),
+        RenderRoot::Occurrence(occ),
+    ]);
+    let twice = host.line_drawing(&doc, &params).unwrap();
+    assert_eq!(twice.count, one.count);
+}
+
+// ------------------------------------------------ renderer move stability
+
+/// Two unit boxes, one at the origin and one three meters along x.
+fn two_boxes() -> (Document, Vec<kernel::ObjectId>) {
+    use kernel::Plane;
+    let mut doc = Document::new();
+    let ground = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let mut objects = Vec::new();
+    for x0 in [0.0, 3.0] {
+        let s = doc.add_sketch(ground);
+        let sk = doc.sketch_mut(s).unwrap();
+        let c = [
+            Point3::new(x0, 0.0, 0.0),
+            Point3::new(x0 + 1.0, 0.0, 0.0),
+            Point3::new(x0 + 1.0, 1.0, 0.0),
+            Point3::new(x0, 1.0, 0.0),
+        ];
+        for k in 0..4 {
+            sk.add_segment(c[k], c[(k + 1) % 4]).unwrap();
+        }
+        let regions = doc.extrudable_regions(s).unwrap();
+        objects.push(doc.extrude_region(s, regions[0], 1.0).unwrap().0);
+    }
+    (doc, objects)
+}
+
+/// FNV-1a 64: a stable fingerprint for byte-exact pins.
+fn fnv64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+fn stability_snapshot_params() -> api::SnapshotParams {
+    api::SnapshotParams {
+        width: 128,
+        height: 128,
+        camera: None,
+        view: Some(api::StandardView::Iso),
+        scene: None,
+        include_ids: false,
+        include_depth: false,
+        depth_bits: 8,
+        include_normals: false,
+        path: None,
+        selection: None,
+        background: softrender::BACKGROUND_RGBA,
+    }
+}
+
+/// The renderer's output for a fixed document never changes by accident
+/// (it moved crates once; any byte difference is a defect, not a re-pin).
+#[test]
+fn snapshot_bytes_are_stable() {
+    let (doc, _) = two_boxes();
+    let r = CliHost::new()
+        .snapshot(&doc, &stability_snapshot_params())
+        .unwrap();
+    assert_eq!(
+        (r.width, r.height, r.png.len(), fnv64(&r.png)),
+        PIN_SNAPSHOT
+    );
+}
+
+#[test]
+fn line_drawing_segments_are_stable() {
+    let (doc, _) = two_boxes();
+    let params = api::LineDrawingParams {
+        camera: None,
+        view: Some(api::StandardView::Iso),
+        scene: None,
+        include_hidden: true,
+        include_soft: false,
+        format: api::LineDrawingFormat::Segments,
+        scale: 1.0,
+        path: None,
+        selection: None,
+    };
+    let r = CliHost::new().line_drawing(&doc, &params).unwrap();
+    let text = format!("{:?}{:?}{:?}", r.segments, r.kinds, r.bounds);
+    assert_eq!((r.count, fnv64(text.as_bytes())), PIN_SEGMENTS);
+}
+
+const PIN_SNAPSHOT: (u32, u32, usize, u64) = (128, 128, 65737, 10977346622869604767);
+const PIN_SEGMENTS: (usize, u64) = (24, 15869532378070628210);

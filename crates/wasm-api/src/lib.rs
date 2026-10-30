@@ -200,6 +200,15 @@ pub const MAX_ARRAY_COUNT: u32 = 1000;
 #[derive(Debug)]
 pub struct ApiError(String);
 
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Lets a `JsError` method guard with `?` like an `ApiError` one does.
+impl std::error::Error for ApiError {}
+
 impl ApiError {
     /// Builds a `"CODE: message"` boundary error directly.
     fn new(code: &str, message: &str) -> ApiError {
@@ -269,6 +278,11 @@ fn doc_err(e: DocumentError) -> ApiError {
     }
 }
 
+/// The bus commands that write the kernel's user-hidden flags without
+/// moving the history (`mutates_document = false`): a bare one is still
+/// recorded, so a reproducer replays to the same document.
+const USER_HIDDEN_WRITERS: &[&str] = &["hew.view.hide", "hew.view.show", "hew.view.show_all"];
+
 /// Whether the command in `frame` records itself when it succeeds, so the
 /// dispatcher must not ALSO record the envelope: `hew.doc.import` (bare, or
 /// as the sole command of a one-command `hew.doc.transact`, the shape MCP
@@ -293,6 +307,118 @@ fn records_itself(method: &str, frame: &str) -> bool {
         })
         .unwrap_or(false)
 }
+
+/// What one live API frame came to: a reply frame, or a plugin command for
+/// the caller to route ([`Scene::api_dispatch`]).
+enum FrameOutcome {
+    Reply(String),
+    Pending(Box<api::ForwardRequest>),
+}
+
+/// A forward [`Scene::api_dispatch`] handed out and has not seen completed.
+struct PendingForward {
+    /// Whether the forwarded plugin command (the one inside a sole-command
+    /// transaction, not the envelope) can change the document, fixed when
+    /// the forward was issued so a plugin unregistered meanwhile does not
+    /// change the answer.
+    mutating: bool,
+    /// The provider plugin's id.
+    plugin: String,
+    /// The command's registry name.
+    method: String,
+    /// The command's declared undo label, if any.
+    label: Option<String>,
+}
+
+/// A compound the host opened around a mutating forward
+/// ([`Scene::compound_begin`]), innermost last on [`Scene::open_compounds`].
+struct HostCompound {
+    kernel_token: kernel::CompoundToken,
+    /// The forward the compound serves (the `ForwardRequest` token): the
+    /// stamp [`Scene::api_dispatch_in_forward`] must carry.
+    forward_token: u64,
+    /// The provider plugin's id.
+    plugin: String,
+    label: String,
+    /// The provider's grant, as recorded with the compound: its own
+    /// connection's when one is open at begin, else the grant of the first
+    /// connection that dispatched inside the compound.
+    grant: Option<serde_json::Value>,
+    /// The selection and isolation mirrors at begin: an abort puts both
+    /// back, since the document's snapshot does not carry them.
+    selection_at_begin: Vec<live::UiSelectionEntry>,
+    isolation_at_begin: Option<Vec<live::UiIsolationEntry>>,
+}
+
+/// How a frame reaches [`Scene::api_dispatch_outcome`].
+#[derive(Clone, Copy)]
+enum DispatchScope {
+    /// A plain frame: refused `document_busy` while a compound is open.
+    Plain,
+    /// A frame a realm issued while serving this forward.
+    InForward(u64),
+    /// A recorded frame re-issued by [`Scene::replay`].
+    Replay,
+}
+
+/// The `&mut self` methods of the `#[wasm_bindgen] impl Scene` blocks
+/// that run while a compound is open (every other one calls
+/// [`Scene::ensure_not_busy`] first; `tests/busy_guard.rs` holds the
+/// line): the bus itself, view mirrors, the compound controls, and the
+/// methods that touch only `Scene`'s own caches, never the document.
+pub const BUSY_EXEMPT: &[&str] = &[
+    "api_dispatch",
+    "api_dispatch_in_forward",
+    "api_complete_forward",
+    "api_connection_open",
+    "api_plugin_connection_open",
+    "api_connection_close",
+    "register_plugin_commands",
+    "unregister_plugin_commands",
+    "compound_begin",
+    "compound_end",
+    "compound_abort",
+    "set_display_units",
+    "set_hidden",
+    "take_pending_view_directives",
+    "set_ui_selection",
+    "set_ui_isolation",
+    // event bookkeeping on the `Scene`, never the document;
+    "drain_events",
+    "set_host_document_id",
+    "note_document_event",
+    "note_tool_changed",
+    "note_scene_activated",
+    // Scene caches only, no document mutator:
+    // the inference scope of the instance being edited;
+    "set_active_inference_instance",
+    // the Model Health verdict cache;
+    "health_summary_json",
+    // the inference scene's transient tool segments;
+    "add_transient_segment",
+    "clear_transient_segments",
+    // the face-range cache a tessellation fills;
+    "object_mesh",
+    "member_mesh",
+    "face_mesh_range",
+    // the `.skp` source a later save builds on (a `Scene` field);
+    "commit_skp_save",
+    "set_skp_source",
+    // the document id a save mints (file identity, not document content:
+    // no history, and a compound abort keeps it), so a `.hew` save while a
+    // plugin command holds the document still writes it;
+    "ensure_document_id",
+    // the kernel's debug validation switch (session-only, never saved, no
+    // document content): Settings ▸ Debug Mode stays usable while busy;
+    "set_torture_mode",
+    // the inference scene's guide candidates (crate-internal, run by the
+    // rebuild after every compound end and abort);
+    "reregister_guides",
+    // the inference scene's view switches.
+    "set_guides_snappable",
+    "set_axes_snappable",
+    "set_render_mode",
+];
 
 /// The most faces a document may hold for `reconcile` to stamp its
 /// canonical `state_hash` on the log after every committed op (see there).
@@ -2241,20 +2367,43 @@ pub struct Scene {
     /// lifecycle) — session-only, like `hidden_objects` above, never
     /// persisted and never fed into the canonical serialization.
     api_connections: std::collections::HashMap<u32, api::Connection>,
+    /// The one command registry every live API connection dispatches
+    /// against: protocol 1 plus the commands plugins registered
+    /// ([`Scene::register_plugin_commands`]).
+    api_registry: api::Registry,
+    /// Each forward [`Scene::api_dispatch`] handed out and
+    /// [`Scene::api_complete_forward`] has not completed, by connection and
+    /// token: what completing it records and whether it resyncs.
+    api_pending_forwards: std::collections::HashMap<(u32, u64), PendingForward>,
     /// The next id [`Scene::api_connection_open`] mints. Monotonic for
     /// this `Scene`'s lifetime — wrapping is astronomically unreachable
     /// (2^32 live connections in one session) but wraps rather than
     /// panics if it ever were.
     next_api_conn_id: u32,
-    /// A JSON-encoded [`live::ViewDirective`] left by the most recent
-    /// [`Scene::api_dispatch`] call whose command was `hew.view.camera`,
-    /// `hew.view.zoom_extents`, or `hew.view.units` and succeeded —
-    /// `None` otherwise, including for a refused view command (which
-    /// changes nothing, view included). [`Scene::take_pending_view_directive`]
-    /// is how the live bridge collects it; see that method and
-    /// `live::ViewDirective`'s doc comment for why this rides a separate
-    /// accessor rather than the JSON-RPC reply itself.
-    pending_view_directive: Option<String>,
+    /// The [`live::ViewDirective`]s the most recent [`Scene::api_dispatch`]
+    /// left, in order: one per host view effect its commands asked for, a
+    /// transaction possibly carrying several. Empty for a refused dispatch
+    /// (which changes nothing, view included).
+    /// [`Scene::take_pending_view_directives`] is how the live bridge
+    /// collects them; see that method and `live::ViewDirective`'s doc
+    /// comment for why they ride a separate accessor rather than the
+    /// JSON-RPC reply itself.
+    pending_view_directives: Vec<live::ViewDirective>,
+    /// The app's selection as it last mirrored it
+    /// ([`Scene::set_ui_selection`]), and as a successful
+    /// `hew.selection.set` left it: what the bus reads and merges into.
+    ui_selection: Vec<live::UiSelectionEntry>,
+    /// The live viewport's isolation as the app last mirrored it
+    /// ([`Scene::set_ui_isolation`]), or as a successful bus command left
+    /// it; `None` when nothing is isolated.
+    ui_isolation: Option<Vec<live::UiIsolationEntry>>,
+    /// The active tool's name as the app last reported it
+    /// ([`Scene::note_tool_changed`]).
+    ui_tool: String,
+    /// The selection and tool [`Scene::drain_events`] last reported, to
+    /// emit `selection_changed` and `tool_changed` once per change.
+    last_drained_selection: Vec<live::UiSelectionEntry>,
+    last_drained_tool: String,
     /// The one open drafting gesture ([`Scene::draft_begin_plane`] and
     /// friends): its handle and instance pose. Session-only; the kernel
     /// `Document` owns the draft itself.
@@ -2287,6 +2436,29 @@ pub struct Scene {
     /// A `.skp` open under way between [`Scene::open_skp_begin`] and the
     /// [`Scene::open_skp_step`] that finishes it.
     pending_open: Option<PendingOpen>,
+    /// The compounds the host opened ([`Scene::compound_begin`]), innermost
+    /// last; the kernel holds the matching stack.
+    open_compounds: Vec<HostCompound>,
+    /// Non-zero while [`Scene::replay`] re-enters a recorded plugin
+    /// compound: the compound is replay's own, so its calls are not busy.
+    replay_compounds: u32,
+    /// The host's id for this window's document, as events name it
+    /// ([`Scene::set_host_document_id`]).
+    host_document_id: String,
+    /// The document epoch [`Scene::drain_events`] last drained up to.
+    last_drained_epoch: u64,
+    /// What the last drain saw, to emit a change once: the session stack,
+    /// the Scenes (stable id and entry JSON), the Scene last activated,
+    /// and the display units.
+    last_context: Vec<NodeId>,
+    last_scenes: Vec<(u64, String)>,
+    last_active_scene: Option<u64>,
+    /// The active Scene as of the last drain.
+    drained_active_scene: Option<u64>,
+    last_units: Option<String>,
+    /// Events the host reported since the last drain (document lifecycle,
+    /// tool changes): `(event name, params)`.
+    pending_host_events: Vec<(String, serde_json::Value)>,
 }
 
 impl Default for Scene {
@@ -2716,6 +2888,32 @@ impl Scene {
         Some(out)
     }
 
+    /// `Err(DocumentBusy)` while a plugin command holds the document (a
+    /// compound is open, docs/agents/PLUGINS.md "Compounds"): the first
+    /// statement of every document-mutating `Scene` method outside
+    /// [`BUSY_EXEMPT`]. The UI reaches the kernel only through `Scene`, so
+    /// this is the whole busy guard for it; the bus carries the compound's
+    /// forward stamp instead ([`Scene::api_dispatch_in_forward`]).
+    fn ensure_not_busy(&self) -> Result<(), ApiError> {
+        if self.doc.compound_open() && self.replay_compounds == 0 {
+            return Err(ApiError::new(
+                "DocumentBusy",
+                "a plugin command is running; wait for it to finish or cancel it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Pops the innermost host compound when it is `kernel_token`'s.
+    fn pop_host_compound(&mut self, kernel_token: u64) -> Result<HostCompound, ApiError> {
+        match self.open_compounds.last() {
+            Some(top) if top.kernel_token.to_raw() == kernel_token => {
+                Ok(self.open_compounds.pop().expect("checked"))
+            }
+            _ => Err(doc_err(kernel::DocumentError::CompoundTokenMismatch)),
+        }
+    }
+
     fn apply_op(&mut self, handle: u64, op: KernelOp) -> Result<KernelOpReport, ApiError> {
         let (report, change) = self
             .doc
@@ -2740,8 +2938,15 @@ impl Scene {
             active_inference_instance: None,
             active_inference_sketches: Vec::new(),
             api_connections: std::collections::HashMap::new(),
+            api_registry: api::Registry::protocol_1(),
+            api_pending_forwards: std::collections::HashMap::new(),
             next_api_conn_id: 0,
-            pending_view_directive: None,
+            pending_view_directives: Vec::new(),
+            ui_selection: Vec::new(),
+            ui_isolation: None,
+            ui_tool: String::new(),
+            last_drained_selection: Vec::new(),
+            last_drained_tool: String::new(),
             open_draft: None,
             open_bracket: None,
             next_draft_handle: 0,
@@ -2751,6 +2956,16 @@ impl Scene {
             skp_source: None,
             pending_skp_source: None,
             pending_open: None,
+            open_compounds: Vec::new(),
+            replay_compounds: 0,
+            host_document_id: "doc_1".to_string(),
+            last_drained_epoch: 0,
+            last_context: Vec::new(),
+            last_scenes: Vec::new(),
+            last_active_scene: None,
+            drained_active_scene: None,
+            last_units: None,
+            pending_host_events: Vec::new(),
         }
     }
 
@@ -2764,7 +2979,7 @@ impl Scene {
     // -------------------------------------------------------------- live API
 
     /// Opens a new live API connection against this scene's document,
-    /// granted `Profile::App` (docs/agents/HEW_API.md §10, §11.2). Returns the
+    /// granted `Grant::app()` (docs/agents/HEW_API.md §10, §11.2). Returns the
     /// connection id the caller must pass to every subsequent
     /// [`Scene::api_dispatch`]/[`Scene::api_connection_close`] call. The
     /// Tauri shell opens exactly one of these per accepted socket
@@ -2775,8 +2990,39 @@ impl Scene {
         self.next_api_conn_id = self.next_api_conn_id.wrapping_add(1);
         let identity = format!("live:{id}");
         self.api_connections
-            .insert(id, api::Connection::new(api::Profile::App, &identity));
+            .insert(id, api::Connection::new(api::Grant::app(), &identity));
         id
+    }
+
+    /// Opens a live API connection holding a restricted grant — a plugin's
+    /// or a connected app's (docs/agents/HEW_API.md §10) — given as the
+    /// grant's JSON. Refuses `GRANT` when the JSON is malformed or the
+    /// grant is not a plugin's or an app's (it names neither, or it holds
+    /// `all`, which only first-party connections hold): first-party
+    /// connections go through [`Scene::api_connection_open`]. The connection's identity
+    /// is `plugin:<id>` or `app:<pairing>`, which history records as the
+    /// origin of its changes.
+    pub fn api_plugin_connection_open(&mut self, grant_json: &str) -> Result<u32, ApiError> {
+        let grant: api::Grant = serde_json::from_str(grant_json)
+            .map_err(|e| ApiError::new("GRANT", &format!("malformed grant: {e}")))?;
+        if !grant.is_restricted() {
+            return Err(ApiError::new(
+                "GRANT",
+                "a plugin connection's grant must name a plugin or an app",
+            ));
+        }
+        if grant.holds(&api::Permission::All) {
+            return Err(ApiError::new(
+                "GRANT",
+                "a plugin connection's grant may not hold `all`, which is for first-party connections",
+            ));
+        }
+        let id = self.next_api_conn_id;
+        self.next_api_conn_id = self.next_api_conn_id.wrapping_add(1);
+        let identity = grant.identity_or(&format!("live:{id}"));
+        self.api_connections
+            .insert(id, api::Connection::new(grant, &identity));
+        Ok(id)
     }
 
     /// Closes a live API connection and drops its dispatch state. A no-op
@@ -2785,6 +3031,29 @@ impl Scene {
     /// connection ends; this just releases what `Scene` was holding for it.
     pub fn api_connection_close(&mut self, conn_id: u32) {
         self.api_connections.remove(&conn_id);
+        self.api_pending_forwards
+            .retain(|(conn, _), _| *conn != conn_id);
+    }
+
+    /// Adds a plugin's commands to the registry every connection dispatches
+    /// against (docs/agents/PLUGINS.md "Commands"). `decls_json` is a JSON
+    /// array of the manifest's `contributes.commands` entries. Refuses
+    /// `REGISTER` with the registration error's name, or for malformed
+    /// JSON; a refused registration adds nothing.
+    pub fn register_plugin_commands(&mut self, id: &str, decls_json: &str) -> Result<(), ApiError> {
+        let decls: Vec<plugin_manifest::CommandContribution> = serde_json::from_str(decls_json)
+            .map_err(|e| {
+                ApiError::new("REGISTER", &format!("malformed command declarations: {e}"))
+            })?;
+        self.api_registry
+            .register_plugin(id, &decls)
+            .map_err(|e| ApiError::new("REGISTER", e.name()))
+    }
+
+    /// Removes every command plugin `id` registered. A no-op for a plugin
+    /// with none.
+    pub fn unregister_plugin_commands(&mut self, id: &str) {
+        self.api_registry.unregister_plugin(id);
     }
 
     /// The app's display length format (`m`, `cm`, `mm`, `arch`,
@@ -2816,13 +3085,250 @@ impl Scene {
     /// `reconcile`'s touched-set-only update — more work, but still cheap
     /// for any Hew-sized document since it only re-registers inference
     /// candidates and never re-tessellates.
+    ///
+    /// The answer is tagged JSON text: `{"reply": "<frame>"}` for a
+    /// response, or `{"pending": {"token": n, "forward": <ForwardRequest>}}`
+    /// for a plugin command, which the caller routes to its plugin and
+    /// completes with [`Scene::api_complete_forward`].
+    ///
+    /// While a compound is open ([`Scene::busy`]) every frame is refused
+    /// `-32000` `document_busy` before the dispatcher runs: the host queues
+    /// instead, and a frame a plugin issues while serving the forward goes
+    /// through [`Scene::api_dispatch_in_forward`]. This is the backstop.
     pub fn api_dispatch(&mut self, conn_id: u32, frame: &str) -> Option<String> {
+        self.api_dispatch_tagged(conn_id, frame, DispatchScope::Plain)
+    }
+
+    /// [`Scene::api_dispatch`] for a frame a plugin realm issued while
+    /// serving forward `forward_token` (docs/agents/PLUGINS.md
+    /// "Compounds"): dispatched with the stamp, so a forward it issues in
+    /// turn carries it. While a compound is open, `forward_token` must be
+    /// the innermost compound's forward, else the frame is refused
+    /// `document_busy` like a plain one. Its mutations land as children of
+    /// that compound, and so do its recordings.
+    pub fn api_dispatch_in_forward(
+        &mut self,
+        conn_id: u32,
+        forward_token: u64,
+        frame: &str,
+    ) -> Option<String> {
+        self.api_dispatch_tagged(conn_id, frame, DispatchScope::InForward(forward_token))
+    }
+
+    /// True while a plugin command holds the document (a compound is
+    /// open): the UI refuses input, the live bridge queues frames, and
+    /// every document-mutating `Scene` method refuses `DocumentBusy`.
+    pub fn busy(&self) -> bool {
+        self.doc.compound_open()
+    }
+
+    /// How many compounds are open (nested plugin commands).
+    pub fn compound_depth(&self) -> usize {
+        self.doc.compound_depth()
+    }
+
+    /// Opens a compound around the mutating forward `forward_token` issued
+    /// on `conn_id` (docs/agents/PLUGINS.md "Compounds"): everything that
+    /// lands until [`Scene::compound_end`] is one undo entry, labeled with
+    /// the command's declared label (or its name) and attributed to the
+    /// provider plugin (`plugin:<id>`). Starts holding back the recording
+    /// until the compound ends. Returns the kernel's token.
+    ///
+    /// # Errors
+    /// `FORWARD` when no such forward is pending or it is not mutating.
+    pub fn compound_begin(&mut self, conn_id: u32, forward_token: u64) -> Result<u64, ApiError> {
+        let Some(pending) = self.api_pending_forwards.get(&(conn_id, forward_token)) else {
+            return Err(ApiError::new("FORWARD", "unknown forward token"));
+        };
+        if !pending.mutating {
+            return Err(ApiError::new(
+                "FORWARD",
+                "a compound opens only around a mutating forward",
+            ));
+        }
+        let plugin = pending.plugin.clone();
+        let label = pending
+            .label
+            .clone()
+            .unwrap_or_else(|| pending.method.clone());
+        // The provider's own connection, lowest id first so the choice is
+        // deterministic.
+        let grant = self
+            .api_connections
+            .iter()
+            .filter(|(_, c)| c.grant().plugin.as_deref() == Some(plugin.as_str()))
+            .min_by_key(|(id, _)| **id)
+            .map(|(_, c)| serde_json::to_value(c.grant()).expect("a grant serializes"));
+        let kernel_token = self.doc.begin_compound(kernel::CompoundMeta {
+            label: label.clone(),
+            origin: kernel::HistoryOrigin::Connection(format!("plugin:{plugin}")),
+            coalesce: None,
+        });
+        recording::push_buffer();
+        self.open_compounds.push(HostCompound {
+            kernel_token,
+            forward_token,
+            plugin,
+            label,
+            grant,
+            selection_at_begin: self.ui_selection.clone(),
+            isolation_at_begin: self.ui_isolation.clone(),
+        });
+        Ok(kernel_token.to_raw())
+    }
+
+    /// Ends the innermost compound and answers `{"committed": bool,
+    /// "generation": n, "epoch": n}`. What its calls recorded becomes one
+    /// `plugin_compound` call (when there was any); the derived caches are
+    /// rebuilt.
+    ///
+    /// # Errors
+    /// `CompoundTokenMismatch` when `kernel_token` is not the innermost
+    /// compound (nothing changes); the kernel's disturbance refusals
+    /// (`TransactionHistoryDisturbed` and its siblings), which abort the
+    /// compound.
+    pub fn compound_end(&mut self, kernel_token: u64) -> Result<String, ApiError> {
+        let top = self.pop_host_compound(kernel_token)?;
+        let calls = recording::pop_buffer();
+        let ended = self.doc.end_compound(top.kernel_token);
+        self.full_resync();
+        let outcome = ended.map_err(doc_err)?;
+        // Recorded whether or not an undo entry landed: a compound whose
+        // children were only registry writes (a material, a tag) still
+        // changed the document.
+        if !calls.is_empty() {
+            let grant = top.grant.unwrap_or_else(|| {
+                serde_json::to_value(api::Grant::plugin(
+                    &top.plugin,
+                    None,
+                    std::collections::BTreeSet::new(),
+                ))
+                .expect("a grant serializes")
+            });
+            recording::record(recording::RecordedCall::PluginCompound {
+                plugin: top.plugin,
+                label: top.label,
+                grant,
+                calls,
+            });
+        }
+        Ok(serde_json::json!({
+            "committed": outcome.committed,
+            "generation": outcome.generation,
+            "epoch": outcome.epoch,
+        })
+        .to_string())
+    }
+
+    /// Aborts the innermost compound: the document is restored whole to
+    /// what it was at [`Scene::compound_begin`] (view state included), the
+    /// recording it held back is dropped, and the derived caches are
+    /// rebuilt. The host treats this as a document-wide change.
+    ///
+    /// The selection and isolation the compound's frames changed go back
+    /// too: the mirrors return to their values at begin, and a `selection`
+    /// and an `isolate` (unframed) or `clear_isolation` directive are left
+    /// for [`Scene::take_pending_view_directives`] when they differ, so the
+    /// app shows them again. The camera a frame moved is not put back.
+    ///
+    /// # Errors
+    /// `CompoundTokenMismatch` when `kernel_token` is not the innermost
+    /// compound; nothing changes.
+    pub fn compound_abort(&mut self, kernel_token: u64) -> Result<(), ApiError> {
+        let top = self.pop_host_compound(kernel_token)?;
+        recording::pop_buffer();
+        self.doc.abort_compound(top.kernel_token).map_err(doc_err)?;
+        self.full_resync();
+        if self.ui_selection != top.selection_at_begin {
+            self.ui_selection = top.selection_at_begin;
+            self.pending_view_directives
+                .push(live::ViewDirective::Selection {
+                    entries: self.ui_selection.clone(),
+                    mode: "replace".to_string(),
+                });
+        }
+        if self.ui_isolation != top.isolation_at_begin {
+            self.ui_isolation = top.isolation_at_begin;
+            self.pending_view_directives.push(match &self.ui_isolation {
+                Some(entries) => live::ViewDirective::Isolate {
+                    entries: entries.clone(),
+                    frame: false,
+                },
+                None => live::ViewDirective::ClearIsolation,
+            });
+        }
+        Ok(())
+    }
+
+    fn api_dispatch_tagged(
+        &mut self,
+        conn_id: u32,
+        frame: &str,
+        scope: DispatchScope,
+    ) -> Option<String> {
+        let tagged = match self.api_dispatch_outcome(conn_id, frame, scope)? {
+            FrameOutcome::Reply(reply) => serde_json::json!({ "reply": reply }),
+            FrameOutcome::Pending(forward) => {
+                serde_json::json!({ "pending": { "token": forward.token, "forward": forward } })
+            }
+        };
+        Some(tagged.to_string())
+    }
+
+    /// Completes a forward [`Scene::api_dispatch`] handed out, with the
+    /// plugin's reply (`reply_json` is a `ForwardReply`: `{"ok": value}`,
+    /// `{"refusal": {...}}`, or `{"failed": "<reason>"}`), and returns the
+    /// final reply frame text (not tagged). A successful mutating command
+    /// is recorded and resynced exactly as a direct reply is. Refuses
+    /// `FORWARD` for an unknown connection or token, or malformed JSON.
+    pub fn api_complete_forward(
+        &mut self,
+        conn_id: u32,
+        token: u64,
+        reply_json: &str,
+    ) -> Result<String, ApiError> {
+        self.pending_view_directives.clear();
+        let reply: api::ForwardReply = serde_json::from_str(reply_json)
+            .map_err(|e| ApiError::new("FORWARD", &format!("malformed forward reply: {e}")))?;
+        let Some(conn) = self.api_connections.get_mut(&conn_id) else {
+            return Err(ApiError::new("FORWARD", "unknown API connection"));
+        };
+        let Some(pending) = self.api_pending_forwards.remove(&(conn_id, token)) else {
+            return Err(ApiError::new("FORWARD", "unknown forward token"));
+        };
+        let resp = conn.complete_forward(&self.api_registry, token, reply);
+        // The forwarded frame itself is never recorded: no plugin runs at
+        // replay time. What its handler did is recorded as the compound's
+        // children ([`Scene::compound_end`]).
+        if resp.error.is_none() && pending.mutating {
+            self.full_resync();
+        }
+        Ok(serde_json::to_string(&resp).expect("Response serializes"))
+    }
+
+    /// [`Scene::api_dispatch`] for tests that never forward: the reply
+    /// frame, untagged.
+    #[cfg(test)]
+    fn api_dispatch_reply(&mut self, conn_id: u32, frame: &str) -> Option<String> {
+        match self.api_dispatch_outcome(conn_id, frame, DispatchScope::Plain)? {
+            FrameOutcome::Reply(reply) => Some(reply),
+            FrameOutcome::Pending(forward) => panic!("{} forwarded", forward.method),
+        }
+    }
+
+    /// [`Scene::api_dispatch`]'s work, untagged.
+    fn api_dispatch_outcome(
+        &mut self,
+        conn_id: u32,
+        frame: &str,
+        scope: DispatchScope,
+    ) -> Option<FrameOutcome> {
         // Cleared unconditionally up front, so every early-return path
         // below (parse error, unknown connection, a dropped notification)
-        // leaves nothing stale for `take_pending_view_directive` to hand
-        // out from a PREVIOUS dispatch — only a `hew.view.*` command that
-        // both runs and succeeds in this very call sets it again below.
-        self.pending_view_directive = None;
+        // leaves nothing stale for `take_pending_view_directives` to hand
+        // out from a PREVIOUS dispatch — only view commands that run and
+        // succeed in this very call leave directives again below.
+        self.pending_view_directives.clear();
         let request: api::Request = match serde_json::from_str(frame) {
             Ok(r) => r,
             Err(e) => {
@@ -2831,9 +3337,43 @@ impl Scene {
                     api::codes::PARSE_ERROR,
                     &format!("malformed JSON-RPC frame: {e}"),
                 );
-                return Some(serde_json::to_string(&resp).expect("Response serializes"));
+                return Some(FrameOutcome::Reply(
+                    serde_json::to_string(&resp).expect("Response serializes"),
+                ));
             }
         };
+        // While a plugin command holds the document, only the frames it
+        // issues itself may run (docs/agents/PLUGINS.md "Compounds"); the
+        // host queues the rest, and this refusal is the backstop.
+        let stamped_by_innermost = match scope {
+            DispatchScope::Plain => false,
+            DispatchScope::InForward(token) => self
+                .open_compounds
+                .last()
+                .is_none_or(|top| top.forward_token == token),
+            DispatchScope::Replay => true,
+        };
+        if self.doc.compound_open() && !stamped_by_innermost {
+            request.id.as_ref()?;
+            let resp = api::Response::err_with(
+                request.id.clone(),
+                api::codes::REFUSED,
+                "refused",
+                api::transact::document_busy().into_data(0, &request.method),
+            );
+            return Some(FrameOutcome::Reply(
+                serde_json::to_string(&resp).expect("Response serializes"),
+            ));
+        }
+        // The provider's grant for the compound's recording, when no
+        // connection of its own was open at begin.
+        if let DispatchScope::InForward(_) = scope
+            && let Some(top) = self.open_compounds.last_mut()
+            && top.grant.is_none()
+            && let Some(conn) = self.api_connections.get(&conn_id)
+        {
+            top.grant = Some(serde_json::to_value(conn.grant()).expect("a grant serializes"));
+        }
         // An import over the API sets Model Health's "Last import" scope
         // like one from the File menu: the objects it leaves behind that
         // were not there before.
@@ -2850,7 +3390,9 @@ impl Scene {
                 api::codes::INTERNAL_FAULT,
                 "unknown API connection",
             );
-            return Some(serde_json::to_string(&resp).expect("Response serializes"));
+            return Some(FrameOutcome::Reply(
+                serde_json::to_string(&resp).expect("Response serializes"),
+            ));
         };
         // Snapshot the method's class before `dispatch` consumes the
         // request, so the mutation check below doesn't need `crates/api`
@@ -2862,19 +3404,60 @@ impl Scene {
         // hew.history.undo/redo are solitary for that reason while
         // plainly changing the document (see
         // `api::CommandDecl::mutates_document`).
-        let mutates = conn
-            .registry()
+        let mutates = self
+            .api_registry
             .get(&method)
             .is_some_and(|c| c.mutates_document);
+        // The host works on copies of the app's selection and isolation
+        // mirrors; they are written back only when the dispatch succeeds,
+        // so a refused command or an aborted transaction leaves them as
+        // they were.
         let mut host = live::LiveHost {
             display_units: self.api_display_units.clone(),
+            selection: api::SelectionState {
+                entries: self
+                    .ui_selection
+                    .iter()
+                    .map(live::UiSelectionEntry::to_entry)
+                    .collect(),
+            },
+            isolation: self
+                .ui_isolation
+                .as_ref()
+                .map(|v| v.iter().map(live::UiIsolationEntry::to_entry).collect()),
             ..live::LiveHost::default()
         };
-        let outcome = conn.dispatch(&mut self.doc, &mut host, request);
-        let api::DispatchOutcome::Reply(resp) = outcome else {
+        let outcome = match scope {
+            DispatchScope::InForward(token) => conn.dispatch_in_forward(
+                &self.api_registry,
+                &mut self.doc,
+                &mut host,
+                request,
+                token,
+            ),
+            DispatchScope::Plain | DispatchScope::Replay => {
+                conn.dispatch(&self.api_registry, &mut self.doc, &mut host, request)
+            }
+        };
+        let resp = match outcome {
+            api::DispatchOutcome::Reply(resp) => resp,
             // A dropped client-originated notification: no side effect,
             // no reply (§4.1).
-            return None;
+            api::DispatchOutcome::Dropped => return None,
+            // A plugin command: nothing ran, so nothing is recorded or
+            // resynced until its reply completes it.
+            api::DispatchOutcome::Forward(forward) => {
+                self.api_pending_forwards.insert(
+                    (conn_id, forward.token),
+                    PendingForward {
+                        mutating: forward.mutating,
+                        plugin: forward.plugin.clone(),
+                        method: forward.method.clone(),
+                        label: forward.label.clone(),
+                    },
+                );
+                return Some(FrameOutcome::Pending(Box::new(forward)));
+            }
         };
         if resp.error.is_none() && mutates {
             // Capture and resync on ONE condition, so a recording can
@@ -2902,41 +3485,309 @@ impl Scene {
             }
         }
         if resp.error.is_none() {
-            // `hew.view.camera`/`zoom_extents`/`units` are NOT `mutates`
-            // (they change no document state — registry.rs's
-            // `mutates_document = false`), so they never reach the branch
-            // above; this is their own hand-off, unconditional on
-            // `mutates` and gated only on success (a refused view command
-            // changes nothing, view included, matching every other
-            // refusal's untouched-document guarantee).
-            self.pending_view_directive = host
-                .directive
-                .take()
-                .map(|d| serde_json::to_string(&d).expect("ViewDirective serializes"));
+            // A bare hide or show writes persisted view state without
+            // mutating the document's history; it is recorded so a
+            // reproducer replays to the same document (inside a
+            // transaction the envelope's own frame is recorded above).
+            if !mutates && USER_HIDDEN_WRITERS.contains(&method.as_str()) {
+                recording::record(recording::RecordedCall::ApiDispatch {
+                    frame: frame.to_string(),
+                });
+            }
+            for directive in &host.directives {
+                if let live::ViewDirective::ActivateScene { sid } = directive {
+                    self.last_active_scene = Some(*sid);
+                }
+            }
+            self.ui_selection = host
+                .selection
+                .entries
+                .iter()
+                .map(|e| live::UiSelectionEntry::from_entry(*e))
+                .collect();
+            self.ui_isolation = host.isolation.as_ref().map(|v| {
+                v.iter()
+                    .map(|e| live::UiIsolationEntry::from_entry(*e))
+                    .collect()
+            });
+            // The view commands are NOT `mutates` (they change no document
+            // history — registry.rs's `mutates_document = false`), so they
+            // never reach the branch above; this is their own hand-off,
+            // unconditional on `mutates` and gated only on success (a
+            // refused view command changes nothing, view included,
+            // matching every other refusal's untouched-document guarantee).
+            self.pending_view_directives = std::mem::take(&mut host.directives);
         }
-        Some(serde_json::to_string(&resp).expect("Response serializes"))
+        Some(FrameOutcome::Reply(
+            serde_json::to_string(&resp).expect("Response serializes"),
+        ))
     }
 
-    /// Takes (clears) the [`live::ViewDirective`] left by the dispatch this
-    /// `Scene` just ran, JSON-encoded — `None` unless that dispatch's
-    /// command was `hew.view.camera`, `hew.view.zoom_extents`, or
-    /// `hew.view.units` and it succeeded. `app/src/api/liveBridge.ts` calls
-    /// this immediately after every [`Scene::api_dispatch`], in the same
-    /// synchronous JS task, and applies the directive itself: a `Camera`
-    /// directive through the mounted `Viewport`'s existing
-    /// `setCamera`/`setStandardView` (the same calls the Camera menu
-    /// makes), a `ZoomExtents` directive through `Viewport.zoomExtents()`,
-    /// and a `Units` directive through `app/src/settings/units.ts`'s
-    /// `setLengthUnit` directly (not a viewport call). See
-    /// [`live::ViewDirective`]'s doc comment for why this is a separate
-    /// accessor rather than a field riding the JSON-RPC reply itself.
+    /// Takes (clears) every [`live::ViewDirective`] the dispatch this
+    /// `Scene` just ran left, in order, as a JSON array — `[]` unless that
+    /// dispatch succeeded and one of its commands asked for a host view
+    /// effect (`hew.view.camera`, `zoom_extents`, `units`, a Scene
+    /// activation, the selection, hide and show, isolation, `zoom_to`).
+    /// `app/src/api/liveBridge.ts` calls this immediately after every
+    /// [`Scene::api_dispatch`], in the same synchronous JS task, and applies
+    /// each directive in order through the app's own paths: the mounted
+    /// `Viewport`'s camera, framing, and isolation calls, the selection
+    /// handlers, the hidden-state re-read, and `app/src/settings/units.ts`'s
+    /// `setLengthUnit`. See [`live::ViewDirective`]'s doc comment for why
+    /// this is a separate accessor rather than a field riding the JSON-RPC
+    /// reply itself.
     ///
     /// "Takes" rather than "peeks": a directive is one-shot intent from one
     /// dispatch, not scene state, so leaving it behind would let a LATER,
     /// unrelated `api_dispatch` call (or a caller that simply forgets to
     /// check) accidentally replay it.
-    pub fn take_pending_view_directive(&mut self) -> Option<String> {
-        self.pending_view_directive.take()
+    pub fn take_pending_view_directives(&mut self) -> String {
+        let directives = std::mem::take(&mut self.pending_view_directives);
+        serde_json::to_string(&directives).expect("ViewDirective serializes")
+    }
+
+    /// The app mirrors its selection here (docs/agents/HEW_API.md §7,
+    /// "Selection and view state") whenever it changes: a JSON array of
+    /// `{"kind": "object"|"group"|"instance"|"sketch"|"guide"|"annotation",
+    /// "id": "<decimal handle>"}` in pick order, the primary first. The
+    /// app's drafting kinds have no public id and are left out. What
+    /// `hew.selection.get` reads and `selection_changed` reports.
+    ///
+    /// # Errors
+    /// `SELECTION` for JSON that is not such an array; the mirror keeps its
+    /// previous value.
+    pub fn set_ui_selection(&mut self, json: &str) -> Result<(), ApiError> {
+        let entries: Vec<live::UiSelectionEntry> = serde_json::from_str(json)
+            .map_err(|e| ApiError::new("SELECTION", &format!("malformed selection: {e}")))?;
+        self.ui_selection = entries;
+        Ok(())
+    }
+
+    /// The app mirrors the live viewport's isolation here whenever it
+    /// changes: a JSON array of `{"kind": "object"|"group"|"instance",
+    /// "id": "<decimal handle>"}` and `{"kind": "member", "object": "<id>",
+    /// "instance": "<id>"}`, or `null` when nothing is isolated. What
+    /// `hew.view.hidden` reports as `isolated`.
+    ///
+    /// # Errors
+    /// `ISOLATION` for JSON of any other shape; the mirror keeps its
+    /// previous value.
+    pub fn set_ui_isolation(&mut self, json: &str) -> Result<(), ApiError> {
+        let entries: Option<Vec<live::UiIsolationEntry>> = serde_json::from_str(json)
+            .map_err(|e| ApiError::new("ISOLATION", &format!("malformed isolation: {e}")))?;
+        self.ui_isolation = entries;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------- events
+
+    /// Every event frame owed to every live connection since the last
+    /// drain (docs/agents/HEW_API.md §4.5), as JSON:
+    /// `[{"conn": <conn_id>, "frames": ["<frame>", ...]}, ...]`, by
+    /// connection id; a connection owed nothing is absent. When the host
+    /// reported lifecycle steps, a last batch `{"conn": null, "frames":
+    /// [...]}` carries each such frame once, `path` included: for the
+    /// host to offer first-party connections that hold no session in this
+    /// window (a listener bound to another document hears of this one
+    /// only that way). Take-not-peek,
+    /// like [`Scene::take_pending_view_directives`]: the host calls it after
+    /// every dispatch and every UI commit and sends each frame on its
+    /// connection.
+    ///
+    /// `document_changed` goes out once per change record since the last
+    /// drain, except a plugin command's: while its compound is open its
+    /// children are held back, and once it ends its one entry goes out (or,
+    /// aborted, one `abort`); more than 64, or a gap the change ring no
+    /// longer covers,
+    /// collapse into one `full` commit at the current clock. The host's
+    /// own events (lifecycle, tool) come first, in the order reported;
+    /// `context_changed`, `scenes_changed`, and `units_changed` follow the
+    /// changes, when the session stack, the Scenes (or the active one), or
+    /// the display units differ from the last drain. Each connection gets the frames it subscribed
+    /// to and its grant may receive, about this document only for a
+    /// connection bound to one, and a lifecycle event's `path` only under
+    /// `documents.save`.
+    pub fn drain_events(&mut self) -> String {
+        let doc_id = self.host_document_id.clone();
+        // The host's own events first: a load reports the old document
+        // closed and the new one opened before the reset that follows.
+        let mut events: Vec<(String, serde_json::Value)> = Vec::new();
+        if self.ui_tool != self.last_drained_tool {
+            events.push((
+                "tool_changed".into(),
+                api::events::tool_changed(&self.ui_tool),
+            ));
+            self.last_drained_tool = self.ui_tool.clone();
+        }
+        events.append(&mut self.pending_host_events);
+
+        // While a plugin command's compound is open its children are not
+        // history yet: they become one entry when it ends, or none when it
+        // aborts. Only what came before it goes out now.
+        let held_at = self.doc.compound_start_epoch();
+        let collapsed = match self.doc.change_records_since_epoch(self.last_drained_epoch) {
+            Some(records) => {
+                let records: Vec<&kernel::ChangeRecord> = records
+                    .iter()
+                    .filter(|r| held_at.is_none_or(|start| r.epoch <= start))
+                    .collect();
+                if records.len() > api::events::MAX_RECORDS_PER_DRAIN {
+                    true
+                } else {
+                    for record in records {
+                        events.push((
+                            "document_changed".into(),
+                            api::events::document_changed(&self.doc, &doc_id, record),
+                        ));
+                    }
+                    false
+                }
+            }
+            None => true,
+        };
+        if collapsed {
+            let record = api::events::collapsed_record(&self.doc);
+            events.push((
+                "document_changed".into(),
+                api::events::document_changed(&self.doc, &doc_id, &record),
+            ));
+        }
+        self.last_drained_epoch = match held_at {
+            Some(start) => self.last_drained_epoch.max(start),
+            None => self.doc.document_epoch(),
+        };
+
+        let stack = self.doc.session_stack();
+        if stack != self.last_context {
+            events.push((
+                "context_changed".into(),
+                api::events::context_changed(&self.doc, &doc_id),
+            ));
+            self.last_context = stack;
+        }
+
+        let scenes_params = api::events::scenes_changed(&self.doc, &doc_id, self.last_active_scene);
+        let scenes: Vec<(u64, String)> = self
+            .doc
+            .scenes()
+            .iter()
+            .zip(scenes_params["scenes"].as_array().into_iter().flatten())
+            .map(|(scene, entry)| (scene.sid, entry.to_string()))
+            .collect();
+        if scenes != self.last_scenes || self.last_active_scene != self.drained_active_scene {
+            events.push(("scenes_changed".into(), scenes_params));
+            self.last_scenes = scenes;
+            self.drained_active_scene = self.last_active_scene;
+        }
+
+        if self.api_display_units != self.last_units {
+            if let Some(units) = &self.api_display_units {
+                events.push((
+                    "units_changed".into(),
+                    api::events::units_changed(&doc_id, units),
+                ));
+            }
+            self.last_units = self.api_display_units.clone();
+        }
+
+        if self.ui_selection != self.last_drained_selection {
+            let entries: Vec<api::SelectionEntry> = self
+                .ui_selection
+                .iter()
+                .map(live::UiSelectionEntry::to_entry)
+                .collect();
+            events.push((
+                "selection_changed".into(),
+                api::events::selection_changed(&self.doc, &doc_id, &entries),
+            ));
+            self.last_drained_selection = self.ui_selection.clone();
+        }
+
+        let mut ids: Vec<u32> = self.api_connections.keys().copied().collect();
+        ids.sort_unstable();
+        let mut out = Vec::new();
+        let broadcast: Vec<String> = events
+            .iter()
+            .filter(|(name, _)| api::events::LIFECYCLE_EVENTS.contains(&name.as_str()))
+            .map(|(name, params)| api::events::notification(name, params.clone()))
+            .collect();
+        for id in ids {
+            let conn = &self.api_connections[&id];
+            let grant = conn.grant();
+            let paths = !grant.is_restricted()
+                || grant.holds(&api::Permission::All)
+                || grant.holds(&api::Permission::DocumentsSave);
+            let frames: Vec<String> = events
+                .iter()
+                .filter(|(name, _)| conn.wants_for(name, &doc_id))
+                .map(|(name, params)| {
+                    let mut params = params.clone();
+                    if !paths
+                        && api::events::LIFECYCLE_EVENTS.contains(&name.as_str())
+                        && let Some(object) = params.as_object_mut()
+                    {
+                        object.remove("path");
+                    }
+                    api::events::notification(name, params)
+                })
+                .collect();
+            if !frames.is_empty() {
+                out.push(serde_json::json!({ "conn": id, "frames": frames }));
+            }
+        }
+        if !broadcast.is_empty() {
+            out.push(serde_json::json!({ "conn": null, "frames": broadcast }));
+        }
+        serde_json::Value::Array(out).to_string()
+    }
+
+    /// The host's id for this window's document (`doc_N` on desktop,
+    /// `doc_1` on the web), which every event names. Defaults to `doc_1`.
+    pub fn set_host_document_id(&mut self, id: &str) {
+        self.host_document_id = id.to_string();
+    }
+
+    /// The host reports a document lifecycle step, emitted by the next
+    /// [`Scene::drain_events`]: `kind` is `will_save`, `saved`, `opened`,
+    /// or `closed` (any other kind is ignored); `format` is the file
+    /// format of a save. Nothing waits for subscribers.
+    pub fn note_document_event(
+        &mut self,
+        kind: &str,
+        title: &str,
+        path: Option<String>,
+        format: Option<String>,
+    ) {
+        let event = match kind {
+            "will_save" => "document_will_save",
+            "saved" => "document_saved",
+            "opened" => "document_opened",
+            "closed" => "document_closed",
+            _ => return,
+        };
+        let document_id = self.doc.document_id();
+        let params = api::events::document_lifecycle(
+            kind,
+            &self.host_document_id,
+            title,
+            path.as_deref(),
+            format.as_deref(),
+            document_id.as_deref(),
+        );
+        self.pending_host_events.push((event.to_string(), params));
+    }
+
+    /// The host reports the active tool (its name, as the toolbar names
+    /// it): the next [`Scene::drain_events`] emits `tool_changed` when it
+    /// differs from the tool last reported.
+    pub fn note_tool_changed(&mut self, tool: &str) {
+        self.ui_tool = tool.to_string();
+    }
+
+    /// The app activated Scene `sid` itself (the Scenes panel): the next
+    /// [`Scene::drain_events`] reports it as the active Scene.
+    pub fn note_scene_activated(&mut self, sid: u64) {
+        self.last_active_scene = Some(sid);
     }
 
     /// Whether `method` is a document-mutating API command, straight
@@ -2953,7 +3804,7 @@ impl Scene {
     /// An unknown method answers `false`: it cannot mutate anything, it
     /// can only come back as a method-not-found error.
     pub fn api_method_mutates(&self, method: &str) -> bool {
-        api::Registry::protocol_1()
+        self.api_registry
             .get(method)
             .is_some_and(|c| c.mutates_document)
     }
@@ -3013,9 +3864,10 @@ impl Scene {
     /// Adds a fresh, empty sketch on the ground plane (M1: the only sketch
     /// surface) and returns its handle. **Additive** — existing sketches are
     /// untouched, so independent coplanar shapes can coexist.
-    pub fn begin_ground_sketch(&mut self) -> u64 {
+    pub fn begin_ground_sketch(&mut self) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         recording::record(recording::RecordedCall::BeginGroundSketch);
-        self.doc.add_sketch(ground_plane()).data().as_ffi()
+        Ok(self.doc.add_sketch(ground_plane()).data().as_ffi())
     }
 
     /// Adds a fresh, empty sketch on the plane through `(px,py,pz)` with
@@ -3039,6 +3891,7 @@ impl Scene {
         ny: f64,
         nz: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let point = Point3::new(px, py, pz);
         let normal = kernel::Vec3::new(nx, ny, nz);
         let plane = Plane::from_point_normal(point, normal).map_err(|e| api_err(&e, &e))?;
@@ -3082,6 +3935,7 @@ impl Scene {
         ny: f64,
         nz: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let point = Point3::new(px, py, pz);
         let normal = kernel::Vec3::new(nx, ny, nz);
         let plane = Plane::from_point_normal(point, normal).map_err(|e| api_err(&e, &e))?;
@@ -3107,6 +3961,7 @@ impl Scene {
     /// the sketch's creation into that step — undoing it removes the sketch.
     /// Tools bracket exactly their commit batch; gestures never nest.
     pub fn sketch_begin_gesture(&mut self, sketch: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.doc
             .begin_sketch_gesture(sketch_id(sketch))
             .map_err(doc_err)?;
@@ -3117,6 +3972,7 @@ impl Scene {
     /// Closes the open drawing gesture on `sketch`, pushing one undo step if
     /// anything changed (an unchanged gesture records nothing).
     pub fn sketch_end_gesture(&mut self, sketch: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .end_sketch_gesture(sketch_id(sketch))
@@ -3128,10 +3984,12 @@ impl Scene {
 
     /// Drops the open drawing gesture (if any) without recording an undo step
     /// — the tool-cancel path. Safe to call when no gesture is open.
-    pub fn sketch_cancel_gesture(&mut self) {
+    pub fn sketch_cancel_gesture(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         if self.doc.cancel_sketch_gesture() {
             recording::record(recording::RecordedCall::SketchCancelGesture);
         }
+        Ok(())
     }
 
     /// Handles of every shown sketch in the document (one drawn in a
@@ -3168,6 +4026,7 @@ impl Scene {
         by: f64,
         bz: f64,
     ) -> Result<SegmentAddedJs, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let s = self
             .doc
@@ -3194,6 +4053,7 @@ impl Scene {
         sketch: u64,
         edge: u64,
     ) -> Result<EdgeRemovedJs, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let eid = SketchEdgeId::from(KeyData::from_ffi(edge));
         let s = self
@@ -3222,6 +4082,7 @@ impl Scene {
         region: u64,
         distance: f64,
     ) -> Result<RegionOffsetJs, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let rid = SketchRegionId::from(KeyData::from_ffi(region));
         let s = self
@@ -3275,6 +4136,7 @@ impl Scene {
     /// `sketch_end_curve` are ONE curve chain (an arc's or circle's facets),
     /// selected and deleted as a unit. Returns the curve handle.
     pub fn sketch_begin_curve(&mut self, sketch: u64) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let s = self
             .doc
@@ -3298,6 +4160,7 @@ impl Scene {
         cz: f64,
         radius: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let s = self
             .doc
@@ -3332,6 +4195,7 @@ impl Scene {
         cz: f64,
         radius: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let s = self
             .doc
@@ -3377,6 +4241,7 @@ impl Scene {
         curve: u64,
         segments: u32,
     ) -> Result<CurveRefacetedJs, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let cid = kernel::SketchCurveId::from(KeyData::from_ffi(curve));
         let s = self
@@ -3415,6 +4280,7 @@ impl Scene {
 
     /// Closes the open curve bracket on `sketch` (no-op when none is open).
     pub fn sketch_end_curve(&mut self, sketch: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let s = self
             .doc
@@ -3586,6 +4452,7 @@ impl Scene {
         island: u64,
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -3644,6 +4511,7 @@ impl Scene {
         islands: &[u64],
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -3735,6 +4603,7 @@ impl Scene {
         islands: &[u64],
         affine: &[f64],
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -3812,6 +4681,7 @@ impl Scene {
         region: u64,
         distance: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let (id, change) = self
             .doc
@@ -3847,6 +4717,7 @@ impl Scene {
         region: u64,
         distance: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let (id, change) = self
             .doc
@@ -3891,6 +4762,7 @@ impl Scene {
         stop_len: Option<f64>,
         group: Option<u64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let edges: Vec<SketchEdgeId> = path_edges
             .iter()
@@ -3943,6 +4815,7 @@ impl Scene {
         stop_len: Option<f64>,
         group: Option<u64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
@@ -3989,6 +4862,7 @@ impl Scene {
         path_face: u64,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
@@ -4022,6 +4896,7 @@ impl Scene {
         path_edges: Vec<u64>,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let edges: Vec<SketchEdgeId> = path_edges
             .iter()
             .map(|&e| SketchEdgeId::from(KeyData::from_ffi(e)))
@@ -4061,6 +4936,7 @@ impl Scene {
         path_face: u64,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
             face: FaceId::from(KeyData::from_ffi(path_face)),
@@ -4106,6 +4982,7 @@ impl Scene {
         face: u64,
         distance: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let (id, change) = self
             .doc
             .extrude_face_as_new_object(
@@ -4137,6 +5014,7 @@ impl Scene {
         path_face: u64,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::InstanceFaceLoop {
             instance: InstanceId::from(KeyData::from_ffi(instance)),
@@ -4181,6 +5059,7 @@ impl Scene {
         path_edges: Vec<u64>,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let edges: Vec<SketchEdgeId> = path_edges
             .iter()
@@ -4225,6 +5104,7 @@ impl Scene {
         path_face: u64,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
@@ -4265,6 +5145,7 @@ impl Scene {
         path_face: u64,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
@@ -4307,6 +5188,7 @@ impl Scene {
         path_edges: Vec<u64>,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let edges: Vec<SketchEdgeId> = path_edges
             .iter()
             .map(|&e| SketchEdgeId::from(KeyData::from_ffi(e)))
@@ -4350,6 +5232,7 @@ impl Scene {
         path_face: u64,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
             face: FaceId::from(KeyData::from_ffi(path_face)),
@@ -4381,6 +5264,7 @@ impl Scene {
     /// 0 = union, 1 = subtract (`a - b`), 2 = intersect. Operands and result
     /// stay stable handles across undo/redo.
     pub fn boolean(&mut self, op: u8, a: u64, b: u64) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let bop = match op {
             0 => BooleanOp::Union,
             1 => BooleanOp::Subtract,
@@ -4414,6 +5298,7 @@ impl Scene {
         b_kind: u8,
         b: u64,
     ) -> Result<NodeJs, ApiError> {
+        self.ensure_not_busy()?;
         let bop = match op {
             0 => BooleanOp::Union,
             1 => BooleanOp::Subtract,
@@ -4442,6 +5327,7 @@ impl Scene {
     /// undo/redo. Errors if the object is unknown/hidden, not a solid, or the
     /// cut is degenerate or misses the solid.
     pub fn slice_object(&mut self, object: u64, plane: &[f64]) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         let p: &[f64; 6] = plane.try_into().map_err(|_| {
             ApiError("BadPlane: slice plane must be 6 floats [px,py,pz,nx,ny,nz]".to_string())
         })?;
@@ -4463,6 +5349,7 @@ impl Scene {
     /// `[m00 m01 m02 tx, m10 m11 m12 ty, m20 m21 m22 tz]`. The object handle is
     /// unchanged; the UI re-pulls its mesh afterward.
     pub fn transform_object(&mut self, object: u64, affine: &[f64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -4490,6 +5377,7 @@ impl Scene {
     /// - `UnknownSketch` — stale or hidden (deleted) handle.
     /// - `Transform` — singular or orientation-flipping (e.g. negative scale).
     pub fn transform_sketch(&mut self, sketch: u64, affine: &[f64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -4523,6 +5411,7 @@ impl Scene {
         y: f64,
         z: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .move_sketch_vertex(
@@ -4552,6 +5441,7 @@ impl Scene {
         id: u64,
         affine: &[f64],
     ) -> Result<NodeJs, ApiError> {
+        self.ensure_not_busy()?;
         let node = node_id(kind, id)?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
@@ -4606,6 +5496,7 @@ impl Scene {
         affine: &[f64],
         count: u32,
     ) -> Result<Vec<NodeJs>, ApiError> {
+        self.ensure_not_busy()?;
         if kinds.len() != ids.len() {
             return Err(ApiError(
                 "BadNodeList: kinds and ids must be the same length".to_string(),
@@ -4683,6 +5574,7 @@ impl Scene {
     /// member node (kind `0` = object, `1` = group, `2` = instance); they
     /// must be the same length, name live sibling nodes, and not repeat.
     pub fn group_nodes(&mut self, kinds: &[u8], ids: &[u64]) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         if kinds.len() != ids.len() {
             return Err(ApiError(
                 "BadNodeList: kinds and ids must be the same length".to_string(),
@@ -4705,6 +5597,7 @@ impl Scene {
     /// Dissolves a group, returning its members to the group's own parent
     /// (inverse of `group_nodes`). The members keep their geometry and handles.
     pub fn ungroup(&mut self, group: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.ungroup(group_id(group)).map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::Ungroup { group });
@@ -4720,6 +5613,7 @@ impl Scene {
     /// selections are out of scope here ( routes guides to
     /// `delete_guide`/`delete_all_guides`).
     pub fn delete_node(&mut self, kind: u8, id: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let node = node_id(kind, id)?;
         let change = self.doc.delete_node(node).map_err(doc_err)?;
         self.reconcile(&change);
@@ -4736,6 +5630,7 @@ impl Scene {
     /// nothing applied, matching `add_node_tag_many`'s all-or-nothing
     /// posture.
     pub fn delete_selection(&mut self, kinds: &[u8], ids: &[u64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let nodes = node_ids(kinds, ids)?;
         let change = self.doc.delete_selection(&nodes).map_err(doc_err)?;
         self.reconcile(&change);
@@ -4775,6 +5670,7 @@ impl Scene {
         ids: &[u64],
         group: Option<u64>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let nodes = node_ids(kinds, ids)?;
         let change = self
             .doc
@@ -4798,6 +5694,7 @@ impl Scene {
     /// # Errors
     /// - `UnknownSketch` — stale, already-hidden, or foreign handle.
     pub fn delete_sketch(&mut self, sketch: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.delete_sketch(sketch_id(sketch)).map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DeleteSketch { sketch });
@@ -4808,6 +5705,7 @@ impl Scene {
     /// beneath it (undoable). `affine` is the same row-major 3×4
     /// 12-float matrix as [`Scene::transform_object`].
     pub fn transform_group(&mut self, group: u64, affine: &[f64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -4849,6 +5747,7 @@ impl Scene {
         sketches: &[u64],
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         if kinds.len() != ids.len() {
             return Err(ApiError(
                 "BadNodeList: kinds and ids must be the same length".to_string(),
@@ -4890,6 +5789,7 @@ impl Scene {
     /// `InvalidRescaleFactor` — `factor` is non-finite, zero, or negative;
     /// the document is untouched.
     pub fn rescale_document(&mut self, factor: f64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.rescale_document(factor).map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::RescaleDocument { factor });
@@ -4944,6 +5844,7 @@ impl Scene {
         yy: f64,
         yz: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .set_axes(
@@ -4992,6 +5893,32 @@ impl Scene {
             .collect()
     }
 
+    /// A world node measured along its own axes: `hew.query.part_frame`'s
+    /// result JSON (`{generation, epoch, origin, x, y, z, extents, source,
+    /// mirrored}`, docs/agents/HEW_API.md §7) for the node's world
+    /// placement — the measurement the cut list and the parts sheet show.
+    /// `kind` is `0` = object, `1` = group, `2` = instance.
+    ///
+    /// # Errors
+    /// - `NotPlaced` — the handle is stale, hidden, or not a world
+    ///   node.
+    /// - `NoPartFrame` — the node holds no faces to measure.
+    /// - `TooManyOccurrences` — the node holds more placements than one
+    ///   walk lists.
+    pub fn part_frame_json(&self, kind: u8, id: u64) -> Result<String, ApiError> {
+        let node = node_id(kind, id)?;
+        let occ = self
+            .doc
+            .occurrence_at(&[], node)
+            .ok_or_else(|| ApiError::new("NotPlaced", "no world placement for that node"))?;
+        let mut v = api::commands::parts::part_frame_result(&self.doc, &occ)
+            .map_err(|e| api_err(&e, &e))?
+            .ok_or_else(|| ApiError::new("NoPartFrame", "that node holds no faces to measure"))?;
+        v["generation"] = serde_json::json!(self.doc.history_generation());
+        v["epoch"] = serde_json::json!(self.doc.document_epoch());
+        Ok(v.to_string())
+    }
+
     /// The containing group handle of a node, or `None` if it is top-level (or
     /// the node handle is stale/hidden). `kind` is `0` = object, `1` = group.
     pub fn node_parent(&self, kind: u8, id: u64) -> Result<Option<u64>, ApiError> {
@@ -5021,6 +5948,7 @@ impl Scene {
     /// [`Scene::instance_def`]). `kinds`/`ids` are parallel arrays (kind `0` =
     /// object, `1` = group, `2` = instance), same as [`Scene::group_nodes`].
     pub fn make_component(&mut self, kinds: &[u8], ids: &[u64]) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         if kinds.len() != ids.len() {
             return Err(ApiError(
                 "BadNodeList: kinds and ids must be the same length".to_string(),
@@ -5044,6 +5972,7 @@ impl Scene {
     /// floats), returning the new instance handle. Reflection and
     /// non-uniform scale are allowed; a singular pose errors.
     pub fn place_instance(&mut self, component: u64, affine: &[f64]) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let pose = affine_transform(affine)?;
         let (instance, change) = self
             .doc
@@ -5086,6 +6015,7 @@ impl Scene {
         name: String,
         group: Option<u64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_ids: Vec<SketchRegionId> = regions
             .iter()
             .map(|&r| SketchRegionId::from(KeyData::from_ffi(r)))
@@ -5114,6 +6044,7 @@ impl Scene {
     /// Move/rotate/scale an instance by composing `affine` (row-major 3×4) into
     /// its pose — never baked. Mirror/non-uniform allowed; singular errors.
     pub fn transform_instance(&mut self, instance: u64, affine: &[f64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let t = affine_transform(affine)?;
         let change = self
             .doc
@@ -5133,6 +6064,7 @@ impl Scene {
     /// "Explode": bakes an instance's pose into independent world objects,
     /// returning their handles. A mirrored instance errors (`CannotExplodeReflected`).
     pub fn explode_instance(&mut self, instance: u64) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         let (created, change) = self
             .doc
             .explode_instance(instance_id(instance))
@@ -5146,6 +6078,7 @@ impl Scene {
     /// its definition, returning the new component handle. Later edits to this
     /// instance's definition no longer affect its former siblings.
     pub fn make_unique(&mut self, instance: u64) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let (new_def, change) = self
             .doc
             .make_unique(instance_id(instance))
@@ -5165,6 +6098,7 @@ impl Scene {
     /// is already open, or if the instance's pose is not a similarity with
     /// positive determinant.
     pub fn open_explode_session(&mut self, instance: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .open_explode_session(instance_id(instance))
@@ -5177,6 +6111,7 @@ impl Scene {
     /// Closes the open explode session, folding its live members/sketches
     /// back into the definition. Refuses typed if no session is open.
     pub fn close_explode_session(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.close_explode_session().map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::CloseExplodeSession);
@@ -5232,6 +6167,7 @@ impl Scene {
     /// typed on a stale/hidden group, a nested group (drill down through
     /// its ancestors), or while a component session is open.
     pub fn open_group_session(&mut self, group: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .open_group_session(group_id(group))
@@ -5245,6 +6181,7 @@ impl Scene {
     /// re-homing survivors and folding in mid-session creations. Refuses
     /// typed otherwise.
     pub fn close_group_session(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.close_group_session().map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::CloseGroupSession);
@@ -5255,6 +6192,7 @@ impl Scene {
     /// the app's Escape / double-click-outside gesture. Dispatches to the
     /// specific close, so the recording stays replay-exact.
     pub fn close_innermost_session(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         match self.doc.session_stack().last() {
             Some(NodeId::Instance(_)) => self.close_explode_session(),
             Some(_) => self.close_group_session(),
@@ -5303,6 +6241,7 @@ impl Scene {
         ay: f64,
         az: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .rescale_session(factor, Point3::new(ax, ay, az))
@@ -5370,6 +6309,19 @@ impl Scene {
             .expanded_def_placements(def)
             .iter()
             .flat_map(|(_, local)| local.to_affine().to_vec())
+            .collect()
+    }
+
+    /// The material each expanded placement inherits (`u64::MAX` = none),
+    /// parallel to [`Scene::instance_expanded_members`]: the instance's own
+    /// material, overridden by any nested placement on the way in that has
+    /// one ([`kernel::Document::instance_expanded_inherited`]). The renderer
+    /// draws each entry through [`Scene::member_mesh`] with this id.
+    pub fn instance_expanded_inherited(&self, instance: u64) -> Vec<u64> {
+        self.doc
+            .instance_expanded_inherited(instance_id(instance))
+            .into_iter()
+            .map(|m| m.map_or(u64::MAX, |m| m.data().as_ffi()))
             .collect()
     }
 
@@ -5441,6 +6393,7 @@ impl Scene {
         component: u64,
         name: Option<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .set_component_name(component_id(component), name)
@@ -5468,6 +6421,7 @@ impl Scene {
     /// - `DefinitionNestedInDefinition` — a live definition still places
     ///   this one as a member; delete/explode the parent first.
     pub fn delete_definition(&mut self, component: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let cid = component_id(component);
         let change = self.doc.delete_definition(cid).map_err(doc_err)?;
         self.reconcile(&change);
@@ -5513,6 +6467,7 @@ impl Scene {
     /// undo entry labeled "Purge unused" (no entry, and a zeroed report, when
     /// there is nothing to purge).
     pub fn purge_unused(&mut self) -> Result<PurgeReportJs, ApiError> {
+        self.ensure_not_busy()?;
         let report = self.doc.purge_unused().map_err(doc_err)?;
         // purge_unused can touch an arbitrary set of objects/instances/
         // components across the whole document (every unused definition's
@@ -5546,6 +6501,7 @@ impl Scene {
         id: u64,
         name: Option<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let node = node_id(kind, id)?;
         let change = self
             .doc
@@ -5562,6 +6518,7 @@ impl Scene {
     ///
     /// `kind`: 0 = object, 1 = group, 2 = instance.
     pub fn add_node_tag(&mut self, kind: u8, id: u64, path: Vec<String>) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let node = node_id(kind, id)?;
         let change = self.doc.add_node_tag(node, path.clone()).map_err(doc_err)?;
         self.reconcile(&change);
@@ -5580,6 +6537,7 @@ impl Scene {
         ids: &[u64],
         path: Vec<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let nodes = node_ids(kinds, ids)?;
         let label = tag_batch_label("Tag", nodes.len());
         let change = self
@@ -5603,6 +6561,7 @@ impl Scene {
         ids: &[u64],
         path: Vec<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let nodes = node_ids(kinds, ids)?;
         let label = tag_batch_label("Untag", nodes.len());
         let change = self
@@ -5628,6 +6587,7 @@ impl Scene {
         id: u64,
         path: Vec<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let node = node_id(kind, id)?;
         let change = self.doc.remove_node_tag(node, &path).map_err(doc_err)?;
         self.reconcile(&change);
@@ -5684,12 +6644,14 @@ impl Scene {
     /// is `/`-joined like [`Scene::node_tags`]. View state, not undoable;
     /// persisted with the document (manifest v5) so hidden `.skp` layers
     /// stay hidden across save/load.
-    pub fn set_tag_hidden(&mut self, path: String, hidden: bool) {
+    pub fn set_tag_hidden(&mut self, path: String, hidden: bool) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let segments: Vec<String> = path.split('/').map(str::to_string).collect();
         self.doc.set_tag_hidden(segments, hidden);
         // A guide hides with its tags: what snaps follows at once.
         self.reregister_guides();
         recording::record(recording::RecordedCall::SetTagHidden { path, hidden });
+        Ok(())
     }
 
     /// Delete the tag `path` — and every registered tag nested under it —
@@ -5699,6 +6661,7 @@ impl Scene {
     /// No-op (no undo entry) for an unknown path. `path` is `/`-joined like
     /// [`Scene::node_tags`].
     pub fn delete_tag(&mut self, path: String) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let segments: Vec<String> = path.split('/').map(str::to_string).collect();
         let change = self.doc.delete_tag(&segments).map_err(doc_err)?;
         self.reconcile(&change);
@@ -5713,6 +6676,7 @@ impl Scene {
     /// collision (`DuplicateTag`) or an empty / self-nested target
     /// (`InvalidTagPath`).
     pub fn rename_tag(&mut self, path: String, new_path: String) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let from: Vec<String> = path
             .split('/')
             .map(|s| s.trim().to_string())
@@ -5747,6 +6711,7 @@ impl Scene {
         id: u64,
         hidden: bool,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let node = node_id(kind, id)?;
         self.doc.set_node_user_hidden(node, hidden);
         recording::record(recording::RecordedCall::SetNodeUserHidden { kind, id, hidden });
@@ -5886,6 +6851,7 @@ impl Scene {
     /// `ObjectIsSolid`, `UnknownRim`, `RimNotPlanar`, `RimSelfIntersecting`,
     /// `CapWouldBeCoplanar`, `NonManifoldRim`, `CapsOverlap`, `Invalid`.
     pub fn cap_rims(&mut self, object: u64, rims: Option<Vec<u32>>) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
         let indices: Option<Vec<usize>> = rims
             .as_ref()
             .map(|r| r.iter().map(|&i| i as usize).collect());
@@ -5912,6 +6878,7 @@ impl Scene {
     /// `UnknownObject`, `UnknownComponent`, `LastDefinitionMember`, or a
     /// refusal: `ObjectIsSolid`, `UnknownFace`, `Invalid`.
     pub fn delete_faces(&mut self, object: u64, faces: Vec<u64>) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         let ids: Vec<kernel::FaceId> = faces
             .iter()
             .map(|&f| kernel::FaceId::from(KeyData::from_ffi(f)))
@@ -5942,6 +6909,7 @@ impl Scene {
         start: f64,
         end: f64,
     ) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         let (split_off, change) = self
             .doc
             .thicken_sheet(object_id(object), start, end)
@@ -5966,6 +6934,7 @@ impl Scene {
         object: u64,
         distance: f64,
     ) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         let (component, local) = self
             .doc
             .map_instance_world_distance(instance_id(instance), distance)
@@ -5994,6 +6963,7 @@ impl Scene {
     /// # Errors
     /// `UnknownObject`; `ObjectIsSolid` when marking a solid.
     pub fn set_accepted_surface(&mut self, object: u64, accepted: bool) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .set_accepted_surface(object_id(object), accepted)
@@ -6084,6 +7054,7 @@ impl Scene {
         face: u64,
         distance: f64,
     ) -> Result<PushPullJs, ApiError> {
+        self.ensure_not_busy()?;
         let iid = instance_id(instance);
         let (component, local_distance) = self
             .doc
@@ -6161,6 +7132,7 @@ impl Scene {
     /// - `LastDefinitionMember` — `object` is the definition's only live
     ///   member; delete its instances instead.
     pub fn delete_def_member(&mut self, component: u64, object: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .delete_def_member(component_id(component), object_id(object))
@@ -6183,6 +7155,7 @@ impl Scene {
         a: u64,
         b: u64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let bop = match op {
             0 => BooleanOp::Union,
             1 => BooleanOp::Subtract,
@@ -6216,6 +7189,7 @@ impl Scene {
         object: u64,
         plane: &[f64],
     ) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         let p: &[f64; 6] = plane.try_into().map_err(|_| {
             ApiError("BadPlane: slice plane must be 6 floats [px,py,pz,nx,ny,nz]".to_string())
         })?;
@@ -6251,6 +7225,7 @@ impl Scene {
         object: u64,
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -6275,6 +7250,7 @@ impl Scene {
         sketch: u64,
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -6324,6 +7300,7 @@ impl Scene {
         island: u64,
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -6356,6 +7333,7 @@ impl Scene {
         islands: &[u64],
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         if island_sketches.len() != islands.len() {
             return Err(ApiError(
                 "BadSelection: island sketch and island arrays must have equal length".to_string(),
@@ -6448,6 +7426,25 @@ impl Scene {
             .object(id)
             .ok_or_else(|| stale("UnknownObject", "object"))?;
         let mesh = tessellate(object, self.doc.materials()).map_err(|e| api_err(&e, &e))?;
+        self.face_range_cache.insert(id, mesh.face_ranges.clone());
+        let watertight = object.watertight() == WatertightState::Watertight;
+        Ok(MeshJs { mesh, watertight })
+    }
+
+    /// Render buffers for a definition member drawn through placements
+    /// whose inherited material is `inherited` (`u64::MAX` = none): faces
+    /// with neither their own paint nor an Object base take it
+    /// (`tessellate::tessellate_with`). [`Scene::object_mesh`] is this with
+    /// no inherited material, which is what a world Object always draws.
+    pub fn member_mesh(&mut self, object: u64, inherited: u64) -> Result<MeshJs, ApiError> {
+        let id = object_id(object);
+        let object = self
+            .doc
+            .object(id)
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let mesh =
+            tessellate::tessellate_with(object, self.doc.materials(), material_id_opt(inherited))
+                .map_err(|e| api_err(&e, &e))?;
         self.face_range_cache.insert(id, mesh.face_ranges.clone());
         let watertight = object.watertight() == WatertightState::Watertight;
         Ok(MeshJs { mesh, watertight })
@@ -6689,6 +7686,7 @@ impl Scene {
         face: u64,
         distance: f64,
     ) -> Result<PushPullJs, ApiError> {
+        self.ensure_not_busy()?;
         let face_id = FaceId::from(KeyData::from_ffi(face));
         let oid = object_id(object);
 
@@ -6766,6 +7764,7 @@ impl Scene {
     /// per-object op delegates to that object's [`History`]. Returns what the
     /// undo touched so callers can refresh only the affected scene nodes.
     pub fn scene_undo(&mut self) -> Result<DocChangeJs, ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.undo().map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::SceneUndo);
@@ -6777,6 +7776,7 @@ impl Scene {
     /// redo never has to remap ids. Returns what the redo touched so callers
     /// can refresh only the affected scene nodes.
     pub fn scene_redo(&mut self) -> Result<DocChangeJs, ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.redo().map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::SceneRedo);
@@ -6810,8 +7810,10 @@ impl Scene {
     /// set before it was captured will therefore show `at_saved_mark() ==
     /// false` at a depth the original session had marked clean; that's
     /// fine — replay never asserts on save state.
-    pub fn mark_saved(&mut self) {
+    pub fn mark_saved(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.doc.mark_saved();
+        Ok(())
     }
 
     /// True when the undo stack sits exactly at the depth
@@ -6890,6 +7892,7 @@ impl Scene {
         target: Box<[f64]>,
         up: Box<[f64]>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let kernel_projection = match projection {
             "perspective" => kernel::CameraProjection::Perspective,
             "parallel" => kernel::CameraProjection::Parallel,
@@ -6986,6 +7989,12 @@ impl Scene {
     /// (X-ray, Wireframe — see [`SnapQuery::see_through_points`]). Only a
     /// tool that drops such a snap onto its plane and discloses it passes it;
     /// omitted/`None` is `false`, the plain plane filter in every mode.
+    ///
+    /// `lock_direction`, when it holds three finite components of non-zero
+    /// length, locks the snap to that direction (normalized here) through
+    /// `anchor` — [`SnapLock::Direction`], taking precedence over
+    /// `lock_axis`. Anything else (absent, the wrong length, non-finite, or
+    /// too short to normalize) leaves the `lock_axis` mapping as it was.
     // Scalar xyz args are deliberate boundary ergonomics (docs/dev/DEVELOPMENT.md).
     #[allow(clippy::too_many_arguments)]
     pub fn snap(
@@ -7006,6 +8015,7 @@ impl Scene {
         off_plane_points: Option<bool>,
         pick: Option<bool>,
         see_through_points: Option<bool>,
+        lock_direction: Option<Box<[f64]>>,
     ) -> Result<Option<SnapJs>, ApiError> {
         let anchor = match anchor {
             None => None,
@@ -7036,7 +8046,14 @@ impl Scene {
                 ));
             }
         };
+        // A direction lock wins over an axis lock when it is usable: three
+        // finite components of non-zero length, normalized here. Anything
+        // else falls through to the axis mapping.
+        let direction = lock_direction
+            .filter(|d| d.len() == 3 && d.iter().all(|c| c.is_finite()))
+            .and_then(|d| kernel::Vec3::new(d[0], d[1], d[2]).normalized().ok());
         let lock = match lock_axis {
+            _ if direction.is_some() => direction.map(SnapLock::Direction),
             None => None,
             Some(0) => Some(SnapLock::Axis(Axis::X)),
             Some(1) => Some(SnapLock::Axis(Axis::Y)),
@@ -7516,11 +8533,19 @@ impl Scene {
     /// Add a solid-color material to the palette and return its handle.
     /// Palette additions are not individually undoable — only face assignment
     /// via [`Scene::paint_face`] is.
-    pub fn add_material(&mut self, name: String, r: u8, g: u8, b: u8, a: u8) -> u64 {
+    pub fn add_material(
+        &mut self,
+        name: String,
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let mat = Material::solid(name.clone(), Rgba8::rgba(r, g, b, a));
         let id = self.doc.add_material(mat).data().as_ffi();
         recording::record(recording::RecordedCall::AddMaterial { name, r, g, b, a });
-        id
+        Ok(id)
     }
 
     /// Add a textured material to the palette and return its handle.
@@ -7539,6 +8564,7 @@ impl Scene {
         world_w: f64,
         world_h: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let fmt = match format {
             0 => ImageFormat::Png,
             1 => ImageFormat::Jpeg,
@@ -7580,6 +8606,7 @@ impl Scene {
     /// # Errors
     /// - `UnknownMaterial` — material handle is not in the palette.
     pub fn set_material_alpha(&mut self, material: u64, alpha: u8) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let mid = MaterialId::from(KeyData::from_ffi(material));
         let change = self.doc.set_material_alpha(mid, alpha).map_err(doc_err)?;
         self.reconcile(&change);
@@ -7603,6 +8630,7 @@ impl Scene {
     /// # Errors
     /// - `UnknownMaterial` — stale or deleted material handle.
     pub fn set_material_name(&mut self, material: u64, name: String) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let mid = MaterialId::from(KeyData::from_ffi(material));
         let change = self
             .doc
@@ -7621,6 +8649,7 @@ impl Scene {
     /// # Errors
     /// - `UnknownMaterial` — stale or already-deleted material handle.
     pub fn delete_material(&mut self, material: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let mid = MaterialId::from(KeyData::from_ffi(material));
         let change = self.doc.delete_material(mid).map_err(doc_err)?;
         self.reconcile(&change);
@@ -7727,6 +8756,7 @@ impl Scene {
     /// - `UnknownMaterial` — material handle is not in the palette (and is not
     ///   the sentinel).
     pub fn paint_face(&mut self, object: u64, face: u64, material: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let oid = object_id(object);
         let fid = FaceId::from(KeyData::from_ffi(face));
         let mid = material_id_opt(material);
@@ -7751,11 +8781,78 @@ impl Scene {
     /// - `UnknownMaterial` — material handle is not in the palette (and is not
     ///   the sentinel).
     pub fn set_object_material(&mut self, object: u64, material: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let oid = object_id(object);
         let mid = material_id_opt(material);
         let change = self.doc.set_object_material(oid, mid).map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::SetObjectMaterial { object, material });
+        Ok(())
+    }
+
+    /// A live instance's own material, or `u64::MAX` when it has none (or
+    /// the handle is stale or hidden).
+    pub fn instance_material(&self, instance: u64) -> u64 {
+        self.doc
+            .instance_material(instance_id(instance))
+            .flatten()
+            .map_or(u64::MAX, |m| m.data().as_ffi())
+    }
+
+    /// Set a placement's own material (`u64::MAX` clears it): member faces
+    /// show it where neither the face nor its Object's base is painted,
+    /// the nearest painted placement winning. Undoable. World and nested
+    /// placements alike.
+    ///
+    /// Returns the WORLD instances whose drawing changed — the instance
+    /// itself, or for a nested placement every world placement that draws
+    /// it — so the renderer re-pulls each of them, not just the one painted.
+    ///
+    /// # Errors
+    /// - `UnknownInstance` — stale or hidden instance handle.
+    /// - `UnknownMaterial` — material handle is not a live palette entry.
+    pub fn set_instance_material(
+        &mut self,
+        instance: u64,
+        material: u64,
+    ) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
+        let change = self
+            .doc
+            .set_instance_material(instance_id(instance), material_id_opt(material))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetInstanceMaterial { instance, material });
+        Ok(change
+            .instances_touched
+            .iter()
+            .filter(|&&i| self.doc.instance_is_world(i))
+            .map(|i| i.data().as_ffi())
+            .collect())
+    }
+
+    /// Set the base material of every object a definition owns (its
+    /// members and its member groups' leaves; `u64::MAX` clears), as one
+    /// undo entry.
+    ///
+    /// # Errors
+    /// - `UnknownComponent` — stale or hidden definition handle.
+    /// - `UnknownMaterial` — material handle is not a live palette entry.
+    pub fn set_definition_material(
+        &mut self,
+        component: u64,
+        material: u64,
+    ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        let change = self
+            .doc
+            .set_definition_material(component_id(component), material_id_opt(material))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetDefinitionMaterial {
+            component,
+            material,
+        });
         Ok(())
     }
 
@@ -7783,6 +8880,7 @@ impl Scene {
         from: u64,
         to: u64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let scope = if document_wide {
             MaterialScope::Document
         } else {
@@ -7845,6 +8943,7 @@ impl Scene {
         face: u64,
         frame: Option<Vec<f64>>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let oid = object_id(object);
         let fid = FaceId::from(KeyData::from_ffi(face));
         let uv_frame = match &frame {
@@ -7932,6 +9031,7 @@ impl Scene {
         dy: f64,
         dz: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let id = self
             .doc
             .add_guide_line(Point3::new(ox, oy, oz), kernel::Vec3::new(dx, dy, dz))
@@ -7952,6 +9052,7 @@ impl Scene {
     /// # Errors
     /// - `DegenerateGuide` — a non-finite coordinate.
     pub fn add_guide_point(&mut self, x: f64, y: f64, z: f64) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let id = self
             .doc
             .add_guide_point(Point3::new(x, y, z))
@@ -7970,6 +9071,7 @@ impl Scene {
     /// # Errors
     /// - `UnknownGuide` — stale, already-hidden, or foreign handle.
     pub fn delete_guide(&mut self, guide: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.delete_guide(guide_id(guide)).map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DeleteGuide { guide });
@@ -7980,6 +9082,7 @@ impl Scene {
     /// step (Edit ▸ Delete Guide Lines). A no-op (and not a separate undo
     /// entry) when there are no guides.
     pub fn delete_all_guides(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.delete_all_guides().map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DeleteAllGuides);
@@ -8135,6 +9238,7 @@ impl Scene {
         plane: &[f64],
         text_override: Option<String>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let a = Anchor {
             node: anchor_node(a_node_kind, a_node_id)?,
             point: point3(a_point)?,
@@ -8189,6 +9293,7 @@ impl Scene {
         leader_dir: &[f64],
         text_override: Option<String>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let anchor = Anchor {
             node: anchor_node(anchor_node_kind, anchor_node_id)?,
             point: point3(anchor_point)?,
@@ -8241,6 +9346,7 @@ impl Scene {
         offset: &[f64],
         text: String,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let anchor = Anchor {
             node: anchor_node(anchor_node_kind, anchor_node_id)?,
             point: point3(anchor_point)?,
@@ -8290,6 +9396,7 @@ impl Scene {
         plane: &[f64],
         text_override: Option<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let a = Anchor {
             node: anchor_node(a_node_kind, a_node_id)?,
             point: point3(a_point)?,
@@ -8349,6 +9456,7 @@ impl Scene {
         leader_dir: &[f64],
         text_override: Option<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let anchor = Anchor {
             node: anchor_node(anchor_node_kind, anchor_node_id)?,
             point: point3(anchor_point)?,
@@ -8404,6 +9512,7 @@ impl Scene {
         offset: &[f64],
         text: String,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let anchor = Anchor {
             node: anchor_node(anchor_node_kind, anchor_node_id)?,
             point: point3(anchor_point)?,
@@ -8436,6 +9545,7 @@ impl Scene {
     /// # Errors
     /// - `UnknownAnnotation` — stale, hidden, or foreign handle.
     pub fn delete_annotation(&mut self, id: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .delete_annotation(annotation_id(id))
@@ -8627,6 +9737,7 @@ impl Scene {
     /// # Errors
     /// Throws a `"DAE: <message>"` `JsError` on parse failure.
     pub fn import_dae(&mut self, dae_bytes: &[u8], images: JsValue) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         // ── 1. Parse the images JS object into an ImageMap ────────────────────
         let mut image_map: ImageMap = ImageMap::new();
         if !images.is_null() && !images.is_undefined() {
@@ -8719,6 +9830,7 @@ impl Scene {
     /// # Errors
     /// Throws a `"glTF: <message>"` `JsError` on parse failure.
     pub fn import_gltf(&mut self, gltf_bytes: &[u8]) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         let (report, warnings) = self
             .import_gltf_core(gltf_bytes)
             .map_err(|e| JsError::new(&e.0))?;
@@ -8767,6 +9879,7 @@ impl Scene {
     /// SketchUp, or "Save As ▸ SketchUp Version 2017") baked into the
     /// message.
     pub fn import_skp(&mut self, skp_bytes: &[u8]) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         let (report, warnings) = self
             .import_skp_core(skp_bytes)
             .map_err(|e| JsError::new(&e.0))?;
@@ -8783,6 +9896,7 @@ impl Scene {
     /// # Errors
     /// As [`Scene::import_skp`].
     pub fn open_skp(&mut self, skp_bytes: Vec<u8>) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         self.open_skp_begin(skp_bytes)?;
         loop {
             let progress = self.open_skp_step(f64::INFINITY)?;
@@ -8809,6 +9923,7 @@ impl Scene {
     /// file for saving back, and `"done"` with the open report under
     /// `report`. See [`Scene::open_skp`] for what an open is.
     pub fn open_skp_begin(&mut self, skp_bytes: Vec<u8>) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         // (Taken by value: the bytes cross into wasm memory once and the
         // save-back source keeps that copy, rather than a second one — on
         // a 400 MB file the difference is a good part of what the browser
@@ -8840,6 +9955,7 @@ impl Scene {
     /// open report. An error (a recipe the kernel refuses) ends the open
     /// with nothing pending.
     pub fn open_skp_step(&mut self, budget_ms: f64) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         let Some(mut pending) = self.pending_open.take() else {
             return Err(JsError::new("SKP: no open under way"));
         };
@@ -9023,6 +10139,10 @@ impl Scene {
         units: Option<String>,
         units_named: Option<bool>,
     ) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
+        // A SketchUp file has no slot for the document id, but the save
+        // mints it on the document anyway so the next `.hew` save keeps it.
+        self.doc.ensure_document_id(live::random_16());
         let units = match skp_units(units.as_deref()) {
             None => skp_export::SaveUnits::Keep,
             Some(u) if units_named == Some(true) => skp_export::SaveUnits::Set(u),
@@ -9132,6 +10252,7 @@ impl Scene {
         unit_scale: f64,
         name: Option<String>,
     ) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         let (report, warnings) = self
             .import_stl_core(stl_bytes, unit_scale, name)
             .map_err(|e| JsError::new(&e.0))?;
@@ -9213,6 +10334,7 @@ impl Scene {
         v: &[f64],
         width: f64,
     ) -> Result<JsValue, ApiError> {
+        self.ensure_not_busy()?;
         let placed = self.place_image_core(image, format, name, origin, u, v, width)?;
         let out = JsObject::new();
         let set = |k: &str, v: JsValue| {
@@ -9344,8 +10466,28 @@ impl Scene {
     /// interrupt an edit to save — autosave included.
     ///
     /// wasm-bindgen marshals `Vec<u8>` to a JS `Uint8Array`.
+    ///
+    /// Never mints the document id: the app calls
+    /// [`Scene::ensure_document_id`] first on the paths that write a file
+    /// (Save, Save As, a copy, Open on Phone), and not for its other uses
+    /// of these bytes (the blank snapshot, autosave, bug reports).
     pub fn save(&self) -> Vec<u8> {
         self.doc.save_for_persistence()
+    }
+
+    /// Mints the document's persistent id (docs/dev/HEW_FILE_FORMAT.md §2
+    /// `document_id`) from `crypto.getRandomValues` if it has none, and
+    /// returns it as lowercase hyphenated UUID text. Idempotent: a
+    /// document's id never changes once set. Not undoable, and not a
+    /// document edit (nothing is recorded, nothing turns dirty).
+    pub fn ensure_document_id(&mut self) -> String {
+        self.doc.ensure_document_id(live::random_16())
+    }
+
+    /// The document's persistent id, or `undefined` until the first save
+    /// mints one ([`Scene::ensure_document_id`]).
+    pub fn document_id(&self) -> Option<String> {
+        self.doc.document_id()
     }
 
     // ------------------------------------------------------------- library
@@ -9429,9 +10571,12 @@ impl Scene {
 
     /// The whole document as a library "model item": a plain save (open
     /// sessions transparently closed, exactly like [`Scene::save`]) with
-    /// `meta_json` stamped into the `hew.library` document attrs.
+    /// `meta_json` stamped into the `hew.library` document attrs, and
+    /// without the document id (the item is a separate document).
     pub fn extract_document_item(&self, meta_json: Option<String>) -> Result<Vec<u8>, ApiError> {
-        let mut item = Document::load(&self.doc.save_for_persistence())
+        // Without the document id: an item is a new document, and every
+        // document opened from it must not share this one's identity.
+        let mut item = Document::load(&self.doc.save_for_persistence_without_document_id())
             .map_err(|e: LoadError| api_err(&e, &e))?;
         apply_library_meta(&mut item, meta_json.as_deref())?;
         Ok(item.save())
@@ -9478,6 +10623,7 @@ impl Scene {
         source_id: Option<String>,
         content_hash: Option<String>,
     ) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         let report = self
             .insert_item_core(bytes, affine, source_id, content_hash)
             .map_err(|e| JsError::new(&e.0))?;
@@ -9528,6 +10674,7 @@ impl Scene {
     /// content-equal, fresh ones otherwise). Not undoable on its own,
     /// matching [`Scene::add_material`].
     pub fn insert_item_palette(&mut self, bytes: &[u8]) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         self.insert_item_palette_core(bytes)
     }
 
@@ -9575,6 +10722,7 @@ impl Scene {
         content_hash: &str,
         def_sid: Option<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.stamp_library_source_core(kinds, ids, source_id, content_hash, def_sid)
     }
 
@@ -9797,7 +10945,7 @@ impl Scene {
     ///
     /// [`Recording`]: recording::Recording
     pub fn replay(&mut self, json: &str) -> Result<u64, ApiError> {
-        use recording::RecordedCall::*;
+        self.ensure_not_busy()?;
         let rec: recording::Recording = serde_json::from_str(json)
             .map_err(|e| ApiError::new("REPLAY", &format!("malformed recording: {e}")))?;
         if rec.version != recording::RECORDING_FORMAT_VERSION {
@@ -9813,1079 +10961,1164 @@ impl Scene {
         // Opened on the first recorded API envelope, if any — a
         // recording with none pays nothing.
         let mut replay_conn: Option<u32> = None;
-        recording::without_capture(|| {
-            for call in rec.calls {
-                match call {
-                    BeginGroundSketch => {
-                        self.begin_ground_sketch();
-                    }
-                    BeginSketchOnPlane {
-                        px,
-                        py,
-                        pz,
-                        nx,
-                        ny,
-                        nz,
-                    } => {
-                        self.begin_sketch_on_plane(px, py, pz, nx, ny, nz)?;
-                    }
-                    SketchAddSegment { sketch, a, b } => {
-                        self.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])?;
-                    }
-                    SketchRemoveEdge { sketch, edge } => {
-                        self.sketch_remove_edge(sketch, edge)?;
-                    }
-                    SketchBeginGesture { sketch } => {
-                        self.sketch_begin_gesture(sketch)?;
-                    }
-                    SketchBeginCurve { sketch } => {
-                        self.sketch_begin_curve(sketch)?;
-                    }
-                    SketchBeginCurveWith {
-                        sketch,
-                        center,
-                        radius,
-                    } => {
-                        self.sketch_begin_curve_with(
-                            sketch, center[0], center[1], center[2], radius,
-                        )?;
-                    }
-                    SketchBeginPolygonWith {
-                        sketch,
-                        center,
-                        radius,
-                    } => {
-                        self.sketch_begin_polygon_with(
-                            sketch, center[0], center[1], center[2], radius,
-                        )?;
-                    }
-                    SketchRefacetCurve {
-                        sketch,
-                        curve,
-                        segments,
-                    } => {
-                        self.sketch_refacet_curve(sketch, curve, segments)?;
-                    }
-                    SketchEndCurve { sketch } => {
-                        self.sketch_end_curve(sketch)?;
-                    }
-                    SketchEndGesture { sketch } => {
-                        self.sketch_end_gesture(sketch)?;
-                    }
-                    SketchCancelGesture => {
-                        self.sketch_cancel_gesture();
-                    }
-                    ExtrudeRegion {
-                        sketch,
-                        region,
-                        distance,
-                    } => {
-                        self.extrude_region(sketch, region, distance)?;
-                    }
-                    FollowMeAlongEdges {
-                        sketch,
-                        region,
-                        path_sketch,
-                        path_edges,
-                        stop_len,
-                        group,
-                    } => {
-                        self.follow_me_along_edges(
-                            sketch,
-                            region,
-                            path_sketch,
-                            path_edges,
-                            stop_len,
-                            group,
-                        )?;
-                    }
-                    FollowMeAroundFace {
-                        sketch,
-                        region,
-                        path_object,
-                        path_face,
-                        stop_len,
-                        group,
-                    } => {
-                        self.follow_me_around_face(
-                            sketch,
-                            region,
-                            path_object,
-                            path_face,
-                            stop_len,
-                            group,
-                        )?;
-                    }
-                    FollowMeAroundInstanceFace {
-                        sketch,
-                        region,
-                        instance,
-                        path_object,
-                        path_face,
-                        stop_len,
-                    } => {
-                        self.follow_me_around_instance_face(
-                            sketch,
-                            region,
-                            instance,
-                            path_object,
-                            path_face,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeMergedAroundFace {
-                        sketch,
-                        region,
-                        path_object,
-                        path_face,
-                        stop_len,
-                    } => {
-                        self.follow_me_merged_around_face(
-                            sketch,
-                            region,
-                            path_object,
-                            path_face,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeFaceAlongEdges {
-                        profile_object,
-                        profile_face,
-                        path_sketch,
-                        path_edges,
-                        stop_len,
-                    } => {
-                        self.follow_me_face_along_edges(
-                            profile_object,
-                            profile_face,
-                            path_sketch,
-                            path_edges,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeFaceAroundFace {
-                        profile_object,
-                        profile_face,
-                        path_object,
-                        path_face,
-                        stop_len,
-                    } => {
-                        self.follow_me_face_around_face(
-                            profile_object,
-                            profile_face,
-                            path_object,
-                            path_face,
-                            stop_len,
-                        )?;
-                    }
-                    SketchOffsetRegion {
-                        sketch,
-                        region,
-                        distance,
-                    } => {
-                        self.sketch_offset_region(sketch, region, distance)?;
-                    }
-                    Boolean { op, a, b } => {
-                        self.boolean(op, a, b)?;
-                    }
-                    BooleanNodes {
-                        op,
-                        a_kind,
-                        a,
-                        b_kind,
-                        b,
-                    } => {
-                        self.boolean_nodes(op, a_kind, a, b_kind, b)?;
-                    }
-                    GroupNodes { kinds, ids } => {
-                        self.group_nodes(&kinds, &ids)?;
-                    }
-                    DuplicateNode { kind, id, affine } => {
-                        self.duplicate_node(kind, id, &affine)?;
-                    }
-                    SliceObject { object, plane } => {
-                        self.slice_object(object, &plane)?;
-                    }
-                    TransformObject { object, affine } => {
-                        self.transform_object(object, &affine)?;
-                    }
-                    TransformSelection {
-                        kinds,
-                        ids,
-                        sketches,
-                        affine,
-                    } => {
-                        self.transform_selection(&kinds, &ids, &sketches, &affine)?;
-                    }
-                    RescaleDocument { factor } => {
-                        self.rescale_document(factor)?;
-                    }
-                    DeleteNode { kind, id } => {
-                        self.delete_node(kind, id)?;
-                    }
-                    DuplicateSelectionArray {
-                        kinds,
-                        ids,
-                        affine,
-                        count,
-                    } => {
-                        self.duplicate_selection_array(&kinds, &ids, &affine, count)?;
-                    }
-                    PushPull {
-                        object,
-                        face,
-                        distance,
-                    } => {
-                        self.push_pull(object, face, distance)?;
-                    }
-                    ExtrudeFaceAsNewObject {
-                        object,
-                        face,
-                        distance,
-                    } => {
-                        self.extrude_face_as_new_object(object, face, distance)?;
-                    }
-                    SceneUndo => {
-                        self.scene_undo()?;
-                    }
-                    SceneRedo => {
-                        self.scene_redo()?;
-                    }
-                    TransformSketch { sketch, affine } => {
-                        self.transform_sketch(sketch, &affine)?;
-                    }
-                    TransformSketchIsland {
-                        sketch,
-                        island,
-                        affine,
-                    } => {
-                        self.transform_sketch_island(sketch, island, &affine)?;
-                    }
-                    TransformSketchIslands {
-                        sketch,
-                        islands,
-                        affine,
-                    } => {
-                        self.transform_sketch_islands(sketch, &islands, &affine)?;
-                    }
-                    CopySketchIslands {
-                        sketch,
-                        islands,
-                        affine,
-                    } => {
-                        self.copy_sketch_islands(sketch, &islands, &affine)?;
-                    }
-                    MoveSketchVertex { sketch, vertex, p } => {
-                        self.move_sketch_vertex(sketch, vertex, p[0], p[1], p[2])?;
-                    }
-                    Ungroup { group } => {
-                        self.ungroup(group)?;
-                    }
-                    DeleteSketch { sketch } => {
-                        self.delete_sketch(sketch)?;
-                    }
-                    TransformGroup { group, affine } => {
-                        self.transform_group(group, &affine)?;
-                    }
-                    MakeComponent { kinds, ids } => {
-                        self.make_component(&kinds, &ids)?;
-                    }
-                    PlaceInstance { component, affine } => {
-                        self.place_instance(component, &affine)?;
-                    }
-                    PlaceText {
-                        sketch,
-                        regions,
-                        distance,
-                        name,
-                        group,
-                    } => {
-                        self.place_text(sketch, regions, distance, name, group)?;
-                    }
-                    TransformInstance { instance, affine } => {
-                        self.transform_instance(instance, &affine)?;
-                    }
-                    ExplodeInstance { instance } => {
-                        self.explode_instance(instance)?;
-                    }
-                    MakeUnique { instance } => {
-                        self.make_unique(instance)?;
-                    }
-                    OpenExplodeSession { instance } => {
-                        self.open_explode_session(instance)?;
-                    }
-                    CloseExplodeSession => {
-                        self.close_explode_session()?;
-                    }
-                    OpenGroupSession { group } => {
-                        self.open_group_session(group)?;
-                    }
-                    CloseGroupSession => {
-                        self.close_group_session()?;
-                    }
-                    RescaleSession { factor, anchor } => {
-                        self.rescale_session(factor, anchor[0], anchor[1], anchor[2])?;
-                    }
-                    PushPullInComponent {
-                        instance,
-                        object,
-                        face,
-                        distance,
-                    } => {
-                        self.push_pull_in_component(instance, object, face, distance)?;
-                    }
-                    BeginSketchOnPlaneInInstance {
-                        instance,
-                        px,
-                        py,
-                        pz,
-                        nx,
-                        ny,
-                        nz,
-                    } => {
-                        self.begin_sketch_on_plane_in_instance(instance, px, py, pz, nx, ny, nz)?;
-                    }
-                    ExtrudeRegionInInstance {
-                        instance,
-                        sketch,
-                        region,
-                        distance,
-                    } => {
-                        self.extrude_region_in_instance(instance, sketch, region, distance)?;
-                    }
-                    DeleteDefMember { component, object } => {
-                        self.delete_def_member(component, object)?;
-                    }
-                    CapRims { object, rims } => {
-                        self.cap_rims(object, rims)?;
-                    }
-                    DeleteFaces { object, faces } => {
-                        self.delete_faces(object, faces)?;
-                    }
-                    SetAcceptedSurface { object, accepted } => {
-                        self.set_accepted_surface(object, accepted)?;
-                    }
-                    ThickenSheet { object, start, end } => {
-                        self.thicken_sheet(object, start, end)?;
-                    }
-                    ThickenSheetInInstance {
-                        instance,
-                        object,
-                        distance,
-                    } => {
-                        self.thicken_sheet_in_instance(instance, object, distance)?;
-                    }
-                    DeleteDefinition { component } => {
-                        self.delete_definition(component)?;
-                    }
-                    PurgeUnused => {
-                        self.purge_unused()?;
-                    }
-                    SetNodeName { kind, id, name } => {
-                        self.set_node_name(kind, id, name)?;
-                    }
-                    AddNodeTag { kind, id, path } => {
-                        self.add_node_tag(kind, id, path)?;
-                    }
-                    RenameTag { path, new_path } => {
-                        self.rename_tag(path, new_path)?;
-                    }
-                    RemoveNodeTag { kind, id, path } => {
-                        self.remove_node_tag(kind, id, path)?;
-                    }
-                    AddNodeTagMany { kinds, ids, path } => {
-                        self.add_node_tag_many(&kinds, &ids, path)?;
-                    }
-                    RemoveNodeTagMany { kinds, ids, path } => {
-                        self.remove_node_tag_many(&kinds, &ids, path)?;
-                    }
-                    SetTagHidden { path, hidden } => {
-                        self.set_tag_hidden(path, hidden);
-                    }
-                    DeleteTag { path } => {
-                        self.delete_tag(path)?;
-                    }
-                    SetNodeUserHidden { kind, id, hidden } => {
-                        self.set_node_user_hidden(kind, id, hidden)?;
-                    }
-                    SetCameraState {
-                        projection,
-                        fov_deg,
-                        parallel_height,
-                        eye,
-                        target,
-                        up,
-                    } => {
-                        let parallel_height = parallel_height.unwrap_or_else(|| {
-                            kernel::CameraState::height_at_target(
-                                Point3::new(eye[0], eye[1], eye[2]),
-                                Point3::new(target[0], target[1], target[2]),
-                                fov_deg,
-                            )
-                        });
-                        self.set_camera_state(
-                            &projection,
-                            fov_deg,
-                            parallel_height,
-                            Box::new(eye),
-                            Box::new(target),
-                            Box::new(up),
-                        )?;
-                    }
-                    SetSectionPlane {
-                        origin,
-                        normal,
-                        active,
-                    } => {
-                        self.set_section_plane(
-                            origin[0], origin[1], origin[2], normal[0], normal[1], normal[2],
-                            active,
-                        )?;
-                    }
-                    ClearSectionPlane => {
-                        self.clear_section_plane();
-                    }
-                    SetViewStyle { json } => {
-                        self.set_view_style_json(json)?;
-                    }
-                    AddScene {
-                        name,
-                        props,
-                        camera_json,
-                        display_json,
-                        after,
-                    } => {
-                        self.add_scene(name, props, camera_json, display_json, after)?;
-                    }
-                    UpdateScene {
-                        sid,
-                        props,
-                        camera_json,
-                        display_json,
-                    } => {
-                        self.update_scene(sid, props, camera_json, display_json)?;
-                    }
-                    SetSceneProps {
-                        sid,
-                        props,
-                        camera_json,
-                        display_json,
-                    } => {
-                        self.set_scene_props(sid, props, camera_json, display_json)?;
-                    }
-                    RenameScene { sid, name } => {
-                        self.rename_scene(sid, name)?;
-                    }
-                    SetSceneDescription { sid, text } => {
-                        self.set_scene_description(sid, text)?;
-                    }
-                    MoveScene { sid, index } => {
-                        self.move_scene(sid, index)?;
-                    }
-                    RemoveScene { sid } => {
-                        self.remove_scene(sid)?;
-                    }
-                    ApplyScene { sid } => {
-                        self.apply_scene(sid)?;
-                    }
-                    AddMaterial { name, r, g, b, a } => {
-                        self.add_material(name, r, g, b, a);
-                    }
-                    AddTextureMaterial {
-                        name,
-                        r,
-                        g,
-                        b,
-                        a,
-                        image,
-                        format,
-                        world_w,
-                        world_h,
-                    } => {
-                        self.add_texture_material(
-                            name, r, g, b, a, &image, format, world_w, world_h,
-                        )?;
-                    }
-                    SetMaterialAlpha { material, alpha } => {
-                        self.set_material_alpha(material, alpha)?;
-                    }
-                    SetMaterialName { material, name } => {
-                        self.set_material_name(material, name)?;
-                    }
-                    DeleteMaterial { material } => {
-                        self.delete_material(material)?;
-                    }
-                    PaintFace {
-                        object,
-                        face,
-                        material,
-                    } => {
-                        self.paint_face(object, face, material)?;
-                    }
-                    SetObjectMaterial { object, material } => {
-                        self.set_object_material(object, material)?;
-                    }
-                    ReplaceMaterial {
-                        document_wide,
-                        scope_object,
-                        from,
-                        to,
-                    } => {
-                        self.replace_material(document_wide, scope_object, from, to)?;
-                    }
-                    SetFaceUvFrame {
-                        object,
-                        face,
-                        frame,
-                    } => {
-                        self.set_face_uv_frame(object, face, frame.map(uv_frame_recorded_to_vec))?;
-                    }
-                    AddGuideLine { origin, dir } => {
-                        self.add_guide_line(
-                            origin[0], origin[1], origin[2], dir[0], dir[1], dir[2],
-                        )?;
-                    }
-                    AddGuidePoint { p } => {
-                        self.add_guide_point(p[0], p[1], p[2])?;
-                    }
-                    DeleteGuide { guide } => {
-                        self.delete_guide(guide)?;
-                    }
-                    DeleteAllGuides => {
-                        self.delete_all_guides()?;
-                    }
-                    AddLinearDimension {
-                        a_node_kind,
-                        a_node_id,
-                        a_point,
-                        b_node_kind,
-                        b_node_id,
-                        b_point,
-                        offset,
-                        plane,
-                        text_override,
-                    } => {
-                        self.add_linear_dimension(
-                            a_node_kind,
-                            a_node_id,
-                            &a_point,
-                            b_node_kind,
-                            b_node_id,
-                            &b_point,
-                            &offset,
-                            &plane,
-                            text_override,
-                        )?;
-                    }
-                    AddRadialDimension {
-                        anchor_node_kind,
-                        anchor_node_id,
-                        anchor_point,
-                        kind,
-                        curve_center,
-                        curve_radius,
-                        curve_plane,
-                        leader_dir,
-                        text_override,
-                    } => {
-                        self.add_radial_dimension(
-                            anchor_node_kind,
-                            anchor_node_id,
-                            &anchor_point,
-                            &kind,
-                            &curve_center,
-                            curve_radius,
-                            &curve_plane,
-                            &leader_dir,
-                            text_override,
-                        )?;
-                    }
-                    AddLeaderText {
-                        anchor_node_kind,
-                        anchor_node_id,
-                        anchor_point,
-                        offset,
-                        text,
-                    } => {
-                        self.add_leader_text(
-                            anchor_node_kind,
-                            anchor_node_id,
-                            &anchor_point,
-                            &offset,
-                            text,
-                        )?;
-                    }
-                    UpdateLinearDimension {
-                        id,
-                        a_node_kind,
-                        a_node_id,
-                        a_point,
-                        b_node_kind,
-                        b_node_id,
-                        b_point,
-                        offset,
-                        plane,
-                        text_override,
-                    } => {
-                        self.update_linear_dimension(
-                            id,
-                            a_node_kind,
-                            a_node_id,
-                            &a_point,
-                            b_node_kind,
-                            b_node_id,
-                            &b_point,
-                            &offset,
-                            &plane,
-                            text_override,
-                        )?;
-                    }
-                    UpdateRadialDimension {
-                        id,
-                        anchor_node_kind,
-                        anchor_node_id,
-                        anchor_point,
-                        kind,
-                        curve_center,
-                        curve_radius,
-                        curve_plane,
-                        leader_dir,
-                        text_override,
-                    } => {
-                        self.update_radial_dimension(
-                            id,
-                            anchor_node_kind,
-                            anchor_node_id,
-                            &anchor_point,
-                            &kind,
-                            &curve_center,
-                            curve_radius,
-                            &curve_plane,
-                            &leader_dir,
-                            text_override,
-                        )?;
-                    }
-                    UpdateLeaderText {
-                        id,
-                        anchor_node_kind,
-                        anchor_node_id,
-                        anchor_point,
-                        offset,
-                        text,
-                    } => {
-                        self.update_leader_text(
-                            id,
-                            anchor_node_kind,
-                            anchor_node_id,
-                            &anchor_point,
-                            &offset,
-                            text,
-                        )?;
-                    }
-                    DeleteAnnotation { id } => {
-                        self.delete_annotation(id)?;
-                    }
-                    InsertItem {
-                        bytes,
-                        affine,
-                        source_id,
-                        content_hash,
-                    } => {
-                        self.insert_item_core(&bytes, &affine, source_id, content_hash)?;
-                    }
-                    InsertItemPalette { bytes } => {
-                        self.insert_item_palette_core(&bytes)?;
-                    }
-                    StampLibrarySource {
-                        kinds,
-                        ids,
-                        source_id,
-                        content_hash,
-                        def_sid,
-                    } => {
-                        self.stamp_library_source_core(
-                            &kinds,
-                            &ids,
-                            &source_id,
-                            &content_hash,
-                            def_sid,
-                        )?;
-                    }
-                    ImportDae { bytes, images } => {
-                        let mut image_map: ImageMap = ImageMap::new();
-                        for img in images {
-                            let format = if img.format == 1 {
-                                ImageFormat::Jpeg
-                            } else {
-                                ImageFormat::Png
-                            };
-                            image_map.insert(img.uri, (img.bytes, format));
-                        }
-                        self.import_dae_core(&bytes, &image_map)?;
-                    }
-                    ImportGltf { bytes } => {
-                        self.import_gltf_core(&bytes)?;
-                    }
-                    ImportSkp { bytes } => {
-                        self.import_skp_core(&bytes)?;
-                    }
-                    ImportOmitted { of, len } => {
-                        return Err(ApiError(format!(
-                            "recording cannot replay {of}: its {len}-byte source file was \
-                             too large to embed"
-                        )));
-                    }
-                    ImportStl {
-                        bytes,
-                        unit_scale,
-                        name,
-                    } => {
-                        self.import_stl_core(&bytes, unit_scale, name)?;
-                    }
-                    PlaceImage {
-                        image,
-                        format,
-                        name,
-                        origin,
-                        u,
-                        v,
-                        width,
-                    } => {
-                        self.place_image_core(&image, format, name, &origin, &u, &v, width)?;
-                    }
-                    SetAxes { origin, x, y } => {
-                        self.set_axes(
-                            origin[0], origin[1], origin[2], x[0], x[1], x[2], y[0], y[1], y[2],
-                        )?;
-                    }
-                    Load { bytes } => {
-                        self.load_core(&bytes)?;
-                    }
-                    FollowMeAlongEdgesInInstance {
-                        instance,
-                        sketch,
-                        region,
-                        path_sketch,
-                        path_edges,
-                        stop_len,
-                    } => {
-                        self.follow_me_along_edges_in_instance(
-                            instance,
-                            sketch,
-                            region,
-                            path_sketch,
-                            path_edges,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeAroundFaceInInstance {
-                        instance,
-                        sketch,
-                        region,
-                        path_object,
-                        path_face,
-                        stop_len,
-                    } => {
-                        self.follow_me_around_face_in_instance(
-                            instance,
-                            sketch,
-                            region,
-                            path_object,
-                            path_face,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeMergedAroundFaceInInstance {
-                        instance,
-                        sketch,
-                        region,
-                        path_object,
-                        path_face,
-                        stop_len,
-                    } => {
-                        self.follow_me_merged_around_face_in_instance(
-                            instance,
-                            sketch,
-                            region,
-                            path_object,
-                            path_face,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeFaceAlongEdgesInInstance {
-                        instance,
-                        profile_object,
-                        profile_face,
-                        path_sketch,
-                        path_edges,
-                        stop_len,
-                    } => {
-                        self.follow_me_face_along_edges_in_instance(
-                            instance,
-                            profile_object,
-                            profile_face,
-                            path_sketch,
-                            path_edges,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeFaceAroundFaceInInstance {
-                        instance,
-                        profile_object,
-                        profile_face,
-                        path_object,
-                        path_face,
-                        stop_len,
-                    } => {
-                        self.follow_me_face_around_face_in_instance(
-                            instance,
-                            profile_object,
-                            profile_face,
-                            path_object,
-                            path_face,
-                            stop_len,
-                        )?;
-                    }
-                    BooleanInComponent {
-                        component,
-                        op,
-                        a,
-                        b,
-                    } => {
-                        self.boolean_in_component(component, op, a, b)?;
-                    }
-                    SliceDefMember {
-                        instance,
-                        object,
-                        plane,
-                    } => {
-                        self.slice_def_member(instance, object, &plane)?;
-                    }
-                    TransformDefMember {
-                        instance,
-                        object,
-                        affine,
-                    } => {
-                        self.transform_def_member(instance, object, &affine)?;
-                    }
-                    TransformDefSketch {
-                        instance,
-                        sketch,
-                        affine,
-                    } => {
-                        self.transform_def_sketch(instance, sketch, &affine)?;
-                    }
-                    TransformDefSketchIsland {
-                        instance,
-                        sketch,
-                        island,
-                        affine,
-                    } => {
-                        self.transform_def_sketch_island(instance, sketch, island, &affine)?;
-                    }
-                    TransformDefSelection {
-                        instance,
-                        objects,
-                        sketches,
-                        island_sketches,
-                        islands,
-                        affine,
-                    } => {
-                        self.transform_def_selection(
-                            instance,
-                            &objects,
-                            &sketches,
-                            &island_sketches,
-                            &islands,
-                            &affine,
-                        )?;
-                    }
-                    DraftBeginPlane {
-                        draft,
-                        px,
-                        py,
-                        pz,
-                        nx,
-                        ny,
-                        nz,
-                        label,
-                    } => {
-                        self.draft_set_next_handle(draft);
-                        self.draft_begin_plane(px, py, pz, nx, ny, nz, &label)?;
-                    }
-                    DraftBeginPlaneInInstance {
-                        draft,
-                        instance,
-                        px,
-                        py,
-                        pz,
-                        nx,
-                        ny,
-                        nz,
-                        label,
-                    } => {
-                        self.draft_set_next_handle(draft);
-                        self.draft_begin_plane_in_instance(
-                            instance, px, py, pz, nx, ny, nz, &label,
-                        )?;
-                    }
-                    DraftBeginFace {
-                        draft,
-                        object,
-                        face,
-                        label,
-                    } => {
-                        self.draft_set_next_handle(draft);
-                        self.draft_begin_face(object, face, &label)?;
-                    }
-                    DraftBeginFaceInInstance {
-                        draft,
-                        instance,
-                        object,
-                        face,
-                        label,
-                    } => {
-                        self.draft_set_next_handle(draft);
-                        self.draft_begin_face_in_instance(instance, object, face, &label)?;
-                    }
-                    DraftBeginSketch {
-                        draft,
-                        sketch,
-                        label,
-                    } => {
-                        self.draft_set_next_handle(draft);
-                        self.draft_begin_sketch(sketch, &label)?;
-                    }
-                    DraftBeginCtx { draft, ctx, label } => {
-                        self.draft_set_next_handle(draft);
-                        self.draft_begin_ctx(&ctx, &label)?;
-                    }
-                    DraftEnd { draft } => {
-                        self.draft_end(draft)?;
-                    }
-                    DraftCancel { draft } => {
-                        self.draft_cancel(draft);
-                    }
-                    DraftAddSegment { draft, a, b } => {
-                        self.draft_add_segment(draft, a[0], a[1], a[2], b[0], b[1], b[2])?;
-                    }
-                    DraftBeginCurveWith {
-                        draft,
-                        center,
-                        radius,
-                    } => {
-                        self.draft_begin_curve_with(draft, &center, radius)?;
-                    }
-                    DraftBeginPolygonWith {
-                        draft,
-                        center,
-                        radius,
-                    } => {
-                        self.draft_begin_polygon_with(draft, &center, radius)?;
-                    }
-                    DraftBeginCurve { draft } => {
-                        self.draft_begin_curve(draft)?;
-                    }
-                    HistoryBracketOpen => {
-                        self.history_bracket_open()?;
-                    }
-                    HistoryBracketCommit { label } => {
-                        self.history_bracket_commit(&label)?;
-                    }
-                    HistoryBracketAbort => {
-                        self.history_bracket_abort();
-                    }
-                    DraftEndCurve { draft } => {
-                        self.draft_end_curve(draft)?;
-                    }
-                    DraftRemoveEdges { draft, keys } => {
-                        self.draft_remove_edges(draft, &keys)?;
-                    }
-                    DraftTransformEdges {
-                        draft,
-                        keys,
-                        affine,
-                    } => {
-                        self.draft_transform_edges(draft, &keys, &affine)?;
-                    }
-                    DraftCopyEdges {
-                        draft,
-                        keys,
-                        affine,
-                    } => {
-                        self.draft_copy_edges(draft, &keys, &affine)?;
-                    }
-                    DraftMoveVertex { draft, at, to } => {
-                        self.draft_move_vertex(draft, at[0], at[1], at[2], to[0], to[1], to[2])?;
-                    }
-                    DraftOffsetRegion {
-                        draft,
-                        region,
-                        distance,
-                    } => {
-                        self.draft_offset_region(draft, region, distance)?;
-                    }
-                    DraftRefacetCurve {
-                        draft,
-                        curve,
-                        segments,
-                    } => {
-                        self.draft_refacet_curve(draft, curve, segments)?;
-                    }
-                    ApiDispatch { frame } => {
-                        // Replayed through a real connection, so the
-                        // envelope takes exactly the path it took live —
-                        // including the transaction bracket that makes it
-                        // one compound undo entry. The connection is
-                        // opened lazily and primed once: only mutating
-                        // frames are recorded, and the handshake that
-                        // precedes them is read-only, so it is never in
-                        // the stream and has to be synthesized here.
-                        let conn = match replay_conn {
-                            Some(id) => id,
-                            None => {
-                                let id = self.api_connection_open();
-                                self.api_dispatch(
-                                    id,
-                                    r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
-                                );
-                                self.api_dispatch(
-                                    id,
-                                    r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
-                                );
-                                replay_conn = Some(id);
-                                id
-                            }
-                        };
-                        let reply = self.api_dispatch(conn, &frame);
-                        // A frame is only ever recorded once it has
-                        // succeeded, so a refusal here means the replay
-                        // has already diverged from the session — fail
-                        // loudly rather than hand back a wrong hash.
-                        if let Some(reply) = reply
-                            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&reply)
-                            && let Some(err) = value.get("error")
-                        {
-                            return Err(ApiError::new(
-                                "REPLAY",
-                                &format!("recorded API envelope was refused on replay: {err}"),
-                            ));
-                        }
-                    }
-                    DeleteSelection { kinds, ids } => {
-                        self.delete_selection(&kinds, &ids)?;
-                    }
-                    ReparentNodes { kinds, ids, group } => {
-                        self.reparent_nodes(&kinds, &ids, group)?;
-                    }
-                }
-            }
-            Ok(())
-        })?;
+        let replayed =
+            recording::without_capture(|| self.replay_calls(rec.calls, &mut replay_conn));
         if let Some(id) = replay_conn {
             self.api_connection_close(id);
         }
+        replayed?;
         Ok(self.doc.state_hash())
+    }
+
+    /// Re-issues recorded `calls` in order ([`Scene::replay`]). API
+    /// envelopes go through `replay_conn`, opened on first use.
+    fn replay_calls(
+        &mut self,
+        calls: Vec<recording::RecordedCall>,
+        replay_conn: &mut Option<u32>,
+    ) -> Result<(), ApiError> {
+        use recording::RecordedCall::*;
+        for call in calls {
+            match call {
+                BeginGroundSketch => {
+                    self.begin_ground_sketch()?;
+                }
+                BeginSketchOnPlane {
+                    px,
+                    py,
+                    pz,
+                    nx,
+                    ny,
+                    nz,
+                } => {
+                    self.begin_sketch_on_plane(px, py, pz, nx, ny, nz)?;
+                }
+                SketchAddSegment { sketch, a, b } => {
+                    self.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])?;
+                }
+                SketchRemoveEdge { sketch, edge } => {
+                    self.sketch_remove_edge(sketch, edge)?;
+                }
+                SketchBeginGesture { sketch } => {
+                    self.sketch_begin_gesture(sketch)?;
+                }
+                SketchBeginCurve { sketch } => {
+                    self.sketch_begin_curve(sketch)?;
+                }
+                SketchBeginCurveWith {
+                    sketch,
+                    center,
+                    radius,
+                } => {
+                    self.sketch_begin_curve_with(sketch, center[0], center[1], center[2], radius)?;
+                }
+                SketchBeginPolygonWith {
+                    sketch,
+                    center,
+                    radius,
+                } => {
+                    self.sketch_begin_polygon_with(
+                        sketch, center[0], center[1], center[2], radius,
+                    )?;
+                }
+                SketchRefacetCurve {
+                    sketch,
+                    curve,
+                    segments,
+                } => {
+                    self.sketch_refacet_curve(sketch, curve, segments)?;
+                }
+                SketchEndCurve { sketch } => {
+                    self.sketch_end_curve(sketch)?;
+                }
+                SketchEndGesture { sketch } => {
+                    self.sketch_end_gesture(sketch)?;
+                }
+                SketchCancelGesture => {
+                    self.sketch_cancel_gesture()?;
+                }
+                ExtrudeRegion {
+                    sketch,
+                    region,
+                    distance,
+                } => {
+                    self.extrude_region(sketch, region, distance)?;
+                }
+                FollowMeAlongEdges {
+                    sketch,
+                    region,
+                    path_sketch,
+                    path_edges,
+                    stop_len,
+                    group,
+                } => {
+                    self.follow_me_along_edges(
+                        sketch,
+                        region,
+                        path_sketch,
+                        path_edges,
+                        stop_len,
+                        group,
+                    )?;
+                }
+                FollowMeAroundFace {
+                    sketch,
+                    region,
+                    path_object,
+                    path_face,
+                    stop_len,
+                    group,
+                } => {
+                    self.follow_me_around_face(
+                        sketch,
+                        region,
+                        path_object,
+                        path_face,
+                        stop_len,
+                        group,
+                    )?;
+                }
+                FollowMeAroundInstanceFace {
+                    sketch,
+                    region,
+                    instance,
+                    path_object,
+                    path_face,
+                    stop_len,
+                } => {
+                    self.follow_me_around_instance_face(
+                        sketch,
+                        region,
+                        instance,
+                        path_object,
+                        path_face,
+                        stop_len,
+                    )?;
+                }
+                FollowMeMergedAroundFace {
+                    sketch,
+                    region,
+                    path_object,
+                    path_face,
+                    stop_len,
+                } => {
+                    self.follow_me_merged_around_face(
+                        sketch,
+                        region,
+                        path_object,
+                        path_face,
+                        stop_len,
+                    )?;
+                }
+                FollowMeFaceAlongEdges {
+                    profile_object,
+                    profile_face,
+                    path_sketch,
+                    path_edges,
+                    stop_len,
+                } => {
+                    self.follow_me_face_along_edges(
+                        profile_object,
+                        profile_face,
+                        path_sketch,
+                        path_edges,
+                        stop_len,
+                    )?;
+                }
+                FollowMeFaceAroundFace {
+                    profile_object,
+                    profile_face,
+                    path_object,
+                    path_face,
+                    stop_len,
+                } => {
+                    self.follow_me_face_around_face(
+                        profile_object,
+                        profile_face,
+                        path_object,
+                        path_face,
+                        stop_len,
+                    )?;
+                }
+                SketchOffsetRegion {
+                    sketch,
+                    region,
+                    distance,
+                } => {
+                    self.sketch_offset_region(sketch, region, distance)?;
+                }
+                Boolean { op, a, b } => {
+                    self.boolean(op, a, b)?;
+                }
+                BooleanNodes {
+                    op,
+                    a_kind,
+                    a,
+                    b_kind,
+                    b,
+                } => {
+                    self.boolean_nodes(op, a_kind, a, b_kind, b)?;
+                }
+                GroupNodes { kinds, ids } => {
+                    self.group_nodes(&kinds, &ids)?;
+                }
+                DuplicateNode { kind, id, affine } => {
+                    self.duplicate_node(kind, id, &affine)?;
+                }
+                SliceObject { object, plane } => {
+                    self.slice_object(object, &plane)?;
+                }
+                TransformObject { object, affine } => {
+                    self.transform_object(object, &affine)?;
+                }
+                TransformSelection {
+                    kinds,
+                    ids,
+                    sketches,
+                    affine,
+                } => {
+                    self.transform_selection(&kinds, &ids, &sketches, &affine)?;
+                }
+                RescaleDocument { factor } => {
+                    self.rescale_document(factor)?;
+                }
+                DeleteNode { kind, id } => {
+                    self.delete_node(kind, id)?;
+                }
+                DuplicateSelectionArray {
+                    kinds,
+                    ids,
+                    affine,
+                    count,
+                } => {
+                    self.duplicate_selection_array(&kinds, &ids, &affine, count)?;
+                }
+                PushPull {
+                    object,
+                    face,
+                    distance,
+                } => {
+                    self.push_pull(object, face, distance)?;
+                }
+                ExtrudeFaceAsNewObject {
+                    object,
+                    face,
+                    distance,
+                } => {
+                    self.extrude_face_as_new_object(object, face, distance)?;
+                }
+                SceneUndo => {
+                    self.scene_undo()?;
+                }
+                SceneRedo => {
+                    self.scene_redo()?;
+                }
+                TransformSketch { sketch, affine } => {
+                    self.transform_sketch(sketch, &affine)?;
+                }
+                TransformSketchIsland {
+                    sketch,
+                    island,
+                    affine,
+                } => {
+                    self.transform_sketch_island(sketch, island, &affine)?;
+                }
+                TransformSketchIslands {
+                    sketch,
+                    islands,
+                    affine,
+                } => {
+                    self.transform_sketch_islands(sketch, &islands, &affine)?;
+                }
+                CopySketchIslands {
+                    sketch,
+                    islands,
+                    affine,
+                } => {
+                    self.copy_sketch_islands(sketch, &islands, &affine)?;
+                }
+                MoveSketchVertex { sketch, vertex, p } => {
+                    self.move_sketch_vertex(sketch, vertex, p[0], p[1], p[2])?;
+                }
+                Ungroup { group } => {
+                    self.ungroup(group)?;
+                }
+                DeleteSketch { sketch } => {
+                    self.delete_sketch(sketch)?;
+                }
+                TransformGroup { group, affine } => {
+                    self.transform_group(group, &affine)?;
+                }
+                MakeComponent { kinds, ids } => {
+                    self.make_component(&kinds, &ids)?;
+                }
+                PlaceInstance { component, affine } => {
+                    self.place_instance(component, &affine)?;
+                }
+                PlaceText {
+                    sketch,
+                    regions,
+                    distance,
+                    name,
+                    group,
+                } => {
+                    self.place_text(sketch, regions, distance, name, group)?;
+                }
+                TransformInstance { instance, affine } => {
+                    self.transform_instance(instance, &affine)?;
+                }
+                ExplodeInstance { instance } => {
+                    self.explode_instance(instance)?;
+                }
+                MakeUnique { instance } => {
+                    self.make_unique(instance)?;
+                }
+                OpenExplodeSession { instance } => {
+                    self.open_explode_session(instance)?;
+                }
+                CloseExplodeSession => {
+                    self.close_explode_session()?;
+                }
+                OpenGroupSession { group } => {
+                    self.open_group_session(group)?;
+                }
+                CloseGroupSession => {
+                    self.close_group_session()?;
+                }
+                RescaleSession { factor, anchor } => {
+                    self.rescale_session(factor, anchor[0], anchor[1], anchor[2])?;
+                }
+                PushPullInComponent {
+                    instance,
+                    object,
+                    face,
+                    distance,
+                } => {
+                    self.push_pull_in_component(instance, object, face, distance)?;
+                }
+                BeginSketchOnPlaneInInstance {
+                    instance,
+                    px,
+                    py,
+                    pz,
+                    nx,
+                    ny,
+                    nz,
+                } => {
+                    self.begin_sketch_on_plane_in_instance(instance, px, py, pz, nx, ny, nz)?;
+                }
+                ExtrudeRegionInInstance {
+                    instance,
+                    sketch,
+                    region,
+                    distance,
+                } => {
+                    self.extrude_region_in_instance(instance, sketch, region, distance)?;
+                }
+                DeleteDefMember { component, object } => {
+                    self.delete_def_member(component, object)?;
+                }
+                CapRims { object, rims } => {
+                    self.cap_rims(object, rims)?;
+                }
+                DeleteFaces { object, faces } => {
+                    self.delete_faces(object, faces)?;
+                }
+                SetAcceptedSurface { object, accepted } => {
+                    self.set_accepted_surface(object, accepted)?;
+                }
+                ThickenSheet { object, start, end } => {
+                    self.thicken_sheet(object, start, end)?;
+                }
+                ThickenSheetInInstance {
+                    instance,
+                    object,
+                    distance,
+                } => {
+                    self.thicken_sheet_in_instance(instance, object, distance)?;
+                }
+                DeleteDefinition { component } => {
+                    self.delete_definition(component)?;
+                }
+                PurgeUnused => {
+                    self.purge_unused()?;
+                }
+                SetNodeName { kind, id, name } => {
+                    self.set_node_name(kind, id, name)?;
+                }
+                AddNodeTag { kind, id, path } => {
+                    self.add_node_tag(kind, id, path)?;
+                }
+                RenameTag { path, new_path } => {
+                    self.rename_tag(path, new_path)?;
+                }
+                RemoveNodeTag { kind, id, path } => {
+                    self.remove_node_tag(kind, id, path)?;
+                }
+                AddNodeTagMany { kinds, ids, path } => {
+                    self.add_node_tag_many(&kinds, &ids, path)?;
+                }
+                RemoveNodeTagMany { kinds, ids, path } => {
+                    self.remove_node_tag_many(&kinds, &ids, path)?;
+                }
+                SetTagHidden { path, hidden } => {
+                    self.set_tag_hidden(path, hidden)?;
+                }
+                DeleteTag { path } => {
+                    self.delete_tag(path)?;
+                }
+                SetNodeUserHidden { kind, id, hidden } => {
+                    self.set_node_user_hidden(kind, id, hidden)?;
+                }
+                SetCameraState {
+                    projection,
+                    fov_deg,
+                    parallel_height,
+                    eye,
+                    target,
+                    up,
+                } => {
+                    let parallel_height = parallel_height.unwrap_or_else(|| {
+                        kernel::CameraState::height_at_target(
+                            Point3::new(eye[0], eye[1], eye[2]),
+                            Point3::new(target[0], target[1], target[2]),
+                            fov_deg,
+                        )
+                    });
+                    self.set_camera_state(
+                        &projection,
+                        fov_deg,
+                        parallel_height,
+                        Box::new(eye),
+                        Box::new(target),
+                        Box::new(up),
+                    )?;
+                }
+                SetSectionPlane {
+                    origin,
+                    normal,
+                    active,
+                } => {
+                    self.set_section_plane(
+                        origin[0], origin[1], origin[2], normal[0], normal[1], normal[2], active,
+                    )?;
+                }
+                ClearSectionPlane => {
+                    self.clear_section_plane()?;
+                }
+                SetViewStyle { json } => {
+                    self.set_view_style_json(json)?;
+                }
+                AddScene {
+                    name,
+                    props,
+                    camera_json,
+                    display_json,
+                    after,
+                } => {
+                    self.add_scene(name, props, camera_json, display_json, after)?;
+                }
+                UpdateScene {
+                    sid,
+                    props,
+                    camera_json,
+                    display_json,
+                } => {
+                    self.update_scene(sid, props, camera_json, display_json)?;
+                }
+                SetSceneProps {
+                    sid,
+                    props,
+                    camera_json,
+                    display_json,
+                } => {
+                    self.set_scene_props(sid, props, camera_json, display_json)?;
+                }
+                RenameScene { sid, name } => {
+                    self.rename_scene(sid, name)?;
+                }
+                SetSceneDescription { sid, text } => {
+                    self.set_scene_description(sid, text)?;
+                }
+                MoveScene { sid, index } => {
+                    self.move_scene(sid, index)?;
+                }
+                RemoveScene { sid } => {
+                    self.remove_scene(sid)?;
+                }
+                ApplyScene { sid } => {
+                    self.apply_scene(sid)?;
+                }
+                AddMaterial { name, r, g, b, a } => {
+                    self.add_material(name, r, g, b, a)?;
+                }
+                AddTextureMaterial {
+                    name,
+                    r,
+                    g,
+                    b,
+                    a,
+                    image,
+                    format,
+                    world_w,
+                    world_h,
+                } => {
+                    self.add_texture_material(name, r, g, b, a, &image, format, world_w, world_h)?;
+                }
+                SetMaterialAlpha { material, alpha } => {
+                    self.set_material_alpha(material, alpha)?;
+                }
+                SetMaterialName { material, name } => {
+                    self.set_material_name(material, name)?;
+                }
+                DeleteMaterial { material } => {
+                    self.delete_material(material)?;
+                }
+                PaintFace {
+                    object,
+                    face,
+                    material,
+                } => {
+                    self.paint_face(object, face, material)?;
+                }
+                SetObjectMaterial { object, material } => {
+                    self.set_object_material(object, material)?;
+                }
+                SetInstanceMaterial { instance, material } => {
+                    let _ = self.set_instance_material(instance, material)?;
+                }
+                SetDefinitionMaterial {
+                    component,
+                    material,
+                } => {
+                    self.set_definition_material(component, material)?;
+                }
+                ReplaceMaterial {
+                    document_wide,
+                    scope_object,
+                    from,
+                    to,
+                } => {
+                    self.replace_material(document_wide, scope_object, from, to)?;
+                }
+                SetFaceUvFrame {
+                    object,
+                    face,
+                    frame,
+                } => {
+                    self.set_face_uv_frame(object, face, frame.map(uv_frame_recorded_to_vec))?;
+                }
+                AddGuideLine { origin, dir } => {
+                    self.add_guide_line(origin[0], origin[1], origin[2], dir[0], dir[1], dir[2])?;
+                }
+                AddGuidePoint { p } => {
+                    self.add_guide_point(p[0], p[1], p[2])?;
+                }
+                DeleteGuide { guide } => {
+                    self.delete_guide(guide)?;
+                }
+                DeleteAllGuides => {
+                    self.delete_all_guides()?;
+                }
+                AddLinearDimension {
+                    a_node_kind,
+                    a_node_id,
+                    a_point,
+                    b_node_kind,
+                    b_node_id,
+                    b_point,
+                    offset,
+                    plane,
+                    text_override,
+                } => {
+                    self.add_linear_dimension(
+                        a_node_kind,
+                        a_node_id,
+                        &a_point,
+                        b_node_kind,
+                        b_node_id,
+                        &b_point,
+                        &offset,
+                        &plane,
+                        text_override,
+                    )?;
+                }
+                AddRadialDimension {
+                    anchor_node_kind,
+                    anchor_node_id,
+                    anchor_point,
+                    kind,
+                    curve_center,
+                    curve_radius,
+                    curve_plane,
+                    leader_dir,
+                    text_override,
+                } => {
+                    self.add_radial_dimension(
+                        anchor_node_kind,
+                        anchor_node_id,
+                        &anchor_point,
+                        &kind,
+                        &curve_center,
+                        curve_radius,
+                        &curve_plane,
+                        &leader_dir,
+                        text_override,
+                    )?;
+                }
+                AddLeaderText {
+                    anchor_node_kind,
+                    anchor_node_id,
+                    anchor_point,
+                    offset,
+                    text,
+                } => {
+                    self.add_leader_text(
+                        anchor_node_kind,
+                        anchor_node_id,
+                        &anchor_point,
+                        &offset,
+                        text,
+                    )?;
+                }
+                UpdateLinearDimension {
+                    id,
+                    a_node_kind,
+                    a_node_id,
+                    a_point,
+                    b_node_kind,
+                    b_node_id,
+                    b_point,
+                    offset,
+                    plane,
+                    text_override,
+                } => {
+                    self.update_linear_dimension(
+                        id,
+                        a_node_kind,
+                        a_node_id,
+                        &a_point,
+                        b_node_kind,
+                        b_node_id,
+                        &b_point,
+                        &offset,
+                        &plane,
+                        text_override,
+                    )?;
+                }
+                UpdateRadialDimension {
+                    id,
+                    anchor_node_kind,
+                    anchor_node_id,
+                    anchor_point,
+                    kind,
+                    curve_center,
+                    curve_radius,
+                    curve_plane,
+                    leader_dir,
+                    text_override,
+                } => {
+                    self.update_radial_dimension(
+                        id,
+                        anchor_node_kind,
+                        anchor_node_id,
+                        &anchor_point,
+                        &kind,
+                        &curve_center,
+                        curve_radius,
+                        &curve_plane,
+                        &leader_dir,
+                        text_override,
+                    )?;
+                }
+                UpdateLeaderText {
+                    id,
+                    anchor_node_kind,
+                    anchor_node_id,
+                    anchor_point,
+                    offset,
+                    text,
+                } => {
+                    self.update_leader_text(
+                        id,
+                        anchor_node_kind,
+                        anchor_node_id,
+                        &anchor_point,
+                        &offset,
+                        text,
+                    )?;
+                }
+                DeleteAnnotation { id } => {
+                    self.delete_annotation(id)?;
+                }
+                InsertItem {
+                    bytes,
+                    affine,
+                    source_id,
+                    content_hash,
+                } => {
+                    self.insert_item_core(&bytes, &affine, source_id, content_hash)?;
+                }
+                InsertItemPalette { bytes } => {
+                    self.insert_item_palette_core(&bytes)?;
+                }
+                StampLibrarySource {
+                    kinds,
+                    ids,
+                    source_id,
+                    content_hash,
+                    def_sid,
+                } => {
+                    self.stamp_library_source_core(
+                        &kinds,
+                        &ids,
+                        &source_id,
+                        &content_hash,
+                        def_sid,
+                    )?;
+                }
+                ImportDae { bytes, images } => {
+                    let mut image_map: ImageMap = ImageMap::new();
+                    for img in images {
+                        let format = if img.format == 1 {
+                            ImageFormat::Jpeg
+                        } else {
+                            ImageFormat::Png
+                        };
+                        image_map.insert(img.uri, (img.bytes, format));
+                    }
+                    self.import_dae_core(&bytes, &image_map)?;
+                }
+                ImportGltf { bytes } => {
+                    self.import_gltf_core(&bytes)?;
+                }
+                ImportSkp { bytes } => {
+                    self.import_skp_core(&bytes)?;
+                }
+                ImportOmitted { of, len } => {
+                    return Err(ApiError(format!(
+                        "recording cannot replay {of}: its {len}-byte source file was \
+                         too large to embed"
+                    )));
+                }
+                ImportStl {
+                    bytes,
+                    unit_scale,
+                    name,
+                } => {
+                    self.import_stl_core(&bytes, unit_scale, name)?;
+                }
+                PlaceImage {
+                    image,
+                    format,
+                    name,
+                    origin,
+                    u,
+                    v,
+                    width,
+                } => {
+                    self.place_image_core(&image, format, name, &origin, &u, &v, width)?;
+                }
+                SetAxes { origin, x, y } => {
+                    self.set_axes(
+                        origin[0], origin[1], origin[2], x[0], x[1], x[2], y[0], y[1], y[2],
+                    )?;
+                }
+                Load { bytes } => {
+                    self.load_core(&bytes)?;
+                }
+                FollowMeAlongEdgesInInstance {
+                    instance,
+                    sketch,
+                    region,
+                    path_sketch,
+                    path_edges,
+                    stop_len,
+                } => {
+                    self.follow_me_along_edges_in_instance(
+                        instance,
+                        sketch,
+                        region,
+                        path_sketch,
+                        path_edges,
+                        stop_len,
+                    )?;
+                }
+                FollowMeAroundFaceInInstance {
+                    instance,
+                    sketch,
+                    region,
+                    path_object,
+                    path_face,
+                    stop_len,
+                } => {
+                    self.follow_me_around_face_in_instance(
+                        instance,
+                        sketch,
+                        region,
+                        path_object,
+                        path_face,
+                        stop_len,
+                    )?;
+                }
+                FollowMeMergedAroundFaceInInstance {
+                    instance,
+                    sketch,
+                    region,
+                    path_object,
+                    path_face,
+                    stop_len,
+                } => {
+                    self.follow_me_merged_around_face_in_instance(
+                        instance,
+                        sketch,
+                        region,
+                        path_object,
+                        path_face,
+                        stop_len,
+                    )?;
+                }
+                FollowMeFaceAlongEdgesInInstance {
+                    instance,
+                    profile_object,
+                    profile_face,
+                    path_sketch,
+                    path_edges,
+                    stop_len,
+                } => {
+                    self.follow_me_face_along_edges_in_instance(
+                        instance,
+                        profile_object,
+                        profile_face,
+                        path_sketch,
+                        path_edges,
+                        stop_len,
+                    )?;
+                }
+                FollowMeFaceAroundFaceInInstance {
+                    instance,
+                    profile_object,
+                    profile_face,
+                    path_object,
+                    path_face,
+                    stop_len,
+                } => {
+                    self.follow_me_face_around_face_in_instance(
+                        instance,
+                        profile_object,
+                        profile_face,
+                        path_object,
+                        path_face,
+                        stop_len,
+                    )?;
+                }
+                BooleanInComponent {
+                    component,
+                    op,
+                    a,
+                    b,
+                } => {
+                    self.boolean_in_component(component, op, a, b)?;
+                }
+                SliceDefMember {
+                    instance,
+                    object,
+                    plane,
+                } => {
+                    self.slice_def_member(instance, object, &plane)?;
+                }
+                TransformDefMember {
+                    instance,
+                    object,
+                    affine,
+                } => {
+                    self.transform_def_member(instance, object, &affine)?;
+                }
+                TransformDefSketch {
+                    instance,
+                    sketch,
+                    affine,
+                } => {
+                    self.transform_def_sketch(instance, sketch, &affine)?;
+                }
+                TransformDefSketchIsland {
+                    instance,
+                    sketch,
+                    island,
+                    affine,
+                } => {
+                    self.transform_def_sketch_island(instance, sketch, island, &affine)?;
+                }
+                TransformDefSelection {
+                    instance,
+                    objects,
+                    sketches,
+                    island_sketches,
+                    islands,
+                    affine,
+                } => {
+                    self.transform_def_selection(
+                        instance,
+                        &objects,
+                        &sketches,
+                        &island_sketches,
+                        &islands,
+                        &affine,
+                    )?;
+                }
+                DraftBeginPlane {
+                    draft,
+                    px,
+                    py,
+                    pz,
+                    nx,
+                    ny,
+                    nz,
+                    label,
+                } => {
+                    self.draft_set_next_handle(draft);
+                    self.draft_begin_plane(px, py, pz, nx, ny, nz, &label)?;
+                }
+                DraftBeginPlaneInInstance {
+                    draft,
+                    instance,
+                    px,
+                    py,
+                    pz,
+                    nx,
+                    ny,
+                    nz,
+                    label,
+                } => {
+                    self.draft_set_next_handle(draft);
+                    self.draft_begin_plane_in_instance(instance, px, py, pz, nx, ny, nz, &label)?;
+                }
+                DraftBeginFace {
+                    draft,
+                    object,
+                    face,
+                    label,
+                } => {
+                    self.draft_set_next_handle(draft);
+                    self.draft_begin_face(object, face, &label)?;
+                }
+                DraftBeginFaceInInstance {
+                    draft,
+                    instance,
+                    object,
+                    face,
+                    label,
+                } => {
+                    self.draft_set_next_handle(draft);
+                    self.draft_begin_face_in_instance(instance, object, face, &label)?;
+                }
+                DraftBeginSketch {
+                    draft,
+                    sketch,
+                    label,
+                } => {
+                    self.draft_set_next_handle(draft);
+                    self.draft_begin_sketch(sketch, &label)?;
+                }
+                DraftBeginCtx { draft, ctx, label } => {
+                    self.draft_set_next_handle(draft);
+                    self.draft_begin_ctx(&ctx, &label)?;
+                }
+                DraftEnd { draft } => {
+                    self.draft_end(draft)?;
+                }
+                DraftCancel { draft } => {
+                    self.draft_cancel(draft)?;
+                }
+                DraftAddSegment { draft, a, b } => {
+                    self.draft_add_segment(draft, a[0], a[1], a[2], b[0], b[1], b[2])?;
+                }
+                DraftBeginCurveWith {
+                    draft,
+                    center,
+                    radius,
+                } => {
+                    self.draft_begin_curve_with(draft, &center, radius)?;
+                }
+                DraftBeginPolygonWith {
+                    draft,
+                    center,
+                    radius,
+                } => {
+                    self.draft_begin_polygon_with(draft, &center, radius)?;
+                }
+                DraftBeginCurve { draft } => {
+                    self.draft_begin_curve(draft)?;
+                }
+                HistoryBracketOpen => {
+                    self.history_bracket_open()?;
+                }
+                HistoryBracketCommit { label } => {
+                    self.history_bracket_commit(&label)?;
+                }
+                HistoryBracketAbort => {
+                    self.history_bracket_abort()?;
+                }
+                DraftEndCurve { draft } => {
+                    self.draft_end_curve(draft)?;
+                }
+                DraftRemoveEdges { draft, keys } => {
+                    self.draft_remove_edges(draft, &keys)?;
+                }
+                DraftTransformEdges {
+                    draft,
+                    keys,
+                    affine,
+                } => {
+                    self.draft_transform_edges(draft, &keys, &affine)?;
+                }
+                DraftCopyEdges {
+                    draft,
+                    keys,
+                    affine,
+                } => {
+                    self.draft_copy_edges(draft, &keys, &affine)?;
+                }
+                DraftMoveVertex { draft, at, to } => {
+                    self.draft_move_vertex(draft, at[0], at[1], at[2], to[0], to[1], to[2])?;
+                }
+                DraftOffsetRegion {
+                    draft,
+                    region,
+                    distance,
+                } => {
+                    self.draft_offset_region(draft, region, distance)?;
+                }
+                DraftRefacetCurve {
+                    draft,
+                    curve,
+                    segments,
+                } => {
+                    self.draft_refacet_curve(draft, curve, segments)?;
+                }
+                ApiDispatch { frame } => {
+                    // Replayed through a real connection, so the
+                    // envelope takes exactly the path it took live —
+                    // including the transaction bracket that makes it
+                    // one compound undo entry. The connection is
+                    // opened lazily and primed once: only mutating
+                    // frames are recorded, and the handshake that
+                    // precedes them is read-only, so it is never in
+                    // the stream and has to be synthesized here.
+                    // Inside a plugin compound it is the compound's
+                    // own connection, opened with the recorded grant.
+                    let conn = match *replay_conn {
+                        Some(id) => id,
+                        None => {
+                            let id = self.api_connection_open();
+                            self.prime_replay_connection(id);
+                            *replay_conn = Some(id);
+                            id
+                        }
+                    };
+                    self.replay_frame(conn, &frame)?;
+                }
+                PluginCompound {
+                    plugin: _,
+                    label,
+                    grant,
+                    calls,
+                } => {
+                    self.replay_plugin_compound(label, &grant, calls)?;
+                }
+                DeleteSelection { kinds, ids } => {
+                    self.delete_selection(&kinds, &ids)?;
+                }
+                ReparentNodes { kinds, ids, group } => {
+                    self.reparent_nodes(&kinds, &ids, group)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The handshake a replay connection needs before its first recorded
+    /// envelope: hello and attach, which are read-only and so never
+    /// recorded themselves.
+    fn prime_replay_connection(&mut self, id: u32) {
+        for frame in [
+            r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+        ] {
+            self.api_dispatch_outcome(id, frame, DispatchScope::Replay);
+        }
+    }
+
+    /// Re-issues one recorded API envelope on `conn`. A frame is only ever
+    /// recorded once it has succeeded, so a refusal here means the replay
+    /// has already diverged from the session — fail loudly rather than
+    /// hand back a wrong hash.
+    fn replay_frame(&mut self, conn: u32, frame: &str) -> Result<(), ApiError> {
+        let reply = match self.api_dispatch_outcome(conn, frame, DispatchScope::Replay) {
+            None => None,
+            Some(FrameOutcome::Reply(reply)) => Some(reply),
+            Some(FrameOutcome::Pending(forward)) => {
+                return Err(ApiError::new(
+                    "REPLAY",
+                    &format!(
+                        "recorded API envelope {} needs its plugin to replay",
+                        forward.method
+                    ),
+                ));
+            }
+        };
+        if let Some(reply) = reply
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&reply)
+            && let Some(err) = value.get("error")
+        {
+            return Err(ApiError::new(
+                "REPLAY",
+                &format!("recorded API envelope was refused on replay: {err}"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Replays one recorded plugin compound as one undo entry, exactly as
+    /// it landed live: a connection holding the recorded grant (identity
+    /// `plugin:<id>`), a kernel compound with that label and origin, the
+    /// recorded calls (nested compounds recursively), and the end.
+    fn replay_plugin_compound(
+        &mut self,
+        label: String,
+        grant: &serde_json::Value,
+        calls: Vec<recording::RecordedCall>,
+    ) -> Result<(), ApiError> {
+        let conn = self
+            .api_plugin_connection_open(&grant.to_string())
+            .map_err(|e| ApiError::new("REPLAY", &format!("recorded compound grant: {e}")))?;
+        self.prime_replay_connection(conn);
+        let identity = self
+            .api_connections
+            .get(&conn)
+            .expect("just opened")
+            .identity()
+            .to_string();
+        let token = self.doc.begin_compound(kernel::CompoundMeta {
+            label,
+            origin: kernel::HistoryOrigin::Connection(identity),
+            coalesce: None,
+        });
+        self.replay_compounds += 1;
+        let mut compound_conn = Some(conn);
+        let replayed = self.replay_calls(calls, &mut compound_conn);
+        self.replay_compounds -= 1;
+        self.api_connection_close(conn);
+        if let Err(e) = replayed {
+            let _ = self.doc.abort_compound(token);
+            self.full_resync();
+            return Err(e);
+        }
+        let ended = self.doc.end_compound(token);
+        self.full_resync();
+        ended
+            .map(|_| ())
+            .map_err(|e| ApiError::new("REPLAY", &format!("recorded compound did not end: {e}")))
     }
 
     /// Replace this scene's document with one deserialized from `bytes` (a
@@ -10907,16 +12140,25 @@ impl Scene {
     /// other typed error uses, so the UI's plain-language copy table can
     /// key on it.
     pub fn load(&mut self, bytes: &[u8]) -> Result<(), JsError> {
+        self.ensure_not_busy()?;
         self.load_core(bytes).map_err(|e| JsError::new(&e.0))
     }
 
     /// [`Scene::load`] minus the JS-error plumbing: parse, swap, rebuild
     /// caches, and record. The replay arm re-issues loads through this.
     fn load_core(&mut self, bytes: &[u8]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let new_doc = Document::load(bytes).map_err(|e: LoadError| api_err(&e, &e))?;
 
-        // Swap is committed only after successful parse.
+        // Swap is committed only after successful parse. The new document's
+        // epoch starts above the old one's, so a reader keyed on it never
+        // sees time go back across an open.
+        let epoch = self.doc.document_epoch();
         self.doc = new_doc;
+        self.doc.raise_document_epoch_to(epoch + 1);
+        // The next drain tells every subscriber to read the document anew.
+        self.doc.record_reset();
+        self.last_active_scene = None;
         self.skp_source = None;
         self.pending_skp_source = None;
         // The app reads (and so checks) a file before it loads the blank
@@ -10939,6 +12181,11 @@ impl Scene {
         // stale id can't keep a fresh object out of inference.
         self.hidden_objects.clear();
         self.hidden_instances.clear();
+        // So do the selection and isolation mirrors: the app clears both on
+        // a load and mirrors the empty state, but a read before that must
+        // not name the new document's entities through the old handles.
+        self.ui_selection.clear();
+        self.ui_isolation = None;
         self.open_draft = None;
         self.active_inference_instance = None;
         self.active_inference_sketches.clear();
@@ -11041,7 +12288,7 @@ mod tests {
     #[test]
     fn load_registers_sketches_with_inference() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         scene.sketch_begin_gesture(sketch).unwrap();
         scene
             .sketch_begin_curve_with(sketch, 1.0, 1.0, 0.0, 0.1)
@@ -11070,7 +12317,7 @@ mod tests {
         let snap = loaded
             .snap(
                 vx, vy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None, None,
-                None,
+                None, None,
             )
             .unwrap()
             .expect("loaded sketch vertex snaps");
@@ -11079,7 +12326,7 @@ mod tests {
         let snap = loaded
             .snap(
                 1.0, 1.0, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap()
             .expect("loaded circle center snaps");
@@ -11096,7 +12343,7 @@ mod tests {
     #[test]
     fn export_reaches_the_shared_writer_with_solids_only_false() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, sketch, 0.0, 0.0, 1.0, 1.0);
         let region = scene.sketch_regions(sketch).unwrap()[0];
         scene.extrude_region(sketch, region, 1.0).unwrap();
@@ -11139,7 +12386,7 @@ mod tests {
     #[test]
     fn replay_copied_circle_keeps_center_snaps_even_overlapping() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         let (cx, cy, r, n) = (1.0f64, 1.0f64, 0.1f64, 24usize);
         // Draw the original circle inside a gesture, like CircleTool.
         scene.sketch_begin_gesture(sketch).unwrap();
@@ -11194,6 +12441,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap()
             .expect("something snaps at the copy center");
@@ -11204,7 +12452,7 @@ mod tests {
         let snap0 = scene
             .snap(
                 cx, cy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None, None,
-                None,
+                None, None,
             )
             .unwrap()
             .expect("original center snaps");
@@ -11226,7 +12474,7 @@ mod tests {
     #[test]
     fn drawn_circle_rim_snaps_all_select_the_curve() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         let (cx, cy, r, n) = (1.0f64, 2.0f64, 0.5f64, 24usize);
         scene.sketch_begin_gesture(sketch).unwrap();
         scene
@@ -11259,7 +12507,7 @@ mod tests {
         let c = scene
             .snap(
                 cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None, None, None, None,
-                None,
+                None, None,
             )
             .unwrap()
             .expect("center snaps");
@@ -11280,7 +12528,7 @@ mod tests {
             let snap = scene
                 .snap(
                     wx, wy, 3.0, 0.0, 0.0, -1.0, 0.01, None, None, None, None, None, None, None,
-                    None, None,
+                    None, None, None,
                 )
                 .unwrap()
                 .unwrap_or_else(|| panic!("a point on the rim always snaps (angle {a})"));
@@ -11344,7 +12592,7 @@ mod tests {
     #[test]
     fn drawn_polygon_center_selects_the_polygon_through_production_wiring() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         let (cx, cy, r, n) = (2.0f64, 1.0f64, 0.6f64, 6usize);
         scene.sketch_begin_gesture(sketch).unwrap();
         let curve = scene
@@ -11369,7 +12617,7 @@ mod tests {
         let c = scene
             .snap(
                 cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None, None, None, None,
-                None,
+                None, None,
             )
             .unwrap()
             .expect("polygon center snaps");
@@ -11420,7 +12668,7 @@ mod tests {
     #[test]
     fn drawn_rectangle_is_one_scene_undo_step() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         assert!(!scene.can_scene_undo(), "an empty sketch is not a step");
 
         scene.sketch_begin_gesture(sketch).unwrap();
@@ -11450,9 +12698,9 @@ mod tests {
     #[test]
     fn pick_sketch_region_targets_any_sketch() {
         let mut scene = Scene::new();
-        let s1 = scene.begin_ground_sketch();
+        let s1 = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, s1, 0.0, 0.0, 1.0, 1.0);
-        let s2 = scene.begin_ground_sketch();
+        let s2 = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, s2, 2.0, 0.0, 3.0, 1.0);
 
         // A downward ray over each rectangle finds its own sketch — including
@@ -11512,7 +12760,7 @@ mod tests {
     #[test]
     fn the_precision_flag_selects_uniform_snap_weights() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         let (cx, cy, r, n) = (1.0f64, 1.0f64, 0.1f64, 24usize);
         scene.sketch_begin_gesture(sketch).unwrap();
         scene
@@ -11543,7 +12791,7 @@ mod tests {
         let default_snap = scene
             .snap(
                 ax, ay, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None, None, None, None,
-                None,
+                None, None,
             )
             .unwrap()
             .expect("something snaps");
@@ -11566,6 +12814,7 @@ mod tests {
                 None,
                 None,
                 Some(true),
+                None,
                 None,
                 None,
                 None,
@@ -11595,6 +12844,7 @@ mod tests {
                 None,
                 None,
                 Some(false),
+                None,
                 None,
                 None,
                 None,
@@ -11699,7 +12949,7 @@ mod tests {
     fn finding1_shared_partition_edge_resolves_to_the_edge() {
         use inference::{PickRay, SnapKind, SnapQuery};
         let mut scene = Scene::new();
-        let s = scene.begin_ground_sketch();
+        let s = scene.begin_ground_sketch().unwrap();
         // A 2×1 outer rectangle plus a partition at x=1 → two 1×1 regions
         // sharing that edge.
         for (a, b) in [
@@ -11773,14 +13023,14 @@ mod tests {
         use inference::{PickRay, SnapKind, SnapQuery};
         let mut scene = Scene::new();
         // A solid box on the ground (a face somewhere along z ≤ 1).
-        let s1 = scene.begin_ground_sketch();
+        let s1 = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, s1, 0.0, 0.0, 2.0, 2.0);
         let r1 = scene.sketch_regions(s1).unwrap()[0];
         let box_obj = scene.extrude_region(s1, r1, 1.0).unwrap();
 
         // A sketch region lifted to z = 2 — in FRONT of the box along a
         // downward ray.
-        let s2 = scene.begin_ground_sketch();
+        let s2 = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, s2, 0.5, 0.5, 1.5, 1.5);
         scene
             .transform_sketch(
@@ -11843,7 +13093,7 @@ mod tests {
         let mut scene = Scene::new();
         // A rectangle spanning the origin, extruded into a pit — its top face
         // lies on z = 0 through the origin, unoccluded from above.
-        let s = scene.begin_ground_sketch();
+        let s = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, s, -1.0, -1.0, 1.0, 1.0);
         let r = scene.sketch_regions(s).unwrap()[0];
         let pit = scene.extrude_region(s, r, -1.0).unwrap();
@@ -12499,7 +13749,7 @@ mod tests {
 
         scene.set_node_user_hidden(0, o, true).unwrap();
         scene.set_node_user_hidden(0, o, false).unwrap();
-        scene.set_tag_hidden("walls".to_string(), true);
+        scene.set_tag_hidden("walls".to_string(), true).unwrap();
         assert_eq!(
             scene.history_generation(),
             g3,
@@ -12529,7 +13779,7 @@ mod tests {
             "the fresh sketch's creation folds into extrude's one entry"
         );
 
-        scene.mark_saved();
+        scene.mark_saved().unwrap();
         assert!(scene.at_saved_mark());
         assert_eq!(scene.saved_depth(), Some(1));
 
@@ -12564,7 +13814,7 @@ mod tests {
         let mut scene = Scene::new();
         let (s, r) = ground_unit_square(&mut scene);
         scene.extrude_region(s, r, 1.0).unwrap();
-        scene.mark_saved();
+        scene.mark_saved().unwrap();
         let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
         scene.extrude_region(s2, r2, 1.0).unwrap();
         scene.scene_undo().unwrap();
@@ -12852,7 +14102,7 @@ mod tests {
         let mut scene = Scene::new();
         scene.start_recording();
 
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         scene
             .sketch_begin_curve_with(sketch, 0.0, 0.0, 0.0, 1.0)
             .unwrap();
@@ -12896,7 +14146,7 @@ mod tests {
         let (s, r) = ground_unit_square(&mut scene);
         let obj = scene.extrude_region(s, r, 2.0).unwrap();
         scene.add_node_tag(0, obj, vec!["A".to_string()]).unwrap();
-        scene.set_tag_hidden("A".to_string(), true);
+        scene.set_tag_hidden("A".to_string(), true).unwrap();
         scene.delete_tag("A".to_string()).unwrap();
         // Undoes the TAG DELETE — not the extrude. If delete_tag were not
         // recorded, the replayed undo would hit the extrude instead.
@@ -12939,7 +14189,7 @@ mod tests {
         scene
             .add_node_tag(0, obj, vec!["Hardware".to_string()])
             .unwrap();
-        scene.set_tag_hidden("Hardware".to_string(), true);
+        scene.set_tag_hidden("Hardware".to_string(), true).unwrap();
         scene
             .set_section_plane(0.5, 0.5, 1.0, 0.0, 0.0, 1.0, true)
             .unwrap();
@@ -12959,8 +14209,8 @@ mod tests {
             .set_scene_description(a, "Everything.".to_string())
             .unwrap();
         // Drift, then a second Scene without the section, then apply the first.
-        scene.set_tag_hidden("Hardware".to_string(), false);
-        scene.clear_section_plane();
+        scene.set_tag_hidden("Hardware".to_string(), false).unwrap();
+        scene.clear_section_plane().unwrap();
         let b = scene
             .add_scene(
                 Some("Cam only".to_string()),
@@ -12973,9 +14223,9 @@ mod tests {
         scene.move_scene(b, 0).unwrap();
         scene.set_scene_props(a, 31 - 16, None, None).unwrap();
         scene.update_scene(a, 4, None, None).unwrap(); // re-capture visible tags (now none hidden)
-        scene.set_tag_hidden("Hardware".to_string(), true);
+        scene.set_tag_hidden("Hardware".to_string(), true).unwrap();
         scene.update_scene(a, 4, None, None).unwrap(); // hidden again
-        scene.set_tag_hidden("Hardware".to_string(), false);
+        scene.set_tag_hidden("Hardware".to_string(), false).unwrap();
         let resolved = scene.apply_scene(a).unwrap();
         assert!(resolved.has_hidden());
         assert_eq!(resolved.hidden_object_ids(), vec![obj]);
@@ -13081,7 +14331,9 @@ mod tests {
         scene
             .add_node_tag(0, a, vec!["Hardware".to_string(), "Screws".to_string()])
             .unwrap();
-        scene.set_tag_hidden("Hardware/Screws".to_string(), true);
+        scene
+            .set_tag_hidden("Hardware/Screws".to_string(), true)
+            .unwrap();
         let sid_before = scene
             .doc
             .sid_of(&kernel::EntityRef::Tag(vec![
@@ -13304,8 +14556,12 @@ mod tests {
         // group transform moved it); (1.0, 0.5, 10.0) straight down lands
         // safely inside its top face, well clear of any edge — the
         // `pick.object()` assert makes that assumption self-checking.
-        let m = scene.add_material("Red".to_string(), 255, 0, 0, 255);
-        let m2 = scene.add_material("Blue".to_string(), 0, 0, 255, 255);
+        let m = scene
+            .add_material("Red".to_string(), 255, 0, 0, 255)
+            .unwrap();
+        let m2 = scene
+            .add_material("Blue".to_string(), 0, 0, 255, 255)
+            .unwrap();
         scene.set_object_material(a, m).unwrap();
         scene.set_material_alpha(m, 128).unwrap();
         let pick = scene.pick_face(1.0, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
@@ -13359,8 +14615,12 @@ mod tests {
         let a = scene.extrude_region(s1, r1, 1.0).unwrap();
         assert!(scene.object_materials(a).is_empty(), "unpainted");
 
-        let red = scene.add_material("Red".to_string(), 220, 30, 30, 255);
-        let blue = scene.add_material("Blue".to_string(), 30, 30, 220, 255);
+        let red = scene
+            .add_material("Red".to_string(), 220, 30, 30, 255)
+            .unwrap();
+        let blue = scene
+            .add_material("Blue".to_string(), 30, 30, 220, 255)
+            .unwrap();
         scene.set_object_material(a, red).unwrap();
         let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
         scene.paint_face(pick.object(), pick.face(), blue).unwrap();
@@ -13472,7 +14732,9 @@ mod tests {
 
         // A material renamed, then painted onto a live face and set as an
         // object's base — both references must unpaint on delete.
-        let m = scene.add_material("Red".to_string(), 220, 30, 30, 255);
+        let m = scene
+            .add_material("Red".to_string(), 220, 30, 30, 255)
+            .unwrap();
         scene.set_material_name(m, "Brick".to_string()).unwrap();
         scene.set_material_name(m, "Brick".to_string()).unwrap(); // no-op rename records nothing extra
         let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
@@ -13497,7 +14759,9 @@ mod tests {
         let def_b = scene.instance_def(inst_of_b).unwrap();
         scene.delete_node(2, inst_of_b).unwrap();
         assert_eq!(scene.unused_definitions(), vec![def_b]);
-        let stray = scene.add_material("Stray".to_string(), 1, 2, 3, 255);
+        let stray = scene
+            .add_material("Stray".to_string(), 1, 2, 3, 255)
+            .unwrap();
         assert_eq!(scene.unused_materials(), vec![stray]);
 
         let report = scene.purge_unused().unwrap();
@@ -13522,6 +14786,91 @@ mod tests {
             "replaying a material/definition lifecycle session reproduces the golden state_hash"
         );
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// Painting a placement and a whole definition records and replays,
+    /// and the expanded inherited materials follow the instance's paint.
+    #[test]
+    fn record_then_replay_covers_instance_and_definition_materials() {
+        recording::reset();
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[a]).unwrap();
+        let def = scene.instance_def(inst).unwrap();
+        let second = scene
+            .place_instance(
+                def,
+                &[1.0, 0.0, 0.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let red = scene
+            .add_material("Red".to_string(), 220, 30, 30, 255)
+            .unwrap();
+        let blue = scene
+            .add_material("Blue".to_string(), 30, 30, 220, 255)
+            .unwrap();
+        assert_eq!(scene.instance_material(second), u64::MAX);
+        assert_eq!(
+            scene.set_instance_material(second, red).unwrap(),
+            vec![second],
+            "a world placement redraws itself"
+        );
+        assert_eq!(scene.instance_material(second), red);
+        assert_eq!(scene.instance_expanded_inherited(second), vec![red]);
+        assert_eq!(scene.instance_expanded_inherited(inst), vec![u64::MAX]);
+        let member = scene.instance_expanded_members(second)[0];
+        let painted = scene.member_mesh(member, red).unwrap();
+        assert!(
+            painted.mesh.groups.iter().all(|g| g.material.is_some()),
+            "an unpainted member drawn through a painted placement takes its material"
+        );
+        scene.set_definition_material(def, blue).unwrap();
+        assert_eq!(scene.material_usage(red), 1);
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(
+            json.contains("\"set_instance_material\"")
+                && json.contains("\"set_definition_material\"")
+        );
+
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// Painting a NESTED placement reports every world placement that draws
+    /// it, so the renderer re-pulls the outer placements' inherited
+    /// materials too.
+    #[test]
+    fn painting_a_nested_placement_reports_its_outer_world_placements() {
+        let mut scene = Scene::new();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let inner = scene.make_component(&[0], &[a]).unwrap();
+        let outer = scene.make_component(&[2], &[inner]).unwrap();
+        let outer_def = scene.instance_def(outer).unwrap();
+        let second = scene
+            .place_instance(
+                outer_def,
+                &[1.0, 0.0, 0.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let red = scene
+            .add_material("Red".to_string(), 220, 30, 30, 255)
+            .unwrap();
+        let mut touched = scene.set_instance_material(inner, red).unwrap();
+        touched.sort_unstable();
+        let mut want = vec![outer, second];
+        want.sort_unstable();
+        assert_eq!(
+            touched, want,
+            "the nested placement itself is not a world instance"
+        );
+        assert_eq!(scene.instance_expanded_inherited(second), vec![red]);
     }
 
     /// The byte-embedding arms replay: a session containing a glTF import
@@ -13731,7 +15080,7 @@ mod tests {
     #[test]
     fn analytic_curve_bracket_rejects_degenerate_radius() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         let err = scene
             .sketch_begin_curve_with(sketch, 0.0, 0.0, 0.0, 0.0)
             .unwrap_err();
@@ -13928,11 +15277,11 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
             r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
         ] {
-            scene.api_dispatch(conn, frame);
+            scene.api_dispatch_reply(conn, frame);
         }
         let unit = |scene: &mut Scene, params: &str| {
             let reply = scene
-                .api_dispatch(
+                .api_dispatch_reply(
                     conn,
                     &format!(
                         r#"{{"jsonrpc":"2.0","id":2,"method":"hew.doc.export","params":{params}}}"#
@@ -13974,16 +15323,16 @@ mod tests {
         // inside one transaction ($ref chaining, exactly as an MCP client
         // drives it).
         let conn = scene.api_connection_open();
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
         );
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
         );
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 r#"{"jsonrpc":"2.0","id":2,"method":"hew.doc.transact","params":{"label":"Agent box","commands":[
                     {"method":"hew.sketch.draw_rect","as":"s1","params":{"plane":{"origin":[5,0,0],"normal":[0,0,1]},"corner_a":[5,0,0],"corner_b":[6,1,0]}},
@@ -14031,11 +15380,11 @@ mod tests {
         let mut scene = Scene::new();
         recording::start();
         let conn = scene.api_connection_open();
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
         );
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
         );
@@ -14049,7 +15398,9 @@ mod tests {
                 {{"method":"hew.material.set_default","params":{{"id":{{"$ref":"box#/object_id"}},"material":{{"$ref":"m#/material"}}}}}},
                 {{"method":"hew.material.position_texture","params":{{"face":{{"object":{{"$ref":"box#/object_id"}},"at":[0.5,0.5,0.5]}},"pins":{{"origin":[0,0,0.5],"u":[0.2,0,0.5],"v":[0,1,0.5]}}}}}}]}}}}"#
         );
-        let reply = scene.api_dispatch(conn, &frame).expect("transact replies");
+        let reply = scene
+            .api_dispatch_reply(conn, &frame)
+            .expect("transact replies");
         assert!(
             !reply.contains("\"error\""),
             "the transaction must succeed: {reply}"
@@ -14063,7 +15414,7 @@ mod tests {
             .expect("the material's id")
             .to_string();
         let saved = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 &format!(
                     r#"{{"jsonrpc":"2.0","id":3,"method":"hew.library.save","params":{{"material":"{material}","name":"Bamboo","return_bytes":true}}}}"#
@@ -14080,7 +15431,7 @@ mod tests {
         let item = Document::load(&item).unwrap();
         assert_eq!(item.materials().len(), 1, "the material alone");
         let replaced = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 &format!(
                     r#"{{"jsonrpc":"2.0","id":4,"method":"hew.material.replace","params":{{"from":"{material}","to":null}}}}"#
@@ -14144,16 +15495,16 @@ mod tests {
         scene.extrude_region(sketch, region, 0.5).expect("extrude");
 
         let conn = scene.api_connection_open();
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
         );
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
         );
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 r#"{"jsonrpc":"2.0","id":2,"method":"hew.history.undo","params":{}}"#,
             )
@@ -14193,15 +15544,15 @@ mod tests {
         let mut scene = Scene::new();
         recording::start();
         let conn = scene.api_connection_open();
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
         );
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
         );
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":2,"method":"hew.query.scene","params":{}}"#,
         );
@@ -14258,7 +15609,7 @@ mod tests {
     /// second solid drawn clear of the first (its position is otherwise
     /// incidental; overlapping regions extrude directly now).
     fn ground_unit_square_at(scene: &mut Scene, x: f64, y: f64) -> (u64, u64) {
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         let corners = [
             (0.0, 0.0, 1.0, 0.0),
             (1.0, 0.0, 1.0, 1.0),
@@ -14501,6 +15852,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("snap call succeeds")
             .expect("axis lock with an anchor always resolves");
@@ -14522,6 +15874,86 @@ mod tests {
             0.0,
             "redo reproduces the moved frame's x.x"
         );
+    }
+
+    /// A direction lock (`lock_direction`) holds the snap to the line
+    /// through the anchor along that direction, normalized at the boundary,
+    /// and wins over an axis lock given alongside it.
+    #[test]
+    fn a_direction_lock_snaps_onto_its_line_through_the_anchor() {
+        let scene = Scene::new();
+        let anchor = [1.0, 2.0, 0.0];
+        let d = [1.0, 1.0, 0.0];
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        let on_line = |snap: &SnapJs| {
+            let p = [
+                snap.x() - anchor[0],
+                snap.y() - anchor[1],
+                snap.z() - anchor[2],
+            ];
+            // Perpendicular distance from the line through the anchor.
+            let t = p[0] * s + p[1] * s;
+            let off = [p[0] - t * s, p[1] - t * s, p[2]];
+            (off[0] * off[0] + off[1] * off[1] + off[2] * off[2]).sqrt()
+        };
+        for lock_axis in [None, Some(0), Some(2)] {
+            // A ray straight down at a point off the line.
+            let snap = scene
+                .snap(
+                    3.5,
+                    3.1,
+                    8.0,
+                    0.0,
+                    0.0,
+                    -1.0,
+                    0.3,
+                    Some(anchor.to_vec().into_boxed_slice()),
+                    lock_axis,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(d.to_vec().into_boxed_slice()),
+                )
+                .expect("snap call succeeds")
+                .expect("a direction lock with an anchor resolves");
+            assert!(on_line(&snap) < 1e-9, "{lock_axis:?}: off the line");
+            let dir = snap
+                .direction()
+                .expect("a locked snap reports its direction");
+            assert!((dir[0] - s).abs() < 1e-12 && (dir[1] - s).abs() < 1e-12);
+            assert!(
+                snap.x() > anchor[0],
+                "the point lies along +d from the anchor"
+            );
+        }
+        // An unusable direction (zero length) leaves the axis lock in force.
+        let snap = scene
+            .snap(
+                3.5,
+                3.1,
+                8.0,
+                0.0,
+                0.0,
+                -1.0,
+                0.3,
+                Some(anchor.to_vec().into_boxed_slice()),
+                Some(0),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(vec![0.0, 0.0, 0.0].into_boxed_slice()),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(snap.direction(), Some(vec![1.0, 0.0, 0.0]));
     }
 
     #[test]
@@ -14619,7 +16051,7 @@ mod tests {
         let mut scene = Scene::new();
         let (s, r) = ground_unit_square(&mut scene);
         scene.extrude_region(s, r, 1.0).unwrap();
-        let s2 = scene.begin_ground_sketch();
+        let s2 = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, s2, 3.0, 0.0, 4.0, 1.0);
 
         // Eye in front of and above the box, aimed at the back-bottom edge's
@@ -14629,7 +16061,7 @@ mod tests {
             scene
                 .snap(
                     ex, ey, ez, 0.0, 4.0, -3.0, 0.01, None, None, None, None, None, None, None,
-                    None, None,
+                    None, None, None,
                 )
                 .unwrap()
                 .map(|snap| snap.kind())
@@ -14918,9 +16350,9 @@ mod tests {
     #[test]
     fn ground_sketches_are_additive_and_coexist() {
         let mut scene = Scene::new();
-        let first = scene.begin_ground_sketch();
+        let first = scene.begin_ground_sketch().unwrap();
         assert_eq!(scene.sketch_lines(first).unwrap().len(), 0);
-        let second = scene.begin_ground_sketch();
+        let second = scene.begin_ground_sketch().unwrap();
         // : beginning a new sketch is additive — the first handle stays live,
         // so independent coplanar sketches coexist.
         assert_ne!(first, second);
@@ -15406,7 +16838,7 @@ mod tests {
     #[test]
     fn transform_sketch_islands_moves_two_islands_together() {
         let mut scene = Scene::new();
-        let s = scene.begin_ground_sketch();
+        let s = scene.begin_ground_sketch().unwrap();
         add_unit_square_to(&mut scene, s, 0.0, 0.0);
         add_unit_square_to(&mut scene, s, 3.0, 0.0);
         let islands = scene.sketch_island_ids(s);
@@ -15449,7 +16881,7 @@ mod tests {
     #[test]
     fn transform_sketch_islands_arranges_onto_another_shape() {
         let mut scene = Scene::new();
-        let s = scene.begin_ground_sketch();
+        let s = scene.begin_ground_sketch().unwrap();
         add_unit_square_to(&mut scene, s, 0.0, 0.0);
         add_unit_square_to(&mut scene, s, 3.0, 0.0);
         let left = scene
@@ -15484,7 +16916,7 @@ mod tests {
     fn transform_sketch_islands_recording_round_trips() {
         let mut scene = Scene::new();
         scene.start_recording();
-        let s = scene.begin_ground_sketch();
+        let s = scene.begin_ground_sketch().unwrap();
         add_unit_square_to(&mut scene, s, 0.0, 0.0);
         add_unit_square_to(&mut scene, s, 3.0, 0.0);
         let left = scene
@@ -15502,7 +16934,7 @@ mod tests {
     #[test]
     fn sketch_unit_keys_json_shape_and_stability() {
         let mut scene = Scene::new();
-        let s = scene.begin_ground_sketch();
+        let s = scene.begin_ground_sketch().unwrap();
         add_unit_square_to(&mut scene, s, 0.0, 0.0);
         let before: serde_json::Value =
             serde_json::from_str(&scene.sketch_unit_keys(s).unwrap()).unwrap();
@@ -15593,7 +17025,7 @@ mod tests {
         let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
         let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
         let g = scene.group_nodes(&[0], &[o2]).unwrap();
-        let free = scene.begin_ground_sketch();
+        let free = scene.begin_ground_sketch().unwrap();
 
         let hash_before = scene.state_hash();
         let affine = [
@@ -15635,6 +17067,30 @@ mod tests {
 
         let err = scene.group_nodes(&[7], &[o]).unwrap_err();
         assert!(err.0.starts_with("BadNodeKind"), "got {}", err.0);
+    }
+
+    /// `part_frame_json` answers `hew.query.part_frame`'s shape for a world
+    /// node: a unit-square footprint extruded 0.25 m reads longest first,
+    /// thickness last, from its largest face; a stale handle refuses typed.
+    #[test]
+    fn part_frame_json_measures_a_world_node_along_its_own_axes() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 0.25).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&scene.part_frame_json(0, o).unwrap()).unwrap();
+        assert_eq!(v["source"], "face");
+        let ext: Vec<f64> = v["extents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect();
+        assert!((ext[0] - 1.0).abs() < 1e-9 && (ext[1] - 1.0).abs() < 1e-9);
+        assert!((ext[2] - 0.25).abs() < 1e-9);
+        assert!(v["generation"].is_u64() && v["epoch"].is_u64());
+        let err = scene.part_frame_json(0, o ^ 0xffff_0000_0000).unwrap_err();
+        assert!(err.0.starts_with("NotPlaced"), "got {}", err.0);
     }
 
     /// `reparent_nodes` moves a live node into a group across the FFI as
@@ -15871,7 +17327,7 @@ mod tests {
         let posed = scene
             .snap(
                 7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap()
             .expect("posed definition endpoint must snap");
@@ -15882,7 +17338,7 @@ mod tests {
         let hidden = scene
             .snap(
                 7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap();
         assert_ne!(
@@ -15894,7 +17350,7 @@ mod tests {
         let shown = scene
             .snap(
                 7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap()
             .expect("showing the active instance restores its posed sketch inference");
@@ -15904,7 +17360,7 @@ mod tests {
         let after_exit = scene
             .snap(
                 7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap();
         assert_ne!(
@@ -15915,7 +17371,7 @@ mod tests {
         let local = scene
             .snap(
                 2.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap();
         assert_ne!(
@@ -15952,7 +17408,7 @@ mod tests {
         let mirrored = scene
             .snap(
                 3.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap()
             .expect("mirrored definition endpoint must snap");
@@ -15987,7 +17443,7 @@ mod tests {
     #[test]
     fn place_text_o_glyph_via_full_gesture_pipeline_is_watertight() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         scene.sketch_begin_gesture(sketch).unwrap();
         let outer = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
         for i in 0..4 {
@@ -16043,7 +17499,7 @@ mod tests {
         let mut scene = Scene::new();
         scene.start_recording();
 
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         scene.sketch_begin_gesture(sketch).unwrap();
         let outer = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
         for i in 0..4 {
@@ -16458,7 +17914,7 @@ mod tests {
             scene.draft_end(d)
         })();
         if let Err(e) = result {
-            scene.draft_cancel(d);
+            scene.draft_cancel(d).unwrap();
             return Err(e);
         }
         Ok(())
@@ -17471,7 +18927,7 @@ mod tests {
             .snap(
                 5.0, 5.0, 3.0, // ray origin
                 0.0, 0.0, -1.0, // ray direction (-Z)
-                0.05, None, None, None, None, None, None, None, None, None,
+                0.05, None, None, None, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("ray crosses the guide line");
@@ -17488,7 +18944,7 @@ mod tests {
         let snap = scene
             .snap(
                 5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap();
         assert!(
@@ -17510,7 +18966,7 @@ mod tests {
             scene
                 .snap(
                     ray.0, ray.1, ray.2, ray.3, ray.4, ray.5, ray.6, None, None, None, None, None,
-                    None, None, None, None,
+                    None, None, None, None, None,
                 )
                 .unwrap()
         };
@@ -17544,7 +19000,7 @@ mod tests {
         let snap = scene
             .snap(
                 2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap()
             .expect("ray points straight at the guide point");
@@ -17567,7 +19023,7 @@ mod tests {
         let cone_miss = scene
             .snap(
                 2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap();
         assert!(
@@ -17589,6 +19045,7 @@ mod tests {
                 None,
                 None,
                 Some(true),
+                None,
                 None,
                 None,
                 None,
@@ -17750,7 +19207,7 @@ mod tests {
     #[test]
     fn linear_dimension_anchored_to_object_detaches_on_delete() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         scene
             .sketch_add_segment(sketch, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0)
             .unwrap();
@@ -18127,10 +19584,613 @@ mod tests {
 
     // ------------------------------------------------------------ live API
 
+    /// The tagged `api_dispatch` return, a forward through
+    /// `api_complete_forward`, and plugin registration on the shared
+    /// registry.
+    #[test]
+    fn api_dispatch_tags_replies_and_forwards_plugin_commands() {
+        let mut scene = Scene::new();
+        assert!(
+            scene
+                .register_plugin_commands("com.example.lib", "not json")
+                .is_err()
+        );
+        let decls = r#"[{"id":"sum","class":"read_only","summary":"Adds."},{"id":"mut","class":"mutating","summary":"Mutates."}]"#;
+        scene
+            .register_plugin_commands("com.example.lib", decls)
+            .expect("registers");
+        assert_eq!(
+            scene
+                .register_plugin_commands("com.example.lib", decls)
+                .unwrap_err()
+                .0,
+            "REGISTER: duplicate_command"
+        );
+        assert!(scene.api_method_mutates("com.example.lib.mut"));
+        assert!(!scene.api_method_mutates("com.example.lib.sum"));
+
+        let conn = scene.api_connection_open();
+        let hello: serde_json::Value = serde_json::from_str(
+            &scene
+                .api_dispatch(
+                    conn,
+                    r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let frame: serde_json::Value =
+            serde_json::from_str(hello["reply"].as_str().expect("a tagged reply")).unwrap();
+        assert_eq!(frame["result"]["profile"], "app");
+        scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+        );
+        assert_eq!(
+            scene.api_dispatch(conn, r#"{"jsonrpc":"2.0","method":"hew.query.scene"}"#),
+            None,
+            "a notification answers nothing"
+        );
+
+        let pending: serde_json::Value = serde_json::from_str(
+            &scene
+                .api_dispatch(
+                    conn,
+                    r#"{"jsonrpc":"2.0","id":7,"method":"com.example.lib.mut","params":{}}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let token = pending["pending"]["token"]
+            .as_u64()
+            .expect("a pending token");
+        assert_eq!(pending["pending"]["forward"]["local"], "mut");
+        assert_eq!(pending["pending"]["forward"]["mutating"], true);
+        assert!(scene.api_complete_forward(conn, token, "{").is_err());
+        assert!(
+            scene
+                .api_complete_forward(conn + 1, token, r#"{"failed":"timeout"}"#)
+                .is_err()
+        );
+        let done: serde_json::Value = serde_json::from_str(
+            &scene
+                .api_complete_forward(conn, token, r#"{"failed":"unavailable"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(done["id"], 7);
+        assert_eq!(done["error"]["data"]["refusal"], "plugin_unavailable");
+        assert_eq!(
+            scene
+                .api_complete_forward(conn, token, r#"{"failed":"unavailable"}"#)
+                .unwrap_err()
+                .0,
+            "FORWARD: unknown forward token"
+        );
+
+        scene.unregister_plugin_commands("com.example.lib");
+        assert!(!scene.api_method_mutates("com.example.lib.mut"));
+        let gone: serde_json::Value = serde_json::from_str(
+            &scene
+                .api_dispatch(
+                    conn,
+                    r#"{"jsonrpc":"2.0","id":8,"method":"com.example.lib.mut","params":{}}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(gone["reply"].as_str().unwrap().contains("-32601"));
+    }
+
+    /// A completed forward never records its own frame (no plugin runs at
+    /// replay time; its compound's children are the record), and resync
+    /// follows the forwarded plugin command's own flag, fixed at dispatch
+    /// so a plugin unregistered meanwhile does not change it.
+    #[test]
+    fn completed_forwards_record_by_the_plugin_commands_own_flag() {
+        let mut scene = Scene::new();
+        scene
+            .register_plugin_commands(
+                "com.example.lib",
+                r#"[{"id":"sum","class":"read_only","summary":"Adds."},{"id":"mut","class":"mutating","summary":"Mutates."}]"#,
+            )
+            .unwrap();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let issue = |scene: &mut Scene, frame: &str| -> u64 {
+            let tagged: serde_json::Value =
+                serde_json::from_str(&scene.api_dispatch(conn, frame).unwrap()).unwrap();
+            tagged["pending"]["token"].as_u64().expect("forwarded")
+        };
+        recording::reset();
+        recording::start();
+        let read_tx = r#"{"jsonrpc":"2.0","id":2,"method":"hew.doc.transact","params":{"commands":[{"method":"com.example.lib.sum"}]}}"#;
+        let token = issue(&mut scene, read_tx);
+        let done = scene
+            .api_complete_forward(conn, token, r#"{"ok":{}}"#)
+            .unwrap();
+        assert!(done.contains("\"results\""), "{done}");
+        assert!(
+            recording::peek_calls().is_empty(),
+            "a read-only plugin command is not a mutation, even inside a transaction"
+        );
+
+        let write = r#"{"jsonrpc":"2.0","id":3,"method":"com.example.lib.mut","params":{}}"#;
+        let token = issue(&mut scene, write);
+        scene.unregister_plugin_commands("com.example.lib");
+        let done = scene
+            .api_complete_forward(conn, token, r#"{"ok":{}}"#)
+            .unwrap();
+        assert!(!done.contains("\"error\""), "{done}");
+        let calls = recording::take_calls();
+        recording::reset();
+        assert!(
+            calls.is_empty(),
+            "the forwarded frame itself is never recorded"
+        );
+    }
+
+    // ------------------------------------------------------------ compounds
+
+    /// A scene with plugin `com.example.parts` registered (mutating `cut`,
+    /// labeled "Cut list"), a first-party caller connection, and the
+    /// provider's own connection (model write and `documents.save`), both
+    /// hello'd and attached. Returns `(scene, caller, provider)`.
+    fn compound_scene() -> (Scene, u32, u32) {
+        let mut scene = Scene::new();
+        scene
+            .register_plugin_commands(
+                "com.example.parts",
+                r#"[{"id":"cut","class":"mutating","summary":"Cuts.","label":"Cut list","permission":"model.write"},
+                    {"id":"inner","class":"mutating","summary":"Inner.","label":"Inner","permission":"model.write"}]"#,
+            )
+            .unwrap();
+        let caller = scene.api_connection_open();
+        hello_and_attach(&mut scene, caller);
+        let provider = scene
+            .api_plugin_connection_open(&provider_grant().to_string())
+            .unwrap();
+        for frame in [
+            r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+        ] {
+            let reply = scene.api_dispatch_reply(provider, frame).unwrap();
+            assert!(!reply.contains("\"error\""), "{reply}");
+        }
+        (scene, caller, provider)
+    }
+
+    fn provider_grant() -> serde_json::Value {
+        serde_json::json!({
+            "ceiling": "app",
+            "permissions": ["model.read", "model.write", "documents.save"],
+            "plugin": "com.example.parts",
+            "app": null,
+            "document": null
+        })
+    }
+
+    /// Issues `method` on `conn` (plainly, or inside forward `within`) and
+    /// returns the pending forward's token.
+    fn issue_forward(scene: &mut Scene, conn: u32, method: &str, within: Option<u64>) -> u64 {
+        let frame = format!(r#"{{"jsonrpc":"2.0","id":9,"method":"{method}","params":{{}}}}"#);
+        let tagged = match within {
+            None => scene.api_dispatch(conn, &frame),
+            Some(t) => scene.api_dispatch_in_forward(conn, t, &frame),
+        }
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&tagged).unwrap();
+        v["pending"]["token"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("forwarded: {tagged}"))
+    }
+
+    fn rect_frame(id: u32, x: f64) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"hew.sketch.draw_rect","params":{{"plane":{{"ground":true}},"corner_a":[{x},0.0,0.0],"corner_b":[{},1.0,0.0]}}}}"#,
+            x + 1.0
+        )
+    }
+
+    /// The reply frame inside a tagged `api_dispatch` answer.
+    fn tagged_reply(tagged: Option<String>) -> serde_json::Value {
+        let v: serde_json::Value = serde_json::from_str(&tagged.expect("an answer")).unwrap();
+        serde_json::from_str(v["reply"].as_str().expect("a reply")).unwrap()
+    }
+
+    #[test]
+    fn compound_begin_end_round_trip() {
+        let (mut scene, caller, provider) = compound_scene();
+        let before = scene.doc.undo_depth();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        assert!(!scene.busy());
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        assert!(scene.busy());
+        assert_eq!(scene.compound_depth(), 1);
+        for (id, x) in [(10, 0.0), (11, 3.0)] {
+            let reply =
+                tagged_reply(scene.api_dispatch_in_forward(provider, forward, &rect_frame(id, x)));
+            assert!(reply.get("error").is_none(), "{reply}");
+        }
+        assert_eq!(
+            scene.doc.undo_depth(),
+            before + 2,
+            "two children while open"
+        );
+        let ended: serde_json::Value =
+            serde_json::from_str(&scene.compound_end(kt).unwrap()).unwrap();
+        assert_eq!(ended["committed"], true);
+        assert_eq!(ended["generation"], scene.doc.history_generation());
+        assert_eq!(ended["epoch"], scene.doc.document_epoch());
+        assert!(!scene.busy());
+        assert_eq!(scene.doc.undo_depth(), before + 1, "one entry");
+        let meta = scene.doc.peek_undo_meta().unwrap();
+        assert_eq!(meta.label, "Cut list");
+        assert_eq!(
+            meta.origin,
+            kernel::HistoryOrigin::Connection("plugin:com.example.parts".into())
+        );
+        let done = scene
+            .api_complete_forward(caller, forward, r#"{"ok":{}}"#)
+            .unwrap();
+        assert!(!done.contains("\"error\""), "{done}");
+        // A wrong or spent token is a mismatch, and changes nothing.
+        assert!(
+            scene
+                .compound_end(kt)
+                .unwrap_err()
+                .0
+                .starts_with("CompoundTokenMismatch:")
+        );
+        // A read-only or unknown forward opens nothing.
+        assert!(
+            scene
+                .compound_begin(caller, 999)
+                .unwrap_err()
+                .0
+                .starts_with("FORWARD:")
+        );
+    }
+
+    #[test]
+    fn plain_dispatch_during_compound_is_document_busy() {
+        let (mut scene, caller, _provider) = compound_scene();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let reply = tagged_reply(scene.api_dispatch(caller, &rect_frame(12, 0.0)));
+        assert_eq!(reply["id"], 12);
+        assert_eq!(reply["error"]["code"], -32000);
+        assert_eq!(reply["error"]["data"]["refusal"], "document_busy");
+        assert_eq!(
+            reply["error"]["data"]["failed_method"],
+            "hew.sketch.draw_rect"
+        );
+        // Reads wait too: the host queues every plain frame.
+        let read = tagged_reply(scene.api_dispatch(
+            caller,
+            r#"{"jsonrpc":"2.0","id":13,"method":"hew.query.scene","params":{}}"#,
+        ));
+        assert_eq!(read["error"]["data"]["refusal"], "document_busy");
+        // A notification still answers nothing.
+        assert_eq!(
+            scene.api_dispatch(caller, r#"{"jsonrpc":"2.0","method":"hew.query.scene"}"#),
+            None
+        );
+        scene.compound_abort(kt).unwrap();
+        let read = tagged_reply(scene.api_dispatch(
+            caller,
+            r#"{"jsonrpc":"2.0","id":14,"method":"hew.query.scene","params":{}}"#,
+        ));
+        assert!(read.get("error").is_none(), "{read}");
+    }
+
+    #[test]
+    fn dispatch_in_forward_with_wrong_token_is_document_busy() {
+        let (mut scene, caller, provider) = compound_scene();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let reply = tagged_reply(scene.api_dispatch_in_forward(
+            provider,
+            forward + 1,
+            &rect_frame(15, 0.0),
+        ));
+        assert_eq!(reply["error"]["data"]["refusal"], "document_busy");
+        assert!(scene.doc.sketch_ids().is_empty(), "nothing ran");
+        scene.compound_abort(kt).unwrap();
+    }
+
+    /// Every document-mutating `Scene` method refuses while a compound is
+    /// open; the shape is `DocumentBusy: ...`.
+    #[test]
+    fn scene_mutators_refuse_document_busy_during_a_compound() {
+        let (mut scene, caller, _provider) = compound_scene();
+        let bytes = scene.doc.save();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let busy = |e: ApiError| assert!(e.0.starts_with("DocumentBusy:"), "{}", e.0);
+        busy(scene.scene_undo().err().expect("refused"));
+        busy(scene.begin_ground_sketch().unwrap_err());
+        // `load` throws the same text as a `JsError`, which only exists in
+        // a wasm runtime; its guard is the same call.
+        busy(scene.load_core(&bytes).unwrap_err());
+        busy(scene.replay("{}").unwrap_err());
+        scene.compound_abort(kt).unwrap();
+        assert!(scene.begin_ground_sketch().is_ok());
+    }
+
+    /// Abort restores the whole document and the epoch still moves on; a
+    /// document replacement starts the new document above the old epoch.
+    #[test]
+    fn compound_abort_restores_and_load_raises_the_epoch() {
+        let (mut scene, caller, provider) = compound_scene();
+        let hash = scene.doc.state_hash();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        tagged_reply(scene.api_dispatch_in_forward(provider, forward, &rect_frame(16, 0.0)));
+        let epoch = scene.doc.document_epoch();
+        scene.compound_abort(kt).unwrap();
+        assert_eq!(scene.doc.state_hash(), hash);
+        assert!(scene.doc.document_epoch() > epoch);
+        let epoch = scene.doc.document_epoch();
+        let bytes = Document::new().save();
+        scene.load_core(&bytes).unwrap();
+        assert!(scene.doc.document_epoch() > epoch);
+    }
+
+    /// An aborted plugin command puts back the selection and isolation its
+    /// frames changed, and leaves the directives that show them again; a
+    /// committed one keeps them.
+    #[test]
+    fn compound_abort_restores_the_selection_and_isolation() {
+        // The frames run on the first-party connection, which holds `view`.
+        let (mut scene, caller, _provider) = compound_scene();
+        let (a_id, a) = scene_box(&mut scene, 0.0);
+        let (_, b) = scene_box(&mut scene, 3.0);
+        let before = format!(r#"[{{"kind":"object","id":"{}"}}]"#, a_id.data().as_ffi());
+        scene.set_ui_selection(&before).unwrap();
+        let before = scene.ui_selection.clone();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        for (id, method, params) in [
+            (30, "hew.selection.set", serde_json::json!({ "ids": [b] })),
+            (31, "hew.view.isolate", serde_json::json!({ "ids": [a] })),
+        ] {
+            let reply = tagged_reply(scene.api_dispatch_in_forward(
+                caller,
+                forward,
+                &frame(id, method, params),
+            ));
+            assert!(reply.get("error").is_none(), "{reply}");
+            directives(&mut scene);
+        }
+        assert_ne!(scene.ui_selection, before);
+        assert!(scene.ui_isolation.is_some());
+        scene.compound_abort(kt).unwrap();
+        assert_eq!(scene.ui_selection, before);
+        assert_eq!(scene.ui_isolation, None);
+        let got = directives(&mut scene);
+        assert_eq!(
+            got,
+            vec![
+                serde_json::json!({
+                    "kind": "selection",
+                    "mode": "replace",
+                    "entries": [{ "kind": "object", "id": a_id.data().as_ffi().to_string() }],
+                }),
+                serde_json::json!({ "kind": "clear_isolation" }),
+            ]
+        );
+
+        // An abort that changed neither leaves no directive.
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        scene.compound_abort(kt).unwrap();
+        assert!(directives(&mut scene).is_empty());
+
+        // Isolation on at begin comes back unframed.
+        let isolate = frame(32, "hew.view.isolate", serde_json::json!({ "ids": [b] }));
+        scene.api_dispatch_reply(caller, &isolate).unwrap();
+        directives(&mut scene);
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let clear = frame(33, "hew.view.clear_isolation", serde_json::json!({}));
+        tagged_reply(scene.api_dispatch_in_forward(caller, forward, &clear));
+        directives(&mut scene);
+        scene.compound_abort(kt).unwrap();
+        let got = directives(&mut scene);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["kind"], "isolate");
+        assert_eq!(got[0]["frame"], false);
+    }
+
+    #[test]
+    fn plugin_compound_records_children_once_and_replays_as_one_entry() {
+        recording::reset();
+        recording::start();
+        let (mut scene, caller, provider) = compound_scene();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        for (id, x) in [(20, 0.0), (21, 3.0)] {
+            tagged_reply(scene.api_dispatch_in_forward(provider, forward, &rect_frame(id, x)));
+        }
+        assert!(
+            recording::peek_calls().is_empty(),
+            "children wait in the buffer"
+        );
+        scene.compound_end(kt).unwrap();
+        scene
+            .api_complete_forward(caller, forward, r#"{"ok":{}}"#)
+            .unwrap();
+        let calls = recording::peek_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let recording::RecordedCall::PluginCompound {
+            plugin,
+            label,
+            grant,
+            calls: children,
+        } = &calls[0]
+        else {
+            panic!("a plugin compound: {calls:?}")
+        };
+        assert_eq!(plugin, "com.example.parts");
+        assert_eq!(label, "Cut list");
+        assert_eq!(grant["plugin"], "com.example.parts");
+        assert_eq!(children.len(), 2);
+        assert!(
+            children
+                .iter()
+                .all(|c| matches!(c, recording::RecordedCall::ApiDispatch { frame } if frame.contains("draw_rect")))
+        );
+        let rec = scene.take_recording();
+        recording::reset();
+        let mut replayed = Scene::new();
+        let hash = replayed.replay(&rec).unwrap();
+        assert_eq!(hash, scene.doc.state_hash());
+        assert_eq!(replayed.doc.undo_depth(), scene.doc.undo_depth());
+        let meta = replayed.doc.peek_undo_meta().unwrap();
+        assert_eq!(meta.label, "Cut list");
+        assert_eq!(
+            meta.origin,
+            kernel::HistoryOrigin::Connection("plugin:com.example.parts".into())
+        );
+        assert!(!replayed.busy());
+    }
+
+    #[test]
+    fn aborted_compound_records_nothing() {
+        recording::reset();
+        recording::start();
+        let (mut scene, caller, provider) = compound_scene();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        tagged_reply(scene.api_dispatch_in_forward(provider, forward, &rect_frame(22, 0.0)));
+        scene.compound_abort(kt).unwrap();
+        scene
+            .api_complete_forward(caller, forward, r#"{"failed":"cancelled"}"#)
+            .unwrap();
+        let calls = recording::take_calls();
+        recording::reset();
+        assert!(calls.is_empty(), "{calls:?}");
+    }
+
+    /// A plugin command that calls another plugin command: the inner
+    /// compound lands as one child of the outer, records inside it, and
+    /// the whole replays as one entry.
+    #[test]
+    fn nested_compound_round_trips() {
+        recording::reset();
+        recording::start();
+        let (mut scene, caller, provider) = compound_scene();
+        let before = scene.doc.undo_depth();
+        let outer = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let okt = scene.compound_begin(caller, outer).unwrap();
+        tagged_reply(scene.api_dispatch_in_forward(provider, outer, &rect_frame(30, 0.0)));
+        // The provider calls a command of its own while serving `outer`.
+        let inner = issue_forward(&mut scene, provider, "com.example.parts.inner", Some(outer));
+        let ikt = scene.compound_begin(provider, inner).unwrap();
+        assert_eq!(scene.compound_depth(), 2);
+        // Only the innermost forward's frames run now.
+        let refused =
+            tagged_reply(scene.api_dispatch_in_forward(provider, outer, &rect_frame(31, 3.0)));
+        assert_eq!(refused["error"]["data"]["refusal"], "document_busy");
+        tagged_reply(scene.api_dispatch_in_forward(provider, inner, &rect_frame(32, 6.0)));
+        // The outer compound cannot end before the inner one.
+        assert!(
+            scene
+                .compound_end(okt)
+                .unwrap_err()
+                .0
+                .starts_with("CompoundTokenMismatch:")
+        );
+        scene.compound_end(ikt).unwrap();
+        scene
+            .api_complete_forward(provider, inner, r#"{"ok":{}}"#)
+            .unwrap();
+        tagged_reply(scene.api_dispatch_in_forward(provider, outer, &rect_frame(33, 9.0)));
+        scene.compound_end(okt).unwrap();
+        scene
+            .api_complete_forward(caller, outer, r#"{"ok":{}}"#)
+            .unwrap();
+        assert_eq!(scene.doc.undo_depth(), before + 1);
+        assert_eq!(scene.doc.peek_undo_meta().unwrap().label, "Cut list");
+
+        let calls = recording::peek_calls();
+        let [
+            recording::RecordedCall::PluginCompound {
+                calls: children, ..
+            },
+        ] = calls.as_slice()
+        else {
+            panic!("one compound: {calls:?}")
+        };
+        assert_eq!(children.len(), 3);
+        assert!(matches!(
+            &children[1],
+            recording::RecordedCall::PluginCompound { label, calls, .. } if label == "Inner" && calls.len() == 1
+        ));
+        let rec = scene.take_recording();
+        recording::reset();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&rec).unwrap(), scene.doc.state_hash());
+        assert_eq!(replayed.doc.undo_depth(), before + 1);
+        assert_eq!(replayed.doc.peek_undo_meta().unwrap().label, "Cut list");
+        // One undo takes the whole nested command back.
+        replayed.scene_undo().unwrap();
+        assert_eq!(replayed.doc.undo_depth(), before);
+        assert!(replayed.doc.sketch_ids().is_empty());
+    }
+
+    /// `hew.doc.import` records itself (as the file it merged); inside a
+    /// compound that record lands in the compound, not beside it.
+    #[test]
+    fn import_inside_compound_is_buffered() {
+        recording::reset();
+        recording::start();
+        let (mut scene, caller, _provider) = compound_scene();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let stl = include_bytes!("../../../app/e2e/fixtures/stl/cube_open.stl");
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": 40, "method": "hew.doc.import",
+            "params": { "path": "cube_open.stl", "units": "mm", "bytes_base64": api::commands::doc::encode_base64(stl) },
+        })
+        .to_string();
+        // A plugin grant may not name a path, so a first-party connection
+        // issues it here; what is under test is where the record lands.
+        let reply = tagged_reply(scene.api_dispatch_in_forward(caller, forward, &frame));
+        assert!(reply.get("error").is_none(), "{reply}");
+        assert!(
+            recording::peek_calls().is_empty(),
+            "the import waits in the buffer"
+        );
+        scene.compound_end(kt).unwrap();
+        let calls = recording::peek_calls();
+        let [
+            recording::RecordedCall::PluginCompound {
+                calls: children, ..
+            },
+        ] = calls.as_slice()
+        else {
+            panic!("one compound: {calls:?}")
+        };
+        assert!(
+            matches!(
+                children.as_slice(),
+                [recording::RecordedCall::ImportStl { .. }]
+            ),
+            "{children:?}"
+        );
+        let rec = scene.take_recording();
+        recording::reset();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&rec).unwrap(), scene.doc.state_hash());
+        assert_eq!(replayed.doc.undo_depth(), scene.doc.undo_depth());
+    }
+
     fn hello_and_attach(scene: &mut Scene, conn: u32) {
         assert!(
             scene
-                .api_dispatch(
+                .api_dispatch_reply(
                     conn,
                     r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
                 )
@@ -18138,7 +20198,7 @@ mod tests {
                 .contains("\"profile\":\"app\"")
         );
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
             )
@@ -18153,7 +20213,7 @@ mod tests {
         hello_and_attach(&mut scene, conn);
 
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 r#"{"jsonrpc":"2.0","id":2,"method":"hew.sketch.draw_rect",
                     "params":{"plane":{"ground":true},"corner_a":[0.0,0.0,0.0],"corner_b":[1.0,1.0,0.0]}}"#,
@@ -18165,6 +20225,702 @@ mod tests {
             1,
             "the sketch dispatched over the live API is the SAME document the viewport reads"
         );
+    }
+
+    /// Subscribes `conn` to `events` (hello and attach first).
+    fn subscribed(scene: &mut Scene, conn: u32, events: &[&str]) {
+        for frame in [
+            r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+        ] {
+            let reply = scene.api_dispatch_reply(conn, frame).unwrap();
+            assert!(reply.contains("\"result\""), "{reply}");
+        }
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": 90, "method": "hew.event.subscribe",
+            "params": { "events": events },
+        })
+        .to_string();
+        let reply = scene.api_dispatch_reply(conn, &frame).unwrap();
+        assert!(reply.contains("\"subscribed\""), "{reply}");
+    }
+
+    /// The frames each connection got, parsed: conn id → frames.
+    fn drained(scene: &mut Scene) -> std::collections::BTreeMap<u32, Vec<serde_json::Value>> {
+        let out: serde_json::Value = serde_json::from_str(&scene.drain_events()).unwrap();
+        out.as_array()
+            .unwrap()
+            .iter()
+            .filter(|batch| !batch["conn"].is_null())
+            .map(|batch| {
+                let conn = batch["conn"].as_u64().unwrap() as u32;
+                let frames = batch["frames"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|f| serde_json::from_str(f.as_str().unwrap()).unwrap())
+                    .collect();
+                (conn, frames)
+            })
+            .collect()
+    }
+
+    fn draw_rect_frame(id: u32, x: f64) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "hew.sketch.draw_rect",
+            "params": { "plane": { "ground": true }, "corner_a": [x, 0.0, 0.0], "corner_b": [x + 1.0, 1.0, 0.0] },
+        })
+        .to_string()
+    }
+
+    /// A box at `x` in the scene's document (a rectangle extruded half a
+    /// meter), and its public id.
+    fn scene_box(scene: &mut Scene, x: f64) -> (ObjectId, String) {
+        let s = scene.doc.add_sketch(ground_plane());
+        scene.doc.begin_sketch_gesture(s).unwrap();
+        let sk = scene.doc.sketch_mut(s).unwrap();
+        let c = [
+            Point3::new(x, 0.0, 0.0),
+            Point3::new(x + 1.0, 0.0, 0.0),
+            Point3::new(x + 1.0, 1.0, 0.0),
+            Point3::new(x, 1.0, 0.0),
+        ];
+        for i in 0..4 {
+            sk.add_segment(c[i], c[(i + 1) % 4]).unwrap();
+        }
+        scene.doc.end_sketch_gesture(s).unwrap();
+        let regions = scene.doc.extrudable_regions(s).unwrap();
+        scene.doc.extrude_region(s, regions[0], 0.5).unwrap();
+        let id = *scene.doc.live_object_ids().last().unwrap();
+        let public = api::IdResolver::new(&scene.doc)
+            .public_of(&scene.doc, &kernel::EntityRef::Object(id))
+            .unwrap();
+        (id, public)
+    }
+
+    fn frame(id: u32, method: &str, params: serde_json::Value) -> String {
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+            .to_string()
+    }
+
+    fn directives(scene: &mut Scene) -> Vec<serde_json::Value> {
+        serde_json::from_str(&scene.take_pending_view_directives()).unwrap()
+    }
+
+    #[test]
+    fn selection_set_updates_the_mirror_and_leaves_a_directive() {
+        let mut scene = Scene::new();
+        let (a_id, a) = scene_box(&mut scene, 0.0);
+        let (b_id, b) = scene_box(&mut scene, 3.0);
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        // The app mirrored a selection of b.
+        scene
+            .set_ui_selection(&format!(
+                r#"[{{"kind":"object","id":"{}"}}]"#,
+                b_id.data().as_ffi()
+            ))
+            .unwrap();
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                &frame(
+                    5,
+                    "hew.selection.set",
+                    serde_json::json!({ "ids": [a], "mode": "add" }),
+                ),
+            )
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["result"]["ids"], serde_json::json!([b, a]), "{reply}");
+        assert_eq!(
+            scene.ui_selection,
+            vec![
+                live::UiSelectionEntry::Object {
+                    id: b_id.data().as_ffi()
+                },
+                live::UiSelectionEntry::Object {
+                    id: a_id.data().as_ffi()
+                },
+            ]
+        );
+        let got = directives(&mut scene);
+        assert_eq!(
+            got,
+            vec![serde_json::json!({
+                "kind": "selection",
+                "mode": "replace",
+                "entries": [
+                    { "kind": "object", "id": b_id.data().as_ffi().to_string() },
+                    { "kind": "object", "id": a_id.data().as_ffi().to_string() },
+                ],
+            })]
+        );
+        assert!(directives(&mut scene).is_empty(), "take, not peek");
+
+        // A refused set leaves the mirror and no directive.
+        scene.doc.set_node_user_hidden(NodeId::Object(a_id), true);
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                &frame(6, "hew.selection.set", serde_json::json!({ "ids": [a] })),
+            )
+            .unwrap();
+        assert!(reply.contains("selection_target_not_visible"), "{reply}");
+        assert_eq!(scene.ui_selection.len(), 2);
+        assert!(directives(&mut scene).is_empty());
+
+        // A malformed mirror is refused and the old one kept.
+        assert!(
+            scene
+                .set_ui_selection(r#"[{"kind":"draft-edge","id":"1"}]"#)
+                .is_err()
+        );
+        assert!(
+            scene
+                .set_ui_selection(r#"[{"kind":"object","id":7}]"#)
+                .is_err()
+        );
+        assert_eq!(scene.ui_selection.len(), 2);
+    }
+
+    #[test]
+    fn two_view_commands_in_one_transact_leave_two_directives() {
+        let mut scene = Scene::new();
+        let (a_id, a) = scene_box(&mut scene, 0.0);
+        let (_, b) = scene_box(&mut scene, 3.0);
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                &frame(
+                    5,
+                    "hew.doc.transact",
+                    serde_json::json!({ "commands": [
+                        { "method": "hew.view.hide", "params": { "ids": [b] } },
+                        { "method": "hew.view.isolate", "params": { "ids": [a] } },
+                        { "method": "hew.view.zoom_to", "params": { "ids": [a], "padding": 0 } }
+                    ] }),
+                ),
+            )
+            .unwrap();
+        assert!(reply.contains("\"results\""), "{reply}");
+        let kinds: Vec<String> = directives(&mut scene)
+            .iter()
+            .map(|d| d["kind"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds, vec!["hidden_changed", "isolate", "zoom_to"]);
+        assert_eq!(
+            scene.ui_isolation,
+            Some(vec![live::UiIsolationEntry::Object {
+                id: a_id.data().as_ffi()
+            }])
+        );
+
+        // An envelope that aborts leaves no directive, no isolation change,
+        // and no hide.
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                &frame(
+                    6,
+                    "hew.doc.transact",
+                    serde_json::json!({ "commands": [
+                        { "method": "hew.view.clear_isolation", "params": {} },
+                        { "method": "hew.view.hide", "params": { "ids": [a] } },
+                        { "method": "hew.view.zoom_to", "params": { "ids": ["obj_ffffff"] } }
+                    ] }),
+                ),
+            )
+            .unwrap();
+        assert!(reply.contains("unknown_entity"), "{reply}");
+        assert!(directives(&mut scene).is_empty());
+        assert!(scene.ui_isolation.is_some(), "the isolation stays");
+        assert!(!scene.doc.node_user_hidden(NodeId::Object(a_id)));
+    }
+
+    #[test]
+    fn drain_emits_selection_changed_once_per_change() {
+        let mut scene = Scene::new();
+        scene.set_host_document_id("doc_3");
+        let (a_id, a) = scene_box(&mut scene, 0.0);
+        let watcher = scene.api_connection_open();
+        let actor = scene.api_connection_open();
+        subscribed(&mut scene, watcher, &["selection_changed", "tool_changed"]);
+        hello_and_attach(&mut scene, actor);
+        drained(&mut scene);
+
+        // The app mirrors a selection: one event, then nothing until it
+        // changes again.
+        let mirror = format!(r#"[{{"kind":"object","id":"{}"}}]"#, a_id.data().as_ffi());
+        scene.set_ui_selection(&mirror).unwrap();
+        let got = drained(&mut scene);
+        let frames = &got[&watcher];
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["method"], "hew.event.selection_changed");
+        let params = &frames[0]["params"];
+        assert_eq!(params["document"], "doc_3");
+        assert_eq!(params["ids"], serde_json::json!([a]));
+        assert_eq!(params["primary"], serde_json::json!(a));
+        assert!(params["generation"].is_u64() && params["epoch"].is_u64());
+        scene.set_ui_selection(&mirror).unwrap();
+        assert!(drained(&mut scene).is_empty(), "the same selection again");
+
+        // A bus clear changes it once; the app's echo of the same state
+        // adds nothing.
+        scene
+            .api_dispatch_reply(
+                actor,
+                &frame(7, "hew.selection.clear", serde_json::json!({})),
+            )
+            .unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got[&watcher][0]["params"]["ids"], serde_json::json!([]));
+        assert_eq!(
+            got[&watcher][0]["params"]["primary"],
+            serde_json::Value::Null
+        );
+        scene.set_ui_selection("[]").unwrap();
+        assert!(drained(&mut scene).is_empty());
+
+        // The tool: once per change.
+        scene.note_tool_changed("Line");
+        scene.note_tool_changed("Line");
+        let got = drained(&mut scene);
+        assert_eq!(got[&watcher].len(), 1);
+        assert_eq!(
+            got[&watcher][0]["params"],
+            serde_json::json!({ "tool": "Line" })
+        );
+        scene.note_tool_changed("Line");
+        assert!(drained(&mut scene).is_empty());
+
+        // An entry whose object is gone is left out.
+        scene.set_ui_selection(&mirror).unwrap();
+        drained(&mut scene);
+        scene.doc.undo().unwrap();
+        scene
+            .set_ui_selection(&format!(
+                r#"[{{"kind":"object","id":"{}"}},{{"kind":"guide","id":"1"}}]"#,
+                a_id.data().as_ffi()
+            ))
+            .unwrap();
+        let got = drained(&mut scene);
+        let change = got[&watcher]
+            .iter()
+            .find(|f| f["method"] == "hew.event.selection_changed")
+            .expect("the mirror changed");
+        assert_eq!(change["params"]["ids"], serde_json::json!([]));
+    }
+
+    /// A bare hide over the bus writes persisted view state outside the
+    /// history; it is recorded like a mutation so a replay matches.
+    #[test]
+    fn a_bare_hide_is_recorded() {
+        let mut scene = Scene::new();
+        let (_, a) = scene_box(&mut scene, 0.0);
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        recording::start();
+        scene
+            .api_dispatch_reply(
+                conn,
+                &frame(5, "hew.view.hide", serde_json::json!({ "ids": [a] })),
+            )
+            .unwrap();
+        scene
+            .api_dispatch_reply(conn, &frame(6, "hew.view.hidden", serde_json::json!({})))
+            .unwrap();
+        recording::stop();
+        let calls = recording::take_calls();
+        let frames: Vec<&str> = calls
+            .iter()
+            .filter_map(|c| match c {
+                recording::RecordedCall::ApiDispatch { frame } => Some(frame.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert!(frames[0].contains("hew.view.hide"));
+    }
+
+    #[test]
+    fn drain_emits_one_frame_per_record_per_subscriber() {
+        let mut scene = Scene::new();
+        scene.set_host_document_id("doc_7");
+        let a = scene.api_connection_open();
+        let b = scene.api_connection_open();
+        let quiet = scene.api_connection_open();
+        subscribed(&mut scene, a, &["document_changed"]);
+        subscribed(&mut scene, b, &["document_changed"]);
+        hello_and_attach(&mut scene, quiet);
+        assert_eq!(drained(&mut scene).len(), 0, "nothing happened yet");
+
+        scene
+            .api_dispatch_reply(a, &draw_rect_frame(1, 0.0))
+            .unwrap();
+        scene
+            .api_dispatch_reply(a, &draw_rect_frame(2, 3.0))
+            .unwrap();
+        scene
+            .api_dispatch_reply(
+                a,
+                r#"{"jsonrpc":"2.0","id":3,"method":"hew.history.undo","params":{}}"#,
+            )
+            .unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got.keys().copied().collect::<Vec<_>>(), vec![a, b]);
+        for frames in got.values() {
+            let kinds: Vec<&str> = frames
+                .iter()
+                .map(|f| f["params"]["kind"].as_str().unwrap())
+                .collect();
+            assert_eq!(kinds, vec!["commit", "commit", "undo"]);
+            assert!(
+                frames
+                    .iter()
+                    .all(|f| f["method"] == "hew.event.document_changed"
+                        && f.get("id").is_none()
+                        && f["params"]["document"] == "doc_7")
+            );
+            assert_eq!(
+                frames[2]["params"]["changes"]["removed"],
+                frames[1]["params"]["changes"]["added"]
+            );
+            assert_eq!(
+                frames[0]["params"]["origin"]["connection"],
+                format!("live:{a}")
+            );
+        }
+        assert!(drained(&mut scene).is_empty(), "take, not peek");
+        // A UI-side commit drains the same way.
+        scene
+            .doc
+            .add_guide_line(Point3::ORIGIN, Vec3::new(1.0, 0.0, 0.0))
+            .unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got[&a].len(), 1);
+        assert_eq!(got[&a][0]["params"]["origin"], "user");
+    }
+
+    #[test]
+    fn the_document_id_is_minted_by_its_own_call_and_rides_the_lifecycle_events() {
+        let mut scene = Scene::new();
+        let first = scene.api_connection_open();
+        subscribed(&mut scene, first, &["document_saved", "document_opened"]);
+        drained(&mut scene);
+        // `save` alone never mints (the blank snapshot, autosave, reports).
+        let before = scene.save();
+        assert_eq!(scene.save(), before);
+        assert_eq!(scene.document_id(), None);
+        scene.note_document_event("opened", "Untitled", None, None);
+        let id = scene.ensure_document_id();
+        assert_eq!(scene.ensure_document_id(), id, "idempotent");
+        assert_eq!(scene.document_id(), Some(id.clone()));
+        let loaded = kernel::Document::load(&scene.save()).unwrap();
+        assert_eq!(loaded.document_id(), Some(id.clone()));
+        scene.note_document_event("saved", "Box", None, Some("hew".into()));
+        let got = drained(&mut scene);
+        let frames = &got[&first];
+        assert_eq!(frames[0]["params"]["document_id"], serde_json::Value::Null);
+        assert_eq!(frames[1]["params"]["document_id"], id.as_str());
+        // A library model item made from the document carries no id.
+        let item = scene.extract_document_item(None).unwrap();
+        assert_eq!(kernel::Document::load(&item).unwrap().document_id(), None);
+    }
+
+    #[test]
+    fn lifecycle_events_are_offered_once_to_the_host_even_with_no_connection() {
+        // A window nobody is connected to still reports its lifecycle: the
+        // host fans it out to first-party connections bound elsewhere.
+        let mut scene = Scene::new();
+        scene.note_document_event("opened", "Box", Some("/tmp/box.hew".into()), None);
+        scene.note_tool_changed("line");
+        let out: serde_json::Value = serde_json::from_str(&scene.drain_events()).unwrap();
+        let batches = out.as_array().unwrap();
+        assert_eq!(batches.len(), 1, "{out}");
+        assert!(batches[0]["conn"].is_null());
+        let frames = batches[0]["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 1, "only the lifecycle event: {out}");
+        let frame: serde_json::Value = serde_json::from_str(frames[0].as_str().unwrap()).unwrap();
+        assert_eq!(frame["method"], "hew.event.document_opened");
+        assert_eq!(frame["params"]["path"], "/tmp/box.hew");
+        assert_eq!(frame["params"]["title"], "Box");
+        // Take, not peek.
+        assert_eq!(scene.drain_events(), "[]");
+    }
+
+    #[test]
+    fn drain_filters_by_grant_and_subscription() {
+        let mut scene = Scene::new();
+        let reader = scene
+            .api_plugin_connection_open(
+                r#"{"ceiling":"core","permissions":["model.read"],"plugin":"com.example.r","document":"doc_1"}"#,
+            )
+            .unwrap();
+        let other_doc = scene
+            .api_plugin_connection_open(
+                r#"{"ceiling":"core","permissions":["model.read"],"plugin":"com.example.o","document":"doc_2"}"#,
+            )
+            .unwrap();
+        let first = scene.api_connection_open();
+        subscribed(
+            &mut scene,
+            reader,
+            &["document_changed", "tool_changed", "document_saved"],
+        );
+        subscribed(&mut scene, other_doc, &["document_changed"]);
+        subscribed(&mut scene, first, &["tool_changed", "document_saved"]);
+        drained(&mut scene);
+
+        scene
+            .api_dispatch_reply(first, &draw_rect_frame(1, 0.0))
+            .unwrap();
+        scene.note_tool_changed("line");
+        scene.note_document_event(
+            "saved",
+            "Box",
+            Some("/tmp/box.hew".into()),
+            Some("hew".into()),
+        );
+        let got = drained(&mut scene);
+        let methods = |conn: u32| -> Vec<String> {
+            got.get(&conn)
+                .map(|fs| {
+                    fs.iter()
+                        .map(|f| f["method"].as_str().unwrap().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        // model.read: document_changed and document_saved, but tool_changed
+        // needs view (denied at subscribe, never delivered); no path
+        // without documents.save.
+        assert_eq!(
+            methods(reader),
+            vec!["hew.event.document_saved", "hew.event.document_changed"]
+        );
+        let saved = &got[&reader][0]["params"];
+        assert_eq!(saved["format"], "hew");
+        assert!(saved.get("path").is_none(), "{saved}");
+        // Bound to another document: nothing about this one.
+        assert!(methods(other_doc).is_empty());
+        // First party: what it subscribed to, path included; not
+        // document_changed, which it did not ask for.
+        assert_eq!(
+            methods(first),
+            vec!["hew.event.tool_changed", "hew.event.document_saved"]
+        );
+        assert_eq!(got[&first][1]["params"]["path"], "/tmp/box.hew");
+        assert_eq!(
+            got[&first][0]["params"],
+            serde_json::json!({ "tool": "line" })
+        );
+    }
+
+    /// A plugin command's children are not history until its compound ends:
+    /// a drain while it is open sends nothing for them, the end sends its one
+    /// entry, and an abort sends one `abort` and nothing of what it undid.
+    #[test]
+    fn drain_holds_a_compounds_children_until_it_ends() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        subscribed(&mut scene, conn, &["document_changed"]);
+        drained(&mut scene);
+        let meta = || kernel::CompoundMeta {
+            label: "Cut list".into(),
+            origin: kernel::HistoryOrigin::Connection("plugin:com.example.p".into()),
+            coalesce: None,
+        };
+        let guide = |scene: &mut Scene| {
+            let txn = scene.doc.begin_transaction();
+            scene
+                .doc
+                .add_guide_line(Point3::ORIGIN, Vec3::new(1.0, 0.0, 0.0))
+                .unwrap();
+            scene.doc.commit_transaction(txn, meta()).unwrap();
+        };
+        // Before the compound: goes out.
+        guide(&mut scene);
+        let token = scene.doc.begin_compound(meta());
+        guide(&mut scene);
+        guide(&mut scene);
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1, "only what came before the compound");
+        assert!(drained(&mut scene).is_empty(), "children held");
+        scene.doc.end_compound(token).unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1);
+        assert_eq!(got[&conn][0]["params"]["label"], "Cut list");
+        assert_eq!(
+            got[&conn][0]["params"]["changes"]["added"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let token = scene.doc.begin_compound(meta());
+        guide(&mut scene);
+        assert!(drained(&mut scene).is_empty());
+        scene.doc.abort_compound(token).unwrap();
+        let got = drained(&mut scene);
+        let kinds: Vec<&str> = got[&conn]
+            .iter()
+            .map(|f| f["params"]["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, vec!["abort"]);
+    }
+
+    #[test]
+    fn drain_collapses_past_64() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        subscribed(&mut scene, conn, &["document_changed"]);
+        drained(&mut scene);
+        for i in 0..65 {
+            scene
+                .doc
+                .attr_set(
+                    kernel::AttrTarget::Document,
+                    "com.example.t",
+                    "k",
+                    kernel::AttrValue::Int(i),
+                )
+                .unwrap();
+        }
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1);
+        let params = &got[&conn][0]["params"];
+        assert_eq!(params["kind"], "commit");
+        assert_eq!(params["changes"]["full"], true);
+        assert_eq!(params["generation"], scene.doc.history_generation());
+        assert_eq!(params["epoch"], scene.doc.document_epoch());
+        // 64 go one by one.
+        for i in 0..64 {
+            scene
+                .doc
+                .attr_set(
+                    kernel::AttrTarget::Document,
+                    "com.example.t",
+                    "k",
+                    kernel::AttrValue::Int(i),
+                )
+                .unwrap();
+        }
+        assert_eq!(drained(&mut scene)[&conn].len(), 64);
+        // A reload is one reset.
+        let bytes = scene.doc.save();
+        scene.load_core(&bytes).unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1);
+        assert_eq!(got[&conn][0]["params"]["kind"], "reset");
+        assert_eq!(got[&conn][0]["params"]["changes"]["full"], true);
+    }
+
+    #[test]
+    fn context_and_units_and_scenes_change_once_each() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        subscribed(
+            &mut scene,
+            conn,
+            &["context_changed", "units_changed", "scenes_changed"],
+        );
+        drained(&mut scene);
+
+        scene.set_display_units("mm");
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1);
+        assert_eq!(
+            got[&conn][0]["params"],
+            serde_json::json!({ "document": "doc_1", "units": "mm" })
+        );
+        scene.set_display_units("mm");
+        assert!(drained(&mut scene).is_empty(), "same units, no event");
+
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                r#"{"jsonrpc":"2.0","id":5,"method":"hew.scenes.add","params":{"name":"Front"}}"#,
+            )
+            .unwrap();
+        assert!(reply.contains("\"result\""), "{reply}");
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1);
+        assert_eq!(got[&conn][0]["method"], "hew.event.scenes_changed");
+        assert_eq!(got[&conn][0]["params"]["scenes"][0]["name"], "Front");
+        assert_eq!(got[&conn][0]["params"]["active"], serde_json::Value::Null);
+        assert!(drained(&mut scene).is_empty());
+        let sid = scene.doc.scenes()[0].sid;
+        scene.note_scene_activated(sid);
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn][0]["params"]["active"], api::ids::scene_id(sid));
+        assert!(drained(&mut scene).is_empty());
+
+        // Enter a group: the stack changed once.
+        let r = scene
+            .api_dispatch_reply(conn, &draw_rect_frame(6, 0.0))
+            .unwrap();
+        assert!(r.contains("\"result\""), "{r}");
+        let sketch = scene.doc.visible_sketch_ids()[0];
+        let region = scene.doc.extrudable_regions(sketch).unwrap()[0];
+        scene.doc.extrude_region(sketch, region, 0.5).unwrap();
+        let objects = scene.doc.top_level_nodes();
+        let (g, _) = scene.doc.group_nodes(&objects).unwrap();
+        drained(&mut scene);
+        scene.doc.open_group_session(g).unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1);
+        assert_eq!(got[&conn][0]["method"], "hew.event.context_changed");
+        assert_eq!(got[&conn][0]["params"]["stack"][0]["kind"], "group");
+        assert!(drained(&mut scene).is_empty());
+    }
+
+    #[test]
+    fn plugin_connections_carry_their_grant_and_identity() {
+        let mut scene = Scene::new();
+        assert!(scene.api_plugin_connection_open("not json").is_err());
+        assert!(
+            scene
+                .api_plugin_connection_open(r#"{"ceiling":"app","permissions":["all"]}"#)
+                .is_err(),
+            "a first-party grant is not a plugin connection"
+        );
+        assert!(
+            scene
+                .api_plugin_connection_open(
+                    r#"{"ceiling":"app","permissions":["all"],"plugin":"com.example.p"}"#
+                )
+                .is_err(),
+            "a plugin grant may not hold all"
+        );
+        let conn = scene
+            .api_plugin_connection_open(
+                r#"{"ceiling":"core","permissions":["model.read"],"plugin":"com.example.p","document":"doc_1"}"#,
+            )
+            .expect("a plugin grant opens");
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+            )
+            .unwrap();
+        assert!(reply.contains("\"profile\":\"plugin\""), "{reply}");
+        assert_eq!(
+            scene.api_connections[&conn].identity(),
+            "plugin:com.example.p"
+        );
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                r#"{"jsonrpc":"2.0","id":1,"method":"hew.sketch.draw_rect",
+                    "params":{"plane":{"ground":true},"corner_a":[0.0,0.0,0.0],"corner_b":[1.0,1.0,0.0]}}"#,
+            )
+            .unwrap();
+        assert!(reply.contains("-32001"), "model.write not held: {reply}");
+        assert!(scene.sketch_ids().is_empty());
     }
 
     #[test]
@@ -18179,7 +20935,7 @@ mod tests {
             "params": { "path": "cube_open.stl", "units": "mm", "bytes_base64": api::commands::doc::encode_base64(stl) },
         })
         .to_string();
-        let reply = scene.api_dispatch(conn, &frame).unwrap();
+        let reply = scene.api_dispatch_reply(conn, &frame).unwrap();
         assert!(reply.contains("\"result\""), "import succeeds: {reply}");
         let ids = scene.last_import_object_ids();
         assert_eq!(ids.len(), 1);
@@ -18206,7 +20962,7 @@ mod tests {
             },
         })
         .to_string();
-        let reply = scene.api_dispatch(conn, &frame).unwrap();
+        let reply = scene.api_dispatch_reply(conn, &frame).unwrap();
         assert!(reply.contains("\"picture\""), "import succeeds: {reply}");
         let [inst] = scene.doc.instance_ids()[..] else {
             panic!("one picture placed");
@@ -18242,7 +20998,7 @@ mod tests {
             },
         })
         .to_string();
-        let reply = scene.api_dispatch(conn, &frame).unwrap();
+        let reply = scene.api_dispatch_reply(conn, &frame).unwrap();
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert!(v.get("error").is_some(), "refused: {reply}");
         assert!(reply.contains("at least"), "names the minimum: {reply}");
@@ -18257,7 +21013,7 @@ mod tests {
     fn api_dispatch_malformed_json_answers_a_parse_error_with_null_id() {
         let mut scene = Scene::new();
         let conn = scene.api_connection_open();
-        let reply = scene.api_dispatch(conn, "not json").unwrap();
+        let reply = scene.api_dispatch_reply(conn, "not json").unwrap();
         assert!(reply.contains("\"id\":null"), "got {reply}");
         assert!(reply.contains("-32700"), "PARSE_ERROR code: {reply}");
     }
@@ -18266,7 +21022,7 @@ mod tests {
     fn api_dispatch_unknown_connection_answers_typed_instead_of_panicking() {
         let mut scene = Scene::new();
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 999,
                 r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
             )
@@ -18279,7 +21035,7 @@ mod tests {
         let mut scene = Scene::new();
         let conn = scene.api_connection_open();
         hello_and_attach(&mut scene, conn);
-        let reply = scene.api_dispatch(
+        let reply = scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","method":"hew.sketch.draw_rect",
                 "params":{"plane":{"ground":true},"corner_a":[0.0,0.0,0.0],"corner_b":[1.0,1.0,0.0]}}"#,
@@ -18298,7 +21054,7 @@ mod tests {
         hello_and_attach(&mut scene, conn);
         scene.api_connection_close(conn);
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 r#"{"jsonrpc":"2.0","id":5,"method":"hew.query.scene","params":{}}"#,
             )
@@ -18317,10 +21073,10 @@ mod tests {
         let mut scene = Scene::new();
         let conn = scene.api_connection_open();
         hello_and_attach(&mut scene, conn);
-        scene.begin_ground_sketch();
+        scene.begin_ground_sketch().unwrap();
 
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 r#"{"jsonrpc":"2.0","id":2,"method":"hew.doc.new","params":{}}"#,
             )
@@ -18364,7 +21120,7 @@ mod tests {
         let ids = scene.guide_ids();
         assert_eq!(ids.len(), 1);
         assert_eq!(scene.guide_tags(ids[0]), vec!["Rig/Cameras".to_string()]);
-        scene.set_tag_hidden("Rig".to_string(), true);
+        scene.set_tag_hidden("Rig".to_string(), true).unwrap();
         assert!(
             scene.guide_ids().is_empty(),
             "hidden through a tag above its own"
@@ -18373,7 +21129,7 @@ mod tests {
             scene.doc.guide(guide_id(ids[0])).is_some(),
             "the document keeps it"
         );
-        scene.set_tag_hidden("Rig".to_string(), false);
+        scene.set_tag_hidden("Rig".to_string(), false).unwrap();
         assert_eq!(scene.guide_ids(), ids);
     }
 

@@ -580,6 +580,17 @@ fn set_document_dirty(app: tauri::AppHandle, window: tauri::WebviewWindow, dirty
     }
 }
 
+/// Report this window's document's persistent id (`document_id`,
+/// HEW_FILE_FORMAT.md §2), or `None` when it has none — the live API's
+/// `hew.meta.documents` `document_id` field. The webview pushes it after
+/// every open and save, beside `set_document_path`.
+#[tauri::command]
+fn set_document_id(app: tauri::AppHandle, window: tauri::WebviewWindow, id: Option<String>) {
+    if let Ok(mut docs) = app.state::<live::LiveApi>().docs.lock() {
+        docs.set_document_id(window.label(), id);
+    }
+}
+
 /// Record (or clear, with `None`) the `.hew` path this window has open —
 /// see [`DocumentPaths`].
 #[tauri::command]
@@ -2293,6 +2304,10 @@ fn frontend_ready(app: tauri::AppHandle, window: tauri::WebviewWindow) {
     if let Ok(mut ready) = app.state::<Mutex<ReadyWindows>>().lock() {
         ready.0.insert(window.label().to_string());
     }
+    // Its live bridge is listening by now: tell it its document's id.
+    if is_document_window_label(window.label()) {
+        live_router::emit_document_id(&app, window.label());
+    }
 }
 /// Whether a window label names a DOCUMENT window — the windows that hold a
 /// model and can receive menu actions, file opens, and library actions.
@@ -2935,6 +2950,7 @@ fn main() {
             focus_window,
             set_document_path,
             set_document_dirty,
+            set_document_id,
             focus_window_with_path,
             set_window_title,
             fly_cursor::set_fly_cursor_lock,

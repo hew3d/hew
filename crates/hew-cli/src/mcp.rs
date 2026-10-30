@@ -17,7 +17,7 @@
 
 use crate::host::CliHost;
 use crate::live::{self, LiveOptions};
-use api::{Connection, DispatchOutcome, Profile, Registry, Request, RequestId};
+use api::{Connection, DispatchOutcome, Grant, Registry, Request, RequestId};
 use kernel::Document;
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
@@ -57,7 +57,7 @@ impl JsonRpcErr {
 /// `Backend` value reserves.
 enum Backend {
     Embedded {
-        conn: Connection,
+        conn: Box<Connection>,
         doc: Box<Document>,
         host: Box<CliHost>,
     },
@@ -72,17 +72,23 @@ enum Backend {
 /// the document is whatever the user already has open.
 pub struct McpServer {
     backend: Backend,
-    /// The protocol-1 command registry, kept independent of `backend`
-    /// (a live session has no local `Connection` to borrow one from) —
-    /// used only to shape the `tools/list` surface and the `hew_query`
-    /// read-only gate; every actual command dispatch goes through
-    /// `backend`, which is what answers with the real (possibly remote)
-    /// authority.
+    /// The command registry, kept independent of `backend` (a live session
+    /// has no local `Connection` to borrow one from). Embedded, it is the
+    /// registry the session's connection dispatches against; live, it is
+    /// protocol 1 plus the plugin commands the remote's capabilities listed
+    /// at connect, used to shape the `tools/list` surface, the `hew_query`
+    /// read-only gate, and the `provider` label on plugin results. Every
+    /// actual command dispatch goes through `backend`, which is what
+    /// answers with the real (possibly remote) authority.
     registry: Registry,
-    /// The granted profile — `Core` embedded, whatever the remote's hello
-    /// reported when live (docs/agents/HEW_API.md §12: live is always `app`, but
-    /// this reads it back rather than assuming).
-    profile: Profile,
+    /// Answers a plugin command an embedded session forwards. No plugin
+    /// host runs inside `hew-cli` yet, so the default answers every
+    /// forward `unavailable`.
+    forward_responder: fn(&api::ForwardRequest) -> api::ForwardReply,
+    /// The grant — `core` embedded, whatever the remote's hello reported
+    /// when live (docs/agents/HEW_API.md §12: live is always `app`, but this
+    /// reads it back rather than assuming).
+    grant: Grant,
 }
 
 /// What the MCP client tells the model before it does anything, per the
@@ -202,8 +208,9 @@ impl McpServer {
     /// `hew.doc.new` auto-attaches on success (docs/agents/HEW_API.md §4.2), so no
     /// separate `attach` round-trip is needed either.
     pub fn new() -> McpServer {
-        let profile = Profile::Core;
-        let mut conn = Connection::new(profile, "hew-cli:mcp");
+        let grant = Grant::core();
+        let registry = Registry::protocol_1();
+        let mut conn = Connection::new(grant.clone(), "hew-cli:mcp");
         let mut doc = Document::new();
         let mut host = CliHost::new();
         for (method, params) in [
@@ -217,7 +224,8 @@ impl McpServer {
                 method: method.to_string(),
                 params: Some(params),
             };
-            let DispatchOutcome::Reply(response) = conn.dispatch(&mut doc, &mut host, request)
+            let DispatchOutcome::Reply(response) =
+                conn.dispatch(&registry, &mut doc, &mut host, request)
             else {
                 panic!("{method} is a request, not a notification");
             };
@@ -229,12 +237,13 @@ impl McpServer {
         }
         McpServer {
             backend: Backend::Embedded {
-                conn,
+                conn: Box::new(conn),
                 doc: Box::new(doc),
                 host: Box::new(host),
             },
-            registry: Registry::protocol_1(),
-            profile,
+            registry,
+            forward_responder: no_plugin_host,
+            grant,
         }
     }
 
@@ -250,19 +259,101 @@ impl McpServer {
     /// document attached` the moment an agent tried to use it
     /// ([`crate::run::dispatch_live`]'s doc comment has the fuller
     /// rationale — this is the same fix, applied here via
-    /// [`crate::run::attach_live`]). The granted profile comes back from
-    /// the remote's own hello reply.
+    /// [`crate::run::attach_live`]). The grant comes back from the
+    /// remote's own hello reply.
     pub fn new_live(opts: &LiveOptions) -> Result<McpServer, live::LiveError> {
         let hello_request = live::build_hello_request("hew-cli:mcp");
-        let mut session = live::connect_live(opts, hello_request)?;
-        if let Err(msg) = crate::run::attach_live(&mut session, opts.document.as_deref()) {
+        let session = live::connect_live(opts, hello_request)?;
+        let mut server = McpServer::from_live_session(session, opts.document.as_deref())?;
+        server.subscribe_plugin_state();
+        Ok(server)
+    }
+
+    /// Asks the app for `plugin_state` events (docs/agents/HEW_API.md §4.5),
+    /// so the tool registry follows plugins loading and unloading
+    /// ([`McpServer::refresh_on_plugin_state`]). An app too old to know
+    /// events refuses; the registry then stays as connected.
+    fn subscribe_plugin_state(&mut self) {
+        let Backend::Live(session) = &mut self.backend else {
+            return;
+        };
+        let request = Request {
+            document: None,
+            jsonrpc: "2.0".to_string(),
+            id: Some(RequestId::Text("mcp-subscribe".to_string())),
+            method: "hew.event.subscribe".to_string(),
+            params: Some(json!({ "events": ["plugin_state"] })),
+        };
+        let _ = session.dispatch(request);
+    }
+
+    /// Before each tool call and after each live dispatch: when a
+    /// `plugin_state` event has arrived (set aside during a reply, or
+    /// readable on the socket now, as one sent after the reply that caused
+    /// it is), re-reads the app's capabilities into the registry, so a
+    /// plugin that loaded or unloaded since is reflected in this tool call
+    /// or the next. Other events are dropped (this session subscribed to
+    /// nothing else).
+    fn refresh_on_plugin_state(&mut self) {
+        let Backend::Live(session) = &mut self.backend else {
+            return;
+        };
+        let events = session.poll_events();
+        if !events
+            .iter()
+            .any(|e| e.get("method").and_then(Value::as_str) == Some("hew.event.plugin_state"))
+        {
+            return;
+        }
+        let capabilities = Request {
+            document: None,
+            jsonrpc: "2.0".to_string(),
+            id: Some(RequestId::Text("mcp-capabilities".to_string())),
+            method: "hew.meta.capabilities".to_string(),
+            params: Some(json!({})),
+        };
+        if let Ok(DispatchOutcome::Reply(api::Response {
+            result: Some(result),
+            ..
+        })) = session.dispatch(capabilities)
+        {
+            self.registry = Registry::from_capabilities(&result);
+        }
+        // What arrived while re-reading is already in the answer.
+        let _ = session.take_events();
+    }
+
+    /// The rest of [`McpServer::new_live`] once the handshake is done:
+    /// attach, then read the remote's capabilities once so the registry
+    /// knows the plugin commands it serves (a capabilities call that fails
+    /// leaves protocol 1 alone).
+    fn from_live_session(
+        mut session: live::LiveSession,
+        document: Option<&str>,
+    ) -> Result<McpServer, live::LiveError> {
+        if let Err(msg) = crate::run::attach_live(&mut session, document) {
             return Err(live::LiveError::Protocol(msg));
         }
-        let profile = session.granted_profile();
+        let grant = session.granted_grant();
+        let capabilities = Request {
+            document: None,
+            jsonrpc: "2.0".to_string(),
+            id: Some(RequestId::Text("mcp-capabilities".to_string())),
+            method: "hew.meta.capabilities".to_string(),
+            params: Some(json!({})),
+        };
+        let registry = match session.dispatch(capabilities)? {
+            DispatchOutcome::Reply(api::Response {
+                result: Some(result),
+                ..
+            }) => Registry::from_capabilities(&result),
+            _ => Registry::protocol_1(),
+        };
         Ok(McpServer {
             backend: Backend::Live(Box::new(session)),
-            registry: Registry::protocol_1(),
-            profile,
+            registry,
+            forward_responder: no_plugin_host,
+            grant,
         })
     }
 
@@ -300,7 +391,7 @@ impl McpServer {
         let result = match method {
             "initialize" => Ok(self.handle_initialize()),
             "tools/list" => Ok(json!({
-                "tools": generate_tools(&self.registry, self.profile)
+                "tools": generate_tools(&self.registry, &self.grant)
             })),
             "tools/call" => self.handle_tools_call(&params),
             _ => Err(JsonRpcErr::method_not_found(method)),
@@ -346,6 +437,9 @@ impl McpServer {
         // Every tool may name the document it addresses; it rides the
         // envelope, not the command's params (§4.2).
         let document = take_document(&mut arguments)?;
+        // A plugin that loaded while this server sat idle is known before
+        // the registry is consulted below.
+        self.refresh_on_plugin_state();
 
         let response = match name {
             "hew_capabilities" => {
@@ -447,19 +541,35 @@ impl McpServer {
             document,
         };
         let outcome = match &mut self.backend {
-            Backend::Embedded { conn, doc, host } => conn.dispatch(doc, &mut **host, request),
+            Backend::Embedded { conn, doc, host } => {
+                match conn.dispatch(&self.registry, doc, &mut **host, request) {
+                    DispatchOutcome::Forward(forward) => {
+                        let reply = (self.forward_responder)(&forward);
+                        DispatchOutcome::Reply(conn.complete_forward(
+                            &self.registry,
+                            forward.token,
+                            reply,
+                        ))
+                    }
+                    other => other,
+                }
+            }
             Backend::Live(session) => session.dispatch(request).map_err(|e| JsonRpcErr {
                 code: -32603,
                 message: format!("live transport error: {e}"),
             })?,
         };
+        self.refresh_on_plugin_state();
         let DispatchOutcome::Reply(response) = outcome else {
             return Err(JsonRpcErr {
                 code: -32603,
                 message: "internal error: envelope dropped unexpectedly".to_string(),
             });
         };
-        let value = serde_json::to_value(&response).expect("Response serializes");
+        let mut value = serde_json::to_value(&response).expect("Response serializes");
+        if response.error.is_none() {
+            label_plugin_result(&self.registry, method, &client_params, &mut value);
+        }
         if response.error.is_none()
             && let Some(outcome) = crate::live_library::finish_save(method, &client_params, &value)
         {
@@ -498,6 +608,51 @@ impl Default for McpServer {
     }
 }
 
+/// The default [`McpServer`] forward responder: no plugin runs here.
+fn no_plugin_host(_: &api::ForwardRequest) -> api::ForwardReply {
+    api::ForwardReply::Failed(api::ForwardFailure::Unavailable)
+}
+
+/// Labels a successful plugin command's result with its provider, so an
+/// agent can tell a plugin's answer from Hew's own (docs/agents/HEW_API.md
+/// §13): an object result gains `"provider": "<plugin id>"`; anything else
+/// becomes `{ "provider", "value" }`. For a `hew.doc.transact` whose one
+/// command is a plugin command, the label goes on `results[0]`.
+fn label_plugin_result(registry: &Registry, method: &str, params: &Value, response: &mut Value) {
+    let (plugin, target) = if method == "hew.doc.transact" {
+        let commands = params.get("commands").and_then(Value::as_array);
+        let Some([only]) = commands.map(Vec::as_slice) else {
+            return;
+        };
+        let Some(plugin) = only
+            .get("method")
+            .and_then(Value::as_str)
+            .and_then(|m| registry.get(m))
+            .and_then(|c| c.plugin_id())
+        else {
+            return;
+        };
+        (plugin, response.pointer_mut("/result/results/0"))
+    } else {
+        let Some(plugin) = registry.get(method).and_then(|c| c.plugin_id()) else {
+            return;
+        };
+        (plugin, response.get_mut("result"))
+    };
+    let Some(target) = target else {
+        return;
+    };
+    match target {
+        Value::Object(map) => {
+            map.insert("provider".to_string(), Value::String(plugin.to_string()));
+        }
+        other => {
+            let value = other.take();
+            *other = json!({ "provider": plugin, "value": value });
+        }
+    }
+}
+
 /// Pulls the optional `document` out of a tool call's arguments — it
 /// addresses the call (an envelope member), so it must not reach the
 /// command's own params, which reject unknown fields.
@@ -524,14 +679,14 @@ fn document_property() -> Value {
 
 /// The MCP tool inventory (docs/agents/HEW_API.md §13): a small set of chunky
 /// tools generated from the registry rather than one tool per command.
-/// `hew_snapshot` is included whenever the connection's profile grants
-/// `hew.view.snapshot` — true for both profiles today, since core grants
+/// `hew_snapshot` is included whenever the connection's grant covers
+/// `hew.view.snapshot` — true for both first-party grants, since core grants
 /// that one `hew.view.*` command specifically (it renders through a
 /// headless software rasterizer, no viewport required — see
 /// docs/design/headless-snapshot.md); a future app-only `hew.view.*`
 /// addition would be the next tool a headless session lacks (an agent
 /// never sees a tool it cannot call).
-pub fn generate_tools(registry: &Registry, profile: Profile) -> Vec<Value> {
+pub fn generate_tools(registry: &Registry, grant: &Grant) -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "hew_capabilities",
@@ -543,7 +698,7 @@ pub fn generate_tools(registry: &Registry, profile: Profile) -> Vec<Value> {
         }),
         json!({
             "name": "hew_transact",
-            "description": "Run hew.* commands in order as one undo entry. Every edit goes through this. Put a draw and the extrude that consumes it in the SAME call, labeling the draw with \"as\" and referencing its result: {\"$ref\": \"rect#/region_id\"} for an id, {\"$face\": \"circle#face\"} for a face it just cut. If any command refuses, none of them applied.",
+            "description": "Run hew.* commands in order as one undo entry. Every edit goes through this. Put a draw and the extrude that consumes it in the SAME call, labeling the draw with \"as\" and referencing its result: {\"$ref\": \"rect#/region_id\"} for an id, {\"$face\": \"circle#face\"} for a face it just cut. If any command refuses, none of them applied. Commands provided by installed plugins are listed by hew_capabilities with a provider; their results carry that provider.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -567,7 +722,7 @@ pub fn generate_tools(registry: &Registry, profile: Profile) -> Vec<Value> {
         }),
         json!({
             "name": "hew_query",
-            "description": "Run one read-only command (hew.query.*, hew.meta.*, hew.attr.get) — measuring, resolving an id, listing faces, raycasting — or one of the read-side Library commands (hew.library.list/describe/remove/update_meta): browsing, deleting, or renaming a saved item. None of these change the attached DOCUMENT (remove/update_meta change on-disk library state, not the document itself). Use hew_transact for anything that does.",
+            "description": "Run one read-only command (hew.query.*, hew.meta.*, hew.attr.get) — measuring, resolving an id, listing faces, raycasting — or one of the read-side Library commands (hew.library.list/describe/remove/update_meta): browsing, deleting, or renaming a saved item. None of these change the attached DOCUMENT (remove/update_meta change on-disk library state, not the document itself). Use hew_transact for anything that does. Commands provided by installed plugins are listed by hew_capabilities with a provider; their results carry that provider.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -586,7 +741,7 @@ pub fn generate_tools(registry: &Registry, profile: Profile) -> Vec<Value> {
     ];
     let snapshot_granted = registry
         .get("hew.view.snapshot")
-        .map(|c| profile.grants(c))
+        .map(|c| grant.grants(c))
         .unwrap_or(false);
     if snapshot_granted {
         tools.push(json!({
@@ -620,7 +775,7 @@ pub fn generate_tools(registry: &Registry, profile: Profile) -> Vec<Value> {
     }
     if registry
         .get("hew.print.pdf")
-        .map(|c| profile.grants(c))
+        .map(|c| grant.grants(c))
         .unwrap_or(false)
     {
         tools.push(json!({
@@ -647,7 +802,7 @@ pub fn generate_tools(registry: &Registry, profile: Profile) -> Vec<Value> {
     }
     if registry
         .get("hew.view.line_drawing")
-        .map(|c| profile.grants(c))
+        .map(|c| grant.grants(c))
         .unwrap_or(false)
     {
         tools.push(json!({
@@ -729,10 +884,358 @@ pub fn run_stdio(live: Option<&LiveOptions>) -> i32 {
 mod tests {
     use super::*;
 
+    /// `com.example.lib`: read-only `sum` (an object result) and `count`
+    /// (a bare-number result).
+    fn sample_plugin() -> Vec<plugin_manifest::CommandContribution> {
+        serde_json::from_value(json!([
+            { "id": "sum", "class": "read_only", "summary": "Adds." },
+            {
+                "id": "count", "class": "read_only", "summary": "Counts.",
+                "result": { "type": "object", "properties": {}, "additionalProperties": false }
+            }
+        ]))
+        .unwrap()
+    }
+
+    fn tool_text(server: &mut McpServer, call: Value) -> Value {
+        let frame = json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": call });
+        let line = server.handle_line(&frame.to_string()).expect("a reply");
+        let v: Value = serde_json::from_str(&line).unwrap();
+        serde_json::from_str(v["result"]["content"][0]["text"].as_str().expect(&line)).unwrap()
+    }
+
+    #[test]
+    fn plugin_results_carry_provider() {
+        fn answer(_: &api::ForwardRequest) -> api::ForwardReply {
+            api::ForwardReply::Ok(json!({}))
+        }
+        let mut server = McpServer::new();
+        server
+            .registry
+            .register_plugin("com.example.lib", &sample_plugin())
+            .unwrap();
+        server.forward_responder = answer;
+
+        let query = tool_text(
+            &mut server,
+            json!({ "name": "hew_query", "arguments": { "method": "com.example.lib.sum" } }),
+        );
+        assert_eq!(query["result"], json!({ "provider": "com.example.lib" }));
+        let transact = tool_text(
+            &mut server,
+            json!({ "name": "hew_transact", "arguments": { "commands": [{ "method": "com.example.lib.sum" }] } }),
+        );
+        assert_eq!(
+            transact["result"],
+            json!({ "results": [{ "provider": "com.example.lib" }], "label": "com.example.lib.sum" })
+        );
+        // First-party results are untouched.
+        let scene = tool_text(
+            &mut server,
+            json!({ "name": "hew_describe_scene", "arguments": {} }),
+        );
+        assert!(scene["result"].get("provider").is_none());
+
+        // A non-object result is wrapped.
+        let mut value = json!({ "jsonrpc": "2.0", "id": "mcp", "result": 7 });
+        label_plugin_result(
+            &server.registry,
+            "com.example.lib.count",
+            &json!({}),
+            &mut value,
+        );
+        assert_eq!(
+            value["result"],
+            json!({ "provider": "com.example.lib", "value": 7 })
+        );
+        let mut value =
+            json!({ "jsonrpc": "2.0", "id": "mcp", "result": { "results": [[1]], "label": "x" } });
+        label_plugin_result(
+            &server.registry,
+            "hew.doc.transact",
+            &json!({ "commands": [{ "method": "com.example.lib.count" }] }),
+            &mut value,
+        );
+        assert_eq!(
+            value["result"]["results"][0],
+            json!({ "provider": "com.example.lib", "value": [1] })
+        );
+
+        // With no plugin host, the embedded default answers unavailable.
+        server.forward_responder = no_plugin_host;
+        let refused = tool_text(
+            &mut server,
+            json!({ "name": "hew_query", "arguments": { "method": "com.example.lib.sum" } }),
+        );
+        assert_eq!(refused["error"]["data"]["refusal"], "plugin_unavailable");
+    }
+
+    /// A fake desktop instance answers hello, attach, and a capabilities
+    /// frame listing one plugin command, then one forwarded query: the
+    /// live registry knows the command, `hew_query` lets it through, and
+    /// its result carries the provider.
+    #[cfg(unix)]
+    #[test]
+    fn live_mcp_lists_plugin_commands_from_capabilities() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let socket_path = std::path::PathBuf::from("/tmp")
+            .join(format!("hew-mcp-caps-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind the fake socket");
+        let mut registry = Registry::protocol_1();
+        registry
+            .register_plugin("com.example.lib", &sample_plugin())
+            .unwrap();
+        let plugin_entry = {
+            let mut conn = Connection::new(Grant::app(), "fake");
+            let mut doc = Document::new();
+            let request = |id: &str, method: &str| Request {
+                document: None,
+                jsonrpc: "2.0".into(),
+                id: Some(RequestId::Text(id.into())),
+                method: method.into(),
+                params: Some(json!({ "protocol": 1 })),
+            };
+            conn.dispatch(
+                &registry,
+                &mut doc,
+                &mut api::NoHost,
+                request("h", "hew.meta.hello"),
+            );
+            let DispatchOutcome::Reply(caps) = conn.dispatch(
+                &registry,
+                &mut doc,
+                &mut api::NoHost,
+                request("c", "hew.meta.capabilities"),
+            ) else {
+                panic!("capabilities replies")
+            };
+            caps.result.unwrap()["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == "com.example.lib.sum")
+                .unwrap()
+                .clone()
+        };
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut next = || {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read a frame");
+                serde_json::from_str::<Value>(line.trim_end()).unwrap()
+            };
+            let hello = next();
+            writeln!(
+                writer,
+                "{}",
+                json!({ "jsonrpc": "2.0", "id": hello["id"], "result": {
+                "protocol": 1, "app": { "name": "hew", "version": "1.3.0" },
+                "profile": "app", "encoding": "json", "documents": [] } })
+            )
+            .unwrap();
+            let attach = next();
+            assert_eq!(attach["method"], "hew.doc.attach");
+            writeln!(
+                writer,
+                "{}",
+                json!({ "jsonrpc": "2.0", "id": attach["id"], "result": {} })
+            )
+            .unwrap();
+            let caps = next();
+            assert_eq!(caps["method"], "hew.meta.capabilities");
+            writeln!(writer, "{}", json!({ "jsonrpc": "2.0", "id": caps["id"], "result": {
+                "commands": [plugin_entry, { "name": "com.bad.x", "provider": { "plugin": "com.bad" } }] } }))
+            .unwrap();
+            let query = next();
+            assert_eq!(query["method"], "com.example.lib.sum");
+            writeln!(
+                writer,
+                "{}",
+                json!({ "jsonrpc": "2.0", "id": query["id"], "result": { "sum": 3 } })
+            )
+            .unwrap();
+        });
+
+        let instance = live::Instance {
+            socket: socket_path.to_str().unwrap().to_string(),
+            token: "t".to_string(),
+            pid: std::process::id(),
+            version: "1.3.0".to_string(),
+            file: std::path::PathBuf::new(),
+        };
+        let session =
+            live::LiveSession::handshake(instance, live::build_hello_request("hew-cli:mcp"))
+                .expect("handshake");
+        let mut mcp = McpServer::from_live_session(session, None).expect("live MCP connects");
+        let sum = mcp
+            .registry
+            .get("com.example.lib.sum")
+            .expect("listed from capabilities");
+        assert!(sum.is_plugin());
+        assert!(mcp.registry.get("com.bad.x").is_none());
+
+        let answer = tool_text(
+            &mut mcp,
+            json!({ "name": "hew_query", "arguments": { "method": "com.example.lib.sum" } }),
+        );
+        assert_eq!(
+            answer["result"],
+            json!({ "sum": 3, "provider": "com.example.lib" })
+        );
+        server.join().expect("fake instance finishes");
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
+    /// `plugin_state` refreshes the live registry: the fake answers
+    /// capabilities twice — before and after a plugin loads — and writes the
+    /// event ahead of an unrelated tool call's reply.
+    #[cfg(unix)]
+    #[test]
+    fn mcp_refreshes_registry_on_plugin_state() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let socket_path = std::path::PathBuf::from("/tmp")
+            .join(format!("hew-mcp-refresh-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path).expect("bind the fake socket");
+        let mut registry = Registry::protocol_1();
+        registry
+            .register_plugin("com.example.lib", &sample_plugin())
+            .unwrap();
+        let capabilities = |registry: &Registry| {
+            let mut conn = Connection::new(Grant::app(), "fake");
+            let mut doc = Document::new();
+            let request = |id: &str, method: &str| Request {
+                document: None,
+                jsonrpc: "2.0".into(),
+                id: Some(RequestId::Text(id.into())),
+                method: method.into(),
+                params: Some(json!({ "protocol": 1 })),
+            };
+            conn.dispatch(
+                registry,
+                &mut doc,
+                &mut api::NoHost,
+                request("h", "hew.meta.hello"),
+            );
+            let DispatchOutcome::Reply(caps) = conn.dispatch(
+                registry,
+                &mut doc,
+                &mut api::NoHost,
+                request("c", "hew.meta.capabilities"),
+            ) else {
+                panic!("capabilities replies")
+            };
+            caps.result.unwrap()
+        };
+        let before = capabilities(&Registry::protocol_1());
+        let after = capabilities(&registry);
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            let mut next = || {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read a frame");
+                serde_json::from_str::<Value>(line.trim_end()).unwrap()
+            };
+            let reply = |writer: &mut std::os::unix::net::UnixStream, id: &Value, result: Value| {
+                writeln!(
+                    writer,
+                    "{}",
+                    json!({ "jsonrpc": "2.0", "id": id, "result": result })
+                )
+                .unwrap();
+            };
+            let hello = next();
+            reply(
+                &mut writer,
+                &hello["id"],
+                json!({
+                "protocol": 1, "app": { "name": "hew", "version": "1.3.0" },
+                "profile": "app", "encoding": "json", "documents": [] }),
+            );
+            let mut methods = Vec::new();
+            for answer in 0..6 {
+                let frame = next();
+                methods.push(frame["method"].as_str().unwrap().to_string());
+                let result = match frame["method"].as_str().unwrap() {
+                    "hew.meta.capabilities" if answer < 3 => before.clone(),
+                    "hew.meta.capabilities" => after.clone(),
+                    "hew.event.subscribe" => {
+                        json!({ "subscribed": ["plugin_state"], "denied": [] })
+                    }
+                    "com.example.lib.sum" => json!({ "sum": 3 }),
+                    _ => json!({}),
+                };
+                reply(&mut writer, &frame["id"], result);
+                if frame["method"] == "hew.query.scene" {
+                    // The plugin loaded; the app reports it after the reply
+                    // it was sending, as the live bridge orders them.
+                    writeln!(
+                        writer,
+                        "{}",
+                        json!({ "jsonrpc": "2.0", "method": "hew.event.plugin_state",
+                        "params": { "plugin": "com.example.lib", "state": "loaded" } })
+                    )
+                    .unwrap();
+                }
+            }
+            methods
+        });
+
+        let instance = live::Instance {
+            socket: socket_path.to_str().unwrap().to_string(),
+            token: "t".to_string(),
+            pid: std::process::id(),
+            version: "1.3.0".to_string(),
+            file: std::path::PathBuf::new(),
+        };
+        let session =
+            live::LiveSession::handshake(instance, live::build_hello_request("hew-cli:mcp"))
+                .expect("handshake");
+        let mut mcp = McpServer::from_live_session(session, None).expect("live MCP connects");
+        mcp.subscribe_plugin_state();
+        assert!(mcp.registry.get("com.example.lib.sum").is_none());
+        let _ = tool_text(
+            &mut mcp,
+            json!({ "name": "hew_query", "arguments": { "method": "hew.query.scene" } }),
+        );
+        // Give the event, sent after that reply, time to land.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // The very next call reaches the newly loaded command: the registry
+        // was refreshed before it was consulted.
+        let answer = tool_text(
+            &mut mcp,
+            json!({ "name": "hew_query", "arguments": { "method": "com.example.lib.sum" } }),
+        );
+        assert_eq!(answer["result"]["sum"], 3, "{answer}");
+        assert_eq!(
+            server.join().expect("fake instance finishes"),
+            vec![
+                "hew.doc.attach",
+                "hew.meta.capabilities",
+                "hew.event.subscribe",
+                "hew.query.scene",
+                "hew.meta.capabilities",
+                "com.example.lib.sum"
+            ]
+        );
+        let _ = std::fs::remove_file(&socket_path);
+    }
+
     #[test]
     fn every_tool_but_capabilities_accepts_a_document() {
         let registry = Registry::protocol_1();
-        for tool in generate_tools(&registry, Profile::App) {
+        for tool in generate_tools(&registry, &Grant::app()) {
             let has = tool["inputSchema"]["properties"].get("document").is_some();
             assert_eq!(
                 has,
@@ -797,7 +1300,7 @@ mod tests {
         // render path (docs/design/headless-snapshot.md) means a headless
         // MCP session can look at what it built too.
         let registry = Registry::protocol_1();
-        let tools = generate_tools(&registry, Profile::Core);
+        let tools = generate_tools(&registry, &Grant::core());
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
@@ -813,10 +1316,31 @@ mod tests {
         );
     }
 
+    /// A plugin grant sees only the tools it can call: without
+    /// `model.read` there is no `hew_snapshot`.
+    #[test]
+    fn plugin_grant_tool_list_follows_its_permissions() {
+        let registry = Registry::protocol_1();
+        let no_read = Grant::plugin(
+            "com.example.p",
+            Some("doc_1"),
+            [api::Permission::ModelWrite].into_iter().collect(),
+        );
+        let tools = generate_tools(&registry, &no_read);
+        assert!(!tools.iter().any(|t| t["name"] == "hew_snapshot"));
+        let read = Grant::plugin(
+            "com.example.p",
+            Some("doc_1"),
+            [api::Permission::ModelRead].into_iter().collect(),
+        );
+        let tools = generate_tools(&registry, &read);
+        assert!(tools.iter().any(|t| t["name"] == "hew_snapshot"));
+    }
+
     #[test]
     fn app_profile_tool_list_includes_snapshot() {
         let registry = Registry::protocol_1();
-        let tools = generate_tools(&registry, Profile::App);
+        let tools = generate_tools(&registry, &Grant::app());
         assert!(tools.iter().any(|t| t["name"] == "hew_snapshot"));
     }
 
@@ -827,7 +1351,7 @@ mod tests {
     #[test]
     fn hew_snapshot_tool_schema_exposes_path() {
         let registry = Registry::protocol_1();
-        let tools = generate_tools(&registry, Profile::Core);
+        let tools = generate_tools(&registry, &Grant::core());
         let snapshot = tools
             .iter()
             .find(|t| t["name"] == "hew_snapshot")
@@ -840,9 +1364,9 @@ mod tests {
 
     #[test]
     fn every_tool_carries_a_name_description_and_input_schema() {
-        for profile in [Profile::Core, Profile::App] {
+        for profile in [Grant::core(), Grant::app()] {
             let registry = Registry::protocol_1();
-            for tool in generate_tools(&registry, profile) {
+            for tool in generate_tools(&registry, &profile) {
                 assert!(tool["name"].is_string());
                 assert!(tool["description"].is_string());
                 assert_eq!(tool["inputSchema"]["type"], "object");

@@ -86,6 +86,16 @@ Every object has an optional **base material** — the color its faces show when
 
 Set the base material with `⌘`/`Ctrl`-click in the Paint tool.
 
+## Painting a component
+
+Click a component with the Paint tool and you paint **that copy**, not the component's faces. The copy you clicked takes the color on every face nobody has painted, and the other copies stay as they were, so the same table can stand in the room in oak and in walnut. `⌘`/`Ctrl`-click does the same thing. While the pointer is over a component, its outline lights up to show which copy a click will paint.
+
+Faces that were painted one by one, and objects with a base material, keep their own color in every copy. To paint those, edit the component: double-click into it, then click a face. That face changes in every copy, including the ones you colored from outside, because a face's own paint always wins.
+
+A component inside another component follows the closest copy that has a color. Paint the inner one and it keeps its color whatever the outer one is painted.
+
+`Alt`-click on a painted copy picks up the copy's color. Exploding a painted copy keeps its look: the pieces it turns into take the copy's color wherever they had none. A material used only by a painted copy counts as in use, so **Purge Unused** leaves it alone.
+
 ## Materials survive modeling
 
 Painted faces keep their materials through splitting, push/pull, slicing, and boolean operations — material assignments follow the surviving geometry. Painting is undoable like any other edit.

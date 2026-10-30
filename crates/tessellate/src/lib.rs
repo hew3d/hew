@@ -143,9 +143,24 @@ impl RenderMesh {
 /// The index buffer is grouped by material so each material's triangles are
 /// contiguous (see `RenderMesh::groups`). Positions/normals/colors/uvs remain
 /// in face order (not sorted); only indices are reordered.
+///
+/// [`tessellate_with`] with no inherited material: what a world Object (or
+/// a definition shown on its own) draws.
 pub fn tessellate(
     object: &Object,
     palette: &MaterialPalette,
+) -> Result<RenderMesh, TessellateError> {
+    tessellate_with(object, palette, None)
+}
+
+/// [`tessellate`] for an Object drawn through a placement whose material
+/// is `inherited` (the kernel's `Document::inherited_material`): a face
+/// resolves to its own material, else the Object's base, else `inherited`,
+/// for the baked colors and the group key alike. Back paint is untouched.
+pub fn tessellate_with(
+    object: &Object,
+    palette: &MaterialPalette,
+    inherited: Option<MaterialId>,
 ) -> Result<RenderMesh, TessellateError> {
     // First pass: collect per-face geometry without committing index order.
     // Each entry: (material_id, base_vertex, triangles, vertex_data).
@@ -234,8 +249,9 @@ pub fn tessellate(
         // Resolve the *effective* material for color, UV world_size, AND the
         // group key: a face with no own material falls back to the object's
         // base material ( follow-up), so faces grown by extrude/boolean and
-        // textured bases all render consistently.
-        let material_id = face.material.or(object.default_material());
+        // textured bases all render consistently; with neither, to the
+        // material the placement passes down.
+        let material_id = face.material.or(object.default_material()).or(inherited);
         let (color, world_size) = match material_id.and_then(|id| palette.get(id)) {
             Some(mat) => {
                 let c = mat.color;
@@ -2429,6 +2445,75 @@ mod tests {
                 "vertex color {c:?} is not the base red"
             );
         }
+    }
+
+    /// An inherited (placement) material fills only what neither the face
+    /// nor the Object's base paints.
+    #[test]
+    fn inherited_material_fills_unpainted_faces_only() {
+        use kernel::{Document, Material, Rgba8};
+
+        let mut doc = Document::new();
+        let sk = doc.add_sketch(xy_plane());
+        let s = doc.sketch_mut(sk).unwrap();
+        for (ax, ay, bx, by) in [
+            (0.0f64, 0.0, 1.0, 0.0),
+            (1.0, 0.0, 1.0, 1.0),
+            (1.0, 1.0, 0.0, 1.0),
+            (0.0, 1.0, 0.0, 0.0),
+        ] {
+            s.add_segment(Point3::new(ax, ay, 0.0), Point3::new(bx, by, 0.0))
+                .unwrap();
+        }
+        let region = doc.extrudable_regions(sk).unwrap()[0];
+        let (obj_id, _) = doc.extrude_region(sk, region, 1.0).unwrap();
+        let inherited = doc.add_material(Material::solid("inherited", Rgba8::rgb(0, 0, 255)));
+        let own = doc.add_material(Material::solid("own", Rgba8::rgb(255, 0, 0)));
+        let base = doc.add_material(Material::solid("base", Rgba8::rgb(0, 255, 0)));
+
+        // Unpainted: everything lands in the inherited group.
+        let mesh = tessellate_with(
+            doc.object(obj_id).unwrap(),
+            doc.materials(),
+            Some(inherited),
+        )
+        .unwrap();
+        assert_eq!(mesh.groups.len(), 1);
+        assert_eq!(mesh.groups[0].material, Some(inherited));
+        // `tessellate` is the no-inheritance case.
+        let plain = tessellate(doc.object(obj_id).unwrap(), doc.materials()).unwrap();
+        assert_eq!(plain.groups[0].material, None);
+
+        // A face with its own paint keeps it.
+        let face = doc.object(obj_id).unwrap().faces().keys().next().unwrap();
+        doc.paint_face(obj_id, face, Some(own)).unwrap();
+        let mesh = tessellate_with(
+            doc.object(obj_id).unwrap(),
+            doc.materials(),
+            Some(inherited),
+        )
+        .unwrap();
+        let mats: Vec<_> = mesh.groups.iter().map(|g| g.material).collect();
+        assert!(mats.contains(&Some(own)) && mats.contains(&Some(inherited)));
+        let painted = mesh.face_ranges.iter().find(|r| r.0 == face).unwrap();
+        let c = &mesh.colors[painted.1 as usize * 3..painted.1 as usize * 3 + 3];
+        assert!(
+            (c[0] - 1.0).abs() < 1e-5 && c[2] < 1e-5,
+            "own paint wins: {c:?}"
+        );
+
+        // An Object with a base never shows the inherited material.
+        doc.set_object_material(obj_id, Some(base)).unwrap();
+        let mesh = tessellate_with(
+            doc.object(obj_id).unwrap(),
+            doc.materials(),
+            Some(inherited),
+        )
+        .unwrap();
+        assert!(
+            mesh.groups.iter().all(|g| g.material != Some(inherited)),
+            "the base beats the inherited material"
+        );
     }
 
     /// Property-based equivalence tests (DEVELOPMENT.md rule 3), mirroring

@@ -93,6 +93,7 @@ fn union_with_concave_imprint_never_panics() {
             loop_path,
             restore: None,
             curves: Vec::new(),
+            edge_attrs: Vec::new(),
         },
     )
     .expect("staple imprints");

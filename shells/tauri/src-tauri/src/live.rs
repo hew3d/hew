@@ -7,7 +7,15 @@
 //! and shuttle newline-delimited JSON-RPC frames between the socket and
 //! the webview via Tauri events — `hew://api-frame` (Rust → JS),
 //! `hew://api-reply` (JS → Rust), `hew://api-connection-open`/`-close`
-//! (Rust → JS, connection lifecycle). `crates/wasm-api/src/live.rs`'s
+//! (Rust → JS, connection lifecycle), and `hew://api-event` (JS → Rust, a
+//! server-originated notification for one connection, docs/agents/HEW_API.md
+//! §4.5). Each unix connection has one writer thread fed by a channel
+//! (`LiveApi::outbound`): replies and events go through it, so a frame is
+//! never split and events interleave between replies. While a frame waits
+//! for its reply the connection's events are held (`EventGate`) and
+//! follow that reply, so an event never arrives ahead of the reply to the
+//! request that caused it. A write that stalls for `WRITE_TIMEOUT` (a peer
+//! that stopped reading) ends the writer, and with it the connection. `crates/wasm-api/src/live.rs`'s
 //! module doc comment is the JS-facing half of this same contract.
 //!
 //! Unix domain sockets on macOS/Linux, a named pipe on Windows
@@ -61,7 +69,7 @@
 
 use std::collections::HashMap;
 #[cfg(unix)]
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Mutex};
@@ -70,13 +78,73 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Listener, Manager};
 
 /// How long a per-connection reader waits for the webview's
-/// `hew://api-reply` before giving up on that one frame and answering a
-/// synthesized internal-fault reply — matches
-/// `crates/hew-cli/src/live.rs`'s own `REPLY_TIMEOUT` so a client sees the
-/// same effective ceiling regardless of which side is slow. A timeout
-/// does not close the connection: the client's NEXT frame gets a fresh
-/// wait, so one slow dispatch cannot poison every request after it.
+/// `hew://api-reply` before giving up on that one frame: it answers a
+/// synthesized internal-fault reply and closes the connection (the
+/// dispatch may still be running in the webview, and replies are
+/// correlated by connection, so a late one must not be handed to the next
+/// request). The clock restarts whenever the webview reports
+/// `hew://api-started` for the connection: when a frame queued behind a
+/// plugin command is dispatched, and each time a plugin command ahead of it
+/// finishes (docs/agents/PLUGINS.md "Compounds"). So a client waiting its
+/// turn is timed out only by one command outlasting the clock, never by the
+/// length of the queue. On a timeout the
+/// window is told `hew://api-abort`, which aborts a compound held for the
+/// connection's forward, so a closed socket never leaves the document
+/// held. Above plugin commands' own 50 s ceiling, so a client sees a
+/// plugin's timeout before this one.
 pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// What the webview reports about a frame a connection is waiting on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReplyEvent {
+    /// `hew://api-started`: a queued frame was just dispatched; its reply
+    /// clock starts now.
+    Started,
+    /// `hew://api-reply`: the frame's reply.
+    Reply(String),
+}
+
+/// Reads one of the two reply-channel events (`hew://api-reply`,
+/// `hew://api-started`) into the connection it is for and what it says;
+/// `None` for another event or a payload that does not parse.
+pub(crate) fn route_reply_event(event: &str, payload: &str) -> Option<(u32, ReplyEvent)> {
+    match event {
+        "hew://api-reply" => {
+            let p = serde_json::from_str::<ReplyPayload>(payload).ok()?;
+            Some((p.conn_id, ReplyEvent::Reply(p.frame)))
+        }
+        "hew://api-started" => {
+            let p = serde_json::from_str::<ConnIdPayload>(payload).ok()?;
+            Some((p.conn_id, ReplyEvent::Started))
+        }
+        _ => None,
+    }
+}
+
+/// Registers the reply channel's listeners: the webview calls back into
+/// Rust with a plain `emit` (no Tauri command), and these are the only
+/// places that ever drain `pending_replies`. A reply takes the waiting
+/// slot; a start leaves it for the reply that follows.
+fn listen_for_replies(app: &AppHandle) {
+    for event in ["hew://api-reply", "hew://api-started"] {
+        let handle = app.clone();
+        app.listen_any(event, move |e| {
+            let Some((conn_id, reply)) = route_reply_event(event, e.payload()) else {
+                return;
+            };
+            let state = handle.state::<LiveApi>();
+            let mut pending = state.pending_replies.lock().expect("pending_replies mutex");
+            let tx = match reply {
+                ReplyEvent::Started => pending.get(&conn_id).cloned(),
+                ReplyEvent::Reply(_) => pending.remove(&conn_id),
+            };
+            drop(pending);
+            if let Some(tx) = tx {
+                let _ = tx.send(reply);
+            }
+        });
+    }
+}
 
 /// Live API dispatch bookkeeping, managed as Tauri state. Session-only:
 /// nothing here is persisted or fed into a document's canonical bytes.
@@ -93,7 +161,7 @@ pub(crate) struct LiveApi {
     /// One slot per frame currently awaiting its `hew://api-reply` — filled
     /// just before emitting `hew://api-frame`, drained by the global reply
     /// listener registered in `start`.
-    pub(crate) pending_replies: Mutex<HashMap<u32, mpsc::Sender<String>>>,
+    pub(crate) pending_replies: Mutex<HashMap<u32, mpsc::Sender<ReplyEvent>>>,
     /// The document registry (ids, client labels, dirty marks).
     pub(crate) docs: Mutex<crate::live_router::DocState>,
     pub(crate) next_op_id: AtomicU32,
@@ -103,6 +171,9 @@ pub(crate) struct LiveApi {
     /// Webview-side operations (`hew://api-op`) awaiting their
     /// `hew://api-op-reply`.
     pub(crate) pending_ops: Mutex<HashMap<u32, mpsc::Sender<serde_json::Value>>>,
+    /// Each connection's writer: every line sent here is written to the
+    /// connection whole, replies and events alike, in the order sent.
+    pub(crate) outbound: Mutex<HashMap<u32, EventGate>>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -123,6 +194,261 @@ pub(crate) struct ConnPayload {
 struct ReplyPayload {
     conn_id: u32,
     frame: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnIdPayload {
+    conn_id: u32,
+}
+
+/// `hew://api-event`'s payload: one notification frame for one connection.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EventPayload {
+    conn_id: u32,
+    frame: String,
+}
+
+/// Reads a `hew://api-event` payload into the connection it is for and
+/// the frame; `None` for a payload that does not parse.
+pub(crate) fn route_event_payload(payload: &str) -> Option<(u32, String)> {
+    let p = serde_json::from_str::<EventPayload>(payload).ok()?;
+    Some((p.conn_id, p.frame))
+}
+
+/// Registers the event listener: a notification the webview owes a
+/// connection goes onto that connection's writer, between its replies. A
+/// connection that has gone (or never had a writer) drops it.
+fn listen_for_events(app: &AppHandle) {
+    let handle = app.clone();
+    app.listen_any("hew://api-event", move |e| {
+        let Some((conn_id, frame)) = route_event_payload(e.payload()) else {
+            return;
+        };
+        let state = handle.state::<LiveApi>();
+        let mut outbound = state.outbound.lock().expect("outbound mutex");
+        if let Some(gate) = outbound.get_mut(&conn_id) {
+            gate.offer(frame);
+        }
+    });
+}
+
+/// The names a `hew.event.subscribe`/`unsubscribe` request left the
+/// connection subscribed to, from its reply; `None` when `line` is another
+/// method or the reply is a refusal.
+pub(crate) fn subscribed_after(line: &str, reply: &str) -> Option<Vec<String>> {
+    let request = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    match request.get("method")?.as_str()? {
+        "hew.event.subscribe" | "hew.event.unsubscribe" => {}
+        _ => return None,
+    }
+    let reply = serde_json::from_str::<serde_json::Value>(reply).ok()?;
+    let names = reply.get("result")?.get("subscribed")?.as_array()?;
+    Some(
+        names
+            .iter()
+            .filter_map(|n| n.as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
+/// Records what `conn_id`'s session in window `label` is now subscribed to,
+/// when `line`'s `reply` says.
+pub(crate) fn note_subscriptions(
+    app: &AppHandle,
+    conn_id: u32,
+    label: &str,
+    line: &str,
+    reply: &str,
+) {
+    let Some(names) = subscribed_after(line, reply) else {
+        return;
+    };
+    if let Some(gate) = app
+        .state::<LiveApi>()
+        .outbound
+        .lock()
+        .expect("outbound mutex")
+        .get_mut(&conn_id)
+    {
+        gate.set_window_subscriptions(label, names);
+    }
+}
+
+/// Window `label`'s session for `conn_id` ended: forget its subscriptions.
+pub(crate) fn clear_window_subscriptions(app: &AppHandle, conn_id: u32, label: &str) {
+    if let Some(gate) = app
+        .state::<LiveApi>()
+        .outbound
+        .lock()
+        .expect("outbound mutex")
+        .get_mut(&conn_id)
+    {
+        gate.clear_window(label);
+    }
+}
+
+/// `hew://api-broadcast`'s payload: a document lifecycle frame and the
+/// connections its window already sent it through their own sessions.
+#[derive(serde::Deserialize)]
+struct BroadcastPayload {
+    frame: String,
+    except: Vec<u32>,
+}
+
+/// Reads a `hew://api-broadcast` payload into the event's name and what
+/// to send; `None` for a payload that does not parse or a frame that is
+/// not a `hew.event.<name>` notification.
+pub(crate) fn route_broadcast_payload(payload: &str) -> Option<(String, String, Vec<u32>)> {
+    let p = serde_json::from_str::<BroadcastPayload>(payload).ok()?;
+    let method = serde_json::from_str::<serde_json::Value>(&p.frame)
+        .ok()?
+        .get("method")?
+        .as_str()?
+        .to_string();
+    let name = method.strip_prefix("hew.event.")?.to_string();
+    Some((name, p.frame, p.except))
+}
+
+/// Offers `frame` (event `name`) to every connection subscribed to it
+/// except `except`: the lifecycle of one window reaches a first-party
+/// listener whose session lives in another (docs/agents/HEW_API.md §4.5).
+/// Every socket connection is first-party, so its grant allows the frame
+/// as it is, `path` included.
+pub(crate) fn broadcast_lifecycle(
+    outbound: &mut HashMap<u32, EventGate>,
+    name: &str,
+    frame: &str,
+    except: &[u32],
+) {
+    for (conn_id, gate) in outbound.iter_mut() {
+        if !except.contains(conn_id) && gate.subscribed_to(name) {
+            gate.offer(frame.to_string());
+        }
+    }
+}
+
+fn listen_for_broadcasts(app: &AppHandle) {
+    let handle = app.clone();
+    app.listen_any("hew://api-broadcast", move |e| {
+        let Some((name, frame, except)) = route_broadcast_payload(e.payload()) else {
+            return;
+        };
+        let state = handle.state::<LiveApi>();
+        let mut outbound = state.outbound.lock().expect("outbound mutex");
+        for gate in outbound.values_mut() {
+            gate.retain_windows(|label| handle.get_webview_window(label).is_some());
+        }
+        broadcast_lifecycle(&mut outbound, &name, &frame, &except);
+    });
+}
+
+/// How long one write to a connection may stall before the writer gives
+/// up on the peer. Bounds how long a connection that stopped reading can
+/// hold its threads, its socket, and its queued frames.
+pub(crate) const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One connection's way out for events. The webview reports a frame's
+/// reply and the events that frame caused on separate channels, so the
+/// events could reach the writer first; while a frame awaits its reply
+/// (`hold` .. `release`) events are kept here, and `release`, called once
+/// the reply is queued, sends them after it.
+pub(crate) struct EventGate {
+    tx: mpsc::Sender<String>,
+    held: Option<Vec<String>>,
+    /// The event names the client has subscribed to, per window session, as
+    /// each session's last `hew.event.subscribe`/`unsubscribe` reply listed
+    /// them (a reply lists only its own session). A connection is
+    /// subscribed to the union. Document
+    /// lifecycle events of a window the connection holds no session in
+    /// reach it through this (see [`broadcast_lifecycle`]).
+    subscribed: HashMap<String, std::collections::HashSet<String>>,
+}
+
+// Only the unix transport has a writer to gate today (the Windows pipe
+// delivers no events yet; HEW_API.md §4.5).
+#[cfg_attr(not(unix), allow(dead_code))]
+impl EventGate {
+    pub(crate) fn new(tx: mpsc::Sender<String>) -> EventGate {
+        EventGate {
+            tx,
+            held: None,
+            subscribed: HashMap::new(),
+        }
+    }
+
+    /// Window `label`'s session now holds exactly `names`.
+    pub(crate) fn set_window_subscriptions(&mut self, label: &str, names: Vec<String>) {
+        self.subscribed
+            .insert(label.to_string(), names.into_iter().collect());
+    }
+
+    /// Window `label`'s session ended or detached: its subscriptions stop
+    /// counting.
+    pub(crate) fn clear_window(&mut self, label: &str) {
+        self.subscribed.remove(label);
+    }
+
+    /// Keeps only the windows `keep` accepts (closed windows drop out).
+    pub(crate) fn retain_windows(&mut self, keep: impl Fn(&str) -> bool) {
+        self.subscribed.retain(|label, _| keep(label));
+    }
+
+    /// Whether any of this connection's window sessions is subscribed to `name`.
+    pub(crate) fn subscribed_to(&self, name: &str) -> bool {
+        self.subscribed.values().any(|names| names.contains(name))
+    }
+
+    /// A frame went to the webview: hold events until its reply is queued.
+    pub(crate) fn hold(&mut self) {
+        self.held.get_or_insert_with(Vec::new);
+    }
+
+    /// An event for this connection: queued now, or held behind a reply.
+    pub(crate) fn offer(&mut self, frame: String) {
+        match &mut self.held {
+            Some(held) => held.push(frame),
+            None => {
+                let _ = self.tx.send(frame);
+            }
+        }
+    }
+
+    /// The reply is queued (or the frame needed none): what was held
+    /// follows it, in order, and events flow straight through again.
+    pub(crate) fn release(&mut self) {
+        for frame in self.held.take().unwrap_or_default() {
+            let _ = self.tx.send(frame);
+        }
+    }
+}
+
+/// Spawns `stream`'s writer thread (see [`write_lines`]) with writes
+/// bounded by `timeout`; returns its channel and handle.
+#[cfg(unix)]
+pub(crate) fn spawn_writer(
+    stream: std::os::unix::net::UnixStream,
+    timeout: Duration,
+) -> std::io::Result<(mpsc::Sender<String>, std::thread::JoinHandle<()>)> {
+    stream.set_write_timeout(Some(timeout))?;
+    let (tx, rx) = mpsc::channel::<String>();
+    let writer = std::thread::spawn(move || write_lines(rx, stream));
+    Ok((tx, writer))
+}
+
+/// A connection's writer thread: writes each line it receives, newline
+/// framed, until the channel closes (every sender dropped, once the queue
+/// is empty) or a write fails.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn write_lines(rx: mpsc::Receiver<String>, mut out: impl std::io::Write) {
+    for line in rx {
+        let mut framed = line;
+        framed.push('\n');
+        if out.write_all(framed.as_bytes()).is_err() || out.flush().is_err() {
+            break;
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -429,25 +755,10 @@ pub fn start(app: &AppHandle) {
         return;
     }
 
-    // The reply channel: the webview calls back into Rust via a plain
-    // `emit("hew://api-reply", {connId, frame})` (no Tauri command/invoke
-    // needed — see crates/wasm-api/src/live.rs's module doc), and this is
-    // the one place that ever drains `pending_replies`.
-    let reply_handle = app.clone();
-    app.listen_any("hew://api-reply", move |event| {
-        let Ok(payload) = serde_json::from_str::<ReplyPayload>(event.payload()) else {
-            return;
-        };
-        let tx = reply_handle
-            .state::<LiveApi>()
-            .pending_replies
-            .lock()
-            .expect("pending_replies mutex")
-            .remove(&payload.conn_id);
-        if let Some(tx) = tx {
-            let _ = tx.send(payload.frame);
-        }
-    });
+    // The reply channel (see `listen_for_replies`).
+    listen_for_replies(app);
+    listen_for_events(app);
+    listen_for_broadcasts(app);
 
     let op_handle = app.clone();
     app.listen_any("hew://api-op-reply", move |event| {
@@ -513,7 +824,7 @@ fn spawn_accept_loop(app: AppHandle, listener: std::os::unix::net::UnixListener,
 #[cfg(unix)]
 fn handle_connection(
     app: AppHandle,
-    mut stream: std::os::unix::net::UnixStream,
+    stream: std::os::unix::net::UnixStream,
     token: String,
     window_label: String,
 ) {
@@ -530,14 +841,38 @@ fn handle_connection(
         return; // wrong method, missing/wrong token, or malformed — drop silently
     };
 
+    let Ok(writer_stream) = stream.try_clone() else {
+        return;
+    };
     let (conn_id, mut route) = register_connection(&app, &window_label);
 
-    let mut write = |out: &str| -> bool {
-        let mut framed = out.to_string();
-        framed.push('\n');
-        stream.write_all(framed.as_bytes()).is_ok() && stream.flush().is_ok()
+    // One writer per connection: replies and events go through the same
+    // channel, so a frame is never split and events land between replies.
+    let Ok((tx, writer)) = spawn_writer(writer_stream, WRITE_TIMEOUT) else {
+        unregister_connection(&app, conn_id, &mut route);
+        return;
     };
+    app.state::<LiveApi>()
+        .outbound
+        .lock()
+        .expect("outbound mutex")
+        .insert(conn_id, EventGate::new(tx.clone()));
+    let mut write = |out: &str| -> bool { tx.send(out.to_string()).is_ok() };
+    // Every frame holds this connection's events until its reply is queued.
+    let gate = |app: &AppHandle, f: fn(&mut EventGate)| {
+        if let Some(g) = app
+            .state::<LiveApi>()
+            .outbound
+            .lock()
+            .expect("outbound mutex")
+            .get_mut(&conn_id)
+        {
+            f(g);
+        }
+    };
+    gate(&app, EventGate::hold);
     let mut ok = serve_frame(&app, &mut route, &sanitized_hello, &mut write);
+    gate(&app, EventGate::release);
     while ok {
         let mut line = String::new();
         match reader.read_line(&mut line) {
@@ -553,10 +888,18 @@ fn handle_connection(
         // field, and the webview must never see the secret. Strip it from
         // every frame, not just the handshake.
         let sanitized = strip_token(trimmed);
+        gate(&app, EventGate::hold);
         ok = serve_frame(&app, &mut route, &sanitized, &mut write);
+        gate(&app, EventGate::release);
     }
 
     unregister_connection(&app, conn_id, &mut route);
+    // The last senders go; the writer finishes what was queued (a timeout's
+    // synthesized reply included) and exits, within `WRITE_TIMEOUT` of a
+    // peer that stopped reading.
+    drop(tx);
+    let _ = writer.join();
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 /// Registers a freshly accepted connection: binds it to `window_label` (the
@@ -593,6 +936,11 @@ fn unregister_connection(app: &AppHandle, conn_id: u32, route: &mut crate::live_
         .pending_replies
         .lock()
         .expect("pending_replies mutex")
+        .remove(&conn_id);
+    state
+        .outbound
+        .lock()
+        .expect("outbound mutex")
         .remove(&conn_id);
     route.close_sessions(app);
 }
@@ -1151,24 +1499,11 @@ mod windows {
             return;
         }
 
-        // The reply channel: identical to unix's — the webview calls back
-        // into Rust via a plain `emit("hew://api-reply", {connId, frame})`
-        // regardless of which transport is forwarding frames.
-        let reply_handle = app.clone();
-        app.listen_any("hew://api-reply", move |event| {
-            let Ok(payload) = serde_json::from_str::<ReplyPayload>(event.payload()) else {
-                return;
-            };
-            let tx = reply_handle
-                .state::<LiveApi>()
-                .pending_replies
-                .lock()
-                .expect("pending_replies mutex")
-                .remove(&payload.conn_id);
-            if let Some(tx) = tx {
-                let _ = tx.send(payload.frame);
-            }
-        });
+        // The reply channel: identical to unix's, whichever transport is
+        // forwarding frames.
+        super::listen_for_replies(app);
+        super::listen_for_events(app);
+        super::listen_for_broadcasts(app);
         let op_handle = app.clone();
         app.listen_any("hew://api-op-reply", move |event| {
             deliver_op_reply(&op_handle, event.payload());
@@ -1587,6 +1922,221 @@ mod tests {
     #[test]
     fn check_and_sanitize_hello_rejects_malformed_json() {
         assert!(check_and_sanitize_hello("not json at all", "secret").is_none());
+    }
+
+    #[test]
+    fn reply_events_route_to_their_connection() {
+        assert_eq!(
+            route_reply_event("hew://api-reply", r#"{"connId":4,"frame":"{}"}"#),
+            Some((4, ReplyEvent::Reply("{}".into())))
+        );
+        assert_eq!(
+            route_reply_event("hew://api-started", r#"{"connId":9}"#),
+            Some((9, ReplyEvent::Started))
+        );
+        assert_eq!(route_reply_event("hew://api-started", "nope"), None);
+        assert_eq!(
+            route_reply_event("hew://api-reply", r#"{"connId":4}"#),
+            None
+        );
+        assert_eq!(
+            route_reply_event("hew://api-queued", r#"{"connId":4}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn event_payloads_route_to_their_connection() {
+        assert_eq!(
+            route_event_payload(r#"{"connId":3,"frame":"{\"jsonrpc\":\"2.0\"}"}"#),
+            Some((3, r#"{"jsonrpc":"2.0"}"#.to_string()))
+        );
+        assert_eq!(route_event_payload(r#"{"connId":3}"#), None);
+        assert_eq!(route_event_payload("nope"), None);
+    }
+
+    #[test]
+    fn subscriptions_are_read_from_the_reply() {
+        let sub = r#"{"jsonrpc":"2.0","id":2,"method":"hew.event.subscribe","params":{"events":["document_opened"]}}"#;
+        let ok = r#"{"jsonrpc":"2.0","id":2,"result":{"subscribed":["document_closed","document_opened"],"denied":[]}}"#;
+        assert_eq!(
+            subscribed_after(sub, ok),
+            Some(vec![
+                "document_closed".to_string(),
+                "document_opened".to_string()
+            ])
+        );
+        let bad =
+            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"unknown event name: x"}}"#;
+        assert_eq!(subscribed_after(sub, bad), None);
+        let other = r#"{"jsonrpc":"2.0","id":3,"method":"hew.meta.hello","params":{}}"#;
+        assert_eq!(subscribed_after(other, ok), None);
+    }
+
+    #[test]
+    fn a_lifecycle_broadcast_reaches_subscribers_not_already_served() {
+        let frame = r#"{"jsonrpc":"2.0","method":"hew.event.document_opened","params":{"document":"doc_2"}}"#;
+        let payload = serde_json::json!({ "frame": frame, "except": [2] }).to_string();
+        let (name, f, except) = route_broadcast_payload(&payload).unwrap();
+        assert_eq!(name, "document_opened");
+        assert_eq!(f, frame);
+        assert_eq!(
+            route_broadcast_payload(r#"{"frame":"{}","except":[]}"#),
+            None
+        );
+        assert_eq!(route_broadcast_payload("nope"), None);
+
+        let mut outbound = HashMap::new();
+        let mut rxs = Vec::new();
+        for (id, subs) in [
+            (1u32, vec!["document_opened"]),
+            (2, vec!["document_opened"]),
+            (3, vec!["document_closed"]),
+            (4, vec![]),
+        ] {
+            let (tx, rx) = mpsc::channel();
+            let mut gate = EventGate::new(tx);
+            gate.set_window_subscriptions("A", subs.into_iter().map(String::from).collect());
+            outbound.insert(id, gate);
+            rxs.push((id, rx));
+        }
+        broadcast_lifecycle(&mut outbound, &name, &f, &except);
+        for (id, rx) in rxs {
+            let got: Vec<String> = rx.try_iter().collect();
+            match id {
+                1 => assert_eq!(got, vec![frame.to_string()]),
+                _ => assert!(got.is_empty(), "conn {id} got {got:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn subscriptions_are_kept_per_window_and_unioned() {
+        let (tx, _rx) = mpsc::channel();
+        let mut gate = EventGate::new(tx);
+        // document_opened in window A, selection_changed in window B: the
+        // connection is subscribed to both.
+        gate.set_window_subscriptions("A", vec!["document_opened".to_string()]);
+        gate.set_window_subscriptions("B", vec!["selection_changed".to_string()]);
+        assert!(gate.subscribed_to("document_opened"));
+        assert!(gate.subscribed_to("selection_changed"));
+        // B's later reply replaces only B's set.
+        gate.set_window_subscriptions("B", vec![]);
+        assert!(gate.subscribed_to("document_opened"));
+        assert!(!gate.subscribed_to("selection_changed"));
+        // Re-attaching A with a different set replaces A's, nothing else.
+        gate.set_window_subscriptions("B", vec!["document_closed".to_string()]);
+        gate.set_window_subscriptions("A", vec!["tool_changed".to_string()]);
+        assert!(!gate.subscribed_to("document_opened"));
+        assert!(gate.subscribed_to("document_closed"));
+        // A closed session or detached window stops counting.
+        gate.clear_window("B");
+        assert!(!gate.subscribed_to("document_closed"));
+        assert!(gate.subscribed_to("tool_changed"));
+        // Windows that no longer exist are dropped.
+        gate.retain_windows(|label| label != "A");
+        assert!(!gate.subscribed_to("tool_changed"));
+    }
+
+    #[test]
+    fn a_broadcast_follows_the_union_across_windows() {
+        let frame = r#"{"jsonrpc":"2.0","method":"hew.event.document_opened","params":{}}"#;
+        let (tx, rx) = mpsc::channel();
+        let mut gate = EventGate::new(tx);
+        gate.set_window_subscriptions("A", vec!["document_opened".to_string()]);
+        gate.set_window_subscriptions("B", vec!["selection_changed".to_string()]);
+        let mut outbound = HashMap::from([(1u32, gate)]);
+        broadcast_lifecycle(&mut outbound, "document_opened", frame, &[]);
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![frame.to_string()]);
+    }
+
+    /// The writer writes each line whole, newline framed, in send order,
+    /// and finishes the queue after the last sender goes.
+    #[test]
+    fn write_lines_frames_each_line_whole_and_drains_on_close() {
+        let (tx, rx) = mpsc::channel::<String>();
+        let out = std::sync::Arc::new(Mutex::new(Vec::<u8>::new()));
+        struct Shared(std::sync::Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Shared {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Shared(out.clone());
+        let event_tx = tx.clone();
+        tx.send(r#"{"id":1,"result":{}}"#.into()).unwrap();
+        event_tx
+            .send(r#"{"method":"hew.event.units_changed"}"#.into())
+            .unwrap();
+        tx.send(r#"{"id":2,"result":{}}"#.into()).unwrap();
+        drop(tx);
+        drop(event_tx);
+        write_lines(rx, sink);
+        assert_eq!(
+            String::from_utf8(out.lock().unwrap().clone()).unwrap(),
+            "{\"id\":1,\"result\":{}}\n{\"method\":\"hew.event.units_changed\"}\n{\"id\":2,\"result\":{}}\n"
+        );
+    }
+
+    /// Events offered while a frame awaits its reply follow that reply;
+    /// between frames they go straight out.
+    #[test]
+    fn events_wait_behind_the_reply_their_frame_is_owed() {
+        let (tx, rx) = mpsc::channel::<String>();
+        let mut gate = EventGate::new(tx.clone());
+        gate.offer("before".into());
+        gate.hold();
+        gate.offer("caused".into());
+        tx.send("reply".into()).unwrap();
+        gate.release();
+        gate.offer("after".into());
+        drop(gate);
+        drop(tx);
+        assert_eq!(
+            rx.iter().collect::<Vec<_>>(),
+            vec!["before", "reply", "caused", "after"]
+        );
+    }
+
+    /// A peer that stops reading cannot hold the writer: a stalled write
+    /// gives up after the write timeout, so joining it is bounded.
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_peer_releases_the_writer_within_the_timeout() {
+        let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (tx, writer) = spawn_writer(ours, Duration::from_millis(100)).unwrap();
+        let big = "x".repeat(1 << 20);
+        for _ in 0..16 {
+            let _ = tx.send(big.clone());
+        }
+        drop(tx);
+        let started = std::time::Instant::now();
+        writer.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// A failed write ends the writer, so the connection's sends start
+    /// failing and its reader stops.
+    #[test]
+    fn write_lines_stops_on_a_failed_write() {
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (tx, rx) = mpsc::channel::<String>();
+        let writer = std::thread::spawn(move || write_lines(rx, Broken));
+        tx.send("a".into()).unwrap();
+        writer.join().unwrap();
+        assert!(tx.send("b".into()).is_err());
     }
 
     #[test]

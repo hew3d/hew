@@ -1,0 +1,56 @@
+{
+  "activation": [
+    "on_command",
+    "on_tool",
+    "on_surface_open",
+    "on_event",
+    "on_document_has_namespace"
+  ],
+  "activationReason": null,
+  "agent": null,
+  "api": 1,
+  "author": null,
+  "contributes": {
+    "actions": null,
+    "commands": [],
+    "dialogSlots": null,
+    "events": null,
+    "exportFormats": null,
+    "hud": null,
+    "importFormats": null,
+    "menus": null,
+    "panels": null,
+    "presave": false,
+    "printPages": null,
+    "settings": null,
+    "sheets": null,
+    "toolbars": null,
+    "tools": null,
+    "viewportSurfaces": null,
+    "windows": null
+  },
+  "data": {
+    "migrate": null,
+    "version": 1
+  },
+  "description": {
+    "$t": "plugin.description"
+  },
+  "hew": null,
+  "homepage": null,
+  "icon": null,
+  "id": "com.example.localized",
+  "license": null,
+  "locales": null,
+  "main": "main.js",
+  "manifest": 1,
+  "name": {
+    "en": "Cut List",
+    "ja": "カットリスト"
+  },
+  "optionalPermissions": [],
+  "permissions": [],
+  "requires": [],
+  "source": null,
+  "version": "1.0.0"
+}

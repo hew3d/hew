@@ -103,6 +103,7 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     node_tags: (_kind: number, _id: bigint) => [] as string[],
     object_materials: (_id: bigint) => [] as bigint[],
     instance_expanded_members: (_id: bigint) => [] as bigint[],
+    instance_expanded_inherited: (_id: bigint) => [] as bigint[],
     tag_meta_paths: () => [] as string[],
     tag_meta_hidden: () => new Uint8Array(),
     set_tag_hidden: vi.fn(),

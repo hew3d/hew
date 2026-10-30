@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `20`**, and **geometry buffer format version `8`**. Both are covered
+version `25`**, and **geometry buffer format version `9`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,10 +59,12 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 22,
-  "geometry_version": 8,
+  "format_version": 25,
+  "geometry_version": 9,
   "app": "hew",
   "app_version": "1.2.1",
+  "document_id": "3f2c9107-5ed4-40a8-806b-1ec297405d83", // v25+, optional;
+                                    // omitted = the document has no id yet
 
   "materials": [
     { "id": 0, "sid": 0, "name": "Red", "color": [220, 50, 40, 255],
@@ -95,7 +97,9 @@ ascending dense-id order (the array index equals the entry's own `id` field).
     { "id": 0, "sid": 6, "def": 0,
       "pose": [1,0,0,0, 0,1,0,0, 0,0,1,0],
       "name": "Chair_1",
-      "tags": [["Furniture"]] }
+      "tags": [["Furniture"]],
+      "material": 0 }  // v23+, optional; dense `materials[]` id. Omitted =
+                       // the placement has no material of its own
   ],
   "sketches": [
     { "id": 0, "sid": 7,
@@ -172,15 +176,33 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `22`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `25`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
-  used by every entry under `geometry/` in this file. Current: `8`.
+  used by every entry under `geometry/` in this file. Current: `9`.
   Redundant with the per-buffer version in each buffer's own header (),
   but lets a reader reject a whole file up front without opening buffers.
 - **`app`**, **`app_version`** (`string`, required) — free-form writer
   identification, no semantic meaning. A reader MUST NOT branch on these.
   Hew writes the release that saved the file (e.g. `"1.2.1"`). Releases up
   to and including 1.2.0 wrote `"0.1.0"` whatever their own version.
+- **`document_id`** (`string`, v25+, optional) — a UUID that identifies the
+  document across saves, so data kept outside the file (a plugin's
+  per-document storage, provenance) can key on it. Format: exactly 36
+  characters, lowercase hexadecimal in the hyphenated `8-4-4-4-12` form
+  (`3f2c9107-5ed4-40a8-806b-1ec297405d83`); Hew mints a version 4 UUID
+  (RFC 9562), but a reader checks only the textual form. Any other value,
+  including uppercase hex, braces, or `null`, is a fatal, typed error. Absent means
+  the document has no id yet: every pre-v25 file, and any document never
+  saved by a v25 writer. A writer mints the id once, from real randomness,
+  the first time it saves the document as `.hew` (a `.skp` save mints it
+  too, on the document in memory, though a SketchUp file has no slot for
+  it), and never changes it after: a save, a Save As to a new name, and a
+  plain file copy all keep it, so two copies of one file carry the same
+  id. A Hew Library item made from a whole document leaves it out: the
+  item is a separate document, and one opened from it gets its own id on
+  its first save. It is file identity, not document content: it is not
+  undoable, and it does not take part in the state digest replay
+  fixtures pin.
 - **`materials`** — the material palette ().
 - **`objects`** — every live Object, both world-tree and component-definition
   members ().
@@ -297,6 +319,17 @@ of the manifest:
 | `sketches[].regions[].faceless` | 21 | `false` (every closed loop has a face, the only possibility before v21) |
 | `guides[].tags` | 21 | empty list (the guide carries no tag) |
 | `guides[].from`, `guides[].to` | 22 | absent: the line runs on forever both ways, the only possibility before v22 |
+| `instances[].material` | 23 | absent: the placement has no material of its own, the only possibility before v23 |
+| `document_id` (top-level string) | 25 | absent: the document has no id yet; the next save mints one |
+
+Manifest v24 adds no manifest field: it marks geometry buffer v9 (face
+and edge attribute dictionaries, §3), so a v24 manifest names
+`geometry_version` 9.
+
+`document_id` (v25) is version-gated the usual single direction: a file
+declaring a version older than 25 that carries it is malformed for its own
+declared version and MUST be rejected. At v25+ it is optional, but a
+present one must have the exact textual form the field reference gives.
 
 Four fields land in the same v13 bump (four efforts in flight at once) and
 are version-gated the same way the retired fields below are (just in the
@@ -389,12 +422,12 @@ All multi-byte integers and all floats are **little-endian**. Material ids
 inside a buffer are the same dense ids used by `manifest.json`'s `materials`
 array — one shared id space, not a buffer-local one.
 
-### 3.1 Layout (current version, `8`)
+### 3.1 Layout (current version, `9`)
 
 ```
 offset  type                field
 0       u8[4]               magic = "HEWG" (0x48 0x45 0x57 0x47)
-4       u32                 version (currently 8)
+4       u32                 version (currently 9)
 8       u8                  watertight: 0 = Open (leaky), 1 = Watertight
 9       u32                 base_material id (0xFFFFFFFF = none)
 13      u8                  imported flag: 0 = strict native tolerance, 1 = imported tolerance
@@ -433,7 +466,28 @@ offset  type                field
                              circumcircle center.x .y .z  radius
         u8                  back paint flag (v8): 0 = the back shows what the front shows, 1 = a back material id follows
         u32                 back material id, present only when the flag above is 1
+        u8                  face_attrs flag (v9): 0 = no dictionary, 1 = a dictionary follows
+        u32                 byte length (L), present only when the flag above is 1
+        u8[L]               the face's attribute dictionary as UTF-8 JSON, present only when the flag above is 1
+        u8                  edge_attrs flag (v9): 0 = no edge of this face carries a dictionary, 1 = per-edge entries follow
+        --- present only when the edge_attrs flag is 1: ---
+        --- one entry per outer edge (K entries), then per hole edge (J per hole, in hole order): ---
+        u8                  edge dictionary flag: 0 = none, 1 = a dictionary follows
+        u32                 byte length (L), present only when the flag above is 1
+        u8[L]               the edge's attribute dictionary as UTF-8 JSON, present only when the flag above is 1
 ```
+
+A face or edge **attribute dictionary** (v9) is the same shape as the
+manifest's `attrs` (§2 field reference): a JSON object of namespace →
+key → value, compact, with object keys in ascending byte order (a
+conforming writer emits it with no whitespace, which makes equal
+dictionaries byte-equal). It is client data the kernel stores and never
+interprets (docs/agents/HEW_API.md §8). An entry is written only when the
+element carries a non-empty dictionary; an empty one is the 0 flag. Like
+the other per-edge blocks, an edge's dictionary is written by every face
+the edge bounds, at the entry for that edge, and the two entries of a
+shared edge must be identical: both absent, or equal dictionaries. A plain
+solid grows by the two flag bytes per face.
 
 A face's back paint (v8) is the material on its back side: a `.skp` face
 can be painted on each side. Renderers draw it where the back can be seen
@@ -483,9 +537,13 @@ order over the raw f64 bit patterns (IEEE 754 `totalOrder`; Rust
   loop's claim sequence in canonical vertex order, then each hole's, each
   compared by length then entry — claim-less before claim-bearing, then by
   `center.x y z radius`), then the per-edge polygon claims (v7; compared
-  the same way). Coincident faces on disjoint shells can tie on
-  geometry alone, so every emitted payload — ring, holes, material, UV
-  frame, surface, and edge-curve claims — participates in the key;
+  the same way), then the face's attribute dictionary (v9; absent before
+  present, present compared as its emitted JSON bytes, lexicographically),
+  then the per-edge dictionaries (the outer loop's entry sequence, then
+  each hole's, absent before present, present by bytes). Coincident faces
+  on disjoint shells can tie on geometry alone, so every emitted payload —
+  ring, holes, material, UV frame, surface, edge claims, and dictionaries
+  — participates in the key;
 - vertices are numbered by first appearance while walking the faces in that
   order (each face's outer loop, then its holes); a vertex several loops
   share (a touching hole) takes the number of its first appearance and is
@@ -546,6 +604,7 @@ present at every version:
 | per-face `soft_edges` flag + payload | 6 | flag byte and payload are not present at all — the `edge_curves` flag (v5) follows the last hole loop directly | no edge is soft |
 | per-face `edge_polygons` flag + payload | 7 | flag byte and payload are not present at all — the next face's material id (or the buffer's end) follows the `edge_curves` block directly | no edge is a polygon's side |
 | per-face back paint flag + id | 8 | flag byte and id are not present at all — the next face's material id (or the buffer's end) follows the `edge_polygons` block directly | no face has a painted back |
+| per-face `face_attrs` and `edge_attrs` blocks | 9 | neither flag byte nor any payload is present — the next face's material id (or the buffer's end) follows the back paint block directly | no face or edge carries a dictionary |
 
 All gates shift subsequent byte offsets, so a reader must branch on the
 buffer's own `version` at each gated point rather than assume fixed offsets
@@ -571,6 +630,18 @@ contents do not describe valid geometry.
   recovery. (After rebuild, the validator additionally rejects an edge-curve
   claim whose endpoints are not within tolerance of `radius` from `center`,
   exactly as it rejects a lying `surface`.)
+- **Attribute dictionaries (v9).** A `face_attrs`, `edge_attrs`, or
+  per-edge dictionary flag outside 0-1, a length running past the end of
+  the buffer (truncation), or a present dictionary that is not valid
+  UTF-8 JSON of the `attrs` shape is a fatal error. The shape is held as
+  strictly as a live write: a JSON object of at least one namespace; every
+  namespace a non-empty string holding at least one key; every key a
+  non-empty string; every value representable (finite numbers, integers
+  within `i64`, nesting at most 64 levels, the manifest's `attrs` rules).
+- **Shared-edge agreement (v9).** The two faces of a shared edge must
+  write the same dictionary entry for it (both absent, or equal
+  dictionaries). A disagreement is a tampered or corrupt file, rejected
+  as such, never resolved by which face was read last.
 - **Face plane recomputation.** Planes are *not* stored; a reader must
   recompute each face's best-fit plane from its outer-loop vertices (Newell's
   method over the loop in the order the writer emits it, rotated to its
@@ -656,6 +727,10 @@ zip path), an optional `base_material` (used by any face whose own per-face
 material is absent — an object-level default paint, not an override), an
 optional `name`, and optional `tags` ().
 
+An object's faces and edges may each carry an attribute dictionary
+(geometry buffer v9, §3.1), stored with the geometry rather than in the
+manifest because faces and edges have no stable id there.
+
 An object needs no stored relationship to the sketch it was extruded from:
 extrusion deletes the profile's scaffolding from the sketch (the outline
 became the solid's base face), and re-extruding occupied ground is simply
@@ -724,9 +799,23 @@ recompute face-plane orientation from winding alone ().
   definition's geometry. Each instance carries its own optional name
   (falling back to the definition's name if absent) and optional tags.
 
+  An instance may carry its own `material` (v23+, optional): a dense
+  `materials[]` id that MUST name an entry of this file (an out-of-range
+  id is a fatal, typed error). Definition-owned instances carry one too.
+  It colors only what nobody painted. A face of a definition member
+  resolves its material in this order: the face's own `material`; else
+  its object's base material; else, walking the instances that place the
+  member from the innermost outward, the first one that has a
+  `material`; else the renderer's default. A painted face or a painted
+  object base therefore keeps its color in every placement, and a nested
+  instance's material wins over its outer instance's. A file declaring
+  `format_version < 23` that carries an instance `material` is malformed
+  for its declared version and MUST be rejected, never honored.
+
 ### 4.5 Materials and textures
 
-Each `materials[]` entry has an id, an informational `name`, and a `color`
+Materials are referenced by faces (front and back), object bases, and
+instances (§4.4). Each `materials[]` entry has an id, an informational `name`, and a `color`
 (`[r, g, b, a]`, each `0-255`). A material may optionally carry a `texture`:
 `asset` (the zip path of the verbatim image bytes), `format` (`"png"` or
 `"jpg"`, matching the asset's actual encoding), and `world_size` (`[width,

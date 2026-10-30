@@ -183,6 +183,7 @@ fn a_transaction_counts_as_one_step_for_the_mark() {
         CompoundMeta {
             label: "Box".to_string(),
             origin: HistoryOrigin::Connection("test".to_string()),
+            coalesce: None,
         },
     )
     .expect("commit");
@@ -306,6 +307,7 @@ fn a_transactions_own_label_and_origin_win() {
         CompoundMeta {
             label: "Table leg".to_string(),
             origin: HistoryOrigin::Connection("hew-cli:7".to_string()),
+            coalesce: None,
         },
     )
     .expect("commit");

@@ -310,6 +310,10 @@ msgstr "{name} · in {parentLabel}"
 msgid "{name} ({copy})"
 msgstr "{name} ({copy})"
 
+#: src/panels/BusyNotice.tsx
+msgid "{name} is working…"
+msgstr "{name} is working…"
+
 #: src/log/reportBundle.ts
 msgid "{objectCount, plural, one {# object} other {# objects}}"
 msgstr "{objectCount, plural, one {# object} other {# objects}}"
@@ -786,6 +790,22 @@ msgstr "A partial sweep can't cut open this shape — its profile touches the tu
 msgid "A placement of this component sits inside a group, so it opens in the in-context editing mode instead."
 msgstr "A placement of this component sits inside a group, so it opens in the in-context editing mode instead."
 
+#: src/kernelErrors.ts
+msgid "A plugin command's answer could not be delivered. If this keeps happening, use Report Bug."
+msgstr "A plugin command's answer could not be delivered. If this keeps happening, use Report Bug."
+
+#: src/kernelErrors.ts
+msgid "A plugin could not connect because its permissions were unreadable. Reinstall the plugin, or use Report Bug if this keeps happening."
+msgstr "A plugin could not connect because its permissions were unreadable. Reinstall the plugin, or use Report Bug if this keeps happening."
+
+#: src/kernelErrors.ts
+msgid "A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window."
+msgstr "A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window."
+
+#: src/kernelErrors.ts
+msgid "A plugin's commands could not be added: its manifest declares a command Hew cannot accept. Update or reinstall the plugin."
+msgstr "A plugin's commands could not be added: its manifest declares a command Hew cannot accept. Update or reinstall the plugin."
+
 #: src/panels/WelcomeScreen.tsx
 msgid "A round table with a textured oak top, walnut cylinder legs, crossed stretchers, and a resting pen cup."
 msgstr "A round table with a textured oak top, walnut cylinder legs, crossed stretchers, and a resting pen cup."
@@ -1229,6 +1249,7 @@ msgid "cancel"
 msgstr "cancel"
 
 #: src/health/healthCopy.ts
+#: src/panels/BusyNotice.tsx
 #: src/panels/ConfirmDialog.tsx
 #: src/panels/ExportDialog.tsx
 #: src/panels/library/LibraryDetailPane.tsx
@@ -1274,6 +1295,10 @@ msgstr "Centered"
 #: src/settings/units.ts
 msgid "Centimeters"
 msgstr "Centimeters"
+
+#: src/i18n/historyLabels.ts
+msgid "Change component axes"
+msgstr "Change component axes"
 
 #: src/i18n/historyLabels.ts
 msgid "Change material opacity"
@@ -3047,6 +3072,10 @@ msgid "Finish editing group"
 msgstr "Finish editing group"
 
 #: src/kernelErrors.ts
+msgid "Finish editing the component before changing its axes."
+msgstr "Finish editing the component before changing its axes."
+
+#: src/kernelErrors.ts
 msgid "Finishing this step needed the drawing it just closed and couldn't find it, so nothing was placed and the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
 msgstr "Finishing this step needed the drawing it just closed and couldn't find it, so nothing was placed and the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
 
@@ -3499,6 +3528,10 @@ msgstr "Hew hit an error"
 #: src/i18n/nativeMenu.ts
 msgid "Hew is already checking for updates."
 msgstr "Hew is already checking for updates."
+
+#: src/kernelErrors.ts
+msgid "Hew lost track of a plugin's work in progress. Nothing was changed; if this keeps happening, use Report Bug."
+msgstr "Hew lost track of a plugin's work in progress. Nothing was changed; if this keeps happening, use Report Bug."
 
 #: src/io/docFormat.ts
 #: src/io/tauriFileHost.ts
@@ -5479,8 +5512,16 @@ msgid "Paint face"
 msgstr "Paint face"
 
 #: src/i18n/historyLabels.ts
+msgid "Paint instance"
+msgstr "Paint instance"
+
+#: src/i18n/historyLabels.ts
 msgid "Paint object"
 msgstr "Paint object"
+
+#: src/tools/PaintTool.ts
+msgid "Painting a component colors this placement. Edit the component to paint its faces."
+msgstr "Painting a component colors this placement. Edit the component to paint its faces."
 
 #: src/i18n/nativeMenu.ts
 msgid "Pan"
@@ -7633,6 +7674,10 @@ msgid "That face isn’t part of what you’re editing — press Esc to step out
 msgstr "That face isn’t part of what you’re editing — press Esc to step out first."
 
 #: src/kernelErrors.ts
+msgid "That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions."
+msgstr "That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions."
+
+#: src/kernelErrors.ts
 msgid "That group is no longer there — the model changed since it was picked. Click it again."
 msgstr "That group is no longer there — the model changed since it was picked. Click it again."
 
@@ -7683,6 +7728,14 @@ msgstr "That offset distance is too small to make a new boundary. Drag further, 
 #: src/kernelErrors.ts
 msgid "That opening is already closed. Check the list again for what is left."
 msgstr "That opening is already closed. Check the list again for what is left."
+
+#: src/kernelErrors.ts
+msgid "That part has no faces to measure."
+msgstr "That part has no faces to measure."
+
+#: src/kernelErrors.ts
+msgid "That part is no longer in the model. Pick it again."
+msgstr "That part is no longer in the model. Pick it again."
 
 #: src/kernelErrors.ts
 msgid "That path line is no longer there — the model changed since it was picked. Click it again."
@@ -7982,6 +8035,10 @@ msgid "The saved file could not be loaded."
 msgstr "The saved file could not be loaded."
 
 #: src/kernelErrors.ts
+msgid "The selection could not be shared with a connected program. If this keeps happening, use Report Bug."
+msgstr "The selection could not be shared with a connected program. If this keeps happening, use Report Bug."
+
+#: src/kernelErrors.ts
 msgid "The selection has nothing visible to transform — everything in it is hidden or empty. Unhide its contents, or select something visible."
 msgstr "The selection has nothing visible to transform — everything in it is hidden or empty. Unhide its contents, or select something visible."
 
@@ -8221,6 +8278,10 @@ msgstr "This loop of lines has no face to push or pull. Draw over one of its lin
 #: src/panels/ImportingOverlay.tsx
 msgid "This may take a moment for large files."
 msgstr "This may take a moment for large files."
+
+#: src/kernelErrors.ts
+msgid "This model has more placed parts than Hew can list at once."
+msgstr "This model has more placed parts than Hew can list at once."
 
 #: src/App.tsx
 msgid "This model is too large for Hew to open"
@@ -8916,6 +8977,10 @@ msgstr "What did you expect instead?"
 #: src/panels/ReportBugDialog.tsx
 msgid "What happened?"
 msgstr "What happened?"
+
+#: src/kernelErrors.ts
+msgid "What is isolated could not be shared with a connected program. If this keeps happening, use Report Bug."
+msgstr "What is isolated could not be shared with a connected program. If this keeps happening, use Report Bug."
 
 #: src/panels/ReportBugDialog.tsx
 msgid "What’s included"

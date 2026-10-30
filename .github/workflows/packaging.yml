@@ -49,6 +49,7 @@ env:
 
 jobs:
   render:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -61,6 +62,7 @@ jobs:
           path: packaging/
 
   pacman:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     # x86_64 only — mainline Arch has no aarch64 port (Docker Hub's official
     # `archlinux` image is amd64-only for the same reason); see the
     # PKGBUILD comment.
@@ -92,6 +94,7 @@ jobs:
           path: pacman-out/
 
   flatpak:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     needs: render
     runs-on: ubuntu-latest
     steps:
@@ -125,6 +128,7 @@ jobs:
           path: flatpak-out/
 
   gentoo-validate:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     needs: render
     runs-on: ubuntu-latest
     container: gentoo/stage3:latest
@@ -138,6 +142,7 @@ jobs:
           packaging/scripts/validate-gentoo-ebuild.sh
 
   publish-pages:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     needs: [pacman, flatpak]
     runs-on: ubuntu-latest
     steps:
@@ -183,6 +188,7 @@ jobs:
         run: gh release upload "$TAG" layout/flatpak/hew.flatpak --repo hew3d/hew --clobber
 
   gentoo-publish:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     needs: [render, gentoo-validate]
     runs-on: ubuntu-latest
     steps:
@@ -205,6 +211,7 @@ jobs:
           git push
 
   homebrew-validate:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     # Installs the rendered cask for real on a macOS runner — download,
     # checksum, the app, and the hew-cli link — then zaps it under a scratch
     # HOME, so a wrong digest, a moved sidecar, or an over-broad zap list
@@ -225,6 +232,7 @@ jobs:
           packaging/scripts/validate-homebrew-cask.sh "${TAG#v}"
 
   homebrew-publish:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     needs: [render, homebrew-validate]
     runs-on: ubuntu-latest
     steps:

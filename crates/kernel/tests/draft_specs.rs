@@ -1503,6 +1503,64 @@ fn paint_survives_a_line_drawn_across_the_painted_imprint() {
     assert_eq!(painted, 2, "the faces outside the imprint stay unpainted");
 }
 
+/// A seam between two faces carrying different attribute dictionaries is
+/// the solid's content, like a paint boundary: the draft lifts it as the
+/// solid's own edge, so erasing it refuses rather than merging the faces
+/// and dropping one dictionary, and the face it lies on offers no drawing
+/// plane for it. With equal dictionaries the same seam is ordinary drawing
+/// again.
+#[test]
+fn a_seam_between_different_dictionaries_is_not_drawing() {
+    for (left_value, right_value, drawing) in [(1, 2, false), (1, 1, true)] {
+        let (mut doc, o) = boxdoc();
+        draft_top(&mut doc, o, "Line", |w| {
+            w.add_segment(z3(4., 0.), z3(4., 6.)).map(|_| ())
+        });
+        assert_eq!(tops(&doc, o), 2);
+        for f in top_face_ids(&doc, o) {
+            let left = doc
+                .object(o)
+                .unwrap()
+                .loop_positions(doc.object(o).unwrap().faces()[f].outer_loop)
+                .all(|q| q.x <= 4.0 + 1e-9);
+            let v = if left { left_value } else { right_value };
+            doc.face_attr_set(o, f, "com.example.t", "k", kernel::AttrValue::Int(v))
+                .unwrap();
+        }
+        let planes = doc.object_drawing_planes(o);
+        assert_eq!(
+            planes.iter().any(|q| (q.point().z - 3.0).abs() < 1e-9),
+            drawing,
+            "the top offers a drawing plane only for a drawn seam"
+        );
+        // Erasing the seam: drawing goes, and the faces merge; a
+        // dictionary boundary is the solid's own edge and refuses, the
+        // document untouched.
+        let before = doc.save();
+        doc.begin_draft(top(), None, &[o], "Erase").unwrap();
+        {
+            let w = doc.draft_sketch_mut().unwrap();
+            let e = w
+                .edge_at_positions(z3(4., 0.), z3(4., 6.))
+                .expect("the seam is in the working sketch");
+            w.remove_edge(e).unwrap();
+        }
+        let erased = doc.end_draft();
+        assert_eq!(
+            erased.is_ok(),
+            drawing,
+            "values {left_value} and {right_value}: {erased:?}"
+        );
+        if drawing {
+            assert_eq!(tops(&doc, o), 1, "the halves merged");
+        } else {
+            doc.cancel_draft();
+            assert_eq!(doc.save(), before, "a refused erase changes nothing");
+            assert_eq!(tops(&doc, o), 2);
+        }
+    }
+}
+
 // ============================================================= refusals
 
 /// A draft that removes a solid's own edge is refused with the document
@@ -1885,6 +1943,7 @@ fn coincident_objects_keep_their_own_imprints() {
             ],
             restore: None,
             curves: Vec::new(),
+            edge_attrs: Vec::new(),
         },
     )
     .unwrap();

@@ -117,11 +117,14 @@ pub(crate) fn dispatch_local(method: &str, params: &Value) -> Response {
     let mut doc = kernel::Document::new();
     let mut host = CliHost::new();
     let mut face_tokens = FaceTokens::new();
+    // hew-cli is a first-party client: the embedded dispatcher's grant.
+    let grant = api::Grant::core();
     let mut ctx = Ctx {
         doc: &mut doc,
         host: &mut host,
         face_tokens: &mut face_tokens,
         current_label: None,
+        grant: &grant,
     };
     let id = Some(RequestId::Text("live-library".to_string()));
     match handler(&mut ctx, &inner_params) {

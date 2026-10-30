@@ -45,6 +45,8 @@ struct RawLineDrawingParams {
     scale: Option<f64>,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    selection: Option<Vec<Value>>,
 }
 
 fn line_drawing(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -54,6 +56,12 @@ fn line_drawing(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             "scene is mutually exclusive with camera and view".to_string(),
         ));
     }
+    if raw.selection.is_some() && raw.scene.is_some() {
+        return Err(CmdError::Params(
+            "selection is mutually exclusive with scene".to_string(),
+        ));
+    }
+    super::doc::validate_selection(&raw.selection)?;
     let (camera, view) = parse_camera_or_view(raw.camera, raw.view)?;
     let scene = raw
         .scene
@@ -89,6 +97,11 @@ fn line_drawing(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         format,
         scale,
         path: raw.path,
+        selection: raw
+            .selection
+            .as_deref()
+            .map(|list| crate::locate::resolve_render_roots(ctx, list))
+            .transpose()?,
     };
     let result = ctx
         .host

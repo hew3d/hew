@@ -17,6 +17,29 @@
  *   Rust -> JS  'hew://api-connection-close' { connId }
  *   Rust -> JS  'hew://api-frame'            { connId, frame }
  *   JS -> Rust  'hew://api-reply'            { connId, frame }
+ *   JS -> Rust  'hew://api-queued'           { connId }
+ *   JS -> Rust  'hew://api-started'          { connId }
+ *   Rust -> JS  'hew://api-abort'            { connId }
+ *   JS -> Rust  'hew://api-event'            { connId, frame }
+ *   Rust -> JS  'hew://document-id'          { id }
+ *
+ * While a plugin command holds the document (`Scene.busy()`, a compound
+ * is open; docs/agents/PLUGINS.md "Compounds"), a frame is queued instead
+ * of dispatched (`api-queued`), and dispatched in arrival order once the
+ * document is free again, each announced by `api-started` so the shell
+ * restarts its reply clock then. Every plugin command that finishes while
+ * frames wait restarts their clocks too (`api-started` again), so a client
+ * behind a chain of commands is timed out only by one command that runs
+ * longer than the clock, never by the length of the queue. `api-abort` is the shell's own timeout
+ * giving up on a connection: the compound opened for its forward, if any,
+ * is aborted, so a closed socket never leaves the document held.
+ *
+ * Events (docs/agents/HEW_API.md §4.5): after every dispatch, forward
+ * completion, and abort the bridge pumps `Scene.drain_events`
+ * (`eventPump.ts`); each frame owed to a socket connection goes back as
+ * `api-event`, which the shell writes on that connection between replies.
+ * `document-id` tells this window the id the shell gave its document, which
+ * every event names.
  *
  * `connId` is the SHELL's id for one accepted socket connection — this
  * module keeps its own map to whatever id `Scene.api_connection_open()`
@@ -39,7 +62,12 @@
 import { isTauri } from '../io/fileHost'
 import type { Scene } from '../wasm/loader'
 import type { StandardView, ViewportApi } from '../viewport/Viewport'
+import type { NodeRef, SelectMode } from '../panels/treeModel'
+import type { IsolationTarget } from '../viewport/isolation'
 import { getLengthUnit, setLengthUnit, type LengthFormat } from '../settings/units'
+import { parseDispatch } from './dispatchResult'
+import { getBusy, setBusy, subscribeBusy } from './busyState'
+import { pumpEvents, registerBroadcastSink, registerEventSink, setPumpDocumentId } from './eventPump'
 
 /** What a webview-side live operation answers (`hew://api-op-reply`'s body
  * beside its `opId`). `refusal` names a typed API refusal the shell turns
@@ -108,6 +136,31 @@ export interface LiveBridgeDeps {
    * own "Add to palette" stamps. Optional; App.tsx wires it.
    */
   markLibraryMaterialsDirty?: () => void
+  /**
+   * Re-reads the hidden state the app mirrors from the document (hidden
+   * nodes, the tag registry) and pushes it to the renderer — what a load
+   * does. Run after a plugin command is aborted: the abort restores the
+   * whole document, view state included, so the mirrors are stale.
+   * Optional; App.tsx wires it to `reseedHiddenStateFromScene`.
+   */
+  reseedViewState?: () => void
+  /**
+   * The app's own selection handlers, which a bus `hew.selection.set` or
+   * `clear` drives (`ViewDirective::Selection`): nodes and sketches through
+   * `handleSelectMany(nodes, 'replace')`, one guide, one annotation, or
+   * nothing. Optional (a host without a selection omits them; the directive
+   * is then a no-op). App.tsx wires them to its handlers.
+   */
+  selectMany?: (nodes: NodeRef[], mode: SelectMode) => void
+  selectGuide?: (id: bigint) => void
+  selectAnnotation?: (id: bigint) => void
+  selectNone?: () => void
+  /**
+   * Isolates through the app's own handler (`isolate` directives): the
+   * viewport's isolation, owned by the bus rather than a panel. Optional;
+   * without it the bridge calls `ViewportApi.isolate` directly.
+   */
+  isolate?: (targets: IsolationTarget[], opts: { frame: boolean }) => void
 }
 
 /** Whether a successful reply added a Library material item to the
@@ -138,6 +191,33 @@ export function addedLibraryMaterials(reply: string): boolean {
  * viewport, with no error anywhere. */
 function methodMutates(scene: Scene, method: string): boolean {
   return scene.api_method_mutates(method)
+}
+
+/** `crates/api/src/envelope.rs`'s `codes::INTERNAL_FAULT`. */
+const INTERNAL_FAULT_CODE = -32003
+
+/** Completes a forward with the `unavailable` reply and returns the final
+ * frame. `Scene.api_complete_forward` refuses only a token it never handed
+ * out, which this bridge cannot produce; should it ever, the client still
+ * gets an answer instead of waiting out the shell's reply timeout. */
+export function completeForward(
+  scene: Scene,
+  wasmId: number,
+  token: number,
+  requestId: number | string,
+  failed: 'unavailable' | 'cancelled' | 'timeout' = 'unavailable',
+): string {
+  try {
+    return scene.api_complete_forward(wasmId, BigInt(token), JSON.stringify({ failed }))
+  } catch (err) {
+    console.error('Scene.api_complete_forward refused a forward this bridge was handed', err)
+    return JSON.stringify({
+      jsonrpc: '2.0',
+      id: requestId,
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- JSON-RPC error text for the developer API, which stays English
+      error: { code: INTERNAL_FAULT_CODE, message: 'the forward could not be completed' },
+    })
+  }
 }
 
 /** `crates/api/src/envelope.rs`'s `codes::NOT_READY` — mirrored here (this
@@ -174,6 +254,15 @@ function notReadyReply(frame: string): string | undefined {
   })
 }
 
+/** Whether a reply frame is a success (no `error`); malformed reads as no. */
+function replySucceeded(reply: string): boolean {
+  try {
+    return (JSON.parse(reply) as { error?: unknown }).error === undefined
+  } catch {
+    return false
+  }
+}
+
 /**
  * Whether a dispatched `frame`/`reply` pair warrants a viewport refresh:
  * the method wasn't one of the read-only ones above, AND the reply
@@ -191,16 +280,27 @@ export function shouldRefreshAfterDispatch(scene: Scene, frame: string, reply: s
     return false
   }
   if (typeof method !== 'string' || !methodMutates(scene, method)) return false
-  try {
-    return (JSON.parse(reply) as { error?: unknown }).error === undefined
-  } catch {
-    return false
-  }
+  return replySucceeded(reply)
 }
+
+/** A selection entry as a `selection` directive carries it: the kernel
+ * handle as a decimal string (`crates/wasm-api/src/live.rs`'s
+ * `UiSelectionEntry`). */
+type DirectiveSelectionEntry = {
+  kind: 'object' | 'group' | 'instance' | 'sketch' | 'guide' | 'annotation'
+  id: string
+}
+
+/** An isolation target as an `isolate` directive carries it
+ * (`UiIsolationEntry`). */
+type DirectiveIsolationEntry =
+  | { kind: 'object' | 'group' | 'instance'; id: string }
+  | { kind: 'member'; object: string; instance: string }
 
 /**
  * The wire shape of `crates/wasm-api/src/live.rs`'s `ViewDirective`,
- * JSON-encoded by `Scene::take_pending_view_directive` — one WASM-internal
+ * JSON-encoded by `Scene::take_pending_view_directives` (an array, in the
+ * order the dispatch's commands ran) — one WASM-internal
  * side channel local to this process (never the JSON-RPC reply itself; see
  * that Rust type's doc comment for why) through which `hew.view.camera`/
  * `zoom_extents`/`units` hand their effect to this bridge, since none of
@@ -226,6 +326,11 @@ type ViewDirective =
   | { kind: 'zoom_extents' }
   | { kind: 'units'; format: LengthFormat }
   | { kind: 'activate_scene'; sid: number }
+  | { kind: 'selection'; entries: DirectiveSelectionEntry[]; mode: 'replace' }
+  | { kind: 'hidden_changed' }
+  | { kind: 'isolate'; entries: DirectiveIsolationEntry[]; frame: boolean }
+  | { kind: 'clear_isolation' }
+  | { kind: 'zoom_to'; min: [number, number, number]; max: [number, number, number]; padding: number }
 
 /** `hew.view.camera`'s own defaults for an explicit camera's optional
  * fields (docs/agents/HEW_API.md §7, `crates/api/src/host.rs`'s `SnapshotCamera`
@@ -237,30 +342,76 @@ const DEFAULT_CAMERA_UP: [number, number, number] = [0, 0, 1]
 const DEFAULT_CAMERA_PROJECTION = 'perspective' as const
 const DEFAULT_CAMERA_FOV_DEG = 35
 
+/** What applying a directive reaches: the viewport and the app's own
+ * handlers (a subset of `LiveBridgeDeps`). */
+export type DirectiveTargets = Pick<
+  LiveBridgeDeps,
+  | 'activateScene'
+  | 'reseedViewState'
+  | 'reconcileVisibility'
+  | 'selectMany'
+  | 'selectGuide'
+  | 'selectAnnotation'
+  | 'selectNone'
+  | 'isolate'
+> & { viewportApi: ViewportApi | null }
+
+/** A `selection` directive's merged entries, applied wholesale through the
+ * app's handlers: nodes and sketches replace the selection, a lone guide or
+ * annotation selects it, and nothing clears it. */
+function applySelection(entries: DirectiveSelectionEntry[], targets: DirectiveTargets): void {
+  if (entries.length === 0) {
+    targets.selectNone?.()
+    return
+  }
+  const [first] = entries
+  if (entries.length === 1 && first.kind === 'guide') {
+    targets.selectGuide?.(BigInt(first.id))
+    return
+  }
+  if (entries.length === 1 && first.kind === 'annotation') {
+    targets.selectAnnotation?.(BigInt(first.id))
+    return
+  }
+  const nodes: NodeRef[] = []
+  for (const e of entries) {
+    // The kernel never merges a guide or annotation with nodes; skip one
+    // defensively rather than hand the node handler a kind it cannot hold.
+    if (e.kind === 'guide' || e.kind === 'annotation') continue
+    nodes.push({ kind: e.kind, id: BigInt(e.id) })
+  }
+  targets.selectMany?.(nodes, 'replace')
+}
+
+function isolationTargets(entries: DirectiveIsolationEntry[]): IsolationTarget[] {
+  return entries.map((e) =>
+    e.kind === 'member'
+      ? { kind: 'member' as const, object: BigInt(e.object), instance: BigInt(e.instance) }
+      : { kind: e.kind, id: BigInt(e.id) },
+  )
+}
+
 /**
- * Applies one `ViewDirective` — the live-viewport/app-settings half of
- * `hew.view.camera`/`zoom_extents`/`units` that `LiveHost` (Rust) cannot
- * perform itself. Routes through the SAME calls the app's own UI already
- * makes: `ViewportApi.setCamera`/`setStandardView`/`zoomExtents` (Camera
- * menu, toolbar, View menu) and `app/src/settings/units.ts`'s
- * `setLengthUnit` (Settings window) — never a second camera or
- * units-writing path.
+ * Applies one `ViewDirective` — the live-viewport/app half of a view
+ * command that `LiveHost` (Rust) cannot perform itself. Routes through the
+ * SAME calls the app's own UI already makes: `ViewportApi.setCamera`/
+ * `setStandardView`/`zoomExtents`/`isolate`/`clearIsolation`/
+ * `zoomToWorldBounds` (Camera menu, toolbar, View menu, Model Health),
+ * `app/src/settings/units.ts`'s `setLengthUnit` (Settings window), the
+ * app's selection handlers, and its hidden-state re-read — never a second
+ * camera, units, selection, or visibility path.
  *
- * A `camera`/`zoom_extents` directive with no mounted `Viewport` (no
- * window has rendered one yet, an extremely narrow startup race in
- * practice — the desktop app's main window always mounts one) is a
- * silent no-op: `hew.view.camera` already succeeded on the Rust side
- * (there is no document mutation to roll back), and there is no sensible
- * fallback for "aim a viewport that does not exist" the way
- * `refreshAfterMutation` has one (`deps.reconcile()`) for a stale
- * document. `units`, unlike the other two, never touches the viewport at
- * all, so it is unaffected by this case.
+ * A viewport directive with no mounted `Viewport` (no window has rendered
+ * one yet, an extremely narrow startup race in practice — the desktop
+ * app's main window always mounts one) is a silent no-op: the command
+ * already succeeded on the Rust side (there is no document mutation to
+ * roll back), and there is no sensible fallback for "aim a viewport that
+ * does not exist" the way `refreshAfterMutation` has one
+ * (`deps.reconcile()`) for a stale document. `units` and the selection,
+ * unlike the others, never touch the viewport at all.
  */
-function applyViewDirective(
-  directive: ViewDirective,
-  viewportApi: ViewportApi | null,
-  activateScene: ((sid: number) => void) | undefined,
-): void {
+function applyViewDirective(directive: ViewDirective, targets: DirectiveTargets): void {
+  const viewportApi = targets.viewportApi
   switch (directive.kind) {
     case 'camera':
       if (viewportApi === null) return
@@ -301,37 +452,134 @@ function applyViewDirective(
       return
     case 'activate_scene':
       // Optional — see `LiveBridgeDeps.activateScene`'s doc.
-      activateScene?.(directive.sid)
+      targets.activateScene?.(directive.sid)
+      return
+    case 'selection':
+      applySelection(directive.entries, targets)
+      return
+    case 'hidden_changed':
+      // The kernel's user-hidden flags moved: re-read them into the app's
+      // hidden set first, then reconcile tags against that fresh set.
+      targets.reseedViewState?.()
+      targets.reconcileVisibility?.()
+      return
+    case 'isolate':
+      // An aborted plugin command putting an isolation back does not reframe.
+      if (targets.isolate !== undefined) {
+        targets.isolate(isolationTargets(directive.entries), { frame: directive.frame !== false })
+      } else {
+        viewportApi?.isolate(isolationTargets(directive.entries), { frame: directive.frame !== false })
+      }
+      return
+    case 'clear_isolation':
+      viewportApi?.clearIsolation()
+      return
+    case 'zoom_to':
+      viewportApi?.zoomToWorldBounds(directive.min, directive.max)
       return
   }
 }
 
-/** Whether a pending view directive (`take_pending_view_directive`'s JSON)
- *  is a `hew.scenes.apply` activation. Malformed JSON answers false. */
-function isSceneActivation(directiveJson: string | undefined): boolean {
-  if (directiveJson === undefined) return false
+/** Parses `take_pending_view_directives`'s JSON array. Malformed input
+ * (never expected — the Rust side is the only producer) reads as none. */
+export function parseViewDirectives(directivesJson: string): ViewDirective[] {
   try {
-    return (JSON.parse(directiveJson) as ViewDirective).kind === 'activate_scene'
+    const parsed = JSON.parse(directivesJson) as unknown
+    return Array.isArray(parsed) ? (parsed as ViewDirective[]) : []
   } catch {
-    return false
+    return []
   }
 }
 
-/** Parses and applies `directiveJson` (from `Scene.take_pending_view_directive`),
- * tolerating malformed input defensively (should never happen — the Rust
- * side is the only producer) by no-op rather than throwing into the Tauri
- * event handler. Exported for direct unit testing alongside
- * `shouldRefreshAfterDispatch`. */
-export function applyPendingViewDirective(
-  directiveJson: string,
-  viewportApi: ViewportApi | null,
-  activateScene?: (sid: number) => void,
-): void {
-  try {
-    applyViewDirective(JSON.parse(directiveJson) as ViewDirective, viewportApi, activateScene)
-  } catch {
-    /* malformed directive JSON should never happen — defensive no-op */
+/** Whether a dispatch's directives include a `hew.scenes.apply` activation. */
+function hasSceneActivation(directives: ViewDirective[]): boolean {
+  return directives.some((d) => d.kind === 'activate_scene')
+}
+
+/** Applies every directive in `directivesJson` (from
+ * `Scene.take_pending_view_directives`) in order, tolerating malformed
+ * input defensively by no-op rather than throwing into the Tauri event
+ * handler; one directive's failure does not stop the rest. Exported for
+ * direct unit testing alongside `shouldRefreshAfterDispatch`. */
+export function applyPendingViewDirectives(directivesJson: string, targets: DirectiveTargets): void {
+  for (const directive of parseViewDirectives(directivesJson)) {
+    try {
+      applyViewDirective(directive, targets)
+    } catch (err) {
+      console.error('a live view directive failed to apply', directive.kind, err)
+    }
   }
+}
+
+/** The directive targets `deps` reaches. */
+export function directiveTargets(deps: LiveBridgeDeps): DirectiveTargets {
+  return {
+    viewportApi: deps.getViewportApi(),
+    activateScene: deps.activateScene,
+    reseedViewState: deps.reseedViewState,
+    reconcileVisibility: deps.reconcileVisibility,
+    selectMany: deps.selectMany,
+    selectGuide: deps.selectGuide,
+    selectAnnotation: deps.selectAnnotation,
+    selectNone: deps.selectNone,
+    isolate: deps.isolate,
+  }
+}
+
+/** Re-renders after a dispatch changed the document: the mounted viewport
+ * refreshes its scene, else the app reconciles without one. */
+function refreshAfterMutation(deps: LiveBridgeDeps): void {
+  const api = deps.getViewportApi()
+  if (api !== null) api.refreshScene()
+  else deps.reconcile()
+}
+
+/**
+ * The tail every answered dispatch runs, after its reply is on its way:
+ * re-render a mutation, mark Library materials dirty, take and apply the
+ * dispatch's view directives in order, and reconcile tag visibility. Shared
+ * by the bridge and the test harness's `apiDispatch`, so both apply a
+ * dispatch exactly the same way. The caller pumps events afterwards.
+ */
+export function afterDispatch(deps: LiveBridgeDeps, scene: Scene, reply: string, mutated: boolean): void {
+  if (mutated) refreshAfterMutation(deps)
+  if (mutated && addedLibraryMaterials(reply)) deps.markLibraryMaterialsDirty?.()
+  // Every directive the dispatch left (`take_pending_view_directives`'s own
+  // doc comment has the full story); `[]` for a refused one.
+  const directivesJson = scene.take_pending_view_directives()
+  // A Scene activation applies the Scene's hidden nodes AND tags itself;
+  // reconciling tags first would push against the pre-activation node
+  // hides, only to be overwritten a moment later.
+  if (mutated && !(deps.activateScene !== undefined && hasSceneActivation(parseViewDirectives(directivesJson)))) {
+    deps.reconcileVisibility?.()
+  }
+  applyPendingViewDirectives(directivesJson, directiveTargets(deps))
+}
+
+/**
+ * Dispatches one frame on `wasmId` and runs the whole answered-dispatch
+ * path, returning the reply frame (`undefined` for a notification). A
+ * plugin command is answered `unavailable` at once, no compound opened:
+ * this is the test harness's synchronous path
+ * (`__hew_test.apiDispatch`), with no queue and no plugin host behind it.
+ */
+export function dispatchFrameNow(
+  deps: LiveBridgeDeps,
+  scene: Scene,
+  wasmId: number,
+  frame: string,
+): string | undefined {
+  scene.set_display_units(getLengthUnit())
+  const result = parseDispatch(scene.api_dispatch(wasmId, frame))
+  if (result.kind === 'none') return undefined
+  const reply =
+    result.kind === 'reply'
+      ? result.frame
+      : completeForward(scene, wasmId, result.token, result.forward.request_id)
+  const mutated = result.kind === 'reply' && shouldRefreshAfterDispatch(scene, frame, reply)
+  afterDispatch(deps, scene, reply, mutated)
+  pumpEvents(scene)
+  return reply
 }
 
 /**
@@ -365,24 +613,88 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
   let unlistenClose: (() => void) | undefined
   let unlistenFrame: (() => void) | undefined
   let unlistenOp: (() => void) | undefined
+  let unlistenAbort: (() => void) | undefined
+  let unlistenDocumentId: (() => void) | undefined
+  // The id the shell gave this window's document (`hew://document-id`),
+  // told to the Scene before each dispatch: it may arrive before the Scene.
+  let hostDocumentId: string | null = null
   let tauriEmit: ((event: string, payload?: unknown) => Promise<void>) | null = null
 
-  const emitReply = (connId: number, frame: string): void => {
-    const payload = { connId, frame }
+  // Frames that arrived while a plugin command held the document, in
+  // arrival order (see the module comment).
+  const queued: Array<{ connId: number; frame: string }> = []
+
+  // The compound this bridge opened around a connection's in-flight
+  // mutating forward, by shell connId: what `hew://api-abort` and Cancel
+  // abort. `done` makes the abort and the forward's completion happen
+  // exactly once whichever comes first.
+  interface InFlight {
+    kernelToken: bigint
+    wasmId: number
+    token: number
+    requestId: number | string
+    done: boolean
+  }
+  const inFlight = new Map<number, InFlight>()
+
+  // The event module, imported once: every emit before it resolves waits on
+  // the same import, so emits reach the shell in the order they were made
+  // (a queued frame's `api-started` before its `api-reply`).
+  let eventModule: Promise<typeof import('@tauri-apps/api/event')> | null = null
+  const emitTo = (event: string, payload: unknown): void => {
     if (tauriEmit !== null) {
-      tauriEmit('hew://api-reply', payload).catch(() => {
+      tauriEmit(event, payload).catch(() => {
         /* the connection is gone — the shell's own reply-timeout covers it */
       })
       return
     }
-    import('@tauri-apps/api/event')
+    eventModule ??= import('@tauri-apps/api/event')
+    eventModule
       .then(({ emit }) => {
         tauriEmit = emit
-        return emit('hew://api-reply', payload)
+        return emit(event, payload)
       })
       .catch(() => {
         /* ignore — not in Tauri, or emission failed */
       })
+  }
+
+  const emitReply = (connId: number, frame: string): void => {
+    emitTo('hew://api-reply', { connId, frame })
+  }
+
+  // A socket connection's events go to the shell, which writes them on the
+  // connection's own writer, between its replies. A wasm connection this
+  // bridge did not open (an in-page plugin's) is someone else's.
+  const unregisterSink = registerEventSink((wasmConnId, frame) => {
+    for (const [connId, wasmId] of wasmConnOf) {
+      if (wasmId === wasmConnId) {
+        emitTo('hew://api-event', { connId, frame })
+        return
+      }
+    }
+  })
+
+  // A document lifecycle frame goes to every socket connection the shell
+  // has subscribed to it, except those this window's own sessions already
+  // sent it: a listener bound to another window hears of this document.
+  const unregisterBroadcast = registerBroadcastSink((frame, delivered) => {
+    const except: number[] = []
+    for (const [connId, wasmId] of wasmConnOf) {
+      if (delivered.has(wasmId)) except.push(connId)
+    }
+    emitTo('hew://api-broadcast', { frame, except })
+  })
+
+  const pump = (scene: Scene): void => {
+    if (hostDocumentId !== null) scene.set_host_document_id(hostDocumentId)
+    pumpEvents(scene)
+  }
+
+  const handleDocumentId = (id: string): void => {
+    hostDocumentId = id
+    setPumpDocumentId(id)
+    deps.getScene()?.set_host_document_id(id)
   }
 
   const handleOp = (opId: number, op: string, args: Record<string, unknown>): void => {
@@ -421,11 +733,103 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
       })
   }
 
-  const refreshAfterMutation = (): void => {
-    const api = deps.getViewportApi()
-    if (api !== null) api.refreshScene()
-    else deps.reconcile()
+  // The tail every aborted compound runs: the document came back whole,
+  // view state included, so the app's mirrors are re-read from it and the
+  // viewport redrawn — a document-wide change.
+  const abortTail = (scene: Scene, kernelToken: bigint): void => {
+    try {
+      scene.compound_abort(kernelToken)
+    } catch (err) {
+      console.error('Scene.compound_abort refused a compound this bridge opened', err)
+    }
+    deps.reseedViewState?.()
+    deps.reconcileVisibility?.()
+    refreshAfterMutation(deps)
+    // The selection and isolation the command's frames changed come back
+    // (the camera does not).
+    applyPendingViewDirectives(scene.take_pending_view_directives(), directiveTargets(deps))
   }
+
+  // Opens the compound for `connId`'s mutating forward and marks the
+  // document busy; false (nothing held) when the scene refuses it.
+  const beginInFlight = (
+    scene: Scene,
+    connId: number,
+    wasmId: number,
+    token: number,
+    forward: { plugin: string; label: string | null; request_id: number | string },
+  ): boolean => {
+    let kernelToken: bigint
+    try {
+      kernelToken = scene.compound_begin(wasmId, BigInt(token))
+    } catch (err) {
+      console.error('Scene.compound_begin refused a forward this bridge was handed', err)
+      return false
+    }
+    inFlight.set(connId, { kernelToken, wasmId, token, requestId: forward.request_id, done: false })
+    setBusy({
+      plugin: forward.plugin,
+      label: forward.label ?? null,
+      startedAt: performance.now(),
+      cancel: () => settleInFlight(connId, 'cancelled'),
+    })
+    return true
+  }
+
+  // Ends `connId`'s in-flight forward without a plugin answer: aborts its
+  // compound, answers the forward with `failed`, and frees the document.
+  // Once, whichever of the placeholder answer, Cancel, and the shell's
+  // timeout comes first.
+  const settleInFlight = (connId: number, failed: 'unavailable' | 'cancelled' | 'timeout'): void => {
+    const held = inFlight.get(connId)
+    const scene = deps.getScene()
+    if (held === undefined || held.done || scene === null) return
+    held.done = true
+    inFlight.delete(connId)
+    abortTail(scene, held.kernelToken)
+    emitReply(connId, completeForward(scene, held.wasmId, held.token, held.requestId, failed))
+    // The abort's `document_changed` follows the reply.
+    pump(scene)
+    // Cleared after the reply is on its way, so what waited behind this
+    // command is dispatched after it, never before.
+    if (!scene.busy()) setBusy(null)
+  }
+
+  // Dispatches what waited behind a plugin command, in arrival order,
+  // while the document stays free.
+  let flushing = false
+  const flushQueue = (): void => {
+    if (flushing) return
+    flushing = true
+    try {
+      drainQueue()
+    } finally {
+      flushing = false
+    }
+  }
+  const drainQueue = (): void => {
+    while (queued.length > 0) {
+      const scene = deps.getScene()
+      if (scene === null) return
+      if (scene.busy()) {
+        // A queued frame started another plugin command: the document made
+        // progress, so what still waits gets a fresh clock.
+        for (const connId of new Set(queued.map((q) => q.connId))) {
+          emitTo('hew://api-started', { connId })
+        }
+        return
+      }
+      const next = queued.shift()
+      if (next === undefined) return
+      emitTo('hew://api-started', { connId: next.connId })
+      handleFrame(next.connId, next.frame, true)
+    }
+  }
+  // Whoever ends a compound (this bridge, the test harness, and later the
+  // plugin host) clears the busy state; that is the moment to drain.
+  const unsubscribeBusy = subscribeBusy(() => {
+    if (getBusy() === null) flushQueue()
+  })
 
   const handleOpen = (connId: number): void => {
     openConnIds.add(connId)
@@ -441,13 +845,17 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
 
   const handleClose = (connId: number): void => {
     openConnIds.delete(connId)
+    // What it left waiting dies with it: its socket can take no reply.
+    for (let i = queued.length - 1; i >= 0; i--) {
+      if (queued[i].connId === connId) queued.splice(i, 1)
+    }
     const wasmId = wasmConnOf.get(connId)
     wasmConnOf.delete(connId)
     if (wasmId === undefined) return
     deps.getScene()?.api_connection_close(wasmId)
   }
 
-  const handleFrame = (connId: number, frame: string): void => {
+  function handleFrame(connId: number, frame: string, fromQueue = false): void {
     if (!openConnIds.has(connId)) return // never accepted by the shell — never dispatched
     const scene = deps.getScene()
     if (scene === null) {
@@ -473,6 +881,15 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
       wasmId = scene.api_connection_open()
       wasmConnOf.set(connId, wasmId)
     }
+    // A plugin command holds the document: wait, in order, behind it (and
+    // behind anything already waiting). The bridge's own frames are never
+    // stamped with a forward, so every one waits.
+    if (scene.busy() || (!fromQueue && queued.length > 0)) {
+      queued.push({ connId, frame })
+      emitTo('hew://api-queued', { connId })
+      if (!scene.busy()) flushQueue()
+      return
+    }
     // A save that hands bytes to a client (the render fallback's way of
     // reading this document) should see the user's current camera.
     try {
@@ -485,27 +902,39 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     // A `.skp` the API exports opens in the app's display units, as File
     // > Export writes it, so the dispatch sees the current preference.
     scene.set_display_units(getLengthUnit())
-    const reply = scene.api_dispatch(wasmId, frame)
-    if (reply === undefined) return // a notification: no reply, per §4.1
+    if (hostDocumentId !== null) scene.set_host_document_id(hostDocumentId)
+    const result = parseDispatch(scene.api_dispatch(wasmId, frame))
+    if (result.kind === 'none') return // a notification: no reply, per §4.1
+    let reply: string
+    if (result.kind === 'reply') {
+      reply = result.frame
+    } else if (result.forward.mutating && beginInFlight(scene, connId, wasmId, result.token, result.forward)) {
+      // A mutating plugin command runs inside a compound: one undo entry,
+      // nothing else lands meanwhile, and an abort puts the document back.
+      // No plugin host runs yet, so the forward is answered `unavailable`
+      // (and the compound aborted) as soon as this frame's task is done;
+      // the plugin realm routes it to the plugin's background instead once
+      // that lands. Until then it is in flight: frames queue behind it,
+      // and Cancel or the shell's timeout can end it.
+      queueMicrotask(() => settleInFlight(connId, 'unavailable'))
+      return
+    } else {
+      reply = completeForward(scene, wasmId, result.token, result.forward.request_id)
+    }
     emitReply(connId, reply)
-    const mutated = shouldRefreshAfterDispatch(scene, frame, reply)
-    if (mutated) refreshAfterMutation()
-    if (mutated && addedLibraryMaterials(reply)) deps.markLibraryMaterialsDirty?.()
-    // `hew.view.camera`/`zoom_extents`/`units`: a non-mutating host effect
-    // `Scene::api_dispatch` left for this bridge to actually perform
-    // (`take_pending_view_directive`'s own doc comment has the full
-    // story). `undefined` for every other dispatch, including a refused
-    // view command.
-    const directiveJson = scene.take_pending_view_directive()
-    // A Scene activation applies the Scene's hidden nodes AND tags itself;
-    // reconciling tags first would push against the pre-activation node
-    // hides, only to be overwritten a moment later.
-    if (mutated && !(deps.activateScene !== undefined && isSceneActivation(directiveJson))) {
-      deps.reconcileVisibility?.()
-    }
-    if (directiveJson !== undefined) {
-      applyPendingViewDirective(directiveJson, deps.getViewportApi(), deps.activateScene)
-    }
+    // A forward is judged by the plugin command itself, not the envelope
+    // that carried it: a read-only plugin command inside a sole-command
+    // transaction changed nothing.
+    const mutated =
+      result.kind === 'pending'
+        ? result.forward.mutating && replySucceeded(reply)
+        : shouldRefreshAfterDispatch(scene, frame, reply)
+    // Re-render, then the view effects the dispatch left (camera, units, a
+    // Scene activation, the selection, hide and show, isolation, framing),
+    // in the order its commands ran.
+    afterDispatch(deps, scene, reply, mutated)
+    // What the dispatch changed reaches subscribers after its reply.
+    pump(scene)
   }
 
   import('@tauri-apps/api/webviewWindow')
@@ -527,20 +956,32 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
             handleOp(event.payload.opId, event.payload.op, event.payload.args ?? {})
           },
         ),
+        // The shell's reply clock ran out for this connection: abort the
+        // compound held for its forward, if any.
+        win.listen<{ connId: number }>('hew://api-abort', (event) => {
+          settleInFlight(event.payload.connId, 'timeout')
+        }),
+        win.listen<{ id: string }>('hew://document-id', (event) => {
+          handleDocumentId(event.payload.id)
+        }),
       ])
     })
-    .then(([openFn, closeFn, frameFn, opFn]) => {
+    .then(([openFn, closeFn, frameFn, opFn, abortFn, documentIdFn]) => {
       if (cancelled) {
         openFn()
         closeFn()
         frameFn()
         opFn()
+        abortFn()
+        documentIdFn()
         return
       }
       unlistenOpen = openFn
       unlistenClose = closeFn
       unlistenFrame = frameFn
       unlistenOp = opFn
+      unlistenAbort = abortFn
+      unlistenDocumentId = documentIdFn
     })
     .catch(() => {
       /* not in Tauri (shouldn't happen — gated by isTauri above), or registration failed */
@@ -548,9 +989,14 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
 
   return () => {
     cancelled = true
+    unsubscribeBusy()
+    unregisterSink()
+    unregisterBroadcast()
     unlistenOpen?.()
     unlistenClose?.()
     unlistenFrame?.()
     unlistenOp?.()
+    unlistenAbort?.()
+    unlistenDocumentId?.()
   }
 }

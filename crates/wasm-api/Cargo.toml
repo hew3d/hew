@@ -14,6 +14,9 @@ crate-type = ["cdylib", "rlib"]
 # kernel-class-pure (kernel, slotmap, serde only — DEVELOPMENT.md rule 1),
 # so this is a safe addition at the WASM boundary where it belongs (§3).
 api.workspace = true
+# Plugin command declarations the app registers on the shared registry
+# (docs/agents/PLUGINS.md "Commands"); pure, already in `api`'s tree.
+plugin-manifest.workspace = true
 kernel.workspace = true
 inference.workspace = true
 tessellate.workspace = true
@@ -22,6 +25,9 @@ softrender.workspace = true
 # Hidden-line removal for vector Line-art prints and SVG export
 # (docs/design/printing.md §7b) — pure geometry, same posture as softrender.
 hlr.workspace = true
+# The renderers behind hew.view.snapshot / hew.view.line_drawing, shared with
+# hew-cli (pure over &Document; no new third-party dependency).
+headless-render.workspace = true
 # Hew-native PDF for Save PDF… (docs/design/printing.md §9b).
 pdfwrite.workspace = true
 dae-import.workspace = true

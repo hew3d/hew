@@ -113,6 +113,13 @@ export interface Snap {
 export interface SnapConstraint {
   anchor?: [number, number, number]
   lockAxis?: 0 | 1 | 2
+  /**
+   * Lock the snap to a line through `anchor` along this direction (the
+   * kernel normalizes it). When both `lockAxis` and `lockDirection` are set,
+   * `lockDirection` wins. No first-party tool sets it yet; plugin tools are
+   * its consumers.
+   */
+  lockDirection?: [number, number, number]
   constraintPlane?: { point: [number, number, number]; normal: [number, number, number] }
   offPlanePoints?: boolean
   /**

@@ -147,6 +147,7 @@ fn recess_circle(
                 loop_path: circle_points(center.x, center.y, r, n, center.z),
                 restore: None,
                 curves: vec![Some(CurveGeom { center, radius: r }); n],
+                edge_attrs: Vec::new(),
             },
         )
         .expect("inner rim imprints");

@@ -154,6 +154,7 @@ fn component_subface_push_through_cuts_every_instance_and_replays() {
                 ],
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .expect("imprint member")

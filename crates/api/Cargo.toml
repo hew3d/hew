@@ -9,11 +9,20 @@ license.workspace = true
 # Transports live in hosts; this crate owns everything contractual.
 [dependencies]
 kernel.workspace = true
+# `hew.query.mesh` reads an object's render buffers (docs/agents/HEW_API.md
+# §7). Kernel-class pure, like `kernel` itself.
+tessellate.workspace = true
 # Slotmap key bits back the compound public ids of sketch sub-entities
 # (docs/agents/HEW_API.md §5.1) — the same crate the kernel's own ids use.
 slotmap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Grants read permission names from plugin manifests
+# (docs/agents/PLUGINS.md "Permissions"). Pure, like this crate; it brings
+# `semver` into the tree.
+plugin-manifest.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# `hew.doc.export`'s `selection` tests export through the real writers.
+mesh-export.workspace = true

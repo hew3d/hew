@@ -382,6 +382,22 @@ enum DocOp {
         axis: (f64, f64, f64),
         angle: f64,
     },
+    /// Re-express the `comp_sel`-th component in a rotated, moved frame
+    /// (`rebase_definition`): world geometry stays put, every placement is
+    /// compensated. A rotated identity basis is always valid, so only an
+    /// open session or a stale definition refuses.
+    RebaseDefinition {
+        comp_sel: usize,
+        origin: (f64, f64, f64),
+        axis: (f64, f64, f64),
+        angle: f64,
+    },
+    /// Mirror the `inst_sel`-th instance across its local axis `axis % 3`
+    /// (`flip_instance`).
+    FlipInstance {
+        inst_sel: usize,
+        axis: u8,
+    },
     /// Add a linear dimension anchored on two of the `obj_sel`-th visible
     /// object's own vertices (exercises re-anchoring: later transforms/
     /// deletes on `obj_sel` touch this annotation).
@@ -455,6 +471,19 @@ enum DocOp {
         obj_sel: usize,
         face_sel: usize,
         frame_sel: usize,
+    },
+    /// A face or edge attribute dictionary write (docs/agents/HEW_API.md
+    /// §8): on the `elem_sel`-th face (`edge: false`) or edge of the
+    /// `obj_sel`-th visible object, `op_sel` picks a key write (small int,
+    /// or a nested value), a key delete, or a whole-namespace delete
+    /// (the deletes refuse typed when there is nothing to delete). Later
+    /// structural ops carry the dictionaries by the per-site rules, and
+    /// every committed state must reopen with them.
+    ElementAttr {
+        obj_sel: usize,
+        elem_sel: usize,
+        edge: bool,
+        op_sel: usize,
     },
     /// `set_material_name` on the `mat_sel`-th seeded material (same
     /// `mat_sel` convention; the sentinel slot is a no-op). A deleted
@@ -577,6 +606,19 @@ enum DocOp {
     },
     Undo,
     Redo,
+    /// Open a compound (a held bracket around a forwarded plugin command).
+    BeginCompound,
+    /// End the innermost open compound, if any.
+    EndCompound,
+    /// Abort the innermost open compound, if any.
+    AbortCompound,
+    /// A one-attribute transaction committed with coalesce key `key % 3`
+    /// (2 is no key), under origin `origin % 2`.
+    CoalescedAttr {
+        key: u8,
+        origin: u8,
+        value: i64,
+    },
 }
 
 fn arb_offset() -> impl Strategy<Value = (f64, f64, f64)> {
@@ -665,6 +707,7 @@ fn two_imprints(
                 loop_path: vec![at(x0, 0.25), at(x1, 0.25), at(x1, 0.75), at(x0, 0.75)],
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         );
         assert!(
@@ -869,6 +912,10 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
             DocOp::PlaceText { x, y, depth: depth.abs() }
         }),
         1 => (0.2..5.0f64).prop_map(|factor| DocOp::Rescale { factor }),
+        1 => (any::<usize>(), arb_offset(), arb_axis(), 0.0..std::f64::consts::TAU).prop_map(
+            |(comp_sel, origin, axis, angle)| DocOp::RebaseDefinition { comp_sel, origin, axis, angle }
+        ),
+        1 => (any::<usize>(), 0u8..3).prop_map(|(inst_sel, axis)| DocOp::FlipInstance { inst_sel, axis }),
         1 => (arb_offset(), arb_offset(), 0.0..std::f64::consts::TAU).prop_map(
             |(origin, axis, angle)| DocOp::SetAxes { origin, axis, angle }
         ),
@@ -899,6 +946,9 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         1 => (any::<usize>(), any::<usize>(), any::<usize>()).prop_map(
             |(obj_sel, face_sel, frame_sel)| DocOp::SetFaceUvFrame { obj_sel, face_sel, frame_sel }
         ),
+        2 => (any::<usize>(), any::<usize>(), proptest::bool::ANY, any::<usize>()).prop_map(
+            |(obj_sel, elem_sel, edge, op_sel)| DocOp::ElementAttr { obj_sel, elem_sel, edge, op_sel }
+        ),
         1 => (any::<usize>(), "[A-Za-z]{1,8}").prop_map(|(mat_sel, name)| {
             DocOp::RenameMaterial { mat_sel, name }
         }),
@@ -911,7 +961,95 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         14 => arb_sketch_edit(),
         2 => Just(DocOp::Undo),
         1 => Just(DocOp::Redo),
+        1 => Just(DocOp::BeginCompound),
+        1 => Just(DocOp::EndCompound),
+        1 => Just(DocOp::AbortCompound),
+        2 => (0..3u8, 0..2u8, -50..50i64)
+            .prop_map(|(key, origin, value)| DocOp::CoalescedAttr { key, origin, value }),
     ]
+}
+
+/// The compound and coalescing ops, applied in `run_doc_case` (they need
+/// the stack of open compounds). `Ok(true)` when `op` was one of them.
+fn apply_compound_op(
+    doc: &mut Document,
+    step: usize,
+    op: &DocOp,
+    open: &mut Vec<(kernel::CompoundToken, usize, bool)>,
+) -> Result<bool, TestCaseError> {
+    let meta = |label: &str, origin: u8, coalesce: Option<String>| kernel::CompoundMeta {
+        label: label.to_string(),
+        origin: kernel::HistoryOrigin::Connection(format!("plugin:fuzz.p{origin}")),
+        coalesce,
+    };
+    match op {
+        DocOp::BeginCompound => {
+            let depth = doc.undo_depth();
+            open.push((doc.begin_compound(meta("compound", 0, None)), depth, false));
+        }
+        DocOp::EndCompound => {
+            if let Some((token, depth, wrote)) = open.pop() {
+                match doc.end_compound(token) {
+                    // Everything the compound held is one entry on top of
+                    // the history it began on: nothing leaked below it
+                    // (a coalesced commit, say).
+                    Ok(outcome) => {
+                        prop_assert_eq!(
+                            doc.undo_depth(),
+                            depth + usize::from(outcome.committed),
+                            "step {}: a compound's work is one entry above its start",
+                            step
+                        );
+                        prop_assert!(
+                            !wrote || outcome.committed,
+                            "step {}: a coalesced commit inside escaped the compound",
+                            step
+                        );
+                        if outcome.committed
+                            && let Some(outer) = open.last_mut()
+                        {
+                            outer.2 = true;
+                        }
+                    }
+                    // An undo inside disturbs the compound: refused and
+                    // restored, which is the contract.
+                    Err(kernel::DocumentError::TransactionHistoryDisturbed) => {}
+                    Err(e) => {
+                        return Err(TestCaseError::fail(format!(
+                            "step {step}: end_compound failed: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+        DocOp::AbortCompound => {
+            if let Some((token, _, _)) = open.pop() {
+                let before = doc.document_epoch();
+                doc.abort_compound(token).map_err(|e| {
+                    TestCaseError::fail(format!("step {step}: abort_compound failed: {e}"))
+                })?;
+                prop_assert!(doc.document_epoch() > before, "abort moves the epoch");
+            }
+        }
+        DocOp::CoalescedAttr { key, origin, value } => {
+            let txn = doc.begin_transaction();
+            doc.attr_set(
+                kernel::AttrTarget::Document,
+                "org.fuzz",
+                "k",
+                kernel::AttrValue::Int(*value),
+            )
+            .map_err(|e| TestCaseError::fail(format!("step {step}: attr_set failed: {e}")))?;
+            let coalesce = (*key < 2).then(|| format!("k{key}"));
+            doc.commit_transaction(txn, meta("edit", *origin, coalesce))
+                .map_err(|e| TestCaseError::fail(format!("step {step}: commit failed: {e}")))?;
+            if let Some(top) = open.last_mut() {
+                top.2 = true;
+            }
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 /// Fixed 3-material palette, seeded once. `add_material` is deliberately
@@ -2086,6 +2224,7 @@ fn apply_doc_op(
                     loop_path,
                     restore: None,
                     curves: Vec::new(),
+                    edge_attrs: Vec::new(),
                 },
             );
         }
@@ -2345,6 +2484,7 @@ fn apply_doc_op(
                         loop_path,
                         restore: None,
                         curves: Vec::new(),
+                        edge_attrs: Vec::new(),
                     },
                 );
                 assert!(
@@ -2605,6 +2745,7 @@ fn apply_doc_op(
                         loop_path,
                         restore: None,
                         curves: Vec::new(),
+                        edge_attrs: Vec::new(),
                     },
                 );
                 assert!(
@@ -3216,6 +3357,41 @@ fn apply_doc_op(
             doc.rescale_document(*factor)
                 .expect("rescale never refuses a valid factor");
         }
+        DocOp::RebaseDefinition {
+            comp_sel,
+            origin,
+            axis,
+            angle,
+        } => {
+            let Some(cid) = nth(&doc.component_ids(), *comp_sel) else {
+                return Ok(true);
+            };
+            let unit_axis = Vec3::new(axis.0, axis.1, axis.2)
+                .normalized()
+                .unwrap_or(Vec3::new(0.0, 0.0, 1.0));
+            let rot = Transform::rotation(unit_axis, *angle)
+                .expect("a unit axis rotation is never singular");
+            let x = rot.apply_vector(Vec3::new(1.0, 0.0, 0.0));
+            let y = rot.apply_vector(Vec3::new(0.0, 1.0, 0.0));
+            let o = Point3::new(origin.0, origin.1, origin.2);
+            match doc.rebase_definition(cid, o, x, y) {
+                Ok(_)
+                | Err(DocumentError::RebaseDuringSession)
+                | Err(DocumentError::UnknownComponent) => {}
+                Err(e) => panic!("a rotated frame refused: {e:?}"),
+            }
+        }
+        DocOp::FlipInstance { inst_sel, axis } => {
+            let Some(iid) = nth(&doc.instance_ids(), *inst_sel) else {
+                return Ok(true);
+            };
+            let axis = match axis % 3 {
+                0 => kernel::Axis::X,
+                1 => kernel::Axis::Y,
+                _ => kernel::Axis::Z,
+            };
+            let _ = doc.flip_instance(iid, axis);
+        }
         DocOp::SetAxes {
             origin,
             axis,
@@ -3449,6 +3625,46 @@ fn apply_doc_op(
                 return Ok(true);
             };
             let _ = doc.set_face_uv_frame(oid, face, pick_uv_frame(*frame_sel));
+        }
+        DocOp::ElementAttr {
+            obj_sel,
+            elem_sel,
+            edge,
+            op_sel,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("visible id resolves");
+            const NS: &str = "com.example.fuzz";
+            let key = ["a", "b"][op_sel % 2];
+            let value = if op_sel % 7 == 0 {
+                kernel::AttrValue::List(vec![
+                    kernel::AttrValue::Float(0.5),
+                    kernel::AttrValue::Text("x".into()),
+                ])
+            } else {
+                kernel::AttrValue::Int((op_sel % 3) as i64)
+            };
+            let (nf, ne) = (obj.faces().len(), obj.edges().len());
+            let face = obj.faces().keys().nth(elem_sel % nf.max(1));
+            let e = obj.edges().keys().nth(elem_sel % ne.max(1));
+            let result = match (*edge, op_sel % 4) {
+                (false, 0 | 1) => face.map(|f| doc.face_attr_set(oid, f, NS, key, value)),
+                (false, 2) => face.map(|f| doc.face_attr_delete(oid, f, NS, Some(key))),
+                (false, _) => face.map(|f| doc.face_attr_delete(oid, f, NS, None)),
+                (true, 0 | 1) => e.map(|x| doc.edge_attr_set(oid, x, NS, key, value)),
+                (true, 2) => e.map(|x| doc.edge_attr_delete(oid, x, NS, Some(key))),
+                (true, _) => e.map(|x| doc.edge_attr_delete(oid, x, NS, None)),
+            };
+            match result {
+                None | Some(Ok(_)) | Some(Err(DocumentError::UnknownAttr)) => {}
+                Some(Err(e)) => {
+                    return Err(TestCaseError::fail(format!(
+                        "step {step}: an attribute write on a live element refused: {e}"
+                    )));
+                }
+            }
         }
         DocOp::RenameMaterial { mat_sel, name } => {
             if let Some(mid) = pick_material(materials, *mat_sel) {
@@ -3753,6 +3969,12 @@ fn apply_doc_op(
                 doc.cancel_sketch_gesture();
             }
         }
+        DocOp::BeginCompound
+        | DocOp::EndCompound
+        | DocOp::AbortCompound
+        | DocOp::CoalescedAttr { .. } => {
+            unreachable!("applied by apply_compound_op")
+        }
         DocOp::Undo => {
             if doc.can_undo()
                 && let Err(e) = doc.undo()
@@ -3802,8 +4024,11 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
         eprintln!("DOC CASE ops={ops:?}");
     }
 
+    let mut open = Vec::new();
     for (step, op) in ops.iter().enumerate() {
-        if !apply_doc_op(&mut doc, step, op, &materials)? {
+        if !apply_compound_op(&mut doc, step, op, &mut open)?
+            && !apply_doc_op(&mut doc, step, op, &materials)?
+        {
             return Ok(());
         }
         check_doc(&doc, step, "apply")?;
@@ -3813,6 +4038,14 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
         check_persistence(&doc, &format!("step {step}"))?;
     }
 
+    // Close what the ops left open, innermost first, so the round-trip
+    // below unwinds a history no compound is holding.
+    while let Some((token, _, _)) = open.pop() {
+        match doc.end_compound(token) {
+            Ok(_) | Err(kernel::DocumentError::TransactionHistoryDisturbed) => {}
+            Err(e) => return Err(TestCaseError::fail(format!("closing compounds: {e}"))),
+        }
+    }
     check_persistence(&doc, "post-sequence")?;
 
     // Unwind the whole document log, replay it, and do both again; the

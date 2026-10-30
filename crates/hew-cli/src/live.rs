@@ -13,7 +13,7 @@
 //! transport, target-gated in Cargo.toml so other platforms gain nothing),
 //! and `--launch` (spawning a desktop instance and polling for it).
 
-use api::{DispatchOutcome, Profile, Request, RequestId, Response};
+use api::{DispatchOutcome, Grant, Request, RequestId, Response};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -23,8 +23,12 @@ use std::time::{Duration, Instant};
 /// normally instantaneous, so this mostly guards against a wedged/never-
 /// accepting listener).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long one request is allowed to wait for its reply.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long one request is allowed to wait for its reply. Above the app's
+/// own 60 s per-frame clock, because that clock restarts while a request
+/// waits behind running plugin commands (docs/agents/PLUGINS.md
+/// "Compounds"): the request waits its turn first, and the app answers a
+/// timeout itself when one is due.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long `--launch` waits for the newly spawned instance to appear and
 /// answer `hello` before giving up.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -428,6 +432,41 @@ fn select(mut instances: Vec<Instance>, want_pid: Option<u32>) -> Result<Instanc
 
 // -------------------------------------------------------------- transport
 
+/// One line off the wire, sorted: a frame with no `id` member is a
+/// server-originated notification (docs/agents/HEW_API.md §4.5), which
+/// `send_receive` keeps aside instead of taking it for a reply; anything
+/// else is a reply.
+fn classify_line(line: &str) -> Result<Result<Response, Value>, LiveError> {
+    let value: Value = serde_json::from_str(line.trim_end())
+        .map_err(|e| LiveError::Protocol(format!("decoding reply: {e}")))?;
+    if value.as_object().is_some_and(|o| !o.contains_key("id")) {
+        return Ok(Err(value));
+    }
+    serde_json::from_value(value)
+        .map(Ok)
+        .map_err(|e| LiveError::Protocol(format!("decoding reply: {e}")))
+}
+
+/// A reply whose id is not the one just sent means the far side
+/// desynchronized (a timed-out dispatch whose late answer arrived after we
+/// moved on). Accepting it would hand the caller another command's result
+/// under its own id, so it is refused instead.
+fn check_reply_id(request: &Request, response: &Response) -> Result<(), LiveError> {
+    if request.id.is_some() && response.id != request.id {
+        return Err(LiveError::Protocol(format!(
+            "reply id {:?} does not match request id {:?} — the connection desynchronized",
+            response.id, request.id
+        )));
+    }
+    Ok(())
+}
+
+/// One frame read by `read_frame`, parsed.
+fn parse_frame(line: &str) -> Result<Value, LiveError> {
+    serde_json::from_str(line.trim_end())
+        .map_err(|e| LiveError::Protocol(format!("decoding a frame: {e}")))
+}
+
 #[cfg(unix)]
 mod transport {
     use super::*;
@@ -437,6 +476,11 @@ mod transport {
     pub struct RawConn {
         stream: UnixStream,
         reader: BufReader<UnixStream>,
+        /// Notifications read while waiting for a reply, oldest first.
+        events: Vec<Value>,
+        /// The bytes of a line a timed-out read left unfinished: the next
+        /// read continues it rather than starting mid-frame.
+        partial: Vec<u8>,
     }
 
     impl RawConn {
@@ -452,11 +496,42 @@ mod transport {
             Ok(RawConn {
                 stream,
                 reader: BufReader::new(reader_half),
+                events: Vec::new(),
+                partial: Vec::new(),
             })
         }
 
+        /// A connection over an already-open stream (tests).
+        #[cfg(test)]
+        pub(crate) fn from_stream(stream: UnixStream) -> RawConn {
+            let reader_half = stream.try_clone().expect("clone the test stream");
+            RawConn {
+                stream,
+                reader: BufReader::new(reader_half),
+                events: Vec::new(),
+                partial: Vec::new(),
+            }
+        }
+
+        /// Takes every notification already readable without waiting
+        /// (beyond a millisecond per frame), with those `send_receive` set
+        /// aside. Only between requests: any frame read here is a
+        /// notification, and one carrying an id (a stray late reply) is
+        /// dropped.
+        pub fn poll_events(&mut self) -> Vec<Value> {
+            let mut events = self.take_events();
+            while let Ok(frame) = self.read_frame(Some(Duration::from_millis(1))) {
+                if frame.as_object().is_some_and(|o| !o.contains_key("id")) {
+                    events.push(frame);
+                }
+            }
+            events
+        }
+
         /// Writes one newline-delimited JSON-RPC frame and blocks for its
-        /// reply, also one line.
+        /// reply, also one line. Notifications that arrive first are kept
+        /// for [`RawConn::take_events`]; the reply clock covers the whole
+        /// wait.
         pub fn send_receive(&mut self, request: &Request) -> Result<Response, LiveError> {
             let mut line = serde_json::to_string(request)
                 .map_err(|e| LiveError::Protocol(format!("encoding request: {e}")))?;
@@ -466,8 +541,49 @@ mod transport {
                 .map_err(LiveError::io)?;
             self.stream.flush().map_err(LiveError::io)?;
 
-            let mut buf = String::new();
-            let n = self.reader.read_line(&mut buf).map_err(|e| {
+            let deadline = Instant::now() + REPLY_TIMEOUT;
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(LiveError::Timeout(format!(
+                        "waiting for a reply timed out after {REPLY_TIMEOUT:?}"
+                    )));
+                }
+                let line = self.read_line(Some(remaining))?;
+                match classify_line(&line)? {
+                    Err(event) => self.events.push(event),
+                    Ok(response) => {
+                        check_reply_id(request, &response)?;
+                        return Ok(response);
+                    }
+                }
+            }
+        }
+
+        /// Reads one line, any frame, waiting at most `timeout` (`None`
+        /// waits forever).
+        pub fn read_frame(&mut self, timeout: Option<Duration>) -> Result<Value, LiveError> {
+            let line = self.read_line(timeout)?;
+            parse_frame(&line)
+        }
+
+        /// The notifications `send_receive` set aside, oldest first.
+        pub fn take_events(&mut self) -> Vec<Value> {
+            std::mem::take(&mut self.events)
+        }
+
+        /// One whole line. Bytes read before a timeout stay in `partial`
+        /// for the next call. A zero timeout waits the shortest time the
+        /// socket allows (a zero socket timeout is refused).
+        fn read_line(&mut self, timeout: Option<Duration>) -> Result<String, LiveError> {
+            let timeout = timeout.map(|t| t.max(Duration::from_micros(1)));
+            self.stream
+                .set_read_timeout(timeout)
+                .map_err(LiveError::io)?;
+            let read = self.reader.read_until(b'\n', &mut self.partial);
+            // Back to the default, so nothing else inherits a forever wait.
+            let _ = self.stream.set_read_timeout(Some(REPLY_TIMEOUT));
+            read.map_err(|e| {
                 if matches!(
                     e.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
@@ -479,23 +595,14 @@ mod transport {
                     LiveError::io(e)
                 }
             })?;
-            if n == 0 {
+            if self.partial.last() != Some(&b'\n') {
+                // End of stream, mid-line or not.
+                self.partial.clear();
                 return Err(LiveError::Closed);
             }
-            let response: Response = serde_json::from_str(buf.trim_end())
-                .map_err(|e| LiveError::Protocol(format!("decoding reply: {e}")))?;
-            // Correlate: a reply whose id is not the one we just sent
-            // means the far side desynchronized (a timed-out dispatch
-            // whose late answer arrived after we moved on). Accepting it
-            // would hand the caller another command's result under its own
-            // id, so refuse instead — the session is no longer trustworthy.
-            if request.id.is_some() && response.id != request.id {
-                return Err(LiveError::Protocol(format!(
-                    "reply id {:?} does not match request id {:?} — the connection desynchronized",
-                    response.id, request.id
-                )));
-            }
-            Ok(response)
+            let line = std::mem::take(&mut self.partial);
+            String::from_utf8(line)
+                .map_err(|e| LiveError::Protocol(format!("a frame was not valid UTF-8: {e}")))
         }
     }
 
@@ -563,6 +670,8 @@ mod transport {
         /// buffering the way `BufReader<UnixStream>` gets for free on the
         /// unix transport, so this module provides the same thing by hand.
         leftover: Vec<u8>,
+        /// Notifications read while waiting for a reply, oldest first.
+        events: Vec<Value>,
     }
 
     impl Drop for RawConn {
@@ -620,6 +729,7 @@ mod transport {
                     return Ok(RawConn {
                         handle: RawHandle(handle),
                         leftover: Vec::new(),
+                        events: Vec::new(),
                     });
                 }
                 let err = unsafe { GetLastError() };
@@ -645,7 +755,8 @@ mod transport {
 
         /// Writes one newline-delimited JSON-RPC frame and blocks for its
         /// reply, also one line — mirrors the unix transport's
-        /// `send_receive` exactly, including reply-id correlation.
+        /// `send_receive` exactly, including reply-id correlation and the
+        /// notifications kept aside for [`RawConn::take_events`].
         pub fn send_receive(&mut self, request: &Request) -> Result<Response, LiveError> {
             let mut line = serde_json::to_string(request)
                 .map_err(|e| LiveError::Protocol(format!("encoding request: {e}")))?;
@@ -653,16 +764,37 @@ mod transport {
             self.write_all(line.as_bytes())?;
 
             let deadline = Instant::now() + REPLY_TIMEOUT;
-            let line = self.read_line(deadline)?;
-            let response: Response = serde_json::from_str(line.trim_end())
-                .map_err(|e| LiveError::Protocol(format!("decoding reply: {e}")))?;
-            if request.id.is_some() && response.id != request.id {
-                return Err(LiveError::Protocol(format!(
-                    "reply id {:?} does not match request id {:?} — the connection desynchronized",
-                    response.id, request.id
-                )));
+            loop {
+                let line = self.read_line(Some(deadline))?;
+                match classify_line(&line)? {
+                    Err(event) => self.events.push(event),
+                    Ok(response) => {
+                        check_reply_id(request, &response)?;
+                        return Ok(response);
+                    }
+                }
             }
-            Ok(response)
+        }
+
+        /// Reads one line, any frame, waiting at most `timeout` (`None`
+        /// waits forever: the read blocks on this thread, with no helper
+        /// thread to cancel).
+        pub fn read_frame(&mut self, timeout: Option<Duration>) -> Result<Value, LiveError> {
+            let line = self.read_line(timeout.map(|t| Instant::now() + t))?;
+            parse_frame(&line)
+        }
+
+        /// The notifications `send_receive` set aside, oldest first.
+        pub fn take_events(&mut self) -> Vec<Value> {
+            std::mem::take(&mut self.events)
+        }
+
+        /// [`RawConn::take_events`] only: the Windows pipe delivers no
+        /// events yet (HEW_API.md §4.5), and a read that polls would leave a
+        /// cancelled `ReadFile` on a synchronous handle in the way of the
+        /// next write.
+        pub fn poll_events(&mut self) -> Vec<Value> {
+            self.take_events()
         }
 
         fn write_all(&mut self, mut buf: &[u8]) -> Result<(), LiveError> {
@@ -694,7 +826,7 @@ mod transport {
         /// with a bounded `recv_timeout`, exactly the "background thread +
         /// bounded channel receive" shape the unix transport's
         /// `connect_with_timeout` already uses for its own bound.
-        fn read_line(&mut self, deadline: Instant) -> Result<String, LiveError> {
+        fn read_line(&mut self, deadline: Option<Instant>) -> Result<String, LiveError> {
             loop {
                 if let Some(pos) = self.leftover.iter().position(|&b| b == b'\n') {
                     let mut line: Vec<u8> = self.leftover.drain(..=pos).collect();
@@ -703,18 +835,49 @@ mod transport {
                         LiveError::Protocol(format!("reply was not valid UTF-8: {e}"))
                     });
                 }
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Err(LiveError::Timeout(format!(
-                        "waiting for a reply timed out after {REPLY_TIMEOUT:?}"
-                    )));
-                }
-                let chunk = self.read_chunk_with_timeout(remaining)?;
+                let chunk = match deadline {
+                    // No bound: block right here, as unix does with no read
+                    // timeout. Nothing needs cancelling.
+                    None => self.read_chunk_blocking()?,
+                    Some(deadline) => {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
+                            return Err(LiveError::Timeout(format!(
+                                "waiting for a reply timed out after {REPLY_TIMEOUT:?}"
+                            )));
+                        }
+                        self.read_chunk_with_timeout(remaining)?
+                    }
+                };
                 if chunk.is_empty() {
                     return Err(LiveError::Closed);
                 }
                 self.leftover.extend_from_slice(&chunk);
             }
+        }
+
+        /// One unbounded `ReadFile` of up to 4 KiB on this thread; empty at
+        /// the far end's close.
+        fn read_chunk_blocking(&mut self) -> Result<Vec<u8>, LiveError> {
+            let mut buf = [0u8; 4096];
+            let mut n: u32 = 0;
+            let ok = unsafe {
+                ReadFile(
+                    self.handle.0,
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    &mut n,
+                    ptr::null_mut(),
+                )
+            };
+            if ok != 0 {
+                return Ok(buf[..n as usize].to_vec());
+            }
+            let err = unsafe { GetLastError() };
+            if err == ERROR_BROKEN_PIPE {
+                return Ok(Vec::new());
+            }
+            Err(LiveError::io(std::io::Error::from_raw_os_error(err as i32)))
         }
 
         /// One bounded `ReadFile` of up to 4 KiB. Unlike the unix
@@ -835,6 +998,18 @@ mod transport {
         pub fn send_receive(&mut self, _request: &Request) -> Result<Response, LiveError> {
             unreachable!("RawConn::connect always errors before a RawConn exists on this platform")
         }
+
+        pub fn read_frame(&mut self, _timeout: Option<Duration>) -> Result<Value, LiveError> {
+            unreachable!("RawConn::connect always errors before a RawConn exists on this platform")
+        }
+
+        pub fn take_events(&mut self) -> Vec<Value> {
+            Vec::new()
+        }
+
+        pub fn poll_events(&mut self) -> Vec<Value> {
+            Vec::new()
+        }
     }
 }
 
@@ -851,6 +1026,22 @@ pub struct LiveSession {
     pub hello_response: Response,
 }
 
+/// The grant a `hew.meta.hello` result reports (see
+/// [`LiveSession::granted_grant`]).
+pub fn grant_from_hello(result: Option<&Value>) -> Grant {
+    match result
+        .and_then(|r| r.get("profile"))
+        .and_then(Value::as_str)
+    {
+        Some("core") => Grant::core(),
+        Some("plugin") => result
+            .and_then(|r| r.get("grant"))
+            .and_then(|g| serde_json::from_value(g.clone()).ok())
+            .unwrap_or_else(Grant::core),
+        _ => Grant::app(),
+    }
+}
+
 impl LiveSession {
     /// Connects to `instance` and performs the mandatory first-frame
     /// handshake (§11.2): `hello_request` must itself be a
@@ -858,7 +1049,10 @@ impl LiveSession {
     /// `params.token`, every other param preserved — and is sent as the
     /// very first frame on the wire. Fails typed if the remote's hello
     /// itself answers an error.
-    fn handshake(instance: Instance, mut hello_request: Request) -> Result<LiveSession, LiveError> {
+    pub fn handshake(
+        instance: Instance,
+        mut hello_request: Request,
+    ) -> Result<LiveSession, LiveError> {
         if hello_request.method != "hew.meta.hello" {
             return Err(LiveError::Protocol(
                 "the first live frame must be hew.meta.hello".to_string(),
@@ -891,21 +1085,35 @@ impl LiveSession {
         })
     }
 
-    /// The profile the remote granted this connection (docs/agents/HEW_API.md
-    /// §12: live connections are always `app`-granted by the application),
-    /// read back from the hello reply rather than assumed, so a future
-    /// remote answering something else is still reflected honestly.
-    pub fn granted_profile(&self) -> Profile {
-        match self
-            .hello_response
-            .result
-            .as_ref()
-            .and_then(|r| r.get("profile"))
-            .and_then(Value::as_str)
-        {
-            Some("core") => Profile::Core,
-            _ => Profile::App,
-        }
+    /// The grant the remote gave this connection (docs/agents/HEW_API.md
+    /// §10, §12: live connections are always `app`-granted by the
+    /// application), read back from the hello reply rather than assumed, so
+    /// a remote answering something else is still reflected honestly.
+    /// `"plugin"` reads the `grant` member and falls back to `core` when it
+    /// is absent or malformed; any other profile reads as `app`, as before.
+    pub fn granted_grant(&self) -> Grant {
+        grant_from_hello(self.hello_response.result.as_ref())
+    }
+
+    /// The notifications (docs/agents/HEW_API.md §4.5) that arrived while
+    /// this session waited for replies, oldest first; they are not handed
+    /// out twice.
+    pub fn take_events(&mut self) -> Vec<Value> {
+        self.conn.take_events()
+    }
+
+    /// Reads the next frame off the connection, whatever it is, waiting at
+    /// most `timeout` (`None` waits forever). `LiveError::Closed` when the
+    /// app closes the connection.
+    pub fn read_frame(&mut self, timeout: Option<Duration>) -> Result<Value, LiveError> {
+        self.conn.read_frame(timeout)
+    }
+
+    /// Every notification that has arrived and is readable now, including
+    /// those set aside while waiting for replies, oldest first; waits for
+    /// nothing else. Call it between requests only.
+    pub fn poll_events(&mut self) -> Vec<Value> {
+        self.conn.poll_events()
     }
 
     /// Forwards one envelope to the remote and returns its reply, mirroring
@@ -1006,7 +1214,8 @@ impl LiveSession {
         let mut doc = kernel::Document::load(&bytes).ok()?;
         let source = self.document_path(request.document.as_deref());
         let mut host = crate::host::CliHost::with_working_path(source.map(PathBuf::from));
-        let mut conn = api::Connection::new(Profile::Core, "hew-cli:live-render");
+        let mut conn = api::Connection::new(Grant::core(), "hew-cli:live-render");
+        let registry = api::Registry::protocol_1();
         let local = |method: &str, params: Value, id: &str| Request {
             jsonrpc: "2.0".to_string(),
             id: Some(RequestId::Text(id.to_string())),
@@ -1019,6 +1228,7 @@ impl LiveSession {
             ("hew.doc.attach", json!({})),
         ] {
             conn.dispatch(
+                &registry,
                 &mut doc,
                 &mut host,
                 local(method, params, "live-render-setup"),
@@ -1026,9 +1236,10 @@ impl LiveSession {
         }
         let mut forwarded = request.clone();
         forwarded.document = None;
-        match conn.dispatch(&mut doc, &mut host, forwarded) {
+        match conn.dispatch(&registry, &mut doc, &mut host, forwarded) {
             DispatchOutcome::Reply(response) => Some(response),
-            DispatchOutcome::Dropped => None,
+            // This registry holds no plugin commands to forward.
+            DispatchOutcome::Dropped | DispatchOutcome::Forward(_) => None,
         }
     }
 }
@@ -1343,6 +1554,43 @@ fn spawn_app() -> Result<(), LiveError> {
 
 #[cfg(test)]
 mod tests {
+    /// A read that times out mid-frame keeps what it read, so the next
+    /// read finishes the same frame; a zero timeout is a timeout, not an
+    /// I/O error.
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_read_keeps_its_partial_frame() {
+        use std::io::Write;
+        let (client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut conn = transport::RawConn::from_stream(client);
+        assert!(matches!(
+            conn.read_frame(Some(Duration::ZERO)),
+            Err(LiveError::Timeout(_))
+        ));
+        server
+            .write_all(br#"{"jsonrpc":"2.0","method":"hew.ev"#)
+            .unwrap();
+        assert!(matches!(
+            conn.read_frame(Some(Duration::from_millis(20))),
+            Err(LiveError::Timeout(_))
+        ));
+        server
+            .write_all(b"ent.units_changed\",\"params\":{}}\n")
+            .unwrap();
+        let frame = conn.read_frame(Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(frame["method"], "hew.event.units_changed");
+        // Polling takes what is readable and drops a stray reply.
+        server
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}\n{\"jsonrpc\":\"2.0\",\"method\":\"hew.event.plugin_state\",\"params\":{}}\n")
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let polled = conn.poll_events();
+        assert_eq!(polled.len(), 1);
+        assert_eq!(polled[0]["method"], "hew.event.plugin_state");
+        drop(server);
+        assert!(matches!(conn.read_frame(None), Err(LiveError::Closed)));
+    }
+
     use super::*;
     #[cfg(unix)]
     use std::io::Write;
@@ -1866,7 +2114,7 @@ mod tests {
         let hello_request = build_hello_request("hew-cli:test");
         let mut session =
             LiveSession::handshake(instance, hello_request).expect("handshake succeeds");
-        assert_eq!(session.granted_profile(), Profile::App);
+        assert_eq!(session.granted_grant(), Grant::app());
         assert_eq!(
             session.hello_response.result.as_ref().unwrap()["profile"],
             "app"
@@ -2110,7 +2358,7 @@ mod tests {
         let hello_request = build_hello_request("hew-cli:test");
         let mut session =
             LiveSession::handshake(instance, hello_request).expect("handshake succeeds");
-        assert_eq!(session.granted_profile(), Profile::App);
+        assert_eq!(session.granted_grant(), Grant::app());
 
         let request = Request {
             document: None,
@@ -2128,5 +2376,36 @@ mod tests {
         server
             .join()
             .expect("fake instance thread completes cleanly");
+    }
+
+    #[test]
+    fn granted_grant_reads_core_app_and_plugin_hellos() {
+        assert_eq!(
+            grant_from_hello(Some(&json!({"profile": "core"}))),
+            Grant::core()
+        );
+        assert_eq!(
+            grant_from_hello(Some(&json!({"profile": "app"}))),
+            Grant::app()
+        );
+        let grant = json!({
+            "ceiling": "core",
+            "permissions": ["model.read"],
+            "plugin": "com.example.p",
+            "app": null,
+            "document": "doc_1"
+        });
+        let got = grant_from_hello(Some(&json!({"profile": "plugin", "grant": grant})));
+        assert_eq!(got.plugin.as_deref(), Some("com.example.p"));
+        assert!(got.holds(&api::Permission::ModelRead));
+        // A plugin hello without a readable grant falls back to core.
+        assert_eq!(
+            grant_from_hello(Some(&json!({"profile": "plugin"}))),
+            Grant::core()
+        );
+        assert_eq!(
+            grant_from_hello(Some(&json!({"profile": "plugin", "grant": {"ceiling": 3}}))),
+            Grant::core()
+        );
     }
 }

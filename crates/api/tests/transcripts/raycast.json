@@ -1,0 +1,572 @@
+{
+  "frames": [
+    {
+      "compare": "/result/profile",
+      "note": "the handshake",
+      "request": {
+        "id": 0,
+        "jsonrpc": "2.0",
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": "core"
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "compare": "/result/label",
+      "note": "box floor",
+      "request": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  -1.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  4.0,
+                  2.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.05,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "floor"
+        }
+      },
+      "response": "floor"
+    },
+    {
+      "compare": "/result/label",
+      "note": "box board",
+      "request": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  0.4,
+                  0.2,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.1,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "board"
+        }
+      },
+      "response": "board"
+    },
+    {
+      "note": "the board becomes the inner component",
+      "request": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "method": "hew.component.create",
+        "params": {
+          "members": [
+            "obj_3"
+          ]
+        }
+      },
+      "response": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.create",
+          "results": [
+            {
+              "component": "cmp_4",
+              "instance": "ins_5"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "the inner instance becomes the outer component",
+      "request": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "method": "hew.component.create",
+        "params": {
+          "members": [
+            "ins_5"
+          ]
+        }
+      },
+      "response": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.create",
+          "results": [
+            {
+              "component": "cmp_6",
+              "instance": "ins_7"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/label",
+      "note": "raise the first placement 1 m",
+      "request": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.move",
+        "params": {
+          "ids": [
+            "ins_7"
+          ],
+          "translation": [
+            0.0,
+            0.0,
+            1.0
+          ]
+        }
+      },
+      "response": "hew.entity.move"
+    },
+    {
+      "note": "a mirrored second placement",
+      "request": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "method": "hew.component.place",
+        "params": {
+          "component": "cmp_6",
+          "pose": [
+            -1.0,
+            0.0,
+            0.0,
+            3.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0
+          ]
+        }
+      },
+      "response": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.place",
+          "results": [
+            {
+              "instance": "ins_8"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/path",
+      "note": "straight down onto the nested board: its occurrence path",
+      "request": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "method": "hew.query.raycast",
+        "params": {
+          "dir": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "origin": [
+            0.2,
+            0.1,
+            5.0
+          ]
+        }
+      },
+      "response": [
+        "ins_7",
+        "ins_5"
+      ]
+    },
+    {
+      "compare": "/result/face",
+      "note": "the same hit's face locator, in the board's own frame",
+      "request": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "method": "hew.query.raycast",
+        "params": {
+          "dir": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "origin": [
+            0.2,
+            0.1,
+            5.0
+          ]
+        }
+      },
+      "response": {
+        "at": [
+          0.2,
+          0.1,
+          0.10000000000000009
+        ],
+        "object": "obj_3"
+      }
+    },
+    {
+      "compare": "/result/object",
+      "note": "the same hit's legacy member names the outermost instance",
+      "request": {
+        "id": 10,
+        "jsonrpc": "2.0",
+        "method": "hew.query.raycast",
+        "params": {
+          "dir": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "origin": [
+            0.2,
+            0.1,
+            5.0
+          ]
+        }
+      },
+      "response": "ins_7"
+    },
+    {
+      "compare": "/result/kind",
+      "note": "excluding the first placement by path falls through to the floor",
+      "request": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "method": "hew.query.raycast",
+        "params": {
+          "dir": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "exclude": [
+            {
+              "path": [
+                "ins_7"
+              ]
+            }
+          ],
+          "origin": [
+            0.2,
+            0.1,
+            5.0
+          ]
+        }
+      },
+      "response": "object"
+    },
+    {
+      "compare": "/result/path",
+      "note": "excluding by path leaves the mirrored placement hit",
+      "request": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "method": "hew.query.raycast",
+        "params": {
+          "dir": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "exclude": [
+            {
+              "path": [
+                "ins_7"
+              ]
+            }
+          ],
+          "origin": [
+            2.8,
+            0.1,
+            5.0
+          ]
+        }
+      },
+      "response": [
+        "ins_8",
+        "ins_5"
+      ]
+    },
+    {
+      "compare": "/result/normal",
+      "note": "a mirrored face keeps its outward world normal",
+      "request": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "method": "hew.query.raycast",
+        "params": {
+          "dir": [
+            -1.0,
+            0.0,
+            0.0
+          ],
+          "origin": [
+            5.0,
+            0.1,
+            1.05
+          ]
+        }
+      },
+      "response": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "compare": "/result/hits/3/distance",
+      "note": "all: four crossings, the fourth is the floor's underside",
+      "request": {
+        "id": 14,
+        "jsonrpc": "2.0",
+        "method": "hew.query.raycast",
+        "params": {
+          "all": true,
+          "dir": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "origin": [
+            0.2,
+            0.1,
+            5.0
+          ]
+        }
+      },
+      "response": 5.0
+    },
+    {
+      "compare": "/result/hits",
+      "note": "max_distance keeps only the two nearer crossings",
+      "request": {
+        "id": 15,
+        "jsonrpc": "2.0",
+        "method": "hew.query.raycast",
+        "params": {
+          "all": true,
+          "dir": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "max_distance": 4.5,
+          "origin": [
+            0.2,
+            0.1,
+            5.0
+          ]
+        }
+      },
+      "response": [
+        {
+          "distance": 3.9,
+          "face": {
+            "at": [
+              0.2,
+              0.1,
+              0.10000000000000009
+            ],
+            "object": "obj_3"
+          },
+          "hidden": false,
+          "kind": "instance",
+          "leaf": "obj_3",
+          "normal": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "object": "ins_7",
+          "path": [
+            "ins_7",
+            "ins_5"
+          ],
+          "point": [
+            0.2,
+            0.1,
+            1.1
+          ]
+        },
+        {
+          "distance": 4.0,
+          "face": {
+            "at": [
+              0.2,
+              0.1,
+              0.0
+            ],
+            "object": "obj_3"
+          },
+          "hidden": false,
+          "kind": "instance",
+          "leaf": "obj_3",
+          "normal": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "object": "ins_7",
+          "path": [
+            "ins_7",
+            "ins_5"
+          ],
+          "point": [
+            0.2,
+            0.1,
+            1.0
+          ]
+        }
+      ]
+    },
+    {
+      "note": "a ray that goes nowhere within max_distance",
+      "request": {
+        "id": 16,
+        "jsonrpc": "2.0",
+        "method": "hew.query.raycast",
+        "params": {
+          "dir": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "max_distance": 0.001,
+          "origin": [
+            0.2,
+            0.1,
+            5.0
+          ]
+        }
+      },
+      "response": {
+        "error": {
+          "code": -32000,
+          "data": {
+            "detail": {},
+            "explanation": "The ray hit no visible face. Check the origin and direction against the scene's geometry.",
+            "failed_index": 0,
+            "failed_method": "hew.query.raycast",
+            "refusal": "locator_missed"
+          },
+          "message": "refused"
+        },
+        "id": 16,
+        "jsonrpc": "2.0"
+      }
+    },
+    {
+      "note": "an unknown exclude entry",
+      "request": {
+        "id": 17,
+        "jsonrpc": "2.0",
+        "method": "hew.query.raycast",
+        "params": {
+          "dir": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "exclude": [
+            "obj_nope"
+          ],
+          "origin": [
+            0.2,
+            0.1,
+            5.0
+          ]
+        }
+      },
+      "response": {
+        "error": {
+          "code": -32000,
+          "data": {
+            "detail": {
+              "id": "obj_nope"
+            },
+            "explanation": "'obj_nope' does not name a live entity of the required kind in this document.",
+            "failed_index": 0,
+            "failed_method": "hew.query.raycast",
+            "refusal": "unknown_entity"
+          },
+          "message": "refused"
+        },
+        "id": 17,
+        "jsonrpc": "2.0"
+      }
+    }
+  ],
+  "profile": "core"
+}

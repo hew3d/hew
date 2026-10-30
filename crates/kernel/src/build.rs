@@ -8,14 +8,29 @@ use std::collections::btree_map::Entry;
 
 use slotmap::SecondaryMap;
 
+use crate::attr::AttrDict;
 use crate::error::TopologyError;
 use crate::ids::{EdgeId, FaceId, HalfEdgeId, VertexId};
 use crate::material::{FaceMaterial, UvFrame};
 use crate::math::{Plane, Point3};
 use crate::tol;
 use crate::topo::{
-    Edge, Face, HalfEdge, Loop, LoopKind, Object, Shell, SurfaceRef, Vertex, WatertightState,
+    AttrSlot, Edge, Face, HalfEdge, Loop, LoopKind, Object, Shell, SurfaceRef, Vertex,
+    WatertightState,
 };
+
+/// One face for [`Object::from_faces_with_holes`]: outer indices, hole
+/// index lists, plane, material, UV frame, analytic surface, and attribute
+/// dictionary (empty = none).
+pub(crate) type FaceSpec = (
+    Vec<usize>,
+    Vec<Vec<usize>>,
+    Plane,
+    FaceMaterial,
+    Option<UvFrame>,
+    Option<SurfaceRef>,
+    AttrDict,
+);
 
 impl Object {
     /// Builds an Object from positions and faces given as CCW-wound (seen
@@ -30,7 +45,16 @@ impl Object {
         positions: &[Point3],
         faces: &[Vec<usize>],
     ) -> Result<Object, TopologyError> {
-        Object::from_polygons_impl(positions, faces, None, None, None, tol::PLANE_DIST, None)
+        Object::from_polygons_impl(
+            positions,
+            faces,
+            None,
+            None,
+            None,
+            None,
+            tol::PLANE_DIST,
+            None,
+        )
     }
 
     /// Like [`Object::from_polygons`], but assigns each face the material and
@@ -38,13 +62,16 @@ impl Object {
     /// `uv_frames` slices ( + the UV-frame extension). Crate-internal: the
     /// boolean assembler uses it so result faces carry their material and UV
     /// frame. Uses the strict [`tol::PLANE_DIST`] gate (kernel-built f64
-    /// geometry is exact). Both slices must be parallel to `faces`.
+    /// geometry is exact). Every slice must be parallel to `faces`; `attrs`
+    /// holds each face's attribute dictionary (empty = none), interned into
+    /// the new Object's own table.
     pub(crate) fn from_polygons_with_materials_and_frames(
         positions: &[Point3],
         faces: &[Vec<usize>],
         materials: &[FaceMaterial],
         uv_frames: &[Option<UvFrame>],
         surfaces: &[Option<SurfaceRef>],
+        attrs: &[AttrDict],
     ) -> Result<Object, TopologyError> {
         Object::from_polygons_impl(
             positions,
@@ -52,6 +79,7 @@ impl Object {
             Some(materials),
             Some(uv_frames),
             Some(surfaces),
+            Some(attrs),
             tol::PLANE_DIST,
             None,
         )
@@ -77,6 +105,7 @@ impl Object {
             Some(materials),
             Some(uv_frames),
             None,
+            None,
             tol::IMPORT_PLANE_DIST,
             None,
         )
@@ -101,17 +130,20 @@ impl Object {
             Some(materials),
             Some(uv_frames),
             None,
+            None,
             tol::IMPORT_PLANE_DIST,
             Some(holes),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from_polygons_impl(
         positions: &[Point3],
         faces: &[Vec<usize>],
         materials: Option<&[FaceMaterial]>,
         uv_frames: Option<&[Option<UvFrame>]>,
         surfaces: Option<&[Option<SurfaceRef>]>,
+        attrs: Option<&[AttrDict]>,
         plane_tol: f64,
         holes: Option<&[Vec<Vec<usize>>]>,
     ) -> Result<Object, TopologyError> {
@@ -210,7 +242,12 @@ impl Object {
                 back_material: None,
                 uv_frame: uv_frames.and_then(|f| f.get(face_index).copied()).flatten(),
                 surface: surfaces.and_then(|s| s.get(face_index).copied()).flatten(),
+                attrs: AttrSlot::NONE,
             });
+            if let Some(dict) = attrs.and_then(|a| a.get(face_index)) {
+                let slot = obj.intern_attrs(dict.clone());
+                obj.faces[face_id].attrs = slot;
+            }
             obj.loops[outer_loop_id].face = face_id;
             build_validated_loop(
                 &mut obj,
@@ -265,6 +302,7 @@ impl Object {
                             curve: None,
                             soft: false,
                             polygon: None,
+                            attrs: AttrSlot::NONE,
                         });
                         obj.half_edges[h].edge = edge;
                         obj.half_edges[t].edge = edge;
@@ -279,6 +317,7 @@ impl Object {
                         curve: None,
                         soft: false,
                         polygon: None,
+                        attrs: AttrSlot::NONE,
                     });
                     obj.half_edges[h].edge = edge;
                 }
@@ -298,20 +337,6 @@ impl Object {
         Ok(obj)
     }
 
-    /// Crate-internal construction path that supports faces with inner loops
-    /// (holes). Used by [`Object::from_extrusion`].
-    ///
-    /// `faces` is a list of `(outer_indices, inner_loops, plane, material,
-    /// uv_frame, surface)` tuples where `outer_indices` and each inner-loop
-    /// list are index lists into `positions`. All winding must be consistent
-    /// (outer CCW, inner CW seen from the face normal) — this function does
-    /// not validate; callers are responsible. `material` is the face's
-    /// material (`None` = default). `uv_frame` is the per-face affine UV
-    /// frame ( ext.; `None` =  `world_size` fallback). `surface` is the
-    /// face's analytic surface reference (`None` = plain planar face).
-    ///
-    /// The public signature/behaviour of [`Object::from_polygons`] is
-    /// unchanged; this function is a separate, internal path.
     /// Paints the backs of a freshly built object's faces, in the order
     /// they were built (a fresh object's faces iterate in insertion order).
     pub(crate) fn set_built_back_materials(&mut self, backs: &[FaceMaterial]) {
@@ -320,18 +345,24 @@ impl Object {
         }
     }
 
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn from_faces_with_holes(
-        positions: &[Point3],
-        faces: &[(
-            Vec<usize>,
-            Vec<Vec<usize>>,
-            Plane,
-            FaceMaterial,
-            Option<UvFrame>,
-            Option<SurfaceRef>,
-        )],
-    ) -> Object {
+    /// Crate-internal construction path that supports faces with inner loops
+    /// (holes). Used by [`Object::from_extrusion`].
+    ///
+    /// `faces` is a list of `(outer_indices, inner_loops, plane, material,
+    /// uv_frame, surface, attrs)` tuples ([`FaceSpec`]) where
+    /// `outer_indices` and each inner-loop list are index lists into
+    /// `positions`. All winding must be consistent
+    /// (outer CCW, inner CW seen from the face normal) — this function does
+    /// not validate; callers are responsible. `material` is the face's
+    /// material (`None` = default). `uv_frame` is the per-face affine UV
+    /// frame ( ext.; `None` =  `world_size` fallback). `surface` is the
+    /// face's analytic surface reference (`None` = plain planar face).
+    /// `attrs` is the face's attribute dictionary (empty = none), interned
+    /// into the new Object's table; every edge starts without one.
+    ///
+    /// The public signature/behaviour of [`Object::from_polygons`] is
+    /// unchanged; this function is a separate, internal path.
+    pub(crate) fn from_faces_with_holes(positions: &[Point3], faces: &[FaceSpec]) -> Object {
         let mut obj = Object::empty();
 
         // Insert all vertices.
@@ -352,7 +383,7 @@ impl Object {
         let mut directed: BTreeMap<(VertexId, VertexId), HalfEdgeId> = BTreeMap::new();
         let mut all_face_ids: Vec<FaceId> = Vec::new();
 
-        for (outer_indices, hole_index_lists, plane, material, uv_frame, surface) in faces {
+        for (outer_indices, hole_index_lists, plane, material, uv_frame, surface, attrs) in faces {
             // ---- outer loop ----
             let outer_loop_id = obj.loops.insert(Loop {
                 face: FaceId::default(),
@@ -368,7 +399,12 @@ impl Object {
                 back_material: None,
                 uv_frame: *uv_frame,
                 surface: *surface,
+                attrs: AttrSlot::NONE,
             });
+            if !attrs.is_empty() {
+                let slot = obj.intern_attrs(attrs.clone());
+                obj.faces[face_id].attrs = slot;
+            }
             obj.loops[outer_loop_id].face = face_id;
             all_face_ids.push(face_id);
 
@@ -410,6 +446,7 @@ impl Object {
                             curve: None,
                             soft: false,
                             polygon: None,
+                            attrs: AttrSlot::NONE,
                         });
                         obj.half_edges[h].edge = edge;
                         obj.half_edges[t].edge = edge;
@@ -424,6 +461,7 @@ impl Object {
                         curve: None,
                         soft: false,
                         polygon: None,
+                        attrs: AttrSlot::NONE,
                     });
                     obj.half_edges[h].edge = edge;
                 }

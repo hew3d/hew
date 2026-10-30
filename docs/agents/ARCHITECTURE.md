@@ -360,12 +360,35 @@ temporarily changing what owns them, not a distinct editing mode.
 
 Materials are a document-level palette; each face carries an optional
 material reference, and each Object carries an optional default material
-that unmarked faces fall back to. A material is a name, a color, and an
+that unmarked faces fall back to. Each component instance carries an
+optional material of its own as well: a member face with neither its own
+material nor an Object default shows the material of the nearest instance
+above it that has one, so one definition can show a different color per
+placement while painted faces keep theirs (SketchUp's rule). The kernel
+resolves that chain (`Document::inherited_material`) and the tessellator
+takes the inherited material as an input, so a member's render mesh is
+keyed by member and inherited material. A material is a name, a color, and an
 optional texture. Textures are stored as opaque, already-encoded image bytes
 — the kernel never decodes an image, keeping image codecs out of a crate
 that must stay dependency-light and pure — mapped onto a face by an affine
 UV frame precise enough to reproduce an imported model's original texture
 scale and orientation, not just a generic planar projection.
+
+Attribute dictionaries (client data the kernel stores and never
+interprets, docs/agents/HEW_API.md §8) live on the document and its
+entities in one document-level table, and on a solid's faces and edges
+inside the Object itself: the Object holds an append-only table of
+interned dictionaries, and each face and edge carries a small `Copy` slot
+into it (none by default). A write interns a new dictionary and repoints
+the element, never editing a slot in place, so elements may share one and
+an undo snapshot can record a slot by value; slots are never renumbered
+while the Object lives, and a dictionary nothing references any more is
+simply not written on save. Each operation assigns slots at the place it
+builds an element (a face built from another takes its slot, a fresh wall
+none, a merge keeps the survivor's); whole-Object rebuilds (booleans,
+slices, thickening, component splits) carry face dictionaries by value
+into the new Object and rebuild edges without any. History replay restores
+dictionaries with the rest of the recorded state (§5.7).
 
 Tags (Hew's analog of SketchUp Layers) are first-class document metadata used
 to group and show/hide Objects, Groups, and Instances independently of the
@@ -522,6 +545,22 @@ only: it is never part of what `.hew` serializes, and saving (autosave
 included) while a session is open transparently writes the document as if
 the session had already been closed, without interrupting the edit.
 
+**The change ring.** Every history change the `Document` makes leaves one
+session-only record in a bounded ring (256 records, `crates/kernel/src/
+changes.rs`): a pushed entry, an undo, a redo, an aborted transaction or
+compound, a document replacement. Each record carries the history clock,
+the entry's label and origin, and a change set classified from the entry's
+`DocAction`s (`document/change_sets.rs`, an exhaustive match: created
+entities are added, deleted or consumed ones removed, everything else
+touched modified; an import or a rescale is `full`). A bracket that drains
+its children into one entry (a transaction, a compound, a definition
+delete, 3D Text) replaces their records with its own, so the ring holds
+one record per visible entry; while such a bracket is open the ring does
+not trim, so its children never push older history out. An abort drops
+its children's records and adds one `full` record. The ring is never serialized and is not part of the file format.
+The API builds `document_changed` events and `hew.query.changes_since`
+from it (HEW_API.md §4.5).
+
 ## 3. Crate and Module Topology
 
 | Crate / module | Responsibility | Depends on |
@@ -539,8 +578,10 @@ the session had already been closed, without interrupting the edit.
 | `crates/image-import` | PNG/JPEG → a placed picture: one face painted with it in a component, placed once (the `.skp` image shape); reads only the pixel size from the header | `kernel` |
 | `crates/softrender` | Headless render device: a pure software rasterizer over `tessellate`'s buffers, for `hew.view.snapshot` off-screen | `kernel`, `tessellate` |
 | `crates/hlr` | Hidden-line removal: projects tessellated solids onto a view plane and returns visible line work — hard edges, curved-wall silhouettes, section-cut outlines — as 2D segments, plus an SVG writer, for vector Line art printing and SVG export | `kernel`, `tessellate` |
+| `crates/headless-render` | The renderers behind `hew.view.snapshot` and `hew.view.line_drawing` (selection, background, fitted cameras, view helpers shared with `hew.print.pdf`), pure over `&Document` and shared by `hew-cli`'s `CliHost` and the app's `LiveHost` | `api`, `kernel`, `softrender`, `hlr` |
 | `crates/pdfwrite` | Small hand-written PDF 1.4 writer (pages of images, stroked paths, text) for Save PDF… and headless `hew.print.pdf` | nothing in-tree (`miniz_oxide` for DEFLATE) |
-| `crates/wasm-api` | `wasm-bindgen` surface exposing the kernel (plus inference, tessellate, hlr, pdfwrite, softrender, the api, and the importers/exporters) to the UI | `kernel`, `inference`, `tessellate`, `hlr`, `pdfwrite`, `softrender`, `api`, `mesh-export`, `dae-import`, `gltf-import`, `skp-import`, `skp-export`, `stl-import`, `image-import` |
+| `crates/wasm-api` | `wasm-bindgen` surface exposing the kernel (plus inference, tessellate, hlr, pdfwrite, softrender, headless-render, the api, and the importers/exporters) to the UI | `kernel`, `inference`, `tessellate`, `hlr`, `pdfwrite`, `softrender`, `headless-render`, `api`, `mesh-export`, `dae-import`, `gltf-import`, `skp-import`, `skp-export`, `stl-import`, `image-import` |
+| `crates/plugin-manifest` | The plugin manifest (`hew-plugin.json`) parser and validator, pure and shared by every host; `crates/api` reads permission names from it (docs/agents/PLUGINS.md) | `serde`, `semver` only |
 | `crates/library` | The Hew Library's on-disk layout: folder resolution, item naming, atomic list/read/write/remove, content hashing — one implementation behind `hew-cli`'s `hew.library.*` and the desktop shell's `library_*` commands | `kernel` |
 | `app/` | TypeScript/React UI: viewport, tools, panels | `wasm-api` (via the compiled WASM package) |
 | `shells/tauri` | Desktop shell | `app/`, `library` |

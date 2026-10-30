@@ -4,9 +4,13 @@
 //! move-with-copy array, and the one-undo-entry / byte-identical-undo
 //! property for every mutating envelope in this namespace.
 
-use api::{Connection, DispatchOutcome, NoHost, Profile, Request, RequestId, Response, codes};
+use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
 use kernel::{CurveGeom, Document, ObjectId, Plane, Point3, SketchId};
 use serde_json::{Value, json};
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // --------------------------------------------------------------- fixtures
 
@@ -91,6 +95,7 @@ fn req(id: i64, method: &str, params: Value) -> Request {
 
 fn hello_attach(conn: &mut Connection, doc: &mut Document) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(0, "hew.meta.hello", json!({ "protocol": 1 })),
@@ -98,9 +103,12 @@ fn hello_attach(conn: &mut Connection, doc: &mut Document) {
         panic!("hello replies")
     };
     assert!(r.error.is_none(), "hello failed: {:?}", r.error);
-    let DispatchOutcome::Reply(r) =
-        conn.dispatch(doc, &mut NoHost, req(1, "hew.doc.attach", json!({})))
-    else {
+    let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
+        doc,
+        &mut NoHost,
+        req(1, "hew.doc.attach", json!({})),
+    ) else {
         panic!("attach replies")
     };
     assert!(r.error.is_none(), "attach failed: {:?}", r.error);
@@ -113,7 +121,9 @@ fn call(
     method: &str,
     params: Value,
 ) -> Response {
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, &mut NoHost, req(id, method, params)) else {
+    let DispatchOutcome::Reply(r) =
+        conn.dispatch(&REGISTRY, doc, &mut NoHost, req(id, method, params))
+    else {
         panic!("{method} replies")
     };
     r
@@ -198,7 +208,7 @@ fn rename_renames_an_object_and_refuses_an_unknown_id() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let public = public_of(&doc, &kernel::EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     call_ok(
@@ -228,7 +238,7 @@ fn rename_renames_a_material_and_refuses_a_null_name() {
         kernel::Rgba8::rgb(180, 140, 90),
     ));
     let public = public_of(&doc, &kernel::EntityRef::Material(mat));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -261,7 +271,7 @@ fn rename_refuses_kinds_the_kernel_cannot_rename() {
     let mut doc = Document::new();
     let sketch = build_circle_sketch(&mut doc, 5.0, 5.0, 1.0);
     let public = public_of(&doc, &kernel::EntityRef::Sketch(sketch));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let data = call_err(
@@ -279,7 +289,7 @@ fn rename_adds_one_undo_entry_and_undoes_cleanly() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let public = public_of(&doc, &kernel::EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -301,7 +311,7 @@ fn delete_deletes_an_object_and_refuses_an_unknown_id() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let public = public_of(&doc, &kernel::EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     call_ok(
@@ -333,7 +343,7 @@ fn delete_deletes_a_material_unpainting_a_face_and_refuses_a_deleted_handle() {
     let obj = build_box(&mut doc, 0.0);
     doc.set_object_material(obj, Some(mat)).expect("base");
     let public = public_of(&doc, &kernel::EntityRef::Material(mat));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -377,7 +387,7 @@ fn delete_deletes_a_component_definition_and_its_world_instance() {
         .make_component(&[kernel::NodeId::Object(obj)])
         .expect("fold");
     let public = public_of(&doc, &kernel::EntityRef::Component(component));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -404,7 +414,7 @@ fn delete_refuses_a_definition_nested_inside_another_live_definition() {
     doc.make_component(&[kernel::NodeId::Instance(inner_inst)])
         .expect("fold outer, nesting the inner instance");
     let public = public_of(&doc, &kernel::EntityRef::Component(inner));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
 
@@ -425,7 +435,7 @@ fn delete_adds_one_undo_entry_and_undoes_cleanly() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let public = public_of(&doc, &kernel::EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -447,7 +457,7 @@ fn move_translates_by_a_vector_with_one_undo_entry() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let public = public_of(&doc, &kernel::EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -470,7 +480,7 @@ fn move_translates_by_from_to_points() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let public = public_of(&doc, &kernel::EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     call_ok(
@@ -493,7 +503,7 @@ fn move_with_copy_count_three_creates_an_array_in_one_undo_entry() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let public = public_of(&doc, &kernel::EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -544,7 +554,7 @@ fn move_refuses_a_mixed_sketch_and_node_selection() {
     let sketch = build_circle_sketch(&mut doc, 5.0, 5.0, 1.0);
     let obj_public = public_of(&doc, &kernel::EntityRef::Object(obj));
     let sketch_public = public_of(&doc, &kernel::EntityRef::Sketch(sketch));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let data = call_err(
@@ -562,7 +572,7 @@ fn move_refuses_copying_a_sketch() {
     let mut doc = Document::new();
     let sketch = build_circle_sketch(&mut doc, 5.0, 5.0, 1.0);
     let sketch_public = public_of(&doc, &kernel::EntityRef::Sketch(sketch));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let data = call_err(
@@ -606,7 +616,7 @@ fn rotate_ninety_degrees_lands_where_expected() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let public = public_of(&doc, &kernel::EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -643,7 +653,7 @@ fn rotate_ninety_degrees_lands_where_expected() {
 #[test]
 fn rotate_refuses_an_unknown_id() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let data = call_err(
@@ -666,7 +676,7 @@ fn rotate_with_copy_creates_a_rotated_duplicate() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let public = public_of(&doc, &kernel::EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let result = call_ok(
@@ -703,7 +713,7 @@ fn scale_scales_about_an_anchor_with_one_undo_entry() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let public = public_of(&doc, &kernel::EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -737,7 +747,7 @@ fn scale_refuses_non_positive_factors() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let public = public_of(&doc, &kernel::EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let r = call(

@@ -11,7 +11,7 @@
 use super::camera::{RawCamera, parse_camera_or_view};
 use super::{CmdError, Ctx, Handler};
 use crate::Refusal;
-use crate::host::{DocFormat, ImportImage, ImportOptions, SaveOutcome, SnapshotParams};
+use crate::host::{DocFormat, Host, ImportImage, ImportOptions, SaveOutcome, SnapshotParams};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -59,8 +59,24 @@ enum WindowFocus {
 
 fn new_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let NewParams { .. } = parse(params)?;
-    ctx.host.new_document(ctx.doc).map_err(CmdError::Refusal)?;
+    replace_document(ctx, |host, doc| host.new_document(doc))?;
     Ok(document_result(ctx))
+}
+
+/// Runs a host's document replacement (`new`, `open`, `revert`) and starts
+/// the new document's epoch above the old one's, whatever the host, so a
+/// reader keyed on `epoch` never sees it go back (docs/agents/HEW_API.md
+/// §7).
+fn replace_document(
+    ctx: &mut Ctx,
+    replace: impl FnOnce(&mut dyn Host, &mut kernel::Document) -> Result<(), Refusal>,
+) -> Result<(), CmdError> {
+    let epoch = ctx.doc.document_epoch();
+    replace(ctx.host, ctx.doc).map_err(CmdError::Refusal)?;
+    ctx.doc.raise_document_epoch_to(epoch + 1);
+    // One `reset` record: everything since any generation is `full`.
+    ctx.doc.record_reset();
+    Ok(())
 }
 
 /// `{document: <the host's only/working document>}` — what a
@@ -88,9 +104,7 @@ struct OpenParams {
 
 fn open_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let OpenParams { path, .. } = parse(params)?;
-    ctx.host
-        .open_document(ctx.doc, &path)
-        .map_err(CmdError::Refusal)?;
+    replace_document(ctx, |host, doc| host.open_document(doc, &path))?;
     Ok(document_result(ctx))
 }
 
@@ -193,12 +207,23 @@ fn save_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     if let Some(u) = &units {
         check_length_format(u)?;
     }
+    if return_bytes
+        && (path.is_some() || copy || format.is_some_and(DocFormat::is_skp) || units.is_some())
+    {
+        return Err(CmdError::Params(
+            "`return_bytes` hands back .hew bytes and takes no `path`, `copy`, SketchUp `format` or `units`".into(),
+        ));
+    }
+    // Every save mints the document id first, if the document has none
+    // (docs/dev/HEW_FILE_FORMAT.md §2 `document_id`): a `.hew` write
+    // carries it, and a SketchUp write, which has no slot for it, leaves
+    // it on the document so the next `.hew` save keeps the same id. A
+    // copy carries it too. An id never changes once minted, and a save the
+    // host refuses or fails keeps no freshly minted one (an errored
+    // envelope leaves the document untouched).
+    let random = ctx.host.random_16();
     if return_bytes {
-        if path.is_some() || copy || format.is_some_and(DocFormat::is_skp) || units.is_some() {
-            return Err(CmdError::Params(
-                "`return_bytes` hands back .hew bytes and takes no `path`, `copy`, SketchUp `format` or `units`".into(),
-            ));
-        }
+        ctx.doc.ensure_document_id(random);
         return Ok(serde_json::json!({
             "bytes_base64": encode_base64(&ctx.doc.save_for_persistence()),
             "format": "hew",
@@ -208,15 +233,21 @@ fn save_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         let Some(path) = path else {
             return Err(CmdError::Params("`copy` needs a `path`".into()));
         };
+        let host = &mut *ctx.host;
         let outcome = ctx
-            .host
-            .save_copy(ctx.doc, &path, format, units.as_deref())
+            .doc
+            .with_document_id_for_save(random, |doc| {
+                host.save_copy(doc, &path, format, units.as_deref())
+            })
             .map_err(CmdError::Refusal)?;
         return Ok(outcome_fields(&outcome));
     }
+    let host = &mut *ctx.host;
     let outcome = ctx
-        .host
-        .save_document(ctx.doc, path.as_deref(), format, units.as_deref())
+        .doc
+        .with_document_id_for_save(random, |doc| {
+            host.save_document(doc, path.as_deref(), format, units.as_deref())
+        })
         .map_err(CmdError::Refusal)?;
     let mut out = outcome_fields(&outcome);
     // A host that wrote the file itself (`CliHost`) returns no bytes — the
@@ -264,9 +295,7 @@ fn revert_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     if ctx.doc.at_saved_mark() {
         return Err(nothing("the document has no changes since the last save"));
     }
-    ctx.host
-        .open_document(ctx.doc, &path)
-        .map_err(CmdError::Refusal)?;
+    replace_document(ctx, |host, doc| host.open_document(doc, &path))?;
     Ok(serde_json::json!({}))
 }
 
@@ -283,6 +312,9 @@ struct ExportParams {
     /// The display units a SketchUp file opens in; absent, the host's.
     #[serde(default)]
     units: Option<String>,
+    /// Export only these placements (or definitions at identity).
+    #[serde(default)]
+    selection: Option<Vec<Value>>,
 }
 
 fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -291,6 +323,7 @@ fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         path,
         segments_per_turn,
         units,
+        selection,
     } = parse(params)?;
     if let Some(u) = &units {
         check_length_format(u)?;
@@ -300,6 +333,18 @@ fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             )));
         }
     }
+    validate_selection(&selection)?;
+    let selection = match &selection {
+        Some(list) => {
+            if matches!(format.as_str(), "skp" | "skp2017") {
+                return Err(CmdError::Params(
+                    "selection applies to the mesh formats (stl, 3mf, glb, gltf, usdz); a SketchUp export writes the whole document".into(),
+                ));
+            }
+            Some(crate::locate::resolve_render_roots(ctx, list)?)
+        }
+        None => None,
+    };
     let bytes = ctx
         .host
         .export_document(
@@ -308,6 +353,7 @@ fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             path.as_deref(),
             segments_per_turn.unwrap_or(0),
             units.as_deref(),
+            selection.as_deref(),
         )
         .map_err(CmdError::Refusal)?;
     Ok(match bytes {
@@ -437,6 +483,10 @@ struct RawSnapshotParams {
     include_normals: Option<bool>,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    selection: Option<Vec<Value>>,
+    #[serde(default)]
+    background: Option<String>,
 }
 
 /// `hew.view.snapshot`'s default and clamped size bounds
@@ -447,6 +497,48 @@ const SNAPSHOT_DEFAULT_SIZE: u32 = 512;
 const SNAPSHOT_MIN_SIZE: u32 = 16;
 const SNAPSHOT_MAX_SIZE: u32 = 2048;
 
+/// The fill of a snapshot's untouched pixels when `background` is absent
+/// (the software rasterizer's own backdrop).
+pub const DEFAULT_SNAPSHOT_BACKGROUND: [u8; 4] = [245, 246, 248, 255];
+
+/// The `selection` rule shared by `hew.doc.export`, `hew.view.snapshot`,
+/// and `hew.view.line_drawing`: when present, it names at least one
+/// entity. (What each entry resolves to is
+/// [`crate::locate::resolve_render_roots`].)
+pub(crate) fn validate_selection(selection: &Option<Vec<Value>>) -> Result<(), CmdError> {
+    match selection {
+        Some(list) if list.is_empty() => Err(CmdError::Params(
+            "selection must name at least one entity".to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// `background`: `"transparent"`, `#rrggbb`, or `#rrggbbaa` (hex digits in
+/// either case). Anything else, `#rgb` and color names included, is
+/// refused.
+pub(crate) fn parse_background(text: &str) -> Result<[u8; 4], CmdError> {
+    let bad = || {
+        CmdError::Params(
+            "background is \"transparent\" or a #rrggbb or #rrggbbaa color".to_string(),
+        )
+    };
+    if text == "transparent" {
+        return Ok([0, 0, 0, 0]);
+    }
+    let hex = text.strip_prefix('#').ok_or_else(bad)?;
+    if !matches!(hex.len(), 6 | 8) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(bad());
+    }
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| bad());
+    Ok([
+        byte(0)?,
+        byte(2)?,
+        byte(4)?,
+        if hex.len() == 8 { byte(6)? } else { 255 },
+    ])
+}
+
 fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let raw: RawSnapshotParams = parse(params)?;
     if raw.scene.is_some() && (raw.camera.is_some() || raw.view.is_some()) {
@@ -454,11 +546,26 @@ fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             "scene is mutually exclusive with camera and view".to_string(),
         ));
     }
+    if raw.selection.is_some() && raw.scene.is_some() {
+        return Err(CmdError::Params(
+            "selection is mutually exclusive with scene".to_string(),
+        ));
+    }
+    validate_selection(&raw.selection)?;
+    let background = match raw.background.as_deref() {
+        None => DEFAULT_SNAPSHOT_BACKGROUND,
+        Some(text) => parse_background(text)?,
+    };
     let (camera, view) = parse_camera_or_view(raw.camera, raw.view)?;
     let scene = raw
         .scene
         .as_deref()
         .map(super::scenes::resolve_scene_id)
+        .transpose()?;
+    let selection = raw
+        .selection
+        .as_deref()
+        .map(|list| crate::locate::resolve_render_roots(ctx, list))
         .transpose()?;
     let width = raw
         .width
@@ -496,6 +603,8 @@ fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         depth_bits,
         include_normals: raw.include_normals.unwrap_or(false),
         path: raw.path,
+        selection,
+        background,
     };
     let result = ctx
         .host
@@ -647,6 +756,24 @@ pub fn decode_base64(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_parses_transparent_and_hex_in_either_case() {
+        assert_eq!(parse_background("transparent").unwrap(), [0, 0, 0, 0]);
+        assert_eq!(
+            parse_background("#1A2B3C").unwrap(),
+            [0x1a, 0x2b, 0x3c, 255]
+        );
+        assert_eq!(
+            parse_background("#1a2b3c80").unwrap(),
+            [0x1a, 0x2b, 0x3c, 0x80]
+        );
+        for bad in [
+            "", "#", "#fff", "#12345", "#1234567", "#gg0000", "red", "1a2b3c",
+        ] {
+            assert!(parse_background(bad).is_err(), "{bad:?}");
+        }
+    }
 
     /// RFC 4648 §10's own test vectors.
     #[test]

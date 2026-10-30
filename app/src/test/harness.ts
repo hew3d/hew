@@ -34,6 +34,8 @@ import type { ViewportApi } from '../viewport/Viewport'
 import type { IsolationTarget } from '../viewport/isolation'
 import { nodeKindToNumber, type NodeKind, type NodeRef } from '../panels/treeModel'
 import { curveRunsView, imprintView } from './drawingView'
+import { setBusy } from '../api/busyState'
+import { applyPendingViewDirectives, directiveTargets, dispatchFrameNow, type LiveBridgeDeps } from '../api/liveBridge'
 import {
   ctxGround,
   ctxOfFace,
@@ -134,6 +136,14 @@ export interface HarnessDeps {
    * without a print surface (Shop Mode boot) can omit it.
    */
   setPrintRecorder?: (recorder: PrintRecorder | null) => void
+  /** Re-read the app's hidden-state mirrors from the document
+   * (`App.reseedHiddenStateFromScene`): the abort tail of a plugin command.
+   * Optional so headless callers without visibility state can omit it. */
+  reseedViewState?: () => void
+  /** The live bridge's deps (App.tsx shares one set), so `apiDispatch`
+   * applies a dispatch exactly the way a socket frame is applied. Optional
+   * so headless callers without the bridge can omit it. */
+  liveBridge?: LiveBridgeDeps
 }
 
 /** What App wires the harness's print recorder into (see App.tsx). */
@@ -629,6 +639,35 @@ export interface HewTestHarness {
   undo(): void
 
   /**
+   * Holds the document as a plugin command would (docs/agents/PLUGINS.md
+   * "Compounds"): a mutating command of the harness's own plugin
+   * (`org.hew3d.harness`, model write) is forwarded on its own connection
+   * and a compound opened around it, labeled `label`. Until it ends the UI
+   * refuses input and shows the busy notice (whose Cancel aborts it).
+   * Returns the compound's token. Nests: a second call inside the first
+   * opens an inner compound.
+   */
+  beginCompound(label: string): number
+  /** Ends the compound `token` names (the innermost); answers the forward. */
+  endCompound(token: number): void
+  /** Aborts the compound `token` names (the innermost): the document goes
+   * back whole to how it was at its begin. */
+  abortCompound(token: number): void
+  /** Whether a plugin command holds the document (`Scene.busy()`). */
+  isBusy(): boolean
+  /**
+   * Dispatches one JSON-RPC request object on the harness's own live API
+   * connection (the app grant; opened, greeted, and attached on first use)
+   * through the live bridge's own path, its view directives applied, and
+   * returns the parsed reply. The harness has no socket; this is how a
+   * spec drives the bus (docs/agents/HEW_API.md §11.2) in a real window.
+   */
+  apiDispatch(request: { method: string; params?: unknown; id?: number }): {
+    result?: unknown
+    error?: { code: number; message: string; data?: Record<string, unknown> }
+  }
+
+  /**
    * Document-level redo. Calls `scene_redo()` and reconciles the viewport.
    * Throws if there is nothing to redo.
    */
@@ -703,6 +742,23 @@ export interface HewTestHarness {
    * to reset the face to the (unpainted) default. Undoable.
    */
   paintFace(object: string, face: string, material: string | null): void
+
+  /**
+   * Paint a component placement: set `instance`'s own material, which its
+   * unpainted faces show (neither the face nor its object's base painted).
+   * Wraps `set_instance_material`. `null` clears it. Undoable.
+   */
+  paintInstance(instance: string, material: string | null): void
+
+  /** `instance`'s own material, or `null` for none (or a stale handle). */
+  getInstanceMaterial(instance: string): string | null
+
+  /**
+   * The material each rendered placement of `instance` inherits, from the
+   * renderer's own record (`null` entries for none), or `null` when the
+   * instance is not rendered.
+   */
+  getInstanceRenderedMaterials(instance: string): (string | null)[] | null
 
   /**
    * Read back `face`'s own material and its object's base material — wraps
@@ -1270,6 +1326,121 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     },
   }
 
+  // ------------------------------------------------- compounds (P1.3)
+  // The harness's own plugin and connection, opened on first use.
+  const HARNESS_PLUGIN = 'org.hew3d.harness'
+  let harnessConn: number | null = null
+  // Open compounds, innermost last: the kernel token and the forward it
+  // serves.
+  const harnessCompounds: Array<{ kernelToken: bigint; forward: bigint }> = []
+
+  const refreshAfterCompound = (aborted: boolean): void => {
+    if (aborted) {
+      deps.reseedViewState?.()
+      deps.reconcileVisibility?.()
+    }
+    const api = deps.getViewportApi()
+    if (api !== null) api.refreshScene()
+    else deps.reconcile()
+  }
+
+  const popHarnessCompound = (token: number): { kernelToken: bigint; forward: bigint } => {
+    const top = harnessCompounds[harnessCompounds.length - 1]
+    if (top === undefined || top.kernelToken !== BigInt(token)) {
+      throw new Error(`__hew_test: compound ${token} is not the innermost one open`)
+    }
+    harnessCompounds.pop()
+    return top
+  }
+
+  const endHarnessCompound = (token: number, aborted: boolean): void => {
+    const s = scene()
+    const top = popHarnessCompound(token)
+    if (aborted) s.compound_abort(top.kernelToken)
+    else s.compound_end(top.kernelToken)
+    // An abort puts back the selection and isolation the command changed.
+    const restored = aborted ? s.take_pending_view_directives() : '[]'
+    const conn = harnessConn
+    if (conn !== null) {
+      s.api_complete_forward(conn, top.forward, JSON.stringify(aborted ? { failed: 'cancelled' } : { ok: {} }))
+    }
+    refreshAfterCompound(aborted)
+    if (deps.liveBridge !== undefined) applyPendingViewDirectives(restored, directiveTargets(deps.liveBridge))
+    if (!s.busy()) setBusy(null)
+  }
+
+  // The harness's own bus connection for `apiDispatch`, opened lazily.
+  let apiConn: number | null = null
+  let apiNextId = 1
+  const apiDispatch: HewTestHarness['apiDispatch'] = (request) => {
+    const s = scene()
+    const bridge = deps.liveBridge
+    if (bridge === undefined) throw new Error('__hew_test.apiDispatch: no live bridge wired')
+    const send = (conn: number, method: string, params: unknown, id?: number): string => {
+      const frame = JSON.stringify({ jsonrpc: '2.0', id: id ?? apiNextId++, method, params: params ?? {} })
+      const reply = dispatchFrameNow(bridge, s, conn, frame)
+      if (reply === undefined) throw new Error(`__hew_test.apiDispatch: ${method} answered nothing`)
+      return reply
+    }
+    if (apiConn === null) {
+      const conn = s.api_connection_open()
+      send(conn, 'hew.meta.hello', { protocol: 1 })
+      send(conn, 'hew.doc.attach', {})
+      apiConn = conn
+    }
+    return JSON.parse(send(apiConn, request.method, request.params, request.id)) as ReturnType<
+      HewTestHarness['apiDispatch']
+    >
+  }
+
+  const beginHarnessCompound = (label: string): number => {
+    const s = scene()
+    const outer = harnessCompounds[harnessCompounds.length - 1]
+    if (outer === undefined) {
+      // The command carries the label, so it is declared afresh each time
+      // no compound is open; nested calls keep the outer declaration.
+      s.unregister_plugin_commands(HARNESS_PLUGIN)
+      s.register_plugin_commands(
+        HARNESS_PLUGIN,
+        JSON.stringify([{ id: 'hold', class: 'mutating', summary: 'Holds the document.', label, permission: 'model.write' }]),
+      )
+    }
+    if (harnessConn === null) {
+      const conn = s.api_plugin_connection_open(
+        JSON.stringify({ ceiling: 'core', permissions: ['model.write'], plugin: HARNESS_PLUGIN, app: null, document: null }),
+      )
+      for (const frame of [
+        '{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}',
+        '{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}',
+      ]) {
+        s.api_dispatch(conn, frame)
+      }
+      harnessConn = conn
+    }
+    const frame = `{"jsonrpc":"2.0","id":2,"method":"${HARNESS_PLUGIN}.hold","params":{}}`
+    const answer =
+      outer === undefined ? s.api_dispatch(harnessConn, frame) : s.api_dispatch_in_forward(harnessConn, outer.forward, frame)
+    const pending = (JSON.parse(answer ?? '{}') as { pending?: { token?: number } }).pending
+    if (pending?.token === undefined) throw new Error(`__hew_test: the hold command did not forward: ${answer}`)
+    const forward = BigInt(pending.token)
+    const kernelToken = s.compound_begin(harnessConn, forward)
+    harnessCompounds.push({ kernelToken, forward })
+    if (outer === undefined) {
+      setBusy({
+        plugin: HARNESS_PLUGIN,
+        label,
+        startedAt: performance.now(),
+        // Cancel aborts every compound the harness holds, innermost first.
+        cancel: () => {
+          while (harnessCompounds.length > 0) {
+            endHarnessCompound(Number(harnessCompounds[harnessCompounds.length - 1].kernelToken), true)
+          }
+        },
+      })
+    }
+    return Number(kernelToken)
+  }
+
   const harness: HewTestHarness = {
     // Ready = kernel scene live AND the viewport API wired. Both are needed
     // before callers drive the harness: drawBox/setCamera/pickFace go through the
@@ -1278,6 +1449,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     // on the scene leaves a race that a slower-mounting engine (webkit) loses —
     // `waitForFunction(isReady)` then `setCamera` flaked. Gate on both.
     isReady: () => deps.getScene() !== null && deps.getViewportApi() !== null,
+
+    beginCompound: (label) => beginHarnessCompound(label),
+    endCompound: (token) => endHarnessCompound(token, false),
+    abortCompound: (token) => endHarnessCompound(token, true),
+    isBusy: () => scene().busy(),
+    apiDispatch,
 
     drawRectangle: (p0, p1) =>
       act((s) => {
@@ -1979,6 +2156,21 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     paintFace: (object, face, material) => {
       act((s) => s.paint_face(BigInt(object), BigInt(face), materialHandle(material)))
+    },
+
+    paintInstance: (instance, material) => {
+      act((s) => s.set_instance_material(BigInt(instance), materialHandle(material)))
+    },
+
+    getInstanceMaterial: (instance) =>
+      query((s) => {
+        const m = s.instance_material(BigInt(instance))
+        return m === MATERIAL_NONE ? null : m.toString()
+      }),
+
+    getInstanceRenderedMaterials: (instance) => {
+      const rendered = deps.getViewportApi()?.getInstanceRenderedInherited(BigInt(instance)) ?? null
+      return rendered === null ? null : rendered.map((m) => (m === MATERIAL_NONE ? null : m.toString()))
     },
 
     getFaceMaterial: (object, face) =>

@@ -26,6 +26,7 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.entity.move" => move_,
         "hew.entity.rotate" => rotate,
         "hew.entity.scale" => scale,
+        "hew.entity.set_frame" => set_frame,
         "hew.doc.purge_unused" => purge_unused,
         _ => return None,
     })
@@ -176,6 +177,86 @@ fn purge_unused(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 struct CopySpec {
     #[serde(default)]
     count: Option<u32>,
+    /// A grid copy (`hew.entity.move` only): 1..=3 axes, each `count`
+    /// slots (the original's included) at `step` apart.
+    #[serde(default)]
+    grid: Option<Vec<GridAxis>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GridAxis {
+    count: u32,
+    step: [f64; 3],
+}
+
+/// Mirrors the wasm boundary's MAX_ARRAY_COUNT trust cap: an agent typo
+/// ("count": 1e9) must refuse, not grind the document forever.
+const API_MAX_ARRAY_COUNT: u32 = 1000;
+
+fn array_count_too_large() -> CmdError {
+    CmdError::Refusal(
+        crate::refusal::Refusal::api(
+            "array_count_too_large",
+            &format!("An array copy places at most {API_MAX_ARRAY_COUNT} copies at once."),
+        )
+        .with_detail(serde_json::json!({ "max": API_MAX_ARRAY_COUNT })),
+    )
+}
+
+/// A grid copy's placements: every index tuple `(i0, i1, i2)` in
+/// lexicographic order except the original's `(0, 0, 0)`, each the
+/// translation `Σ i_a · step_a`. The product of the counts, the original's
+/// slot included, is at most [`API_MAX_ARRAY_COUNT`].
+fn grid_placements(grid: &[GridAxis]) -> Result<Vec<Transform>, CmdError> {
+    if grid.is_empty() || grid.len() > 3 {
+        return Err(CmdError::Params("copy.grid takes one to three axes".into()));
+    }
+    let mut slots: u64 = 1;
+    for axis in grid {
+        if axis.count == 0 {
+            return Err(CmdError::Params(
+                "a grid axis's count must be at least 1".into(),
+            ));
+        }
+        if axis.step.iter().any(|c| !c.is_finite()) {
+            return Err(CmdError::Params(
+                "a grid axis's step components must be finite".into(),
+            ));
+        }
+        slots = slots.saturating_mul(u64::from(axis.count));
+    }
+    if slots > u64::from(API_MAX_ARRAY_COUNT) {
+        return Err(array_count_too_large());
+    }
+    if slots == 1 {
+        return Err(CmdError::Params(
+            "a grid copy needs a count above 1 on at least one axis".into(),
+        ));
+    }
+    let mut placements = Vec::with_capacity(slots as usize - 1);
+    let mut index = vec![0u32; grid.len()];
+    loop {
+        // Advance the last axis fastest: lexicographic order.
+        let mut a = grid.len();
+        loop {
+            if a == 0 {
+                return Ok(placements);
+            }
+            a -= 1;
+            index[a] += 1;
+            if index[a] < grid[a].count {
+                break;
+            }
+            index[a] = 0;
+        }
+        let mut offset = Vec3::new(0.0, 0.0, 0.0);
+        for (i, axis) in index.iter().zip(grid) {
+            let s = Vec3::new(axis.step[0], axis.step[1], axis.step[2]);
+            offset = offset + s * f64::from(*i);
+        }
+        placements.push(Transform::translation(offset));
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -240,6 +321,28 @@ fn move_(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     }
     let has_translation = p.translation.is_some();
     let has_from_to = p.from.is_some() || p.to.is_some();
+    if let Some(grid) = p.copy.as_ref().and_then(|c| c.grid.as_ref()) {
+        if p.copy.as_ref().is_some_and(|c| c.count.is_some()) {
+            return Err(CmdError::Params(
+                "copy takes \"count\" or \"grid\", not both".into(),
+            ));
+        }
+        if has_translation || has_from_to {
+            return Err(CmdError::Params(
+                "a grid copy takes its steps from \"grid\", not from a translation".into(),
+            ));
+        }
+        let placements = grid_placements(grid)?;
+        let (nodes, sketches) = split_ids(ctx, &p.ids)?;
+        if !sketches.is_empty() {
+            if !nodes.is_empty() {
+                return Err(mixed_selection_refusal());
+            }
+            return Err(sketch_copy_refusal());
+        }
+        let (roots, _) = ctx.doc.duplicate_nodes_placements(&nodes, &placements)?;
+        return Ok(serde_json::json!({ "ids": public_ids(ctx, &roots) }));
+    }
     if has_translation == has_from_to {
         return Err(CmdError::Params(
             "move needs exactly one of \"translation\" or \"from\"+\"to\"".into(),
@@ -293,17 +396,8 @@ fn apply_node_transform(
         return Ok(serde_json::json!({}));
     };
     let count = copy.count.unwrap_or(1);
-    // Mirrors the wasm boundary's MAX_ARRAY_COUNT trust cap: an agent
-    // typo ("count": 1e9) must refuse, not grind the document forever.
-    const API_MAX_ARRAY_COUNT: u32 = 1000;
     if count > API_MAX_ARRAY_COUNT {
-        return Err(CmdError::Refusal(
-            crate::refusal::Refusal::api(
-                "array_count_too_large",
-                &format!("An array copy places at most {API_MAX_ARRAY_COUNT} copies at once."),
-            )
-            .with_detail(serde_json::json!({ "max": API_MAX_ARRAY_COUNT })),
-        ));
+        return Err(array_count_too_large());
     }
     let count = NonZeroU32::new(count)
         .ok_or_else(|| CmdError::Params("copy count must be positive".into()))?;
@@ -314,16 +408,19 @@ fn apply_node_transform(
         let (roots, _) = ctx.doc.duplicate_nodes_array(nodes, t, count)?;
         roots
     };
+    Ok(serde_json::json!({ "ids": public_ids(ctx, &ids) }))
+}
+
+/// The public ids of nodes a copy just created.
+fn public_ids(ctx: &Ctx, ids: &[NodeId]) -> Vec<String> {
     let resolver = ctx.resolver();
-    let public: Vec<String> = ids
-        .iter()
+    ids.iter()
         .map(|&n| {
             resolver
                 .public_of(ctx.doc, &node_entity(n))
                 .expect("just created")
         })
-        .collect();
-    Ok(serde_json::json!({ "ids": public }))
+        .collect()
 }
 
 fn node_entity(n: NodeId) -> EntityRef {
@@ -352,6 +449,12 @@ fn rotate(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
     if p.ids.is_empty() {
         return Err(kernel::DocumentError::EmptySelection.into());
+    }
+    if p.copy.as_ref().is_some_and(|c| c.grid.is_some()) {
+        return Err(CmdError::Params(
+            "hew.entity.rotate's copy takes \"count\" only; a grid copy is hew.entity.move's"
+                .into(),
+        ));
     }
     if !p.angle.is_finite() {
         return Err(CmdError::Params("angle must be finite".into()));
@@ -427,4 +530,81 @@ fn scale(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     }
     ctx.doc.transform_selection(&nodes, &[], &t)?;
     Ok(serde_json::json!({}))
+}
+
+// ------------------------------------------------------------- set_frame
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetFrameParams {
+    id: String,
+    #[serde(default)]
+    origin: Option<[f64; 3]>,
+    #[serde(default)]
+    x: Option<[f64; 3]>,
+    #[serde(default)]
+    y: Option<[f64; 3]>,
+    #[serde(default)]
+    clear: Option<bool>,
+}
+
+/// `hew.entity.set_frame`: writes (or clears) the `hew.part` / `frame`
+/// override `hew.query.part_frame` reads first, on an object or group
+/// (docs/agents/PLUGINS.md "Setting axes"). The values are coordinates in
+/// the face frame `part_frame` reports for the part without the override,
+/// after its `[length, width, thickness]` swap (`crate::part_frame`), and
+/// are stored as given once [`kernel::AxesFrame::new`] accepts them. This
+/// is the one first-party writer of `hew.part`, so it bypasses the
+/// attribute namespace rule `hew.attr.set` enforces.
+fn set_frame(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    use crate::part_frame::{FRAME_KEY, FRAME_NAMESPACE};
+    use kernel::{AttrTarget, AttrValue, AxesFrame, Point3};
+    let p: SetFrameParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    let clear = p.clear.unwrap_or(false);
+    let vectors = [p.origin.is_some(), p.x.is_some(), p.y.is_some()];
+    let frame = match (clear, vectors) {
+        (true, [false, false, false]) => None,
+        (false, [true, true, true]) => Some((p.origin.unwrap(), p.x.unwrap(), p.y.unwrap())),
+        _ => {
+            return Err(CmdError::Params(
+                "set_frame takes \"origin\", \"x\", and \"y\" together, or \"clear\": true alone"
+                    .into(),
+            ));
+        }
+    };
+    let entity = match ctx.resolver().resolve(&p.id) {
+        Some(e @ (EntityRef::Object(_) | EntityRef::Group(_))) => e,
+        Some(_) => {
+            return Err(CmdError::Refusal(Refusal::api(
+                "not_a_part",
+                "Only objects and groups take a part frame; components use hew.component.rebase.",
+            )));
+        }
+        None => return Err(unknown_entity(&p.id)),
+    };
+    let target = AttrTarget::Entity(entity);
+    let Some((origin, x, y)) = frame else {
+        let present = ctx
+            .doc
+            .attr_get(&target)?
+            .and_then(|d| d.get(FRAME_NAMESPACE))
+            .is_some_and(|ns| ns.contains_key(FRAME_KEY));
+        if present {
+            ctx.doc
+                .attr_delete(target, FRAME_NAMESPACE, Some(FRAME_KEY))?;
+        }
+        return Ok(serde_json::json!({ "id": p.id, "source": "face" }));
+    };
+    let v = |c: [f64; 3]| Vec3::new(c[0], c[1], c[2]);
+    AxesFrame::new(Point3::new(origin[0], origin[1], origin[2]), v(x), v(y))
+        .map_err(kernel::DocumentError::InvalidFrame)?;
+    let list = |c: [f64; 3]| AttrValue::List(c.iter().map(|&n| AttrValue::Float(n)).collect());
+    let mut m = std::collections::BTreeMap::new();
+    m.insert("origin".to_string(), list(origin));
+    m.insert("x".to_string(), list(x));
+    m.insert("y".to_string(), list(y));
+    ctx.doc
+        .attr_set(target, FRAME_NAMESPACE, FRAME_KEY, AttrValue::Map(m))?;
+    Ok(serde_json::json!({ "id": p.id, "source": "attribute" }))
 }

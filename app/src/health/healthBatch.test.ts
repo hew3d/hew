@@ -23,6 +23,7 @@ import {
   thickenOp,
 } from './healthBatch'
 import { parseHealthReport, type HealthRow } from './healthReport'
+import { taggedDispatch } from '../test/taggedDispatch'
 
 function rows(...specs: Array<[string, Record<string, unknown>?]>): HealthRow[] {
   return parseHealthReport(
@@ -47,7 +48,7 @@ function fakeScene(refuse: (frame: Frame, call: number) => { index: number; expl
     api_connection_open: vi.fn(() => 7),
     api_connection_close: vi.fn(),
     object_public_ids: vi.fn((ids: BigUint64Array) => Array.from(ids, (id) => (stale.includes(id) ? '' : `obj_${id}`))),
-    api_dispatch: vi.fn((_conn: number, raw: string) => {
+    api_dispatch: vi.fn(taggedDispatch((_conn: number, raw: string) => {
       const req = JSON.parse(raw) as { id: number } & Frame
       frames.push(req)
       if (req.method !== 'hew.doc.transact') return JSON.stringify({ jsonrpc: '2.0', id: req.id, result: {} })
@@ -62,7 +63,7 @@ function fakeScene(refuse: (frame: Frame, call: number) => { index: number; expl
           data: { refusal: 'X', failed_index: refusal.index, failed_method: 'm', detail: {}, explanation: refusal.explanation },
         },
       })
-    }),
+    })),
   }
   return { scene: scene as unknown as WasmScene & typeof scene, frames }
 }
@@ -138,8 +139,9 @@ describe('runBatch — refusals are never skipped silently', () => {
       api_connection_open: () => 1,
       api_connection_close: vi.fn(),
       object_public_ids: () => ['obj_1'],
-      api_dispatch: (_c: number, raw: string) =>
+      api_dispatch: taggedDispatch((_c: number, raw: string) =>
         JSON.stringify({ jsonrpc: '2.0', id: 1, ...(raw.includes('transact') ? { error: { code: -32004, message: 'not ready' } } : { result: {} }) }),
+      ),
     } as unknown as WasmScene
     expect(() => runBatch(scene, () => 'L', rows(['1']).map(capOp))).toThrow('not ready')
     expect(scene.api_connection_close).toHaveBeenCalled()

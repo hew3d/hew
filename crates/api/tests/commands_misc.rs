@@ -8,9 +8,13 @@
 //! the context-balance / history-status pins the task calls out
 //! specifically.
 
-use api::{Connection, DispatchOutcome, NoHost, Profile, Request, RequestId, Response, codes};
+use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
 use kernel::{Document, EntityRef, Material, NodeId, Plane, Point3, Rgba8};
 use serde_json::{Value, json};
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // --------------------------------------------------------------- fixtures
 
@@ -65,6 +69,7 @@ fn req(id: i64, method: &str, params: Value) -> Request {
 
 fn hello_attach(conn: &mut Connection, doc: &mut Document) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(0, "hew.meta.hello", json!({ "protocol": 1 })),
@@ -72,9 +77,12 @@ fn hello_attach(conn: &mut Connection, doc: &mut Document) {
         panic!("hello replies")
     };
     assert!(r.error.is_none(), "hello failed: {:?}", r.error);
-    let DispatchOutcome::Reply(r) =
-        conn.dispatch(doc, &mut NoHost, req(1, "hew.doc.attach", json!({})))
-    else {
+    let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
+        doc,
+        &mut NoHost,
+        req(1, "hew.doc.attach", json!({})),
+    ) else {
         panic!("attach replies")
     };
     assert!(r.error.is_none(), "attach failed: {:?}", r.error);
@@ -87,7 +95,9 @@ fn call(
     method: &str,
     params: Value,
 ) -> Response {
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, &mut NoHost, req(id, method, params)) else {
+    let DispatchOutcome::Reply(r) =
+        conn.dispatch(&REGISTRY, doc, &mut NoHost, req(id, method, params))
+    else {
         panic!("{method} replies")
     };
     r
@@ -159,7 +169,7 @@ fn group_create_groups_nodes_and_refuses_an_unknown_member() {
     let b = build_box(&mut doc, 3.0);
     let a_pub = public_of(&doc, &EntityRef::Object(a));
     let b_pub = public_of(&doc, &EntityRef::Object(b));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -195,7 +205,7 @@ fn group_explode_dissolves_a_group_and_refuses_an_unknown_id() {
     let a = build_box(&mut doc, 0.0);
     let (group, _) = doc.group_nodes(&[NodeId::Object(a)]).expect("group");
     let group_pub = public_of(&doc, &EntityRef::Group(group));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -229,7 +239,7 @@ fn group_reparent_moves_a_node_into_a_group_and_refuses_an_unknown_id() {
     let (group, _) = doc.group_nodes(&[NodeId::Object(b)]).expect("group");
     let a_pub = public_of(&doc, &EntityRef::Object(a));
     let group_pub = public_of(&doc, &EntityRef::Group(group));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -266,7 +276,7 @@ fn group_reparent_refuses_an_empty_ids_list() {
     // condition — "everything picked is hidden or gone," not "nothing was
     // picked").
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let data = call_err(
@@ -285,7 +295,7 @@ fn group_reparent_moves_a_node_back_to_the_top_level_with_a_null_parent() {
     let a = build_box(&mut doc, 0.0);
     let (group, _) = doc.group_nodes(&[NodeId::Object(a)]).expect("group");
     let a_pub = public_of(&doc, &EntityRef::Object(a));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     assert_eq!(doc.node_parent(NodeId::Object(a)), Some(group));
 
@@ -305,7 +315,7 @@ fn group_reparent_refuses_a_group_cycle_and_a_session_in_scope() {
     let a = build_box(&mut doc, 0.0);
     let (group, _) = doc.group_nodes(&[NodeId::Object(a)]).expect("group");
     let group_pub = public_of(&doc, &EntityRef::Group(group));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     // A group can't be moved into itself.
@@ -344,7 +354,7 @@ fn component_create_folds_members_into_a_definition_plus_instance() {
     let mut doc = Document::new();
     let a = build_box(&mut doc, 0.0);
     let a_pub = public_of(&doc, &EntityRef::Object(a));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -386,7 +396,7 @@ fn component_place_places_an_instance_at_a_translation_pose() {
     let a = build_box(&mut doc, 0.0);
     let (component, _, _) = doc.make_component(&[NodeId::Object(a)]).expect("fold");
     let component_pub = public_of(&doc, &EntityRef::Component(component));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -436,7 +446,7 @@ fn component_make_unique_deep_copies_the_definition() {
         .place_instance(component, kernel::Transform::IDENTITY)
         .expect("second placement");
     let instance2_pub = public_of(&doc, &EntityRef::Instance(instance2));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -480,7 +490,7 @@ fn component_explode_bakes_an_instance_into_world_objects() {
     let a = build_box(&mut doc, 0.0);
     let (_, instance, _) = doc.make_component(&[NodeId::Object(a)]).expect("fold");
     let instance_pub = public_of(&doc, &EntityRef::Instance(instance));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -515,7 +525,7 @@ fn context_enter_and_exit_balanced_inside_one_transaction_commits() {
     let a = build_box(&mut doc, 0.0);
     let (group, _) = doc.group_nodes(&[NodeId::Object(a)]).expect("group");
     let group_pub = public_of(&doc, &EntityRef::Group(group));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     assert!(doc.session_stack().is_empty());
@@ -560,7 +570,7 @@ fn bare_context_enter_is_rejected_as_a_protocol_error() {
     let a = build_box(&mut doc, 0.0);
     let (group, _) = doc.group_nodes(&[NodeId::Object(a)]).expect("group");
     let group_pub = public_of(&doc, &EntityRef::Group(group));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
 
@@ -581,7 +591,7 @@ fn bare_context_enter_is_rejected_as_a_protocol_error() {
 #[test]
 fn material_create_succeeds_and_adds_no_undo_entry() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
 
@@ -632,7 +642,7 @@ fn material_paint_paints_a_face_and_refuses_an_unknown_material() {
     };
     let material = doc.add_material(Material::solid("Oak", Rgba8::rgb(180, 140, 90)));
     let material_pub = public_of(&doc, &EntityRef::Material(material));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -668,7 +678,7 @@ fn material_set_default_sets_the_objects_base_material() {
     let obj_pub = public_of(&doc, &EntityRef::Object(obj));
     let material = doc.add_material(Material::solid("Oak", Rgba8::rgb(180, 140, 90)));
     let material_pub = public_of(&doc, &EntityRef::Material(material));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -699,7 +709,7 @@ fn material_set_opacity_sets_alpha_and_refuses_an_unknown_material() {
     let mut doc = Document::new();
     let material = doc.add_material(Material::solid("Oak", Rgba8::rgb(180, 140, 90)));
     let material_pub = public_of(&doc, &EntityRef::Material(material));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -757,7 +767,7 @@ fn call_params_err(
 #[test]
 fn material_create_with_a_texture_matches_the_palettes_add_texture() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
 
@@ -852,7 +862,7 @@ fn material_create_with_a_texture_matches_the_palettes_add_texture() {
 #[test]
 fn material_create_rejects_a_malformed_texture_and_refuses_a_path_without_file_access() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let png = b64(PNG_1X1);
     let cases = [
@@ -942,7 +952,7 @@ fn material_position_texture_pins_a_tile_and_resets_like_the_tool() {
     let obj = build_box(&mut doc, 0.0);
     let obj_pub = public_of(&doc, &EntityRef::Object(obj));
     let face = top_face(&doc, obj);
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -1040,7 +1050,7 @@ fn material_position_texture_refuses_degenerate_pins_and_malformed_params() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let obj_pub = public_of(&doc, &EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let locator = json!({ "object": obj_pub, "at": [0.5, 0.5, 0.5] });
     let depth = doc.undo_depth();
@@ -1101,7 +1111,7 @@ fn material_replace_repaints_everywhere_or_within_one_object() {
         public_of(&doc, &EntityRef::Material(ash)),
     );
     let a_pub = public_of(&doc, &EntityRef::Object(a));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth = doc.undo_depth();
     let bytes_before = doc.save();
@@ -1177,7 +1187,7 @@ fn material_replace_repaints_everywhere_or_within_one_object() {
 #[test]
 fn tag_create_registers_a_path_and_adds_no_undo_entry() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
 
@@ -1209,7 +1219,7 @@ fn tag_assign_assigns_and_removes_a_tag_from_a_node() {
     let obj = build_box(&mut doc, 0.0);
     let obj_pub = public_of(&doc, &EntityRef::Object(obj));
     doc.set_tag_hidden(vec!["Structure".to_string()], false);
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -1262,7 +1272,7 @@ fn tag_assign_assigns_and_removes_a_tag_from_a_node() {
 fn tag_set_visible_toggles_visibility_and_adds_no_undo_entry() {
     let mut doc = Document::new();
     doc.set_tag_hidden(vec!["Structure".to_string()], false);
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
 
@@ -1285,7 +1295,7 @@ fn tag_set_visible_toggles_visibility_and_adds_no_undo_entry() {
 fn tag_delete_deletes_a_registered_tag_and_refuses_an_unknown_path() {
     let mut doc = Document::new();
     doc.set_tag_hidden(vec!["Structure".to_string()], false);
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -1323,7 +1333,7 @@ fn tag_rename_moves_the_tag_keeping_identity_and_refuses_unknown_duplicate_and_i
             "Roof".to_string(),
         ]))
         .unwrap();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -1378,7 +1388,7 @@ fn tag_rename_moves_the_tag_keeping_identity_and_refuses_unknown_duplicate_and_i
 #[test]
 fn guide_line_adds_a_guide_and_refuses_a_bad_derived_origin() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -1414,7 +1424,7 @@ fn guide_line_adds_a_guide_and_refuses_a_bad_derived_origin() {
 #[test]
 fn guide_point_adds_a_guide_point() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -1449,7 +1459,7 @@ fn guide_clear_deletes_every_guide() {
     doc.add_guide_point(Point3::new(1.0, 1.0, 1.0)).unwrap();
     doc.add_guide_line(Point3::new(0.0, 0.0, 0.0), kernel::Vec3::new(1.0, 0.0, 0.0))
         .unwrap();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -1463,7 +1473,7 @@ fn guide_clear_deletes_every_guide() {
 #[test]
 fn guide_angular_rotates_base_dir_around_plane_normal_and_adds_one_undo_entry() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -1509,7 +1519,7 @@ fn guide_angular_rotates_base_dir_around_plane_normal_and_adds_one_undo_entry() 
 #[test]
 fn guide_angular_refuses_a_bad_derived_origin() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let data = call_err(
@@ -1530,7 +1540,7 @@ fn guide_angular_refuses_a_bad_derived_origin() {
 #[test]
 fn guide_angular_rejects_a_base_dir_with_no_projection_into_the_plane() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     // base_dir parallel to plane_normal projects to zero — a malformed
@@ -1561,7 +1571,7 @@ fn attr_set_writes_a_key_and_get_reads_it_back() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let obj_pub = public_of(&doc, &EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -1616,7 +1626,7 @@ fn attr_set_refuses_an_unrepresentable_number() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let obj_pub = public_of(&doc, &EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let data = call_err(
@@ -1634,7 +1644,7 @@ fn attr_set_refuses_a_too_deep_value() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let obj_pub = public_of(&doc, &EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let mut value = json!(null);
@@ -1659,7 +1669,7 @@ fn attr_writes_refuse_the_reserved_hew_namespace() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let obj_pub = public_of(&doc, &EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -1700,7 +1710,7 @@ fn attr_set_accepts_a_namespace_that_merely_begins_with_hew() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let obj_pub = public_of(&doc, &EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     for ns in ["hewlett.example", "hews", "hew-tools.example", "HEW"] {
@@ -1729,7 +1739,7 @@ fn attr_get_still_reads_the_reserved_namespace() {
         kernel::AttrValue::Int(7),
     )
     .expect("first-party write goes through the kernel, unrestricted");
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let got = call_ok(
@@ -1745,7 +1755,7 @@ fn attr_get_still_reads_the_reserved_namespace() {
 #[test]
 fn attr_set_refuses_an_unknown_target() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let data = call_err(
@@ -1770,7 +1780,7 @@ fn attr_delete_deletes_a_key_and_refuses_an_unknown_attr() {
         kernel::AttrValue::Int(1),
     )
     .expect("seed attr");
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -1814,7 +1824,7 @@ fn attr_get_addresses_the_document_target() {
         kernel::AttrValue::Bool(true),
     )
     .expect("seed");
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let result = call_ok(
@@ -1832,7 +1842,7 @@ fn attr_get_addresses_the_document_target() {
 #[test]
 fn status_reports_no_entries_before_anything_happens() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let result = call_ok(&mut conn, &mut doc, 2, "hew.history.status", json!({}));
@@ -1846,7 +1856,7 @@ fn status_reports_the_transact_label_and_connection_origin_after_an_api_transact
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let obj_pub = public_of(&doc, &EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
 
@@ -1876,7 +1886,7 @@ fn status_reports_saved_depth_and_every_entrys_label_and_origin() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let obj_pub = public_of(&doc, &EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     // build_box left two UI-authored entries (Draw, Push/Pull — see this
@@ -1928,7 +1938,7 @@ fn undo_with_a_wrong_expected_label_refuses() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let obj_pub = public_of(&doc, &EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     call_ok(
@@ -1958,7 +1968,7 @@ fn undo_pops_the_top_entry_and_redo_restores_it() {
     let mut doc = Document::new();
     let obj = build_box(&mut doc, 0.0);
     let obj_pub = public_of(&doc, &EntityRef::Object(obj));
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     call_ok(
@@ -1982,7 +1992,7 @@ fn undo_pops_the_top_entry_and_redo_restores_it() {
 #[test]
 fn undo_refuses_nothing_to_undo_and_redo_refuses_nothing_to_redo() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let data = call_err(&mut conn, &mut doc, 2, "hew.history.undo", json!({}));
@@ -2008,7 +2018,7 @@ fn purge_unused_removes_an_unused_material_and_definition_as_one_undo_entry() {
     doc.delete_node(NodeId::Instance(stray_inst))
         .expect("delete the only instance");
 
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
     let bytes_before = doc.save();
@@ -2034,7 +2044,7 @@ fn purge_unused_is_a_noop_and_adds_no_undo_entry_when_idle() {
     let a = build_box(&mut doc, 0.0);
     let mat = doc.add_material(Material::solid("Used", Rgba8::rgb(1, 2, 3)));
     doc.set_object_material(a, Some(mat)).expect("base");
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
     let depth_before = doc.undo_depth();
 

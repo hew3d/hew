@@ -6,7 +6,8 @@
  * PushPullTool.test.ts/CircleTool.test.ts.
  */
 import { describe, it, expect, vi } from 'vitest'
-import { PaintTool, MATERIAL_SENTINEL } from './PaintTool'
+import { PaintTool, MATERIAL_SENTINEL, resetInstancePaintExplained } from './PaintTool'
+import type { NodeRef } from '../panels/treeModel'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
@@ -17,13 +18,14 @@ function makeSnap(overrides: Partial<Snap> = {}): Snap {
   return { x: 0, y: 0, z: 0, kind: 'ground', ...overrides }
 }
 
-/** A fake `FacePickJs` returning the seeded handles. */
-function makeFacePick(object: bigint, face: bigint) {
+/** A fake `FacePickJs` returning the seeded handles (`instance`: the
+ *  placement the pick went through, if any). */
+function makeFacePick(object: bigint, face: bigint, instance?: bigint) {
   return {
     object: () => object,
     face: () => face,
     depth: () => 1,
-    instance: () => undefined,
+    instance: () => instance,
     free: vi.fn(),
   }
 }
@@ -45,6 +47,11 @@ function makeWasmScene(opts: {
   faceMaterial?: ReturnType<typeof makeFaceMaterial> | undefined
   paintFaceThrows?: string
   replaceMaterialThrows?: string
+  /** `instance_expanded_members`/`instance_expanded_inherited` of the
+   *  picked placement; omitted, nothing inherited. */
+  expanded?: { members: bigint[]; inherited: bigint[] }
+  /** What `set_instance_material` reports as redrawn; omitted, `[]`. */
+  touched?: bigint[]
 } = {}): WasmScene {
   return {
     pick_face: vi.fn(() => opts.facePick),
@@ -53,6 +60,9 @@ function makeWasmScene(opts: {
       if (opts.paintFaceThrows !== undefined) throw new Error(opts.paintFaceThrows)
     }),
     set_object_material: vi.fn(),
+    set_instance_material: vi.fn(() => BigUint64Array.from(opts.touched ?? [])),
+    instance_expanded_members: vi.fn(() => BigUint64Array.from(opts.expanded?.members ?? [])),
+    instance_expanded_inherited: vi.fn(() => BigUint64Array.from(opts.expanded?.inherited ?? [])),
     replace_material: vi.fn(() => {
       if (opts.replaceMaterialThrows !== undefined) throw new Error(opts.replaceMaterialThrows)
     }),
@@ -308,3 +318,100 @@ describe('PaintTool — replace everywhere (Shift/Ctrl+Shift, design §2)', () =
     expect(onReplace).not.toHaveBeenCalled()
   })
 })
+
+describe('PaintTool — component placements', () => {
+  function makeInstanceTool(scene: WasmScene, stack: NodeRef[] = []) {
+    const onCommit = vi.fn()
+    const onToast = vi.fn()
+    const onSample = vi.fn()
+    const onReplace = vi.fn()
+    const onInstanceCommit = vi.fn()
+    const onHover = vi.fn()
+    const tool = new PaintTool(scene, onCommit, onToast, onSample, onReplace, () => stack, onInstanceCommit, onHover)
+    return { tool, onCommit, onToast, onSample, onInstanceCommit, onHover }
+  }
+
+  it('a click on an instance pick at the top level paints the placement', () => {
+    resetInstancePaintExplained()
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 9n), touched: [9n] })
+    const { tool, onInstanceCommit, onToast } = makeInstanceTool(scene)
+    tool.setCurrentMaterial(7n)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(scene.set_instance_material).toHaveBeenCalledWith(9n, 7n)
+    expect(scene.paint_face).not.toHaveBeenCalled()
+    expect(onInstanceCommit).toHaveBeenCalledWith([9n])
+    // The first one explains itself, once per session.
+    expect(onToast).toHaveBeenCalledTimes(1)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(onToast).toHaveBeenCalledTimes(1)
+  })
+
+  it('a whole-object (Ctrl/Cmd) click on an instance also paints the placement', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 9n) })
+    const { tool } = makeInstanceTool(scene)
+    tool.setCurrentMaterial(7n)
+    tool.setWholeObject(true)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(scene.set_instance_material).toHaveBeenCalledWith(9n, 7n)
+    expect(scene.set_object_material).not.toHaveBeenCalled()
+  })
+
+  it('inside the instance editing context a click paints the face', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 9n) })
+    const { tool, onCommit } = makeInstanceTool(scene, [{ kind: 'instance', id: 9n }])
+    tool.setCurrentMaterial(7n)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(scene.paint_face).toHaveBeenCalledWith(3n, 4n, 7n)
+    expect(scene.set_instance_material).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledWith(3n)
+  })
+
+  it('painting a nested placement refreshes every world placement that draws it', () => {
+    // Inside an outer placement's editing session, a surfaced nested
+    // placement is the pick's instance; the kernel names the world
+    // placements whose drawing changed.
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 9n), touched: [20n, 21n] })
+    const { tool, onInstanceCommit } = makeInstanceTool(scene, [{ kind: 'instance', id: 5n }])
+    tool.setCurrentMaterial(7n)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(onInstanceCommit).toHaveBeenCalledWith([20n, 21n])
+  })
+
+  it('the eyedropper samples the nearest painted placement on the member path', () => {
+    // Member 3n draws under an unpainted outer placement and a painted
+    // nested one: the kernel's nearest-wins inherited material is 12n.
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, 9n),
+      expanded: { members: [1n, 3n], inherited: [MATERIAL_SENTINEL, 12n] },
+      faceMaterial: makeFaceMaterial(5n, 6n),
+    })
+    const { tool, onSample } = makeInstanceTool(scene)
+    tool.setEyedropper(true)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(onSample).toHaveBeenCalledWith(12n)
+    expect(tool.getCurrentMaterial()).toBe(12n)
+    expect(scene.face_material).not.toHaveBeenCalled()
+  })
+
+  it('the eyedropper falls back to the face when the placement has no material', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, 9n),
+      faceMaterial: makeFaceMaterial(MATERIAL_SENTINEL, 6n),
+    })
+    const { tool, onSample } = makeInstanceTool(scene)
+    tool.setEyedropper(true)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(onSample).toHaveBeenCalledWith(6n)
+  })
+
+  it('hovering reports the placement a click would paint, and clears on cancel', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 9n) })
+    const { tool, onHover } = makeInstanceTool(scene)
+    tool.onPointerMove(makeSnap(), RAY)
+    expect(tool.hoveredInstance).toBe(9n)
+    expect(onHover).toHaveBeenLastCalledWith(9n)
+    tool.cancel()
+    expect(onHover).toHaveBeenLastCalledWith(null)
+  })
+})
+

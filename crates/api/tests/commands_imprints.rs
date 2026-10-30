@@ -14,9 +14,13 @@
 //! (`not_in_plane`) and a locator that names neither kind of imprint
 //! (`not_an_imprint`).
 
-use api::{Connection, DispatchOutcome, NoHost, Profile, Request, RequestId, Response, codes};
+use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
 use kernel::Document;
 use serde_json::{Value, json};
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // ----------------------------------------------------------------- fixtures
 // (mirrors commands_face_imprint.rs's fixture set — each integration test
@@ -36,6 +40,7 @@ fn req(id: i64, method: &str, params: Value) -> Request {
 
 fn hello(conn: &mut Connection, doc: &mut Document) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(0, "hew.meta.hello", json!({ "protocol": 1 })),
@@ -47,9 +52,12 @@ fn hello(conn: &mut Connection, doc: &mut Document) {
 
 fn hello_attach(conn: &mut Connection, doc: &mut Document) {
     hello(conn, doc);
-    let DispatchOutcome::Reply(r) =
-        conn.dispatch(doc, &mut NoHost, req(1, "hew.doc.attach", json!({})))
-    else {
+    let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
+        doc,
+        &mut NoHost,
+        req(1, "hew.doc.attach", json!({})),
+    ) else {
         panic!("attach replies")
     };
     assert!(r.error.is_none(), "attach failed: {:?}", r.error);
@@ -62,7 +70,9 @@ fn call(
     method: &str,
     params: Value,
 ) -> Response {
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, &mut NoHost, req(id, method, params)) else {
+    let DispatchOutcome::Reply(r) =
+        conn.dispatch(&REGISTRY, doc, &mut NoHost, req(id, method, params))
+    else {
         panic!("{method} replies")
     };
     r
@@ -204,7 +214,7 @@ fn approx_point(v: &Value, expected: [f64; 3], tol: f64) {
 
 #[test]
 fn sub_face_imprint_is_listed_moved_rotated_scaled_and_deleted() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -343,7 +353,7 @@ fn sub_face_imprint_is_listed_moved_rotated_scaled_and_deleted() {
 
 #[test]
 fn chord_imprint_is_listed_moved_along_its_edge_and_deleted() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -449,7 +459,7 @@ fn chord_imprint_is_listed_moved_along_its_edge_and_deleted() {
 
 #[test]
 fn move_imprint_off_the_faces_plane_refuses_not_in_plane() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -495,7 +505,7 @@ fn move_imprint_off_the_faces_plane_refuses_not_in_plane() {
 
 #[test]
 fn move_imprint_on_a_plain_face_point_refuses_not_an_imprint() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     // A plain box, nothing drawn on any of its faces.
@@ -537,7 +547,7 @@ fn imprints_lists_a_circle_cut_apart_by_a_rectangle_as_one_curve_unit() {
     // A circle drawn across the rectangle's right side lands as two runs,
     // each listed as a chord; `curve_units` names them as the one circle,
     // each run with the `at` locator its chord entry carries.
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(
@@ -614,7 +624,7 @@ fn imprints_lists_a_circle_cut_apart_by_a_rectangle_as_one_curve_unit() {
 /// locator names that circle: passing it to move_imprint moves the circle.
 #[test]
 fn a_whole_circles_run_locator_moves_it() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
     let object_id = build_box(

@@ -97,12 +97,12 @@ export type UnspecifiedShape = Record<string, unknown>
 /**
  * `hew.attr.delete` (v1) — Delete one attribute key or a whole namespace.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, invalid_attr_name, reserved_attr_namespace, unknown_attr, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
+ * Refusals: unknown_entity, unknown_face, unknown_edge, not_a_solid_edge, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, invalid_attr_name, reserved_attr_namespace, attr_namespace_not_granted, unknown_attr, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
  */
 export interface AttrDeleteParams {
   key?: string
   ns: string
-  target: string
+  target: string | { face: UnspecifiedShape } | { edge: UnspecifiedShape }
 }
 
 export interface AttrDeleteResult {}
@@ -110,11 +110,11 @@ export interface AttrDeleteResult {}
 /**
  * `hew.attr.get` (v1) — Read a target's attribute dictionaries.
  * Tier: Required · Class: read-only · Served: kernel
- * Refusals: unknown_entity, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
+ * Refusals: unknown_entity, unknown_face, unknown_edge, not_a_solid_edge, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
  */
 export interface AttrGetParams {
   ns?: string
-  target: string
+  target: string | { face: UnspecifiedShape } | { edge: UnspecifiedShape }
 }
 
 export type AttrGetResult = UnspecifiedShape
@@ -122,12 +122,12 @@ export type AttrGetResult = UnspecifiedShape
 /**
  * `hew.attr.set` (v1) — Write one attribute key.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, invalid_attr_name, reserved_attr_namespace, non_finite_attr_value, attr_value_too_deep, unrepresentable_attr_value, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
+ * Refusals: unknown_entity, unknown_face, unknown_edge, not_a_solid_edge, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, invalid_attr_name, reserved_attr_namespace, attr_namespace_not_granted, non_finite_attr_value, attr_value_too_deep, unrepresentable_attr_value, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
  */
 export interface AttrSetParams {
   key: string
   ns: string
-  target: string
+  target: string | { face: UnspecifiedShape } | { edge: UnspecifiedShape }
   value: UnspecifiedShape
 }
 
@@ -161,6 +161,26 @@ export interface ComponentExplodeResult {
 }
 
 /**
+ * `hew.component.flip_instance` (v1) — Mirror one world instance across one of its definition's local axes.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_entity
+ */
+export interface ComponentFlipInstanceParams {
+  /** the definition-local axis to mirror across (the plane normal to it, through the local origin) */
+  axis: "x" | "y" | "z"
+  /** a world instance ("ins_…") */
+  instance: string
+}
+
+export interface ComponentFlipInstanceResult {
+  instance: string
+  /** whether the new pose's determinant is negative */
+  mirrored: boolean
+  /** the new pose, row-major 3×4 */
+  pose: number[]
+}
+
+/**
  * `hew.component.make_unique` (v1) — Deep-copy an instance's definition into a private one.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: unknown_entity, unknown_instance, unknown_component
@@ -188,6 +208,28 @@ export interface ComponentPlaceResult {
 }
 
 /**
+ * `hew.component.rebase` (v1) — Re-express a definition in a new frame; every placement is compensated, so nothing moves on screen.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_entity, invalid_frame, rebase_during_session
+ */
+export interface ComponentRebaseParams {
+  /** a definition ("cmp_…"), or an instance ("ins_…") meaning its definition */
+  id: string
+  /** the new origin, in the definition's current local coordinates */
+  origin: [number, number, number]
+  /** the new x axis, unit length, in the definition's current local coordinates */
+  x: [number, number, number]
+  /** the new y axis, unit length and perpendicular to x; z is x × y */
+  y: [number, number, number]
+}
+
+export interface ComponentRebaseResult {
+  component: string
+  /** how many instances place the definition, world or nested in another definition; each pose was compensated */
+  instances_updated: number
+}
+
+/**
  * `hew.context.enter` (v1) — Open a group/component editing frame (transaction-balanced only).
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: unknown_entity, explode_session_open, explode_session_nested_group, explode_session_pose_unsupported, explode_session_grouped_instance, unknown_group, unknown_instance
@@ -210,7 +252,7 @@ export interface ContextExitResult {}
 /**
  * `hew.doc.attach` (v1) — Bind this connection to one open document, named by `document` (id, path, label, or title; see hew.meta.documents). With no `document`, the connection's current document.
  * Tier: Required · Class: solitary · Served: kernel
- * Refusals: unknown_document, ambiguous_document
+ * Refusals: unknown_document, ambiguous_document, document_not_granted
  */
 export interface DocAttachParams {
   /** a document id (doc_N), or its exact path, label, or title when unambiguous */
@@ -218,13 +260,13 @@ export interface DocAttachParams {
 }
 
 export interface DocAttachResult {
-  document?: { attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string }
+  document?: { attached?: boolean; dirty: boolean; document_id: string | null; front?: boolean; id: string; label?: string; path: string | null; title: string }
 }
 
 /**
  * `hew.doc.close` (v1) — Close an open document window (the attached one, or the named `document`). Refuses unsaved changes unless `discard` is set.
  * Tier: Standard · Class: solitary · Served: host
- * Refusals: host_capability_missing, unknown_document, ambiguous_document, unsaved_changes, last_document
+ * Refusals: host_capability_missing, unknown_document, ambiguous_document, unsaved_changes, last_document, document_busy
  */
 export interface DocCloseParams {
   /** close even with unsaved changes (they are lost); default false */
@@ -233,19 +275,21 @@ export interface DocCloseParams {
 }
 
 export interface DocCloseResult {
-  closed?: { attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string }
+  closed?: { attached?: boolean; dirty: boolean; document_id: string | null; front?: boolean; id: string; label?: string; path: string | null; title: string }
 }
 
 /**
  * `hew.doc.export` (v1) — Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp ("skp", 2026 container; "skp2017") — bytes base64, or a path on hosts with filesystem access.
  * Tier: Required · Class: solitary · Served: host
- * Refusals: export_failed, host_capability_missing, nothing_to_export, save_failed
+ * Refusals: export_failed, host_capability_missing, nothing_to_export, save_failed, unknown_entity, unknown_occurrence, too_many_occurrences
  */
 export interface DocExportParams {
   /** "gltf" is an alias for "glb" — every host that implements one implements both. "skp" is the SketchUp 2026 container, "skp2017" the 2017 format; exporting never changes the document's own file */
   format: "stl" | "3mf" | "glb" | "gltf" | "usdz" | "skp" | "skp2017"
   path?: string
   segments_per_turn?: number
+  /** draw only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its leaves at the identity pose) */
+  selection?: (string | { path: string[] })[]
   /** SketchUp formats only: the display units the file opens in (hew.view.units's formats). Absent: the host's display units (the app's preference live; meters headless). */
   units?: "m" | "cm" | "mm" | "arch" | "frac_in" | "dec_in"
 }
@@ -265,7 +309,7 @@ export interface DocFocusParams {
 }
 
 export interface DocFocusResult {
-  document?: { attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string }
+  document?: { attached?: boolean; dirty: boolean; document_id: string | null; front?: boolean; id: string; label?: string; path: string | null; title: string }
 }
 
 /**
@@ -316,7 +360,7 @@ export interface DocImportResult {
 /**
  * `hew.doc.new` (v1) — Create a fresh document. The desktop app opens it in a new window — behind the user's current one unless `focus` says otherwise — and attaches the connection to it; headless hosts replace the working document.
  * Tier: Required · Class: solitary · Served: host
- * Refusals: host_capability_missing, window_not_ready
+ * Refusals: host_capability_missing, window_not_ready, document_busy
  */
 export interface DocNewParams {
   /** where the new window goes; background (the default) never takes the user's focus */
@@ -326,13 +370,13 @@ export interface DocNewParams {
 }
 
 export interface DocNewResult {
-  document?: { attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string }
+  document?: { attached?: boolean; dirty: boolean; document_id: string | null; front?: boolean; id: string; label?: string; path: string | null; title: string }
 }
 
 /**
  * `hew.doc.open` (v1) — Open a .hew or SketchUp .skp document. The desktop app opens it in a new window (or attaches to the window that already has that file open), behind the user's current window unless `focus` says otherwise; headless hosts replace the working document.
  * Tier: Required · Class: solitary · Served: host
- * Refusals: host_capability_missing, load_failed, window_not_ready
+ * Refusals: host_capability_missing, load_failed, window_not_ready, document_busy
  */
 export interface DocOpenParams {
   /** where the new window goes; background (the default) never takes the user's focus */
@@ -346,7 +390,7 @@ export interface DocOpenParams {
 export interface DocOpenResult {
   /** the file was already open in a window; the connection was attached to it instead of opening a second copy */
   already_open?: boolean
-  document?: { attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string }
+  document?: { attached?: boolean; dirty: boolean; document_id: string | null; front?: boolean; id: string; label?: string; path: string | null; title: string }
 }
 
 /**
@@ -364,7 +408,7 @@ export interface DocPurgeUnusedResult {
 /**
  * `hew.doc.revert` (v1) — Revert to Saved: re-read the document's saved file in place, discarding every change since the last save. The undo and redo history is cleared and the document reads clean. Refuses `nothing_to_revert` when the document has no saved file or has no changes since the last save. There is no confirmation step: the caller is deliberate.
  * Tier: Standard · Class: solitary · Served: host
- * Refusals: host_capability_missing, load_failed, nothing_to_revert, unknown_document, ambiguous_document
+ * Refusals: host_capability_missing, load_failed, nothing_to_revert, unknown_document, ambiguous_document, document_busy
  */
 export interface DocRevertParams {
   document?: string
@@ -402,10 +446,14 @@ export interface DocSaveResult {
 /**
  * `hew.doc.transact` (v1) — Execute commands in order, atomically, as one labeled undo entry.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: ref_resolution_failed
+ * Refusals: ref_resolution_failed, generation_moved
  */
 export interface DocTransactParams {
+  /** merge into the top undo entry when it was committed under the same key by a connection with this connection's identity (docs/agents/HEW_API.md §6.5) */
+  coalesce?: string
   commands: { as?: string; method: string; params?: UnspecifiedShape }[]
+  /** refuse with generation_moved, before any command runs, unless the document's history generation is this value (docs/agents/HEW_API.md §6.5) */
+  expect_generation?: number
   label?: string
 }
 
@@ -432,7 +480,7 @@ export interface EntityDeleteResult {}
  * Refusals: unknown_entity, mixed_selection_unsupported, sketch_copy_unsupported, array_count_too_large, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch
  */
 export interface EntityMoveParams {
-  copy?: { count?: number }
+  copy?: { count?: number; grid?: { count: number; step: [number, number, number] }[] }
   from?: UnspecifiedShape
   ids: string[]
   to?: UnspecifiedShape
@@ -440,6 +488,7 @@ export interface EntityMoveParams {
 }
 
 export interface EntityMoveResult {
+  /** the copies, placement-major, each placement's block in ids order */
   ids?: string[]
 }
 
@@ -484,6 +533,55 @@ export interface EntityScaleParams {
 }
 
 export interface EntityScaleResult {}
+
+/**
+ * `hew.entity.set_frame` (v1) — Set or clear the part frame override (hew.part / frame) of an object or group.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_entity, not_a_part, invalid_frame
+ */
+export interface EntitySetFrameParams {
+  /** true removes the override; give it alone */
+  clear?: boolean
+  /** an object ("obj_…") or group ("grp_…") */
+  id: string
+  origin?: [number, number, number]
+  x?: [number, number, number]
+  y?: [number, number, number]
+}
+
+export interface EntitySetFrameResult {
+  id: string
+  /** where hew.query.part_frame now takes the frame from */
+  source: "attribute" | "face"
+}
+
+/**
+ * `hew.event.subscribe` (v1) — Receive the named events on this connection as notification frames. Names the grant may not receive come back in `denied`.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: none.
+ */
+export interface EventSubscribeParams {
+  events: ("document_changed" | "selection_changed" | "context_changed" | "document_will_save" | "document_saved" | "document_opened" | "document_closed" | "units_changed" | "scenes_changed" | "tool_changed" | "plugin_state" | "slot_changed" | "settings_changed" | "ui_cancel" | "window_closed" | "surface_closed")[]
+}
+
+export interface EventSubscribeResult {
+  denied: string[]
+  subscribed: string[]
+}
+
+/**
+ * `hew.event.unsubscribe` (v1) — Stop receiving the named events on this connection.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: none.
+ */
+export interface EventUnsubscribeParams {
+  events: ("document_changed" | "selection_changed" | "context_changed" | "document_will_save" | "document_saved" | "document_opened" | "document_closed" | "units_changed" | "scenes_changed" | "tool_changed" | "plugin_state" | "slot_changed" | "settings_changed" | "ui_cancel" | "window_closed" | "surface_closed")[]
+}
+
+export interface EventUnsubscribeResult {
+  denied: string[]
+  subscribed: string[]
+}
 
 /**
  * `hew.group.create` (v1) — Group sibling nodes non-destructively.
@@ -592,6 +690,8 @@ export interface HistoryStatusParams {}
 
 export interface HistoryStatusResult {
   entries: { redo: { bookkeeping: boolean; label: string; origin: UnspecifiedShape }[]; undo: { bookkeeping: boolean; label: string; origin: UnspecifiedShape }[] }
+  epoch: number
+  generation: number
   redo_depth: number
   saved_depth: UnspecifiedShape
   top: UnspecifiedShape
@@ -770,12 +870,15 @@ export interface MaterialCreateResult {
 /**
  * `hew.material.paint` (v1) — Paint a face or entity.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, unknown_object, unknown_face, unknown_material, locator_missed, ambiguous_locator
+ * Refusals: unknown_entity, unknown_object, unknown_instance, unknown_component, unknown_face, unknown_material, locator_missed, ambiguous_locator
  */
 export interface MaterialPaintParams {
   face?: UnspecifiedShape
+  /** an object (its base material), an instance (the placement's own material), or a definition (every object it owns) */
   id?: string
   material: string | null
+  /** for an instance id: the placement (default) or its definition; a definition id takes only "definition" */
+  scope?: "instance" | "definition"
 }
 
 export interface MaterialPaintResult {}
@@ -804,7 +907,7 @@ export interface MaterialPositionTextureResult {}
 export interface MaterialReplaceParams {
   /** the material to replace; null: unpainted object bases */
   from: string | null
-  /** only within this object; omitted: the whole document */
+  /** only within this object; omitted: the whole document, instance materials included */
   object?: string
   /** the material it becomes; null: unpaint */
   to: string | null
@@ -855,7 +958,7 @@ export interface MetaCapabilitiesResult {
 export interface MetaDocumentsParams {}
 
 export interface MetaDocumentsResult {
-  documents: ({ attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string })[]
+  documents: ({ attached?: boolean; dirty: boolean; document_id: string | null; front?: boolean; id: string; label?: string; path: string | null; title: string })[]
 }
 
 /**
@@ -872,9 +975,10 @@ export interface MetaHelloParams {
 
 export interface MetaHelloResult {
   app: { name: string; version: string }
-  documents: ({ attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string })[]
+  documents: ({ attached?: boolean; dirty: boolean; document_id: string | null; front?: boolean; id: string; label?: string; path: string | null; title: string })[]
   encoding: string
-  profile: "core" | "app"
+  grant?: UnspecifiedShape
+  profile: "core" | "app" | "plugin"
   protocol: number
 }
 
@@ -930,6 +1034,22 @@ export interface PrintPdfResult {
 }
 
 /**
+ * `hew.query.changes_since` (v1) — What changed since a history generation: the union of the change sets since then, or `full` when the history no longer reaches back that far.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: none.
+ */
+export interface QueryChangesSinceParams {
+  generation: number
+}
+
+export interface QueryChangesSinceResult {
+  changes: { added: string[]; attrs: ({ id: string; ns: string; scope: "entity" | "face" | "edge" })[]; document: boolean; full: boolean; modified: string[]; removed: string[] }
+  epoch: number
+  from: number
+  generation: number
+}
+
+/**
  * `hew.query.context` (v1) — The open editing-context frame stack.
  * Tier: Required · Class: read-only · Served: kernel
  * Refusals: none.
@@ -938,6 +1058,8 @@ export interface QueryContextParams {}
 
 export interface QueryContextResult {
   direct_members?: UnspecifiedShape
+  epoch: number
+  generation: number
   stack: unknown[]
 }
 
@@ -952,6 +1074,8 @@ export interface QueryEntityParams {
 }
 
 export interface QueryEntityResult {
+  epoch: number
+  generation: number
   id: string
   kind: string
 }
@@ -959,64 +1083,145 @@ export interface QueryEntityResult {
 /**
  * `hew.query.faces` (v1) — A solid's faces: planes, areas, centroids, boundary loops.
  * Tier: Required · Class: read-only · Served: kernel
- * Refusals: unknown_entity
+ * Refusals: unknown_entity, unknown_occurrence
  */
 export interface QueryFacesParams {
-  object: string
+  /** an object id; give this or path */
+  object?: string
+  /** an occurrence path ending at an object ([...instances, object]); each face then also reports material_effective through it */
+  path?: string[]
 }
 
 export interface QueryFacesResult {
+  epoch: number
+  /** per face: object, plane, area, centroid, outer, holes, material, surface, texture_pins, attrs (the face's attribute dictionary, namespace -> key -> value, {} for none), and material_effective when asked through a path */
   faces: unknown[]
+  generation: number
   object: string
 }
 
 /**
- * `hew.query.measure` (v1) — Distances and angles between points, edges, and faces.
+ * `hew.query.measure` (v1) — Distances between points, edges, and faces; or the volume, area, and bounding box of a part, group, or instance.
  * Tier: Required · Class: read-only · Served: kernel
- * Refusals: unknown_entity, locator_missed, ambiguous_locator, no_such_point
+ * Refusals: unknown_entity, unknown_occurrence, locator_missed, ambiguous_locator, no_such_point, too_many_occurrences
  */
-export interface QueryMeasureParams {
-  from: UnspecifiedShape
-  to: UnspecifiedShape
+export type QueryMeasureParams = { from: UnspecifiedShape; to: UnspecifiedShape } | { id: string } | { path: string[] }
+
+export type QueryMeasureResult = { delta: unknown[]; distance: number; epoch: number; generation: number } | { area: number; bbox: { max: unknown[]; min: unknown[] }; epoch: number; extents: unknown[]; generation: number; leaf_count: number; open_leaves: number; volume: number | null }
+
+/**
+ * `hew.query.mesh` (v1) — One placement's triangle mesh: positions, normals, indices, and per-triangle face indices, base64.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_entity, unknown_occurrence, mesh_too_large, too_many_occurrences
+ */
+export interface QueryMeshParams {
+  /** a world node's public id */
+  id?: string
+  /** an occurrence path, instances first and the node last */
+  path?: string[]
+  /** defaults to world; local is the node's own frame (an instance's definition coordinates) */
+  space?: "world" | "local"
 }
 
-export interface QueryMeasureResult {
-  delta: unknown[]
-  distance: number
+export interface QueryMeshResult {
+  epoch: number
+  /** u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base */
+  face_indices_base64: string
+  generation: number
+  /** u32 little-endian, three per triangle, counter-clockwise from outside */
+  indices_base64: string
+  /** f32 little-endian xyz per vertex, unit length */
+  normals_base64: string
+  parts: { face_index_base: number; id: string; index_base: number; index_count: number }[]
+  /** f32 little-endian xyz per vertex */
+  positions_base64: string
+  triangle_count: number
+  vertex_count: number
 }
 
 /**
- * `hew.query.raycast` (v1) — First hit along a ray — the programmatic form of clicking.
+ * `hew.query.occurrences` (v1) — Every placement in the model with its path and world pose: objects, groups, and instances, nested definitions expanded through each instance.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_entity, unknown_occurrence, too_many_occurrences
+ */
+export interface QueryOccurrencesParams {
+  /** defaults to false: hidden placements are skipped and hidden instances are not descended */
+  include_hidden?: boolean
+  /** which rows to return (never what is traversed); defaults to all three */
+  kinds?: ("object" | "group" | "instance")[]
+  /** where to start: node ids (world nodes) or occurrence locators {path}; absent is the whole world. Rows come in root order, each root's subtree depth-first, a placement listed once even when two roots reach it */
+  roots?: (string | { path: string[] })[]
+}
+
+export interface QueryOccurrencesResult {
+  epoch: number
+  generation: number
+  occurrences: ({ definition: string | null; definition_name: string | null; depth: number; hidden: boolean; id: string; kind: "object" | "group" | "instance"; material: string | null; material_effective: string | null; mirrored: boolean; name: string | null; parent: string | null; path: string[]; tags: string[][]; user_hidden: boolean; world_pose: number[] })[]
+}
+
+/**
+ * `hew.query.part_frame` (v1) — A part measured along its own axes: origin, axes, and extents of one placement.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_entity, unknown_occurrence, no_part_frame, too_many_occurrences
+ */
+export interface QueryPartFrameParams {
+  /** a world node's public id */
+  id?: string
+  /** an occurrence path, instances first and the node last */
+  path?: string[]
+}
+
+export interface QueryPartFrameResult {
+  epoch: number
+  /** along x, y, z: [length, width, thickness] for a face frame; the definition's own axis order for an instance */
+  extents: [number, number, number]
+  generation: number
+  mirrored: boolean
+  origin: [number, number, number]
+  source: "attribute" | "definition" | "face"
+  x: [number, number, number]
+  y: [number, number, number]
+  z: [number, number, number]
+}
+
+/**
+ * `hew.query.raycast` (v1) — First hit along a ray, or every crossing, through any depth of nesting — the programmatic form of clicking.
  * Tier: Required · Class: read-only · Served: kernel
- * Refusals: locator_missed, ambiguous_locator
+ * Refusals: locator_missed, ambiguous_locator, unknown_entity, unknown_occurrence, too_many_occurrences
  */
 export interface QueryRaycastParams {
+  /** list every face crossing along the ray, nearest first (front and back faces both), instead of only the nearest; an empty list is a success */
+  all?: boolean
   dir: [number, number, number]
+  /** world node ids or occurrence locators {path}; each entry and everything under it is ignored by the ray */
+  exclude?: (string | { path: string[] })[]
+  /** let the ray hit parts that are effectively hidden (user-hidden or on a hidden tag); each hit reports hidden. Default false: hidden parts fall through, as rendering does */
+  include_hidden?: boolean
+  /** meters along the ray; farther crossings are dropped */
+  max_distance?: number
   origin: [number, number, number]
 }
 
-export interface QueryRaycastResult {
-  distance: number
-  kind: "object" | "instance"
-  normal: unknown[]
-  /** the world object's or, for an instance hit, the instance's public id */
-  object: string
-  point: unknown[]
-}
+export type QueryRaycastResult = { distance: number; epoch: number; face: UnspecifiedShape; generation: number; hidden: boolean; kind: "object" | "instance"; leaf: string; normal: unknown[]; object: string; path: string[]; point: unknown[] } | { epoch: number; generation: number; hits: ({ distance: number; face: UnspecifiedShape; hidden: boolean; kind: "object" | "instance"; leaf: string; normal: unknown[]; object: string; path: string[]; point: unknown[] })[]; raycast_hits_capped?: boolean }
 
 /**
  * `hew.query.resolve` (v1) — Resolve any locator (point, face, edge) to its concrete value without mutating.
  * Tier: Required · Class: read-only · Served: kernel
- * Refusals: unknown_entity, locator_missed, ambiguous_locator, no_such_point, face_token_unknown, face_token_stale
+ * Refusals: unknown_entity, locator_missed, ambiguous_locator, no_such_point, face_token_unknown, face_token_stale, unknown_occurrence
  */
 export interface QueryResolveParams {
   /** HEW_API.md §5.2's edge locator: a solid edge by {object,at}, a sketch edge's own public id ("edg_…") as a bare string, or a sketch edge by {sketch,at} / {sketch,from,to} */
   edge?: UnspecifiedShape
   face?: UnspecifiedShape
+  /** an occurrence locator {path: [instance, …, leaf]}; answers {occurrence: OccurrenceJson} */
+  occurrence?: UnspecifiedShape
   point?: UnspecifiedShape
 }
 
-export type QueryResolveResult = UnspecifiedShape
+export interface QueryResolveResult {
+  epoch: number
+  generation: number
+}
 
 /**
  * `hew.query.scene` (v1) — The document tree with per-entity summaries.
@@ -1028,11 +1233,36 @@ export interface QuerySceneParams {}
 export interface QuerySceneResult {
   components: unknown[]
   document: UnspecifiedShape
+  epoch: number
+  generation: number
   guides: unknown[]
   materials: unknown[]
   sketches: unknown[]
   tags: unknown[]
   tree: unknown[]
+}
+
+/**
+ * `hew.query.topology` (v1) — One object's vertices, faces, and edges with their adjacency, planes, and analytic curves.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_entity, unknown_occurrence, not_an_object
+ */
+export interface QueryTopologyParams {
+  /** a world node's public id */
+  id?: string
+  /** an occurrence path, instances first and the node last */
+  path?: string[]
+  /** defaults to world; local is the node's own frame (an instance's definition coordinates) */
+  space?: "world" | "local"
+}
+
+export interface QueryTopologyResult {
+  edges: UnspecifiedShape[]
+  epoch: number
+  faces: UnspecifiedShape[]
+  generation: number
+  object: string
+  vertices: [number, number, number][]
 }
 
 /**
@@ -1152,6 +1382,56 @@ export interface ScenesUpdateParams {
 }
 
 export interface ScenesUpdateResult {}
+
+/**
+ * `hew.selection.clear` (v1) — Clear the app's selection.
+ * Tier: Standard · Class: read-only · Served: host
+ * Refusals: host_capability_missing
+ */
+export interface SelectionClearParams {}
+
+export interface SelectionClearResult {
+  epoch: number
+  generation: number
+  /** public ids in pick order; index 0 is the primary */
+  ids: string[]
+  primary: string | null
+}
+
+/**
+ * `hew.selection.get` (v1) — The app's selection: public ids in pick order, the primary first. A drafting selection reads as empty.
+ * Tier: Standard · Class: read-only · Served: host
+ * Refusals: host_capability_missing
+ */
+export interface SelectionGetParams {}
+
+export interface SelectionGetResult {
+  epoch: number
+  generation: number
+  /** public ids in pick order; index 0 is the primary */
+  ids: string[]
+  primary: string | null
+}
+
+/**
+ * `hew.selection.set` (v1) — Change the app's selection: replace it (the default), or add, subtract, or toggle the named entities. Nodes and sketches mix; a guide or an annotation is selected alone. Hidden entities refuse.
+ * Tier: Standard · Class: read-only · Served: host
+ * Refusals: unknown_entity, selection_target_not_visible, selection_mixed_kinds, host_capability_missing
+ */
+export interface SelectionSetParams {
+  /** objects, groups, instances, and sketches; or exactly one guide; or exactly one annotation */
+  ids: string[]
+  /** defaults to replace */
+  mode?: "replace" | "add" | "subtract" | "toggle"
+}
+
+export interface SelectionSetResult {
+  epoch: number
+  generation: number
+  /** public ids in pick order; index 0 is the primary */
+  ids: string[]
+  primary: string | null
+}
 
 /**
  * `hew.sketch.copy` (v1) — Copy drawing units on a plane by an offset.
@@ -1706,9 +1986,58 @@ export interface ViewCameraParams {
 export interface ViewCameraResult {}
 
 /**
- * `hew.view.line_drawing` (v1) — Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane meters.
+ * `hew.view.clear_isolation` (v1) — End the live viewport's isolation; a no-op when nothing is isolated.
+ * Tier: Standard · Class: read-only · Served: host
+ * Refusals: host_capability_missing
+ */
+export interface ViewClearIsolationParams {}
+
+export interface ViewClearIsolationResult {}
+
+/**
+ * `hew.view.hidden` (v1) — What is hidden: the hidden objects, groups, and instances, the hidden tags, and the live viewport's isolation (null when nothing is isolated or the host has no viewport).
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: none.
+ */
+export interface ViewHiddenParams {}
+
+export interface ViewHiddenResult {
+  hidden: string[]
+  isolated: (string | { instance: string; object: string })[] | null
+  tags_hidden: string[]
+}
+
+/**
+ * `hew.view.hide` (v1) — Hide objects, groups, and component instances. View state: saved with the document, never undoable. Tags hide through hew.tag.set_visible.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_entity, not_a_node
+ */
+export interface ViewHideParams {
+  ids: string[]
+}
+
+export interface ViewHideResult {
+  /** every hidden object, group, and instance */
+  hidden: string[]
+}
+
+/**
+ * `hew.view.isolate` (v1) — Show only the named objects, groups, instances, or definition members (each with an instance that places it) in the live viewport, and frame them. View-only: nothing in the document changes.
+ * Tier: Standard · Class: read-only · Served: host
+ * Refusals: unknown_entity, host_capability_missing
+ */
+export interface ViewIsolateParams {
+  ids: (string | { instance: string; object: string })[]
+}
+
+export interface ViewIsolateResult {
+  isolated: (string | { instance: string; object: string })[]
+}
+
+/**
+ * `hew.view.line_drawing` (v1) — Hidden-line drawing of the visible document, or of a selection, from a camera (crates/hlr), served identically in the app and in hew-cli: hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane meters.
  * Tier: Standard · Class: solitary · Served: host
- * Refusals: host_capability_missing, nothing_to_render, too_complex, save_failed, unknown_scene
+ * Refusals: host_capability_missing, nothing_to_render, too_complex, save_failed, unknown_scene, unknown_entity, unknown_occurrence, too_many_occurrences
  */
 export interface ViewLineDrawingParams {
   /** identical vocabulary to hew.view.snapshot's camera; mutually exclusive with view and scene */
@@ -1725,6 +2054,8 @@ export interface ViewLineDrawingParams {
   scale?: number
   /** a Scene's id: its camera and hidden sets, as hew.view.snapshot */
   scene?: string
+  /** draw only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its leaves at the identity pose) */
+  selection?: (string | { path: string[] })[]
   /** a named standard view (parallel projection); mutually exclusive with camera and scene */
   view?: "iso" | "front" | "back" | "left" | "right" | "top" | "bottom"
 }
@@ -1745,11 +2076,38 @@ export interface ViewLineDrawingResult {
 }
 
 /**
- * `hew.view.snapshot` (v1) — Render the attached document to PNG, headless-rendered via a software rasterizer (a live host may render through its viewport instead) — bytes base64 by default, or a path on hosts with filesystem access.
+ * `hew.view.show` (v1) — Show hidden objects, groups, and component instances again.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_entity, not_a_node
+ */
+export interface ViewShowParams {
+  ids: string[]
+}
+
+export interface ViewShowResult {
+  /** every hidden object, group, and instance */
+  hidden: string[]
+}
+
+/**
+ * `hew.view.show_all` (v1) — Show every hidden object, group, and component instance. Hidden tags stay hidden.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: none.
+ */
+export interface ViewShowAllParams {}
+
+export interface ViewShowAllResult {
+  hidden: string[]
+}
+
+/**
+ * `hew.view.snapshot` (v1) — Render the attached document to PNG, rendered by the host's software rasterizer, identically in the app and in hew-cli, optionally of a selection on a transparent background — bytes base64 by default, or a path on hosts with filesystem access.
  * Tier: Standard · Class: solitary · Served: host
- * Refusals: host_capability_missing, nothing_to_render, save_failed, unknown_scene
+ * Refusals: host_capability_missing, nothing_to_render, save_failed, unknown_entity, unknown_occurrence, unknown_scene, too_many_occurrences
  */
 export interface ViewSnapshotParams {
+  /** "transparent", #rrggbb, or #rrggbbaa; the fill of pixels no surface touches (defaults to the rasterizer's light gray). The id, depth, and normals passes are unaffected. */
+  background?: string
   /** mutually exclusive with view */
   camera?: { eye: [number, number, number]; fov_deg?: number; parallel_height?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
   /** bits per pixel of the depth PNG (default 8); only with include_depth */
@@ -1766,6 +2124,8 @@ export interface ViewSnapshotParams {
   path?: string
   /** a Scene's id: renders through its resolved camera and hidden sets (Document::resolve_scene) instead of the document's own — falls back to the usual cameraless resolution when the Scene captures no camera. Mutually exclusive with camera and view. The Scene's section plane, if any, is NOT rendered headlessly at 1.0. */
   scene?: string
+  /** render only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its members at the identity pose, one picture however many times it is placed). With no camera or view the camera is a fitted isometric over the selection, never the document's saved camera; view fits that standard view to the selection. Mutually exclusive with scene. */
+  selection?: (string | { path: string[] })[]
   /** a named standard view fitted to the scene bounding box; mutually exclusive with camera and scene */
   view?: "iso" | "front" | "back" | "left" | "right" | "top" | "bottom"
   /** defaults to 512; out-of-range values are clamped, not refused */
@@ -1822,6 +2182,22 @@ export interface ViewZoomExtentsParams {}
 
 export interface ViewZoomExtentsResult {}
 
+/**
+ * `hew.view.zoom_to` (v1) — Frame the named entities in the live viewport. padding widens the box on every side by that fraction of its largest extent (default 0.1). Answers the box before padding.
+ * Tier: Standard · Class: read-only · Served: host
+ * Refusals: unknown_entity, nothing_to_frame, host_capability_missing
+ */
+export interface ViewZoomToParams {
+  ids: string[]
+  /** defaults to 0.1 */
+  padding?: number
+}
+
+export interface ViewZoomToResult {
+  max: [number, number, number]
+  min: [number, number, number]
+}
+
 /** A typed client over a caller-supplied {@link HewTransport}. One
  * method per registry command, grouped by namespace
  * (`client.sketch.drawRect(…)`), generated from the registry above. */
@@ -1862,8 +2238,10 @@ export class HewApiClient {
   readonly component = {
     create: (params: ComponentCreateParams): Promise<ComponentCreateResult> => this.mutate('hew.component.create', params),
     explode: (params: ComponentExplodeParams): Promise<ComponentExplodeResult> => this.mutate('hew.component.explode', params),
+    flipInstance: (params: ComponentFlipInstanceParams): Promise<ComponentFlipInstanceResult> => this.mutate('hew.component.flip_instance', params),
     makeUnique: (params: ComponentMakeUniqueParams): Promise<ComponentMakeUniqueResult> => this.mutate('hew.component.make_unique', params),
     place: (params: ComponentPlaceParams): Promise<ComponentPlaceResult> => this.mutate('hew.component.place', params),
+    rebase: (params: ComponentRebaseParams): Promise<ComponentRebaseResult> => this.mutate('hew.component.rebase', params),
   }
 
   readonly context = {
@@ -1892,6 +2270,12 @@ export class HewApiClient {
     rename: (params: EntityRenameParams): Promise<EntityRenameResult> => this.mutate('hew.entity.rename', params),
     rotate: (params: EntityRotateParams): Promise<EntityRotateResult> => this.mutate('hew.entity.rotate', params),
     scale: (params: EntityScaleParams): Promise<EntityScaleResult> => this.mutate('hew.entity.scale', params),
+    setFrame: (params: EntitySetFrameParams): Promise<EntitySetFrameResult> => this.mutate('hew.entity.set_frame', params),
+  }
+
+  readonly event = {
+    subscribe: (params: EventSubscribeParams): Promise<EventSubscribeResult> => this.call('hew.event.subscribe', params),
+    unsubscribe: (params: EventUnsubscribeParams): Promise<EventUnsubscribeResult> => this.call('hew.event.unsubscribe', params),
   }
 
   readonly group = {
@@ -1942,13 +2326,18 @@ export class HewApiClient {
   }
 
   readonly query = {
+    changesSince: (params: QueryChangesSinceParams): Promise<QueryChangesSinceResult> => this.call('hew.query.changes_since', params),
     context: (params: QueryContextParams): Promise<QueryContextResult> => this.call('hew.query.context', params),
     entity: (params: QueryEntityParams): Promise<QueryEntityResult> => this.call('hew.query.entity', params),
     faces: (params: QueryFacesParams): Promise<QueryFacesResult> => this.call('hew.query.faces', params),
     measure: (params: QueryMeasureParams): Promise<QueryMeasureResult> => this.call('hew.query.measure', params),
+    mesh: (params: QueryMeshParams): Promise<QueryMeshResult> => this.call('hew.query.mesh', params),
+    occurrences: (params: QueryOccurrencesParams): Promise<QueryOccurrencesResult> => this.call('hew.query.occurrences', params),
+    partFrame: (params: QueryPartFrameParams): Promise<QueryPartFrameResult> => this.call('hew.query.part_frame', params),
     raycast: (params: QueryRaycastParams): Promise<QueryRaycastResult> => this.call('hew.query.raycast', params),
     resolve: (params: QueryResolveParams): Promise<QueryResolveResult> => this.call('hew.query.resolve', params),
     scene: (params: QuerySceneParams): Promise<QuerySceneResult> => this.call('hew.query.scene', params),
+    topology: (params: QueryTopologyParams): Promise<QueryTopologyResult> => this.call('hew.query.topology', params),
   }
 
   readonly scenes = {
@@ -1960,6 +2349,12 @@ export class HewApiClient {
     rename: (params: ScenesRenameParams): Promise<ScenesRenameResult> => this.mutate('hew.scenes.rename', params),
     reorder: (params: ScenesReorderParams): Promise<ScenesReorderResult> => this.mutate('hew.scenes.reorder', params),
     update: (params: ScenesUpdateParams): Promise<ScenesUpdateResult> => this.mutate('hew.scenes.update', params),
+  }
+
+  readonly selection = {
+    clear: (params: SelectionClearParams): Promise<SelectionClearResult> => this.call('hew.selection.clear', params),
+    get: (params: SelectionGetParams): Promise<SelectionGetResult> => this.call('hew.selection.get', params),
+    set: (params: SelectionSetParams): Promise<SelectionSetResult> => this.call('hew.selection.set', params),
   }
 
   readonly sketch = {
@@ -2006,9 +2401,16 @@ export class HewApiClient {
 
   readonly view = {
     camera: (params: ViewCameraParams): Promise<ViewCameraResult> => this.call('hew.view.camera', params),
+    clearIsolation: (params: ViewClearIsolationParams): Promise<ViewClearIsolationResult> => this.call('hew.view.clear_isolation', params),
+    hidden: (params: ViewHiddenParams): Promise<ViewHiddenResult> => this.call('hew.view.hidden', params),
+    hide: (params: ViewHideParams): Promise<ViewHideResult> => this.call('hew.view.hide', params),
+    isolate: (params: ViewIsolateParams): Promise<ViewIsolateResult> => this.call('hew.view.isolate', params),
     lineDrawing: (params: ViewLineDrawingParams): Promise<ViewLineDrawingResult> => this.call('hew.view.line_drawing', params),
+    show: (params: ViewShowParams): Promise<ViewShowResult> => this.call('hew.view.show', params),
+    showAll: (params: ViewShowAllParams): Promise<ViewShowAllResult> => this.call('hew.view.show_all', params),
     snapshot: (params: ViewSnapshotParams): Promise<ViewSnapshotResult> => this.call('hew.view.snapshot', params),
     units: (params: ViewUnitsParams): Promise<ViewUnitsResult> => this.call('hew.view.units', params),
     zoomExtents: (params: ViewZoomExtentsParams): Promise<ViewZoomExtentsResult> => this.call('hew.view.zoom_extents', params),
+    zoomTo: (params: ViewZoomToParams): Promise<ViewZoomToResult> => this.call('hew.view.zoom_to', params),
   }
 }

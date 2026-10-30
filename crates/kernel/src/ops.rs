@@ -39,6 +39,7 @@
 //! strokes are tool-layer state (the UI buffers the polyline and commits when
 //! it closes). This keeps every committed state a valid solid.
 
+use crate::attr::AttrDict;
 use crate::geom2d::{
     boundaries_contact, boundaries_contact_away_from_shared, hole_leaves_outer,
     interior_point_of_loops, point_inside_polygon, point_near_segment, polygon_is_simple,
@@ -48,7 +49,9 @@ use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, MaterialId, VertexId};
 use crate::math::{Plane, Point3, Vec3};
 use crate::sketch::Profile;
 use crate::tol;
-use crate::topo::{Edge, Face, HalfEdge, Loop, LoopKind, Object, Vertex, WatertightState};
+use crate::topo::{
+    AttrSlot, Edge, Face, HalfEdge, Loop, LoopKind, Object, Vertex, WatertightState,
+};
 use crate::transform::{Transform, TransformError};
 
 /// The explicit combination modes (ARCHITECTURE.md: combining Objects is always a
@@ -197,6 +200,10 @@ pub struct FaceMergeInnerReport {
     /// or an arc-and-line shape and undoing gives the curve back, not a plain
     /// polygon that would boss into faceted walls.
     pub curves: Vec<Option<crate::sketch::CurveGeom>>,
+    /// The attribute dictionary each dissolved loop edge carried, in
+    /// `curves` order; empty when none carried one. Undo re-imprints with
+    /// them, so the loop's edges come back with their dictionaries.
+    pub edge_attrs: Vec<crate::attr::AttrDict>,
 }
 
 /// What `transform_sub_face` changed: an imprint slid, turned, or scaled on
@@ -1191,7 +1198,9 @@ impl Object {
         // Freshly extruded faces take the default material and no UV frame.
         let face_specs: Vec<_> = face_specs
             .into_iter()
-            .map(|(outer, inners, plane, surface)| (outer, inners, plane, None, None, surface))
+            .map(|(outer, inners, plane, surface)| {
+                (outer, inners, plane, None, None, surface, AttrDict::new())
+            })
             .collect();
         let obj = Object::from_faces_with_holes(&positions, &face_specs);
         // Note: extrusion stamps side-wall FACES with `SurfaceRef` (above) but
@@ -2491,7 +2500,7 @@ impl Object {
 
         let face_specs: Vec<_> = face_specs
             .into_iter()
-            .map(|(o, i, p, surf)| (o, i, p, None, None, surf))
+            .map(|(o, i, p, surf)| (o, i, p, None, None, surf, AttrDict::new()))
             .collect();
         let mut obj = Object::from_faces_with_holes(&positions, &face_specs);
         // Mark the collected soft transverse joints (design §7b) on the
@@ -3613,7 +3622,7 @@ impl Object {
         face: FaceId,
         loop_path: &[Point3],
     ) -> Result<FaceSplitInnerReport, StickyError> {
-        self.split_face_inner_impl(face, loop_path, None, &[])
+        self.split_face_inner_impl(face, loop_path, None, &[], &[])
     }
 
     /// [`Object::split_face_inner`] carrying the analytic circle the imprinted
@@ -3639,7 +3648,7 @@ impl Object {
         let curves = curve
             .map(|g| vec![Some(g); loop_path.len()])
             .unwrap_or_default();
-        self.split_face_inner_impl(face, loop_path, None, &curves)
+        self.split_face_inner_impl(face, loop_path, None, &curves, &[])
     }
 
     /// [`Object::split_face_inner`] with a per-edge analytic claim: `curves[k]`
@@ -3659,7 +3668,7 @@ impl Object {
         loop_path: &[Point3],
         curves: &[Option<crate::sketch::CurveGeom>],
     ) -> Result<FaceSplitInnerReport, StickyError> {
-        self.split_face_inner_impl(face, loop_path, None, curves)
+        self.split_face_inner_impl(face, loop_path, None, curves, &[])
     }
 
     /// [`Object::split_face_inner`] with explicit attributes for the created
@@ -3677,20 +3686,25 @@ impl Object {
         loop_path: &[Point3],
         restore: Option<crate::topo::FaceAttrs>,
     ) -> Result<FaceSplitInnerReport, StickyError> {
-        self.split_face_inner_impl(face, loop_path, restore, &[])
+        self.split_face_inner_impl(face, loop_path, restore, &[], &[])
     }
 
     /// Shared body of the [`Object::split_face_inner`] family. `restore` is
     /// the undo attribute snapshot (see [`Object::split_face_inner_with_attrs`]);
     /// `curve` stamps the imprinted loop's edges (see
-    /// [`Object::split_face_inner_with_curve`]). Crate-internal so history's
-    /// dispatch can supply both at once.
+    /// [`Object::split_face_inner_with_curve`]). `edge_attrs` gives each
+    /// loop edge back the attribute dictionary it carried when a
+    /// `merge_inner_face` dissolved it ([`FaceMergeInnerReport::edge_attrs`]),
+    /// in the same per-edge order as `curves`; empty gives every new edge
+    /// none (the forward/tool semantics). Crate-internal so history's
+    /// dispatch can supply them all at once.
     pub(crate) fn split_face_inner_impl(
         &mut self,
         face: FaceId,
         loop_path: &[Point3],
         restore: Option<crate::topo::FaceAttrs>,
         curves: &[Option<crate::sketch::CurveGeom>],
+        edge_attrs: &[crate::attr::AttrDict],
     ) -> Result<FaceSplitInnerReport, StickyError> {
         // ---- validation (no mutation) ----
         if !self.faces.contains_key(face) {
@@ -3701,6 +3715,9 @@ impl Object {
         }
         if !curves.is_empty() && curves.len() != loop_path.len() {
             return Err(StickyError::CurveClaimOffLoop);
+        }
+        if !edge_attrs.is_empty() && edge_attrs.len() != loop_path.len() {
+            return Err(StickyError::WouldCorrupt);
         }
         let face_plane = self.faces[face].plane;
         let normal = face_plane.normal();
@@ -3733,6 +3750,16 @@ impl Object {
             (0..n).map(|i| curves[(2 * n - 2 - i) % n]).collect()
         } else {
             curves.to_vec()
+        };
+        // Edge dictionaries follow the winding the same way.
+        let edge_attrs: Vec<crate::attr::AttrDict> = if edge_attrs.is_empty() {
+            vec![crate::attr::AttrDict::new(); n]
+        } else if reversed {
+            (0..n)
+                .map(|i| edge_attrs[(2 * n - 2 - i) % n].clone())
+                .collect()
+        } else {
+            edge_attrs.to_vec()
         };
 
         // The caller owns the analytic truth: a supplied circle claim must
@@ -3792,6 +3819,7 @@ impl Object {
             back_material: sub_attrs.back_material,
             uv_frame: sub_attrs.uv_frame,
             surface: sub_attrs.surface,
+            attrs: sub_attrs.attrs,
         });
         obj.loops[sub_loop].face = sub_face;
 
@@ -3841,7 +3869,9 @@ impl Object {
                 curve: curves[k],
                 soft: false,
                 polygon: None,
+                attrs: AttrSlot::NONE,
             });
+            obj.set_edge_attrs(edge, edge_attrs[k].clone());
             obj.half_edges[h_sub[k]].edge = edge;
             obj.half_edges[h_hole[k]].edge = edge;
             new_edges.push(edge);
@@ -3942,6 +3972,23 @@ impl Object {
             .iter()
             .map(|&h| self.edges[self.half_edges[h].edge].curve)
             .collect();
+        // ...and each loop edge's attribute dictionary (empty when no loop
+        // edge carries one, the common case).
+        let edge_attrs: Vec<crate::attr::AttrDict> = if h_sub
+            .iter()
+            .all(|&h| self.edges[self.half_edges[h].edge].attrs.is_none())
+        {
+            Vec::new()
+        } else {
+            h_sub
+                .iter()
+                .map(|&h| {
+                    self.edge_attrs(self.half_edges[h].edge)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect()
+        };
 
         // ---- removal surgery on a clone ----
         let mut obj = self.clone();
@@ -3979,6 +4026,7 @@ impl Object {
             loop_path,
             sub_face_attrs,
             curves,
+            edge_attrs,
         })
     }
 
@@ -4648,6 +4696,7 @@ impl Object {
                     axis: normal,
                     radius: g.radius,
                 }),
+                attrs: AttrSlot::NONE,
             });
             obj.loops[wloop].face = wface;
             walls.push(wface);
@@ -4680,6 +4729,7 @@ impl Object {
                 curve: top_curve,
                 soft: false,
                 polygon: top_poly,
+                attrs: AttrSlot::NONE,
             });
             obj.half_edges[h_sub[k]].edge = e_top;
             obj.half_edges[wa[k]].edge = e_top;
@@ -4700,6 +4750,7 @@ impl Object {
                 curve: None,
                 soft: false,
                 polygon: None,
+                attrs: AttrSlot::NONE,
             });
             obj.half_edges[wb[k]].edge = e_vert;
             obj.half_edges[wd[prev]].edge = e_vert;
@@ -5552,6 +5603,7 @@ impl Object {
             || fa.back_material != fb.back_material
             || fa.uv_frame != fb.uv_frame
             || fa.surface != fb.surface
+            || !self.face_attrs_eq(face_a, face_b)
         {
             return None;
         }
@@ -5865,14 +5917,7 @@ impl Object {
         let mut positions: Vec<Point3> = Vec::new();
         let mut local_index: std::collections::BTreeMap<VertexId, usize> =
             std::collections::BTreeMap::new();
-        let mut specs: Vec<(
-            Vec<usize>,
-            Vec<Vec<usize>>,
-            Plane,
-            crate::material::FaceMaterial,
-            Option<crate::material::UvFrame>,
-            Option<crate::topo::SurfaceRef>,
-        )> = Vec::with_capacity(faces.len());
+        let mut specs: Vec<crate::build::FaceSpec> = Vec::with_capacity(faces.len());
         for &fid in faces {
             let face = &self.faces[fid];
             let outer = loop_indices(self, face.outer_loop, &mut positions, &mut local_index);
@@ -5888,6 +5933,9 @@ impl Object {
                 face.material,
                 face.uv_frame,
                 face.surface,
+                // Each face keeps its own dictionary; edges are rebuilt
+                // fresh and carry none (like their curve claims).
+                self.face_attrs(fid).cloned().unwrap_or_default(),
             ));
         }
 
@@ -8493,6 +8541,7 @@ fn twin_half_edges(obj: &mut Object, a: HalfEdgeId, b: HalfEdgeId) {
         curve: None,
         soft: false,
         polygon: None,
+        attrs: AttrSlot::NONE,
     });
     obj.half_edges[a].twin = Some(b);
     obj.half_edges[a].edge = edge;
@@ -8723,6 +8772,7 @@ fn build_coplanar_wall(
         curve: None,
         soft: false,
         polygon: None,
+        attrs: AttrSlot::NONE,
     });
     obj.half_edges[h_sub].edge = e_top;
     obj.half_edges[wa].edge = e_top;
@@ -8757,6 +8807,7 @@ fn build_coplanar_wall(
         back_material: None,
         uv_frame: None,
         surface: None,
+        attrs: AttrSlot::NONE,
     });
     obj.loops[wloop].face = wface;
     Ok(wface)
@@ -9075,6 +9126,7 @@ fn do_split_face(
         back_material: obj.faces[face].back_material,
         uv_frame: obj.faces[face].uv_frame,
         surface: obj.faces[face].surface,
+        attrs: obj.faces[face].attrs,
     });
     obj.loops[loop_b_id].face = face_b_id;
 
@@ -9275,6 +9327,7 @@ fn do_split_face_hole(
         back_material: obj.faces[face].back_material,
         uv_frame: obj.faces[face].uv_frame,
         surface: obj.faces[face].surface,
+        attrs: obj.faces[face].attrs,
     });
     wire_loop_sequence(obj, &lune_seq, lune_loop, lune);
     // 8. The rerouted hole keeps its loop id (still Inner, still `face`'s).
@@ -9418,6 +9471,7 @@ pub(crate) fn build_cut_chains(
             curve: None,
             soft: false,
             polygon: None,
+            attrs: AttrSlot::NONE,
         });
         obj.half_edges[h_fwd].edge = edge_id;
         obj.half_edges[h_bwd].edge = edge_id;
@@ -9514,6 +9568,9 @@ pub(crate) fn split_boundary_edge(
     let was_soft = obj.edges[edge_id].soft;
     // A piece of a polygon's side is still that polygon's side.
     let was_polygon = obj.edges[edge_id].polygon;
+    // Both fragments keep the edge's attribute dictionary (same slot: the
+    // dictionary is a value, so sharing it is safe).
+    let was_attrs = obj.edges[edge_id].attrs;
 
     // Insert the new vertex.
     let new_v = obj.vertices.insert(Vertex {
@@ -9590,6 +9647,7 @@ pub(crate) fn split_boundary_edge(
             curve: None,
             soft: was_soft,
             polygon: was_polygon,
+            attrs: was_attrs,
         });
         edge_b_id = obj.edges.insert(Edge {
             half_edge: h_b,
@@ -9597,6 +9655,7 @@ pub(crate) fn split_boundary_edge(
             curve: None,
             soft: was_soft,
             polygon: was_polygon,
+            attrs: was_attrs,
         });
         obj.half_edges[h_a].edge = edge_a_id;
         obj.half_edges[t_b].edge = edge_a_id;
@@ -9634,6 +9693,7 @@ pub(crate) fn split_boundary_edge(
             curve: None,
             soft: was_soft,
             polygon: was_polygon,
+            attrs: was_attrs,
         });
         edge_b_id = obj.edges.insert(Edge {
             half_edge: h_b,
@@ -9641,6 +9701,7 @@ pub(crate) fn split_boundary_edge(
             curve: None,
             soft: was_soft,
             polygon: was_polygon,
+            attrs: was_attrs,
         });
         obj.half_edges[h_a].edge = edge_a_id;
         obj.half_edges[h_b].edge = edge_b_id;

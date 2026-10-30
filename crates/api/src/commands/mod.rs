@@ -43,6 +43,9 @@ pub struct Ctx<'a> {
     /// The label the executing command was given with `"as"`, if any —
     /// where its face tokens land.
     pub current_label: Option<String>,
+    /// The calling connection's grant: what a command checks for its own
+    /// finer-grained rules (the attribute namespace rule, §8).
+    pub grant: &'a crate::grant::Grant,
 }
 
 impl Ctx<'_> {
@@ -62,6 +65,26 @@ impl Ctx<'_> {
                 .insert(key.to_string(), (object, face));
         }
     }
+}
+
+/// `result` with the document's clock added as top-level members:
+/// `generation` ([`kernel::Document::history_generation`], which an abort
+/// rewinds with the stacks) and `epoch` ([`kernel::Document::document_epoch`],
+/// which never runs backwards). Every `hew.query.*` result and
+/// `hew.history.status` carry both (docs/agents/HEW_API.md §7), so a
+/// client always has the value `expect_generation` wants at hand.
+pub(crate) fn with_clock(
+    doc: &kernel::Document,
+    mut result: serde_json::Value,
+) -> serde_json::Value {
+    if let Some(map) = result.as_object_mut() {
+        map.insert(
+            "generation".into(),
+            serde_json::json!(doc.history_generation()),
+        );
+        map.insert("epoch".into(), serde_json::json!(doc.document_epoch()));
+    }
+    result
 }
 
 /// One command implementation.
@@ -110,9 +133,11 @@ pub mod entity;
 pub mod health;
 pub mod history;
 pub mod library;
+pub mod parts;
 pub mod print;
 pub mod query;
 pub mod scenes;
+pub mod selection;
 pub mod sketch;
 pub mod solid;
 pub mod structure;
@@ -123,6 +148,7 @@ pub mod view;
 /// own match — a `None` answers the `unimplemented` refusal (§14).
 pub fn handler(name: &str) -> Option<Handler> {
     query::handler(name)
+        .or_else(|| parts::handler(name))
         .or_else(|| sketch::handler(name))
         .or_else(|| draft::handler(name))
         .or_else(|| solid::handler(name))
@@ -134,6 +160,7 @@ pub fn handler(name: &str) -> Option<Handler> {
         .or_else(|| history::handler(name))
         .or_else(|| doc::handler(name))
         .or_else(|| view::handler(name))
+        .or_else(|| selection::handler(name))
         .or_else(|| scenes::handler(name))
         .or_else(|| print::handler(name))
         .or_else(|| library::handler(name))

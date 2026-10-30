@@ -23,6 +23,8 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.component.place" => component_place,
         "hew.component.make_unique" => component_make_unique,
         "hew.component.explode" => component_explode,
+        "hew.component.rebase" => component_rebase,
+        "hew.component.flip_instance" => component_flip_instance,
         "hew.context.enter" => context_enter,
         "hew.context.exit" => context_exit,
         _ => return None,
@@ -232,6 +234,86 @@ fn component_explode(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         })
         .collect();
     Ok(serde_json::json!({ "objects": public }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RebaseParams {
+    id: String,
+    origin: [f64; 3],
+    x: [f64; 3],
+    y: [f64; 3],
+}
+
+/// `hew.component.rebase` (docs/agents/PLUGINS.md "Setting axes"):
+/// `Document::rebase_definition`, with an instance id meaning its
+/// definition. `instances_updated` counts every live instance placing the
+/// definition, world or nested in another definition.
+fn component_rebase(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: RebaseParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    let component = match ctx.resolver().resolve(&p.id) {
+        Some(EntityRef::Component(c)) => c,
+        Some(EntityRef::Instance(i)) => ctx
+            .doc
+            .instance_def(i)
+            .ok_or_else(|| unknown_entity(&p.id))?,
+        _ => return Err(unknown_entity(&p.id)),
+    };
+    let v = |c: [f64; 3]| kernel::Vec3::new(c[0], c[1], c[2]);
+    let origin = kernel::Point3::new(p.origin[0], p.origin[1], p.origin[2]);
+    ctx.doc
+        .rebase_definition(component, origin, v(p.x), v(p.y))?;
+    let instances_updated = ctx.doc.instances_of(component).len();
+    let resolver = ctx.resolver();
+    let public = resolver
+        .public_of(ctx.doc, &EntityRef::Component(component))
+        .ok_or_else(|| CmdError::Internal("a rebased definition has no public id".into()))?;
+    Ok(serde_json::json!({ "component": public, "instances_updated": instances_updated }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FlipParams {
+    instance: String,
+    axis: FlipAxis,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum FlipAxis {
+    X,
+    Y,
+    Z,
+}
+
+/// `hew.component.flip_instance`: `Document::flip_instance` on one world
+/// instance. A definition-owned (nested) instance refuses `unknown_entity`,
+/// as every world-only instance command does.
+fn component_flip_instance(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: FlipParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    let Some(EntityRef::Instance(instance)) = ctx.resolver().resolve(&p.instance) else {
+        return Err(unknown_entity(&p.instance));
+    };
+    if !ctx.doc.instance_is_world(instance) {
+        return Err(unknown_entity(&p.instance));
+    }
+    let axis = match p.axis {
+        FlipAxis::X => kernel::Axis::X,
+        FlipAxis::Y => kernel::Axis::Y,
+        FlipAxis::Z => kernel::Axis::Z,
+    };
+    ctx.doc.flip_instance(instance, axis)?;
+    let pose = ctx
+        .doc
+        .instance_pose(instance)
+        .ok_or_else(|| CmdError::Internal("a flipped instance has no pose".into()))?;
+    Ok(serde_json::json!({
+        "instance": p.instance,
+        "pose": pose.to_affine(),
+        "mirrored": pose.determinant() < 0.0,
+    }))
 }
 
 // --------------------------------------------------------------- context

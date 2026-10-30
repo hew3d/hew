@@ -20,7 +20,9 @@ import {
   mapUndoRedoError,
   keyboardBelongsToFieldOrDialog,
   cursorFor,
+  createIsolationController,
 } from './Viewport'
+import type { IsolationScene } from './isolation'
 import { setShowToolPointer } from '../settings/view'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
@@ -374,5 +376,61 @@ describe('cursorFor honors Settings ▸ View ▸ Show tool pointer', () => {
     } finally {
       setShowToolPointer(true)
     }
+  })
+})
+
+describe('createIsolationController', () => {
+  /** Two world objects, nothing else. */
+  function twoObjects(): IsolationScene {
+    return {
+      object_ids: () => BigUint64Array.from([1n, 2n]),
+      instance_ids: () => new BigUint64Array(),
+      group_ids: () => new BigUint64Array(),
+      group_members: () => [],
+      node_parent: () => undefined,
+      instance_expanded_members: () => new BigUint64Array(),
+    }
+  }
+
+  function controller() {
+    const onTargetsChange = vi.fn()
+    const onCountChange = vi.fn()
+    const applyHidden = vi.fn()
+    const frame = vi.fn()
+    const ctl = createIsolationController({
+      scene: twoObjects(),
+      baseHidden: () => ({ objects: [], instances: [] }),
+      applyHidden,
+      frame,
+      onCountChange,
+      onTargetsChange,
+    })
+    return { ctl, onTargetsChange, onCountChange, applyHidden, frame }
+  }
+
+  it('reports the targets at every change: isolating, then clearing, is two calls', () => {
+    const { ctl, onTargetsChange, onCountChange, frame } = controller()
+    expect(ctl.isolate([{ kind: 'object', id: 1n }])).toBe(1)
+    ctl.clear()
+    expect(onTargetsChange).toHaveBeenCalledTimes(2)
+    expect(onTargetsChange).toHaveBeenNthCalledWith(1, [{ kind: 'object', id: 1n }])
+    expect(onTargetsChange).toHaveBeenNthCalledWith(2, null)
+    expect(onCountChange.mock.calls).toEqual([[1], [null]])
+    expect(frame).toHaveBeenCalledTimes(1)
+    expect(ctl.state()).toBeNull()
+    // Clearing again changes nothing, so reports nothing.
+    ctl.clear()
+    expect(onTargetsChange).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports a re-resolution that drops every target, and an isolation of nothing', () => {
+    const { ctl, onTargetsChange } = controller()
+    // An id that does not exist resolves to no isolation at all.
+    expect(ctl.isolate([{ kind: 'object', id: 9n }])).toBe(0)
+    expect(onTargetsChange).not.toHaveBeenCalled()
+    ctl.isolate([{ kind: 'object', id: 2n }], { frame: false })
+    ctl.rebase()
+    expect(onTargetsChange).toHaveBeenCalledTimes(2)
+    expect(onTargetsChange).toHaveBeenLastCalledWith([{ kind: 'object', id: 2n }])
   })
 })

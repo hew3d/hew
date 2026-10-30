@@ -16,7 +16,7 @@ use crate::geom2d::{boundaries_contact, point_inside_polygon, polygon_is_simple}
 use crate::health::{Finding, Rim, diagnose};
 use crate::ids::{FaceId, HalfEdgeId, LoopId, ShellId, VertexId};
 use crate::math::{Plane, Point3, Vec3};
-use crate::topo::{Face, HalfEdge, Loop, LoopKind, Object, WatertightState};
+use crate::topo::{AttrSlot, Face, HalfEdge, Loop, LoopKind, Object, WatertightState};
 
 /// The thinnest solid [`Object::thicken_sheet`] makes: a micron, far above
 /// the point-merge tolerance its walls' corners must clear, far below any
@@ -356,6 +356,7 @@ impl Object {
                 back_material: None,
                 uv_frame: None,
                 surface: None,
+                attrs: AttrSlot::NONE,
             });
             let outer = obj.add_cap_loop(&rim.half_edges, face, LoopKind::Outer);
             obj.faces[face].outer_loop = outer;
@@ -534,14 +535,7 @@ impl Object {
             })
         };
 
-        let mut specs: Vec<(
-            Vec<usize>,
-            Vec<Vec<usize>>,
-            Plane,
-            crate::material::FaceMaterial,
-            Option<crate::material::UvFrame>,
-            Option<crate::topo::SurfaceRef>,
-        )> = Vec::with_capacity(faces.len() * 3);
+        let mut specs: Vec<crate::build::FaceSpec> = Vec::with_capacity(faces.len() * 3);
         for &f in faces {
             let face = &self.faces[f];
             let mut lower_rings = Vec::new();
@@ -571,6 +565,8 @@ impl Object {
                     material,
                     shifted(face.uv_frame, by),
                     None,
+                    // Both copies are the sheet's face, dictionary included.
+                    self.face_attrs(f).cloned().unwrap_or_default(),
                 ));
             }
         }
@@ -582,7 +578,15 @@ impl Object {
                     let (b_lo, b_hi) = at(he[he[h].next].origin, &mut positions);
                     let wall = vec![a_lo, b_lo, b_hi, a_hi];
                     let plane = plane_of(&wall, &positions)?;
-                    specs.push((wall, Vec::new(), plane, None, None, None));
+                    specs.push((
+                        wall,
+                        Vec::new(),
+                        plane,
+                        None,
+                        None,
+                        None,
+                        crate::attr::AttrDict::new(),
+                    ));
                 }
             }
         }
@@ -838,6 +842,34 @@ impl Object {
             }
         }
         six_v / 6.0
+    }
+
+    /// The enclosed volume of a watertight Object, in cubic model units;
+    /// `None` for an open one (an open shell encloses nothing, and a guess
+    /// would be a silent repair).
+    pub fn volume(&self) -> Option<f64> {
+        (self.watertight() == crate::topo::WatertightState::Watertight)
+            .then(|| self.signed_volume().abs())
+    }
+
+    /// The summed area of every face (holes subtracted), in square model
+    /// units. Defined for open Objects too.
+    pub fn surface_area(&self) -> f64 {
+        let ring_area = |lid| {
+            let p: Vec<Vec3> = self.loop_positions(lid).map(|pt| pt.to_vec()).collect();
+            let mut sum = Vec3::new(0.0, 0.0, 0.0);
+            for i in 0..p.len() {
+                sum = sum + p[i].cross(p[(i + 1) % p.len()]);
+            }
+            (sum * 0.5).length()
+        };
+        self.faces
+            .values()
+            .map(|f| {
+                let holes: f64 = f.inner_loops.iter().map(|&l| ring_area(l)).sum();
+                (ring_area(f.outer_loop) - holes).max(0.0)
+            })
+            .sum()
     }
 
     /// The cap polygon for `rim`: its vertices against the boundary's

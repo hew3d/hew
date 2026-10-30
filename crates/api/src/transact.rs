@@ -9,9 +9,10 @@
 //! canonical §4.4 shape with the failing index.
 
 use crate::commands::{self, CmdError, Ctx, FaceTokens};
+use crate::grant::Grant;
 use crate::host::Host;
 use crate::refusal::Refusal;
-use crate::registry::{CommandClass, Profile, Registry};
+use crate::registry::{CommandClass, Registry};
 use kernel::{CompoundMeta, HistoryOrigin};
 
 /// One command inside a `hew.doc.transact` envelope.
@@ -30,6 +31,35 @@ pub struct TxParams {
     #[serde(default)]
     pub label: Option<String>,
     pub commands: Vec<TxCommand>,
+    /// Compare-and-swap (docs/agents/HEW_API.md §6.5): refuse
+    /// `generation_moved` unless the document's history generation is this
+    /// value when the envelope is dispatched.
+    #[serde(default)]
+    pub expect_generation: Option<u64>,
+    /// Coalescing key (§6.5): the commit extends the top undo entry when a
+    /// connection with this one's identity (the history origin) committed
+    /// it under the same key.
+    #[serde(default)]
+    pub coalesce: Option<String>,
+}
+
+/// The commands that replace the document, which a compound abort cannot
+/// restore: refused `document_busy` while a compound is open
+/// (docs/agents/PLUGINS.md "Compounds").
+pub const DOCUMENT_REPLACING: &[&str] = &[
+    "hew.doc.open",
+    "hew.doc.new",
+    "hew.doc.revert",
+    "hew.doc.close",
+];
+
+/// The `document_busy` refusal: a document-replacing command while a
+/// plugin command holds the document.
+pub fn document_busy() -> Refusal {
+    Refusal::api(
+        "document_busy",
+        "A plugin command is running on this document. Wait for it to finish, or cancel it, then try again.",
+    )
 }
 
 /// How a whole transaction failed.
@@ -37,8 +67,17 @@ pub struct TxParams {
 pub enum TxError {
     /// Static envelope defect (`-32602`), before anything ran.
     Invalid(String),
-    /// A command outside the granted profile (`-32001`), with its index.
+    /// A command outside the grant (`-32001`), with its index.
     NotPermitted(usize),
+    /// A restricted grant set a path parameter (`-32001`
+    /// `path_not_granted`), with the command's index and the pointer.
+    PathNotGranted { index: usize, pointer: &'static str },
+    /// A restricted grant without `documents.other` named a document in a
+    /// command's `document` parameter (`-32001` `document_not_granted`).
+    DocumentNotGranted {
+        index: usize,
+        document: serde_json::Value,
+    },
     /// A command refused at execution — the bracket was aborted, the
     /// document is untouched.
     Refused {
@@ -46,21 +85,29 @@ pub enum TxError {
         method: String,
         refusal: Refusal,
     },
+    /// A plugin command shares the envelope with another command
+    /// (`-32000` `plugin_command_in_transaction`), with its index. A plugin
+    /// command runs only as its own envelope (docs/agents/HEW_API.md §6.4).
+    PluginCommandInTransaction(usize),
     /// A kernel invariant failed (`-32003`).
     Internal(String),
 }
 
-/// Runs one transaction envelope. `identity` becomes the history origin.
+/// Runs one transaction envelope under `grant`. `identity` becomes the
+/// history origin.
 pub fn run(
     doc: &mut kernel::Document,
     host: &mut dyn Host,
     registry: &Registry,
-    profile: Profile,
+    grant: &Grant,
     identity: &str,
     params: &serde_json::Value,
 ) -> Result<serde_json::Value, TxError> {
     let parsed: TxParams = serde_json::from_value(params.clone())
         .map_err(|e| TxError::Invalid(format!("malformed transact params: {e}")))?;
+    // Before anything else runs, the solitary path and the static pass
+    // included.
+    precheck(doc, &parsed)?;
     if parsed.commands.is_empty() {
         return Err(TxError::Invalid(
             "a transaction needs at least one command".into(),
@@ -74,12 +121,23 @@ pub fn run(
     // opens and no undo entry is added.
     if parsed.commands.len() == 1 {
         let cmd = &parsed.commands[0];
+        // A plugin command is never executed here (the dispatcher forwards
+        // a sole one); it falls through to the static pass, which refuses.
         if let Some(decl) = registry.get(&cmd.method)
             && decl.class == CommandClass::Solitary
+            && !decl.is_plugin()
         {
-            if !profile.grants(decl) {
+            if doc.compound_open() && DOCUMENT_REPLACING.contains(&cmd.method.as_str()) {
+                return Err(TxError::Refused {
+                    index: 0,
+                    method: cmd.method.clone(),
+                    refusal: document_busy(),
+                });
+            }
+            if !grant.grants(decl) {
                 return Err(TxError::NotPermitted(0));
             }
+            path_check(grant, &cmd.method, &cmd.params, 0)?;
             check_refs(&cmd.params, &[], 0)?;
             let Some(handler) = commands::handler(&cmd.method) else {
                 return Err(TxError::Refused {
@@ -100,6 +158,7 @@ pub fn run(
                 host,
                 face_tokens: &mut face_tokens,
                 current_label: cmd.label.clone(),
+                grant,
             };
             let params = cmd.params.clone().unwrap_or(serde_json::json!({}));
             let label = parsed.label.clone().unwrap_or_else(|| cmd.method.clone());
@@ -126,8 +185,12 @@ pub fn run(
                 cmd.method
             )));
         };
-        if !profile.grants(decl) {
+        if !grant.grants(decl) {
             return Err(TxError::NotPermitted(i));
+        }
+        path_check(grant, &cmd.method, &cmd.params, i)?;
+        if decl.is_plugin() {
+            return Err(TxError::PluginCommandInTransaction(i));
         }
         if decl.class == CommandClass::Solitary {
             return Err(TxError::Invalid(format!(
@@ -208,6 +271,7 @@ pub fn run(
             host,
             face_tokens: &mut face_tokens,
             current_label: cmd.label.clone(),
+            grant,
         };
         match handler(&mut ctx, &params) {
             Ok(result) => {
@@ -245,11 +309,77 @@ pub fn run(
         CompoundMeta {
             label: label.clone(),
             origin: HistoryOrigin::Connection(identity.to_string()),
+            coalesce: parsed.coalesce.clone(),
         },
     )
     .map_err(|e| TxError::Internal(format!("commit failed after balanced execution: {e}")))?;
 
     Ok(serde_json::json!({ "results": results, "label": label }))
+}
+
+/// The envelope-level checks every `hew.doc.transact` gets first, a sole
+/// plugin command's included (docs/agents/HEW_API.md §6.5): compare-and-swap
+/// (`generation_moved` unless the history generation is `expect_generation`),
+/// then the `coalesce` key's length.
+pub fn precheck(doc: &kernel::Document, tx: &TxParams) -> Result<(), TxError> {
+    if let Some(expected) = tx.expect_generation
+        && doc.history_generation() != expected
+    {
+        let actual = doc.history_generation();
+        return Err(TxError::Refused {
+            index: 0,
+            method: "hew.doc.transact".into(),
+            refusal: Refusal::api(
+                "generation_moved",
+                "The document changed since this envelope was computed. Read it again and resend.",
+            )
+            .with_detail(serde_json::json!({ "expected": expected, "actual": actual })),
+        });
+    }
+    if let Some(key) = &tx.coalesce
+        && (key.is_empty() || key.len() > 64)
+    {
+        return Err(TxError::Invalid("coalesce must be 1..=64 bytes".into()));
+    }
+    Ok(())
+}
+
+/// The static checks a sole command of an envelope gets before it runs
+/// (or, for a plugin command, before it is forwarded): the path and
+/// document parameter rules, and `$ref`/`$face` references, of which a
+/// sole command can have none that resolve.
+pub(crate) fn static_checks(
+    grant: &Grant,
+    method: &str,
+    params: &Option<serde_json::Value>,
+    index: usize,
+) -> Result<(), TxError> {
+    path_check(grant, method, params, index)?;
+    check_refs(params, &[], index)
+}
+
+/// A restricted grant may not set a path parameter (docs/agents/HEW_API.md
+/// §10), checked statically per command so nothing runs on failure. A
+/// `$ref` that would fill a path member counts as setting it.
+fn path_check(
+    grant: &Grant,
+    method: &str,
+    params: &Option<serde_json::Value>,
+    index: usize,
+) -> Result<(), TxError> {
+    if !grant.is_restricted() {
+        return Ok(());
+    }
+    let params = params.as_ref().unwrap_or(&serde_json::Value::Null);
+    if let Some(pointer) = crate::paths::path_param_set(method, params) {
+        return Err(TxError::PathNotGranted { index, pointer });
+    }
+    if !grant.may_address_other_documents()
+        && let Some(document) = crate::paths::document_param_set(method, params)
+    {
+        return Err(TxError::DocumentNotGranted { index, document });
+    }
+    Ok(())
 }
 
 /// Static `$ref`/`$face` label checks: every reference names an earlier

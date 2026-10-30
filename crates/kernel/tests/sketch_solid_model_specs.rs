@@ -576,6 +576,7 @@ fn z7_push_through_results_claim_nothing() {
                 ],
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .expect("imprint")

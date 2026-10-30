@@ -555,6 +555,13 @@ pub enum RecordedCall {
     },
     /// `set_object_material(object, material)` — `u64::MAX` = clear.
     SetObjectMaterial { object: u64, material: u64 },
+    /// `set_instance_material(instance, material)` — `u64::MAX` = clear.
+    /// Additive variant: recordings that never paint a placement replay on
+    /// older builds unchanged.
+    SetInstanceMaterial { instance: u64, material: u64 },
+    /// `set_definition_material(component, material)` — `u64::MAX` =
+    /// clear. Additive, as [`RecordedCall::SetInstanceMaterial`].
+    SetDefinitionMaterial { component: u64, material: u64 },
     /// `replace_material(document_wide, scope_object, from, to)` — the
     /// Shift-click "replace everywhere" gesture (paint-tool design §2);
     /// `scope_object` is meaningless when `document_wide` is true. `u64::MAX`
@@ -1107,6 +1114,27 @@ pub enum RecordedCall {
         curve: u64,
         segments: u32,
     },
+    /// One forwarded plugin command's compound (docs/agents/PLUGINS.md
+    /// "Compounds"): the calls its handler made while the compound was
+    /// open, which landed as one undo entry. The forwarded frame itself is
+    /// never recorded (no plugin runs at replay time); its children are,
+    /// here and nowhere else, so an aborted compound records nothing.
+    ///
+    /// Replay opens a connection holding `grant` (identity `plugin:<id>`),
+    /// opens a kernel compound labeled `label` with that origin, replays
+    /// `calls` in order (a nested plugin command's compound is one of
+    /// them), and ends the compound: one entry, as live. Additive variant:
+    /// a recording without one replays on older builds unchanged.
+    PluginCompound {
+        /// The provider plugin's id.
+        plugin: String,
+        /// The compound's label: the command's declared label, or its name.
+        label: String,
+        /// The provider's grant, as JSON (`api::Grant`).
+        grant: serde_json::Value,
+        /// The calls recorded while the compound was open, in order.
+        calls: Vec<RecordedCall>,
+    },
 }
 
 /// A [`kernel::UvFrame`]'s components, flattened for [`RecordedCall::SetFaceUvFrame`]
@@ -1154,6 +1182,9 @@ thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
     /// Calls captured so far.
     static CALLS: RefCell<Vec<RecordedCall>> = const { RefCell::new(Vec::new()) };
+    /// One buffer per open compound, innermost last ([`push_buffer`]):
+    /// while one exists, [`record`] appends to it instead of to `CALLS`.
+    static BUFFERS: RefCell<Vec<Vec<RecordedCall>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Begins capture, discarding any prior in-progress recording. The caller should
@@ -1205,9 +1236,33 @@ pub fn record_import_sized(method: &str, total_len: usize, embed: impl FnOnce() 
 /// Appends one committed call — a no-op unless capture is active. Call this
 /// **after** the mutation succeeds, so failed/refused ops are never recorded.
 pub fn record(call: RecordedCall) {
-    if is_active() {
+    if !is_active() {
+        return;
+    }
+    let call = BUFFERS.with(|b| match b.borrow_mut().last_mut() {
+        Some(buffer) => {
+            buffer.push(call);
+            None
+        }
+        None => Some(call),
+    });
+    if let Some(call) = call {
         CALLS.with(|c| c.borrow_mut().push(call));
     }
+}
+
+/// Routes [`record`] into a fresh buffer until the matching [`pop_buffer`]:
+/// a compound's children are held until it ends (recorded as one
+/// [`RecordedCall::PluginCompound`]) or aborts (dropped). Nests; pushes
+/// whether or not capture is active, so push and pop always pair.
+pub fn push_buffer() {
+    BUFFERS.with(|b| b.borrow_mut().push(Vec::new()));
+}
+
+/// Takes the innermost buffer [`push_buffer`] opened; empty when none is
+/// open or capture was off.
+pub fn pop_buffer() -> Vec<RecordedCall> {
+    BUFFERS.with(|b| b.borrow_mut().pop().unwrap_or_default())
 }
 
 /// Takes the captured calls, clearing the buffer.
@@ -1235,15 +1290,25 @@ pub fn panic_snapshot_json() -> Option<String> {
         calls: &'a [RecordedCall],
         golden_hash: u64,
     }
+    // The calls a compound still holds follow the recorded ones (outermost
+    // first), so a panic mid-compound still reproduces.
+    let buffered: Vec<RecordedCall> = BUFFERS
+        .try_with(|b| {
+            b.try_borrow()
+                .map(|buffers| buffers.iter().flatten().cloned().collect())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
     CALLS
         .try_with(|c| {
             let calls = c.try_borrow().ok()?;
-            if calls.is_empty() {
+            if calls.is_empty() && buffered.is_empty() {
                 return None;
             }
+            let all: Vec<RecordedCall> = calls.iter().cloned().chain(buffered).collect();
             serde_json::to_string(&RecordingView {
                 version: RECORDING_FORMAT_VERSION,
-                calls: &calls,
+                calls: &all,
                 golden_hash: 0,
             })
             .ok()
@@ -1265,6 +1330,7 @@ pub fn without_capture<R>(body: impl FnOnce() -> R) -> R {
 pub fn reset() {
     ENABLED.with(|e| e.set(false));
     CALLS.with(|c| c.borrow_mut().clear());
+    BUFFERS.with(|b| b.borrow_mut().clear());
 }
 
 #[cfg(test)]
@@ -1325,6 +1391,47 @@ mod tests {
             let _held = c.borrow_mut();
             assert_eq!(panic_snapshot_json(), None);
         });
+    }
+
+    #[test]
+    fn buffers_hold_calls_until_popped_and_nest() {
+        reset();
+        start();
+        record(RecordedCall::BeginGroundSketch);
+        push_buffer();
+        record(RecordedCall::HistoryBracketOpen);
+        push_buffer();
+        record(RecordedCall::HistoryBracketAbort);
+        let rec: Recording =
+            serde_json::from_str(&panic_snapshot_json().expect("snapshot")).expect("parses");
+        assert_eq!(
+            rec.calls,
+            vec![
+                RecordedCall::BeginGroundSketch,
+                RecordedCall::HistoryBracketOpen,
+                RecordedCall::HistoryBracketAbort
+            ],
+            "a panic mid-compound still carries the buffered calls"
+        );
+        assert_eq!(pop_buffer(), vec![RecordedCall::HistoryBracketAbort]);
+        assert_eq!(pop_buffer(), vec![RecordedCall::HistoryBracketOpen]);
+        assert_eq!(pop_buffer(), Vec::new(), "nothing open pops empty");
+        assert_eq!(take_calls(), vec![RecordedCall::BeginGroundSketch]);
+    }
+
+    #[test]
+    fn plugin_compound_round_trips_through_json() {
+        let call = RecordedCall::PluginCompound {
+            plugin: "com.example.parts".into(),
+            label: "Cut list".into(),
+            grant: serde_json::json!({"plugin": "com.example.parts"}),
+            calls: vec![RecordedCall::ApiDispatch { frame: "{}".into() }],
+        };
+        let json = serde_json::to_value(&call).unwrap();
+        assert_eq!(json["method"], "plugin_compound");
+        assert_eq!(json["calls"][0]["method"], "api_dispatch");
+        let back: RecordedCall = serde_json::from_value(json).unwrap();
+        assert_eq!(back, call);
     }
 
     #[test]

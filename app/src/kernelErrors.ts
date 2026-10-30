@@ -231,6 +231,12 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`Only siblings can be grouped — everything selected must be top-level, or all inside the same group. Move them to one level first.`,
   GroupCycle:
     msg`A group can't be moved into itself or into one of its own members. Pick a different group, or move it out to the top level.`,
+  TooManyOccurrences: msg`This model has more placed parts than Hew can list at once.`,
+  InvalidFrame:
+    msg`That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions.`,
+  RebaseDuringSession: msg`Finish editing the component before changing its axes.`,
+  NotPlaced: msg`That part is no longer in the model. Pick it again.`,
+  NoPartFrame: msg`That part has no faces to measure.`,
   GroupedOperand:
     msg`This operation can't target an object inside a group. Ungroup it, or leave the group context, first.`,
   BooleanOperandHasInstance:
@@ -314,6 +320,13 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`A connected tool changed which group or component was open for editing without putting it back, so its whole batch was discarded and the model was left unchanged.`,
   TransactionGestureUnbalanced:
     msg`A connected tool left a drawing step unfinished at the end of its batch, so the whole batch was discarded and the model was left unchanged.`,
+  // A plugin command held the document and its compound bookkeeping did not
+  // line up (docs/agents/PLUGINS.md "Compounds"): a host bug, never the
+  // person's doing.
+  CompoundTokenMismatch: msg`Hew lost track of a plugin's work in progress. Nothing was changed; if this keeps happening, use Report Bug.`,
+  // Not a kernel variant: the wasm boundary's busy guard, while a plugin
+  // command holds the document.
+  DocumentBusy: msg`A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.`,
 
   // ------------------------------------------- attribute dictionaries
   // Reachable only through the API surface (the UI has no attribute
@@ -402,6 +415,11 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   ImageTooLarge: msg`That picture is larger than 64 megapixels. Save a smaller copy of it and place that instead.`,
   ImageTooSmall: msg`That picture would be too small to place: each side needs to be at least 0.001 mm. Drag it out larger or type a bigger width.`,
   ImageTooBig: msg`That picture would be too big to place: each side can be at most 1,000,000 m. Drag it out smaller or type a smaller width.`,
+  GRANT: msg`A plugin could not connect because its permissions were unreadable. Reinstall the plugin, or use Report Bug if this keeps happening.`,
+  REGISTER: msg`A plugin's commands could not be added: its manifest declares a command Hew cannot accept. Update or reinstall the plugin.`,
+  FORWARD: msg`A plugin command's answer could not be delivered. If this keeps happening, use Report Bug.`,
+  SELECTION: msg`The selection could not be shared with a connected program. If this keeps happening, use Report Bug.`,
+  ISOLATION: msg`What is isolated could not be shared with a connected program. If this keeps happening, use Report Bug.`,
   BadRenderMode:
     msg`The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug.`,
   REPLAY: msg`This recorded session couldn't be replayed. If this keeps happening, use Report Bug.`,
