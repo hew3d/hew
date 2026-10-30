@@ -151,7 +151,6 @@ import { CleanModifierTap } from './cleanModifierTap'
 import { MultiClickTracker } from './multiClick'
 import { resolveSelectableRef, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
 import {
-  allFree,
   draftRef,
   geometryOf,
   isDraftRef,
@@ -3246,14 +3245,13 @@ export default function Viewport({
       )
       const snap = excludeAxisSnapForSelect(rawSnap)
       const g = pickGuide(ndcX, ndcY)
-      // A line drawn on a face under the cursor wins over a guide lying
-      // along it: guides are often placed exactly on the edges a shape was
-      // drawn to, and the line is what the click is for. The guide stays
-      // selectable anywhere else along its length.
+      // A drawn line under the cursor, on a face or on the ground, wins over
+      // a guide lying along it: guides are often placed exactly on the edges
+      // a shape was drawn to, and the line is what the click is for. The
+      // guide stays selectable anywhere else along its length.
       const under = g !== null ? resolveSelectableRef(snap, ray, selectionDeps()) : null
-      const lineOnFace =
-        under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve') && !allFree(wasmScene, under)
-      if (g !== null && !lineOnFace) {
+      const lineUnder = under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve')
+      if (g !== null && !lineUnder) {
         onSelectGuideRef.current?.(g)
         scheduleRender()
         return

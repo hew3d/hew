@@ -204,8 +204,8 @@ function simulatePick(l: Listing, ctx: string, ray: Float64Array, tol: number): 
 }
 
 interface SceneStubs {
-  region?: { sketch: bigint; region: bigint }
-  edge?: { sketch: bigint; edge: bigint }
+  region?: { sketch: bigint; region: bigint; depth?: number }
+  edge?: { sketch: bigint; edge: bigint; depth?: number }
   face?: { object: bigint; instance?: bigint; depth: number; face?: bigint }
   /** The drawing on each plane, keyed by the plane's z (all planes are
    *  horizontal, normal +Z). z = 0 is the ground and every sketch's plane. */
@@ -250,9 +250,19 @@ function fakeScene(s: SceneStubs): SelectScene {
           },
         }),
     pick_sketch_region: () =>
-      s.region && { sketch: () => s.region!.sketch, region: () => s.region!.region, free: vi.fn() },
+      s.region && {
+        sketch: () => s.region!.sketch,
+        region: () => s.region!.region,
+        depth: () => s.region!.depth ?? 5,
+        free: vi.fn(),
+      },
     pick_sketch_edge: () =>
-      s.edge && { sketch: () => s.edge!.sketch, edge: () => s.edge!.edge, free: vi.fn() },
+      s.edge && {
+        sketch: () => s.edge!.sketch,
+        edge: () => s.edge!.edge,
+        depth: () => s.edge!.depth ?? 5,
+        free: vi.fn(),
+      },
     pick_sketch_region_in_instance: () =>
       s.instanceRegion && {
         sketch: () => s.instanceRegion!.sketch,
@@ -399,6 +409,32 @@ describe('resolveSelectableRef — provenance × context × depth', () => {
     expect(resolveSelectableRef(bareSnap(), DOWN, deps(fakeScene({}), []))).toBeNull()
     // In a context, sketch pickers are skipped — only the in-context solid.
     expect(resolveSelectableRef(bareSnap(), DOWN, deps(fakeScene({ drawn: { 0: rectListing(0) }, region: { sketch: 21n, region: 5n }, face: { object: 42n, depth: 8 } }), GROUP_CTX))).toMatchObject({ kind: 'object', id: 42n })
+  })
+
+  it('a line lying on an axis is picked at a screen distance where the ray meets it, not at the camera', () => {
+    // The axis snap outranks the line and names nothing to select, so the
+    // click falls back to the edge under the ray. A perspective camera's
+    // scale shrinks to zero at the camera itself: measured there, the 8 px
+    // reach would vanish and only a click exactly on the line would hit it.
+    const onAxis: Snap = { ...base, kind: 'on-axis', x: 0.5, y: 0, z: 0 }
+    const ray: Ray = { origin: [0.5, 0.001, 5], direction: [0, 0, -1] } // 1 mm (4 px) off the line
+    const d: ResolveDeps = {
+      ...deps(fakeScene({ drawn: { 0: lineThroughOrigin(4, FREE_21) }, edge: { sketch: 11n, edge: 4n } }), []),
+      worldPerPixelAt: (p) => (WPP / 5) * Math.hypot(p[0] - ray.origin[0], p[1] - ray.origin[1], p[2] - ray.origin[2]),
+    }
+    expect(resolveSelectableRef(onAxis, ray, d)).toEqual(draft('draft-edge', GROUND, K(4)))
+  })
+
+  it('a guide or axis snap on a drawn line selects the line wherever the snap holds, not only within the pick radius', () => {
+    // Guides and axes outrank a line lying along them, so the snap names the
+    // guide while the cursor is still well off the line: the click selects
+    // what the snap latched onto, the line under the snap point.
+    for (const kind of ['on-guide', 'on-axis']) {
+      const snap: Snap = { ...base, kind, x: 0.5, y: 0, z: 0 }
+      const ray: Ray = { origin: [0.5, 0.0075, 5], direction: [0, 0, -1] } // 30 px off the line
+      const scene = fakeScene({ drawn: { 0: lineThroughOrigin(4, FREE_21) }, edge: { sketch: 11n, edge: 4n } })
+      expect(resolveSelectableRef(snap, ray, deps(scene, []))).toEqual(draft('draft-edge', GROUND, K(4)))
+    }
   })
 
   it('inside an instance, fallback picks its posed definition sketch before the member solid', () => {
@@ -889,6 +925,13 @@ describe('resolveSelectableRef — drawing refinement on a struck face (docs/des
     // the solid.
     const far: Ray = { origin: [0.5, 0.3, 5], direction: [0, 0, -1] }
     expect(resolveSelectableRef(onGuide, far, deps(scene, []))).toMatchObject({ kind: 'object', id: OBJECT })
+  })
+
+  it('a guide snap held on a line drawn on a face selects the line from beyond the pick radius', () => {
+    const scene = faceScene(chordListing(0))
+    const onGuide: Snap = { ...base, kind: 'on-guide', x: 0.5, y: 0, z: 0 }
+    const ray: Ray = { origin: [0.5, 0.0075, 5], direction: [0, 0, -1] } // 30 px off the line
+    expect(resolveSelectableRef(onGuide, ray, deps(scene, []))).toEqual(draft('draft-edge', GROUND, K(20)))
   })
 
   it('the pick asks the camera for its scale at the snapped point', () => {

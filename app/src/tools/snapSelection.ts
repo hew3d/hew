@@ -106,10 +106,10 @@ export interface SelectScene {
   sketch_region_island(sketch: bigint, region: bigint): bigint | undefined
   pick_sketch_region(
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
-  ): { sketch(): bigint; region(): bigint; free(): void } | undefined
+  ): { sketch(): bigint; region(): bigint; depth(): number; free(): void } | undefined
   pick_sketch_edge(
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
-  ): { sketch(): bigint; edge(): bigint; free(): void } | undefined
+  ): { sketch(): bigint; edge(): bigint; depth(): number; free(): void } | undefined
   pick_sketch_region_in_instance?(
     instance: bigint,
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
@@ -413,11 +413,7 @@ export function resolveSelectableRef(
   const topLevel = deps.context.length === 0
   const deepest = topLevel ? undefined : deps.context[deps.context.length - 1]
   const activeInstance = deepest?.kind === 'instance' ? deepest.id : undefined
-  const sketchCtx = (sketch: bigint, instance: bigint | undefined): string | null => {
-    // A scene double without `sketch_plane` cannot name a sketch's plane.
-    if (deps.scene.sketch_plane === undefined) return null
-    return ctxOfSketch(wasm(deps), sketch, instance ?? null)
-  }
+  const sketchCtx = (sketch: bigint, instance: bigint | undefined): string | null => sketchCtxOf(sketch, instance, deps)
   // Definition sketches are rendered through the active instance but are not
   // duplicated into the global inference index per placement. Probe that
   // scoped geometry before interpreting a solid snap, otherwise the member
@@ -518,11 +514,25 @@ export function resolveSelectableRef(
       pick satisfies never
   }
 
-  // Fallback (a provenance-less snap, or a sketch snap out of context):
-  // resolve what is actually under the ray. Sketch pickers are top-level only
-  // (they find the sketch, hence the plane); the solid pick is far-plane
-  // bounded and context-scoped; with no sketch under the ray the drawing, if
-  // any, is on the ground plane.
+  // A guide or an axis outranks a line lying along it, so the snap holds on
+  // the guide while the cursor is still well off the line: what the snap
+  // latched onto is the line under the snap point, so look there first.
+  if (snap !== null && (snap.kind === 'on-guide' || snap.kind === 'on-axis')) {
+    const ref = underRay(rayThrough(ray, [snap.x, snap.y, snap.z]), snap, topLevel, deps)
+    if (ref !== null && (ref.kind === 'draft-edge' || ref.kind === 'draft-curve')) return ref
+  }
+  return underRay(ray, snap, topLevel, deps)
+}
+
+/**
+ * Fallback (a provenance-less snap, or a sketch snap out of context): resolve
+ * what is actually under the ray. Sketch pickers are top-level only (they find
+ * the sketch, hence the plane); the solid pick is far-plane bounded and
+ * context-scoped; with no sketch under the ray the drawing, if any, is on the
+ * ground plane. The plane pick measures its screen reach where the ray meets
+ * the drawing: a perspective camera's scale at its own position is zero.
+ */
+function underRay(ray: Ray, snap: Snap | null, topLevel: boolean, deps: ResolveDeps): NodeRef | null {
   if (topLevel) {
     const regionPick = deps.scene.pick_sketch_region(
       ray.origin[0], ray.origin[1], ray.origin[2],
@@ -530,7 +540,8 @@ export function resolveSelectableRef(
     )
     if (regionPick !== undefined) {
       try {
-        const ref = pickInCtx(sketchCtx(regionPick.sketch(), undefined), ray, undefined, undefined, deps)
+        const at = pointAlongRay(ray, regionPick.depth())
+        const ref = pickInCtx(sketchCtxOf(regionPick.sketch(), undefined, deps), ray, at, undefined, deps)
         if (ref !== null) return ref
       } finally {
         regionPick.free()
@@ -542,7 +553,8 @@ export function resolveSelectableRef(
     )
     if (edgePick !== undefined) {
       try {
-        const ref = pickInCtx(sketchCtx(edgePick.sketch(), undefined), ray, undefined, undefined, deps)
+        const at = pointAlongRay(ray, edgePick.depth())
+        const ref = pickInCtx(sketchCtxOf(edgePick.sketch(), undefined, deps), ray, at, undefined, deps)
         if (ref !== null) return ref
       } finally {
         edgePick.free()
@@ -550,4 +562,21 @@ export function resolveSelectableRef(
     }
   }
   return solidUnderRay(ray, deps, snap)
+}
+
+/** A sketch's plane context, or null: a scene double without `sketch_plane`
+ * cannot name a sketch's plane. */
+function sketchCtxOf(sketch: bigint, instance: bigint | undefined, deps: ResolveDeps): string | null {
+  return deps.scene.sketch_plane === undefined ? null : ctxOfSketch(wasm(deps), sketch, instance ?? null)
+}
+
+/** `ray` moved sideways to pass through `point`, same direction: exact for an
+ * orthographic camera, and off a perspective one's by a fraction of a pixel's
+ * worth of angle across the snap radius. */
+function rayThrough(ray: Ray, point: readonly [number, number, number]): Ray {
+  const [dx, dy, dz] = ray.direction
+  const len2 = dx * dx + dy * dy + dz * dz
+  const w = [point[0] - ray.origin[0], point[1] - ray.origin[1], point[2] - ray.origin[2]]
+  const t = len2 > 0 ? (w[0] * dx + w[1] * dy + w[2] * dz) / len2 : 0
+  return { origin: [point[0] - dx * t, point[1] - dy * t, point[2] - dz * t], direction: [dx, dy, dz] }
 }
