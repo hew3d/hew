@@ -201,6 +201,35 @@ fn face_under(obj: &Object, plane: &crate::math::Plane, p: Point3) -> bool {
     })
 }
 
+/// Merges a Follow Me sweep into the solid it was drawn on: a sweep that
+/// shares volume with `base` is carved out of it (Subtract), one that does
+/// not is fused onto it (Union). Intersect decides which.
+///
+/// Two Subtract verdicts mean the carve is not the merge after all, and
+/// both have Union as the exact combined volume rather than a guess: a
+/// sweep that removes nothing (`base − sweep = base`, so `base ∪ sweep`
+/// keeps everything and loses nothing) and a sweep that engulfs the base
+/// (`base − sweep = ∅`, so `base ∪ sweep = sweep`). Falling through to
+/// Union in those two cases merges honestly instead of failing the whole
+/// Follow Me on a verdict the person drawing cannot act on. Where Union
+/// then refuses too — a sweep within tolerance of coinciding with its base,
+/// a degenerate contact — that refusal stands: it is the arrangement's
+/// answer, not a disagreement between two of them.
+fn merge_sweep(base: &Object, swept: &Object) -> Result<Object, BooleanError> {
+    let op = match Object::boolean(BooleanOp::Intersect, base, swept, &Transform::IDENTITY) {
+        Ok(_) => BooleanOp::Subtract,
+        Err(_) => BooleanOp::Union,
+    };
+    match Object::boolean(op, base, swept, &Transform::IDENTITY) {
+        Err(BooleanError::NothingRemoved | BooleanError::EmptyResult)
+            if op == BooleanOp::Subtract =>
+        {
+            Object::boolean(BooleanOp::Union, base, swept, &Transform::IDENTITY)
+        }
+        r => r,
+    }
+}
+
 /// Whether `obj` has an edge from `a` to `b` (either direction, within
 /// [`crate::tol::POINT_MERGE`]).
 fn object_has_edge(obj: &Object, a: Point3, b: Point3) -> bool {
@@ -11077,12 +11106,7 @@ impl Document {
             return Err(DocumentError::GroupedOperand);
         }
         let base = &base_rec.object;
-        let op = match Object::boolean(BooleanOp::Intersect, base, &swept, &Transform::IDENTITY) {
-            Ok(_) => BooleanOp::Subtract,
-            Err(_) => BooleanOp::Union,
-        };
-        let mut result = Object::boolean(op, base, &swept, &Transform::IDENTITY)
-            .map_err(DocumentError::Boolean)?;
+        let mut result = merge_sweep(base, &swept).map_err(DocumentError::Boolean)?;
         // Dissolve the merge's coplanar seams, preserving the base's
         // pre-existing imprints (`Document::boolean`'s treatment; the
         // swept tool is fresh and contributes none).
@@ -11166,12 +11190,7 @@ impl Document {
             return Err(DocumentError::GroupedOperand);
         }
         let base = &base_rec.object;
-        let op = match Object::boolean(BooleanOp::Intersect, base, &swept, &Transform::IDENTITY) {
-            Ok(_) => BooleanOp::Subtract,
-            Err(_) => BooleanOp::Union,
-        };
-        let mut result = Object::boolean(op, base, &swept, &Transform::IDENTITY)
-            .map_err(DocumentError::Boolean)?;
+        let mut result = merge_sweep(base, &swept).map_err(DocumentError::Boolean)?;
         // Dissolve the coplanar seams the merge introduced, preserving the
         // base's pre-existing imprints; the swept tool is fresh and
         // contributes none (exactly `Document::boolean`'s treatment).
@@ -11343,12 +11362,7 @@ impl Document {
             })
             .ok_or(DocumentError::UnknownObject)?;
         let base = &base_rec.object;
-        let op = match Object::boolean(BooleanOp::Intersect, base, &swept, &Transform::IDENTITY) {
-            Ok(_) => BooleanOp::Subtract,
-            Err(_) => BooleanOp::Union,
-        };
-        let mut result = Object::boolean(op, base, &swept, &Transform::IDENTITY)
-            .map_err(DocumentError::Boolean)?;
+        let mut result = merge_sweep(base, &swept).map_err(DocumentError::Boolean)?;
         // Dissolve the merge's coplanar seams, preserving the base's
         // pre-existing imprints (`Document::boolean`'s treatment).
         let preserve = base.coplanar_edge_segments();
@@ -11445,12 +11459,7 @@ impl Document {
         // boolean's operand rules; the swept body never enters the document.
         let base_rec = &self.objects[object];
         let base = &base_rec.object;
-        let op = match Object::boolean(BooleanOp::Intersect, base, &swept, &Transform::IDENTITY) {
-            Ok(_) => BooleanOp::Subtract,
-            Err(_) => BooleanOp::Union,
-        };
-        let mut result = Object::boolean(op, base, &swept, &Transform::IDENTITY)
-            .map_err(DocumentError::Boolean)?;
+        let mut result = merge_sweep(base, &swept).map_err(DocumentError::Boolean)?;
         let preserve = base.coplanar_edge_segments();
         result.merge_coplanar_faces(&preserve);
 
@@ -12137,6 +12146,16 @@ impl Document {
     /// identity transform. On success the operands are hidden and the result is
     /// the only visible product; on `Err` nothing changes (the op's strong
     /// guarantee) and the operands stay visible.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] — an operand is stale or hidden.
+    /// - [`DocumentError::GroupedOperand`] — an operand is inside a group.
+    /// - [`DocumentError::Boolean`] — `a == b` (degenerate contact), or the
+    ///   engine refused: a non-solid operand, an empty result, degenerate
+    ///   contact, or a subtract whose cutter removes nothing
+    ///   ([`BooleanError::NothingRemoved`]: disjoint or merely touching
+    ///   operands). On that last refusal both operands stay visible, so the
+    ///   cutter can be moved and the subtract tried again.
     pub fn boolean(
         &mut self,
         op: BooleanOp,
@@ -12245,7 +12264,8 @@ impl Document {
     /// - [`DocumentError::UnknownObject`] — `a`/`b` is stale, hidden, or not
     ///   a member of `component`.
     /// - [`DocumentError::Boolean`] — `a == b` (degenerate contact), or the
-    ///   engine itself refused (non-solid operand, empty result, …).
+    ///   engine itself refused (non-solid operand, empty result, a subtract
+    ///   that removes nothing — [`BooleanError::NothingRemoved`] — …).
     ///
     /// On `Err` the document is untouched (the strong guarantee).
     pub fn boolean_in_component(
@@ -12387,7 +12407,10 @@ impl Document {
     ///   group (replacing ops consume operands and emit top-level results).
     /// - [`DocumentError::Boolean`] — the engine refused (degenerate contact
     ///   between members or operands, empty result, …), including
-    ///   [`BooleanError::DegenerateContact`] for `a == b`.
+    ///   [`BooleanError::DegenerateContact`] for `a == b` and
+    ///   [`BooleanError::NothingRemoved`] for a subtract whose cutter is
+    ///   disjoint from, or only touches, the target. Both operand subtrees
+    ///   stay visible on that refusal.
     pub fn boolean_nodes(
         &mut self,
         op: BooleanOp,
@@ -24807,6 +24830,74 @@ mod tests {
             .next()
             .expect("rectangle closes one region");
         doc.extrude_region(s, region, 1.0).expect("box extrudes").0
+    }
+
+    /// A closed box from `min` to `max`, built directly (not through a
+    /// document), for exercising [`merge_sweep`] on bare solids.
+    fn bare_box(min: Point3, max: Point3) -> Object {
+        let (a, b) = (min, max);
+        Object::from_polygons(
+            &[
+                Point3::new(a.x, a.y, a.z),
+                Point3::new(b.x, a.y, a.z),
+                Point3::new(b.x, b.y, a.z),
+                Point3::new(a.x, b.y, a.z),
+                Point3::new(a.x, a.y, b.z),
+                Point3::new(b.x, a.y, b.z),
+                Point3::new(b.x, b.y, b.z),
+                Point3::new(a.x, b.y, b.z),
+            ],
+            &[
+                vec![0, 3, 2, 1],
+                vec![4, 5, 6, 7],
+                vec![0, 1, 5, 4],
+                vec![1, 2, 6, 5],
+                vec![2, 3, 7, 6],
+                vec![3, 0, 4, 7],
+            ],
+        )
+        .expect("a box is a valid solid")
+    }
+
+    /// `merge_sweep` carves a sweep that shares volume with its base, fuses
+    /// one that does not, and still fuses when the Subtract it chose turns
+    /// out not to be the merge: a sweep that engulfs the base (Intersect
+    /// finds volume, Subtract is empty) merges to the sweep itself rather
+    /// than failing the Follow Me. A sweep within tolerance of coinciding
+    /// with its base stays a typed refusal — Union refuses it too, and that
+    /// is the arrangement's one answer, not a disagreement between two.
+    #[test]
+    fn merge_sweep_fuses_when_the_carve_is_not_the_merge() {
+        let base = bare_box(Point3::ORIGIN, Point3::new(1.0, 1.0, 1.0));
+        let volume = |o: &Object| o.signed_volume();
+
+        // Crossing: carved.
+        let crossing = bare_box(Point3::new(0.5, 0.5, 0.5), Point3::new(1.5, 1.5, 1.5));
+        let r = merge_sweep(&base, &crossing).expect("carve");
+        assert!((volume(&r) - 0.875).abs() < 1e-9, "carved {}", volume(&r));
+
+        // Apart: fused (two shells, both volumes).
+        let apart = bare_box(Point3::new(3.0, 0.0, 0.0), Point3::new(4.0, 1.0, 1.0));
+        let r = merge_sweep(&base, &apart).expect("fuse");
+        assert!((volume(&r) - 2.0).abs() < 1e-9, "fused {}", volume(&r));
+
+        // Engulfing: Intersect is the base, Subtract is empty — the merge is
+        // the sweep.
+        let engulf = bare_box(Point3::new(-1.0, -1.0, -1.0), Point3::new(2.0, 2.0, 2.0));
+        assert_eq!(
+            Object::boolean(BooleanOp::Subtract, &base, &engulf, &Transform::IDENTITY).unwrap_err(),
+            BooleanError::EmptyResult
+        );
+        let r = merge_sweep(&base, &engulf).expect("engulfing sweep merges to itself");
+        assert!((volume(&r) - 27.0).abs() < 1e-9, "engulfed {}", volume(&r));
+
+        // Within tolerance of coincident: every op refuses, and so does the
+        // merge — typed, with no result.
+        let nudged = bare_box(
+            Point3::new(1e-9, 0.0, 0.0),
+            Point3::new(1.0 + 1e-9, 1.0, 1.0),
+        );
+        assert!(merge_sweep(&base, &nudged).is_err());
     }
 
     /// The unique face of `obj` whose plane normal matches `dir`, if any.

@@ -2102,7 +2102,16 @@ export function flattenSessionScope(
  */
 export type BooleanCoreOutcome =
   | { kind: 'ok'; node: NodeRef; autoExploded: boolean }
-  | { kind: 'refused'; code?: string; message: string }
+  | {
+      kind: 'refused'
+      code?: string
+      message: string
+      /** True when an instance operand's auto-explode was committed and
+       *  then undone because the retried boolean refused: the document is
+       *  back where it started, but the scene passed through other states
+       *  on the way, so the caller refreshes what it renders. */
+      rolledBack?: boolean
+    }
   | {
       kind: 'mutated-failed'
       /** Every node now sitting in the document in place of a pre-explode
@@ -2221,15 +2230,35 @@ export function runBooleanCore(
       const node = attempt(opA, opB)
       return { kind: 'ok', node, autoExploded: true }
     } catch (err2) {
-      // Unlike every refusal above, the explode(s) already committed real
-      // mutations — the document now holds the exploded pieces, not the
-      // pre-explode instance(s).
+      // The explode(s) were committed only so this boolean could run. When
+      // the boolean itself refuses — a cutter that removes nothing, a
+      // degenerate contact — the person asked for a boolean and got none, so
+      // the document must read as untouched: roll the explode steps back
+      // (each was one undo step) and report a plain refusal. Only if an
+      // undo itself fails is the partial state disclosed as mutated-failed,
+      // with the exact step count that restores it.
       const code2 = parseKernelErrorCode(err2)
       const rawMsg2 = err2 instanceof Error ? err2.message : String(err2)
+      let rolledBack = 0
+      try {
+        // Each explode step was one undo entry; the returned change report
+        // is a wasm handle, freed since the caller re-pulls the whole scene.
+        for (; rolledBack < committedSteps; rolledBack++) wasmScene.scene_undo().free()
+      } catch {
+        // fall through to the honest partial-state report below
+      }
+      if (rolledBack === committedSteps) {
+        return {
+          kind: 'refused',
+          code: code2 ?? undefined,
+          message: kernelErrorMessage(code2 ?? 'Unknown', rawMsg2),
+          rolledBack: true,
+        }
+      }
       return {
         kind: 'mutated-failed',
         settledNodes,
-        committedSteps,
+        committedSteps: committedSteps - rolledBack,
         retryFailed: true,
         otherOperandExploded: false,
         code: code2 ?? undefined,
@@ -4651,6 +4680,15 @@ export default function Viewport({
       const outcome = runBooleanCore(wasmScene, op, a, b)
 
       if (outcome.kind === 'refused') {
+        if (outcome.rolledBack) {
+          // The document is back where it started, but the scene passed
+          // through the exploded state on the way; re-pull what is rendered
+          // so nothing stale from that detour survives.
+          handleSceneRefresh()
+          sceneRenderer.refreshAllSketches()
+          sceneRenderer.refreshGuides()
+          scheduleRender()
+        }
         handleToast(outcome.message, outcome.code)
         return null
       }

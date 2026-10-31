@@ -804,11 +804,15 @@ common in practice, not edge cases, so the boolean engine classifies
 coplanar sub-faces by an exact, tolerance-free coverage test instead of
 falling back to a numerically fragile epsilon comparison. A genuinely
 ambiguous case (an edge lying exactly on a face with no area overlap) is
-refused outright rather than resolved arbitrarily. Results are also cleaned
-up: coplanar seams a boolean (or a through-cut push/pull) introduces are
-dissolved, so two joined tops read as one face — while coplanar edges the
-operands already carried (drawing on faces, not yet extruded) are
-preserved, and differing face materials are a hard stop.
+refused outright rather than resolved arbitrarily. A Subtract whose cutter
+is disjoint from, or only touches, the target is refused as `NothingRemoved`
+(the arrangement dropped no face of the target and kept no face of the
+cutter, so the target's skin is unchanged), since handing back the target
+unchanged would read as a cut that silently did nothing.
+Results are also cleaned up: coplanar seams a boolean (or a through-cut
+push/pull) introduces are dissolved, so two joined tops read as one face —
+while coplanar edges the operands already carried (drawing on faces, not
+yet extruded) are preserved, and differing face materials are a hard stop.
 
 **A baked transform for plain geometry; a real pose only for Component
 instances.** Move, rotate, and scale write directly into an Object's or

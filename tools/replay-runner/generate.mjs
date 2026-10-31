@@ -205,6 +205,86 @@ function buildHexPrism(scene) {
   return scene.take_recording();
 }
 
+/**
+ * Draws a closed regular `n`-gon on a fresh sketch in the plane x = `x`
+ * (normal +X), centered at (y = cy, z = cz) with circumradius `r`, and returns
+ * `[sketchHandle, regionHandle]` — a disk drawn in the plane of a solid's
+ * side face but out in empty space, the Getting Started guide's cutter.
+ */
+function sidePlaneRegularPolygon(scene, n, x, cy, cz, r) {
+  const sketch = scene.begin_sketch_on_plane(x, cy, cz, 1, 0, 0);
+  const pt = (i) => {
+    const t = (2 * Math.PI * i) / n;
+    return [cy + r * Math.cos(t), cz + r * Math.sin(t)];
+  };
+  let region = null;
+  for (let i = 0; i < n; i++) {
+    const [ay, az] = pt(i);
+    const [by, bz] = pt((i + 1) % n);
+    const report = scene.sketch_add_segment(sketch, x, ay, az, x, by, bz);
+    const created = report.regions_created();
+    if (created.length > 0) {
+      region = created[0];
+    }
+  }
+  if (region === null) {
+    throw new Error(`closing the ${n}-gon did not create a region`);
+  }
+  return [sketch, region];
+}
+
+/**
+ * The Getting Started guide's cutter, in meters: a 7 × 5 × 6 cm bin, a 2 cm
+ * disk drawn in the plane of its right face (x = 0.07) 3 cm above the top
+ * corner at y = 0 (the upper-left corner as the Right view shows it, eye at
+ * +X looking toward -X with Z up, so screen-left is y = 0), pushed 7 cm
+ * across the bin into a cylinder that hangs just above it, then moved down
+ * 3 cm so its axis runs along the top edge, and subtracted. Before the move
+ * the cutter only hangs over the bin, so that
+ * Subtract is refused (`NothingRemoved`) and leaves nothing in the
+ * recording — the scenario asserts the refusal rather than recording it —
+ * and the fixture locks the cut that the moved cutter makes.
+ */
+function buildCutterMovedIntoBin(scene) {
+  scene.start_recording();
+
+  const bin = scene.begin_ground_sketch();
+  const footprint = [
+    [0, 0, 0.07, 0],
+    [0.07, 0, 0.07, 0.05],
+    [0.07, 0.05, 0, 0.05],
+    [0, 0.05, 0, 0],
+  ];
+  let binRegion = null;
+  for (const [ax, ay, bx, by] of footprint) {
+    const created = scene.sketch_add_segment(bin, ax, ay, 0, bx, by, 0).regions_created();
+    if (created.length > 0) binRegion = created[0];
+  }
+  if (binRegion === null) throw new Error('closing the bin footprint did not create a region');
+  const block = scene.extrude_region(bin, binRegion, 0.06);
+
+  const [disk, diskRegion] = sidePlaneRegularPolygon(scene, 24, 0.07, 0.0, 0.09, 0.02);
+  const cutter = scene.extrude_region(disk, diskRegion, -0.07);
+
+  // Hanging a centimeter above the bin: nothing to remove, refused, not
+  // recorded (refused calls never enter a recording).
+  let refused = null;
+  try {
+    scene.boolean_nodes(1 /* subtract */, 0, block, 0, cutter);
+  } catch (err) {
+    refused = String(err);
+  }
+  if (refused === null || !refused.startsWith('NothingRemoved:')) {
+    throw new Error(`expected the hanging cutter's subtract to refuse NothingRemoved, got ${refused}`);
+  }
+
+  scene.transform_object(cutter, translate(0, 0, -0.03));
+  scene.boolean_nodes(1 /* subtract */, 0, block, 0, cutter);
+
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
 /** Named scenarios, each producing a `take_recording()` JSON string. */
 const SCENARIOS = {
   'two-boxes-union-slice': buildTwoBoxesUnionSlice,
@@ -215,6 +295,7 @@ const SCENARIOS = {
   'multi-object-scene': buildMultiObjectScene,
   'chained-boolean': buildChainedBoolean,
   'hex-prism': buildHexPrism,
+  'cutter-moved-into-bin': buildCutterMovedIntoBin,
 };
 
 /** Runs scenario `name`'s build and writes `fixtures/<name>.json`. */

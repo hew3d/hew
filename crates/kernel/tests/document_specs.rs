@@ -323,6 +323,59 @@ fn boolean_with_self_is_refused() {
     );
 }
 
+/// A Subtract whose cutter does not reach the target refuses as
+/// `NothingRemoved`, and the refusal is a true no-op on the document: both
+/// operands stay visible, no result object appears, and nothing was
+/// recorded for undo. This is the guide's "cutter drawn beside the bin"
+/// case, through the node-level entry point the app calls.
+#[test]
+fn subtract_that_removes_nothing_leaves_the_document_untouched() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    // Disjoint: a whole unit away along x.
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    // Touching: shares the x=1 wall of `a` with no volume in common.
+    let c = extrude_box(&mut doc, 1.0, 0.0, 2.0, 1.0, 0.0, 1.0);
+    let before = doc.state_hash();
+    let visible = doc.visible_object_ids();
+    assert_eq!(visible.len(), 3);
+    let undo_depth = doc.undo_depth();
+
+    for cutter in [b, c] {
+        assert_eq!(
+            doc.boolean_nodes(
+                BooleanOp::Subtract,
+                NodeId::Object(a),
+                NodeId::Object(cutter)
+            )
+            .map(|_| ()),
+            Err(DocumentError::Boolean(BooleanError::NothingRemoved))
+        );
+        assert_eq!(
+            doc.boolean(BooleanOp::Subtract, a, cutter).map(|_| ()),
+            Err(DocumentError::Boolean(BooleanError::NothingRemoved))
+        );
+    }
+    assert_eq!(
+        doc.visible_object_ids(),
+        visible,
+        "both operands still visible"
+    );
+    assert_eq!(doc.state_hash(), before, "document untouched");
+    assert_eq!(
+        doc.undo_depth(),
+        undo_depth,
+        "a refusal records no undo entry"
+    );
+
+    // The same cutter moved INTO the target cuts, so the refusal is about
+    // this placement, not about the operands.
+    doc.transform_object(b, &Transform::translation(Vec3::new(-1.5, 0.0, 0.0)))
+        .expect("move the cutter into the target");
+    doc.boolean_nodes(BooleanOp::Subtract, NodeId::Object(a), NodeId::Object(b))
+        .expect("overlapping subtract succeeds");
+}
+
 #[test]
 fn boolean_with_hidden_operand_errors() {
     let mut doc = Document::new();

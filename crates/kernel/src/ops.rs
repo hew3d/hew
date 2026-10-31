@@ -508,6 +508,11 @@ pub enum BooleanError {
     /// edge-on-face tangency). Refused rather than repaired; nudge or use a
     /// merge-group container instead.
     DegenerateContact,
+    /// Subtract removed no volume: the operands are disjoint or only touch
+    /// (along a face, an edge, or a corner), so the result would be `a`
+    /// unchanged. Refused rather than returned as a no-op that reads like a
+    /// cut; move the cutter so it passes through `a`.
+    NothingRemoved,
 }
 
 /// Typed failures of [`Object::slice`].
@@ -810,6 +815,12 @@ impl std::fmt::Display for BooleanError {
             }
             BooleanError::DegenerateContact => {
                 write!(f, "operands touch degenerately; no manifold result exists")
+            }
+            BooleanError::NothingRemoved => {
+                write!(
+                    f,
+                    "subtract removed no volume; the operands are disjoint or only touch"
+                )
             }
         }
     }
@@ -5616,7 +5627,9 @@ impl Object {
     /// # Errors
     /// See [`BooleanError`]. Degenerate contact (coincident faces, tangent
     /// edges) is refused, not repaired — resolution strategies (nudging,
-    /// merge-group containers) belong to M2 UX.
+    /// merge-group containers) belong to M2 UX. A subtract whose operands
+    /// are disjoint or only touch, so that nothing is removed, refuses as
+    /// [`BooleanError::NothingRemoved`] rather than returning `a` unchanged.
     pub fn boolean(
         op: BooleanOp,
         a: &Object,
@@ -6376,6 +6389,10 @@ impl Object {
                 Ok(result)
             }
             Err(BooleanError::EmptyResult) => Err(PushPullError::WouldVanish),
+            // The tool is swept from a face of this solid, so it can remove
+            // nothing only when the sweep had no depth: a vanishing distance,
+            // not damaged geometry.
+            Err(BooleanError::NothingRemoved) => Err(PushPullError::DistanceTooSmall),
             Err(_) => Err(PushPullError::NonManifoldResult),
         }
     }

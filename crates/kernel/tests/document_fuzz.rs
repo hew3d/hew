@@ -163,7 +163,10 @@ enum DocOp {
         edge_sel: usize,
         from_features: bool,
     },
-    /// Boolean between two distinct visible objects.
+    /// Boolean between two distinct visible objects. A typed refusal is an
+    /// accepted no-op: `DegenerateContact` for a measure-zero contact,
+    /// `EmptyResult` for an empty intersect or a total subtract, and
+    /// `NothingRemoved` for a subtract whose operands do not overlap.
     Boolean {
         kind: u8,
         a_sel: usize,
@@ -325,7 +328,8 @@ enum DocOp {
     /// parity.md phase K2) — the shared-geometry combine, replacing both
     /// operands with a new member. `a_sel == b_sel` (same live member) is an
     /// accepted typed no-op (`DegenerateContact`), like the world `Boolean`
-    /// op's own `a_sel == b_sel` case.
+    /// op's own `a_sel == b_sel` case; so is a subtract between members
+    /// that do not overlap (`NothingRemoved`).
     BooleanInComponent {
         comp_sel: usize,
         kind: u8,

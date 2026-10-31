@@ -1580,7 +1580,7 @@ export interface SolidSliceResult {
 /**
  * `hew.solid.subtract` (v1) — Boolean subtraction of two solids.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity
+ * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, nothing_removed
  */
 export interface SolidSubtractParams {
   /** a node id: obj_/grp_/ins_ */

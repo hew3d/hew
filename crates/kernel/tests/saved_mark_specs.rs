@@ -394,6 +394,10 @@ fn every_common_action_gets_the_label_the_ui_shows() {
     // Booleans name their op.
     doc.boolean(BooleanOp::Union, a, b).expect("union");
     assert_eq!(last(&doc), "Union");
+    // `d` starts three units clear of `c`; a Subtract that removes nothing
+    // is refused, so move the cutter into the target first.
+    doc.transform_object(d, &Transform::translation(Vec3::new(-2.5, 0.5, 0.25)))
+        .expect("move cutter into target");
     doc.boolean(BooleanOp::Subtract, c, d).expect("subtract");
     assert_eq!(last(&doc), "Subtract");
 

@@ -7894,6 +7894,7 @@ Boolean subtraction of two solids.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `nothing_removed` — Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid.
 
 ### `hew.solid.thicken`
 

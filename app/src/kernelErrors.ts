@@ -185,6 +185,8 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   SingularTransform: msg`One object's placement is scaled down to nothing, so the operation can't run.`,
   DegenerateContact:
     msg`The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.`,
+  NothingRemoved:
+    msg`Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid.`,
 
   // ----------------------------------------------------------- slice
   NotSolid: msg`Only a solid can be sliced. To make it solid, select it and choose Object ▸ Make Solid…`,
@@ -476,6 +478,7 @@ export function describedErrorCodes(): string[] {
 const ERROR_LEVEL_CODES: ReadonlySet<string> = new Set([
   'WouldVanish', 'NonManifoldResult', 'ObjectNotSolid', 'DegenerateGeometry',
   'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'SingularTransform',
+  'NothingRemoved',
   'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
   // A refusal to rebuild geometry the user asked to rebuild. Its sibling
   // segment-count codes stay at warn: those are an out-of-range number, not a

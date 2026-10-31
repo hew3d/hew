@@ -4999,6 +4999,10 @@ msgstr "Nothing was changed, so there is nothing to undo."
 msgid "Nothing was closed."
 msgstr "Nothing was closed."
 
+#: src/kernelErrors.ts
+msgid "Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid."
+msgstr "Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid."
+
 #: src/health/healthCopy.ts
 msgid "Nothing was given a thickness."
 msgstr "Nothing was given a thickness."

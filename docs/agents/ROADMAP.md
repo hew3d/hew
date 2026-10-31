@@ -266,7 +266,9 @@ below.
   untouched, sharing a footprint with the new solid exactly like
   re-extruding occupied ground
 - Explicit boolean union, subtract, and intersect, with coplanar seams
-  dissolved on the result (a union of two flush boxes reads as one box)
+  dissolved on the result (a union of two flush boxes reads as one box).
+  A subtract whose cutter sits apart from, or only touches, the target
+  refuses with a typed `NothingRemoved` and leaves both solids in place
 - Non-destructive, nestable grouping (Group/Ungroup)
 - Group-level booleans: Union/Subtract/Intersect accept a whole group on
   either side (or mixed with a plain solid). The group's solids are fused

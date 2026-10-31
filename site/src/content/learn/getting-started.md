@@ -123,11 +123,14 @@ It is worth saying that you don't always *have* to use the arrow keys to lock to
 
 Our goal is to make a "cutter" out of a cylinder that we construct to lie *across* the bin. It'll be easier to do this if you **Orbit** the model to show the right face of the bin more clearly. Alternatively, you can choose **Camera ▸ Standard Views ▸ Right**. Play around with this - being able to master the camera is a critical skill working in 3D.
 
-Drawing on the "right" face means locking to the **red / X-plane** (which is perpendicular to the X-axis, because that's how that works).
+Drawing in the plane of the "right" face means working on the **red / X-plane** (which is perpendicular to the X-axis, because that's how that works). This time we want that plane but not the face itself, so we pin it.
 
-1. Choose the **Circle** (`C`) tool and hover over the bin's right face. Then press the **Right arrow** key. The Status Bar confirms that we're locked to the red plane and there are some visual clues as well.
-2. Click the upper left corner of the right face as the circle center and enter a radius of `2cm`. We now have a disk Sketch on the right face of the bin, rather than on the ground
-3. Choose **Push/Pull** (`P`) to create a cylinder the entire length of the bin (`7cm` or just choose a point on the far edge)
+1. Choose the **Circle** (`C`) tool and hover over the bin's right face. Then press `Shift`. The Status Bar confirms the plane is pinned, and from now on the cursor stays on that plane wherever it goes, even out past the face's edges into empty space. The pin is a toggle: it stays on until you press `Shift` again, press `Esc`, or switch tools. (The arrow keys lock a plane's *direction* but let it pass through whatever you click, so they would put a click in empty space on the ground instead. The pin fixes the plane itself.)
+2. Move the cursor straight up from the upper left corner of the right face, about `3cm` above it in empty space, and click to set the circle center. Type `2cm` and press `Enter` for the radius. The disk hangs in the air just above the bin, clear of the face: a Sketch in the Outliner, in the same plane as the face but not on it. Anywhere between 2 and 5 cm above the corner works; closer than 2 cm and the disk crosses the face's top edge, which splits it (see below), and higher than 5 cm the drop in step 4 won't reach the bin.
+3. Choose **Push/Pull** (`P`), click the disk, type `-7cm`, and press `Enter`. The minus sign sends the push back through the disk's plane, across the bin to its far side; a plain `7cm` would push it the other way, out into the air. We now have a cylinder floating along the top of the bin, the entire length of it.
+4. Choose **Move** (`M`) and click the cylinder. Press the **Up arrow** key to lock the move to the blue axis, move the cursor downward so the cylinder starts to drop, type `3cm`, and press `Enter`. The cylinder now runs along the bin's top edge, partly sunk into the wall.
+
+The disk starts clear of the bin on purpose. If you draw a shape in the plane of a face and it overlaps the face's edge, the edge splits it: the part on the face becomes part of the face, and the rest becomes a Sketch of its own. Push/Pull would then extrude only that leftover piece, which misses the bin entirely. Drawing the cutter clear of the bin and moving it into place keeps the whole disk together.
 
 ![The bin with a right face disk being extruded into a cylinder](/docs/bin-with-cutter.webp)
 
@@ -143,6 +146,8 @@ We are starting with our bin that has a cylinder lying across it, from the previ
 ![The command palette filtered down to the Subtract tool](/docs/command-palette-sub.webp)
 
 The end result of the **Subtract** is a bin with a cut-out the shape of our cutter (since a **Subtract** removes any part of the initial solid that is shared with the second solid.)
+
+If Hew answers "Nothing was cut away" instead, the cylinder isn't passing through the bin: the two solids only touch or sit apart, and nothing has changed. If the cylinder lies along the top of the bin but too high, **Move** it down a little farther (Up arrow to lock the blue axis, as in step 8) and run **Subtract** again. If it sticks out into the air away from the bin, the push went the wrong way: **Undo** back to the disk and push it again with `-7cm`.
 
 ![The bin with a curved cutout from the cutter](/docs/bin-with-cutout.webp)
 

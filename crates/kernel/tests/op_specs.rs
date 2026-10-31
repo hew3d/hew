@@ -3895,6 +3895,78 @@ proptest! {
     }
 }
 
+/// One coordinate of a cube placement: mostly free, but often landing
+/// exactly on a face-contact offset (±1), a coincident one (0), or just
+/// short of or past contact (1 ∓ 1e-5, 1e-9, 1e-12 — a sliver of overlap
+/// wider than, at, and far below the merge tolerance), so the touching and
+/// near-touching configurations are sampled as a matter of course rather
+/// than by luck.
+fn placement_coord() -> impl Strategy<Value = f64> {
+    prop_oneof![
+        8 => -2.5..2.5f64,
+        2 => Just(1.0),
+        2 => Just(-1.0),
+        1 => Just(0.0),
+        1 => Just(1.0 - 1e-5),
+        1 => Just(1.0 - 1e-9),
+        1 => Just(1.0 - 1e-12),
+        1 => Just(1.0 + 1e-9),
+        1 => Just(-(1.0 - 1e-5)),
+        1 => Just(-(1.0 - 1e-9)),
+        1 => Just(-(1.0 - 1e-12)),
+    ]
+}
+
+proptest! {
+    /// `NothingRemoved` is exactly the no-overlap case, seen from Subtract:
+    /// whenever Intersect finds real shared volume, Subtract never claims
+    /// there was nothing to remove (it either cuts or empties `a` entirely);
+    /// whenever Subtract refuses as `NothingRemoved`, Intersect agrees there
+    /// is no shared volume (empty, or a contact too thin to resolve); and
+    /// whenever the placement leaves no volume in common at all (some axis
+    /// offset at or beyond a full edge), Subtract never returns a solid —
+    /// it refuses as `NothingRemoved`, or as `DegenerateContact` where the
+    /// contact is an edge or a corner the weld cannot resolve.
+    #[test]
+    fn nothing_removed_agrees_with_intersect(
+        dx in placement_coord(),
+        dy in placement_coord(),
+        dz in placement_coord(),
+    ) {
+        let a = unit_cube();
+        let b = unit_cube();
+        let shift = Transform::translation(Vec3::new(dx, dy, dz));
+        let intersect = Object::boolean(BooleanOp::Intersect, &a, &b, &shift);
+        let subtract = Object::boolean(BooleanOp::Subtract, &a, &b, &shift);
+        if intersect.is_ok() {
+            prop_assert!(
+                matches!(subtract, Ok(_) | Err(BooleanError::EmptyResult)),
+                "intersect found volume at ({dx}, {dy}, {dz}) but subtract said {subtract:?}"
+            );
+        }
+        if matches!(subtract, Err(BooleanError::NothingRemoved)) {
+            prop_assert!(
+                matches!(
+                    intersect,
+                    Err(BooleanError::EmptyResult) | Err(BooleanError::DegenerateContact)
+                ),
+                "subtract removed nothing at ({dx}, {dy}, {dz}) but intersect said {:?}",
+                intersect.map(|o| signed_volume(&o))
+            );
+        }
+        if dx.abs() >= 1.0 || dy.abs() >= 1.0 || dz.abs() >= 1.0 {
+            prop_assert!(
+                matches!(
+                    subtract,
+                    Err(BooleanError::NothingRemoved) | Err(BooleanError::DegenerateContact)
+                ),
+                "no volume in common at ({dx}, {dy}, {dz}) but subtract said {:?}",
+                subtract.map(|o| signed_volume(&o))
+            );
+        }
+    }
+}
+
 #[test]
 fn subtract_can_split_a_solid_into_multiple_shells() {
     // A bar (volume 3) with a slab bitten out of its middle third becomes two

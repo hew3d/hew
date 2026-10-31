@@ -4052,6 +4052,10 @@ impl Registry {
             cmd.params_schema = boolean_params.clone();
             cmd.result_schema = boolean_result.clone();
             cmd.refusals = boolean_refusals();
+            // Subtract alone refuses when its cutter is disjoint from, or
+            // only touches, the target: union and intersect have an honest
+            // answer there (two shells; an empty result).
+            cmd.refusals.push("nothing_removed");
 
             let cmd = commands
                 .get_mut("hew.solid.intersect")

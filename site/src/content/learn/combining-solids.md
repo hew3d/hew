@@ -23,6 +23,8 @@ When the result is one connected solid, it's a single new Object. When it comes 
 
 If an input isn't solid, the operation is refused and says so. Select the open one (Object Info shows **Open** for it) and choose **Object ▸ Make Solid…** to close it; see [Making imported shapes solid](/learn/import-export/#making-imported-shapes-solid).
 
+A Subtract whose cutter doesn't reach into the first object is refused too: "Nothing was cut away" means the two solids only touch or sit apart, so there was nothing to remove. Both stay where they were. Move the cutter so it passes through the other solid and try again.
+
 ### Combining groups
 
 Either side of a boolean can be a whole [group](/learn/groups-and-components/) instead of a single object. You can mix, too — subtract a group of cutters from one solid in a single command. Because you asked for volume algebra, Hew first fuses the solids inside each group operand into one composite (grouping alone never merges anything), then applies the command between the two composites. Every solid under a group operand has to be watertight — one that isn't solid anywhere refuses the whole operation.

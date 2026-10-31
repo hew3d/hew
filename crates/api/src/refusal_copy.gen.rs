@@ -250,6 +250,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "DegenerateContact" => {
             "The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect."
         }
+        "NothingRemoved" => {
+            "Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid."
+        }
         "NotSolid" => {
             "Only a solid can be sliced. To make it solid, select it and choose Object ▸ Make Solid…"
         }
