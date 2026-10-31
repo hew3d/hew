@@ -27,3 +27,15 @@ new_sqlite_classes = ["ShareDrop"]
 [[routes]]
 pattern = "share.hew3d.com/*"
 zone_name = "hew3d.com"
+
+# The same-origin route the desktop and phone clients use
+# (`<origin>/relay/...`, DASHBOARD-SETUP.md step (d)). Two patterns because
+# `/relay/*` does not match the bare, slash-less `/relay`. A Workers route
+# on this hostname takes priority over the Pages custom domain.
+[[routes]]
+pattern = "app.hew3d.com/relay/*"
+zone_name = "hew3d.com"
+
+[[routes]]
+pattern = "app.hew3d.com/relay"
+zone_name = "hew3d.com"

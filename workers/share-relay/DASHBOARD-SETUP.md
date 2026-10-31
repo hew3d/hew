@@ -133,6 +133,11 @@ interoperate without a migration step.
       out without the flag — same as against `share.hew3d.com`). Everything
       else — bare `/relay`, uploads, one-shot downloads, size caps, CORS —
       must pass.
+- [ ] The routes are also declared in `wrangler.toml`, and
+      `.github/workflows/relay-probe.yml` runs `scripts/relay-probe.sh`
+      against both live origins every 30 minutes (identity plus a real
+      upload and one-shot download), so a missing route fails a run
+      instead of waiting for a user report.
 
 ## Optional: allow a self-hosted HTTPS test origin
 

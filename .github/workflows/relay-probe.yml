@@ -1,0 +1,26 @@
+# Relay probe — is the hosted relay answering where clients look for it?
+#
+# CI proves the relay's code; nothing else notices a deployment gap, such as a
+# Worker route that was never added or was dropped, which breaks "Open on
+# Phone" for every desktop while every test stays green. This runs
+# scripts/relay-probe.sh against the live origins on a schedule. A failed run
+# emails the repository's watchers, which is the alert.
+
+name: Relay probe
+
+on:
+  schedule:
+    # Every 30 minutes.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: scripts/relay-probe.sh
