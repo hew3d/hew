@@ -510,7 +510,17 @@ below.
   nothing else puts a point there. Only the edges through the pick cone
   are paired, at most 2,000 pairs a query (past that the query offers no
   crossing and counts the skip), and screen-space crossings of edges that
-  only overlap on screen are not offered. Candidates within a pixel of each other on screen rank by
+  only overlap on screen are not offered. Where an edge of one owner passes
+  through a face of another (a panel's edge entering the wall it is set
+  into, with nothing imprinted on the wall), the piercing snaps as the same
+  intersection, carrying the edge and the pierced face: the edge must cross
+  the face's plane strictly (an edge ending on the face is its own
+  endpoint; an edge lying in the plane has no single point) inside the
+  face's outer loop and outside its holes, curved surfaces counting as
+  their facets. Edges through the pick cone are paired with the faces the
+  cone reaches, nearest pairs first, at most 2,000 pairs a query; the
+  pairs a capped query leaves untested are counted and traced, like the
+  edge pairs. Candidates within a pixel of each other on screen rank by
   depth, nearest first, so a stack of corners seen from a nearly-vertical
   Top view — top plate, sole plate, slab — resolves to the one in front
   rather than to whichever the camera's slight tilt happens to lean toward.

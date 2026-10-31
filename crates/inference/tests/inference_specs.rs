@@ -8,7 +8,7 @@
 
 use inference::{
     ApertureMode, CrossedEdge, ElementRef, FacePolicy, InferenceScene, POINT_SNAP_REACH, PickRay,
-    SOFT_AXIS_SCREEN_REACH, Snap, SnapKind, SnapLock, SnapQuery, SnapWeights,
+    PiercedFace, SOFT_AXIS_SCREEN_REACH, Snap, SnapKind, SnapLock, SnapQuery, SnapWeights,
 };
 use kernel::{
     AxesFrame, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchEdgeId, SketchId,
@@ -5830,5 +5830,825 @@ fn hidden_geometry_behind_the_constraining_face_is_reachable_only_when_opted_in_
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Edge × face piercings between different owners.
+//
+// A panel set into a wall with nothing imprinted on the wall: the panel's
+// edge passes through the wall's face, and since separate Objects never
+// merge there is no vertex, no edge, nothing at the point where it does.
+// Hovering it offered only On Face or On Edge, flickering between the two.
+// The piercing is offered as `Intersection` — the edge strictly through the
+// face's plane, the crossing point inside the face's outer loop and outside
+// its holes, only between different owners, never for an edge that ends on
+// the face (an Endpoint) or lies in its plane — with the edge in
+// `source`/`sketch_source` and the face in `pierced_face`.
+// ---------------------------------------------------------------------------
+
+/// The wall: a thick slab standing in the plane x = 1, its near face x = 1
+/// spanning y 0..2, z 0..1.
+fn wall() -> Object {
+    box_object(Point3::new(1.0, 0.0, 0.0), Point3::new(1.5, 2.0, 1.0))
+}
+
+/// The panel: 10 cm thick, 60 cm tall, set 30 cm into the wall. Its
+/// top-front edge (0,0.9,0.6)–(1.3,0.9,0.6) passes through the wall's near
+/// face at [`PIERCE`], well inside the face and far from every vertex (its
+/// own end, 30 cm inside the wall, is outside the pick cone even with the
+/// wall gone or see-through).
+fn panel() -> Object {
+    box_object(Point3::new(0.0, 0.9, 0.0), Point3::new(1.3, 1.0, 0.6))
+}
+
+const PIERCE: Point3 = Point3::new(1.0, 0.9, 0.6);
+
+/// In front of the wall, left of the panel and above it: the eye sees the
+/// piercing with nothing in between.
+const PIERCE_EYE: Point3 = Point3::new(-1.0, 0.3, 1.5);
+
+fn pierce_query(aim: Point3) -> SnapQuery {
+    query(ray_at(PIERCE_EYE, aim), NARROW)
+}
+
+/// A hair off the piercing, out in the air in front of the wall.
+fn near_pierce() -> SnapQuery {
+    pierce_query(Point3::new(1.0, 0.895, 0.605))
+}
+
+fn wall_and_panel() -> InferenceScene {
+    let mut scene = InferenceScene::new();
+    scene.add_object(oid(1), &wall(), &Transform::IDENTITY);
+    scene.add_object(oid(2), &panel(), &Transform::IDENTITY);
+    scene
+}
+
+#[test]
+fn an_edge_through_another_objects_face_snaps_the_piercing_as_an_intersection() {
+    let scene = wall_and_panel();
+    let q = near_pierce();
+    let snap = scene.resolve(&q).expect("the piercing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, PIERCE);
+    // The edge is the panel's; the face is the wall's.
+    let edge = snap.source.expect("the edge's provenance");
+    assert_eq!(edge.object, oid(2));
+    assert!(matches!(edge.element, ElementRef::Edge(_)), "{snap:?}");
+    let Some(PiercedFace::Object(face)) = snap.pierced_face else {
+        panic!("the pierced face's provenance: {snap:?}");
+    };
+    assert_eq!(face.object, oid(1));
+    assert!(matches!(face.element, ElementRef::Face(_)), "{snap:?}");
+    assert_eq!(
+        snap.crossed_edge, None,
+        "an edge × face piercing, not edge × edge"
+    );
+    assert_eq!(snap.direction, None, "a piercing names no direction");
+    assert_eq!(
+        scene.resolve(&q),
+        scene.resolve_linear(&q),
+        "the indexed and linear walks agree"
+    );
+    let stats = scene.crossing_stats();
+    assert!(
+        stats.pierce_faces_pooled > 0 && stats.pierce_pairs_tested > 0,
+        "{stats:?}"
+    );
+}
+
+/// The reported flicker: with only the panel the cursor near the point is
+/// On Edge, with only the wall it is On Face, and together it used to be
+/// one or the other depending on the pixel. Now every hover around the
+/// point lands on the piercing, exactly.
+#[test]
+fn hovering_around_the_piercing_lands_on_it_instead_of_flickering() {
+    let mut only_panel = InferenceScene::new();
+    only_panel.add_object(oid(2), &panel(), &Transform::IDENTITY);
+    let alone = resolve(&only_panel, near_pierce()).expect("the edge is in the cone");
+    assert_eq!(alone.kind, SnapKind::OnEdge, "{alone:?}");
+    let mut only_wall = InferenceScene::new();
+    only_wall.add_object(oid(1), &wall(), &Transform::IDENTITY);
+    let alone = resolve(&only_wall, near_pierce()).expect("the face is under the cursor");
+    assert_eq!(alone.kind, SnapKind::OnFace, "{alone:?}");
+
+    let scene = wall_and_panel();
+    // A ring of cursor positions 5 mm around the point in the wall's plane,
+    // plus the point itself: each is a pixel or two off on screen.
+    let mut aims = vec![PIERCE];
+    for k in 0..8 {
+        let t = std::f64::consts::TAU * k as f64 / 8.0;
+        aims.push(PIERCE + Vec3::new(0.0, 0.005 * t.cos(), 0.005 * t.sin()));
+    }
+    for aim in aims {
+        let snap = scene
+            .resolve(&pierce_query(aim))
+            .expect("something is under the cursor");
+        assert_eq!(
+            snap.kind,
+            SnapKind::Intersection,
+            "aimed at {aim:?}: the piercing beats On Face and On Edge: {snap:?}"
+        );
+        assert_at(&snap, PIERCE);
+        assert!(snap.pierced_face.is_some(), "{snap:?}");
+    }
+    // A named point: the piercing reaches as far as an endpoint or midpoint
+    // does (`POINT_SNAP_REACH` apertures), so a cursor 1.4 apertures off
+    // still takes it over the face it is sitting on.
+    let to = PIERCE - PIERCE_EYE;
+    let side = to.cross(Vec3::new(0.0, 0.0, 1.0)).normalized().unwrap();
+    let aim = PIERCE + side * (to.length() * (1.4 * NARROW).tan());
+    let snap = resolve(&scene, pierce_query(aim)).expect("within a point's reach");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, PIERCE);
+}
+
+/// A vertex at the piercing still wins: Endpoint is the stronger kind.
+#[test]
+fn a_vertex_at_the_piercing_still_wins() {
+    let mut scene = wall_and_panel();
+    // A block in front of the wall whose corner is exactly the piercing.
+    let block = box_object(Point3::new(0.9, 0.9, 0.6), Point3::new(1.0, 1.0, 0.7));
+    scene.add_object(oid(3), &block, &Transform::IDENTITY);
+    let snap = scene
+        .resolve(&near_pierce())
+        .expect("the corner is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Endpoint, "{snap:?}");
+    assert_at(&snap, PIERCE);
+    assert_eq!(snap.source.map(|s| s.object), Some(oid(3)));
+    assert_eq!(snap.pierced_face, None);
+}
+
+/// An edge that ENDS on the face (a butt joint) is a T meeting: its own
+/// Endpoint snap names the point, and no piercing is offered — nor for the
+/// panel's end-face edges lying in the wall's plane.
+#[test]
+fn an_edge_ending_on_the_face_is_an_endpoint_not_a_piercing() {
+    let mut scene = InferenceScene::new();
+    scene.add_object(oid(1), &wall(), &Transform::IDENTITY);
+    let butted = box_object(Point3::new(0.0, 0.9, 0.0), Point3::new(1.0, 1.0, 0.6));
+    scene.add_object(oid(2), &butted, &Transform::IDENTITY);
+    let snap = scene
+        .resolve(&near_pierce())
+        .expect("the corner is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Endpoint, "{snap:?}");
+    assert_at(&snap, PIERCE);
+    assert_eq!(snap.pierced_face, None);
+    // Aimed at the butted panel's vertical end edge (x = 1, y = 0.9,
+    // z 0..0.6), which lies IN the wall's plane — a third of the way up,
+    // clear of its corners and its midpoint: On Edge, since an edge lying
+    // in the plane pierces nothing, and the wall's face under it loses to
+    // the edge on it.
+    let snap = scene
+        .resolve(&pierce_query(Point3::new(1.0, 0.9, 0.2)))
+        .expect("the end edge is under the cursor");
+    assert_eq!(snap.kind, SnapKind::OnEdge, "{snap:?}");
+    assert_eq!(snap.source.map(|e| e.object), Some(oid(2)));
+    assert_eq!(snap.pierced_face, None);
+}
+
+/// A panel stopping short of the wall pierces nothing: its edges are
+/// parallel to the ones that would, but end in the air.
+#[test]
+fn an_edge_stopping_short_of_the_face_pierces_nothing() {
+    let mut scene = InferenceScene::new();
+    scene.add_object(oid(1), &wall(), &Transform::IDENTITY);
+    let short = box_object(Point3::new(0.0, 0.9, 0.0), Point3::new(0.99, 1.0, 0.6));
+    scene.add_object(oid(2), &short, &Transform::IDENTITY);
+    let snap = scene
+        .resolve(&near_pierce())
+        .expect("the wall is under the cursor");
+    assert_ne!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_eq!(snap.pierced_face, None);
+}
+
+/// An edge through the face's PLANE beside the face is no piercing: the
+/// crossing must land inside the face's outer loop.
+#[test]
+fn an_edge_through_the_plane_beside_the_face_pierces_nothing() {
+    let mut scene = InferenceScene::new();
+    scene.add_object(oid(1), &wall(), &Transform::IDENTITY);
+    // The panel lifted above the wall (which is 1 m tall): its edges cross
+    // x = 1 at z = 1.2 and 1.8, past the wall's top.
+    let high = box_object(Point3::new(0.0, 0.9, 1.2), Point3::new(1.3, 1.0, 1.8));
+    scene.add_object(oid(2), &high, &Transform::IDENTITY);
+    let at = Point3::new(1.0, 0.9, 1.8);
+    let snap = scene
+        .resolve(&pierce_query(at + Vec3::new(0.0, -0.005, 0.005)))
+        .expect("the edge is under the cursor");
+    assert_eq!(snap.kind, SnapKind::OnEdge, "{snap:?}");
+    assert_eq!(snap.pierced_face, None);
+}
+
+/// Holes are respected: an edge through a window in a drawn region misses
+/// the region; through its material it pierces, carrying the region.
+#[test]
+fn an_edge_through_a_hole_in_a_face_pierces_nothing() {
+    let rid = kernel::SketchRegionId::default();
+    // A 2 × 2 drawn region standing in the plane x = 3, with a 0.4 × 0.4
+    // window in its middle.
+    let plate = inference::SketchRegionFace {
+        region: rid,
+        plane: Plane::from_point_normal(Point3::new(3.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0))
+            .unwrap(),
+        boundary: vec![
+            Point3::new(3.0, 0.0, 0.0),
+            Point3::new(3.0, 2.0, 0.0),
+            Point3::new(3.0, 2.0, 2.0),
+            Point3::new(3.0, 0.0, 2.0),
+        ],
+        holes: vec![vec![
+            Point3::new(3.0, 0.8, 0.8),
+            Point3::new(3.0, 1.2, 0.8),
+            Point3::new(3.0, 1.2, 1.2),
+            Point3::new(3.0, 0.8, 1.2),
+        ]],
+    };
+    let eye = Point3::new(0.0, -1.0, 3.0);
+    let probe = |scene: &InferenceScene, at: Point3| {
+        scene.resolve(&query(
+            ray_at(eye, at + Vec3::new(0.0, -0.005, 0.005)),
+            NARROW,
+        ))
+    };
+
+    // A rod through the window: its edges cross x = 3 inside the hole.
+    let mut through_hole = InferenceScene::new();
+    through_hole.add_sketch_faces(sid(1), std::slice::from_ref(&plate));
+    let rod = box_object(Point3::new(2.5, 0.95, 0.95), Point3::new(3.5, 1.05, 1.05));
+    through_hole.add_object(oid(1), &rod, &Transform::IDENTITY);
+    let snap = probe(&through_hole, Point3::new(3.0, 0.95, 1.05)).expect("the rod's edge");
+    assert_ne!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_eq!(snap.pierced_face, None);
+
+    // A rod through the material: a piercing, naming the region.
+    let mut through_plate = InferenceScene::new();
+    through_plate.add_sketch_faces(sid(1), &[plate]);
+    let rod = box_object(Point3::new(2.5, 1.5, 1.5), Point3::new(3.5, 1.6, 1.6));
+    through_plate.add_object(oid(1), &rod, &Transform::IDENTITY);
+    let at = Point3::new(3.0, 1.5, 1.6);
+    let snap = probe(&through_plate, at).expect("the piercing");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, at);
+    assert_eq!(
+        snap.pierced_face,
+        Some(PiercedFace::SketchRegion(sid(1), rid))
+    );
+    assert_eq!(snap.source.map(|s| s.object), Some(oid(1)));
+}
+
+/// An imprinted face: the parent carries the imprint as a hole, the
+/// coplanar sub-face fills it. An edge through the imprint pierces the
+/// SUB-face, not the parent — the hole test and the face test together.
+#[test]
+fn an_edge_through_an_imprint_pierces_the_sub_face_not_the_parent() {
+    let mut cube = unit_cube();
+    let top = cube
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane
+                .normal()
+                .approx_eq(Vec3::new(0.0, 0.0, 1.0), tol::NORMAL_DIRECTION)
+        })
+        .map(|(id, _)| id)
+        .unwrap();
+    let report = cube
+        .split_face_inner(
+            top,
+            &[
+                Point3::new(0.25, 0.25, 1.0),
+                Point3::new(0.75, 0.25, 1.0),
+                Point3::new(0.75, 0.75, 1.0),
+                Point3::new(0.25, 0.75, 1.0),
+            ],
+        )
+        .unwrap();
+    let mut scene = InferenceScene::new();
+    scene.add_object(oid(1), &cube, &Transform::IDENTITY);
+    // A post standing through the imprint: its vertical edges cross z = 1
+    // at (0.45, 0.45), (0.55, 0.45), … — inside the sub-face.
+    let post = box_object(Point3::new(0.45, 0.45, 0.5), Point3::new(0.55, 0.55, 1.5));
+    scene.add_object(oid(2), &post, &Transform::IDENTITY);
+    let at = Point3::new(0.45, 0.45, 1.0);
+    let q = query(
+        ray_at(
+            Point3::new(0.3, 0.3, 3.0),
+            at + Vec3::new(-0.003, -0.003, 0.0),
+        ),
+        NARROW,
+    );
+    let snap = scene.resolve(&q).expect("the piercing");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, at);
+    let Some(PiercedFace::Object(face)) = snap.pierced_face else {
+        panic!("{snap:?}");
+    };
+    assert_eq!(face.object, oid(1));
+    assert_eq!(
+        face.element,
+        ElementRef::Face(report.sub_face),
+        "the sub-face, not the parent {:?}: {snap:?}",
+        report.parent
+    );
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+}
+
+/// A placed component's face is pierced like a world face, and the
+/// provenance names the placement.
+#[test]
+fn an_edge_through_a_placed_instances_face_snaps() {
+    let mut scene = InferenceScene::new();
+    // The wall as a definition member at the origin, placed 1 m along x.
+    let member = box_object(Point3::new(0.0, 0.0, 0.0), Point3::new(0.2, 2.0, 1.0));
+    scene.set_def_member(oid(1), &member);
+    let instance = InstanceId::from(slotmap::KeyData::from_ffi(1 << 32 | 5));
+    scene.add_placement(
+        instance,
+        oid(1),
+        &Transform::translation(Vec3::new(1.0, 0.0, 0.0)),
+    );
+    scene.add_object(oid(2), &panel(), &Transform::IDENTITY);
+    let q = near_pierce();
+    let snap = scene.resolve(&q).expect("the piercing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, PIERCE);
+    let Some(PiercedFace::Object(face)) = snap.pierced_face else {
+        panic!("{snap:?}");
+    };
+    assert_eq!((face.object, face.instance), (oid(1), Some(instance)));
+    assert_eq!(snap.source.map(|s| s.object), Some(oid(2)));
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+
+    // And the other way round: a placed panel through a world wall.
+    let mut scene = InferenceScene::new();
+    scene.add_object(oid(1), &wall(), &Transform::IDENTITY);
+    let member = box_object(Point3::new(0.0, 0.0, 0.0), Point3::new(1.1, 0.1, 0.6));
+    scene.set_def_member(oid(2), &member);
+    scene.add_placement(
+        instance,
+        oid(2),
+        &Transform::translation(Vec3::new(0.0, 0.9, 0.0)),
+    );
+    let snap = scene.resolve(&q).expect("the piercing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, PIERCE);
+    assert_eq!(
+        snap.source.map(|s| (s.object, s.instance)),
+        Some((oid(2), Some(instance)))
+    );
+    assert!(
+        matches!(snap.pierced_face, Some(PiercedFace::Object(f)) if f.object == oid(1)),
+        "{snap:?}"
+    );
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+}
+
+/// A drawn line through a solid's face pierces it, with sketch-edge
+/// provenance.
+#[test]
+fn a_sketch_edge_through_an_objects_face_snaps() {
+    let mut scene = InferenceScene::new();
+    scene.add_object(oid(1), &wall(), &Transform::IDENTITY);
+    scene.add_sketch(
+        sid(1),
+        &[(
+            eid(1),
+            Point3::new(0.5, 0.9, 0.6),
+            Point3::new(1.1, 0.9, 0.6),
+        )],
+    );
+    let snap = scene
+        .resolve(&near_pierce())
+        .expect("the piercing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, PIERCE);
+    assert_eq!(snap.sketch_source, Some((sid(1), eid(1))));
+    assert_eq!(snap.source, None);
+    assert!(
+        matches!(snap.pierced_face, Some(PiercedFace::Object(f)) if f.object == oid(1)),
+        "{snap:?}"
+    );
+}
+
+/// Faces exist for input only under a policy that has them: in Wireframe
+/// nothing pierces; in X-ray the piercing is offered like in Shaded.
+#[test]
+fn piercings_follow_the_face_policy() {
+    let mut scene = wall_and_panel();
+    scene.set_face_policy(FacePolicy::Absent);
+    let snap = scene
+        .resolve(&near_pierce())
+        .expect("the edge is still there");
+    assert_ne!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_eq!(snap.pierced_face, None);
+    scene.set_face_policy(FacePolicy::SeeThrough);
+    let snap = scene.resolve(&near_pierce()).expect("the piercing");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, PIERCE);
+}
+
+/// A dense spot cannot stall a pointer move: a query tests at most
+/// `PIERCE_PAIR_CAP` cross-owner edge × face pairs, nearest first, and
+/// counts the pairs it left untested in `crossing_stats` rather than
+/// dropping them silently. A scene of one owner pools no face and tests
+/// nothing.
+#[test]
+fn pierce_pairs_past_the_cap_are_skipped_and_counted() {
+    let cap = inference::PIERCE_PAIR_CAP as u64;
+    // One drawn line slanting down through a stack of `n` drawn squares
+    // (each its own sketch) a millimetre apart, seen from straight above
+    // with the line's upper end behind the eye and its lower end out of
+    // the cone: the edge is in the pool, no endpoint competes.
+    let stack = |n: u64| {
+        let mut scene = InferenceScene::new();
+        for i in 0..n {
+            let z = -0.001 * (i + 1) as f64;
+            let at = |x: f64, y: f64| Point3::new(x, y, z);
+            scene.add_sketch_faces(
+                sid(i + 1),
+                &[inference::SketchRegionFace {
+                    region: kernel::SketchRegionId::default(),
+                    plane: Plane::from_polygon(&[at(0.0, 0.0), at(1.0, 0.0), at(1.0, 1.0)])
+                        .unwrap(),
+                    boundary: vec![at(0.0, 0.0), at(1.0, 0.0), at(1.0, 1.0), at(0.0, 1.0)],
+                    holes: vec![],
+                }],
+            );
+        }
+        scene.add_sketch(
+            sid(10_000),
+            &[(
+                eid(1),
+                Point3::new(0.3, 0.5, 4.0),
+                Point3::new(0.65, 0.5, -3.0),
+            )],
+        );
+        scene
+    };
+    let q = query(
+        PickRay {
+            origin: Point3::new(0.5, 0.5, 3.0),
+            direction: Vec3::new(0.0, 0.0, -1.0),
+        },
+        NARROW,
+    );
+    // The line crosses z = 0 at x = 0.5 and the first square 1 mm lower.
+    let first = Point3::new(0.5 + 0.35 * 0.001 / 7.0, 0.5, -0.001);
+
+    // Under the cap: every pair is tested, the nearest piercing wins.
+    let n = 20;
+    let scene = stack(n);
+    let snap = scene.resolve(&q).expect("the stack is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, first);
+    let stats = scene.crossing_stats();
+    assert_eq!(stats.pierce_pairs_tested, n);
+    assert_eq!(stats.pierce_faces_pooled, n, "every square is in the cone");
+    assert_eq!(
+        (stats.pierce_queries_capped, stats.pierce_pairs_skipped),
+        (0, 0)
+    );
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+
+    // Past it: exactly `cap` pairs are tested, the rest counted.
+    let n = cap + 100;
+    let scene = stack(n);
+    let snap = scene.resolve(&q).expect("the stack is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, first);
+    let stats = scene.crossing_stats();
+    assert_eq!(stats.pierce_pairs_tested, cap);
+    assert_eq!(stats.pierce_queries_capped, 1);
+    assert_eq!(stats.pierce_pairs_skipped, n - cap);
+
+    // One owner: no pair, no step.
+    let scene = cube_scene();
+    scene.resolve(&query(
+        ray_at(Point3::new(2.0, -2.0, 3.0), Point3::new(0.5, 0.5, 1.0)),
+        WIDE,
+    ));
+    assert_eq!(scene.crossing_stats(), inference::CrossingStats::default());
+}
+
+mod pierce_props {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Any panel set into any wall: the piercing of the panel's
+        /// top-front edge through the wall's near face snaps exactly, from
+        /// any eye in front of and above it, identically on the indexed
+        /// and linear paths.
+        #[test]
+        fn a_panel_set_into_a_wall_snaps_its_piercing_exactly(
+            xw in 0.5f64..3.0,
+            thickness in 0.05f64..1.0,
+            length in 1.0f64..4.0,
+            height in 1.0f64..3.0,
+            fy in 0.1f64..0.9,
+            fz in 0.1f64..0.9,
+            depth in 0.02f64..0.4,
+            eye in (0.5f64..2.0, 0.2f64..1.5, 0.2f64..1.5),
+        ) {
+            // The wall's near face x = xw spans y 0..length, z 0..height;
+            // the panel's top-front edge crosses it at least 10 cm inside
+            // every boundary (the panel is 10 cm thick and 60 cm tall, so
+            // its other piercings are at least 10 cm away).
+            let py = 0.1 + fy * (length - 0.2);
+            let pz = 0.1 + fz * (height - 0.2);
+            prop_assume!(pz > 0.6);
+            let pierce = Point3::new(xw, py, pz);
+            let wall = box_object(
+                Point3::new(xw, 0.0, 0.0),
+                Point3::new(xw + thickness, length, height),
+            );
+            let panel = box_object(
+                Point3::new(xw - 2.0, py, pz - 0.6),
+                Point3::new(xw + depth, py + 0.1, pz),
+            );
+            let mut scene = InferenceScene::new();
+            scene.add_object(oid(1), &wall, &Transform::IDENTITY);
+            scene.add_object(oid(2), &panel, &Transform::IDENTITY);
+            let eye = Point3::new(xw - 1.0 - eye.0, py - eye.1, pz + eye.2);
+            let q = query(ray_at(eye, pierce), NARROW);
+            let snap = scene.resolve(&q);
+            prop_assert!(
+                snap.is_some_and(|s| s.kind == SnapKind::Intersection
+                    && s.position.approx_eq(pierce, tol::POINT_MERGE)
+                    && matches!(s.pierced_face, Some(PiercedFace::Object(f)) if f.object == oid(1))
+                    && s.source.is_some_and(|e| e.object == oid(2))),
+                "{:?}",
+                snap
+            );
+            prop_assert_eq!(snap, scene.resolve_linear(&q));
+        }
+    }
+}
+
+/// The pool holds only faces the pick cone reaches, drawn regions included,
+/// so geometry far from the cursor — however much of it — never spends the
+/// cap, and the linear reference path, which sees every face, pools the
+/// same ones and agrees with the indexed path.
+#[test]
+fn faces_far_from_the_cursor_never_reach_the_pool_and_both_paths_agree() {
+    let mut scene = InferenceScene::new();
+    // A drawn line slanting down through a drawn square 0.5 m below the
+    // ground: the piercing at (0.525, 0.5, -0.5).
+    let plate = |z: f64, x0: f64| inference::SketchRegionFace {
+        region: kernel::SketchRegionId::default(),
+        plane: Plane::from_polygon(&[
+            Point3::new(x0, 0.0, z),
+            Point3::new(x0 + 1.0, 0.0, z),
+            Point3::new(x0 + 1.0, 1.0, z),
+        ])
+        .unwrap(),
+        boundary: vec![
+            Point3::new(x0, 0.0, z),
+            Point3::new(x0 + 1.0, 0.0, z),
+            Point3::new(x0 + 1.0, 1.0, z),
+            Point3::new(x0, 1.0, z),
+        ],
+        holes: vec![],
+    };
+    // Two thousand drawn squares and 340 boxes (2,040 faces) a kilometre
+    // away, all registered before the target so they come first in every
+    // order but distance.
+    for i in 0..2000u64 {
+        scene.add_sketch_faces(sid(i + 1), &[plate(-0.001 * (i + 1) as f64, 1000.0)]);
+    }
+    for i in 0..340u64 {
+        let x = 1000.0 + 3.0 * i as f64;
+        scene.add_object(
+            oid(i + 1),
+            &box_object(Point3::new(x, 0.0, 0.0), Point3::new(x + 1.0, 1.0, 1.0)),
+            &Transform::IDENTITY,
+        );
+    }
+    scene.add_sketch_faces(sid(9000), &[plate(-0.5, 0.0)]);
+    scene.add_sketch(
+        sid(10_000),
+        &[(
+            eid(1),
+            Point3::new(0.3, 0.5, 4.0),
+            Point3::new(0.65, 0.5, -3.0),
+        )],
+    );
+    let q = query(
+        PickRay {
+            origin: Point3::new(0.5, 0.5, 3.0),
+            direction: Vec3::new(0.0, 0.0, -1.0),
+        },
+        NARROW,
+    );
+    let snap = scene.resolve(&q).expect("the piercing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, Point3::new(0.525, 0.5, -0.5));
+    let stats = scene.crossing_stats();
+    assert_eq!(
+        stats.pierce_faces_pooled, 1,
+        "only the target square: {stats:?}"
+    );
+    assert_eq!(stats.pierce_pairs_tested, 1);
+    assert_eq!(stats.pierce_queries_capped, 0);
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+}
+
+/// Faces the cone reaches but the cursor is not on cannot starve the face
+/// it IS on: pairs are tested in order of their distance from the ray, so
+/// the pierced face under the cursor is tested first however many nearby
+/// decoys the cap then cuts off — and the indexed and linear paths agree
+/// about which pairs the cap reached.
+#[test]
+fn decoys_near_the_cursor_do_not_starve_the_piercing_under_it() {
+    let cap = inference::PIERCE_PAIR_CAP as u64;
+    let mut scene = InferenceScene::new();
+    // Decoys: 2 cm drawn squares a centimetre beside the ray, stacked a
+    // millimetre apart, each its own sketch, registered first. The line
+    // below passes at x ≥ 0.5 and never pierces one.
+    let n = cap + 100;
+    for i in 0..n {
+        let z = -0.001 * (i + 1) as f64;
+        let at = |x: f64, y: f64| Point3::new(x, y, z);
+        scene.add_sketch_faces(
+            sid(i + 1),
+            &[inference::SketchRegionFace {
+                region: kernel::SketchRegionId::default(),
+                plane: Plane::from_polygon(&[at(0.47, 0.49), at(0.49, 0.49), at(0.49, 0.51)])
+                    .unwrap(),
+                boundary: vec![
+                    at(0.47, 0.49),
+                    at(0.49, 0.49),
+                    at(0.49, 0.51),
+                    at(0.47, 0.51),
+                ],
+                holes: vec![],
+            }],
+        );
+    }
+    // The target: a unit square 0.5 m down, the ray through it.
+    let z = -0.5;
+    let at = |x: f64, y: f64| Point3::new(x, y, z);
+    scene.add_sketch_faces(
+        sid(9000),
+        &[inference::SketchRegionFace {
+            region: kernel::SketchRegionId::default(),
+            plane: Plane::from_polygon(&[at(0.0, 0.0), at(1.0, 0.0), at(1.0, 1.0)]).unwrap(),
+            boundary: vec![at(0.0, 0.0), at(1.0, 0.0), at(1.0, 1.0), at(0.0, 1.0)],
+            holes: vec![],
+        }],
+    );
+    scene.add_sketch(
+        sid(10_000),
+        &[(
+            eid(1),
+            Point3::new(0.3, 0.5, 4.0),
+            Point3::new(0.65, 0.5, -3.0),
+        )],
+    );
+    let q = query(
+        PickRay {
+            origin: Point3::new(0.5, 0.5, 3.0),
+            direction: Vec3::new(0.0, 0.0, -1.0),
+        },
+        NARROW,
+    );
+    let snap = scene.resolve(&q).expect("the piercing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, Point3::new(0.525, 0.5, -0.5));
+    let stats = scene.crossing_stats();
+    assert_eq!(
+        stats.pierce_faces_pooled,
+        n + 1,
+        "every decoy is in the cone"
+    );
+    assert_eq!(stats.pierce_pairs_tested, cap, "the cap was reached");
+    assert_eq!(
+        (stats.pierce_queries_capped, stats.pierce_pairs_skipped),
+        (1, n + 1 - cap)
+    );
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+}
+
+/// Placements under a rotation, a tilt, a non-uniform scale and a mirror:
+/// the face of a placed wall is pierced where the posed geometry says, and
+/// so is a world face by a placed panel's edge, identically on the indexed
+/// and linear paths.
+#[test]
+fn piercings_hold_under_rotated_scaled_and_mirrored_placements() {
+    let poses: Vec<(&str, Transform)> = vec![
+        (
+            "rotated",
+            Transform::rotation(Vec3::new(0.0, 0.0, 1.0), 0.3)
+                .unwrap()
+                .then(&Transform::translation(Vec3::new(1.0, -0.2, 0.1))),
+        ),
+        (
+            "tilted",
+            Transform::rotation(Vec3::new(1.0, 0.0, 0.0), -0.4)
+                .unwrap()
+                .then(&Transform::translation(Vec3::new(1.0, 0.3, 0.2))),
+        ),
+        (
+            "scaled",
+            Transform::scale(Vec3::new(2.0, 0.5, 1.5))
+                .then(&Transform::translation(Vec3::new(1.0, 0.0, 0.0))),
+        ),
+        (
+            "mirrored",
+            Transform::scale(Vec3::new(-1.0, 1.0, 1.0))
+                .then(&Transform::translation(Vec3::new(1.0, 0.0, 0.0))),
+        ),
+    ];
+    let instance = InstanceId::from(slotmap::KeyData::from_ffi(1 << 32 | 5));
+    // A unit vector perpendicular to `v`, leaning the way `lean` maps to.
+    let aside = |pose: &Transform, v: Vec3, lean: Vec3| {
+        let w = pose.apply_vector(lean);
+        let v = v.normalized().unwrap();
+        (w - v * w.dot(v)).normalized().unwrap()
+    };
+    for (name, pose) in &poses {
+        // The wall placed: its near face is the member's x = 0, pierced at
+        // the image of (0, 0.9, 0.6) by a drawn line along the image of x.
+        let member = box_object(Point3::new(0.0, 0.0, 0.0), Point3::new(0.2, 2.0, 1.0));
+        let mut scene = InferenceScene::new();
+        scene.set_def_member(oid(1), &member);
+        scene.add_placement(instance, oid(1), pose);
+        let q0 = pose.apply_point(Point3::new(0.0, 0.9, 0.6));
+        let v = pose.apply_vector(Vec3::new(1.0, 0.0, 0.0));
+        scene.add_sketch(sid(1), &[(eid(1), q0 - v * 0.5, q0 + v * 0.1)]);
+        let side = aside(pose, v, Vec3::new(0.0, -1.0, 1.0));
+        let eye = q0 - v.normalized().unwrap() * 1.5 + side * 0.8;
+        let q = query(ray_at(eye, q0), NARROW);
+        let snap = scene
+            .resolve(&q)
+            .unwrap_or_else(|| panic!("{name}: the piercing is under the cursor"));
+        assert_eq!(snap.kind, SnapKind::Intersection, "{name}: {snap:?}");
+        assert!(
+            snap.position.approx_eq(q0, tol::POINT_MERGE),
+            "{name}: {snap:?}"
+        );
+        assert_eq!(snap.sketch_source, Some((sid(1), eid(1))), "{name}");
+        assert!(
+            matches!(
+                snap.pierced_face,
+                Some(PiercedFace::Object(f)) if f.object == oid(1) && f.instance == Some(instance)
+            ),
+            "{name}: {snap:?}"
+        );
+        assert_eq!(scene.resolve(&q), scene.resolve_linear(&q), "{name}");
+
+        // The panel placed: its top-front edge, the image of
+        // (0,0.9,0.6)–(1.3,0.9,0.6), through a drawn square standing
+        // across it at the image of (1.0, 0.9, 0.6).
+        let member = box_object(Point3::new(0.0, 0.9, 0.0), Point3::new(1.3, 1.0, 0.6));
+        let mut scene = InferenceScene::new();
+        scene.set_def_member(oid(2), &member);
+        scene.add_placement(instance, oid(2), pose);
+        let q1 = pose.apply_point(Point3::new(1.0, 0.9, 0.6));
+        let d = (pose.apply_point(Point3::new(1.3, 0.9, 0.6))
+            - pose.apply_point(Point3::new(0.0, 0.9, 0.6)))
+        .normalized()
+        .unwrap();
+        let u = aside(pose, d, Vec3::new(0.0, 1.0, 0.0));
+        let w = d.cross(u);
+        let rid = kernel::SketchRegionId::default();
+        scene.add_sketch_faces(
+            sid(2),
+            &[inference::SketchRegionFace {
+                region: rid,
+                plane: Plane::from_point_normal(q1, d).unwrap(),
+                boundary: vec![
+                    q1 - u * 0.5 - w * 0.5,
+                    q1 + u * 0.5 - w * 0.5,
+                    q1 + u * 0.5 + w * 0.5,
+                    q1 - u * 0.5 + w * 0.5,
+                ],
+                holes: vec![],
+            }],
+        );
+        // In front of the square, off to the side the panel is not on.
+        let out = aside(pose, d, Vec3::new(0.0, -1.0, 1.0));
+        let eye = q1 - d * 1.2 + out * 1.0;
+        let q = query(ray_at(eye, q1), NARROW);
+        let snap = scene
+            .resolve(&q)
+            .unwrap_or_else(|| panic!("{name}: the piercing is under the cursor"));
+        assert_eq!(snap.kind, SnapKind::Intersection, "{name}: {snap:?}");
+        assert!(
+            snap.position.approx_eq(q1, tol::POINT_MERGE),
+            "{name}: {snap:?}"
+        );
+        assert_eq!(
+            snap.source.map(|e| (e.object, e.instance)),
+            Some((oid(2), Some(instance))),
+            "{name}: {snap:?}"
+        );
+        assert_eq!(
+            snap.pierced_face,
+            Some(PiercedFace::SketchRegion(sid(2), rid)),
+            "{name}"
+        );
+        assert_eq!(scene.resolve(&q), scene.resolve_linear(&q), "{name}");
     }
 }

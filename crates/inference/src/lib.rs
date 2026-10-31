@@ -128,6 +128,15 @@
 //! placements, sketches) truly cross in 3D: separate Objects never merge, so
 //! nothing else puts a point there. That last test pairs only the edges
 //! through the pick cone, and at most [`CROSSING_PAIR_CAP`] pairs a query.
+//! The same tier also holds the point where an edge of one owner passes
+//! THROUGH a face of another (a panel's edge entering a wall it is set
+//! into, with nothing imprinted on the wall): the edge is on one side of
+//! the face's plane at one end and the other side at the other end, and
+//! the point where it crosses lies inside the face's outer loop and
+//! outside its holes. Edges through the pick cone are paired with the
+//! faces the cone reaches, nearest pairs first and at most
+//! [`PIERCE_PAIR_CAP`] pairs a query, and the snap carries the edge and the
+//! face it pierces ([`Snap::pierced_face`]).
 
 use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -180,10 +189,14 @@ pub enum SnapKind {
     /// order.
     Quadrant,
     /// On a crossing: a guide line or an axis line through an edge, two
-    /// guide lines, or two edges of different owners that truly cross in
-    /// 3D (both edges in the snap's provenance, see [`Snap::crossed_edge`]).
+    /// guide lines, two edges of different owners that truly cross in
+    /// 3D (both edges in the snap's provenance, see [`Snap::crossed_edge`]),
+    /// or an edge of one owner passing through a face of another (the edge
+    /// and the face in the provenance, see [`Snap::pierced_face`]).
     /// Screen-space "apparent" crossings of edges that only overlap on
-    /// screen are not offered.
+    /// screen are not offered, and neither is an edge that merely ends on
+    /// a face or lies in its plane: the first is an [`SnapKind::Endpoint`],
+    /// the second has no single point.
     ///
     /// Outranks [`SnapKind::Midpoint`]: every edge has a midpoint, crossings
     /// are rare, so a cursor near both means the crossing (a midpoint a
@@ -731,6 +744,23 @@ pub struct Snap {
     /// one. `None` for every other snap, including the guide and axis
     /// crossings (those cross a line, not a second edge).
     pub crossed_edge: Option<CrossedEdge>,
+    /// The face an edge passes THROUGH ([`SnapKind::Intersection`] where an
+    /// edge of one owner pierces a face of another): the edge is in
+    /// [`source`](Snap::source) or [`sketch_source`](Snap::sketch_source)
+    /// as usual — the point lies on it — and this is the face. `None` for
+    /// every other snap. Lets a tool adopt the pierced face (its plane, its
+    /// owner) the way it adopts the face an `OnFace` snap names.
+    pub pierced_face: Option<PiercedFace>,
+}
+
+/// The face of an edge × face piercing: a solid's face (world or placed)
+/// or a committed sketch region's fill (see [`Snap::pierced_face`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PiercedFace {
+    /// An Object's face (world or placed).
+    Object(SnapSource),
+    /// A committed sketch region's face.
+    SketchRegion(SketchId, SketchRegionId),
 }
 
 /// One edge of an edge × edge crossing: an Object edge or a committed
@@ -760,8 +790,29 @@ pub enum CrossedEdge {
 /// is every pair of about 63 edges.
 pub const CROSSING_PAIR_CAP: usize = 2000;
 
-/// Cumulative edge × edge crossing counters for one scene (see
-/// [`InferenceScene::crossing_stats`]).
+/// The most edge × face pairs one query tests for a piercing.
+///
+/// The piercing test pairs the edges through the pick cone (the same pool
+/// the edge × edge test uses) with the faces the cone reaches — faces some
+/// point of whose material or boundary passes within the pick cone, world,
+/// placed and drawn-region faces alike. Both sets are a handful on open
+/// geometry, but a cone through a dense import can hold hundreds of each,
+/// and pairs grow with the product. A query therefore tests at most this
+/// many cross-owner pairs, in order of the pair's distance from the ray —
+/// the nearer of edge and face deciding nothing, the farther deciding the
+/// order (`walk_pierce_pairs`) — so the piercing under the cursor, whose
+/// edge and face both pass close to the ray, is tested before pairs with
+/// anything farther off, and a cap cuts off the farthest pairs first. The
+/// pairs a capped query leaves untested are counted in
+/// [`InferenceScene::crossing_stats`] and traced at debug level, never
+/// silent. A face pairs with no edge of its own owner, and a face no edge
+/// in the pool is foreign to is never pooled, so a cone full of one Object
+/// pools and tests nothing. The same budget as [`CROSSING_PAIR_CAP`], spent
+/// separately: a query may do both walks.
+pub const PIERCE_PAIR_CAP: usize = 2000;
+
+/// Cumulative edge × edge crossing and edge × face piercing counters for
+/// one scene (see [`InferenceScene::crossing_stats`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CrossingStats {
     /// Cross-owner edge pairs tested for a crossing.
@@ -777,6 +828,19 @@ pub struct CrossingStats {
     pub queries_capped: u64,
     /// Cross-owner edge pairs those capped queries left untested.
     pub pairs_skipped: u64,
+    /// Faces pooled for the piercing walk: faces the pick cone reaches
+    /// whose owner some pooled edge is foreign to. Zero whenever no edge is
+    /// in the cone or every edge and face there belongs to one owner — the
+    /// walk then pools (and pays for) nothing.
+    pub pierce_faces_pooled: u64,
+    /// Cross-owner edge × face pairs tested for a piercing. Each query
+    /// tests at most [`PIERCE_PAIR_CAP`].
+    pub pierce_pairs_tested: u64,
+    /// Queries [`PIERCE_PAIR_CAP`] stopped with cross-owner edge × face
+    /// pairs still untested.
+    pub pierce_queries_capped: u64,
+    /// Cross-owner edge × face pairs those capped queries left untested.
+    pub pierce_pairs_skipped: u64,
 }
 
 /// Internal candidate provenance: an Object element, a committed sketch edge,
@@ -791,34 +855,56 @@ enum Provenance {
     SketchCurve(SketchId, SketchCurveId),
     /// An edge × edge crossing: the first edge, then the second.
     Crossing(CrossedEdge, CrossedEdge),
+    /// An edge × face piercing: the edge, then the face it passes through.
+    Pierce(CrossedEdge, PiercedFace),
 }
 
 /// The four mutually-exclusive [`Snap`] provenance fields, plus the
-/// crossing's second edge ([`Snap::crossed_edge`]).
+/// crossing's second edge ([`Snap::crossed_edge`]) and the piercing's face
+/// ([`Snap::pierced_face`]).
 type SplitProvenance = (
     Option<SnapSource>,
     Option<(SketchId, SketchEdgeId)>,
     Option<(SketchId, SketchRegionId)>,
     Option<(SketchId, SketchCurveId)>,
     Option<CrossedEdge>,
+    Option<PiercedFace>,
 );
 
 impl Provenance {
     /// Split into the public [`Snap`] provenance fields (object, sketch edge,
     /// sketch region, sketch curve) — exactly one is `Some` for a real
     /// candidate — and the crossed edge, `Some` only for an edge × edge
-    /// crossing (whose first edge fills the object or sketch-edge field).
+    /// crossing (whose first edge fills the object or sketch-edge field),
+    /// and the pierced face, `Some` only for an edge × face piercing (whose
+    /// edge fills that field the same way).
     fn split(this: Option<Provenance>) -> SplitProvenance {
+        // The first edge of a crossing or the edge of a piercing fills the
+        // object or sketch-edge field: the point lies on it.
+        let edge = |e: CrossedEdge| match e {
+            CrossedEdge::Object(s) => (Some(s), None),
+            CrossedEdge::Sketch(sid, eid) => (None, Some((sid, eid))),
+        };
         match this {
-            Some(Provenance::Object(s)) => (Some(s), None, None, None, None),
-            Some(Provenance::SketchEdge(sid, eid)) => (None, Some((sid, eid)), None, None, None),
-            Some(Provenance::SketchRegion(sid, rid)) => (None, None, Some((sid, rid)), None, None),
-            Some(Provenance::SketchCurve(sid, cid)) => (None, None, None, Some((sid, cid)), None),
-            Some(Provenance::Crossing(first, second)) => match first {
-                CrossedEdge::Object(s) => (Some(s), None, None, None, Some(second)),
-                CrossedEdge::Sketch(sid, eid) => (None, Some((sid, eid)), None, None, Some(second)),
-            },
-            None => (None, None, None, None, None),
+            Some(Provenance::Object(s)) => (Some(s), None, None, None, None, None),
+            Some(Provenance::SketchEdge(sid, eid)) => {
+                (None, Some((sid, eid)), None, None, None, None)
+            }
+            Some(Provenance::SketchRegion(sid, rid)) => {
+                (None, None, Some((sid, rid)), None, None, None)
+            }
+            Some(Provenance::SketchCurve(sid, cid)) => {
+                (None, None, None, Some((sid, cid)), None, None)
+            }
+            Some(Provenance::Crossing(first, second)) => {
+                let (object, sketch) = edge(first);
+                (object, sketch, None, None, Some(second), None)
+            }
+            Some(Provenance::Pierce(e, face)) => {
+                let (object, sketch) = edge(e);
+                (object, sketch, None, None, None, Some(face))
+            }
+            None => (None, None, None, None, None, None),
         }
     }
 }
@@ -1743,9 +1829,10 @@ impl InferenceScene {
         self.occlusion_tests.get()
     }
 
-    /// Cumulative edge × edge crossing counters across all queries so far:
-    /// pairs tested, and the queries (and their pairs) skipped for passing
-    /// [`CROSSING_PAIR_CAP`] — cheap introspection for tests and debug
+    /// Cumulative edge × edge crossing and edge × face piercing counters
+    /// across all queries so far: pairs tested, and the queries (and their
+    /// pairs) skipped for passing [`CROSSING_PAIR_CAP`] or
+    /// [`PIERCE_PAIR_CAP`] — cheap introspection for tests and debug
     /// overlays, like [`InferenceScene::occlusion_face_tests`].
     pub fn crossing_stats(&self) -> CrossingStats {
         self.crossing_stats.get()
@@ -2943,6 +3030,174 @@ impl InferenceScene {
             }
         }
 
+        // --- Edge × face piercings between different owners ---
+        // A panel set into a wall, with nothing imprinted on the wall: the
+        // panel's edge passes through the wall's face, and separate Objects
+        // never merge, so there is no vertex, no edge, nothing at the point
+        // where it does — hovering it flickered between On Face and On Edge
+        // and never offered a point. Every edge in the crossing pool (the
+        // edges through the pick cone at `Intersection`'s reach — a piercing
+        // in the cone lies on its edge, so that edge is in the pool) is
+        // tested against every face of a DIFFERENT owner whose box the cone
+        // reaches (`segment_pierces_face`: strictly through the plane, inside
+        // the outer loop, outside the holes). An edge that ends on a face is
+        // a T meeting the Endpoint snap names; an edge in a face's plane has
+        // no single point; neither is offered. Within one owner an edge
+        // never pierces a face: a solid's edges end on its faces, and the
+        // kernel splits an Object's or a sketch's own crossings into
+        // vertices. Snapped as `Intersection`, the same tier as every other
+        // crossing (above Midpoint, below the exact named points, so a
+        // vertex at the point still wins; above On Edge and On Face, so the
+        // point beats the two things it lies on), carrying the edge as the
+        // first provenance and the face as `pierced_face`.
+        //
+        // The face pool is the faces the pick CONE reaches, not the ray query
+        // the On Face candidates above use: the ray need not hit the pierced
+        // face for the piercing to be under the cursor. The spatial index
+        // prunes world and placed faces to a superset by box
+        // (`faces_in_cone`, `placed_faces_in_cone`); then every face —
+        // world, placed, and the linearly walked drawn regions alike — is
+        // kept only if some point of its material or boundary actually
+        // passes within the cone (`face_cone_key`), the exact test both the
+        // indexed and the linear reference path apply, so the two pool the
+        // same faces in the same order and agree even when the cap cuts the
+        // walk short. Curved surfaces are their planar facets here as
+        // everywhere in this crate, so an edge through a cylinder's wall
+        // pierces the facet it crosses. Faces are targets only under a face
+        // policy that has them (`faces_are_targets`): in Wireframe faces do
+        // not exist for input, piercings included; in X-ray they do, and the
+        // occlusion cull being off there makes a piercing inside a solid
+        // reachable, exactly like every other point.
+        //
+        // Nothing is pooled unless it can pair: with no edge in the cone the
+        // block is skipped whole, and a face is materialized and tested only
+        // when some pooled edge belongs to another owner, so hovering one
+        // Object's own geometry costs the cone walk and nothing more. At
+        // most `PIERCE_PAIR_CAP` pairs, nearest first on both sides — the
+        // edges by angular distance (the pool is sorted as for the edge ×
+        // edge walk, sorted here when that walk had one owner and left it
+        // as emitted) and the faces by how close they come to the ray — in
+        // order of the pair's distance (`walk_pierce_pairs`); what the cap
+        // leaves untested is counted and traced, never dropped silently.
+        if faces_are_targets && !crossing_pool.is_empty() {
+            let pool_owners: BTreeSet<EdgeOwner> = crossing_pool.iter().map(|e| e.owner).collect();
+            let foreign = |owner: EdgeOwner| pool_owners.len() > 1 || !pool_owners.contains(&owner);
+            let pierce_aperture = aperture * weights.reach(SnapKind::Intersection, widening);
+            let key_of = |plane: &Plane, boundary: &[Point3], holes: &[Vec<Point3>]| {
+                face_cone_key(origin, dir, plane, boundary, holes, pierce_aperture, mode)
+            };
+            let world_pierce_ids = match index {
+                Some(ix) => ix.faces_in_cone(origin, dir, prune_tolerance),
+                None => (0..self.faces.len()).collect::<Vec<_>>(),
+            };
+            let placed_pierce_ids = match index {
+                Some(ix) => ix.placed_faces_in_cone(
+                    &self.placements,
+                    &members,
+                    origin,
+                    dir,
+                    prune_tolerance,
+                ),
+                None => self.all_placed(source, |g| g.faces.len()),
+            };
+            // Placed faces materialize on demand — only the foreign ones the
+            // cone reaches — each with its placement index, its owner.
+            let placed_pierce: Vec<(SceneFace, usize, f64)> = placed_pierce_ids
+                .iter()
+                .filter_map(|&(pi, li)| {
+                    if !foreign(EdgeOwner::Placement(pi)) {
+                        return None;
+                    }
+                    let pl = &self.placements[pi];
+                    let face = geom(pl.member)?.face_at(li, pl)?;
+                    let key = key_of(&face.plane, &face.boundary, &face.holes)?;
+                    Some((face, pi, key))
+                })
+                .collect();
+            let mut pierce_faces: Vec<PierceFace<'_>> = Vec::new();
+            for &fi in &world_pierce_ids {
+                let f = &self.faces[fi];
+                let owner = EdgeOwner::World(f.source.object);
+                if !foreign(owner) {
+                    continue;
+                }
+                if let Some(key) = key_of(&f.plane, &f.boundary, &f.holes) {
+                    pierce_faces.push(PierceFace {
+                        plane: &f.plane,
+                        boundary: &f.boundary,
+                        holes: &f.holes,
+                        owner,
+                        face: PiercedFace::Object(f.source),
+                        key,
+                    });
+                }
+            }
+            pierce_faces.extend(placed_pierce.iter().map(|(f, pi, key)| PierceFace {
+                plane: &f.plane,
+                boundary: &f.boundary,
+                holes: &f.holes,
+                owner: EdgeOwner::Placement(*pi),
+                face: PiercedFace::Object(f.source),
+                key: *key,
+            }));
+            for (sid, f) in &self.sketch_faces {
+                let owner = EdgeOwner::Sketch(*sid);
+                if !foreign(owner) {
+                    continue;
+                }
+                if let Some(key) = key_of(&f.plane, &f.boundary, &f.holes) {
+                    pierce_faces.push(PierceFace {
+                        plane: &f.plane,
+                        boundary: &f.boundary,
+                        holes: &f.holes,
+                        owner,
+                        face: PiercedFace::SketchRegion(*sid, f.region),
+                        key,
+                    });
+                }
+            }
+            if !pierce_faces.is_empty() {
+                // Nearest first on both sides; stable, so ties keep pool
+                // order (world, placed, drawn regions, each ascending).
+                pierce_faces.sort_by(|x, y| x.key.total_cmp(&y.key));
+                if !two_owners {
+                    crossing_pool.sort_by(|x, y| x.ang.total_cmp(&y.ang));
+                }
+                let walk =
+                    walk_pierce_pairs(&crossing_pool, &pierce_faces, PIERCE_PAIR_CAP, |e, f| {
+                        if let Some(p) =
+                            segment_pierces_face(e.a, e.b, f.plane, f.boundary, f.holes)
+                            && let Some((ang, depth)) = wcone(p, SnapKind::Intersection)
+                        {
+                            candidates.push((
+                                SnapKind::Intersection,
+                                ang,
+                                depth,
+                                p,
+                                Some(Provenance::Pierce(e.edge, f.face)),
+                                None,
+                            ));
+                        }
+                    });
+                let mut stats = self.crossing_stats.get();
+                stats.pierce_faces_pooled += pierce_faces.len() as u64;
+                stats.pierce_pairs_tested += walk.tested as u64;
+                if walk.skipped > 0 {
+                    stats.pierce_queries_capped += 1;
+                    stats.pierce_pairs_skipped += walk.skipped as u64;
+                    tracing::debug!(
+                        target: "inference::crossings",
+                        edges = crossing_pool.len(),
+                        faces = pierce_faces.len(),
+                        skipped = walk.skipped,
+                        cap = PIERCE_PAIR_CAP,
+                        "edge piercing pairs past the cap left untested",
+                    );
+                }
+                self.crossing_stats.set(stats);
+            }
+        }
+
         // The active lock's direction, resolved and normalized ONCE, ahead
         // of candidate generation: the reach-reference gate just below
         // needs it, and the lock context further down reuses it verbatim.
@@ -3618,6 +3873,7 @@ impl InferenceScene {
                         sketch_region_source,
                         sketch_curve_source,
                         crossed_edge,
+                        pierced_face,
                     ) = Provenance::split(*prov);
                     Some(Snap {
                         position: projected,
@@ -3629,6 +3885,7 @@ impl InferenceScene {
                         direction: Some(lock_dir),
                         projected_from: Some(*pos),
                         crossed_edge,
+                        pierced_face,
                     })
                 } else {
                     // Nothing snapped: the directional fallback (`fall`, the
@@ -3654,6 +3911,7 @@ impl InferenceScene {
                         direction: Some(lock_dir),
                         projected_from: None,
                         crossed_edge: None,
+                        pierced_face: None,
                     })
                 }
             }
@@ -3667,6 +3925,7 @@ impl InferenceScene {
                         sketch_region_source,
                         sketch_curve_source,
                         crossed_edge,
+                        pierced_face,
                     ) = Provenance::split(prov);
                     Snap {
                         position: pos,
@@ -3678,6 +3937,7 @@ impl InferenceScene {
                         direction: snap_dir,
                         projected_from: None,
                         crossed_edge,
+                        pierced_face,
                     }
                 })
             }
@@ -4650,6 +4910,208 @@ fn segment_crossing(a0: Point3, a1: Point3, b0: Point3, b1: Point3) -> Option<Po
     Some(p)
 }
 
+/// One face in a query's piercing pool (see `resolve_impl`): a world or
+/// placed solid face, or a committed sketch region's fill, with the owner
+/// its edges belong to — an edge never pierces its own owner's faces — and
+/// how close it comes to the pick ray (`face_cone_key`), the order the
+/// walk takes faces in.
+struct PierceFace<'a> {
+    plane: &'a Plane,
+    boundary: &'a [Point3],
+    holes: &'a [Vec<Point3>],
+    owner: EdgeOwner,
+    face: PiercedFace,
+    /// The face's distance from the ray in the query's aperture units
+    /// (`CrossingEdge::ang`'s units): 0 when the ray passes through it.
+    key: f64,
+}
+
+/// How close a face comes to the pick ray, for the piercing pool: `Some(0)`
+/// when the ray passes through the face's material, else the smallest
+/// distance from the ray (an angle under `Cone`, metres under `Cylinder` —
+/// `cone_test`'s units) at which a point of the face's boundary, outer loop
+/// or hole, passes it, or `None` when no point of the face is within
+/// `aperture` of the ray. Exact for the face as a region, not a box: the
+/// cone is convex, so when it meets the face's material and the ray itself
+/// misses the material, a straight path inside the cone from the ray's
+/// point in the face's plane to a point of the material crosses the
+/// boundary — and with the ray parallel to the plane the cone's trace in
+/// the plane is unbounded while the face is not, so the boundary is met
+/// again. The indexed and the linear reference path both apply it to
+/// every face they see, so they pool the same faces (the index is a
+/// superset by box, and every point this test accepts lies in the face's
+/// box) in the same order.
+fn face_cone_key(
+    origin: Point3,
+    dir: Vec3,
+    plane: &Plane,
+    boundary: &[Point3],
+    holes: &[Vec<Point3>],
+    aperture: f64,
+    mode: ApertureMode,
+) -> Option<f64> {
+    if face_cone_hit(origin, dir, plane, boundary, holes, aperture).is_some() {
+        return Some(0.0);
+    }
+    let mut nearest: Option<f64> = None;
+    for ring in std::iter::once(boundary).chain(holes.iter().map(Vec::as_slice)) {
+        for (i, &a) in ring.iter().enumerate() {
+            let b = ring[(i + 1) % ring.len()];
+            if let Some((_, dist, _)) = segment_cone_hit(origin, dir, a, b, aperture, mode) {
+                nearest = Some(nearest.map_or(dist, |n: f64| n.min(dist)));
+            }
+        }
+    }
+    nearest
+}
+
+/// Visits the cross-owner pairs `(e, f)` of `edges` × `faces` — each sorted
+/// nearest the ray first (`CrossingEdge::ang`, `PierceFace::key`) — in order
+/// of the pair's distance from the ray, the farther of the two: the sorted
+/// lists are merged, and each item, as it is reached, pairs with every item
+/// of the other list reached before it. The piercing under the cursor,
+/// whose edge and face both pass close to the ray, is therefore tested
+/// before any pair with a farther edge or face, and a cap cuts off the
+/// farthest pairs first. Pairs of one owner are skipped free (an edge never
+/// pierces its own owner's faces); at most `cap` cross-owner pairs are
+/// visited, and the rest are counted as skipped. One owner on both sides
+/// visits nothing.
+fn walk_pierce_pairs<'a>(
+    edges: &[CrossingEdge],
+    faces: &[PierceFace<'a>],
+    cap: usize,
+    mut visit: impl FnMut(&CrossingEdge, &PierceFace<'a>),
+) -> PairWalk {
+    let mut walk = PairWalk {
+        tested: 0,
+        steps: 0,
+        skipped: 0,
+    };
+    let Some(first_edge) = edges.first() else {
+        return walk;
+    };
+    if faces.is_empty() {
+        return walk;
+    }
+    // One owner on both sides: nothing to pair.
+    if edges.iter().all(|e| e.owner == first_edge.owner)
+        && faces.iter().all(|f| f.owner == first_edge.owner)
+    {
+        return walk;
+    }
+    debug_assert!(
+        edges.is_sorted_by(|x, y| x.ang <= y.ang),
+        "edges nearest first"
+    );
+    debug_assert!(
+        faces.is_sorted_by(|x, y| x.key <= y.key),
+        "faces nearest first"
+    );
+    // How many pairs the walk owes: every edge against every face not of
+    // its owner.
+    let cross_pairs = || -> usize {
+        edges
+            .iter()
+            .map(|e| faces.iter().filter(|f| f.owner != e.owner).count())
+            .sum()
+    };
+    // Visits one pair unless it is one owner's; `false` once the cap is
+    // reached.
+    let mut try_pair = |e: &CrossingEdge, f: &PierceFace<'a>| -> bool {
+        if e.owner == f.owner {
+            return true;
+        }
+        if walk.tested == cap {
+            return false;
+        }
+        walk.tested += 1;
+        walk.steps += 1;
+        visit(e, f);
+        true
+    };
+    let (mut i, mut j) = (0, 0);
+    'merge: while i < edges.len() || j < faces.len() {
+        // Take the nearer head; it pairs with everything already taken on
+        // the other side, so every pair visited now is at least as far as
+        // every pair visited before it.
+        let take_edge = j == faces.len() || (i < edges.len() && edges[i].ang <= faces[j].key);
+        if take_edge {
+            for f in &faces[..j] {
+                if !try_pair(&edges[i], f) {
+                    break 'merge;
+                }
+            }
+            i += 1;
+        } else {
+            for e in &edges[..i] {
+                if !try_pair(e, &faces[j]) {
+                    break 'merge;
+                }
+            }
+            j += 1;
+        }
+    }
+    walk.skipped = cross_pairs() - walk.tested;
+    walk
+}
+
+/// Where segment `[a, b]` passes through the planar face with `plane`,
+/// outer `boundary` and `holes`: `a` and `b` lie strictly on opposite sides
+/// of the plane — each further than [`tol::PLANE_DIST`] from it — the
+/// segment meets the plane at more than [`tol::EDGE_FACE_GRAZING_SINE`],
+/// and the point where it crosses lies inside the boundary polygon and
+/// outside every hole (the same containment test an `OnFace` hit uses).
+/// `None` when either endpoint is on the plane (an edge that ends on the
+/// face is a T meeting the Endpoint snap already names; an edge lying in
+/// the plane has no single crossing point), when the edge grazes the plane
+/// (its ends a few nanometres either side, as a transform chain leaves a
+/// flush panel's edge: in the plane for every purpose, and the crossing an
+/// arbitrary point along it), when both endpoints are on one side (which
+/// covers every edge parallel to the plane that is not in it), or when the
+/// crossing misses the face's material. A crossing exactly on the face's
+/// boundary is the face's own edge crossing this one — `segment_crossing`'s
+/// case — and may or may not be reported here too; both land on the same
+/// point at the same tier.
+///
+/// Precision: each signed distance carries rounding of order ε times the
+/// coordinate magnitude (the plane's offset is one f64, so a local origin
+/// would not remove it), and the crossing's error along the edge is that
+/// divided by the sine of the edge's angle to the plane; the grazing gate
+/// bounds it (see the tolerance's doc), and at ordinary angles it is far
+/// below [`tol::POINT_MERGE`] even 100 km from the origin.
+fn segment_pierces_face(
+    a: Point3,
+    b: Point3,
+    plane: &Plane,
+    boundary: &[Point3],
+    holes: &[Vec<Point3>],
+) -> Option<Point3> {
+    let da = plane.signed_distance(a);
+    let db = plane.signed_distance(b);
+    if da.abs() <= tol::PLANE_DIST || db.abs() <= tol::PLANE_DIST {
+        return None; // an endpoint on the plane: a T meeting, or in-plane
+    }
+    if (da > 0.0) == (db > 0.0) {
+        return None; // both ends on one side: no crossing (parallel included)
+    }
+    // `da - db` is the edge's length times the sine of its angle to the
+    // plane; below the grazing sine the edge is in the plane for every
+    // practical purpose.
+    if (da - db).abs() < (b - a).length() * tol::EDGE_FACE_GRAZING_SINE {
+        return None; // grazing: no usable crossing point
+    }
+    let t = da / (da - db);
+    let p = a + (b - a) * t;
+    let n = plane.normal();
+    if !point_in_polygon(p, boundary, n) {
+        return None; // the crossing is beside the face
+    }
+    if holes.iter().any(|hole| point_in_polygon(p, hole, n)) {
+        return None; // the crossing is through a hole in the face
+    }
+    Some(p)
+}
+
 /// The point where two infinite lines cross, or `None` when parallel or
 /// skew beyond [`tol::POINT_MERGE`]. Returns the midpoint of the closest
 /// pair (exact crossing → the crossing itself).
@@ -5257,6 +5719,348 @@ mod tests {
             seen.push((e.ang as usize, f.ang as usize))
         });
         (seen, walk)
+    }
+
+    /// The unit square in the plane z = 0, as a face.
+    fn unit_square_face() -> (Plane, Vec<Point3>) {
+        let boundary = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+        (Plane::from_polygon(&boundary).unwrap(), boundary)
+    }
+
+    #[test]
+    fn segment_pierces_face_finds_only_true_piercings() {
+        let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        let (plane, square) = unit_square_face();
+        let no_holes: &[Vec<Point3>] = &[];
+        // Straight through the middle.
+        let hit = segment_pierces_face(
+            p(0.3, 0.4, -1.0),
+            p(0.3, 0.4, 2.0),
+            &plane,
+            &square,
+            no_holes,
+        );
+        assert!(hit.is_some_and(|q| q.approx_eq(p(0.3, 0.4, 0.0), tol::POINT_MERGE)));
+        // Slanted through the middle: the crossing is where z = 0.
+        let hit = segment_pierces_face(
+            p(0.0, 0.5, -1.0),
+            p(1.0, 0.5, 1.0),
+            &plane,
+            &square,
+            no_holes,
+        );
+        assert!(hit.is_some_and(|q| q.approx_eq(p(0.5, 0.5, 0.0), tol::POINT_MERGE)));
+        // Through the plane but beside the face.
+        assert_eq!(
+            segment_pierces_face(
+                p(1.5, 0.5, -1.0),
+                p(1.5, 0.5, 1.0),
+                &plane,
+                &square,
+                no_holes
+            ),
+            None
+        );
+        // Through a hole in the face.
+        let hole = vec![
+            p(0.25, 0.25, 0.0),
+            p(0.75, 0.25, 0.0),
+            p(0.75, 0.75, 0.0),
+            p(0.25, 0.75, 0.0),
+        ];
+        assert_eq!(
+            segment_pierces_face(
+                p(0.5, 0.5, -1.0),
+                p(0.5, 0.5, 1.0),
+                &plane,
+                &square,
+                std::slice::from_ref(&hole)
+            ),
+            None
+        );
+        // Beside the hole, still on the face: a hit.
+        assert!(
+            segment_pierces_face(
+                p(0.1, 0.5, -1.0),
+                p(0.1, 0.5, 1.0),
+                &plane,
+                &square,
+                &[hole]
+            )
+            .is_some()
+        );
+        // Ending on the face (a T): the Endpoint snap's, not a piercing.
+        assert_eq!(
+            segment_pierces_face(
+                p(0.5, 0.5, -1.0),
+                p(0.5, 0.5, 0.0),
+                &plane,
+                &square,
+                no_holes
+            ),
+            None
+        );
+        assert_eq!(
+            segment_pierces_face(
+                p(0.5, 0.5, 0.0),
+                p(0.5, 0.5, 1.0),
+                &plane,
+                &square,
+                no_holes
+            ),
+            None
+        );
+        // Lying in the plane: no single point.
+        assert_eq!(
+            segment_pierces_face(
+                p(-1.0, 0.5, 0.0),
+                p(2.0, 0.5, 0.0),
+                &plane,
+                &square,
+                no_holes
+            ),
+            None
+        );
+        // Parallel to the plane, off it: nothing.
+        assert_eq!(
+            segment_pierces_face(
+                p(-1.0, 0.5, 0.2),
+                p(2.0, 0.5, 0.2),
+                &plane,
+                &square,
+                no_holes
+            ),
+            None
+        );
+        // Both ends on one side.
+        assert_eq!(
+            segment_pierces_face(
+                p(0.5, 0.5, 0.1),
+                p(0.5, 0.5, 1.0),
+                &plane,
+                &square,
+                no_holes
+            ),
+            None
+        );
+    }
+
+    proptest! {
+        /// A segment built to pass through an interior point `p` of a random
+        /// planar quad pierces it there, in either direction; slid along the
+        /// plane normal until one endpoint sits on the plane it does not,
+        /// and moved wholly to one side it does not.
+        #[test]
+        fn segment_pierces_face_recovers_a_built_piercing(
+            c in (-5.0f64..5.0, -5.0f64..5.0, -5.0f64..5.0),
+            u in (-1.0f64..1.0, -1.0f64..1.0, -1.0f64..1.0),
+            v in (-1.0f64..1.0, -1.0f64..1.0, -1.0f64..1.0),
+            d in (-1.0f64..1.0, -1.0f64..1.0, -1.0f64..1.0),
+            su in -0.9f64..0.9,
+            sv in -0.9f64..0.9,
+            s in 0.05f64..0.95,
+            len in 0.1f64..4.0,
+        ) {
+            let c = Point3::new(c.0, c.1, c.2);
+            let u = Vec3::new(u.0, u.1, u.2);
+            let v = Vec3::new(v.0, v.1, v.2);
+            let d = Vec3::new(d.0, d.1, d.2);
+            prop_assume!(u.length() > 0.1 && v.length() > 0.1 && d.length() > 0.1);
+            let n = u.cross(v);
+            prop_assume!(n.length() > 0.1 * u.length() * v.length());
+            let n_unit = n.normalized().unwrap();
+            // Well away from parallel to the plane.
+            prop_assume!(d.normalized().unwrap().dot(n_unit).abs() > 0.1);
+            // A parallelogram face around `c`, and a point inside it.
+            let boundary = vec![c - u - v, c + u - v, c + u + v, c - u + v];
+            let plane = Plane::from_polygon(&boundary).unwrap();
+            let p = c + u * su + v * sv;
+            let d = d.normalized().unwrap();
+            let a = p - d * (s * len);
+            let b = p + d * ((1.0 - s) * len);
+            let hit = segment_pierces_face(a, b, &plane, &boundary, &[]);
+            prop_assert!(hit.is_some_and(|q| q.approx_eq(p, 1e-9)), "{:?}", hit);
+            let hit = segment_pierces_face(b, a, &plane, &boundary, &[]);
+            prop_assert!(hit.is_some_and(|q| q.approx_eq(p, 1e-9)), "{:?}", hit);
+            // Slid so `a` lands on the plane: a T meeting, not a piercing.
+            let slide = d * (s * len);
+            prop_assert_eq!(segment_pierces_face(a + slide, b + slide, &plane, &boundary, &[]), None);
+            // Wholly on one side.
+            let away = d * len;
+            prop_assert_eq!(segment_pierces_face(a + away, b + away, &plane, &boundary, &[]), None);
+            prop_assert_eq!(segment_pierces_face(a - away, b - away, &plane, &boundary, &[]), None);
+        }
+    }
+
+    /// A pool edge owned by `owner` at angular distance `ang`; its index
+    /// rides in `a.x` so a visit can name it (the geometry itself is never
+    /// read by the walk).
+    fn walk_edge_at(owner: EdgeOwner, ang: f64, i: usize) -> CrossingEdge {
+        CrossingEdge {
+            a: Point3::new(i as f64, 0.0, 0.0),
+            b: Point3::new(1.0, 0.0, 0.0),
+            ang,
+            owner,
+            edge: CrossedEdge::Sketch(SketchId::default(), SketchEdgeId::default()),
+        }
+    }
+
+    /// A pool face owned by `owner` at distance `key`; `holes.len()` is its
+    /// index so a visit can name it (the geometry itself is never read by
+    /// the walk).
+    fn walk_face<'a>(
+        owner: EdgeOwner,
+        key: f64,
+        i: usize,
+        plane: &'a Plane,
+        boundary: &'a [Point3],
+        holes: &'a [Vec<Point3>],
+    ) -> PierceFace<'a> {
+        PierceFace {
+            plane,
+            boundary,
+            holes: &holes[..i],
+            owner,
+            face: PiercedFace::SketchRegion(SketchId::default(), SketchRegionId::default()),
+            key,
+        }
+    }
+
+    #[test]
+    fn the_pierce_walk_visits_foreign_pairs_nearest_first_within_the_cap() {
+        let (plane, square) = unit_square_face();
+        let holes: Vec<Vec<Point3>> = (0..5).map(|_| Vec::new()).collect();
+        let w = EdgeOwner::World(ObjectId::default());
+        let p0 = EdgeOwner::Placement(0);
+        let p1 = EdgeOwner::Placement(1);
+        // Edges nearest first: World at 0.5, Placement(0) at 1.5, World at 2.5.
+        let edges = [
+            walk_edge_at(w, 0.5, 0),
+            walk_edge_at(p0, 1.5, 1),
+            walk_edge_at(w, 2.5, 2),
+        ];
+        // Faces nearest first, owners mixed.
+        let faces = [
+            walk_face(p1, 0.0, 0, &plane, &square, &holes),
+            walk_face(w, 1.0, 1, &plane, &square, &holes),
+            walk_face(p0, 2.0, 2, &plane, &square, &holes),
+            walk_face(w, 3.0, 3, &plane, &square, &holes),
+            walk_face(p1, 10.0, 4, &plane, &square, &holes),
+        ];
+        let run = |cap: usize| {
+            let mut seen = Vec::new();
+            let walk = walk_pierce_pairs(&edges, &faces, cap, |e, f| {
+                seen.push((e.a.x as usize, f.holes.len()))
+            });
+            (seen, walk)
+        };
+        // Uncapped: pairs in order of the farther of edge and face — every
+        // cross-owner pair once, none of one owner.
+        let (seen, walk) = run(usize::MAX);
+        assert_eq!(
+            seen,
+            vec![
+                (0, 0), // edge 0 (0.5) × face 0 (0.0)
+                (1, 0), // edge 1 (1.5) × faces 0, 1
+                (1, 1),
+                (0, 2), // face 2 (2.0) × edge 0 (edge 1 is its owner)
+                (2, 0), // edge 2 (2.5) × faces 0, 2 (face 1 is its owner)
+                (2, 2),
+                (1, 3), // face 3 (3.0) × edge 1 (edges 0, 2 are its owner)
+                (0, 4), // face 4 (10.0) × every edge
+                (1, 4),
+                (2, 4),
+            ]
+        );
+        assert_eq!((walk.tested, walk.skipped), (10, 0));
+        // Capped at 4: the four nearest pairs, the rest counted.
+        let (seen, walk) = run(4);
+        assert_eq!(seen, vec![(0, 0), (1, 0), (1, 1), (0, 2)]);
+        assert_eq!((walk.tested, walk.skipped), (4, 6));
+    }
+
+    #[test]
+    fn the_pierce_walk_does_no_work_with_one_shared_owner() {
+        let (plane, square) = unit_square_face();
+        let holes: Vec<Vec<Point3>> = vec![Vec::new(), Vec::new()];
+        let w = EdgeOwner::World(ObjectId::default());
+        let edges = [walk_edge_at(w, 0.0, 0), walk_edge_at(w, 1.0, 1)];
+        let faces = [
+            walk_face(w, 0.0, 0, &plane, &square, &holes),
+            walk_face(w, 1.0, 1, &plane, &square, &holes),
+        ];
+        let walk = walk_pierce_pairs(&edges, &faces, usize::MAX, |_, _| {
+            panic!("one owner pairs nothing")
+        });
+        assert_eq!(
+            walk,
+            PairWalk {
+                tested: 0,
+                steps: 0,
+                skipped: 0
+            }
+        );
+        // No edges, or no faces: likewise.
+        let walk = walk_pierce_pairs(&[], &faces, usize::MAX, |_, _| panic!("no edges"));
+        assert_eq!(walk.tested, 0);
+        let walk = walk_pierce_pairs(&edges, &[], usize::MAX, |_, _| panic!("no faces"));
+        assert_eq!(walk.tested, 0);
+    }
+
+    /// Far from the origin, where every coordinate carries rounding of
+    /// order 1e-11: a crossing at an ordinary angle is still exact to the
+    /// scene tolerance, and a grazing edge — its ends a few nanometres
+    /// either side of the plane — is refused rather than placed anywhere.
+    #[test]
+    fn segment_pierces_face_far_from_the_origin() {
+        let far = 1e5;
+        // A unit square tilted 37° off the ground (normal (0.6, 0, 0.8)),
+        // 100 km out along x and y.
+        let o = Point3::new(far, far, 0.0);
+        let u = Vec3::new(0.8, 0.0, -0.6);
+        let v = Vec3::new(0.0, 1.0, 0.0);
+        let n = Vec3::new(0.6, 0.0, 0.8);
+        let boundary = vec![o, o + u, o + u + v, o + v];
+        let plane = Plane::from_polygon(&boundary).unwrap();
+        let p = o + u * 0.3 + v * 0.4;
+        // Through `p` at 45° to the plane.
+        let d = (n + u).normalized().unwrap();
+        let hit = segment_pierces_face(p - d * 0.7, p + d * 0.9, &plane, &boundary, &[]);
+        assert!(
+            hit.is_some_and(|q| q.approx_eq(p, tol::POINT_MERGE)),
+            "{hit:?} vs {p:?}"
+        );
+        // Grazing: a metre-long edge in the plane to within 2 nm at each
+        // end, on opposite sides. Past PLANE_DIST, so only the grazing gate
+        // refuses it — here and at metre scale alike.
+        let graze = |o: Point3| {
+            segment_pierces_face(
+                o + u * 0.0 + v * 0.5 + n * 2e-9,
+                o + u * 1.0 + v * 0.5 - n * 2e-9,
+                &Plane::from_polygon(&[o, o + u, o + u + v]).unwrap(),
+                &[o, o + u, o + u + v, o + v],
+                &[],
+            )
+        };
+        assert_eq!(graze(o), None);
+        assert_eq!(graze(Point3::new(0.0, 0.0, 0.0)), None);
+        // Just past the grazing sine the crossing is offered, where it is.
+        let steep = segment_pierces_face(
+            o + v * 0.5 + n * 2e-6,
+            o + u * 1.0 + v * 0.5 - n * 2e-6,
+            &plane,
+            &boundary,
+            &[],
+        );
+        assert!(
+            steep.is_some_and(|q| q.approx_eq(o + u * 0.5 + v * 0.5, 1e-5)),
+            "{steep:?}"
+        );
     }
 
     #[test]

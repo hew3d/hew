@@ -71,6 +71,24 @@ pub const OFFSET_MITER_LIMIT: f64 = 20.0;
 /// 4.2e-8 rad saturation bound and ≥ 10× over the multiplicative bound.
 pub const CONE_SLACK: f64 = 1e-7;
 
+/// Smallest sine of the angle between an edge and a face's plane at which
+/// the inference layer offers the point where the edge passes through the
+/// face (dimensionless).
+///
+/// The crossing point is `a + (b − a) · da / (da − db)` from the endpoints'
+/// signed plane distances, and `|da − db|` is the edge's length times this
+/// sine. Each distance carries rounding of order ε · X for coordinates of
+/// magnitude X (the plane's offset is one f64), so the point's error along
+/// the edge is about ε · X / sine. Below this sine the edge lies in the
+/// plane for every practical purpose — an edge 1 m long whose ends are a
+/// few nanometres either side of the plane, as a transform chain or a
+/// quantized import leaves a flush panel's edge — and the "crossing" is an
+/// arbitrary point along it, which must not be offered as a snap. At 1e-6
+/// (a fifth of an arc second) the error bound is ε · X / 1e-6, about a
+/// tenth of a nanometre at metre scale and some 20 µm at 100 km, and no edge a
+/// person draws through a face is anywhere near it.
+pub const EDGE_FACE_GRAZING_SINE: f64 = 1e-6;
+
 /// Relative depth skin for snap-occlusion culling in the inference layer
 /// (dimensionless fraction). When deciding whether an opaque face hides a snap
 /// candidate, a face counts as an occluder only if it lies at least this

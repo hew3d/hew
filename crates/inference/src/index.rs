@@ -770,6 +770,21 @@ impl SceneIndex {
         self.faces.ray_candidates(origin, dir)
     }
 
+    /// World face candidates for `resolve`'s edge × face piercing test
+    /// (superset, ascending). A piercing point lies on the face's plane
+    /// inside its boundary's shadow — inside the box [`face_aabb`] builds —
+    /// and is admitted only within the pick cone, so the cone/cylinder-vs-box
+    /// test covers it; unlike [`SceneIndex::faces_crossing_ray`] this is a
+    /// cone query, since the ray itself need not hit the pierced face.
+    pub(crate) fn faces_in_cone(
+        &self,
+        origin: Point3,
+        dir: Vec3,
+        tol: PruneTolerance,
+    ) -> Vec<usize> {
+        self.faces.cone_candidates(origin, dir, tol)
+    }
+
     /// Placed point candidates: `(placement index, member-local index)`
     /// pairs, ascending — the two-level walk. The outer BVH admits
     /// placements by world box; each admitted placement walks its member's
@@ -849,6 +864,38 @@ impl SceneIndex {
                 .index
                 .faces
                 .ray_candidates_mapped(m.bounds.face_map(&pl.pose), origin, dir)
+            {
+                out.push((pi, li));
+            }
+        }
+        out
+    }
+
+    /// Placed face candidates for the piercing test (see
+    /// [`SceneIndex::placed_points_in_cone`]; cone query like
+    /// [`SceneIndex::faces_in_cone`], with the face-slack inflation of
+    /// [`DefBounds::face_map`], which keeps every boundary vertex's
+    /// projection onto the world plane — and so every piercing point —
+    /// inside the mapped box).
+    pub(crate) fn placed_faces_in_cone(
+        &self,
+        placements: &[Placement],
+        members: &Members<'_>,
+        origin: Point3,
+        dir: Vec3,
+        tol: PruneTolerance,
+    ) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for pi in self.placement_faces.cone_candidates(origin, dir, tol) {
+            let pl = &placements[pi];
+            let (Some(m), Some(g)) = (members.map.get(&pl.member), (members.geometry)(pl.member))
+            else {
+                continue;
+            };
+            for li in
+                g.index
+                    .faces
+                    .cone_candidates_mapped(m.bounds.face_map(&pl.pose), origin, dir, tol)
             {
                 out.push((pi, li));
             }
