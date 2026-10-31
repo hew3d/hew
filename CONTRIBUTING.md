@@ -69,6 +69,8 @@ do not contribute to the `.skp` import path. This rule has no exceptions.
 Hew is licensed [AGPL-3.0-only](LICENSE) with the
 [Hew Plugin API Exception](LICENSE-EXCEPTION). Contributions are accepted
 under those same terms (inbound = outbound); there is no CLA.
+The one exception is `brand/`, whose assets are licensed
+[CC BY 4.0](brand/LICENSE); contributions there are accepted under that license.
 
 Every commit must be signed off under the
 [Developer Certificate of Origin 1.1](https://developercertificate.org/):
