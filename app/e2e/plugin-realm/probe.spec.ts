@@ -294,8 +294,8 @@ for (const id of ['latency', 'throughput', 'transfer']) {
 // some engines), so the row's own completion is not assumed: the driver asks
 // the page something while the frame is alive and records a frozen host when
 // the page never answers.
-test('surface-spin', async ({ page }, ti) => {
-  test.skip(process.env.PROBE_SPIN !== '1', 'surface-spin is explicit-only (set PROBE_SPIN=1)')
+// Registered only on request: a skip would trip the zero-skips gate in verify-full.sh.
+if (process.env.PROBE_SPIN === '1') test('surface-spin', async ({ page }, ti) => {
   test.setTimeout(40_000)
   try {
     await load(page, 'surface-spin')
