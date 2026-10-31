@@ -187,6 +187,110 @@ describe('DimensionTool — linear dimension gesture', () => {
   })
 })
 
+describe('DimensionTool — a click on a line dimensions the whole line', () => {
+  /** A scene whose edges all run (0,0,0)→(2,0,0); sketch edges belong to no
+   *  curve, so a sketch line is a plain line, not a radial target. */
+  function edgeScene() {
+    const made = makeWasmScene()
+    const ends = () => new Float64Array([0, 0, 0, 2, 0, 0])
+    Object.assign(made.scene, {
+      sketch_edge_curve: vi.fn(() => undefined),
+      edge_endpoints: vi.fn(ends),
+      edge_endpoints_in_instance: vi.fn(ends),
+      sketch_edge_endpoints: vi.fn(ends),
+      sketch_edge_endpoints_in_instance: vi.fn(ends),
+    })
+    return made
+  }
+  type LinearCall = [number, bigint, Float64Array, number, bigint, Float64Array]
+  /** Drag the offset out to +Y and click to place it. */
+  function place(tool: DimensionTool): void {
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), RAY)
+  }
+
+  it('one click on a solid edge takes both its ends, then the offset drag places the dimension', () => {
+    const { scene, linearCalls } = edgeScene()
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0.7, y: 0, z: 0, kind: 'on-edge', elementKind: 'edge', object: 5n, element: 3n }), RAY)
+    expect(scene.edge_endpoints).toHaveBeenCalledWith(5n, 3n)
+    expect(tool.statusHint()).toMatch(/drag/i)
+    place(tool)
+
+    expect(linearCalls.length).toBe(1)
+    const [aKind, aId, aPoint, bKind, bId, bPoint] = linearCalls[0] as LinearCall
+    expect([aKind, aId, bKind, bId]).toEqual([0, 5n, 0, 5n]) // both ends follow the object
+    expect(Array.from(aPoint)).toEqual([0, 0, 0])
+    expect(Array.from(bPoint)).toEqual([2, 0, 0])
+  })
+
+  it('a drawn sketch line works the same, with free anchors', () => {
+    const { scene, linearCalls } = edgeScene()
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1.2, y: 0, z: 0, kind: 'on-edge', elementKind: 'sketch-edge', sketch: 7n, element: 4n }), RAY)
+    expect(scene.sketch_edge_endpoints).toHaveBeenCalledWith(7n, 4n)
+    place(tool)
+
+    expect(linearCalls.length).toBe(1)
+    const [aKind, , aPoint, bKind, , bPoint] = linearCalls[0] as LinearCall
+    expect([aKind, bKind]).toEqual([-1, -1])
+    expect(Array.from(aPoint)).toEqual([0, 0, 0])
+    expect(Array.from(bPoint)).toEqual([2, 0, 0])
+  })
+
+  it('an edge of a placed component resolves through the instance and anchors to it', () => {
+    const { scene, linearCalls } = edgeScene()
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0, kind: 'on-edge', elementKind: 'edge', object: 5n, instance: 77n, element: 3n }), RAY)
+    expect(scene.edge_endpoints_in_instance).toHaveBeenCalledWith(77n, 5n, 3n)
+    place(tool)
+
+    const [aKind, aId, , bKind, bId] = linearCalls[0] as LinearCall
+    expect([aKind, aId, bKind, bId]).toEqual([2, 77n, 2, 77n])
+  })
+
+  it('inside a component, a definition sketch line resolves through the edited instance', () => {
+    const { scene } = edgeScene()
+    const { tool } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: 77n, component: 3n })
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0, kind: 'on-edge', elementKind: 'sketch-edge', sketch: 7n, element: 4n }), RAY)
+    expect(scene.sketch_edge_endpoints_in_instance).toHaveBeenCalledWith(77n, 7n, 4n)
+    expect(tool.statusHint()).toMatch(/drag/i)
+  })
+
+  it('a point on the line (endpoint, midpoint) still starts a point-to-point dimension', () => {
+    for (const kind of ['endpoint', 'midpoint']) {
+      const { scene } = edgeScene()
+      const { tool } = makeTool(scene)
+      tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0, kind, elementKind: 'edge', object: 5n, element: 3n }), RAY)
+      expect(tool.statusHint()).toMatch(/second point/i)
+    }
+  })
+
+  it('a stale edge falls back to a point-to-point dimension from the click', () => {
+    const { scene } = edgeScene()
+    Object.assign(scene, { edge_endpoints: vi.fn(() => undefined) })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0, kind: 'on-edge', elementKind: 'edge', object: 5n, element: 3n }), RAY)
+    expect(tool.statusHint()).toMatch(/second point/i)
+  })
+
+  it('a drawn circle\'s rim keeps the radial gesture', () => {
+    const { scene, radialCalls } = makeWasmScene()
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 2, y: 0, z: 0, kind: 'on-edge', elementKind: 'sketch-edge', sketch: 7n, element: 4n }), RAY)
+    tool.onPointerMove(makeSnap({ x: 4, y: 0, z: 0 }), RAY)
+    tool.onPointerDown(makeSnap({ x: 4, y: 0, z: 0 }), RAY)
+    expect(radialCalls.length).toBe(1)
+  })
+})
+
 describe('DimensionTool — camera-aware working plane, no shared sketch (dimensions-playtest2.md §3, as corrected by the angle-dimensions fix)', () => {
   // RED-CHECK (all tests in this block, against the pre-playtest2 code): it
   // had no `updateCamera` method at all (`tool.updateCamera is not a

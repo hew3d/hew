@@ -202,11 +202,12 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, arrowToAxis, axisLockColorName, axisLockColorNameCapitalized } from './moveInput'
 import { displayedLength, isFreePick } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
-import { planeFromSketch, axisDrawPlane, isPointOnDrawPlane, SketchPickCache, instanceOf, GROUND_PLANE_EPS, type DrawPlane } from './drawPlane'
+import { planeFromSketch, axisDrawPlane, isPointOnDrawPlane, SketchPickCache, GROUND_PLANE_EPS, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
 import type { V3 } from '../viewport/geoHelpers'
 import { crossV3, normalizeV3, dotV3, subV3 } from '../viewport/geoHelpers'
 import { worldFaceNormal } from './faceDraw'
+import { snapEdgeEndpoints } from './snapEdge'
 import {
   AXIS_ALONG_EDGE_SIN,
   AXIS_ALONG_EDGE_COS,
@@ -1874,14 +1875,8 @@ export class TapeMeasureTool implements Tool {
    * distinguishing "vertex that happens to sit on an edge" needs more
    * inference-engine plumbing than this slice adds).
    *
-   * Component-instance members: a plain `edge_endpoints`/`sketch_edge_
-   * endpoints` call refuses a definition-owned object/sketch (it isn't
-   * world geometry with a single world-space pose of its own). When the
-   * snap names a placing `instance` — or, for a sketch edge, the tool is
-   * currently inside an `'instance'` edit context — the `*_in_instance`
-   * variant is tried first, composing that instance's pose into the
-   * endpoints. A group member needs none of this: it's still `is_world()`
-   * in the kernel, so it already resolves via the plain calls below.
+   * Edge endpoints, component-instance members included, come from
+   * `snapEdgeEndpoints` (snapEdge.ts), with this tool's edit context.
    */
   private _tryResolveEdge(
     snap: Snap,
@@ -1896,37 +1891,12 @@ export class TapeMeasureTool implements Tool {
       }
     }
 
-    let endpoints: Float64Array | number[] | undefined
-    if (snap.elementKind === 'edge' && snap.object !== undefined && snap.element !== undefined) {
-      endpoints = snap.instance !== undefined
-        ? this.wasmScene.edge_endpoints_in_instance(snap.instance, snap.object, snap.element)
-        : this.wasmScene.edge_endpoints(snap.object, snap.element)
-    } else if (
-      snap.elementKind === 'sketch-edge' &&
-      snap.sketch !== undefined &&
-      snap.element !== undefined
-    ) {
-      // A committed sketch line works as a guide reference too — the most
-      // common case: a parallel guide off a just-drawn rectangle's edge.
-      // `snap.instance` (if the hover carried one) wins over the edit
-      // context's instance; either way, a definition-owned sketch edge
-      // needs a placing instance composed in to resolve world-space
-      // endpoints at all.
-      const instance = snap.instance ?? instanceOf(this._editContext) ?? undefined
-      endpoints = instance !== undefined
-        ? this.wasmScene.sketch_edge_endpoints_in_instance(instance, snap.sketch, snap.element)
-        : undefined
-      if (endpoints === undefined) {
-        // No instance resolved at all, OR the in-instance call refused
-        // (e.g. hovering a plain world sketch while inside an unrelated
-        // instance edit context — a legitimate case, not an error): fall
-        // back to the ordinary world-space lookup.
-        endpoints = this.wasmScene.sketch_edge_endpoints(snap.sketch, snap.element)
-      }
-    }
-    if (endpoints === undefined) return null // stale/consumed — fall back
+    // A committed sketch line works as a guide reference too — the most
+    // common case: a parallel guide off a just-drawn rectangle's edge.
+    const endpoints = snapEdgeEndpoints(this.wasmScene, snap, this._editContext)
+    if (endpoints === null) return null // stale/consumed — fall back
 
-    const [ax, ay, az, bx, by, bz] = endpoints
+    const [[ax, ay, az], [bx, by, bz]] = endpoints
     const dx = bx - ax, dy = by - ay, dz = bz - az
     const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
     if (len < 1e-9) return null // degenerate edge

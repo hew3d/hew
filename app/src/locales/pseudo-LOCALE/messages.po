@@ -1435,8 +1435,12 @@ msgid "Click a point for the new origin."
 msgstr ""
 
 #: src/tools/DimensionTool.ts
-msgid "Click a point to dimension from, or click a drawn circle/arc for a radius dimension."
+msgid "Click a point to dimension from, a line to dimension it, or a drawn circle/arc for a radius dimension."
 msgstr ""
+
+#: src/tools/DimensionTool.ts
+#~ msgid "Click a point to dimension from, or click a drawn circle/arc for a radius dimension."
+#~ msgstr ""
 
 #: src/tools/TapeMeasureTool.ts
 msgid "Click a point to measure from — or click an edge to drop a parallel guide."

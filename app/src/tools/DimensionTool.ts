@@ -40,6 +40,12 @@
  *      Degenerate (cursor still on the A-B line, zero offset) refuses with a
  *      status hint rather than committing an unplaceable dimension.
  *
+ * Gesture (linear, from a line — SketchUp's edge gesture): a first click ON a
+ * straight line (an `on-edge` snap, not one of its points) takes the line's
+ * two ends as A and B at once (`snapEdgeEndpoints`) and goes straight to
+ * step 3; a press-drag-release on the line places the dimension in one
+ * motion. A drawn circle/arc's rim keeps the radial gesture below.
+ *
  * Gesture (radial — click a drawn circle/arc, dimensions-playtest2.md §4):
  *   1. First click on a drawn (unextruded) sketch circle/arc's rim OR its
  *      analytic center snap starts a PENDING `'have-curve'` stage — it does
@@ -83,7 +89,7 @@
 import { t } from '@lingui/core/macro'
 import { shownAnnotationIds } from '../viewport/shownAnnotations'
 import * as THREE from 'three'
-import type { Tool, Snap } from './types'
+import type { Tool, Snap, EditContext } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
@@ -111,6 +117,7 @@ import { nextIdlePlaneLock, axisLockColorName, radiusReadout, diameterReadout } 
 import { worldFaceNormal } from './faceDraw'
 import { ctxGround, ctxOfFace, ctxOfSketch, planeOfCtx, readPlaneUnits, type PlaneUnitsScene } from './planeUnits'
 import { projectPointOntoPlane } from './tapeOffset'
+import { snapEdgeEndpoints } from './snapEdge'
 import { axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
 
@@ -551,6 +558,13 @@ export class DimensionTool implements Tool {
   /** Click-drag-release works as well as click-click (Tool.dragCommits). */
   readonly dragCommits = true
 
+  /** The current editing context: resolves a clicked line's endpoints inside
+   *  a component instance (`snapEdgeEndpoints`). */
+  private _editContext: EditContext = { kind: 'top' }
+  setEditContext(ctx: EditContext): void {
+    this._editContext = ctx
+  }
+
   statusHint(): string {
     const lockedAxis = this.planeLock !== null ? axisLockColorName(this.planeLock) : null
     const lockNote = lockedAxis !== null ? t`Locked to the ${lockedAxis} plane — same arrow or ArrowDown unlocks.` : ''
@@ -567,7 +581,7 @@ export class DimensionTool implements Tool {
           : t`Drag out the leader, then click to place — Tab for radius.`
       }
       default:
-        return withLock(t`Click a point to dimension from, or click a drawn circle/arc for a radius dimension.`)
+        return withLock(t`Click a point to dimension from, a line to dimension it, or a drawn circle/arc for a radius dimension.`)
     }
   }
 
@@ -662,6 +676,50 @@ export class DimensionTool implements Tool {
 
   capturingInput(): boolean {
     return this.stage.kind !== 'idle'
+  }
+
+  /**
+   * Enter `have-b` on the baseline A→B: the offset drag starts from here.
+   * Design v1.1 "Dimensions on-plane": only a genuinely ADOPTED sketch plane
+   * carries forward as `have-b`'s hard override (`_workingPlane`'s
+   * pre-existing behavior, unchanged). A lock/on-face/view-aligned freeze
+   * instead just SEEDS the fresh drag state's latch — so the offset drag
+   * starts continuous with the plane B was just constrained to — but ONLY
+   * when B actually WAS constrained by it (`seedFromFrozen`): an
+   * off-plane-honored precise point (`HAVE_A_OFF_PLANE_KINDS`, e.g. a real
+   * endpoint) never touched the frozen plane at all, so seeding from it would
+   * bias `have-b` toward a plane the second click had no real relationship
+   * to — purely incidental if the (camera-only, no-drag-information) freeze
+   * axis happens to be perpendicular to the resulting baseline. No lock check
+   * needed either: while locked, `_workingPlane` reads `this.planeLock`
+   * directly, regardless of `gesturePlane`/the latch.
+   */
+  private _beginOffsetDrag(
+    aNode: { kind: number; id: bigint } | null,
+    aPoint: V3,
+    bNode: { kind: number; id: bigint } | null,
+    bPoint: V3,
+    frozenPlane: DrawPlane | null,
+    adopted: boolean,
+    seedFromFrozen: boolean,
+  ): void {
+    this._axisDragState = freshAxisPlaneDragState() // a NEW baseline starts its drag unlatched
+    if (!adopted && frozenPlane !== null && seedFromFrozen) {
+      const baseDir = normalizeV3(sub(bPoint, aPoint))
+      if (baseDir !== null && Math.abs(dot(baseDir, frozenPlane.normal)) < 1e-6) {
+        this._axisDragState.latched = frozenPlane.normal
+      }
+    }
+    this.stage = {
+      kind: 'have-b',
+      aNode,
+      aPoint,
+      bNode,
+      bPoint,
+      offset: [0, 0, 0],
+      gesturePlane: adopted ? frozenPlane : null,
+    }
+    this._updatePreview()
   }
 
   /** See `_snapProjected`'s doc — `Tool.snapProjected`'s cue-label
@@ -811,6 +869,17 @@ export class DimensionTool implements Tool {
         this._updatePreview()
         return
       }
+      // A click on a line itself (not a point on it) dimensions the whole
+      // line, SketchUp's edge gesture: its two ends are A and B at once, and
+      // the gesture goes straight to the offset drag. The plane is frozen
+      // exactly as for a first point.
+      const edge = snap.kind === 'on-edge' ? snapEdgeEndpoints(this.wasmScene, snap, this._editContext) : null
+      if (edge !== null && length(sub(edge[1], edge[0])) >= 1e-9) {
+        const node = anchorNodeFromSnap(snap)
+        const frozen = this._freezeGesturePlane(ray, snap, edge[0])
+        this._beginOffsetDrag(node, edge[0], node, edge[1], frozen?.plane ?? null, frozen?.adopted ?? false, true)
+        return
+      }
       // The first click always freezes a gesture plane now (design v1.1
       // "Dimensions on-plane" — see `_freezeGesturePlane`), not just when a
       // sketch happens to be hovered: without one, the second point's snap
@@ -835,42 +904,10 @@ export class DimensionTool implements Tool {
       // just because the raw snap did.
       const bPoint = this._haveAPoint(snap, this._haveAPlane(this.stage))
       if (length(sub(bPoint, this.stage.aPoint)) < 1e-9) return // same point twice — ignore
-      this._axisDragState = freshAxisPlaneDragState() // a NEW baseline starts its drag unlatched
-      // Design v1.1 "Dimensions on-plane": only a genuinely ADOPTED sketch
-      // plane carries forward as `have-b`'s hard override (`_workingPlane`'s
-      // pre-existing behavior, unchanged). A lock/on-face/view-aligned
-      // freeze instead just SEEDS the fresh drag state's latch — so the
-      // offset drag starts continuous with the plane the second click was
-      // just constrained to — but ONLY when that click actually WAS
-      // constrained by it: an off-plane-honored precise point
-      // (`HAVE_A_OFF_PLANE_KINDS`, e.g. a real endpoint) never touched the
-      // frozen plane at all, so seeding from it would bias `have-b` toward
-      // a plane the second click had no real relationship to — purely
-      // incidental if the (camera-only, no-drag-information) freeze axis
-      // happens to be perpendicular to the resulting baseline. `_haveAPoint`
-      // already computed exactly this distinction; reusing its raw kind
-      // check here (rather than re-deriving one from the resolved point)
-      // is what keeps this in sync with it. No lock check needed either:
-      // while locked, `_workingPlane` reads `this.planeLock` directly,
-      // regardless of `gesturePlane`/the latch.
-      const frozenPlane = this.stage.gesturePlane
-      const adopted = this.stage.gesturePlaneAdopted
-      if (!adopted && frozenPlane !== null && !HAVE_A_OFF_PLANE_KINDS.has(snap.kind)) {
-        const baseDir = normalizeV3(sub(bPoint, this.stage.aPoint))
-        if (baseDir !== null && Math.abs(dot(baseDir, frozenPlane.normal)) < 1e-6) {
-          this._axisDragState.latched = frozenPlane.normal
-        }
-      }
-      this.stage = {
-        kind: 'have-b',
-        aNode: this.stage.aNode,
-        aPoint: this.stage.aPoint,
-        bNode: anchorNodeFromSnap(snap),
-        bPoint,
-        offset: [0, 0, 0],
-        gesturePlane: adopted ? frozenPlane : null,
-      }
-      this._updatePreview()
+      this._beginOffsetDrag(
+        this.stage.aNode, this.stage.aPoint, anchorNodeFromSnap(snap), bPoint,
+        this.stage.gesturePlane, this.stage.gesturePlaneAdopted, !HAVE_A_OFF_PLANE_KINDS.has(snap.kind),
+      )
       return
     }
 
