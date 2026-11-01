@@ -323,8 +323,13 @@ pub fn tessellate(
         }
         mesh.face_ranges.push((face_id, base, poly.len() as u32));
 
-        // Run ear clipping (local indices into poly).
-        let triangles = ear_clip(&poly);
+        // Run ear clipping (local indices into poly), keeping only the
+        // triangles the f32 buffers can hold with their winding (see
+        // `winds_forward_in_f32`).
+        let triangles: Vec<[usize; 3]> = ear_clip(&poly)
+            .into_iter()
+            .filter(|&tri| winds_forward_in_f32(&poly, normal, tri))
+            .collect();
 
         // A painted back: the same polygon again, facing the other way,
         // in the back's color and with its texture's scale.
@@ -456,6 +461,38 @@ pub fn tessellate(
     }
 
     Ok(mesh)
+}
+
+/// True if triangle `tri` of `poly` still winds with `normal` once its
+/// corners are rounded to the `f32` the render buffers hold.
+///
+/// Ear clipping emits every triangle with a strictly positive f64 area, but
+/// the fan it builds from one vertex across a hole's chain of chords ends
+/// at that vertex's tangent to the hole, and the last fan triangle before
+/// the tangent is as thin as the tangent point happens to fall close to a
+/// chain vertex — a zero-to-chord-length lottery that regularly lands under
+/// the f32 quantum of the coordinates (about 2e-7 m at 2 m from the
+/// origin). The ring forces that triangle: by the time it is clipped, the
+/// fan apex is the only ring vertex visible from the chord, so no other
+/// ear choice and no edge flip can replace it. Written to the buffers it
+/// would wind backwards or collapse: a back-facing triangle under the
+/// renderer's culling, with a face normal disagreeing with its vertices.
+/// Its footprint is below what the buffers can represent — after rounding,
+/// its two neighbours already cover it between them — so it is left out
+/// rather than written inverted. The gate is the sign of the output's own
+/// winding, not a distance tolerance: a triangle with any representable
+/// altitude keeps a positive area under rounding, so only sub-quantum
+/// slivers are affected and the face's coverage is unchanged.
+fn winds_forward_in_f32(poly: &[[f64; 5]], normal: kernel::Vec3, tri: [usize; 3]) -> bool {
+    let rounded = |i: usize| {
+        kernel::Point3::new(
+            f64::from(poly[i][0] as f32),
+            f64::from(poly[i][1] as f32),
+            f64::from(poly[i][2] as f32),
+        )
+    };
+    let (a, b, c) = (rounded(tri[0]), rounded(tri[1]), rounded(tri[2]));
+    (b - a).cross(c - a).dot(normal) > 0.0
 }
 
 // ──────────────────────────────────────── orthonormal basis for a plane
