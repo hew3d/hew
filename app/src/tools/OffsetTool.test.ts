@@ -111,6 +111,7 @@ function makeWasmScene(opts: {
     draftLog: dm.log,
     history_generation: vi.fn(() => 1n),
     pick_face: vi.fn(() => opts.facePick),
+    session_stack: vi.fn(() => []),
     pick_sketch_region: vi.fn(() => opts.regionPick),
     pick_sketch_region_in_instance: vi.fn(() => opts.regionPickInInstance ?? opts.regionPick),
     pick_sketch_edge: vi.fn(() => opts.edgePick),
@@ -563,6 +564,31 @@ describe('OffsetTool — typed distance (VCB)', () => {
 
     const call = offsetCalls(scene)[0]
     expect(call[2]).toBeCloseTo(0.4)
+  })
+})
+
+describe('OffsetTool — hover hint (Tool.hoverHint)', () => {
+  const RAY: Ray = { origin: [0.5, 0.5, 5], direction: [0, 0, -1] }
+  it('hovering a component member\'s face explains the refusal before the click, and the click toasts the same line as guidance', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { tool, onToast } = makeTool(scene)
+    expect(tool.hoverHint()).toBeNull()
+    tool.onPointerMove(null, RAY)
+    expect(tool.hoverHint()).toContain('component')
+    expect(tool.statusHint()).toContain('component')
+    expect(onToast).not.toHaveBeenCalled()
+    tool.onPointerDown(null, RAY)
+    expect(String((onToast as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('component')
+    expect((onToast as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe('EditContextHint')
+    tool.onPointerLeave()
+    expect(tool.hoverHint()).toBeNull()
+  })
+
+  it('a plain face hovers with no hint', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerMove(null, RAY)
+    expect(tool.hoverHint()).toBeNull()
   })
 })
 

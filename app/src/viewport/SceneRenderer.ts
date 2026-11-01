@@ -585,6 +585,17 @@ const _slotMatrix = new THREE.Matrix4()
  * `_slotMatrix` so the pull path (record construction) and the write path
  * (slot matrix writes) never alias the same scratch object. */
 const _composeScratch = new THREE.Matrix4()
+
+/** A THREE matrix from a row-major 3×4 affine (12 floats, the kernel's
+ *  `instance_pose` / `component_sketch_frame` layout). */
+function rowMajorToMatrix4(a: ArrayLike<number>): THREE.Matrix4 {
+  return new THREE.Matrix4().set(
+    a[0], a[1], a[2], a[3],
+    a[4], a[5], a[6], a[7],
+    a[8], a[9], a[10], a[11],
+    0, 0, 0, 1,
+  )
+}
 /** Scratch bounds for the live-slots-only batch bounds computation. */
 const _boundsBox = new THREE.Box3()
 const _boundsSphere = new THREE.Sphere()
@@ -1051,6 +1062,16 @@ export class SceneRenderer {
         ![...this.instanceRecords.values()].some((r) => r.memberIds.includes(id)),
     )
     const recheckInstances = new Set<bigint>(touchedInstances)
+    // Live sibling placements (ARCHITECTURE.md 2.11): with a component
+    // session open, every other placement of the on-loan definition draws
+    // the session's world objects through its own pose, so a session commit
+    // that creates or deletes a world object changes those placements'
+    // member lists even though the caller's touched set names only the
+    // object. Re-pull them on every targeted refresh — a handful of
+    // instances, pose + member-id pulls, no geometry; a touched session
+    // object that is already a cached member took the `dirtyMembers` path
+    // above and rebuilds its batches like any definition edit.
+    for (const iid of this.wasmScene.session_placements()) recheckInstances.add(iid)
     if (touchedComponentSet.size > 0 || unresolvedMemberIds.length > 0) {
       for (const [iid, rec] of this.instanceRecords) {
         if (unresolvedMemberIds.length > 0 || touchedComponentSet.has(rec.componentId)) {
@@ -1068,41 +1089,42 @@ export class SceneRenderer {
         this._removeInstance(iid)
         continue
       }
-      // Compare the FULL placement sequence (member id per index, repeats
-      // included), not just the deduplicated member set: a nested
-      // definition can gain/lose a placement of a member it already had
-      // (e.g. an array count edit) with the deduplicated set unchanged —
-      // that still resizes the batch and must take the slow path. Local
-      // pose is deliberately NOT part of this comparison: a nested def edit
-      // that only moves a placement (member set/count unchanged) is exactly
-      // what the fast path below is for, since it always re-composes
-      // `rec.matrix × placement.localMatrix` from the FRESH placement.
-      const samePlacements =
-        next.componentId === prev.componentId &&
-        next.placements.length === prev.placements.length &&
-        next.placements.every((p, i) => p.memberId === prev.placements[i].memberId)
-      if (!samePlacements) {
-        // Batch membership changed (a placement gained/lost/swapped) — the
-        // slow (rebuild) path.
+      // Diff the placements per member by BATCH KEY multiset (member ×
+      // bucket, counts included): a member whose key counts differ gained,
+      // lost, or re-bucketed a placement — its batches resize or move and
+      // take the slow (rebuild) path. Every OTHER member of this instance
+      // keeps its slots and takes the fast in-place write below. Counting
+      // rather than comparing the full sequence matters for live sibling
+      // placements (ARCHITECTURE.md 2.11): a solid created inside a
+      // session adds ONE placement to every sibling, and rebuilding every
+      // member of every sibling for that was a per-commit hitch on a large
+      // component with many copies. Local pose is deliberately NOT part of
+      // the comparison: a nested def edit that only moves a placement is
+      // exactly what the fast path is for, since it re-composes
+      // `rec.matrix × placement.localMatrix` from the FRESH placement. A
+      // bucket flip (reflected/orthogonal, derived from the COMPOSED pose)
+      // shows up as a key count change on both the old and the new key.
+      if (next.componentId !== prev.componentId) {
         for (const m of prev.memberIds) membersToRebuild.add(m)
         for (const m of next.memberIds) membersToRebuild.add(m)
         continue
       }
-      // A pose-only change can still flip an individual PLACEMENT's own
-      // bucket: `reflected`/`orthogonal` are derived from the COMPOSED pose
-      // (outer × local — module doc on `Placement`), so a nested
-      // definition's local pose can independently mirror a member even when
-      // the outer instance pose only translates. Detect any placement whose
-      // bucket tag changed and route just that member through the slow
-      // (rebuild) path below; OTHER placements/members of this same
-      // instance, whose bucket did not change, still take the fast in-place
-      // write below.
-      for (let i = 0; i < next.placements.length; i++) {
-        const nextPlacement = next.placements[i]
-        const prevPlacement = prev.placements[i]
-        const prevKey = this._batchKeyFor(nextPlacement.memberId, prevPlacement)
-        const nextKey = this._batchKeyFor(nextPlacement.memberId, nextPlacement)
-        if (prevKey !== nextKey) membersToRebuild.add(nextPlacement.memberId)
+      const keyCounts = (placements: Placement[]): Map<string, number> => {
+        const counts = new Map<string, number>()
+        for (const p of placements) {
+          const key = this._batchKeyFor(p.memberId, p) ?? `${p.memberId}|?`
+          counts.set(key, (counts.get(key) ?? 0) + 1)
+        }
+        return counts
+      }
+      const prevCounts = keyCounts(prev.placements)
+      const nextCounts = keyCounts(next.placements)
+      const memberOfKey = (key: string): bigint => BigInt(key.slice(0, key.indexOf('|')))
+      for (const [key, n] of prevCounts) {
+        if (nextCounts.get(key) !== n) membersToRebuild.add(memberOfKey(key))
+      }
+      for (const [key, n] of nextCounts) {
+        if (prevCounts.get(key) !== n) membersToRebuild.add(memberOfKey(key))
       }
       // Fast path: write the slot matrix of every placement whose member is
       // NOT being rebuilt this pass. `occurrence` tracks each (member,
@@ -1111,8 +1133,8 @@ export class SceneRenderer {
       // per-instance slot list (built in the same encounter order by
       // `_rebuildMemberBatches`/`_buildBatch`) even when its placements now
       // land in DIFFERENT buckets and so belong to independent slot
-      // sequences (`samePlacements` above guarantees the member SEQUENCE
-      // still matches; it says nothing about each placement's bucket).
+      // sequences (a member not in `membersToRebuild` has exactly the same
+      // key counts as before, so its slot list is still the right length).
       const occurrence = new Map<string, number>()
       for (const placement of next.placements) {
         const m = placement.memberId
@@ -2544,11 +2566,20 @@ export class SceneRenderer {
     for (const instanceId of this.wasmScene.instance_ids()) {
       const componentId = this.wasmScene.instance_def(instanceId)
       if (componentId === undefined) continue
-      const sketchIds = this.wasmScene.component_member_sketches(componentId)
+      // `component_rendered_sketches`, not `component_member_sketches`:
+      // while the definition is on loan to an open session this is the
+      // session's live world drawing, and `component_sketch_frame` is the
+      // inverse session pose that brings it back into the definition's
+      // frame — so a live sibling placement shows lines drawn inside the
+      // session as they are drawn (ARCHITECTURE.md 2.11). For a closed
+      // definition the list is its own def-local sketches at identity.
+      const sketchIds = this.wasmScene.component_rendered_sketches(componentId)
       if (sketchIds.length === 0) continue
       const pose = this.wasmScene.instance_pose(instanceId)
       if (pose === undefined) continue
-      this._buildDefSketchGroup(instanceId, pose, sketchIds)
+      const frame = this.wasmScene.component_sketch_frame(componentId)
+      const composed = this._composeRowMajorPose(rowMajorToMatrix4(pose), rowMajorToMatrix4(frame))
+      this._buildDefSketchGroup(instanceId, composed, sketchIds)
     }
   }
 

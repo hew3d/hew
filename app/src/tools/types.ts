@@ -194,6 +194,24 @@ export interface Tool {
   snapProjected?(): boolean
 
   /**
+   * (optional) A cursor-side explanation for what is under the pointer when
+   * the tool cannot act on it — Push/Pull hovering a face that belongs to a
+   * component not being edited ("double-click it to edit the component").
+   * The Viewport passes it through to the inference chip, which shows it as
+   * its own line beside the cursor, so the guidance sits where the person
+   * is looking instead of only in a bottom toast after the click is
+   * refused. `null` (or absent) means nothing to explain right now.
+   */
+  hoverHint?(): string | null
+
+  /**
+   * (optional) The pointer left the canvas. A tool that memoizes anything
+   * about what is hovered (`hoverHint`'s refusal line) drops it here, so the
+   * status bar does not keep describing a face the cursor is no longer over.
+   */
+  onPointerLeave?(): void
+
+  /**
    * (optional) Return snap constraints the tool wants injected into the next
    * snapService.resolve() call.  Viewport feature-detects with
    * `'snapConstraint' in tool`.

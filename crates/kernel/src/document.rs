@@ -468,9 +468,14 @@ struct ExplodeSession {
     members: Vec<ObjectId>,
     /// Live definition-owned sketches at open time.
     sketches: Vec<SketchId>,
-    /// Every live instance of `component` at open time (including `instance`
-    /// itself) — all hidden for the session's duration (sibling live
-    /// propagation is deliberately given up; see the design doc).
+    /// The instances the open HID for the session's duration: exactly the
+    /// entered `instance` (its geometry is on loan to the world tree, so a
+    /// second render of it through the instance path would double up).
+    /// Every OTHER live placement of `component` stays live and renders the
+    /// session's in-progress geometry through its own pose —
+    /// [`Document::expand_def_core`]'s on-loan rule (ARCHITECTURE.md 2.11,
+    /// "live sibling placements"). Kept as a list, not a single id, because
+    /// the replay arms and the width gates are written over it.
     hidden_instances: Vec<InstanceId>,
     /// Definition-local snapshot of each member `Object`, taken BEFORE
     /// baking. Used for (a) the exact, no-inverse-transform undo of
@@ -1584,8 +1589,10 @@ enum DocAction {
         prev_instance_name: Option<String>,
     },
     /// `open_explode_session` baked `component`'s live members/sketches into
-    /// world ownership at `pose` and hid every live instance of `component`
-    /// (docs/design/explode-session-prototype.md). Undo is EXACT — no
+    /// world ownership at `pose` and hid the entered instance
+    /// (`hidden_instances`; every sibling placement stays live and renders
+    /// the session's geometry — docs/design/explode-session-prototype.md,
+    /// ARCHITECTURE.md 2.11). Undo is EXACT — no
     /// inverse-transform — restoring `pristine_objects`/`pristine_sketches`
     /// verbatim, `Definition` ownership, and unhiding `hidden_instances`;
     /// this is independent of whatever [`ExplodeSession`] state a later
@@ -1617,10 +1624,12 @@ enum DocAction {
     /// anything DELETED during it from `ComponentDef.members` (leaving
     /// members that were ALREADY tombstoned before the open in place, so an
     /// older `delete_def_member`'s undo stays valid), and unhid
-    /// `hidden_instances` — unless the close EMPTIED the definition, in
-    /// which case it deleted definition and instances outright (`emptied`) —
-    /// except a definition a live definition still nests, which stays,
-    /// empty, so that placement never points at a hidden definition.
+    /// `hidden_instances` (the entered instance) — unless the close EMPTIED
+    /// the definition, in which case it deleted definition and instances
+    /// outright (`emptied`, tombstoning the live sibling placements listed
+    /// in `emptied_instances` too) — except a definition a live definition
+    /// still nests, which stays, empty, so that placement never points at a
+    /// hidden definition.
     /// Undo re-opens the session ([`Document::bake_explode_session`] over
     /// the stored `members`/`sketches`/`hidden_instances` lists — see those
     /// fields for why re-derivation is wrong) after first restoring
@@ -1674,10 +1683,26 @@ enum DocAction {
         /// definition that is nested elsewhere is kept, empty, and its
         /// world placements unhide like any other close
         /// (`delete_definition` refuses that same case). Undo un-hides an
-        /// emptied definition and re-opens the session; the instances stay
-        /// hidden either way (a session hides them, an emptied close keeps
-        /// them hidden).
+        /// emptied definition, revives `emptied_instances`, and re-opens
+        /// the session; the entered instance stays hidden either way (a
+        /// session hides it, an emptied close keeps it hidden).
         emptied: bool,
+        /// The live sibling placements an EMPTIED close tombstoned along
+        /// with the definition (world placements other than the entered
+        /// instance, which `hidden_instances` already holds). Empty unless
+        /// `emptied`. Undo revives exactly these before re-baking, so the
+        /// reopened session shows its siblings again.
+        emptied_instances: Vec<InstanceId>,
+        /// For every world group that listed one of `emptied_instances`,
+        /// its FULL member list before the emptied close spliced the
+        /// tombstoned siblings out (a group never lists a hidden member —
+        /// the same splice `delete_node` performs). Undo restores each
+        /// list verbatim. Empty unless `emptied`.
+        emptied_parent_members: Vec<(GroupId, Vec<NodeId>)>,
+        /// Annotations whose `detached` flag the emptied close changed by
+        /// hiding a sibling they were anchored to — recorded exactly as
+        /// `delete_node` records them, replayed verbatim on undo.
+        reanchored: Vec<AnnotationReanchor>,
     },
     /// `open_group_session` applied the ungroup posture to a top-level
     /// group for an editing session (docs/design/group-session.md):
@@ -3005,7 +3030,13 @@ pub enum DocumentError {
     /// ALREADY on loan to an open frame (its members are world-baked —
     /// baking them twice is meaningless), opening a GROUP session inside a
     /// component frame, and saving mid-session (a session's baked state is
-    /// one the file format never represents).
+    /// one the file format never represents). Also every definition-level
+    /// op addressed through a live SIBLING placement of an on-loan
+    /// definition (the in-instance surfaces, `make_unique`,
+    /// `transform_instance`, `apply_def_op`, `delete_def_member`): the
+    /// sibling shows the session's geometry but its definition's members
+    /// are world objects right now, and editing them as def-local content
+    /// would corrupt them (ARCHITECTURE.md 2.11).
     ExplodeSessionOpen,
     /// `close_explode_session` was called with no session open.
     ExplodeSessionNotOpen,
@@ -3030,14 +3061,13 @@ pub enum DocumentError {
     /// backstop behind the app's own session modality (the app scopes
     /// picking/selection to session geometry and gates the menus).
     ExplodeSessionScope,
-    /// `open_explode_session` was given an instance whose definition has a
-    /// group-nested placement — the entered instance itself, or any live
-    /// sibling. A session bakes members to TOP-LEVEL world objects
+    /// `open_explode_session` was given an instance that is itself nested
+    /// inside a group. A session bakes members to TOP-LEVEL world objects
     /// (splicing them into a containing group, and holding that consistent
-    /// through group moves and deletion, is not modeled), and it must HIDE
-    /// every placement of the definition, which a grouped sibling cannot
-    /// survive (a group listing a hidden member violates the tree
-    /// invariant). Refused typed; the app falls back to the in-context
+    /// through group moves and deletion, is not modeled). A grouped
+    /// SIBLING no longer trips this: siblings stay live for the session
+    /// (nothing hides them), so a group listing one keeps the tree
+    /// invariant. Refused typed; the app falls back to the in-context
     /// editing model for exactly this case, the same way it does for a
     /// non-similarity pose.
     ExplodeSessionGroupedInstance,
@@ -3263,8 +3293,8 @@ impl std::fmt::Display for DocumentError {
             ),
             DocumentError::ExplodeSessionGroupedInstance => write!(
                 f,
-                "a placement of this component is inside a group; it opens in \
-                 the in-context editing mode instead"
+                "this placement is inside a group; it opens in the in-context \
+                 editing mode instead"
             ),
             DocumentError::DefinitionNestedInDefinition => write!(
                 f,
@@ -5891,10 +5921,11 @@ impl Document {
 
     /// The expansion cost currently ON LOAN to open component frames:
     /// each frame's definition renders as world geometry for the session's
-    /// duration and its placements are hidden, so
-    /// [`Document::expanded_total`] cannot see that content. The width
-    /// gates add this back, or a mid-session op would be measured against
-    /// an artificially small document.
+    /// duration through the HIDDEN entered instance, which
+    /// [`Document::expanded_total`] cannot see (the live sibling placements
+    /// it does see, through [`Document::expand_def_core`]'s on-loan rule).
+    /// The width gates add this back, or a mid-session op would be measured
+    /// against an artificially small document.
     fn expanded_on_loan(&self) -> usize {
         let mut memo = BTreeMap::new();
         let mut total = 0usize;
@@ -5912,6 +5943,24 @@ impl Document {
         total.min(MAX_EXPANDED_PLACEMENTS + 1)
     }
 
+    /// How many WORLD placements a component frame's definition has right
+    /// now: the hidden entered instance plus every live sibling. The number
+    /// of times the frame's content renders, and the per-frame factor of
+    /// [`Document::session_fold_multiplier`].
+    fn frame_placement_count(&self, sess: &ExplodeSession) -> usize {
+        let hidden = sess
+            .hidden_instances
+            .iter()
+            .filter(|&&i| self.instances.contains_key(i))
+            .count();
+        let live = self
+            .instances
+            .iter()
+            .filter(|(_, r)| !r.hidden && r.owner_def.is_none() && r.def == sess.component)
+            .count();
+        (hidden + live).max(1)
+    }
+
     /// How many times content folded into the INNERMOST open component
     /// frame will end up rendered once every frame closes: the product of
     /// each open frame's placement count (a frame's definition renders
@@ -5921,13 +5970,7 @@ impl Document {
         self.sessions
             .iter()
             .filter_map(|f| match f {
-                SessionFrame::Component(sess) => Some(
-                    sess.hidden_instances
-                        .iter()
-                        .filter(|&&i| self.instances.contains_key(i))
-                        .count()
-                        .max(1),
-                ),
+                SessionFrame::Component(sess) => Some(self.frame_placement_count(sess)),
                 SessionFrame::Group(_) => None,
             })
             .fold(1usize, |acc, n| acc.saturating_mul(n))
@@ -6071,13 +6114,47 @@ impl Document {
                     if depth > MAX_COMPONENT_DEPTH {
                         continue;
                     }
-                    // A definition ON LOAN to an open session renders as
-                    // world geometry through the session itself; expanding
-                    // it here (a def-owned placement inside ANOTHER
-                    // definition) would draw its baked world coordinates at
-                    // a second, wrong frame. Its content simply doesn't
-                    // render there for the session's duration.
-                    if self.defs_on_loan().contains(&d) {
+                    // A definition ON LOAN to an open session has its
+                    // content baked into the world tree at the entered
+                    // instance's pose. A placement of it (a live sibling, or
+                    // a def-owned placement inside ANOTHER definition)
+                    // renders that in-progress world geometry through the
+                    // session's inverse pose and then its own: the LIVE
+                    // SIBLING rule (ARCHITECTURE.md 2.11). Every other
+                    // placement therefore shows the edit as it happens,
+                    // each through its own transform.
+                    if let Some(k) = self.frame_on_loan(d) {
+                        let SessionFrame::Component(sess) = &self.sessions[k] else {
+                            unreachable!("frame_on_loan returns component frames only");
+                        };
+                        let base = sess.pose_inv.then(&pose);
+                        let (objects, instances) = self.frame_content(k);
+                        for &o in &objects {
+                            out.push((o, base));
+                            if let Some(s) = shown.as_deref_mut() {
+                                s.push(
+                                    vis && !(track && self.world_node_hidden(NodeId::Object(o))),
+                                );
+                            }
+                        }
+                        for &i in instances.iter().rev() {
+                            // A surfaced instance the user drilled further
+                            // into is hidden (entered) but its record's
+                            // pose still stands; its definition is on loan
+                            // to the deeper frame and expands by this same
+                            // rule one level down.
+                            let Some(rec) = self.instances.get(i) else {
+                                continue;
+                            };
+                            let node_vis =
+                                vis && !(track && self.world_node_hidden(NodeId::Instance(i)));
+                            stack.push(Item::Def(
+                                rec.def,
+                                rec.pose.then(&base),
+                                depth + 1,
+                                node_vis,
+                            ));
+                        }
                         continue;
                     }
                     let Some(c) = self.components.get(d).filter(|c| !c.hidden) else {
@@ -6924,6 +7001,9 @@ impl Document {
         let local_plane = pose_inv
             .apply_plane(&plane)
             .map_err(DocumentError::Transform)?;
+        // A live sibling of an entered instance: its definition's drawing
+        // is world geometry for the session (ARCHITECTURE.md 2.11).
+        self.refuse_def_on_loan(component)?;
 
         let id = self.insert_sketch_record(Sketch::on_plane(local_plane));
         self.fresh_sketches.insert(id);
@@ -10585,6 +10665,10 @@ impl Document {
             .get(instance)
             .filter(|r| !r.hidden && r.owner_def.is_none())
             .ok_or(DocumentError::UnknownInstance)?;
+        // A live sibling of an entered instance shows the session's
+        // geometry, but its definition's members are world objects right
+        // now — not an in-instance operand (ARCHITECTURE.md 2.11).
+        self.refuse_def_on_loan(rec.def)?;
         Ok((rec.def, rec.pose))
     }
 
@@ -15450,10 +15534,15 @@ impl Document {
         // A def-owned member instance is not a world operand — composing
         // into its def-local pose would edit the shared definition through
         // the world path (nested-components review).
-        let rec = match self.instances.get_mut(instance) {
-            Some(rec) if !rec.hidden && rec.owner_def.is_none() => rec,
+        let def = match self.instances.get(instance) {
+            Some(rec) if !rec.hidden && rec.owner_def.is_none() => rec.def,
             _ => return Err(DocumentError::UnknownInstance),
         };
+        // A live sibling of an entered instance is not a world operand
+        // either: the session's frame is captured from the entered pose
+        // and the sibling renders through it (ARCHITECTURE.md 2.11).
+        self.refuse_def_on_loan(def)?;
+        let rec = &mut self.instances[instance];
         let prev = rec.pose;
         let next = prev.then(t);
         rec.pose = next;
@@ -15504,6 +15593,9 @@ impl Document {
             }
             _ => return Err(DocumentError::UnknownComponent),
         }
+        // An on-loan definition's members are world objects right now: the
+        // session's own world-path ops edit them (ARCHITECTURE.md 2.11).
+        self.refuse_def_on_loan(component)?;
         // A tombstoned member (delete_def_member, or an undone in-definition
         // birth) stays listed in `members` (hide-not-delete) but is not a
         // live operand — mutating it would record an undo entry for an
@@ -15569,6 +15661,9 @@ impl Document {
         if self.components.get(component).is_none_or(|c| c.hidden) {
             return Err(DocumentError::UnknownComponent);
         }
+        // An on-loan definition's members are session world objects: the
+        // session deletes them as world nodes (ARCHITECTURE.md 2.11).
+        self.refuse_def_on_loan(component)?;
         // Any member of the definition: a direct one, or one inside a group
         // within it (nested components). Either way the tombstone stays
         // listed where it was, hidden, exactly as an undone birth would.
@@ -15673,8 +15768,9 @@ impl Document {
         // Mid-session, the exploded instance must be session geometry: its
         // baked objects are CREATED nodes, which the close folds into the
         // open group (group frame) or definition (component frame — where
-        // every placement of any def is either hidden or outside the
-        // session by construction, so the op refuses outright there).
+        // only a surfaced or mid-session-placed instance is session
+        // geometry; a live sibling placement of the on-loan definition is
+        // outside the session and refuses here).
         self.explode_scope_node(NodeId::Instance(instance))?;
         // A def-owned member instance cannot explode from the world path:
         // hiding it would strip content from EVERY placement of its owning
@@ -16164,6 +16260,10 @@ impl Document {
             Some(rec) if !rec.hidden && rec.owner_def.is_none() => rec.def,
             _ => return Err(DocumentError::UnknownInstance),
         };
+        // The members of an on-loan definition are world-baked right now;
+        // copying them into a new definition would copy baked coordinates
+        // as def-local ones (ARCHITECTURE.md 2.11).
+        self.refuse_def_on_loan(prev_def)?;
         let members: Vec<NodeId> = match self.components.get(prev_def) {
             Some(c) if !c.hidden => c
                 .members
@@ -16351,8 +16451,9 @@ impl Document {
     }
 
     /// Every definition currently ON LOAN to an open session frame — the
-    /// expansion walks skip these (their geometry is world-baked, so a
-    /// def-owned placement elsewhere would render it at the wrong frame),
+    /// expansion walks render these from the frame's world geometry
+    /// through the session's inverse pose ([`Document::expand_def_core`]),
+    /// the definition-level ops refuse them ([`Document::refuse_def_on_loan`]),
     /// and re-entering one refuses.
     fn defs_on_loan(&self) -> Vec<ComponentId> {
         self.sessions
@@ -16362,6 +16463,222 @@ impl Document {
                 SessionFrame::Group(_) => None,
             })
             .collect()
+    }
+
+    /// The index on [`Document::sessions`] of the component frame that has
+    /// `def` on loan, if any — the per-definition form of
+    /// [`Document::defs_on_loan`], without the allocation.
+    fn frame_on_loan(&self, def: ComponentId) -> Option<usize> {
+        self.sessions.iter().position(|f| match f {
+            SessionFrame::Component(sess) => sess.component == def,
+            SessionFrame::Group(_) => false,
+        })
+    }
+
+    /// What the component frame at `k` currently holds on loan, as the
+    /// world geometry a sibling placement renders (ARCHITECTURE.md 2.11,
+    /// live sibling placements): the frame's live world member objects plus
+    /// everything created between its open and the NEXT component frame's
+    /// open (a deeper frame's own creations belong to that frame and reach
+    /// this one through its entered instance), and likewise the frame's
+    /// surfaced and mid-session-placed instances that are live world
+    /// instances — or hidden only because a deeper frame entered them. The
+    /// same undo-stack walk the close's fold-in uses, so the two agree on
+    /// what the session owns. Deterministic order: members first, in
+    /// definition order, then creations in history order.
+    fn frame_content(&self, k: usize) -> (Vec<ObjectId>, Vec<InstanceId>) {
+        let SessionFrame::Component(sess) = &self.sessions[k] else {
+            return (Vec::new(), Vec::new());
+        };
+        let next_open = self.sessions[k + 1..]
+            .iter()
+            .find_map(|f| match f {
+                SessionFrame::Component(deeper) => Some(deeper.undo_len_at_open),
+                SessionFrame::Group(_) => None,
+            })
+            .unwrap_or(self.undo.actions.len())
+            .min(self.undo.actions.len());
+        let from = sess.undo_len_at_open.min(next_open);
+        let entered_deeper = |i: InstanceId| {
+            self.sessions[k + 1..].iter().any(|f| match f {
+                SessionFrame::Component(deeper) => deeper.instance == i,
+                SessionFrame::Group(_) => false,
+            })
+        };
+
+        // Ordered output with set-backed de-duplication: a long session
+        // (a bulk array built inside a component) must not go quadratic
+        // in its creations.
+        let mut objects: Vec<ObjectId> = Vec::new();
+        let mut seen_objects: BTreeSet<ObjectId> = BTreeSet::new();
+        let mut instances: Vec<InstanceId> = Vec::new();
+        let mut seen_instances: BTreeSet<InstanceId> = BTreeSet::new();
+        let push_object =
+            |objects: &mut Vec<ObjectId>, seen: &mut BTreeSet<ObjectId>, o: ObjectId| {
+                if self
+                    .objects
+                    .get(o)
+                    .is_some_and(|r| !r.hidden && r.is_world())
+                    && seen.insert(o)
+                {
+                    objects.push(o);
+                }
+            };
+        let push_instance =
+            |instances: &mut Vec<InstanceId>, seen: &mut BTreeSet<InstanceId>, i: InstanceId| {
+                let live_world = self
+                    .instances
+                    .get(i)
+                    .is_some_and(|r| !r.hidden && r.owner_def.is_none());
+                if (live_world || entered_deeper(i)) && seen.insert(i) {
+                    instances.push(i);
+                }
+            };
+        for &m in &sess.members {
+            push_object(&mut objects, &mut seen_objects, m);
+        }
+        for &i in &sess.surfaced_instances {
+            push_instance(&mut instances, &mut seen_instances, i);
+        }
+        for action in &self.undo.actions[from..next_open] {
+            let (created, _) = action.created_objects_and_sketches();
+            for o in created {
+                push_object(&mut objects, &mut seen_objects, o);
+            }
+            for node in action.created_nodes() {
+                if let NodeId::Instance(i) = node {
+                    push_instance(&mut instances, &mut seen_instances, i);
+                }
+            }
+        }
+        (objects, instances)
+    }
+
+    /// The SKETCHES the component frame at `k` holds on loan, as the world
+    /// drawing a sibling placement renders (ARCHITECTURE.md 2.11): the
+    /// definition's own sketches baked to the world at open, every free
+    /// sketch drawn between this frame's open and the next component
+    /// frame's open, and the owned sketches of the frame's objects — the
+    /// same set the close folds back into the definition. World
+    /// coordinates; a renderer maps them through the inverse session pose
+    /// ([`Document::def_rendered_sketches`]).
+    fn frame_sketches(&self, k: usize) -> Vec<SketchId> {
+        let SessionFrame::Component(sess) = &self.sessions[k] else {
+            return Vec::new();
+        };
+        let next_open = self.sessions[k + 1..]
+            .iter()
+            .find_map(|f| match f {
+                SessionFrame::Component(deeper) => Some(deeper.undo_len_at_open),
+                SessionFrame::Group(_) => None,
+            })
+            .unwrap_or(self.undo.actions.len())
+            .min(self.undo.actions.len());
+        let from = sess.undo_len_at_open.min(next_open);
+        let (objects, _) = self.frame_content(k);
+        let frame_objects: BTreeSet<ObjectId> = objects.into_iter().collect();
+        let mut out: Vec<SketchId> = Vec::new();
+        let mut seen: BTreeSet<SketchId> = BTreeSet::new();
+        let mut push = |out: &mut Vec<SketchId>, s: SketchId| {
+            let world = self.sketches.contains_key(s)
+                && !self.sketch_tombstoned(&s)
+                && !self.def_sketches.contains_key(&s);
+            if world && seen.insert(s) {
+                out.push(s);
+            }
+        };
+        for &s in &sess.sketches {
+            push(&mut out, s);
+        }
+        for action in &self.undo.actions[from..next_open] {
+            let (_, created) = action.created_objects_and_sketches();
+            for s in created {
+                push(&mut out, s);
+            }
+        }
+        // A FRESH sketch (minted, no gesture recorded yet) has no recorded
+        // provenance and belongs to the innermost frame by construction —
+        // the same rule `explode_session_scope` applies.
+        if next_open == self.undo.actions.len() {
+            for &s in &self.fresh_sketches {
+                push(&mut out, s);
+            }
+        }
+        for (&s, owner) in &self.object_sketches {
+            if frame_objects.contains(owner) {
+                push(&mut out, s);
+            }
+        }
+        out
+    }
+
+    /// The sketches a renderer draws for every placement of `def`, with
+    /// the transform that maps their stored coordinates into the
+    /// definition's local frame: the definition's own sketches at identity
+    /// for a closed definition, or — for a definition on loan to an open
+    /// component frame — the frame's world drawing
+    /// ([`Document::frame_sketches`]) at the inverse session pose, so a
+    /// live sibling placement shows the session's drawing as it happens
+    /// (ARCHITECTURE.md 2.11). `None` if the component is stale or hidden.
+    /// Read-only; the picking surfaces keep using
+    /// [`Document::def_member_sketches`], whose coordinates are always
+    /// definition-local.
+    pub fn def_rendered_sketches(&self, def: ComponentId) -> Option<(Vec<SketchId>, Transform)> {
+        if self.components.get(def).is_none_or(|c| c.hidden) {
+            return None;
+        }
+        match self.frame_on_loan(def) {
+            Some(k) => {
+                let SessionFrame::Component(sess) = &self.sessions[k] else {
+                    return None;
+                };
+                Some((self.frame_sketches(k), sess.pose_inv))
+            }
+            None => Some((
+                self.def_member_sketches(def).unwrap_or_default(),
+                Transform::IDENTITY,
+            )),
+        }
+    }
+
+    /// Whether a WORLD node is hidden from view by itself or by a group it
+    /// sits in — [`Document::member_node_hidden`] walked up the parent
+    /// chain, for the session geometry a sibling placement renders (the
+    /// definition walk gets this for free from its group descent).
+    fn world_node_hidden(&self, node: NodeId) -> bool {
+        if self.member_node_hidden(node) {
+            return true;
+        }
+        let mut cursor = self.node_parent(node);
+        let mut steps = 0usize;
+        while let Some(g) = cursor {
+            steps += 1;
+            if steps > self.groups.len() {
+                break;
+            }
+            if self.member_node_hidden(NodeId::Group(g)) {
+                return true;
+            }
+            cursor = self.groups.get(g).and_then(|r| r.parent);
+        }
+        false
+    }
+
+    /// Every live world instance that renders a definition on loan to an
+    /// open component frame — the sibling placements of each entered
+    /// instance, plus world placements of definitions that nest one. These
+    /// show the session's in-progress geometry (ARCHITECTURE.md 2.11), so a
+    /// mutation inside a frame touches them ([`Document::complete_change`])
+    /// and a renderer refreshes them with the session's objects. Empty when
+    /// no component frame is open.
+    pub fn session_placements(&self) -> Vec<InstanceId> {
+        let mut out: Vec<InstanceId> = Vec::new();
+        for frame in &self.sessions {
+            if let SessionFrame::Component(sess) = frame {
+                merge_unique(&mut out, self.placing_instances(sess.component));
+            }
+        }
+        out
     }
 
     /// The INNERMOST component explode session, if the innermost frame is
@@ -16506,7 +16823,9 @@ impl Document {
 
     /// Opens an explode session on `instance`: bakes its definition's live
     /// members/sketches into world-owned geometry at the instance's pose
-    /// and hides every live instance of that definition — see the design
+    /// and hides the entered instance — every other placement stays live
+    /// and renders the session's geometry through its own pose
+    /// (ARCHITECTURE.md 2.11, live sibling placements) — see the design
     /// doc's module-level rationale. Recorded as [`DocAction::SessionOpened`].
     ///
     /// # Errors
@@ -16542,21 +16861,16 @@ impl Document {
         if pose.similarity_scale().is_none() || pose.determinant() <= 0.0 {
             return Err(DocumentError::ExplodeSessionPoseUnsupported);
         }
-        // A group-nested placement refuses — the ENTERED instance or ANY
-        // live sibling of the definition (adversarial-review findings: the
-        // bake orphaned members from the entered instance's containing
-        // group for the session's duration, and a mid-session delete of
-        // that group resurrected the instance as an unreachable orphan at
-        // close; and the session must HIDE every placement, which a grouped
-        // sibling cannot survive — a group listing a hidden member violates
-        // the tree invariant `debug_validate_tree` holds). The app falls
-        // back to the in-context editing model, exactly like the pose gate
-        // above.
-        if self
-            .instances_of(component)
-            .iter()
-            .any(|&i| self.instances[i].parent.is_some())
-        {
+        // A group-nested ENTERED instance refuses (adversarial-review
+        // finding: the bake orphaned members from the entered instance's
+        // containing group for the session's duration, and a mid-session
+        // delete of that group resurrected the instance as an unreachable
+        // orphan at close). A grouped SIBLING is fine: siblings stay live
+        // for the session and render its geometry through their own pose
+        // (ARCHITECTURE.md 2.11), so no group ever lists a hidden member.
+        // The app falls back to the in-context editing model, exactly like
+        // the pose gate above.
+        if self.instances[instance].parent.is_some() {
             return Err(DocumentError::ExplodeSessionGroupedInstance);
         }
         // Derive the session's lists from the definition's CURRENT state —
@@ -16601,15 +16915,14 @@ impl Document {
             .filter(|&(sid, &c)| c == component && !self.sketch_tombstoned(sid))
             .map(|(&sid, _)| sid)
             .collect();
-        // Only WORLD placements hide: a def-owned placement of this
-        // definition inside ANOTHER definition stays live — the expansion
-        // walks skip on-loan definitions instead, so its content simply
-        // doesn't render for the session's duration and returns at close.
-        let hidden_instances: Vec<InstanceId> = self
-            .instances_of(component)
-            .into_iter()
-            .filter(|&i| self.instances[i].owner_def.is_none())
-            .collect();
+        // Only the ENTERED instance hides: its geometry is the session's
+        // world geometry, so rendering it through the instance path too
+        // would double it up. Every other placement — a live world sibling,
+        // or a def-owned placement inside ANOTHER definition — stays live
+        // and renders the in-progress world geometry through
+        // `expand_def_core`'s on-loan rule (ARCHITECTURE.md 2.11), so the
+        // edit shows on every placement as it happens.
+        let hidden_instances: Vec<InstanceId> = vec![instance];
         // Outer placements that render this definition's content THROUGH
         // other definitions need refreshing at both open and close.
         let outer_placements = self.placing_instances(component);
@@ -17004,18 +17317,19 @@ impl Document {
         // folded in) does not survive the close: definition and instances
         // are deleted outright (hidden, ids stable — the tombstone pattern
         // every deletion here uses), matching `delete_def_member`'s
-        // documented SketchUp posture for a now-empty component. Otherwise,
-        // unhide the instances hidden at open — a definition instance is
-        // never independently deletable mid-session (nothing in this
-        // session touches instances but the open/close bracket itself), so
-        // every entry here is still exactly the tombstone `open` recorded.
-        // (A definition of lines alone is not empty, as a group of lines
-        // alone is not.) Nor does a definition that a LIVE definition
-        // still places as a member go: tombstoning it would leave that
-        // member instance referencing a hidden definition. It stays, empty,
-        // for the same reason `delete_definition` refuses
-        // (`DefinitionNestedInDefinition`) — the close cannot refuse, so it
-        // keeps the definition instead.
+        // documented SketchUp posture for a now-empty component — the live
+        // sibling placements go with it (`emptied_instances`, so undo can
+        // revive exactly those). Otherwise, unhide the entered instance
+        // hidden at open — a definition instance is never independently
+        // deletable mid-session (nothing in this session touches instances
+        // but the open/close bracket itself), so every entry here is still
+        // exactly the tombstone `open` recorded. (A definition of lines
+        // alone is not empty, as a group of lines alone is not.) Nor does a
+        // definition that a LIVE definition still places as a member go:
+        // tombstoning it would leave that member instance referencing a
+        // hidden definition. It stays, empty, for the same reason
+        // `delete_definition` refuses (`DefinitionNestedInDefinition`) —
+        // the close cannot refuse, so it keeps the definition instead.
         let holds_drawing = self.def_sketches.iter().any(|(s, &c)| {
             c == session.component
                 && !self.hidden_sketches.contains(s)
@@ -17030,8 +17344,43 @@ impl Document {
         let emptied = self.components[session.component].members.is_empty()
             && !holds_drawing
             && !nested_in_live_def;
+        // Outer placements re-render the returned content; read before an
+        // emptied close tombstones the siblings so they are reported too.
+        let outer_placements = self.placing_instances(session.component);
+        let mut emptied_instances: Vec<InstanceId> = Vec::new();
+        let mut emptied_parent_members: Vec<(GroupId, Vec<NodeId>)> = Vec::new();
+        let mut reanchored: Vec<AnnotationReanchor> = Vec::new();
         if emptied {
             self.components[session.component].hidden = true;
+            emptied_instances = self
+                .instances
+                .iter()
+                .filter(|(_, r)| !r.hidden && r.def == session.component)
+                .map(|(id, _)| id)
+                .collect();
+            // A sibling inside a world group leaves its group's member
+            // list (a group never lists a hidden member — the tree
+            // invariant `delete_node` keeps with the same splice); the
+            // list is recorded whole, once per group, so undo restores it
+            // verbatim however many siblings one group held.
+            for &i in &emptied_instances {
+                if let Some(pg) = self.instances[i].parent {
+                    if !emptied_parent_members.iter().any(|(g, _)| *g == pg) {
+                        emptied_parent_members.push((pg, self.groups[pg].members.clone()));
+                    }
+                    self.splice_out_parent(pg, NodeId::Instance(i), &[]);
+                }
+            }
+            for &i in &emptied_instances {
+                self.instances[i].hidden = true;
+            }
+            // An annotation anchored to a sibling detaches with it, exactly
+            // as it would under `delete_node`.
+            let hidden_nodes: Vec<NodeId> = emptied_instances
+                .iter()
+                .map(|&i| NodeId::Instance(i))
+                .collect();
+            reanchored = self.reevaluate_liveness_recorded(&hidden_nodes);
         } else {
             for &i in &session.hidden_instances {
                 self.instances[i].hidden = false;
@@ -17068,10 +17417,13 @@ impl Document {
                 .copied()
                 .chain(folded_instances.iter().copied()),
         );
-        // Outer placements re-render the returned content.
+        change.instances_touched.extend(outer_placements);
         change
             .instances_touched
-            .extend(self.placing_instances(session.component));
+            .extend(emptied_instances.iter().copied());
+        change
+            .groups_touched
+            .extend(emptied_parent_members.iter().map(|(g, _)| *g));
 
         let action = DocAction::SessionClosed {
             instance: session.instance,
@@ -17109,6 +17461,9 @@ impl Document {
                 })
                 .collect(),
             emptied,
+            emptied_instances,
+            emptied_parent_members,
+            reanchored,
         };
 
         (change, action)
@@ -17552,6 +17907,24 @@ impl Document {
         Ok(())
     }
 
+    /// Typed refusal for a definition-level op reaching a definition that
+    /// is ON LOAN to an open component frame — through a live sibling
+    /// placement, or by component id. Its members are world objects for
+    /// the session's duration (the sibling renders them through the
+    /// session's inverse pose), so treating them as def-local content
+    /// would edit baked coordinates as if they were local ones. The
+    /// session's own world-path tools are the way to edit them. No-op
+    /// when the definition is not on loan.
+    ///
+    /// # Errors
+    /// - [`DocumentError::ExplodeSessionOpen`] — the definition is on loan.
+    fn refuse_def_on_loan(&self, def: ComponentId) -> Result<(), DocumentError> {
+        if self.frame_on_loan(def).is_some() {
+            return Err(DocumentError::ExplodeSessionOpen);
+        }
+        Ok(())
+    }
+
     /// Every node the actions from index `from` onward SURFACED into the
     /// current frame: minted nodes ([`DocAction::created_nodes`]) plus the
     /// members a mid-session `ungroup` released to the top level (the
@@ -17709,9 +18082,10 @@ impl Document {
     }
 
     /// Scope check for a Follow Me path source: its sketch or object must be
-    /// inside the open session (an `InstanceFaceLoop` path never is — every
-    /// instance is hidden for the session's duration). No-op when no session
-    /// is open.
+    /// inside the open session (an `InstanceFaceLoop` path never is — a
+    /// session has no instance geometry of its own; a live sibling shows
+    /// the session's objects, which are the path source). No-op when no
+    /// session is open.
     fn explode_scope_follow_path(&self, path: &FollowMePath) -> Result<(), DocumentError> {
         match self.sessions.last() {
             None => Ok(()),
@@ -17740,7 +18114,7 @@ impl Document {
     /// (the user's session stays open; no history is recorded anywhere).
     ///
     /// A session bakes definition members into world-owned objects for its
-    /// duration and hides every sibling placement of the entered component
+    /// duration and hides the entered placement of the component
     /// (`Document::open_explode_session`) — a state neither the `.hew`
     /// format nor a mesh export represents, so both need the SAME "as if
     /// closed" view before reading the document, not two separate
@@ -18500,6 +18874,24 @@ impl Document {
     /// change they reconcile; [`Document::undo`] and [`Document::redo`]
     /// return completed changes already.
     pub fn complete_change(&self, change: &mut DocChange) {
+        // Live sibling placements (ARCHITECTURE.md 2.11): while a component
+        // frame is open, every placement of its definition renders the
+        // frame's world geometry, so any change to that geometry — an
+        // object edited, created, deleted, a sketch drawn, a surfaced
+        // instance moved — is a change to what each placement shows. The
+        // placements land in `instances_touched` exactly as a definition
+        // edit lands every instance there. Over-approximate on purpose
+        // (any touched geometry mid-session, not only session content):
+        // re-registering a handful of placements is cheap, and the
+        // alternative is a stale sibling after some op this filter forgot.
+        if !self.sessions.is_empty()
+            && (!change.objects_touched.is_empty()
+                || !change.sketches_touched.is_empty()
+                || !change.instances_touched.is_empty()
+                || !change.groups_touched.is_empty())
+        {
+            merge_unique(&mut change.instances_touched, self.session_placements());
+        }
         if self.object_sketches.is_empty() || change.objects_touched.is_empty() {
             return;
         }
@@ -20764,6 +21156,14 @@ impl Document {
                 change
                     .instances_touched
                     .extend(surfaced_instances.iter().map(|&(i, _)| i));
+                // The live sibling placements rendered the session's world
+                // geometry a moment ago and render the definition's own
+                // members again now (ARCHITECTURE.md 2.11) — report them so
+                // the render/inference layers re-pull their placements (the
+                // frame is popped, so `complete_change` no longer adds them).
+                change
+                    .instances_touched
+                    .extend(self.placing_instances(component));
                 change
             }
             &DocAction::SessionClosed {
@@ -20782,10 +21182,14 @@ impl Document {
                 ref surfaced_groups,
                 ref surfaced_instances,
                 emptied,
+                ref emptied_instances,
+                ref emptied_parent_members,
+                ref reanchored,
             } => {
                 // Re-opens the session (docs/design/explode-session-
-                // prototype.md): un-delete an emptied definition, undo the
-                // fold-in (each `folded_*` back to world ownership,
+                // prototype.md): un-delete an emptied definition (and the
+                // sibling placements the emptied close took with it), undo
+                // the fold-in (each `folded_*` back to world ownership,
                 // re-baked), restore `prev_members` (reverses both the
                 // fold-in append and any mid-session deletion's removal in
                 // one step), then re-bake via `bake_explode_session` over
@@ -20796,6 +21200,19 @@ impl Document {
                 // accepted drift this implies.
                 if emptied {
                     self.components[component].hidden = false;
+                    for &i in emptied_instances {
+                        self.instances[i].hidden = false;
+                    }
+                    // Grouped siblings return to their groups' lists, and
+                    // annotations to their recorded liveness — verbatim,
+                    // the `Deleted` undo arm's posture.
+                    for (pg, members) in emptied_parent_members {
+                        self.groups[*pg].members = members.clone();
+                    }
+                    for r in reanchored {
+                        self.annotations[r.annotation].annotation = r.before.clone();
+                        self.annotations[r.annotation].detached = r.before_detached;
+                    }
                 }
                 for &o in folded_objects {
                     self.objects[o].object.apply_session_pose(&pose);
@@ -20903,6 +21320,12 @@ impl Document {
                 change
                     .instances_touched
                     .extend(self.placing_instances(component));
+                change
+                    .instances_touched
+                    .extend(emptied_instances.iter().copied());
+                change
+                    .groups_touched
+                    .extend(emptied_parent_members.iter().map(|(g, _)| *g));
                 self.sessions
                     .push(SessionFrame::Component(Box::new(session)));
                 change

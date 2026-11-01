@@ -235,19 +235,50 @@ export function distanceOffPlane(p: V3, point: V3, normal: V3): number {
   return normal[0] * (p[0] - point[0]) + normal[1] * (p[1] - point[1]) + normal[2] * (p[2] - point[2])
 }
 
+/** The toast code the face-editing tools attach to an `ineligibleFaceHint`
+ *  refusal. Not a kernel error: it marks the toast as GUIDANCE (how to get
+ *  in — double-click the component, enter the group, step out) so the app
+ *  can show it more prominently and keep it up longer than a plain warning,
+ *  without ever classifying it as an error. The hint is easy to miss as an
+ *  ordinary bottom toast (bug report: a person coming from SketchUp pushed
+ *  on a component face, saw nothing happen, and read the viewport as
+ *  broken). */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- a toast code, not copy
+export const EDIT_CONTEXT_HINT_CODE = 'EditContextHint'
+
 /** Why an ineligible face refused, phrased as the way in — shared by every
  *  tool that fails closed on one (Push/Pull, Offset). Inside ANY editing
  *  context the refusal is the scope ('step out' is the only honest
  *  guidance); at the top level an instanced pick belongs to a component and
  *  anything else was a grouped face. `verb` names the tool's action. */
-export function ineligibleFaceHint(verb: string, contextScoped: boolean, instance: bigint | undefined): string {
+export function ineligibleFaceHint(
+  verb: string,
+  contextScoped: boolean,
+  instance: bigint | undefined,
+  sessionOpen = false,
+): string {
   if (contextScoped) {
     return t`${verb} is scoped to what you are editing — press Esc to step out first`
+  }
+  // A group or component is open for editing (a session frame; the tool's
+  // edit context stays at the top level for one). Double-clicking a face
+  // outside it does nothing until the session is finished, so "double-click
+  // it" would send the person down a dead end — name the real way out.
+  if (sessionOpen) {
+    return instance !== undefined
+      ? t`That face belongs to another copy — press Esc to finish editing the open component first, then double-click this one`
+      : t`That face isn't part of what you are editing — press Esc to finish first`
   }
   if (instance !== undefined) {
     return t`That face is part of a component — double-click it to edit the component`
   }
   return t`That face is inside a group — double-click to enter the group and edit it`
+}
+
+/** Whether a group or component editing session is open (`session_stack`),
+ *  for `ineligibleFaceHint`'s wording. */
+export function sessionIsOpen(wasmScene: WasmScene): boolean {
+  return wasmScene.session_stack().length > 0
 }
 
 /**

@@ -434,16 +434,17 @@ below.
   transient ungroup (nothing bakes; grouping, component/instance creation,
   import, and 3D text stay available inside one, their products folding
   into the group); a component session is a transient explode of the
-  instance's pose, always the innermost frame, with sibling instances
-  hidden for the session's duration instead of updating live. Frames nest
+  instance's pose, always the innermost frame, with every other placement
+  of the definition staying visible and showing the edit live through its
+  own pose (the live-sibling rule, ARCHITECTURE.md 2.11). Frames nest
   per container level and close LIFO (Escape, double-click outside),
   folding edits and mid-session creations back into the container; both
   entry paths — viewport drill-down and Outliner double-click — produce
   the same breadcrumb, with every level on it marked as editing. A
   component session requires the instance's pose to be a similarity
   (uniform scale, no mirror); a group-nested placement now opens through
-  its group's session, and a non-uniformly-scaled, mirrored, or
-  elsewhere-grouped-sibling placement falls back to the previous
+  its group's session, and a non-uniformly-scaled or mirrored placement,
+  or one entered directly inside a group, falls back to the previous
   in-context editing model (the component-edit-parity machinery, still
   fully supported for those cases). Session open/close are ordinary undo
   steps, and saving — autosave included — works transparently mid-session

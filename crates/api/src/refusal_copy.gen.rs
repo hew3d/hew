@@ -364,7 +364,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again."
         }
         "ExplodeSessionGroupedInstance" => {
-            "A placement of this component sits inside a group, so it opens in the in-context editing mode instead."
+            "This instance sits inside a group, so it opens in the in-context editing mode instead."
         }
         "ExplodeSessionNestedGroup" => {
             "This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one."

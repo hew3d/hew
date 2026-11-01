@@ -67,6 +67,8 @@ function makeWasmScene(opts: {
    *  the active component (component-edit-parity.md phase A2). */
   memberSketches?: bigint[]
   componentThroughResults?: bigint[]
+  /** A component/group editing session is open (`session_stack` non-empty). */
+  sessionOpen?: boolean
   /** Plane listings by context (the face / sketch plane's `plane_units_json`).
    *  Absent: the scene lists nothing and the struck face stands. */
   listings?: Record<string, MockListing>
@@ -78,6 +80,7 @@ function makeWasmScene(opts: {
     ...(opts.listings !== undefined ? planeUnitsMock(opts.listings) : {}),
     history_generation: vi.fn(() => 1n),
     pick_face: vi.fn(() => opts.facePick),
+    session_stack: vi.fn(() => (opts.sessionOpen === true ? [{ kind: 'instance', id: 77n }] : [])),
     // `pick_sketch_region` only ever walks WORLD-tree sketches — Path B calls
     // its `_in_instance` sibling instead while inside an instance context, so
     // the two are seeded independently (`regionPick` covers whichever one the
@@ -210,6 +213,80 @@ describe('PushPullTool — Path A (object face)', () => {
     expect(scene.extrude_region).not.toHaveBeenCalled()
     expect(tool.capturingInput()).toBe(false)
     expect(String((onToast as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('component')
+    // The refusal is GUIDANCE, tagged so the app emphasizes the toast
+    // rather than filing it as an ordinary warning (bug report: the plain
+    // bottom toast was easy to miss).
+    expect((onToast as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe('EditContextHint')
+  })
+
+  // Part A of the live-siblings bug report: a person coming from SketchUp
+  // pushes on a copied component, sees nothing happen, and reads the
+  // viewport as broken. The way in now shows BEFORE the click: hovering a
+  // component face outside its edit session puts the same hint beside the
+  // cursor (Tool.hoverHint) and in the status bar (statusHint).
+  it('hovering a component face outside its edit session explains itself before any click', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { tool, onToast } = makeTool(scene)
+
+    expect(tool.hoverHint()).toBeNull()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+
+    expect(tool.hoverHint()).toContain('double-click it to edit the component')
+    expect(tool.statusHint()).toContain('double-click it to edit the component')
+    expect(onToast).not.toHaveBeenCalled() // a hover never toasts
+  })
+
+  it('with a session open, the hint names Esc as the way out instead of a dead-end double-click', () => {
+    // Double-clicking another copy while a component is open for editing
+    // is ignored by the viewport (outside the session scope), so the hover
+    // and the refused click must not promise it.
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n), sessionOpen: true })
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).toContain('press Esc to finish editing the open component first')
+    expect(tool.hoverHint()).not.toContain('double-click it to edit')
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    expect(String((onToast as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('press Esc')
+  })
+
+  it('the hover hint is dropped on cancel, on a context change, and when the pointer leaves the canvas', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).not.toBeNull()
+    tool.onPointerLeave()
+    expect(tool.hoverHint()).toBeNull()
+    expect(tool.statusHint()).toContain('Click a face')
+
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).not.toBeNull()
+    tool.cancel()
+    expect(tool.hoverHint()).toBeNull()
+
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).not.toBeNull()
+    tool.setEditContext({ kind: 'instance', id: 12n, component: 100n })
+    expect(tool.hoverHint()).toBeNull()
+  })
+
+  it('the hover hint clears over a pushable face and over nothing', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).not.toBeNull()
+
+    // A fresh ray object: the per-ray pick cache must not serve the old
+    // instanced pick for a ray that now hits a plain face.
+    const plain = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool: tool2 } = makeTool(plain)
+    tool2.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool2.hoverHint()).toBeNull()
+    expect(tool2.statusHint()).toContain('Click a face')
+
+    const empty = makeWasmScene({})
+    const { tool: tool3 } = makeTool(empty)
+    tool3.onPointerMove(null, RAY)
+    expect(tool3.hoverHint()).toBeNull()
   })
 
   it('free drawing lying ON an ineligible face (drawn on a component from outside) takes the click and extrudes', () => {

@@ -441,7 +441,7 @@ Open a group/component editing frame (transaction-balanced only).
 - `explode_session_open` — This component is already open for editing further out. Step back out to it (Escape) instead of opening it again — and close the editor before saving.
 - `explode_session_nested_group` — This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one.
 - `explode_session_pose_unsupported` — This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first.
-- `explode_session_grouped_instance` — A placement of this component sits inside a group, so it opens in the in-context editing mode instead.
+- `explode_session_grouped_instance` — This instance sits inside a group, so it opens in the in-context editing mode instead.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 

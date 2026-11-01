@@ -65,11 +65,13 @@
 //!
 //! **Session normalization.** `Document::open_explode_session`/`open_group_
 //! session` bake an entered definition's members into world-owned objects
-//! for the session's duration and HIDE every sibling placement of that
-//! component (so editing one of eight identical chairs doesn't show the
-//! other seven mid-bake twice). `visible_object_ids`/`instance_ids` (this
-//! traversal's own inputs) honor that hiding, so exporting mid-session
-//! used to silently drop every hidden sibling — a live `hew.doc.export`
+//! for the session's duration and HIDE the entered placement (every other
+//! placement stays live and renders the session's world content through
+//! its own pose — ARCHITECTURE.md 2.11). `visible_object_ids`/
+//! `instance_ids` (this traversal's own inputs) honor that hiding, and
+//! the sibling expansion is a render-time view of baked world coordinates,
+//! so exporting mid-session used to silently drop the hidden placement (and
+//! every sibling, when sessions still hid them all) — a live `hew.doc.export`
 //! disagreed with `hew.doc.save` about what the document even was, though
 //! `save` was always correct: `Document::save_for_persistence` already
 //! normalized against exactly this by writing a session-closed clone

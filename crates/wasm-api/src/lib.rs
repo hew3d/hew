@@ -2346,15 +2346,17 @@ impl Scene {
                 self.inference.add_object(id, object, &Transform::IDENTITY);
             } else {
                 self.inference.remove_object(id);
-                // A touched non-world id may be a definition member whose
-                // shared geometry just changed — a definition edit reports
-                // the member here and every instance of it in
-                // `instances_touched`. Dropping the cached definition-space
-                // candidates makes the instance re-registration below
-                // re-extract from the new geometry; for a plain hidden or
-                // deleted world object this is a no-op.
-                self.inference.remove_def_member(id);
             }
+            // A touched id may ALSO be cached as a definition member whose
+            // shared geometry just changed: a definition edit reports the
+            // member here and every instance of it in `instances_touched`,
+            // and a session edit reports a world object that every live
+            // sibling placement renders as a member (ARCHITECTURE.md 2.11,
+            // live sibling placements). Dropping the cached definition-
+            // space candidates makes the instance re-registration below
+            // re-extract from the new geometry; for an id never placed
+            // this is a no-op.
+            self.inference.remove_def_member(id);
         }
         // Instances: re-register each touched instance's definition geometry at
         // its pose (clearing any prior candidates first), or drop hidden/gone
@@ -5159,8 +5161,13 @@ impl Scene {
     /// prototype.md, a `proto/explode-session` prototype): temporarily bakes
     /// the instance's definition's live members/sketches into WORLD-owned
     /// geometry at the instance's pose (SAME ids — a move, not
-    /// `explode_instance`'s copy) and hides every live instance of that
-    /// definition, so the app's ordinary, unmodified tool set can edit them.
+    /// `explode_instance`'s copy) and hides the entered instance, so the
+    /// app's ordinary, unmodified tool set can edit them. Every other
+    /// placement of the definition stays live and renders the session's
+    /// geometry through its own pose (`instance_expanded_members` /
+    /// `instance_expanded_local_poses` answer with the session's world
+    /// objects and the inverse session pose — ARCHITECTURE.md 2.11), so a
+    /// renderer shows the edit on every copy as it happens.
     /// `close_explode_session` folds them back. Refuses typed if a session
     /// is already open, or if the instance's pose is not a similarity with
     /// positive determinant.
@@ -5200,6 +5207,22 @@ impl Scene {
         self.doc
             .explode_session_component()
             .map(|c| c.data().as_ffi())
+    }
+
+    /// Every live world instance that renders a definition on loan to an
+    /// open component frame — the live sibling placements of each entered
+    /// instance, plus world placements of definitions that nest one
+    /// (ARCHITECTURE.md 2.11). These draw the session's in-progress
+    /// objects through their own poses, so a renderer re-pulls their
+    /// placements after any session edit (the kernel reports them in
+    /// every mid-session `DocChange`'s `instances_touched` for the same
+    /// reason). Empty when no component frame is open. Read-only.
+    pub fn session_placements(&self) -> Vec<u64> {
+        self.doc
+            .session_placements()
+            .iter()
+            .map(|i| i.data().as_ffi())
+            .collect()
     }
 
     /// The live objects inside the open explode session (original members
@@ -6044,6 +6067,40 @@ impl Scene {
             .filter(|&&s| self.doc.sketch(s).is_some() && !self.doc.sketch_tags_hidden(s))
             .map(|s| s.data().as_ffi())
             .collect()
+    }
+
+    /// The sketches a renderer draws for every placement of a definition
+    /// (`component_rendered_sketches`), paired with
+    /// [`Scene::component_sketch_frame`]: a closed definition's own
+    /// def-local sketches, or — while the definition is on loan to an open
+    /// component session — the session's live world drawing (its baked
+    /// sketches, free sketches drawn mid-session, the members' owned
+    /// sketches), so a live sibling placement shows the drawing as it
+    /// happens (ARCHITECTURE.md 2.11). Same liveness/tag filter as
+    /// [`Scene::component_member_sketches`]. Read-only.
+    pub fn component_rendered_sketches(&self, component: u64) -> Vec<u64> {
+        self.doc
+            .def_rendered_sketches(component_id(component))
+            .map(|(v, _)| v)
+            .unwrap_or_default()
+            .iter()
+            .filter(|&&s| self.doc.sketch(s).is_some() && !self.doc.sketch_tags_hidden(s))
+            .map(|s| s.data().as_ffi())
+            .collect()
+    }
+
+    /// The row-major 3×4 affine that maps [`Scene::component_rendered_sketches`]'
+    /// stored coordinates into the definition's local frame — identity for
+    /// a closed definition, the inverse session pose while the definition is
+    /// on loan. A renderer draws each placement's sketches at
+    /// `instance_pose × this`. Read-only.
+    pub fn component_sketch_frame(&self, component: u64) -> Vec<f64> {
+        self.doc
+            .def_rendered_sketches(component_id(component))
+            .map(|(_, t)| t)
+            .unwrap_or(Transform::IDENTITY)
+            .to_affine()
+            .to_vec()
     }
 
     /// The visible instances that place a definition.
@@ -11173,6 +11230,101 @@ mod tests {
             .unwrap()
             .expect("loaded circle center snaps");
         assert_eq!(snap.kind(), "center");
+    }
+
+    /// Draws an axis-aligned box `[x0,x1]×[y0,y1]×[0,h]` through the same
+    /// ground-sketch + extrude calls the app makes, returning its handle.
+    fn scene_box(scene: &mut Scene, x0: f64, y0: f64, x1: f64, y1: f64, h: f64) -> u64 {
+        let sketch = scene.begin_ground_sketch();
+        scene.sketch_begin_gesture(sketch).unwrap();
+        let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+        for i in 0..4 {
+            let (ax, ay) = corners[i];
+            let (bx, by) = corners[(i + 1) % 4];
+            scene
+                .sketch_add_segment(sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        scene.sketch_end_gesture(sketch).unwrap();
+        let region = scene.sketch_regions(sketch).unwrap()[0];
+        scene.extrude_region(sketch, region, h).unwrap()
+    }
+
+    /// Live sibling placements reach INFERENCE through the ordinary
+    /// placement registration (ARCHITECTURE.md 2.11): with a session open
+    /// on one copy, a pick onto the OTHER copy strikes the shared member
+    /// through that copy, and after a push/pull inside the session the pick
+    /// lands on the raised top — not on cached pre-edit geometry. Pins the
+    /// `reconcile` rule that drops a touched object's cached def-member
+    /// candidates whether or not it is a world object, and the
+    /// `session_placements` accessor the renderer re-pulls from.
+    #[test]
+    fn a_live_sibling_snaps_to_the_session_edit_not_to_stale_geometry() {
+        let mut scene = Scene::new();
+        let member = scene_box(&mut scene, 0.0, 0.0, 2.0, 1.0, 1.0);
+        let component = scene.make_component(&[0], &[member]).unwrap();
+        let sibling = scene
+            .place_instance(
+                component,
+                &[1.0, 0.0, 0.0, 4.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let entered = scene.instances_of(component)[0];
+        assert_ne!(entered, sibling);
+
+        // Before: a pick straight down onto the sibling's top strikes the
+        // member through the sibling at depth 4 (top at z = 1).
+        let pick = scene
+            .pick_face(5.0, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .expect("hits the sibling");
+        assert_eq!(pick.instance(), Some(sibling));
+        assert!((pick.depth() - 4.0).abs() < 1e-6);
+
+        scene.open_explode_session(entered).unwrap();
+        assert_eq!(scene.session_placements(), vec![sibling]);
+        let pick = scene
+            .pick_face(5.0, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .expect("the live sibling is still pickable mid-session");
+        assert_eq!(pick.instance(), Some(sibling));
+        assert_eq!(pick.object(), member);
+
+        // Raise the member's top by one meter inside the session.
+        let top = scene
+            .pick_face(1.0, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .expect("the session's world member");
+        assert_eq!(top.instance(), None);
+        scene.push_pull(member, top.face(), 1.0).unwrap();
+
+        // The sibling's inference candidates follow: depth 3 (top at z = 2).
+        let pick = scene
+            .pick_face(5.0, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .expect("still pickable after the edit");
+        assert_eq!(pick.instance(), Some(sibling));
+        assert!(
+            (pick.depth() - 3.0).abs() < 1e-6,
+            "sibling pick depth {} should reflect the raised top",
+            pick.depth()
+        );
+        // And an on-face snap over the sibling sits on the raised top.
+        let snap = scene
+            .snap(
+                5.0, 0.5, 5.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None,
+                None, None,
+            )
+            .unwrap()
+            .expect("snaps on the sibling");
+        assert!(
+            (snap.z() - 2.0).abs() < 1e-6,
+            "snap z {} on the raised top",
+            snap.z()
+        );
+
+        scene.close_explode_session().unwrap();
+        assert!(scene.session_placements().is_empty());
+        let pick = scene
+            .pick_face(5.0, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .expect("pickable after close");
+        assert!((pick.depth() - 3.0).abs() < 1e-6);
     }
 
     /// `Scene::export` reaches the exact same shared writer

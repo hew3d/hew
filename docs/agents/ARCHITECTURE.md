@@ -458,13 +458,50 @@ kernel bakes the instance's pose into the definition's member Objects and
 sketches — the SAME `ObjectId`/`SketchId`s, a move of ownership rather than
 a copy — and retargets them from the definition to the world tree. From
 that point every tool sees ordinary world geometry and behaves exactly as
-it does anywhere else, because that is what it now is. Every other live
-instance of the definition is hidden for the session's duration: there is
-exactly one copy of the geometry, and it is on loan to the world tree, so
-there is nothing left to keep in sync — a deliberate trade of live
-per-instance propagation during the edit for a tool set that needs no
-component-awareness at all. Closing the session (Escape, double-click
-outside) folds the members back: an Object or sketch the session touched
+it does anywhere else, because that is what it now is. Only the entered
+instance hides (its geometry is the world geometry now; drawing it through
+the instance path too would double it). Every other placement of the
+definition stays live and shows the edit as it happens — **live sibling
+placements**, SketchUp's behavior. There is still exactly one copy of the
+geometry, on loan to the world tree, so nothing is kept in sync: a sibling
+simply renders the session's world objects through the session's inverse
+pose and then its own. That is `Document::expand_def_core`'s on-loan rule:
+`expanded_def_placements` of an on-loan definition answers with the frame's
+live world objects — the original members plus everything created since
+the open and not claimed by a deeper frame — at the inverse session pose,
+and with the frame's surfaced and mid-session-placed instances expanded
+the same way one level down. A placement inside another definition, and
+a sibling nested in a group, render through the same rule, and nested
+frames compose, so a sibling of the outer frame shows an edit made two
+frames deep. Because a sibling is a real live instance, inference snaps to
+it, picks report it, and the Outliner lists it, with no sibling-specific
+code anywhere; the renderer's instanced-batch path draws it from the same
+cached member mesh it would use for a closed definition, so a session edit
+costs one mesh re-pull per changed object, not one per placement. Every
+mid-session `DocChange` lists the live placements in `instances_touched`
+(`Document::complete_change`; `Scene::session_placements` reads the same
+list), exactly as a definition edit lands every instance there. What a
+sibling cannot be is an operand of a definition-level op while the loan is
+out: `make_unique`, `transform_instance`, `apply_def_op`,
+`delete_def_member`, and the in-instance surfaces refuse
+`ExplodeSessionOpen` on it, since the definition's members are world
+objects right now and treating them as def-local content would corrupt
+them; the session's own world-path tools are the way to edit what it
+shows. The frame's drawing travels the same way: `def_rendered_sketches`
+answers, for an on-loan definition, with the session's live world sketches
+(the definition's own, baked at open; free sketches drawn mid-session; the
+members' owned sketches) and the inverse session pose as their frame, so a
+sibling's def-sketch linework follows the drawing as it happens (those
+lines snap only through the entered copy, as a closed definition's sketches
+snap only through the active instance). Undo inside the session reverts
+the siblings with the edit, and undoing the open restores the plain
+definition render. A close that empties the definition tombstones the
+siblings with it (`emptied_instances`), splices a grouped sibling out of
+its group's member list and detaches annotations anchored to one exactly
+as `delete_node` would (`emptied_parent_members`, `reanchored`), and undo
+revives and re-lists exactly those. Closing the session
+(Escape, double-click outside) folds the members back: an Object or sketch
+the session touched
 unbakes through the inverse pose, one it never touched is restored from a
 pristine snapshot taken at open (bit-exact, sidestepping round-trip
 floating-point noise entirely for the common case of a session that only
@@ -482,21 +519,20 @@ Similarities are exactly the transforms that keep a circle a circle, which
 is what lets analytic curve and surface metadata (2.6) survive the
 bake/unbake round trip intact; baking a mirrored pose directly would invert
 winding and produce an inside-out solid. Group nesting gates a session the
-same way: the bake produces top-level world objects and must hide every
-placement of the definition, neither of which a group-nested placement can
-survive coherently (splicing baked members into a containing group is not
-modeled, and a group may not list a hidden member). Session nesting
-dissolves the common case of that gate: an instance inside a Group is
+same way for the ENTERED instance: the bake produces top-level world
+objects, which a group-nested placement cannot survive coherently
+(splicing baked members into a containing group is not modeled). A
+sibling nested in some other group does not trip it: nothing hides a
+sibling, so its group keeps listing a live member. Session nesting
+dissolves the common case of the gate: an instance inside a Group is
 genuinely top-level while its group's frame is open, so drilling in
-through the group opens its explode session normally — only a
-same-definition placement grouped *elsewhere* still trips it. An instance
-that fails either gate — a non-uniform scale, a mirror, or a sibling
-placement nested inside some other group — falls back to the previous
-in-context editing model instead: the tool set operates on the
-definition's members directly, through the pose, without baking or
-retargeting anything. That model remains fully supported for exactly
-these cases; the session stack is the default path, not a replacement for
-it.
+through the group opens its explode session normally. An instance that
+fails either gate — a non-uniform scale, a mirror, or a placement entered
+directly inside a group — falls back to the previous in-context editing
+model instead: the tool set operates on the definition's members
+directly, through the pose, without baking or retargeting anything. That
+model remains fully supported for exactly these cases; the session stack
+is the default path, not a replacement for it.
 
 The stack also gives in-context resize a natural target: the Tape
 Measure's measure-then-type-a-length gesture, which resizes the whole

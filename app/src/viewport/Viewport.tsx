@@ -315,6 +315,10 @@ export interface InferenceInfo {
    *  tip's second line (docs/design/selection-path.md "The hover line"). */
   object?: bigint
   instance?: bigint
+  /** The active tool's cursor-side explanation for why it cannot act on
+   *  what is hovered (`Tool.hoverHint`) — Push/Pull over a component face
+   *  outside its edit session. Shown as the chip's own line. */
+  hint?: string
 }
 
 interface Props {
@@ -5142,9 +5146,11 @@ export default function Viewport({
      * The double-click gesture's own open attempt: a plain double-click on a
      * component instance opens an explode session; if the kernel gates it —
      * `ExplodeSessionPoseUnsupported` (non-uniform scale or a mirror) or
-     * `ExplodeSessionGroupedInstance` (a placement of the definition is
-     * nested in a group, which a session's hide-every-placement bake cannot
-     * honor) — fall back SILENTLY to the ordinary "enter this instance's
+     * `ExplodeSessionGroupedInstance` (the entered instance itself is
+     * nested in a group, which a session's bake to top-level world objects
+     * cannot honor; a grouped SIBLING is fine — siblings stay live,
+     * ARCHITECTURE.md 2.11) — fall back SILENTLY to the ordinary "enter
+     * this instance's
      * edit context" gesture (K1/K2), which remains the editing model for
      * exactly those instances. Any other refusal surfaces as the usual
      * kernel-error toast and enters neither. Exposed on `ViewportApi` too
@@ -9283,6 +9289,12 @@ export default function Viewport({
           direction: snap.direction,
           frame: getDrawingAxes(wasmScene),
           projected: activeTool.snapProjected?.() ?? false,
+          // A tool's own hover guidance (Tool.hoverHint): the refusal a
+          // click would toast, shown beside the cursor before the click.
+          ...((): { hint?: string } => {
+            const hint = activeTool.hoverHint?.() ?? null
+            return hint === null ? {} : { hint }
+          })(),
           // Hover identification is a Select-only, idle-only second line.
           ...(toolController.activeToolName === 'Select' && !readOnlyRef.current &&
               !toolHasArmedGesture(activeTool) && snap.object !== undefined &&
@@ -10368,6 +10380,11 @@ export default function Viewport({
       pointerRestClient.x = ev.clientX
       pointerRestClient.y = ev.clientY
       if (leftCanvasBounds(ev.clientX, ev.clientY, renderer.domElement.getBoundingClientRect())) pointerInsideCanvas = false
+      // Nothing is hovered any more: the tool drops its hover memo
+      // (Tool.onPointerLeave), the status bar re-polls, and the chip goes.
+      toolController.activeTool.onPointerLeave?.()
+      reportToolHint()
+      onInferenceChangeRef.current?.(null)
     }
     renderer.domElement.addEventListener('pointerenter', onCanvasPointerEnter)
     renderer.domElement.addEventListener('pointerleave', onCanvasPointerLeave)

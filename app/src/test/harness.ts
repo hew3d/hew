@@ -813,6 +813,23 @@ export interface HewTestHarness {
   getExplodeSessionInstance(): string | null
 
   /**
+   * Every live world instance rendering a definition on loan to an open
+   * component session — the entered instance's live sibling placements
+   * (ARCHITECTURE.md 2.11) — as decimal handle strings; empty with no
+   * session open (`session_placements`).
+   */
+  getSessionPlacements(): string[]
+
+  /**
+   * The leaf objects an instance's placement draws, as decimal handle
+   * strings, in placement order (`instance_expanded_members`). With the
+   * instance's definition on loan to a session these are the session's
+   * WORLD objects, so a spec can prove a sibling renders the in-progress
+   * geometry rather than a stale copy.
+   */
+  getInstanceExpandedMembers(instance: string): string[]
+
+  /**
    * A component definition's live member OBJECTS, as decimal handle
    * strings (component-edit-parity.md) — the ground truth for "did this
    * edit land in the shared definition (seen by every instance) or
@@ -2221,6 +2238,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         const i = s.explode_session_instance()
         return i === undefined ? null : String(i)
       }),
+
+    getSessionPlacements: () =>
+      query((s) => Array.from(s.session_placements()).map(String)),
+
+    getInstanceExpandedMembers: (instance) =>
+      query((s) => Array.from(s.instance_expanded_members(BigInt(instance))).map(String)),
 
     getComponentMemberObjects: (component) =>
       query((s) => Array.from(s.component_member_objects(BigInt(component))).map(String)),

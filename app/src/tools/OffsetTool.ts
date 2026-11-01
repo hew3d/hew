@@ -44,7 +44,7 @@ import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { signedOffsetDistance, decodeOffsetLoops, loopToSegmentPairs } from './offsetMath'
 import { runDraft, refreshAfterDraft } from './draftCommit'
-import { defaultFaceEligible, ineligibleFaceHint, type FaceEligible } from './faceDraw'
+import { defaultFaceEligible, ineligibleFaceHint, sessionIsOpen, EDIT_CONTEXT_HINT_CODE, type FaceEligible } from './faceDraw'
 import { ctxOfFace, ctxOfSketch, keyToId, type PlaneUnitsScene } from './planeUnits'
 import { regionUnderRay, regionOfFreeProfile, regionOfSegment, type PickedRegion } from './regionPick'
 
@@ -121,12 +121,69 @@ export class OffsetTool implements Tool {
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
+    // A face Offset cannot cut explains itself while hovered (the same line
+    // the refused click toasts) — Push/Pull's posture.
+    if (this.stage.kind === 'idle' && this._hoverRefusal !== null) return this._hoverRefusal
     if (this.stage.kind === 'idle' && this.retype.isOpen) {
       return t`Type an exact distance to redo the offset you just made — or click another face or profile.`
     }
     return this.stage.kind === 'idle'
       ? t`Click a face or a closed profile to offset its boundary.`
       : t`Drag inward or outward, click to commit — or type an exact distance.`
+  }
+
+  /** The hovered face's refusal while idle (see `_updateHoverRefusal`). */
+  private _hoverRefusal: string | null = null
+
+  /** Cursor-side guidance (Tool.hoverHint). */
+  hoverHint(): string | null {
+    return this.stage.kind === 'idle' ? this._hoverRefusal : null
+  }
+
+  /** The pointer left the canvas: nothing is hovered (Tool.onPointerLeave). */
+  onPointerLeave(): void {
+    this._hoverRefusal = null
+  }
+
+  /** Why a component member's face refuses Offset — the click's toast and
+   *  the hover's line, one wording. */
+  private _componentFaceHint(): string {
+    return t`Offset can’t cut a component’s member face yet — try a sketch region instead, or explode the instance.`
+  }
+
+  private _ineligibleFaceHint(instance: bigint | undefined): string {
+    return ineligibleFaceHint(
+      t({ context: 'tool', message: 'Offset' }),
+      this._editContext.kind !== 'top',
+      instance,
+      sessionIsOpen(this.wasmScene),
+    )
+  }
+
+  /**
+   * Resolves whether the face under `ray` would refuse a click, deciding
+   * exactly as `_pickTarget` does (same pick, same two refusal branches,
+   * same order), so the hover never says one thing and the click another.
+   */
+  private _updateHoverRefusal(ray: Ray): void {
+    let next: string | null = null
+    const pick = this.wasmScene.pick_face(
+      ray.origin[0], ray.origin[1], ray.origin[2],
+      ray.direction[0], ray.direction[1], ray.direction[2],
+    )
+    if (pick !== undefined) {
+      try {
+        const objectHandle = pick.object()
+        const instanceHandle = pick.instance()
+        if (instanceHandle !== undefined) next = this._componentFaceHint()
+        else if (!this._isEligible(objectHandle, instanceHandle)) next = this._ineligibleFaceHint(instanceHandle)
+      } catch {
+        next = null
+      } finally {
+        pick.free()
+      }
+    }
+    this._hoverRefusal = next
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -246,7 +303,10 @@ export class OffsetTool implements Tool {
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
     this.lastSnap = snap
-    if (this.stage.kind !== 'dragging') return
+    if (this.stage.kind !== 'dragging') {
+      this._updateHoverRefusal(ray)
+      return
+    }
 
     const distance = this._dragDistance(snap, ray)
     this.stage = {
@@ -270,6 +330,7 @@ export class OffsetTool implements Tool {
   onPointerDown(snap: Snap | null, ray: Ray): void {
     // Any pointer action ends the retype window — the next offset begins.
     this.disarmRetype()
+    this._hoverRefusal = null
     if (this.stage.kind === 'idle') {
       this._pickTarget(ray)
       return
@@ -334,6 +395,7 @@ export class OffsetTool implements Tool {
     this._clearPreview()
     this.onMeasurementCb('')
     this.lastSnap = null
+    this._hoverRefusal = null
   }
 
   // ── Stage 1: pick ──────────────────────────────────────────────────────────
@@ -357,16 +419,14 @@ export class OffsetTool implements Tool {
         // instance, which must not swallow the click with no feedback
         // (PushPullTool's `_ineligibleFaceHint` is the precedent).
         if (instanceHandle !== undefined) {
-          this.onToast(
-            t`Offset can’t cut a component’s member face yet — try a sketch region instead, or explode the instance.`,
-          )
+          this.onToast(this._componentFaceHint(), EDIT_CONTEXT_HINT_CODE)
           return
         }
         // The draw tools' and Push/Pull's eligibility policy: a face inside a
         // group (not entered) or outside the editing scope refuses with the
         // same hint, never a silent no-op.
         if (!this._isEligible(objectHandle, instanceHandle)) {
-          this.onToast(ineligibleFaceHint(t({ context: 'tool', message: 'Offset' }), this._editContext.kind !== 'top', instanceHandle))
+          this.onToast(this._ineligibleFaceHint(instanceHandle), EDIT_CONTEXT_HINT_CODE)
           return
         }
         if (this._activeContext === null || objectHandle === this._activeContext) {

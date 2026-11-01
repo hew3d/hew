@@ -33,7 +33,7 @@ import {
   PREVIEW_PUSHPULL_FALLBACK,
   PREVIEW_PUSHPULL_TOKEN,
 } from './previewTint'
-import { defaultFaceEligible, ineligibleFaceHint, worldFaceNormal, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
+import { defaultFaceEligible, ineligibleFaceHint, sessionIsOpen, worldFaceNormal, EDIT_CONTEXT_HINT_CODE, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
 import { ctxOfFace, type PlaneUnitsScene } from './planeUnits'
 import { regionUnderRay } from './regionPick'
 
@@ -188,6 +188,10 @@ export class PushPullTool implements Tool {
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.stage.kind === 'idle') {
+      // A face the tool cannot push explains itself while hovered — the
+      // same line the refused click toasts, shown BEFORE the click, in the
+      // status bar and (`hoverHint`) beside the cursor.
+      if (this._hoverRefusal !== null) return this._hoverRefusal
       if (this.retype.isOpen) {
         return t`Type an exact distance to redo the push/pull you just made — or click another face; double-click repeats the last distance.`
       }
@@ -506,15 +510,59 @@ export class PushPullTool implements Tool {
       this.stage = { ...this.stage, distance }
       this._drawGhostPreview(anchor, target.normal, distance)
       this._reportMeasurement(distance)
+    } else {
+      this._updateHoverRefusal(ray)
     }
     // Hover highlight is handled via CueLayer for on-face snaps (M1 shortcut
     // per docs/dev/DEVELOPMENT.md: show snap marker at face location; per-face highlight
     // requires face→triangle table in MeshJs which is a WASM_API addendum).
   }
 
+  /** The hovered face's refusal while idle (see `_updateHoverRefusal`), or
+   *  null when the cursor is over something the tool can act on, nothing,
+   *  or a gesture is in progress. */
+  private _hoverRefusal: string | null = null
+
+  /** Cursor-side guidance (Tool.hoverHint): the same line the refused
+   *  click would toast, shown while the face is merely hovered. */
+  hoverHint(): string | null {
+    return this.stage.kind === 'idle' ? this._hoverRefusal : null
+  }
+
+  /**
+   * Resolves whether the face under `ray` would refuse a click, exactly as
+   * `onPointerDown`'s Path A decides it — the same memoized pick
+   * (`_pickCache`, keyed on this ray object) and the same region-in-front
+   * rule, so the hover never says one thing and the click another. A
+   * component face hovered outside its edit session (the common
+   * SketchUp-habit case: push on a copied component without entering it)
+   * is what this exists for; a grouped face and an out-of-scope face get
+   * their own lines from the same helper.
+   */
+  private _updateHoverRefusal(ray: Ray): void {
+    let next: string | null = null
+    try {
+      const eligible = this._pickCache.pickFor(this.wasmScene, ray, (object, instance) =>
+        this._isEligible(object, instance))
+      const raw = this._pickCache.rawPickFor(ray)
+      if (raw !== null && eligible === null) {
+        const activeInstance = this._activeInstance
+        const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
+        if (!regionInFrontOfFace(region, raw, false)) next = this._ineligibleFaceHint(raw.instance)
+      }
+    } catch {
+      next = null
+    }
+    this._hoverRefusal = next
+  }
+
   onPointerDown(snap: Snap | null, ray: Ray): void {
     // Any pointer action ends the retype window — the next push/pull begins.
     this.disarmRetype()
+    // The click decides for itself (and re-toasts a refusal); a hover memo
+    // left standing here would survive a double-click that opens the very
+    // component it describes.
+    this._hoverRefusal = null
     if (this.stage.kind === 'idle') {
       let target: PushPullTarget | null = null
       let anchor: [number, number, number] = [0, 0, 0]
@@ -585,7 +633,7 @@ export class PushPullTool implements Tool {
           // did not aim at. Refuse explicably instead. `snapConstraint`
           // fails closed the same way at hover time (see its own doc) —
           // the two must never disagree.
-          this.onToast(this._ineligibleFaceHint(raw.instance))
+          this.onToast(this._ineligibleFaceHint(raw.instance), EDIT_CONTEXT_HINT_CODE)
           return
         }
       }
@@ -759,6 +807,15 @@ export class PushPullTool implements Tool {
     clearPreview(this.preview)
     this.onMeasurementCb('')
     this.lastSnap = null
+    // A context change or tool switch arrives without a pointer move; the
+    // hovered face's refusal would otherwise outlive the state it described
+    // (the chip still saying "double-click it" over a face just entered).
+    this._hoverRefusal = null
+  }
+
+  /** The pointer left the canvas: nothing is hovered (Tool.onPointerLeave). */
+  onPointerLeave(): void {
+    this._hoverRefusal = null
   }
 
   /**
@@ -883,6 +940,7 @@ export class PushPullTool implements Tool {
       t`Push/pull`,
       this._contextScoped || this._activeContext !== null || this._activeComponent !== null,
       instance,
+      sessionIsOpen(this.wasmScene),
     )
   }
 

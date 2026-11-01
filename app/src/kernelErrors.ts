@@ -278,7 +278,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   ExplodeSessionScope:
     msg`That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.`,
   ExplodeSessionGroupedInstance:
-    msg`A placement of this component sits inside a group, so it opens in the in-context editing mode instead.`,
+    msg`This instance sits inside a group, so it opens in the in-context editing mode instead.`,
   ExplodeSessionNestedGroup:
     msg`This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one.`,
   // App-side refusal (not a kernel code, like InvalidSelection above): a

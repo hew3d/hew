@@ -74,6 +74,7 @@ import { installTestHarness, type PrintRecorder } from './test/harness'
 import { installLiveBridge, type LiveOpOutcome, type LiveOpRunner } from './api/liveBridge'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
+import { EDIT_CONTEXT_HINT_CODE } from './tools/faceDraw'
 import { outlinerDrawing, resolveDraft, setKernelHidden, type OutlinerDrawing, type PlaneUnitsScene } from './tools/planeUnits'
 import { makeFileHost, isTauri, FileReadError, type DocFormat, type ExportFileType, type FileHost, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
 import {
@@ -215,6 +216,10 @@ interface Toast {
    * `updateToast` schedules its own short auto-dismiss once a patch turns
    * this back to false. */
   sticky?: boolean
+  /** Guidance rather than a warning (`EDIT_CONTEXT_HINT_CODE`: "double-click
+   * it to edit the component"): drawn in the accent tint, larger, and kept
+   * up longer, so the way in is not missed at the bottom of the window. */
+  emphasis?: boolean
 }
 
 let toastCounter = 0
@@ -2097,10 +2102,11 @@ export default function App() {
     }
 
     const id = ++toastCounter
-    setToasts((prev) => [...prev, { id, message, code, isError }])
+    const emphasis = code === EDIT_CONTEXT_HINT_CODE
+    setToasts((prev) => [...prev, { id, message, code, isError, emphasis }])
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id))
-    }, 4000)
+    }, emphasis ? 7000 : 4000)
   }, [])
   const handleToastRef = useRef(handleToast)
   handleToastRef.current = handleToast
@@ -7572,6 +7578,8 @@ export default function App() {
               return (
                 <div
                   key={toast.id}
+                  data-testid="toast"
+                  data-emphasis={toast.emphasis === true ? 'true' : undefined}
                   onClick={() => dismissToast(toast.id)}
                   style={{
                     display: 'flex',
@@ -7584,12 +7592,16 @@ export default function App() {
                     // overlay/text-primary pair instead of a hardcoded dark
                     // chip, so it's no longer illegible against the light
                     // theme's own light canvas.
+                    // A guidance toast (emphasis) keeps the opaque overlay
+                    // surface — it can land over the floating dock — and
+                    // reads as guidance through the accent border and text.
                     background: toast.isError ? 'var(--status-leaky-bg)' : 'var(--surface-overlay)',
-                    color: toast.isError ? '#fff' : 'var(--text-primary)',
-                    border: toast.isError ? 'none' : '1px solid var(--border-strong)',
+                    color: toast.isError ? '#fff' : toast.emphasis === true ? 'var(--accent-text-strong)' : 'var(--text-primary)',
+                    border: toast.isError ? 'none' : toast.emphasis === true ? '2px solid var(--accent-base)' : '1px solid var(--border-strong)',
                     borderRadius: '4px',
-                    fontFamily: 'monospace',
-                    fontSize: '13px',
+                    fontFamily: toast.emphasis === true ? 'var(--font-family-ui)' : 'monospace',
+                    fontSize: toast.emphasis === true ? '15px' : '13px',
+                    fontWeight: toast.emphasis === true ? 600 : undefined,
                     cursor: 'pointer',
                     pointerEvents: 'auto',
                     boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
@@ -7618,7 +7630,10 @@ export default function App() {
                       message wraps under the code instead of in a narrow
                       column beside it. */}
                   <span>
-                    {toast.code !== undefined && (
+                    {/* A kernel code is worth showing (it is what a bug report
+                        quotes); a guidance toast's code is a styling tag, not
+                        something a person should read. */}
+                    {toast.code !== undefined && toast.emphasis !== true && (
                       <strong style={{ marginRight: '6px', opacity: 0.8 }}>[{toast.code}]</strong>
                     )}
                     {toast.message}

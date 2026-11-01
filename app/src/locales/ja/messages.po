@@ -787,8 +787,8 @@ msgid "A partial sweep can't cut open this shape — its profile touches the tur
 msgstr ""
 
 #: src/kernelErrors.ts
-msgid "A placement of this component sits inside a group, so it opens in the in-context editing mode instead."
-msgstr ""
+#~ msgid "A placement of this component sits inside a group, so it opens in the in-context editing mode instead."
+#~ msgstr ""
 
 #: src/panels/WelcomeScreen.tsx
 msgid "A round table with a textured oak top, walnut cylinder legs, crossed stretchers, and a resting pen cup."
@@ -7602,6 +7602,10 @@ msgstr ""
 msgid "That face belongs to a different component instance — press Esc to step out first."
 msgstr ""
 
+#: src/tools/faceDraw.ts
+msgid "That face belongs to another copy — press Esc to finish editing the open component first, then double-click this one"
+msgstr ""
+
 #: src/kernelErrors.ts
 msgid "That face has no usable area. Pick a different face."
 msgstr ""
@@ -7636,6 +7640,10 @@ msgstr ""
 
 #: src/tools/FollowMeTool.ts
 msgid "That face isn’t part of the component you’re editing — press Esc to step out first."
+msgstr ""
+
+#: src/tools/faceDraw.ts
+msgid "That face isn't part of what you are editing — press Esc to finish first"
 msgstr ""
 
 #: src/tools/FollowMeTool.ts
@@ -8204,6 +8212,10 @@ msgstr ""
 
 #: src/panels/ObjectInfoPanel.tsx
 msgid "This instance only — leave empty to show the definition name"
+msgstr ""
+
+#: src/kernelErrors.ts
+msgid "This instance sits inside a group, so it opens in the in-context editing mode instead."
 msgstr ""
 
 #: src/kernelErrors.ts
