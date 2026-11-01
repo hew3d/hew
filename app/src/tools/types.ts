@@ -55,6 +55,11 @@ export interface Snap {
    *  projected onto the locked line (`x/y/z` are the projection). The cue
    *  layer draws the dotted tie between the two. */
   projectedFrom?: [number, number, number]
+  /** For an `'intersection'` snap: true when an edge passes THROUGH a face
+   *  of another owner (the kernel's `pierced_face` is set), false when two
+   *  edges — or an edge and a guide or axis — cross. The edge is the snap's
+   *  provenance either way; a tool only words the point differently. */
+  piercesFace?: boolean
   object?: bigint
   /** Placing component instance handle, when the snap came from instanced
    *  geometry (pairs with `object`). */

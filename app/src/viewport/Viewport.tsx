@@ -41,6 +41,7 @@ import { DEPTH_BIAS } from './depthPolicy'
 import type { Scene as WasmScene, DocChangeJs } from '../wasm/loader'
 import type { HealthOverlay } from '../health/healthReport'
 import { CueLayer } from './CueLayer'
+import { SiblingPreviewMirror } from './siblingPreview'
 import { DrawPlaneCueLayer } from './DrawPlaneCueLayer'
 import type { DrawPlane } from '../tools/drawPlane'
 import { SnapService } from './snapService'
@@ -2861,6 +2862,26 @@ export default function Viewport({
     const previewGroup = new THREE.Group()
     previewGroup.name = 'Preview'
     threeScene.add(previewGroup)
+    // Inside a component session, the geometry ghosts a tool draws into
+    // `previewGroup` are drawn again through every other placement of the
+    // definition (siblingPreview.ts, ARCHITECTURE.md 2.11), so a drag shows
+    // on every copy as the commit will. Its own scene-level group: a tool's
+    // `clearPreview` disposes what it finds under the preview group, and
+    // the mirrors share the ghosts' geometry. Synced before each render.
+    const siblingPreviewGroup = new THREE.Group()
+    siblingPreviewGroup.name = 'SiblingPreview'
+    threeScene.add(siblingPreviewGroup)
+    const siblingPreview = new SiblingPreviewMirror({
+      source: previewGroup,
+      root: siblingPreviewGroup,
+      frames: () => wasmScene.session_sibling_frames(),
+      // Read again when the entered instance or the placement list changes
+      // under a gesture (undo/redo across a session boundary, a placement
+      // created or deleted); `invalidate()` below covers what this cannot
+      // see — a visibility, tag, or isolation change, any document change.
+      fingerprint: () =>
+        `${wasmScene.explode_session_instance() ?? ''}|${Array.from(wasmScene.session_placements()).join(',')}`,
+    })
 
     /**
      * The session-scope nodeKey filter `resolvePickToSelectable` should
@@ -4557,6 +4578,10 @@ export default function Viewport({
      * full rebuild runs as before.
      */
     function handleSceneRefresh(touched?: RefreshTouched): void {
+      // The document changed (a commit, undo/redo, a session opened or
+      // closed): a mirrored gesture still in flight re-reads its sibling
+      // frames on the next sync rather than drawing at stale poses.
+      siblingPreview.invalidate()
       const wtMap = touched !== undefined
         ? sceneRenderer.refreshTouched(touched)
         : sceneRenderer.refresh()
@@ -5803,7 +5828,7 @@ export default function Viewport({
           dirLight,
           lightRig: MODEL_LIGHT_RIG.light,
           gridAxes: [infiniteGrid.mesh, originAxes],
-          hideAlways: [cueLayer.group, drawPlaneCueLayer.group, previewGroup, sceneRenderer.sectionGroup],
+          hideAlways: [cueLayer.group, drawPlaneCueLayer.group, previewGroup, siblingPreviewGroup, sceneRenderer.sectionGroup],
           viewportCssSize: () => ({ width: el.clientWidth, height: el.clientHeight }),
           liveTheme: () => readAppliedTheme(),
           liveSection: () => getSectionState(),
@@ -5893,6 +5918,9 @@ export default function Viewport({
       updateOriginAxesFrame(originAxes, wasmScene)
       clampOriginAxes(originAxes, rig, el.clientHeight)
       syncGuides(rig.effectiveDistance(controls.getDistance()))
+      // The sibling mirrors too: a capture between a tool's `clearPreview`
+      // and the next loop frame must not draw clones of disposed geometry.
+      siblingPreview.sync()
       renderer.render(threeScene, camera)
       const gl = renderer.getContext()
       const width = gl.drawingBufferWidth
@@ -6258,6 +6286,9 @@ export default function Viewport({
 
     function applyHidden(opts?: { fadeMs?: number }): void {
       const eff = effectiveHidden(baseHidden, isolation === null ? null : isolation.view)
+      // A placement hidden, shown, or isolated away mid-gesture gains or
+      // loses its mirror on the next sync.
+      siblingPreview.invalidate()
       hiddenObjectIdsRef.current = new Set(eff.objects)
       hiddenInstanceIdsRef.current = new Set(eff.instances)
       sceneRenderer.setIsolationFade(isolation === null ? null : isolation.view.fade, {
@@ -8823,6 +8854,11 @@ export default function Viewport({
         // mounted — with it closed this is a single boolean check per
         // rendered frame. Read renderer.info right after render(), before
         // three.js auto-resets the per-frame counters on the next frame.
+        // Mirror the session-geometry ghosts onto the sibling placements
+        // (or drop the mirrors once the preview is empty) — after the tool's
+        // own per-frame hooks above, so a ghost they moved is mirrored where
+        // it is now.
+        siblingPreview.sync()
         const statsActive = isRenderStatsActive()
         const renderStart = statsActive ? performance.now() : 0
         renderer.render(threeScene, camera)
@@ -11149,6 +11185,7 @@ export default function Viewport({
       controls.dispose()
       cueLayer.clear()
       drawPlaneCueLayer.clear()
+      siblingPreview.end()
       sceneRenderer.dispose()
       toolControllerRef.current = null
       switchToolRef.current = null

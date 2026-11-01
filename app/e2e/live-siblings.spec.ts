@@ -234,6 +234,107 @@ test('live siblings: the other copy stays visible while one copy is edited, and 
   await page.screenshot({ path: 'test-results/live-siblings-after-close.png' })
 })
 
+test('live siblings: a Push/Pull drag previews on the other copy mid-drag, and Escape takes it away', async ({
+  page,
+}) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  const bRegion = screenBox(ctx, [4, 0, 0], [6, 1, 2.2])
+  const downOntoB = { origin: [5, 0.5, 5] as [number, number, number], dir: [0, 0, -1] as [number, number, number] }
+  const setup = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const box = h.drawBox([0, 0, 0], [2, 1, 0], 1)
+    const { instance, component } = h.makeComponent([box])
+    const instanceB = h.placeInstance(component, 4, 0, 0)
+    return { instance, component, instanceB, memberId: h.getComponentMemberObjects(component)[0] }
+  })
+  await page.waitForTimeout(150)
+
+  // Open copy A, pick Push/Pull, and park the cursor on A's top: the idle
+  // look of copy B every comparison below is against.
+  await dblClickWorld(page, ctx, 1, 0.5, 1)
+  await page.waitForTimeout(250)
+  expect(await page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBe(setup.instance)
+  await page.keyboard.press('p')
+  const anchor = px(ctx, 1, 0.5, 1)
+  const target = px(ctx, 1, 0.5, 2)
+  const park = async (): Promise<void> => {
+    await page.mouse.move(anchor.x - 4, anchor.y - 4)
+    await page.waitForTimeout(40)
+    await page.mouse.move(anchor.x, anchor.y)
+    await page.waitForTimeout(200)
+  }
+  await park()
+  const bIdle = await page.screenshot({ clip: bRegion })
+
+  // Arm the drag on A's top and move up 1 m WITHOUT the committing click:
+  // the swept ghost stands on A, and its mirror stands on B. Nothing has
+  // reached the kernel — B's member is still 1 m tall and B still picks as
+  // itself — yet B's pixels changed with the gesture.
+  await page.mouse.down()
+  await page.mouse.up()
+  await page.mouse.move(target.x, target.y, { steps: 10 })
+  await page.waitForTimeout(250)
+  const bMidDrag = await page.screenshot({ clip: bRegion })
+  await page.screenshot({ path: 'test-results/live-siblings-mid-drag.png' })
+  expect(bMidDrag.equals(bIdle), 'copy B shows the drag in flight').toBe(false)
+  const boundsMid = await page.evaluate((id) => window.__hew_test!.getObjectBounds(id), setup.memberId)
+  expect(boundsMid[5]).toBeCloseTo(1, 6)
+  const pickMid = await page.evaluate((r) => window.__hew_test!.pickFace(r.origin, r.dir), downOntoB)
+  expect(pickMid?.instance).toBe(setup.instanceB)
+  expect(await page.evaluate(() => window.__hew_test!.getSessionPlacements())).toEqual([setup.instanceB])
+
+  // Escape cancels the gesture (the session stays open): the mirror goes
+  // with the ghost, and B is pixel-identical to its idle look.
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(100)
+  expect(await page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBe(setup.instance)
+  await park()
+  const bAfterEscape = await page.screenshot({ clip: bRegion })
+  await page.screenshot({ path: 'test-results/live-siblings-after-escape.png' })
+  expect(bAfterEscape.equals(bIdle), 'copy B is back to its idle look after Escape').toBe(true)
+
+  // A committed drag leaves no mirror behind either. The committed look
+  // of B is compared with a baseline that never had a preview at all: the
+  // same pull done through the harness (no gesture, no ghost, no mirror),
+  // so a mirror lingering after the drag's commit would make the two
+  // differ. Then undo, and B is pixel-identical to idle again.
+  await page.mouse.down()
+  await page.mouse.up()
+  await page.mouse.move(target.x, target.y, { steps: 10 })
+  await page.waitForTimeout(150)
+  await page.mouse.down()
+  await page.mouse.up()
+  await page.waitForTimeout(200)
+  const boundsCommitted = await page.evaluate((id) => window.__hew_test!.getObjectBounds(id), setup.memberId)
+  expect(boundsCommitted[5]).toBeCloseTo(2, 3)
+  await park()
+  const bCommitted = await page.screenshot({ clip: bRegion })
+  await page.evaluate(() => window.__hew_test!.undo())
+  await page.waitForTimeout(250)
+  await page.evaluate((id) => {
+    const h = window.__hew_test!
+    const top = h.pickFace([1, 0.5, 5], [0, 0, -1])
+    if (top === null || top.object !== id) throw new Error('the member top did not pick')
+    h.pushPull(top.object, top.face, 1)
+  }, setup.memberId)
+  await page.waitForTimeout(250)
+  const boundsBaseline = await page.evaluate((id) => window.__hew_test!.getObjectBounds(id), setup.memberId)
+  expect(boundsBaseline[5]).toBeCloseTo(2, 3)
+  await park()
+  const bCommittedBaseline = await page.screenshot({ clip: bRegion })
+  expect(bCommitted.equals(bCommittedBaseline), 'the drag’s commit shows the solid alone, like a pull with no gesture').toBe(true)
+  expect(bCommitted.equals(bMidDrag)).toBe(false)
+  await page.evaluate(() => window.__hew_test!.undo())
+  await page.waitForTimeout(250)
+  await park()
+  const bUndone = await page.screenshot({ clip: bRegion })
+  expect(bUndone.equals(bIdle), 'copy B is back to its idle look after commit + undo').toBe(true)
+
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(250)
+  expect(await page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBeNull()
+})
+
 test('live siblings: Push/Pull explains a component face outside its edit session beside the cursor', async ({
   page,
 }) => {

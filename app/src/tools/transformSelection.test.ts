@@ -21,7 +21,9 @@ import {
   dropRidingDrafts,
   planSketchTransforms,
   buildNodePreview,
+  buildSelectionPreview,
 } from './transformSelection'
+import { isSessionGhost } from './transformPreview'
 import { affineToFloat64, applyAffineToPoint, rotateAboutPivotAxis, translationAffine } from './transformMath'
 import { ctxGround, ctxOfPlane, draftRef } from './planeUnits'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -1876,6 +1878,51 @@ describe('buildNodePreview — drawn-shape ghost', () => {
   it('returns null for a stale drawn ref — nothing to preview', () => {
     const preview = buildNodePreview(sceneWithListing([]), null, null, di(999n))
     expect(preview).toBeNull()
+  })
+})
+
+describe('buildNodePreview / buildSelectionPreview — the ghost root the tool drives is marked as session geometry', () => {
+  function sceneWithListing(units: FakeUnit[]): WasmScene {
+    return { plane_units_json: () => listingJson(units) } as unknown as WasmScene
+  }
+  function objectsGroupWith(id: bigint): THREE.Group {
+    const objectsGroup = new THREE.Group()
+    const sub = new THREE.Group()
+    sub.name = `Object_${id}`
+    sub.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial()))
+    objectsGroup.add(sub)
+    return objectsGroup
+  }
+
+  it('a single drawn shape: the LineSegments ghost itself', () => {
+    const preview = buildNodePreview(sceneWithListing([chain(40n, [7n, 8n])]), null, null, di(40n))
+    expect(preview).not.toBeNull()
+    expect(isSessionGhost(preview!)).toBe(true)
+  })
+
+  it('a single world object: the faded clone', () => {
+    const preview = buildNodePreview({} as WasmScene, objectsGroupWith(5n), null, { kind: 'object', id: 5n })
+    expect(preview).not.toBeNull()
+    expect(isSessionGhost(preview!)).toBe(true)
+  })
+
+  it('a multi-node selection: the shared container the tool drives, not just its children', () => {
+    const scene = sceneWithListing([chain(40n, [7n, 8n])])
+    const preview = buildSelectionPreview(scene, objectsGroupWith(5n), null, [{ kind: 'object', id: 5n }, di(40n)])
+    expect(preview).not.toBeNull()
+    expect(preview!.children).toHaveLength(2)
+    expect(isSessionGhost(preview!)).toBe(true)
+  })
+
+  it('a definition sketch through an active instance: the posed wrapper the tool drives', () => {
+    const scene = {
+      sketch_lines: () => new Float32Array([0, 0, 0, 1, 0, 0]),
+      instance_pose: () => new Float64Array([1, 0, 0, 2, 0, 1, 0, 0, 0, 0, 1, 0]),
+    } as unknown as WasmScene
+    const preview = buildNodePreview(scene, null, null, { kind: 'sketch', id: 3n }, 77n)
+    expect(preview).not.toBeNull()
+    expect(preview).toBeInstanceOf(THREE.Group)
+    expect(isSessionGhost(preview!)).toBe(true)
   })
 })
 

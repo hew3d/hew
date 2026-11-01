@@ -480,7 +480,38 @@ cached member mesh it would use for a closed definition, so a session edit
 costs one mesh re-pull per changed object, not one per placement. Every
 mid-session `DocChange` lists the live placements in `instances_touched`
 (`Document::complete_change`; `Scene::session_placements` reads the same
-list), exactly as a definition edit lands every instance there. What a
+list), exactly as a definition edit lands every instance there. The
+gesture BEFORE the commit shows on the siblings too, as it does in
+SketchUp: a tool previews in the session's world coordinates (Push/Pull's
+swept prism, a Move/Rotate/Scale ghost of the selection, Offset's loops —
+each marked as session geometry by the preview builder that makes it,
+`markSessionGhost`), and the viewport's sibling preview mirror
+(`app/src/viewport/siblingPreview.ts`) draws every marked ghost again
+through each sibling's frame — `Scene::session_sibling_frames`, one
+world-to-world affine per shown placement image: the inverse session pose,
+the nesting poses for a placement reached through another definition,
+then the placement's own pose, with the entered instance and any hidden,
+tag-hidden, or isolated-away placement left out. The mirrors are clones
+sharing the ghost's geometry and materials, built when the ghost appears
+and dropped when the preview empties (commit, cancel, Escape, tool
+switch). A snapshot of the ghost tree (node identity, geometry, material,
+transform, visibility) decides what a frame costs: nothing when nothing
+changed, a retarget of the existing clones when the same shape carries
+new geometry or transforms (Push/Pull's fresh prism per move, a driven
+Move/Rotate/Scale ghost, a child swapped in place), a rebuild only when
+the tree's shape changes — so a drag never re-tessellates per move. The
+frames are read when a gesture's first ghost appears and again only when
+the session fingerprint (entered instance, placement list) changes or the
+viewport invalidates them on a document, visibility, or isolation change,
+so a mid-gesture undo or hide never leaves a mirror at a stale pose. Two
+budgets bound a big model: the frame cap (the first N placements in
+kernel order get a mirror) and a total node budget (a big multi-select
+ghost gets fewer full mirrors; one too big for even one mirror is drawn
+on every frame as a wireframe box of its bounds). The out-of-band
+capture render syncs the mirrors too, so a thumbnail never draws clones
+of geometry a tool has already disposed. Cursor cues that are not
+geometry — a protractor, a leader, a station marker — are not marked and
+are not mirrored. What a
 sibling cannot be is an operand of a definition-level op while the loan is
 out: `make_unique`, `transform_instance`, `apply_def_op`,
 `delete_def_member`, and the in-instance surfaces refuse

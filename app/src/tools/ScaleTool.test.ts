@@ -7,6 +7,8 @@ import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
 import { ctxGround, draftRef } from './planeUnits'
 import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
+import { SiblingPreviewMirror } from '../viewport/siblingPreview'
+import { isSessionGhost } from './transformPreview'
 
 /** `updateGripScale` now takes a `worldPerPixel` callback (the CameraRig
  * form, docs/design/camera.md §1) instead of a raw `(camera, viewportH)`
@@ -912,5 +914,32 @@ describe('ScaleTool — a clicked factor is exactly the displayed factor', () =>
   it('a hard-snapped click keeps the raw ratio', () => {
     expect(drag('endpoint').z).toBeCloseTo(1.61374, 12)
     expect(drag('endpoint').z).not.toBe(1.61)
+  })
+})
+
+describe('ScaleTool — the drag ghost is session geometry, mirrored onto sibling placements', () => {
+  it('grabbing a grip puts a marked ghost in the preview (the gizmo is not one); the mirror shows it and clears with Esc', () => {
+    const ID = 9n
+    const objectsGroup = makeBoxObjectsGroup(ID, [0, 0, 0], [2, 2, 1])
+    const { tool, preview } = makeTool([{ kind: 'object', id: ID } as NodeRef], objectsGroup)
+    const root = new THREE.Group()
+    const mirror = new SiblingPreviewMirror({ source: preview, root, frames: () => [1, 0, 0, 4, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 7, 0, 0, 1, 0] })
+
+    tool.activate()
+    expect(preview.children.filter(isSessionGhost)).toHaveLength(0) // gizmo only
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(0)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1])) // grab a grip
+    expect(tool.capturingInput()).toBe(true)
+    const ghosts = preview.children.filter(isSessionGhost)
+    expect(ghosts).toHaveLength(1)
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(2)
+    expect((root.children[1] as THREE.Group).children).toHaveLength(1)
+
+    tool.onKey({ key: 'Escape' } as KeyboardEvent)
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(0)
   })
 })

@@ -16,6 +16,8 @@ import type { Ray } from '../viewport/math'
 import { ctxOfPlane, keyToId } from './planeUnits'
 import { draftMock, type DraftLog } from './draftMock'
 import { planeUnitsMock, ringUnit, hexKey, type MockListing, type MockRegion } from './planeUnitsMock'
+import { SiblingPreviewMirror } from '../viewport/siblingPreview'
+import { isSessionGhost } from './transformPreview'
 
 /** Ray straight down at (x, y). */
 function rayAt(x: number, y: number): Ray {
@@ -913,5 +915,28 @@ describe('OffsetTool — a clicked distance is exactly the displayed distance', 
     } finally {
       setLengthUnit(prev)
     }
+  })
+})
+
+describe('OffsetTool — the offset loops are session geometry, mirrored onto sibling placements', () => {
+  it('the dragged loops are marked ghosts; the mirror shows one clone per loop per frame and clears with Esc', () => {
+    const regionPick = makeRegionPick(9n, 7n)
+    const scene = makeWasmScene({ regionPick })
+    const { tool, preview } = makeTool(scene)
+    const root = new THREE.Group()
+    const mirror = new SiblingPreviewMirror({ source: preview, root, frames: () => [1, 0, 0, 4, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 7, 0, 0, 1, 0] })
+
+    tool.onPointerDown(null, rayAt(1, 1))
+    tool.onPointerMove(null, rayAt(1, 0.5))
+    const ghosts = preview.children.filter(isSessionGhost)
+    expect(ghosts.length).toBeGreaterThan(0)
+    expect(ghosts).toHaveLength(preview.children.length) // every loop, nothing else
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(2)
+    expect((root.children[0] as THREE.Group).children).toHaveLength(ghosts.length)
+
+    tool.onKey({ key: 'Escape', preventDefault: () => {} } as unknown as KeyboardEvent)
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(0)
   })
 })

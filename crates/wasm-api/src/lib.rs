@@ -2201,6 +2201,16 @@ impl SnapJs {
     pub fn projected_from(&self) -> Option<Vec<f64>> {
         self.snap.projected_from.map(|p| vec![p.x, p.y, p.z])
     }
+
+    /// Whether this `"intersection"` snap is an edge passing THROUGH a face
+    /// of another owner (`inference::Snap::pierced_face` is set) rather
+    /// than two edges, or an edge and a guide or axis, crossing. The edge
+    /// is the snap's provenance as usual; a tool words the point from
+    /// this ("where the edge meets the face") without a second lookup.
+    /// `false` for every other snap.
+    pub fn pierces_face(&self) -> bool {
+        self.snap.pierced_face.is_some()
+    }
 }
 
 // ------------------------------------------------------------------- scene
@@ -5223,6 +5233,65 @@ impl Scene {
             .iter()
             .map(|i| i.data().as_ffi())
             .collect()
+    }
+
+    /// Where else the innermost open component session's live geometry is
+    /// drawn: one row-major 3×4 affine (12 floats, concatenated) per shown
+    /// placement image of the definition on loan, each mapping the
+    /// session's WORLD coordinates — what every tool inside the session
+    /// previews in — onto that sibling's rendering (ARCHITECTURE.md 2.11:
+    /// the inverse session pose, then the placement's own pose, with the
+    /// nesting poses between for a placement reached through another
+    /// definition). A drag preview built once in session coordinates is
+    /// drawn again through each frame, so every copy shows the gesture as
+    /// it happens, the way the committed edit will land on it. The entered
+    /// instance is not listed (its image IS the session geometry); a
+    /// placement hidden by eye or tag, isolated away, or reached through a
+    /// hidden member is not either. Empty when no component session is
+    /// open. Read-only; one call per gesture is the intended cost.
+    pub fn session_sibling_frames(&self) -> Vec<f64> {
+        let Some(def) = self.doc.explode_session_component() else {
+            return Vec::new();
+        };
+        // The inverse session pose, as the sketch frame already reads it.
+        let Some((_, pose_inv)) = self.doc.def_rendered_sketches(def) else {
+            return Vec::new();
+        };
+        let session_objects: std::collections::BTreeSet<ObjectId> = self
+            .doc
+            .explode_session_objects()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let mut frames: Vec<Transform> = Vec::new();
+        for i in self.doc.session_placements() {
+            if self.hidden_instances.contains(&i) {
+                continue;
+            }
+            let (Some(pose), Some(idef)) = (self.doc.instance_pose(i), self.doc.instance_def(i))
+            else {
+                continue;
+            };
+            if idef == def {
+                // A direct sibling: the one image the loan rule gives it.
+                frames.push(pose_inv.then(&pose));
+                continue;
+            }
+            // A placement of a definition that nests the one on loan: the
+            // expansion already composes the inverse session pose with the
+            // nesting poses for each session object; every distinct local
+            // pose a shown session object lands at is one image.
+            let placements = self.doc.expanded_def_placements(idef);
+            let shown = self.doc.expanded_def_placements_shown(idef);
+            let mut locals: Vec<Transform> = Vec::new();
+            for ((o, local), s) in placements.iter().zip(shown) {
+                if s && session_objects.contains(o) && !locals.contains(local) {
+                    locals.push(*local);
+                }
+            }
+            frames.extend(locals.iter().map(|l| l.then(&pose)));
+        }
+        frames.iter().flat_map(|t| t.to_affine()).collect()
     }
 
     /// The live objects inside the open explode session (original members
@@ -11325,6 +11394,241 @@ mod tests {
             .pick_face(5.0, 0.5, 5.0, 0.0, 0.0, -1.0)
             .expect("pickable after close");
         assert!((pick.depth() - 3.0).abs() < 1e-6);
+    }
+
+    /// One row-major 3×4 affine per 12 floats of `session_sibling_frames`.
+    fn frames_of(scene: &Scene) -> Vec<[f64; 12]> {
+        let flat = scene.session_sibling_frames();
+        assert_eq!(flat.len() % 12, 0, "whole affines only");
+        flat.chunks(12)
+            .map(|c| <[f64; 12]>::try_from(c).unwrap())
+            .collect()
+    }
+
+    fn affine_close(a: &[f64; 12], b: &[f64; 12]) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9)
+    }
+
+    /// `affine` applied to a point, by hand (independent of `Transform`).
+    fn affine_apply(a: &[f64; 12], p: [f64; 3]) -> [f64; 3] {
+        [
+            a[0] * p[0] + a[1] * p[1] + a[2] * p[2] + a[3],
+            a[4] * p[0] + a[5] * p[1] + a[6] * p[2] + a[7],
+            a[8] * p[0] + a[9] * p[1] + a[10] * p[2] + a[11],
+        ]
+    }
+
+    fn point_close(a: [f64; 3], b: [f64; 3]) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9)
+    }
+
+    /// Where a sibling draws the session's world geometry
+    /// (`session_sibling_frames`, ARCHITECTURE.md 2.11): the inverse
+    /// session pose then the sibling's own. The entered copy is ROTATED
+    /// and uniformly scaled, so the two orders do not commute and a
+    /// swapped composition lands the frame elsewhere; one sibling is
+    /// non-uniformly scaled and one is mirrored (both legal for a
+    /// placement that is not entered). The entered copy is never listed,
+    /// a hidden sibling is not either, and there is nothing outside a
+    /// session.
+    #[test]
+    fn sibling_frames_map_session_world_coordinates_onto_each_other_copy() {
+        let mut scene = Scene::new();
+        assert!(scene.session_sibling_frames().is_empty());
+        let member = scene_box(&mut scene, 0.0, 0.0, 2.0, 1.0, 1.0);
+        let entered = scene.make_component(&[0], &[member]).unwrap();
+        let component = scene.instance_def(entered).unwrap();
+        // The copy to enter: scale 2, rotate 90° about Z, translate (4, 0, 0)
+        // — E(q) = (4 − 2·q.y, 2·q.x, 2·q.z). `transform_instance` composes
+        // onto the identity pose it was made with.
+        let e = [0.0, -2.0, 0.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0];
+        scene.transform_instance(entered, &e).unwrap();
+        // Siblings: the definition as authored, at the origin…
+        let plain = scene
+            .place_instance(
+                component,
+                &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        // …stretched ×2 along Y at (0, 7, 0)…
+        let stretched = scene
+            .place_instance(
+                component,
+                &[1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 7.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        // …and mirrored across X at (10, 0, 0).
+        let mirrored = scene
+            .place_instance(
+                component,
+                &[-1.0, 0.0, 0.0, 10.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        assert!(scene.session_sibling_frames().is_empty(), "no session open");
+
+        scene.open_explode_session(entered).unwrap();
+        let frames = frames_of(&scene);
+        assert_eq!(
+            frames.len(),
+            3,
+            "three siblings, the entered copy not among them: {frames:?}"
+        );
+        // The plain sibling's frame is E⁻¹ exactly: q = ((p.y)/2, (4 − p.x)/2, p.z/2).
+        let e_inv = [0.0, 0.5, 0.0, 0.0, -0.5, 0.0, 0.0, 2.0, 0.0, 0.0, 0.5, 0.0];
+        assert!(
+            frames.iter().any(|f| affine_close(f, &e_inv)),
+            "plain sibling frame = E⁻¹: {frames:?}"
+        );
+        // The mirrored sibling's frame is M∘E⁻¹ exactly.
+        let m_e_inv = [
+            0.0, -0.5, 0.0, 10.0, -0.5, 0.0, 0.0, 2.0, 0.0, 0.0, 0.5, 0.0,
+        ];
+        assert!(
+            frames.iter().any(|f| affine_close(f, &m_e_inv)),
+            "mirrored sibling frame = M∘E⁻¹: {frames:?}"
+        );
+        // Every frame maps the entered copy's image of the box corner
+        // q = (2, 1, 1) — session world point E(q) = (2, 4, 2) — onto that
+        // sibling's own image of q.
+        let p = [2.0, 4.0, 2.0];
+        let images: Vec<[f64; 3]> = frames.iter().map(|f| affine_apply(f, p)).collect();
+        for want in [[2.0, 1.0, 1.0], [2.0, 9.0, 1.0], [8.0, 1.0, 1.0]] {
+            assert!(
+                images.iter().any(|&got| point_close(got, want)),
+                "no frame maps E(q) onto {want:?}: {images:?}"
+            );
+        }
+
+        // A sibling hidden by eye or tag, or isolated away (the app pushes
+        // all three through `set_hidden`) draws nothing, so it has no frame.
+        scene.set_hidden(&[], &[stretched, mirrored]);
+        let frames = frames_of(&scene);
+        assert_eq!(frames.len(), 1);
+        assert!(affine_close(&frames[0], &e_inv));
+        scene.set_hidden(&[], &[]);
+        assert_eq!(frames_of(&scene).len(), 3);
+        let _ = plain;
+
+        scene.close_explode_session().unwrap();
+        assert!(scene.session_sibling_frames().is_empty());
+    }
+
+    /// A placement reached through ANOTHER definition that nests the one
+    /// on loan is an image too, at the nesting pose composed in: the
+    /// session's world coordinates, through the inverse session pose, the
+    /// nested placement's local pose, then the outer instance's own — the
+    /// outer pose is a rotation, so the order shows. A nested placement
+    /// hidden by eye or by tag inside its definition, and an outer
+    /// instance hidden or isolated away, have no frame.
+    #[test]
+    fn sibling_frames_compose_nesting_poses_for_placements_inside_other_definitions() {
+        let mut scene = Scene::new();
+        let member = scene_box(&mut scene, 0.0, 0.0, 2.0, 1.0, 1.0);
+        let inner_copy = scene.make_component(&[0], &[member]).unwrap();
+        let inner = scene.instance_def(inner_copy).unwrap();
+        // A second placement of the inner definition at L = (0, 3, 0),
+        // wrapped in an outer definition, whose instance is then posed at
+        // W = rotate 90° about Z, translate (10, 0, 0).
+        let nested = scene
+            .place_instance(
+                inner,
+                &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 3.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let outer_copy = scene.make_component(&[2], &[nested]).unwrap();
+        let outer = scene.instance_def(outer_copy).unwrap();
+        scene
+            .transform_instance(
+                outer_copy,
+                &[0.0, -1.0, 0.0, 10.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        assert_ne!(inner, outer);
+
+        // Enter the inner copy at the origin (session world = definition
+        // local): the one other image is W∘L, q ↦ (7 − q.y, q.x, q.z).
+        scene.open_explode_session(inner_copy).unwrap();
+        assert_eq!(scene.session_placements(), vec![outer_copy]);
+        let frames = frames_of(&scene);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        let w_l = [0.0, -1.0, 0.0, 7.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        assert!(affine_close(&frames[0], &w_l), "{frames:?}");
+        assert!(point_close(
+            affine_apply(&frames[0], [2.0, 1.0, 1.0]),
+            [6.0, 2.0, 1.0]
+        ));
+
+        // The nested placement hidden inside its definition (eye): no image.
+        scene.set_node_user_hidden(2, nested, true).unwrap();
+        assert!(frames_of(&scene).is_empty(), "eye-hidden member");
+        scene.set_node_user_hidden(2, nested, false).unwrap();
+        assert_eq!(frames_of(&scene).len(), 1);
+        // The nested placement on a hidden tag: no image.
+        scene
+            .add_node_tag(2, nested, vec!["Fixtures".to_string()])
+            .unwrap();
+        scene.set_tag_hidden("Fixtures".to_string(), true);
+        assert!(frames_of(&scene).is_empty(), "tag-hidden member");
+        scene.set_tag_hidden("Fixtures".to_string(), false);
+        assert_eq!(frames_of(&scene).len(), 1);
+        // The outer instance hidden or isolated away (`set_hidden`): no image.
+        scene.set_hidden(&[], &[outer_copy]);
+        assert!(frames_of(&scene).is_empty(), "hidden outer placement");
+        scene.set_hidden(&[], &[]);
+        assert_eq!(frames_of(&scene).len(), 1);
+        scene.close_explode_session().unwrap();
+    }
+
+    /// `SnapJs::pierces_face` tells the app which Intersection it holds: an
+    /// edge passing through a face of another Object (the panel's top edge
+    /// entering the wall's face, as in e2e/edge-pierce-snap.spec.ts) is
+    /// one, a named point is not.
+    #[test]
+    fn a_snap_reports_whether_its_intersection_pierces_a_face() {
+        let mut scene = Scene::new();
+        let _wall = scene_box(&mut scene, 1.0, 0.0, 1.5, 2.0, 1.0);
+        let _panel = scene_box(&mut scene, 0.0, 0.9, 1.3, 1.0, 0.6);
+        // Aim at the piercing (1, 0.9, 0.6) from in front of the wall, left
+        // of the panel and above it, two metres out.
+        let pierce = [1.0, 0.9, 0.6];
+        let dir: [f64; 3] = [-2.0, -0.6, 0.9];
+        let n = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        let d = [dir[0] / n, dir[1] / n, dir[2] / n];
+        let o = [
+            pierce[0] + d[0] * 2.0,
+            pierce[1] + d[1] * 2.0,
+            pierce[2] + d[2] * 2.0,
+        ];
+        let snap = scene
+            .snap(
+                o[0], o[1], o[2], -d[0], -d[1], -d[2], 0.002, None, None, None, None, None, None,
+                None, None, None,
+            )
+            .unwrap()
+            .expect("snaps at the piercing");
+        assert_eq!(snap.kind(), "intersection");
+        assert!(
+            snap.pierces_face(),
+            "the panel's edge pierces the wall's face"
+        );
+        assert!(point_close([snap.x(), snap.y(), snap.z()], pierce));
+
+        // The panel's top-front corner (0, 0.9, 0.6): an endpoint, no pierce.
+        let corner = [0.0, 0.9, 0.6];
+        let o = [
+            corner[0] + d[0] * 2.0,
+            corner[1] + d[1] * 2.0,
+            corner[2] + d[2] * 2.0,
+        ];
+        let snap = scene
+            .snap(
+                o[0], o[1], o[2], -d[0], -d[1], -d[2], 0.002, None, None, None, None, None, None,
+                None, None, None,
+            )
+            .unwrap()
+            .expect("snaps at the corner");
+        assert_eq!(snap.kind(), "endpoint");
+        assert!(!snap.pierces_face());
     }
 
     /// `Scene::export` reaches the exact same shared writer

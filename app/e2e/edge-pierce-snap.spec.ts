@@ -98,13 +98,15 @@ test('where a panel’s edge enters a wall’s face the piercing snaps, and Tape
   await hover(page, normal, PIERCE, 8, -6)
   expect(await chip(page), 'Line 10 px off the piercing').toContain('Intersection')
 
-  // Tape Measure: the piercing snaps the same way, the hint says a click
-  // there measures from it, and the click starts a measurement rather
-  // than a parallel guide off the panel's edge.
+  // Tape Measure: the piercing snaps the same way, the hint names what the
+  // person sees — an edge meeting a face, not two edges crossing (the
+  // edge × edge wording is edge-crossing-snap.spec.ts's) — and the click
+  // starts a measurement rather than a parallel guide off the panel's edge.
   await page.getByRole('radio', { name: 'Tape Measure' }).click()
   await hover(page, normal, PIERCE, 2, 1)
   expect(await chip(page), 'Tape Measure at normal zoom').toContain('Intersection')
-  await expect(page.getByText('Click to measure from the crossing.', { exact: true })).toBeVisible()
+  await expect(page.getByText('Click to measure from where the edge meets the face.', { exact: true })).toBeVisible()
+  expect(await page.getByText('Click to measure from the crossing.', { exact: true }).count()).toBe(0)
   await page.mouse.down()
   await page.mouse.up()
   await expect(page.getByText('Click the second point to read the distance', { exact: false })).toBeVisible()

@@ -54,6 +54,7 @@ import {
   buildInstancePreviewClone,
   buildInstanceMemberPreviewClone,
   buildSketchPreviewClone,
+  markSessionGhost,
 } from './transformPreview'
 import {
   allFree,
@@ -1383,9 +1384,11 @@ export function buildNodePreview(
       0, 0, 0, 1,
     )
     posed.add(preview)
+    // The wrapper is what the tool drives, so it is the ghost's root for
+    // the sibling preview mirror (markSessionGhost), not the posed leaf.
     const wrapper = new THREE.Group()
     wrapper.add(posed)
-    return wrapper
+    return markSessionGhost(wrapper)
   }
   if (node.kind === 'group') {
     // A group's renderable leaves are its world objects AND its instances;
@@ -1456,5 +1459,7 @@ export function buildSelectionPreview(
     )
     if (child !== null) group.add(child)
   }
-  return group.children.length > 0 ? group : null
+  // The shared group is the one object the tool drives — the ghost root
+  // the sibling preview mirror clones and follows (markSessionGhost).
+  return group.children.length > 0 ? markSessionGhost(group) : null
 }

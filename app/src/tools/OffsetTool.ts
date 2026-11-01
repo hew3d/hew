@@ -42,6 +42,7 @@ import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retyp
 import { displayedLength } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
+import { markSessionGhost } from './transformPreview'
 import { signedOffsetDistance, decodeOffsetLoops, loopToSegmentPairs } from './offsetMath'
 import { runDraft, refreshAfterDraft } from './draftCommit'
 import { defaultFaceEligible, ineligibleFaceHint, sessionIsOpen, EDIT_CONTEXT_HINT_CODE, type FaceEligible } from './faceDraw'
@@ -598,7 +599,9 @@ export class OffsetTool implements Tool {
 
     for (const loop of loops) {
       if (loop.length < 9) continue
-      this.preview.add(makeFatSegments(loopToSegmentPairs(loop), PREVIEW_LINE_STYLE))
+      // The offset loops are the geometry the commit draws, so inside a
+      // component session every other copy shows them too (markSessionGhost).
+      this.preview.add(markSessionGhost(makeFatSegments(loopToSegmentPairs(loop), PREVIEW_LINE_STYLE)))
     }
   }
 

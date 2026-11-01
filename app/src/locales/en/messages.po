@@ -1586,6 +1586,10 @@ msgstr "Click to drop an angular guide at the measured angle — or type exact d
 msgid "Click to measure from the crossing."
 msgstr "Click to measure from the crossing."
 
+#: src/tools/TapeMeasureTool.ts
+msgid "Click to measure from where the edge meets the face."
+msgstr "Click to measure from where the edge meets the face."
+
 #: src/tools/TextPlaceTool.ts
 msgid "Click to place — 3D Text places at the top level while editing a component."
 msgstr "Click to place — 3D Text places at the top level while editing a component."

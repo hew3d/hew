@@ -119,6 +119,7 @@ describe('SnapService — precision mode', () => {
       kind: () => 'endpoint',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
       object: () => undefined,
       instance: () => undefined,
       element: () => 7n,
@@ -165,6 +166,7 @@ describe('SnapService — precision mode', () => {
       kind: () => 'center',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -209,6 +211,7 @@ describe('SnapService — precision mode', () => {
       kind: () => 'on-axis',
       direction: () => new Float64Array([1, 0, 0]),
       projected_from: () => undefined,
+      pierces_face: () => false,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -244,6 +247,7 @@ describe('SnapService — precision mode', () => {
       kind: () => 'midpoint',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -275,6 +279,7 @@ describe('SnapService — precision mode', () => {
       kind: () => 'midpoint',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -315,6 +320,7 @@ describe('SnapService — ApertureBasis (projection-aware aperture, camera.md §
     kind: () => 'endpoint',
     direction: () => undefined,
     projected_from: () => undefined,
+    pierces_face: () => false,
     object: () => undefined,
     instance: () => undefined,
     element: () => 7n,
@@ -377,6 +383,7 @@ describe('SnapService — clearHold (finding 5a: discrete-tap hysteresis)', () =
       kind: () => 'endpoint',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
       object: () => undefined,
       instance: () => undefined,
       element: () => 7n,
@@ -427,6 +434,7 @@ describe('SnapService — apertureScaleOverride (finding 5b: tap-inspect vs. coa
     kind: () => 'endpoint',
     direction: () => undefined,
     projected_from: () => undefined,
+    pierces_face: () => false,
     object: () => undefined,
     instance: () => undefined,
     element: () => 7n,
@@ -477,6 +485,7 @@ describe('SnapService — facesOnly (design v1.1 Lane E "Push/Pull face-first")'
       kind: () => kind,
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -544,5 +553,33 @@ describe('SnapService — facesOnly (design v1.1 Lane E "Push/Pull face-first")'
     expect(fromKernel).toBe(false)
     expect(snap?.kind).toBe('plane')
     expect(snapFn.mock.calls.length).toBe(1) // only the (missed) acquire query — no hold-resist re-query
+  })
+})
+
+describe('snapJsToSnap — pierces_face', () => {
+  const snapJs = (pierces: boolean) => ({
+    x: () => 1, y: () => 0.9, z: () => 0.6,
+    kind: () => 'intersection',
+    direction: () => undefined,
+    projected_from: () => undefined,
+    pierces_face: () => pierces,
+    object: () => 7n,
+    instance: () => undefined,
+    element: () => 3n,
+    element_kind: () => 'edge',
+    sketch: () => undefined,
+    sketch_region: () => undefined,
+    sketch_curve: () => undefined,
+    free: () => {},
+  })
+
+  it('carries the kernel’s pierced-face flag onto the snap, true and false alike', () => {
+    const pierced = new SnapService({ snap: vi.fn(() => snapJs(true)) } as unknown as Scene)
+    const snap = pierced.resolve(DOWN, 800, PERSPECTIVE_45).snap
+    expect(snap?.kind).toBe('intersection')
+    expect(snap?.piercesFace).toBe(true)
+
+    const crossing = new SnapService({ snap: vi.fn(() => snapJs(false)) } as unknown as Scene)
+    expect(crossing.resolve(DOWN, 800, PERSPECTIVE_45).snap?.piercesFace).toBe(false)
   })
 })

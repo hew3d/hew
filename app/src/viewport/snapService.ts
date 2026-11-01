@@ -123,6 +123,7 @@ function snapJsToSnap(s: SnapJs): Snap {
       kind: s.kind(),
       direction: dir !== undefined ? [dir[0], dir[1], dir[2]] : undefined,
       projectedFrom: from !== undefined ? [from[0], from[1], from[2]] : undefined,
+      piercesFace: s.pierces_face(),
       object: s.object(),
       instance: s.instance(),
       element: elem,

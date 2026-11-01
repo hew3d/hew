@@ -14,9 +14,10 @@
  *        snaps, which carry the analytic line's direction) → the same
  *        PARALLEL-GUIDE mode, sourced from the infinite analytic line.
  *      - On an edge crossing ('intersection' snap — the point where two
- *        edges pass through each other) → MEASURE mode from the crossing,
- *        though the snap carries the first edge's provenance: the crossing
- *        is a point, and which edge it would offset is a coin toss.
+ *        edges pass through each other, or where an edge passes through a
+ *        face: `piercesFace`) → MEASURE mode from the crossing, though the
+ *        snap carries the first edge's provenance: the crossing is a
+ *        point, and which edge it would offset is a coin toss.
  *      - Anywhere else → MEASURE mode. Remembers the picked point as P0.
  *   2. Pointer move previews:
  *      - Parallel mode, no resolved offset plane (`_resolveOffsetPlane`
@@ -342,8 +343,13 @@ function noOffsetSideMessage(): string {
   return t`Move the cursor to the side the guide should go, then type the distance.`
 }
 
-/** Idle hint while the cursor is on an edge crossing (`isCrossingSnap`). */
-const crossingHint = (): string => t`Click to measure from the crossing.`
+/** Idle hint while the cursor is on an edge crossing (`isCrossingSnap`):
+ *  two edges crossing, or an edge passing through a face (`piercesFace`),
+ *  named as the person sees it. */
+const crossingHint = (piercesFace: boolean): string =>
+  piercesFace
+    ? t`Click to measure from where the edge meets the face.`
+    : t`Click to measure from the crossing.`
 
 /** Whether `snap` is an edge-crossing snap (`SnapKind::Intersection` —
  *  "intersection" across the wasm boundary): a first click there measures
@@ -641,14 +647,16 @@ export class TapeMeasureTool implements Tool {
         if (this._recall !== null) {
           return t`Type a distance and press Enter to resize the model to it — or click a point to measure from.`
         }
-        if (this._hoverCrossing) return crossingHint()
+        if (this._hoverCrossing !== null) return crossingHint(this._hoverCrossing.piercesFace)
         return t`Click a point to measure from — or click an edge to drop a parallel guide.`
     }
   }
 
-  /** Whether the last idle hover sat on an edge crossing (`isCrossingSnap`),
-   *  for the idle hint. Set by every `onPointerMove`; false mid-gesture. */
-  private _hoverCrossing = false
+  /** The edge crossing the last idle hover sat on (`isCrossingSnap`), for
+   *  the idle hint — which of its two shapes (edge × edge, or an edge
+   *  through a face) decides the wording. Set by every `onPointerMove`;
+   *  null off a crossing and mid-gesture. */
+  private _hoverCrossing: { piercesFace: boolean } | null = null
 
   private stage: Stage = { kind: 'idle' }
   private preview: THREE.Group
@@ -1092,6 +1100,8 @@ export class TapeMeasureTool implements Tool {
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
     this._hoverCrossing = this.stage.kind === 'idle' && isCrossingSnap(snap)
+      ? { piercesFace: snap?.piercesFace === true }
+      : null
     if (snap === null) return
 
     if (this.stage.kind === 'parallel') {

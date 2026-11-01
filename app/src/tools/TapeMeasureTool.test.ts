@@ -1855,4 +1855,41 @@ describe('TapeMeasureTool — starts from an edge-crossing snap (#51b)', () => {
     tool.onPointerMove(null, RAY)
     expect(tool.statusHint()).toBe(idle)
   })
+
+  // Where an edge of one Object passes THROUGH a face of another (a panel
+  // set into a wall), the snap is an Intersection too, carrying the edge as
+  // its provenance — but the person sees an edge meeting a face, not two
+  // edges crossing, and the hint says so.
+  const pierceSnap = (): Snap => makeSnap({ ...crossingSnap(), piercesFace: true })
+
+  it('hovering where an edge pierces a face names the face in the hint', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    const idle = 'Click a point to measure from — or click an edge to drop a parallel guide.'
+
+    tool.onPointerMove(pierceSnap(), RAY)
+    expect(tool.statusHint()).toBe('Click to measure from where the edge meets the face.')
+    // Back to an edge × edge crossing: the plain crossing wording.
+    tool.onPointerMove(makeSnap({ ...crossingSnap(), piercesFace: false }), RAY)
+    expect(tool.statusHint()).toBe('Click to measure from the crossing.')
+    tool.onPointerMove(pierceSnap(), RAY)
+    tool.onPointerMove(null, RAY)
+    expect(tool.statusHint()).toBe(idle)
+  })
+
+  it('a click where an edge pierces a face measures from the point, not a guide off the edge', () => {
+    const { scene } = makeWasmScene()
+    const points: (readonly [number, number, number][])[] = []
+    const onGesturePoint = vi.fn((p: readonly [number, number, number][]) => points.push(p))
+    const { tool } = makeTool(scene, { onGesturePoint })
+
+    tool.onPointerMove(pierceSnap(), RAY)
+    tool.onPointerDown(pierceSnap(), RAY)
+    expect(scene.edge_endpoints).not.toHaveBeenCalled()
+    expect(points[0]).toEqual([CROSSING])
+    expect(tool.statusHint()).toMatch(/^Click the second point to read the distance/)
+    // Mid-gesture the idle crossing hint is gone, whatever the cursor is over.
+    tool.onPointerMove(pierceSnap(), RAY)
+    expect(tool.statusHint()).not.toContain('where the edge meets the face')
+  })
 })
