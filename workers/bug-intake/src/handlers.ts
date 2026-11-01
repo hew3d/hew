@@ -22,15 +22,24 @@
  * of those three is its own exported handler below.
  */
 
-import { MAX_UPLOAD_BYTES, PIECE_BYTES, CONTRACT_FORMAT, INDEX_DO_NAME } from './constants.ts'
+import {
+  MAX_UPLOAD_BYTES,
+  PIECE_BYTES,
+  CONTRACT_FORMAT,
+  INDEX_DO_NAME,
+  THREAD_MESSAGE_MAX_CHARS,
+  THREAD_BODY_MAX_BYTES,
+  STATUS_VERSION_MAX_CHARS,
+} from './constants.ts'
 import { readBodyCapped, TOO_LARGE } from './bytes.ts'
 import { decompressAndValidateHead, HeadDecompressor, parseHeadForDisplay } from './headScan.ts'
 import { generateReportId, isValidReportId, normalizeReportId } from './id.ts'
 import { hashClient } from './clientHash.ts'
-import { generateUploadToken, hashToken } from './uploadToken.ts'
-import { sendNotification, type RawMailSender } from './email.ts'
+import { generateUploadToken, generateFollowSecret, hashToken } from './uploadToken.ts'
+import { sendNotification, sendThreadNotification, formatBytes, type RawMailSender } from './email.ts'
 import { verifyAccessJwt, type VerifyOptions } from './adminAuth.ts'
-import { renderList, renderDetail, escapeHtml } from './adminPages.ts'
+import { renderList, renderDetail, renderFormError, escapeHtml, CANNED_REPLIES } from './adminPages.ts'
+import { isThreadStatus } from './threadStore.ts'
 import type { BugIntakeEnv } from './types.ts'
 
 /** The only origin admin mutation forms are ever legitimately submitted
@@ -69,6 +78,35 @@ function dropStub(env: BugIntakeEnv, id: string) {
   return env.REPORT_DROP.get(env.REPORT_DROP.idFromName(id))
 }
 
+function threadStub(env: BugIntakeEnv, id: string) {
+  return env.REPORT_THREAD.get(env.REPORT_THREAD.idFromName(id))
+}
+
+/** A thread message's length rule: 1 to `THREAD_MESSAGE_MAX_CHARS`
+ *  characters counted as Unicode code points (what a Rust client's
+ *  `chars().count()` counts), and not only whitespace. */
+function validMessageText(text: unknown): text is string {
+  if (typeof text !== 'string' || text.trim().length === 0) return false
+  return [...text].length <= THREAD_MESSAGE_MAX_CHARS
+}
+
+/** The parent-thread line for a follow-up attachment — "kitchen.skp (46.5
+ *  MB)". The file name comes from the follow-up bundle's description,
+ *  which clients write as "File for report HEW-XXXX-XXXX: <name>" on its
+ *  first line (the head scan reads only `format`/`report`/`system`, never
+ *  the `attachment` key itself); the size is the stored compressed bundle,
+ *  the one size the Worker knows. A description in any other shape falls
+ *  back to "A file". */
+export function attachmentLabel(description: string, sizeBytes: number): string {
+  const firstLine = description.split(/\r?\n/, 1)[0]
+  // A greedy capture trimmed afterwards — not a lazy `(.+?)\s*$`, which
+  // backtracks quadratically on a long run of spaces.
+  const match = /^File for report HEW-[0-9A-Z]{4}-[0-9A-Z]{4}:(.*)$/i.exec(firstLine)
+  const trimmed = match ? match[1].trim() : ''
+  const name = trimmed === '' ? 'A file' : [...trimmed].slice(0, 200).join('')
+  return `${name} (${formatBytes(sizeBytes)})`
+}
+
 /** Unconditionally deletes a report's (possibly partial) `ReportDrop` and
  *  releases its `ReportIndex` reservation — the cleanup abandonment needs,
  *  at any point in the upload (docs/design/report-bug.md §4: "A 400 on a
@@ -89,6 +127,20 @@ function dropStub(env: BugIntakeEnv, id: string) {
  *  DIFFERENT: it fails before any `ReportStore` call ever sees a token, so
  *  it goes through `ReportStore.abandon`/`ReportDrop.abandon` instead,
  *  which checks the token itself — see `handlePutPiece`. */
+/** A `ReportDrop`'s alarm (retention or abandonment) for `reportId`, after
+ *  the drop has read its id and before it wipes its bytes:
+ *  `ReportIndex.bundleExpired`, then — when that removed the row (nobody
+ *  follows the report) — the report's `ReportThread` too. Such a thread can
+ *  only be a secretless one the admin created by replying or setting a
+ *  status (`adminThreadFor`); with its row gone nothing could ever reach or
+ *  delete it again. `ReportThread.destroy` is idempotent and writes nothing
+ *  for an id with no thread. Throws on failure, so the drop's alarm keeps
+ *  its bytes and retries the whole step. */
+export async function expireReport(env: BugIntakeEnv, reportId: string): Promise<void> {
+  const rowGone = await indexStub(env).bundleExpired(reportId)
+  if (rowGone) await threadStub(env, reportId).destroy()
+}
+
 async function abandonUpload(env: BugIntakeEnv, id: string): Promise<void> {
   try {
     await dropStub(env, id).destroy()
@@ -161,6 +213,42 @@ export async function handleStart(request: Request, env: BugIntakeEnv): Promise<
     return jsonResponse(503, { error: 'unavailable' })
   }
 
+  // A follow-up attachment (docs/design/follow-a-report.md §5.6): the
+  // parent's follow secret must verify before anything is read or
+  // reserved; every failure is the same 403, whether the parent id is
+  // malformed, unknown, unfollowed, or the secret is wrong. `Hew-Follow` is
+  // ignored on a follow-up, so attachments never get threads of their own.
+  const followUpHeader = request.headers.get('hew-follow-up')
+  let parentId: string | null = null
+  if (followUpHeader !== null) {
+    const secret = request.headers.get('hew-follow-secret') ?? ''
+    const rawParent = followUpHeader.trim()
+    if (secret === '' || !isValidReportId(rawParent)) {
+      return jsonResponse(403, { error: 'forbidden' })
+    }
+    parentId = normalizeReportId(rawParent)
+    let verified: boolean
+    try {
+      verified = await threadStub(env, parentId).verifySecret(await hashToken(secret))
+    } catch (err) {
+      console.error(`bug-intake: verifySecret failed for follow-up of ${parentId}:`, err)
+      return jsonResponse(503, { error: 'unavailable' })
+    }
+    if (!verified) return jsonResponse(403, { error: 'forbidden' })
+    // The thread alone is not enough: the parent must also be a committed
+    // report the index still lists, so an attachment never hangs off a
+    // row that is gone or was never finished.
+    let parentEntry: Awaited<ReturnType<ReturnType<typeof indexStub>['getReport']>>
+    try {
+      parentEntry = await indexStub(env).getReport(parentId)
+    } catch (err) {
+      console.error(`bug-intake: getReport failed for follow-up of ${parentId}:`, err)
+      return jsonResponse(503, { error: 'unavailable' })
+    }
+    if (parentEntry === null || !parentEntry.committed) return jsonResponse(403, { error: 'forbidden' })
+  }
+  const wantsFollow = parentId === null && request.headers.get('hew-follow')?.trim() === '1'
+
   const piece = await readBodyCapped(request, PIECE_BYTES)
   if (piece === TOO_LARGE) {
     return jsonResponse(413, { error: 'too-large', maxBytes: MAX_UPLOAD_BYTES })
@@ -199,6 +287,7 @@ export async function handleStart(request: Request, env: BugIntakeEnv): Promise<
       appVersion,
       platform,
       descriptionPreview: description.slice(0, 200),
+      parentId,
     })
   } catch (err) {
     console.error('bug-intake: reserveReport failed:', err)
@@ -214,15 +303,25 @@ export async function handleStart(request: Request, env: BugIntakeEnv): Promise<
 
   const token = generateUploadToken()
   const tokenHash = await hashToken(token)
+  // The follow secret is minted here, not at COMMIT (design D4): a retried
+  // COMMIT after a lost 201 then needs no rotation. Only its hash is kept.
+  const follow = wantsFollow ? generateFollowSecret() : null
+  const followHash = follow === null ? null : await hashToken(follow)
   try {
-    await dropStub(env, id).startUpload(id, declaredTotal, tokenHash, piece, { description, appVersion, platform })
+    await dropStub(env, id).startUpload(id, declaredTotal, tokenHash, piece, {
+      description,
+      appVersion,
+      platform,
+      followHash,
+      parentId,
+    })
   } catch (err) {
     console.error(`bug-intake: startUpload failed for ${id}:`, err)
     await abandonUpload(env, id)
     return jsonResponse(503, { error: 'unavailable' })
   }
 
-  return jsonResponse(201, { id, token, pieceBytes: PIECE_BYTES })
+  return jsonResponse(201, follow === null ? { id, token, pieceBytes: PIECE_BYTES } : { id, token, pieceBytes: PIECE_BYTES, follow })
 }
 
 // ---------------------------------------------------------------------------
@@ -371,9 +470,41 @@ export async function handleCommit(request: Request, env: BugIntakeEnv, id: stri
     return jsonResponse(400, { error: 'invalid', message: 'fewer bytes arrived than declared' })
   }
 
+  const now = Date.now()
+
+  // A followed report's thread is created BEFORE the index row flips, so a
+  // failure here is a 503 the client retries and `create` (idempotent)
+  // finishes; the row's `following` is set by the same `commitReport` call.
+  if (result.followHash !== null && result.parentId === null) {
+    try {
+      await threadStub(env, id).create(id, result.followHash, now)
+    } catch (err) {
+      console.error(`bug-intake: thread create failed for ${id}:`, err)
+      return jsonResponse(503, { error: 'unavailable' })
+    }
+  }
+
+  // A follow-up attachment's message on the parent thread, appended before
+  // the flip for the same reason; `appendAttachment` is idempotent per
+  // child id. A parent thread that ended meanwhile (or is full) leaves the
+  // attachment a plain report with its `parentId`, which still lists it
+  // under the parent on the admin page.
+  let parentStatus: { status: string; statusVersion: string | null } | null = null
+  const label = attachmentLabel(result.description, result.sizeBytes)
+  if (result.parentId !== null) {
+    try {
+      const appended = await threadStub(env, result.parentId).appendAttachment(id, label, now)
+      if (appended.ok) parentStatus = { status: appended.status, statusVersion: appended.statusVersion }
+      else console.log(`bug-intake: attachment ${id} not added to ${result.parentId}'s thread: ${appended.reason}`)
+    } catch (err) {
+      console.error(`bug-intake: appendAttachment failed for ${id} on ${result.parentId}:`, err)
+      return jsonResponse(503, { error: 'unavailable' })
+    }
+  }
+
   let outcome: Awaited<ReturnType<ReturnType<typeof indexStub>['commitReport']>>
   try {
-    outcome = await indexStub(env).commitReport(id)
+    outcome = await indexStub(env).commitReport(id, result.followHash !== null && result.parentId === null)
   } catch (err) {
     // The drop is already committed and its bytes are safe — this only
     // means the admin index doesn't know it yet. See handlers.ts's design
@@ -395,7 +526,20 @@ export async function handleCommit(request: Request, env: BugIntakeEnv, id: stri
     return jsonResponse(503, { error: 'unavailable' })
   }
 
-  if (outcome === 'flipped') {
+  if (outcome === 'flipped' && result.parentId !== null) {
+    // A follow-up sends the attachment email INSTEAD of the new-report one
+    // (follow-a-report §3.3), and refreshes the parent row's list caches.
+    try {
+      await indexStub(env).setThreadCache(result.parentId, { reporterActivityAt: now, ...(parentStatus ?? {}) })
+    } catch (err) {
+      console.error(`bug-intake: setThreadCache failed for ${result.parentId}:`, err)
+    }
+    await sendThreadNotification(
+      env,
+      { kind: 'attachment', id: result.parentId, childId: id, label, sizeBytes: result.sizeBytes },
+      mailer,
+    )
+  } else if (outcome === 'flipped') {
     // Best-effort and genuinely never throws (see `sendNotification`'s
     // doc) — the report is already committed and durably stored by this
     // point (§8). Sent only on the call that actually flipped the index
@@ -408,6 +552,136 @@ export async function handleCommit(request: Request, env: BugIntakeEnv, id: stri
   }
 
   return jsonResponse(201, { id })
+}
+
+// ---------------------------------------------------------------------------
+// Thread routes — /report/<id>/thread (docs/design/follow-a-report.md §5.3)
+// ---------------------------------------------------------------------------
+
+function threadForbidden(): Response {
+  return jsonResponse(403, { error: 'forbidden' })
+}
+
+function rateLimited(retryAfterMs: number): Response {
+  return jsonResponse(429, { error: 'rate-limited' }, { 'retry-after': String(Math.max(1, Math.ceil(retryAfterMs / 1000))) })
+}
+
+/** The per-client thread-route quota (`THREAD_RATE_WINDOW_MAX` per 10
+ *  minutes), counted on `ReportIndex` only AFTER the thread DO accepted the
+ *  secret — so a wrong-secret flood costs the index nothing (design D10).
+ *  `null` means within the limit. */
+async function countThreadRequest(env: BugIntakeEnv, request: Request, now: number): Promise<Response | null> {
+  const clientHash = await hashClient(env.IP_HASH_SECRET!, request.headers.get('cf-connecting-ip') ?? '', now)
+  const counted = await indexStub(env).countThreadRequest(clientHash, now)
+  return counted.ok ? null : rateLimited(counted.retryAfterMs)
+}
+
+/** Reads a thread route's small JSON body, or `null` if it is too big or
+ *  not a JSON object. */
+async function readJsonObject(request: Request): Promise<Record<string, unknown> | null> {
+  const body = await readBodyCapped(request, THREAD_BODY_MAX_BYTES)
+  if (body === TOO_LARGE) return null
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(body))
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
+/** Every `/report/<id>/thread[...]` route. Order: the secret header (a
+ *  missing one is 403 with no DO touched), `IP_HASH_SECRET` (503), the
+ *  request body where there is one (400 — it says nothing about the
+ *  report), then the thread DO (403 for every failure: no thread, a
+ *  wrong or revoked secret, an admin-only thread), then the rate count.
+ *  The DO call comes first so a rejected secret never writes to the index;
+ *  for a reporter post the secret is checked with `verifySecret` before
+ *  the count so a rate-limited post stores nothing. */
+async function handleThread(
+  request: Request,
+  env: BugIntakeEnv,
+  id: string,
+  sub: 'thread' | 'seen',
+  mailer: RawMailSender,
+): Promise<Response> {
+  const secret = request.headers.get('hew-follow-secret') ?? ''
+  if (secret === '') return threadForbidden()
+  if (!env.IP_HASH_SECRET) return jsonResponse(503, { error: 'unavailable' })
+  const secretHash = await hashToken(secret)
+  const thread = threadStub(env, id)
+  const now = Date.now()
+
+  try {
+    if (sub === 'seen') {
+      if (request.method !== 'POST') return methodNotAllowed()
+      const body = await readJsonObject(request)
+      const upTo = body?.upTo
+      if (typeof upTo !== 'number' || !Number.isInteger(upTo) || upTo < 0) {
+        return jsonResponse(400, { error: 'invalid', message: 'body must be {"upTo": <non-negative integer>}' })
+      }
+      if ((await thread.markSeen(secretHash, upTo, now)) === 'forbidden') return threadForbidden()
+      const limited = await countThreadRequest(env, request, now)
+      if (limited) return limited
+      return new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } })
+    }
+
+    if (request.method === 'GET') {
+      const afterParam = new URL(request.url).searchParams.get('after')
+      const after = afterParam === null ? 0 : Number(afterParam)
+      if (!/^[0-9]+$/.test(afterParam ?? '0') || !Number.isSafeInteger(after)) {
+        return jsonResponse(400, { error: 'invalid', message: 'after must be a non-negative integer' })
+      }
+      const view = await thread.read(secretHash, after, now)
+      if (view === 'forbidden') return threadForbidden()
+      const limited = await countThreadRequest(env, request, now)
+      if (limited) return limited
+      return jsonResponse(200, view)
+    }
+
+    if (request.method === 'POST') {
+      const body = await readJsonObject(request)
+      const text = body?.text
+      if (!validMessageText(text)) {
+        return jsonResponse(400, { error: 'invalid', message: `text must be 1 to ${THREAD_MESSAGE_MAX_CHARS} characters` })
+      }
+      if (!(await thread.verifySecret(secretHash))) return threadForbidden()
+      const limited = await countThreadRequest(env, request, now)
+      if (limited) return limited
+      const posted = await thread.postReporter(secretHash, text, now)
+      if (!posted.ok) {
+        if (posted.reason === 'forbidden') return threadForbidden()
+        if (posted.reason === 'too-many') return rateLimited(posted.retryAfterMs)
+        return jsonResponse(409, { error: 'full' })
+      }
+      try {
+        await indexStub(env).setThreadCache(id, { reporterActivityAt: now, status: posted.status, statusVersion: posted.statusVersion })
+      } catch (err) {
+        // The message is stored; only the admin list's caches are stale.
+        console.error(`bug-intake: setThreadCache failed for ${id}:`, err)
+      }
+      await sendThreadNotification(env, { kind: 'reply', id, text, reopened: posted.reopened }, mailer)
+      return jsonResponse(201, { seq: posted.seq })
+    }
+
+    if (request.method === 'DELETE') {
+      // Forget. `revoke` tells the index (through the DO's own hook) before
+      // wiping. A second call finds no thread: 403, which the client reads
+      // as done. Counted like every other accepted request, but never
+      // turned into a 429 — the thread is already gone.
+      if ((await thread.revoke(secretHash)) === 'forbidden') return threadForbidden()
+      try {
+        await countThreadRequest(env, request, now)
+      } catch (err) {
+        console.error('bug-intake: countThreadRequest failed after a revoke:', err)
+      }
+      return new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } })
+    }
+
+    return methodNotAllowed()
+  } catch (err) {
+    console.error(`bug-intake: thread route failed for ${id}:`, err)
+    return jsonResponse(503, { error: 'unavailable' })
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -486,23 +760,102 @@ async function readHeadForDisplay(env: BugIntakeEnv, id: string): Promise<string
 }
 
 async function handleAdminDetail(env: BugIntakeEnv, id: string): Promise<Response> {
-  const entry = await indexStub(env).getReport(id)
+  const index = indexStub(env)
+  const entry = await index.getReport(id)
   // A reservation still uploading (or one abandoned and not yet pruned) is
   // treated exactly like an unknown id — it isn't a real report yet.
   if (entry === null || !entry.committed) return adminHtml(404, `<p>No report ${escapeHtml(id)}.</p>`)
   let head = null
-  try {
-    const text = await readHeadForDisplay(env, id)
-    if (text !== null) head = parseHeadForDisplay(text)
-  } catch (err) {
-    console.error(`bug-intake: failed to read/decompress report ${id}'s head for detail view:`, err)
+  if (!entry.bundleDeleted) {
+    try {
+      const text = await readHeadForDisplay(env, id)
+      if (text !== null) head = parseHeadForDisplay(text)
+    } catch (err) {
+      console.error(`bug-intake: failed to read/decompress report ${id}'s head for detail view:`, err)
+    }
   }
-  return adminHtml(200, renderDetail(entry, head))
+  // A follow-up attachment has no thread of its own (its parent's page is
+  // where the conversation is), so its page shows only the "↳ for" link.
+  if (entry.parentId !== null) return adminHtml(200, renderDetail(entry, head))
+  const now = Date.now()
+  const thread = await threadStub(env, id).adminView(now)
+  await index.markAdminViewed(id, now)
+  const children = await index.listChildren(id)
+  return adminHtml(200, renderDetail(entry, head, { thread, children }))
+}
+
+/** Reads an admin form body (`application/x-www-form-urlencoded`). */
+async function readForm(request: Request): Promise<URLSearchParams> {
+  const body = await readBodyCapped(request, THREAD_BODY_MAX_BYTES)
+  if (body === TOO_LARGE) return new URLSearchParams()
+  return new URLSearchParams(new TextDecoder().decode(body))
+}
+
+/** The thread a maintainer action writes to: the report's own, or — for a
+ *  report nobody follows (or whose thread ended) — one created now with no
+ *  secret, so the reply or status is "kept with it" (§3.2) but can reach
+ *  no one. `null` for an unknown, uncommitted, or follow-up row. */
+async function adminThreadFor(env: BugIntakeEnv, id: string, now: number) {
+  const entry = await indexStub(env).getReport(id)
+  if (entry === null || !entry.committed || entry.parentId !== null) return null
+  const thread = threadStub(env, id)
+  await thread.create(id, '', now) // a no-op when the thread exists
+  return thread
+}
+
+async function handleAdminReply(request: Request, env: BugIntakeEnv, id: string): Promise<Response> {
+  if (!originAllowed(request)) return forbidden()
+  const form = await readForm(request)
+  const canned = form.get('canned')
+  let text: string | null
+  if (canned !== null && canned !== '') {
+    text = Object.hasOwn(CANNED_REPLIES, canned) ? CANNED_REPLIES[canned].text : null
+    if (text === null) return adminHtml(400, renderFormError(id, 'Unknown canned reply.'))
+  } else {
+    text = form.get('text')
+    if (!validMessageText(text)) {
+      return adminHtml(400, renderFormError(id, `A reply must be 1 to ${THREAD_MESSAGE_MAX_CHARS} characters.`))
+    }
+  }
+  const now = Date.now()
+  const thread = await adminThreadFor(env, id, now)
+  if (thread === null) return notFound()
+  const posted = await thread.postMaintainer(text, now)
+  if (!posted.ok && posted.reason === 'not-found') return notFound()
+  if (!posted.ok) return adminHtml(409, renderFormError(id, 'This thread is full.'))
+  return redirectNoStore(`${ADMIN_ORIGIN}/report/admin/${id}`, 303)
+}
+
+async function handleAdminStatus(request: Request, env: BugIntakeEnv, id: string): Promise<Response> {
+  if (!originAllowed(request)) return forbidden()
+  const form = await readForm(request)
+  const status = form.get('status')
+  if (!isThreadStatus(status)) return adminHtml(400, renderFormError(id, 'Pick a status.'))
+  const version = (form.get('version') ?? '').trim()
+  if (status === 'fixed' && version === '') return adminHtml(400, renderFormError(id, 'Fixed needs the version it is fixed in.'))
+  if ([...version].length > STATUS_VERSION_MAX_CHARS) return adminHtml(400, renderFormError(id, 'That version is too long.'))
+  const note = (form.get('note') ?? '').trim()
+  if ([...note].length > THREAD_MESSAGE_MAX_CHARS) return adminHtml(400, renderFormError(id, 'That note is too long.'))
+  const now = Date.now()
+  const thread = await adminThreadFor(env, id, now)
+  if (thread === null) return notFound()
+  const set = await thread.setStatus(status, status === 'fixed' ? version : null, note === '' ? null : note, now)
+  if (!set.ok && set.reason === 'not-found') return notFound()
+  if (!set.ok) return adminHtml(409, renderFormError(id, 'This thread is full.'))
+  // The status is already stored on the thread; a failed cache copy only
+  // leaves the list's badge stale. Answering 5xx here would invite a retry
+  // that writes a second status message.
+  try {
+    await indexStub(env).setThreadCache(id, { status: set.status, statusVersion: set.statusVersion })
+  } catch (err) {
+    console.error(`bug-intake: setThreadCache failed for ${id}:`, err)
+  }
+  return redirectNoStore(`${ADMIN_ORIGIN}/report/admin/${id}`, 303)
 }
 
 async function handleAdminDownload(env: BugIntakeEnv, id: string): Promise<Response> {
   const entry = await indexStub(env).getReport(id)
-  if (entry === null || !entry.committed) return notFound()
+  if (entry === null || !entry.committed || entry.bundleDeleted) return notFound()
   const stub = dropStub(env, id)
   const dropHead = await stub.head()
   if (dropHead === null) return notFound()
@@ -525,8 +878,21 @@ async function handleAdminDownload(env: BugIntakeEnv, id: string): Promise<Respo
 
 async function handleAdminDelete(request: Request, env: BugIntakeEnv, id: string): Promise<Response> {
   if (!originAllowed(request)) return forbidden()
+  // The thread goes first, so the reporter's key stops working the same
+  // moment (follow-a-report §3.2); the row is deleted here directly, so
+  // the thread's own index hook is not needed on this path.
+  await threadStub(env, id).destroy()
   await dropStub(env, id).destroy()
-  await indexStub(env).deleteReport(id)
+  const index = indexStub(env)
+  await index.deleteReport(id)
+  // A report's follow-up attachments are the reporter's material for THIS
+  // report: a deletion request quoting the ID means the file they attached
+  // too, and a child left behind would only carry a "for <parent>" link to
+  // a page that no longer exists. Children have no threads of their own.
+  for (const child of await index.listChildren(id)) {
+    await dropStub(env, child.id).destroy()
+    await index.deleteReport(child.id)
+  }
   return redirectNoStore(`${ADMIN_ORIGIN}/report/admin/`, 303)
 }
 
@@ -566,6 +932,8 @@ async function routeAdmin(
     if (action === 'download' && request.method === 'GET') return handleAdminDownload(env, id)
     if (action === 'delete' && request.method === 'POST') return handleAdminDelete(request, env, id)
     if (action === 'triage' && request.method === 'POST') return handleAdminTriage(request, env, id)
+    if (action === 'reply' && request.method === 'POST') return handleAdminReply(request, env, id)
+    if (action === 'status' && request.method === 'POST') return handleAdminStatus(request, env, id)
   }
   return notFound()
 }
@@ -598,6 +966,16 @@ async function handleRequestInner(
   if (pathname.startsWith(REPORT_PREFIX)) {
     const rest = pathname.slice(REPORT_PREFIX.length) // "<id>/<index-or-commit>"
     const segments = rest.split('/')
+    if (segments.length === 3 && segments[1] === 'thread' && segments[2] === 'seen') {
+      // Every thread-route failure is 403, a malformed id included (no
+      // public route says whether an id exists or is well formed).
+      if (!isValidReportId(segments[0])) return threadForbidden()
+      return handleThread(request, env, normalizeReportId(segments[0]), 'seen', mailer)
+    }
+    if (segments.length === 2 && segments[1] === 'thread') {
+      if (!isValidReportId(segments[0])) return threadForbidden()
+      return handleThread(request, env, normalizeReportId(segments[0]), 'thread', mailer)
+    }
     if (segments.length === 2) {
       const [rawId, action] = segments
       if (isValidReportId(rawId)) {

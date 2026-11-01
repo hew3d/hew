@@ -1,9 +1,16 @@
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildNotificationMime, sanitizeHeaderValue, sendNotification, type RawMailSender } from './email.ts'
+import {
+  buildNotificationMime,
+  buildThreadEventMime,
+  sanitizeHeaderValue,
+  sendNotification,
+  sendThreadNotification,
+  type RawMailSender,
+} from './email.ts'
 import { IndexStore } from './indexStore.ts'
-import { EMAIL_DAY_MAX } from './constants.ts'
+import { EMAIL_DAY_MAX, EMAIL_THREAD_RESERVE } from './constants.ts'
 import { FakeDurableObjectNamespace } from './testSupport/fakeDurableObject.ts'
 import type { BugIntakeEnv, ReportIndexStub } from './types.ts'
 
@@ -181,5 +188,54 @@ describe('sendNotification', () => {
     const overCap = await sendNotification(env, makeReport({ id: 'HEW-OVER-CAP0' }), mailer)
     assert.equal(overCap, false)
     assert.equal(sendCount, EMAIL_DAY_MAX)
+  })
+})
+
+describe('thread event emails (follow-a-report §3.3)', () => {
+  test('reply: the subject and the message text in the body', () => {
+    const raw = buildThreadEventMime({ kind: 'reply', id: 'HEW-AAAA-BBBB', text: 'Still broken.\nSubject: injected', reopened: false }, 'f@x', 't@x')
+    assert.match(raw, /^Subject: \[Hew bug report\] HEW-AAAA-BBBB — reply from the reporter\r$/m)
+    assert.equal((raw.split('\r\n\r\n')[0].match(/^Subject:/gm) ?? []).length, 1, 'body text never becomes a header')
+    assert.ok(raw.includes('Still broken.'))
+    assert.ok(!raw.includes('reopened'))
+    assert.ok(buildThreadEventMime({ kind: 'reply', id: 'HEW-AAAA-BBBB', text: 'x', reopened: true }, 'f@x', 't@x').includes('reopened'))
+  })
+
+  test('attachment: the size in the subject, the reporter-chosen name only in the body', () => {
+    const raw = buildThreadEventMime(
+      { kind: 'attachment', id: 'HEW-AAAA-BBBB', childId: 'HEW-CCCC-DDDD', label: 'evil\r\nBcc: x@y.skp (46.5 MB)', sizeBytes: 48_758_000 },
+      'f@x',
+      't@x',
+    )
+    assert.match(raw, /^Subject: \[Hew bug report\] HEW-AAAA-BBBB — file attached \(46\.5 MB\)\r$/m)
+    const headers = raw.split('\r\n\r\n')[0]
+    assert.ok(!headers.includes('Bcc'))
+    assert.ok(raw.includes('https://app.hew3d.com/report/admin/HEW-CCCC-DDDD'))
+  })
+
+  test('sendThreadNotification stops short of the cap, leaving the reserve for new reports, and never throws', async () => {
+    const env = {} as BugIntakeEnv
+    env.REPORT_INDEX = new FakeDurableObjectNamespace<ReportIndexStub>((state) => new IndexStore(state.storage))
+    env.NOTIFY_TO = 't@x'
+    env.NOTIFY_FROM = 'f@x'
+    let sent = 0
+    const mailer: RawMailSender = { send: async () => { sent++ } }
+    const threadMax = EMAIL_DAY_MAX - EMAIL_THREAD_RESERVE
+    for (let i = 0; i < threadMax; i++) {
+      assert.equal(await sendThreadNotification(env, { kind: 'reply', id: 'HEW-AAAA-BBBB', text: 'x', reopened: false }, mailer), true)
+    }
+    assert.equal(await sendThreadNotification(env, { kind: 'reply', id: 'HEW-AAAA-BBBB', text: 'x', reopened: false }, mailer), false)
+    assert.equal(sent, threadMax)
+    // The reserved slots still carry new-report emails, all the way to the cap.
+    for (let i = 0; i < EMAIL_THREAD_RESERVE; i++) {
+      assert.equal(await sendNotification(env, makeReport(), mailer), true)
+    }
+    assert.equal(await sendNotification(env, makeReport(), mailer), false)
+    assert.equal(sent, EMAIL_DAY_MAX)
+    const throwing: RawMailSender = { send: async () => { throw new Error('smtp down') } }
+    const env2 = { ...env, REPORT_INDEX: new FakeDurableObjectNamespace<ReportIndexStub>((state) => new IndexStore(state.storage)) }
+    assert.equal(await sendThreadNotification(env2, { kind: 'reply', id: 'HEW-AAAA-BBBB', text: 'x', reopened: false }, throwing), false)
+    const unconfigured = { ...env2, NOTIFY_TO: undefined }
+    assert.equal(await sendThreadNotification(unconfigured, { kind: 'reply', id: 'HEW-AAAA-BBBB', text: 'x', reopened: false }, mailer), false)
   })
 })
