@@ -325,10 +325,10 @@ pub fn tessellate(
 
         // Run ear clipping (local indices into poly), keeping only the
         // triangles the f32 buffers can hold with their winding (see
-        // `winds_forward_in_f32`).
+        // `tri_winds_forward_in_f32`).
         let triangles: Vec<[usize; 3]> = ear_clip(&poly)
             .into_iter()
-            .filter(|&tri| winds_forward_in_f32(&poly, normal, tri))
+            .filter(|&tri| tri_winds_forward_in_f32(&poly, normal, tri))
             .collect();
 
         // A painted back: the same polygon again, facing the other way,
@@ -483,15 +483,33 @@ pub fn tessellate(
 /// winding, not a distance tolerance: a triangle with any representable
 /// altitude keeps a positive area under rounding, so only sub-quantum
 /// slivers are affected and the face's coverage is unchanged.
-fn winds_forward_in_f32(poly: &[[f64; 5]], normal: kernel::Vec3, tri: [usize; 3]) -> bool {
-    let rounded = |i: usize| {
+fn tri_winds_forward_in_f32(poly: &[[f64; 5]], normal: kernel::Vec3, tri: [usize; 3]) -> bool {
+    let at = |i: usize| kernel::Point3::new(poly[i][0], poly[i][1], poly[i][2]);
+    winds_forward_in_f32(at(tri[0]), at(tri[1]), at(tri[2]), normal)
+}
+
+/// True if the triangle `a b c` still winds with `normal` once each corner
+/// is rounded to `f32` — the gate the render buffers apply to every
+/// triangle (see `tri_winds_forward_in_f32`, which says why a sliver can
+/// fail it), shared with the mesh exporters, which store `f32` too and
+/// apply it at their own scale: pass the corners in the coordinates the
+/// writer rounds (millimeters for STL, meters for glTF and USDZ). `normal`
+/// need not be unit; only the sign of the rounded winding against it
+/// counts, and a collapsed triangle (zero rounded area) fails.
+pub fn winds_forward_in_f32(
+    a: kernel::Point3,
+    b: kernel::Point3,
+    c: kernel::Point3,
+    normal: kernel::Vec3,
+) -> bool {
+    let rounded = |p: kernel::Point3| {
         kernel::Point3::new(
-            f64::from(poly[i][0] as f32),
-            f64::from(poly[i][1] as f32),
-            f64::from(poly[i][2] as f32),
+            f64::from(p.x as f32),
+            f64::from(p.y as f32),
+            f64::from(p.z as f32),
         )
     };
-    let (a, b, c) = (rounded(tri[0]), rounded(tri[1]), rounded(tri[2]));
+    let (a, b, c) = (rounded(a), rounded(b), rounded(c));
     (b - a).cross(c - a).dot(normal) > 0.0
 }
 
