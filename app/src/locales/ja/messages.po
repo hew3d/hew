@@ -2079,6 +2079,14 @@ msgstr ""
 msgid "cross-section"
 msgstr ""
 
+#: src/viewport/Viewport.tsx
+msgid "Crossing"
+msgstr ""
+
+#: src/viewport/Viewport.tsx
+msgid "Crossing selection: picks everything the box touches. Drag left to right for a window selection."
+msgstr ""
+
 #: src/tools/FollowMeTool.ts
 msgid "Ctrl/Cmd-click to merge with the solid."
 msgstr ""
@@ -8987,7 +8995,12 @@ msgstr ""
 
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
+#: src/viewport/Viewport.tsx
 msgid "Window"
+msgstr ""
+
+#: src/viewport/Viewport.tsx
+msgid "Window selection: picks objects the box fully encloses or mostly covers. Drag right to left for a crossing selection."
 msgstr ""
 
 #: src/i18n/nativeMenu.ts

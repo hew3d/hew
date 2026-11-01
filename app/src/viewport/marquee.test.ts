@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
 import {
   MarqueeProjector,
+  WINDOW_COVERAGE_MIN,
+  boundsCoverage,
+  emptyScreenBounds,
   normalizedRect,
   pointInRect,
   pointInTriangle,
@@ -103,5 +106,57 @@ describe('MarqueeProjector', () => {
     const vert = new Float32Array([0, 0, 0])
     expect(projector().allVerticesInRect(vert, at, centerRect)).toBe(false)
     expect(projector().allVerticesInRect(vert, identity, centerRect)).toBe(true)
+  })
+})
+
+describe('window coverage', () => {
+  const bounds = { minX: 0, minY: 0, maxX: 100, maxY: 100 }
+
+  it('is the share of the on-screen box inside the rectangle', () => {
+    expect(boundsCoverage(bounds, normalizedRect(-10, -10, 110, 110))).toBe(1)
+    expect(boundsCoverage(bounds, normalizedRect(-10, -10, 50, 100))).toBeCloseTo(0.5, 10)
+    expect(boundsCoverage(bounds, normalizedRect(60, 60, 200, 200))).toBeCloseTo(0.16, 10)
+    expect(boundsCoverage(bounds, normalizedRect(200, 200, 300, 300))).toBe(0)
+  })
+
+  it('treats an edge-on (zero-area) box as uncovered', () => {
+    expect(boundsCoverage({ minX: 5, minY: 5, maxX: 5, maxY: 50 }, normalizedRect(0, 0, 100, 100))).toBe(0)
+  })
+
+  it('threshold is a clear majority, not a corner touch', () => {
+    expect(WINDOW_COVERAGE_MIN).toBe(0.8)
+    expect(boundsCoverage(bounds, normalizedRect(-10, -10, 40, 40))).toBeLessThan(WINDOW_COVERAGE_MIN)
+  })
+
+  it('extendScreenBounds spans every vertex and refuses geometry behind the camera', () => {
+    const cam = new THREE.PerspectiveCamera(60, 1, 0.1, 100)
+    cam.position.set(0, 0, 10)
+    cam.updateMatrixWorld()
+    const p = new MarqueeProjector(cam, 200, 200)
+    const acc = emptyScreenBounds()
+    expect(p.extendScreenBounds(new Float32Array([-1, -1, 0, 1, 1, 0]), new THREE.Matrix4(), acc)).toBe(true)
+    expect(acc.minX).toBeLessThan(100)
+    expect(acc.maxX).toBeGreaterThan(100)
+    expect(acc.maxY - acc.minY).toBeGreaterThan(0)
+    expect(p.extendScreenBounds(new Float32Array([0, 0, 20]), new THREE.Matrix4(), emptyScreenBounds())).toBe(false)
+  })
+
+  it('boxScreenBounds brackets every vertex of the box and refuses a box behind the camera', () => {
+    const cam = new THREE.PerspectiveCamera(60, 1, 0.1, 100)
+    cam.position.set(0, 0, 10)
+    cam.updateMatrixWorld()
+    const p = new MarqueeProjector(cam, 200, 200)
+    const verts = new Float32Array([-2, -1, 0, 3, 2, 1])
+    const box = new THREE.Box3().setFromArray(verts as unknown as number[])
+    const b = emptyScreenBounds()
+    expect(p.boxScreenBounds(box, new THREE.Matrix4(), b)).toBe(true)
+    const exact = emptyScreenBounds()
+    p.extendScreenBounds(verts, new THREE.Matrix4(), exact)
+    expect(b.minX).toBeLessThanOrEqual(exact.minX)
+    expect(b.maxX).toBeGreaterThanOrEqual(exact.maxX)
+    expect(b.minY).toBeLessThanOrEqual(exact.minY)
+    expect(b.maxY).toBeGreaterThanOrEqual(exact.maxY)
+    const behind = new THREE.Box3(new THREE.Vector3(0, 0, 5), new THREE.Vector3(1, 1, 20))
+    expect(p.boxScreenBounds(behind, new THREE.Matrix4(), emptyScreenBounds())).toBe(false)
   })
 })

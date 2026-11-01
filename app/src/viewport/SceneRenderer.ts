@@ -5371,6 +5371,32 @@ export class SceneRenderer {
     return this.instanceGroups.get(instanceId)?.group ?? null
   }
 
+  /**
+   * Face geometry of one placement's shown members for screen-space hit
+   * testing, read straight from the shared member cache. Unlike
+   * `getInstanceGroup` this never materializes the placement out of its batch
+   * (a marquee over a brick wall would otherwise pull thousands of placements
+   * out of their batches and rebuild materials for each). `matrixWorld`
+   * composes the outer pose with the member's local pose. Null when the
+   * instance is not rendered.
+   */
+  instanceFaceParts(instanceId: bigint): { positions: Float32Array; indices: Uint32Array; matrixWorld: THREE.Matrix4 }[] | null {
+    const rec = this.instanceRecords.get(instanceId)
+    if (rec === undefined) return null
+    const outer = new THREE.Matrix4().multiplyMatrices(this.instancesGroup.matrixWorld, rec.matrix)
+    const parts: { positions: Float32Array; indices: Uint32Array; matrixWorld: THREE.Matrix4 }[] = []
+    for (const placement of rec.placements) {
+      if (!placement.shown) continue
+      const cached = this._getMemberGeometry(placement.memberId)
+      parts.push({
+        positions: cached.positions,
+        indices: cached.indices,
+        matrixWorld: new THREE.Matrix4().multiplyMatrices(outer, placement.localMatrix),
+      })
+    }
+    return parts
+  }
+
   /** The rendered group for one object id — map-backed, unlike a name walk
    * over `objectsGroup` (marquee hit-testing calls this per candidate). */
   getObjectGroup(objectId: bigint): THREE.Group | null {

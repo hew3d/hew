@@ -2079,6 +2079,14 @@ msgstr "create component"
 msgid "cross-section"
 msgstr "cross-section"
 
+#: src/viewport/Viewport.tsx
+msgid "Crossing"
+msgstr "Crossing"
+
+#: src/viewport/Viewport.tsx
+msgid "Crossing selection: picks everything the box touches. Drag left to right for a window selection."
+msgstr "Crossing selection: picks everything the box touches. Drag left to right for a window selection."
+
 #: src/tools/FollowMeTool.ts
 msgid "Ctrl/Cmd-click to merge with the solid."
 msgstr "Ctrl/Cmd-click to merge with the solid."
@@ -8991,8 +8999,13 @@ msgstr "Whole units"
 
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
+#: src/viewport/Viewport.tsx
 msgid "Window"
 msgstr "Window"
+
+#: src/viewport/Viewport.tsx
+msgid "Window selection: picks objects the box fully encloses or mostly covers. Drag right to left for a crossing selection."
+msgstr "Window selection: picks objects the box fully encloses or mostly covers. Drag right to left for a crossing selection."
 
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts

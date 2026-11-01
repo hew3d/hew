@@ -128,7 +128,7 @@ import { readAnnotation, commitAnnotationText, initialEditorText, type Annotatio
 import { collectLeafIds, isDraftKind, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structuralSelection, treeIndexOf, type NodeRef, type SelectMode } from '../panels/treeModel'
 import { selectModeFor, isModifiedSelectPress } from './selectModifiers'
 import { baseBindingFor, desiredDragState, switchDragTo, orbitDragState, setPreciseOrbit, forceBaseAfterPress, type SwitchableDrag } from './orbitDragSwitch'
-import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
+import { MarqueeProjector, WINDOW_COVERAGE_MIN, boundsCoverage, emptyScreenBounds, normalizedRect, type MarqueeMode, type MarqueeRect, type ScreenBounds } from './marquee'
 import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
 import { DragCommitGate } from './dragCommit'
 import {
@@ -2996,6 +2996,8 @@ export default function Viewport({
     // every routed event (the wrapped listeners below) and on tool switches,
     // pushing CHANGES up — a string compare keeps the per-move cost trivial.
     let lastToolHint: string | null = null
+    /** Live window/crossing state of an active marquee drag, for the status bar. */
+    let marqueeHint: 'window' | 'crossing' | null = null
     function reportToolHint(): void {
       // Camera tools (Orbit/Pan/Zoom/Zoom Window) park the controller on
       // Select — for Orbit/Pan/Zoom because OrbitControls owns the left
@@ -3008,7 +3010,11 @@ export default function Viewport({
       // reads the new mode.
       const hint = activeCameraTool !== null
         ? null
-        : (toolController.activeTool.statusHint?.() ?? null)
+        : marqueeHint !== null && toolController.activeToolName === 'Select'
+          ? (marqueeHint === 'crossing'
+            ? t`Crossing selection: picks everything the box touches. Drag left to right for a window selection.`
+            : t`Window selection: picks objects the box fully encloses or mostly covers. Drag right to left for a crossing selection.`)
+          : (toolController.activeTool.statusHint?.() ?? null)
       if (hint !== lastToolHint) {
         lastToolHint = hint
         onToolHintRef.current?.(hint)
@@ -3187,20 +3193,46 @@ export default function Viewport({
       scheduleRender()
     }
 
-    /** The face meshes rendered for one node's visible leaves. */
-    function candidateMeshes(cand: { leafObjects: bigint[]; leafInstances: bigint[] }): THREE.Mesh[] {
-      const meshes: THREE.Mesh[] = []
+    /** One face mesh's worth of hit-test geometry. */
+    interface MarqueePart {
+      positions: ArrayLike<number>
+      index: ArrayLike<number> | null
+      matrixWorld: THREE.Matrix4
+      /** Local-space bounds of `positions` (cached per buffer). */
+      box: THREE.Box3
+    }
+    const partBoxes = new WeakMap<object, THREE.Box3>()
+    function boxOfPositions(positions: ArrayLike<number>): THREE.Box3 {
+      let box = partBoxes.get(positions)
+      if (box === undefined) {
+        box = new THREE.Box3().setFromArray(positions as ArrayLike<number> as number[])
+        partBoxes.set(positions, box)
+      }
+      return box
+    }
+
+    /** The face geometry rendered for one node's visible leaves. Instances
+     * are read from the renderer's member cache, never materialized. */
+    function candidateParts(cand: { leafObjects: bigint[]; leafInstances: bigint[] }): MarqueePart[] {
+      const parts: MarqueePart[] = []
       for (const id of cand.leafObjects) {
         sceneRenderer.getObjectGroup(id)?.traverse((child) => {
-          if (child instanceof THREE.Mesh) meshes.push(child)
+          if (!(child instanceof THREE.Mesh)) return
+          const positions = child.geometry.getAttribute('position').array
+          parts.push({
+            positions,
+            index: child.geometry.index?.array ?? null,
+            matrixWorld: child.matrixWorld,
+            box: boxOfPositions(positions),
+          })
         })
       }
       for (const id of cand.leafInstances) {
-        sceneRenderer.getInstanceGroup(id)?.traverse((child) => {
-          if (child instanceof THREE.Mesh) meshes.push(child)
-        })
+        for (const p of sceneRenderer.instanceFaceParts(id) ?? []) {
+          parts.push({ positions: p.positions, index: p.indices, matrixWorld: p.matrixWorld, box: boxOfPositions(p.positions) })
+        }
       }
-      return meshes
+      return parts
     }
 
     /**
@@ -3216,25 +3248,59 @@ export default function Viewport({
       const projector = new MarqueeProjector(camera, el.clientWidth, el.clientHeight)
       const out: NodeRef[] = []
 
+      const bb: ScreenBounds = { minX: 0, minY: 0, maxX: 0, maxY: 0 }
       for (const cand of visibleTopLevelCandidates()) {
-        const meshes = candidateMeshes(cand)
-        if (meshes.length === 0) continue
-        let hit: boolean
+        const parts = candidateParts(cand)
+        if (parts.length === 0) continue
+        // Cheap per-part screen bounds from the local bounding box (null when
+        // a corner is behind the camera). A large group is thousands of
+        // parts; most are nowhere near the rect and must not cost a vertex
+        // scan.
+        const bounds: (ScreenBounds | null)[] = parts.map((pt) =>
+          projector.boxScreenBounds(pt.box, pt.matrixWorld, bb) ? { ...bb } : null,
+        )
+        const touches = (i: number): boolean => {
+          const b = bounds[i]
+          if (b !== null && (b.maxX < rect.minX || b.minX > rect.maxX || b.maxY < rect.minY || b.minY > rect.maxY)) {
+            return false
+          }
+          return projector.meshTouchesRect(parts[i].positions, parts[i].index, parts[i].matrixWorld, rect)
+        }
+        let hit = false
         if (mode === 'window') {
-          hit = meshes.every((m) =>
-            projector.allVerticesInRect(
-              m.geometry.getAttribute('position').array, m.matrixWorld, rect,
-            ),
-          )
+          hit = parts.every((pt, i) => {
+            // Box inside the rect proves every vertex is; a box that pokes out
+            // (rotated geometry overshoots its corners) still needs the scan.
+            const b = bounds[i]
+            if (b !== null && b.minX >= rect.minX && b.maxX <= rect.maxX && b.minY >= rect.minY && b.maxY <= rect.maxY) return true
+            return projector.allVerticesInRect(pt.positions, pt.matrixWorld, rect)
+          })
+          if (!hit) {
+            // Not fully enclosed: still picked when the window swallows most
+            // of the object (WINDOW_COVERAGE_MIN of its on-screen extent). The
+            // exact extents are only worth scanning when the rect reaches the
+            // object's box at all; a part whose box corner is behind the
+            // camera has no box bounds and goes straight to the exact scan.
+            let reaches = true
+            if (bounds.every((b) => b !== null)) {
+              const u = emptyScreenBounds()
+              for (const b of bounds) {
+                u.minX = Math.min(u.minX, b!.minX); u.maxX = Math.max(u.maxX, b!.maxX)
+                u.minY = Math.min(u.minY, b!.minY); u.maxY = Math.max(u.maxY, b!.maxY)
+              }
+              reaches = boundsCoverage(u, rect) > 0
+            }
+            if (reaches) {
+              const acc = emptyScreenBounds()
+              const allFront = parts.every((pt) => projector.extendScreenBounds(pt.positions, pt.matrixWorld, acc))
+              // The window must also touch the object itself: a ring or frame
+              // can have most of its bounding box empty, and a window drawn
+              // inside the hole is not aimed at it.
+              hit = allFront && boundsCoverage(acc, rect) >= WINDOW_COVERAGE_MIN && parts.some((_, i) => touches(i))
+            }
+          }
         } else {
-          hit = meshes.some((m) =>
-            projector.meshTouchesRect(
-              m.geometry.getAttribute('position').array,
-              m.geometry.index?.array ?? null,
-              m.matrixWorld,
-              rect,
-            ),
-          )
+          hit = parts.some((_, i) => touches(i))
         }
         if (hit) out.push(cand.node)
       }
@@ -3611,6 +3677,10 @@ export default function Viewport({
       /** The press's modifier matrix, applied to the swept nodes on release. */
       mode: SelectMode
       active: boolean
+      /** Live direction of the drag: right-to-left is a crossing selection. */
+      crossing: boolean
+      /** The arming pointer: other pointers' moves never drive this gesture. */
+      pointerId: number
     }
     let marqueeDrag: MarqueeDrag | null = null
 
@@ -4108,12 +4178,29 @@ export default function Viewport({
       return [ev.clientX - r.left, ev.clientY - r.top]
     }
 
+    /** Window (L→R) and crossing (R→L) read as two different tools: solid blue
+     * with a "Window" tag versus dashed green with a "Crossing" tag. */
+    const marqueeChip = document.createElement('div')
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS, not user-facing text
+    Object.assign(marqueeChip.style, {
+      position: 'absolute', top: '0', left: '0', transform: 'translateY(-100%)',
+      padding: '1px 6px', font: '600 11px system-ui, sans-serif', color: '#fff',
+      whiteSpace: 'nowrap', borderRadius: '3px 3px 0 0',
+    })
+    marqueeOverlay.appendChild(marqueeChip)
+
     function updateMarqueeOverlay(x: number, y: number): void {
       if (marqueeDrag === null) return
       const rect = normalizedRect(marqueeDrag.startX, marqueeDrag.startY, x, y)
-      // Solid border = window (L→R), dashed = crossing (R→L) — SketchUp's cue.
-      marqueeOverlay.style.border =
-        x >= marqueeDrag.startX ? '1px solid #4a90e2' : '1px dashed #4a90e2'
+      const crossing = x < marqueeDrag.startX
+      marqueeDrag.crossing = crossing
+      marqueeHint = crossing ? 'crossing' : 'window'
+      const color = crossing ? '#1e9e4a' : '#2d6cdf'
+      marqueeOverlay.style.border = crossing ? `2px dashed ${color}` : `2px solid ${color}`
+      marqueeOverlay.style.background = crossing ? 'rgba(30, 158, 74, 0.16)' : 'rgba(45, 108, 223, 0.16)'
+      marqueeChip.style.background = color
+      marqueeChip.textContent = crossing ? t`Crossing` : t`Window`
+      marqueeChip.style.display = 'block'
       marqueeOverlay.style.left = `${rect.minX}px`
       marqueeOverlay.style.top = `${rect.minY}px`
       marqueeOverlay.style.width = `${rect.maxX - rect.minX}px`
@@ -4123,6 +4210,7 @@ export default function Viewport({
 
     function clearMarquee(): void {
       marqueeDrag = null
+      marqueeHint = null
       marqueeOverlay.style.display = 'none'
     }
 
@@ -4286,6 +4374,8 @@ export default function Viewport({
         // no crossing-selection analogue, so drag direction carries no
         // separate meaning the way it does for the Select marquee.
         marqueeOverlay.style.border = '1px solid #4a90e2'
+        marqueeOverlay.style.background = 'rgba(74, 144, 226, 0.12)'
+        marqueeChip.style.display = 'none'
         marqueeOverlay.style.left = `${rect.minX}px`
         marqueeOverlay.style.top = `${rect.minY}px`
         marqueeOverlay.style.width = `${rect.maxX - rect.minX}px`
@@ -9144,10 +9234,15 @@ export default function Viewport({
 
       // Armed marquee: past the drag threshold the rubber-band owns the
       // pointer — update the rectangle and skip hover/snap work entirely.
-      if (marqueeDrag !== null) {
+      if (marqueeDrag !== null && ev.pointerId === marqueeDrag.pointerId) {
         if ((ev.buttons & 1) === 0) {
-          // The release happened outside our listeners (focus loss) — drop it.
-          clearMarquee()
+          // The button is already up, yet the release never reached us:
+          // browsers can deliver a move carrying the updated button state
+          // (and drop the pointer capture) ahead of the pointerup. Treat it
+          // as the release it is — discarding the gesture here is what made
+          // some drags vanish with nothing selected. A real focus loss is
+          // handled by the window-blur listener instead.
+          finishMarquee(ev)
         } else {
           const [px, py] = canvasPoint(ev)
           if (
@@ -9639,7 +9734,7 @@ export default function Viewport({
           if (readOnlyRef.current) {
             deferredTapDrag = { startX: px, startY: py, active: false, pointerId: ev.pointerId }
           } else {
-            marqueeDrag = { startX: px, startY: py, mode: selectModeFor(ev), active: false }
+            marqueeDrag = { startX: px, startY: py, mode: selectModeFor(ev), active: false, crossing: false, pointerId: ev.pointerId }
           }
           // Track the drag even when it leaves the canvas.
           renderer.domElement.setPointerCapture(ev.pointerId)
@@ -10188,6 +10283,36 @@ export default function Viewport({
     // sweep, E4 — see the interface doc for why click-move-click alone can't
     // express that gesture), dispatched first and independently of the
     // Select-only `dragMove`/`marqueeDrag` state below.
+    /** Completes the armed marquee press (a click-pick when it never became a
+     * drag) at the event's position. Shared by pointerup and the early-release
+     * move path in onPointerMove. */
+    function finishMarquee(ev: PointerEvent): void {
+      if (marqueeDrag === null) return
+      const drag = marqueeDrag
+      clearMarquee()
+
+      // The tool changed mid-drag (keyboard shortcut) — drop the gesture.
+      if (toolController.activeToolName !== 'Select') return
+
+      if (!drag.active) {
+        // A plain click: run the pick chain at the RELEASE position — if the
+        // camera moved between press and release (scroll zoom, inertia), the
+        // pick lands on what is visibly under the cursor now.
+        const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
+        dispatchSelectPick(ndcX, ndcY, makeWorldRay(ndcX, ndcY, camera))
+        return
+      }
+
+      const [px, py] = canvasPoint(ev)
+      const rect = normalizedRect(drag.startX, drag.startY, px, py)
+      // Drag direction picks the mode: L→R window, R→L crossing (SketchUp).
+      const mode: MarqueeMode = px >= drag.startX ? 'window' : 'crossing'
+      const refs = computeMarqueeSelection(rect, mode)
+      // An empty plain marquee clears the selection, like clicking air; a
+      // modified one leaves it alone (mergeSelection's per-mode rule).
+      onSelectManyRef.current?.(refs, drag.mode)
+      scheduleRender()
+    }
     function onPointerUp(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
       if (ev.button !== 0) return
@@ -10378,31 +10503,7 @@ export default function Viewport({
         return
       }
 
-      if (marqueeDrag === null) return
-      const drag = marqueeDrag
-      clearMarquee()
-
-      // The tool changed mid-drag (keyboard shortcut) — drop the gesture.
-      if (toolController.activeToolName !== 'Select') return
-
-      if (!drag.active) {
-        // A plain click: run the pick chain at the RELEASE position — if the
-        // camera moved between press and release (scroll zoom, inertia), the
-        // pick lands on what is visibly under the cursor now.
-        const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
-        dispatchSelectPick(ndcX, ndcY, makeWorldRay(ndcX, ndcY, camera))
-        return
-      }
-
-      const [px, py] = canvasPoint(ev)
-      const rect = normalizedRect(drag.startX, drag.startY, px, py)
-      // Drag direction picks the mode: L→R window, R→L crossing (SketchUp).
-      const mode: MarqueeMode = px >= drag.startX ? 'window' : 'crossing'
-      const refs = computeMarqueeSelection(rect, mode)
-      // An empty plain marquee clears the selection, like clicking air; a
-      // modified one leaves it alone (mergeSelection's per-mode rule).
-      onSelectManyRef.current?.(refs, drag.mode)
-      scheduleRender()
+      finishMarquee(ev)
     }
     function onPointerCancel(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
@@ -10414,6 +10515,7 @@ export default function Viewport({
       // still-armed drag.
       abortFovDrag(ev.pointerId)
       clearMarquee()
+      reportToolHint()
       if (dragCommitGate.pointerId === ev.pointerId) endDragCommit()
       // Both scoped to the arming pointer too (ADVERSARIAL-REVIEW finding
       // 4) — this listener fires for every pointer's own cancel, same as
@@ -10465,6 +10567,8 @@ export default function Viewport({
     renderer.domElement.addEventListener('pointerdown', onPointerDownTracked)
     renderer.domElement.addEventListener('pointerup', onPointerUpTracked)
     renderer.domElement.addEventListener('pointercancel', onPointerCancel)
+    const onWindowBlurMarquee = (): void => { if (marqueeDrag !== null) { clearMarquee(); reportToolHint() } }
+    window.addEventListener('blur', onWindowBlurMarquee)
     renderer.domElement.addEventListener('dblclick', onDoubleClickTracked)
     window.addEventListener('keydown', onKeyDownTracked)
 
@@ -11163,6 +11267,7 @@ export default function Viewport({
       renderer.domElement.removeEventListener('pointerdown', onPointerDownTracked)
       renderer.domElement.removeEventListener('pointerup', onPointerUpTracked)
       renderer.domElement.removeEventListener('pointercancel', onPointerCancel)
+      window.removeEventListener('blur', onWindowBlurMarquee)
       renderer.domElement.removeEventListener('dblclick', onDoubleClickTracked)
       marqueeOverlay.remove()
       loupeOverlay.remove()
