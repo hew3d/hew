@@ -303,6 +303,23 @@ enum DocOp {
         origin: (f64, f64, f64),
         direction: (f64, f64, f64),
     },
+    /// Moves the `guide_sel`-th live guide through a rigid pose
+    /// (`Document::transform_guide`): the undo/redo of its exact geometry
+    /// and the save/load round trip of a rotated direction.
+    MoveGuide {
+        guide_sel: usize,
+        axis: (f64, f64, f64),
+        angle: f64,
+        offset: (f64, f64, f64),
+    },
+    /// Copies the `guide_sel`-th live guide `count` times along a
+    /// translation (`Document::duplicate_guide_array`, Move's copy and
+    /// array on a guide).
+    CopyGuide {
+        guide_sel: usize,
+        offset: (f64, f64, f64),
+        count: u32,
+    },
     /// Boolean between the `a_sel`-th and `b_sel`-th LIVE members of the
     /// `comp_sel`-th component (`boolean_in_component`, component-edit-
     /// parity.md phase K2) — the shared-geometry combine, replacing both
@@ -846,6 +863,14 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         1 => any::<usize>().prop_map(|inst_sel| DocOp::MakeUnique { inst_sel }),
         1 => (arb_offset(), arb_axis()).prop_map(|(origin, direction)| {
             DocOp::AddGuideLine { origin, direction }
+        }),
+        1 => (any::<usize>(), arb_axis(), -3.0..3.0f64, arb_offset()).prop_map(
+            |(guide_sel, axis, angle, offset)| DocOp::MoveGuide {
+                guide_sel, axis, angle, offset,
+            }
+        ),
+        1 => (any::<usize>(), arb_offset(), 1u32..4).prop_map(|(guide_sel, offset, count)| {
+            DocOp::CopyGuide { guide_sel, offset, count }
         }),
         1 => (0u8..3, any::<usize>(), any::<usize>(), any::<usize>()).prop_map(
             |(kind, comp_sel, a_sel, b_sel)| DocOp::BooleanInComponent {
@@ -3060,6 +3085,35 @@ fn apply_doc_op(
             let origin = Point3::new(origin.0, origin.1, origin.2);
             let direction = Vec3::new(direction.0, direction.1, direction.2);
             let _ = doc.add_guide_line(origin, direction);
+        }
+        DocOp::MoveGuide {
+            guide_sel,
+            axis,
+            angle,
+            offset,
+        } => {
+            let Some(gid) = nth(&doc.guide_ids(), *guide_sel) else {
+                return Ok(true);
+            };
+            let Ok(rot) = Transform::rotation(Vec3::new(axis.0, axis.1, axis.2), *angle) else {
+                return Ok(true);
+            };
+            let pose = rot.then(&Transform::translation(Vec3::new(
+                offset.0, offset.1, offset.2,
+            )));
+            let _ = doc.transform_guide(gid, &pose);
+        }
+        DocOp::CopyGuide {
+            guide_sel,
+            offset,
+            count,
+        } => {
+            let Some(gid) = nth(&doc.guide_ids(), *guide_sel) else {
+                return Ok(true);
+            };
+            let step = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
+            let count = std::num::NonZeroU32::new(*count).expect("strategy draws 1..4");
+            let _ = doc.duplicate_guide_array(gid, &step, count);
         }
         DocOp::BooleanInComponent {
             comp_sel,

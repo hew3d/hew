@@ -523,7 +523,11 @@ below.
   tangent-from-anchor points of drawn circles and arcs, honoring each
   arc's actual angular range
 - Construction guides — guide lines and points that participate in
-  snapping and are saved with the model
+  snapping and are saved with the model. Move moves a guide like any
+  selection (axis locks, typed and retyped distances), and its copy
+  toggle copies it, ×N / /N arrays included, each move or copy one undo
+  step. With nothing else selected, a click on a guide starts moving
+  that guide; a guide taken that way is selected only for the gesture
 - Tape Measure (point-to-point distance, or drop a parallel guide at an
   offset — sourced from an edge (a plain object's, a group member's, or a
   component instance's), a sketch line, a world axis, or another guide

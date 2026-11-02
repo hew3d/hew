@@ -1480,6 +1480,18 @@ enum DocAction {
     /// then-visible guide in one step. Undo unhides exactly these; redo
     /// re-hides them.
     DeletedGuides { guides: Vec<GuideId> },
+    /// `transform_guide` moved one construction guide. Undo writes `before`
+    /// back, redo `after` — both exact, so no drift builds up across
+    /// undo/redo cycles. The `GuideId` stays stable.
+    TransformedGuide {
+        guide: GuideId,
+        before: Guide,
+        after: Guide,
+    },
+    /// `duplicate_guide_array` created copies of a construction guide (a
+    /// Move+copy, or its ×N / /N array) in one step. Undo hides them all;
+    /// redo unhides them. The `GuideId`s stay stable.
+    DuplicatedGuides { guides: Vec<GuideId> },
     /// `add_linear_dimension`/`add_radial_dimension`/`add_leader_text`
     /// created an annotation. Undo hides it; redo unhides. The
     /// `AnnotationId` stays stable. Mirrors [`DocAction::CreatedGuide`].
@@ -2230,6 +2242,8 @@ impl DocAction {
             DocAction::CreatedGuide { .. }
             | DocAction::DeletedGuide { .. }
             | DocAction::DeletedGuides { .. }
+            | DocAction::TransformedGuide { .. }
+            | DocAction::DuplicatedGuides { .. }
             | DocAction::CreatedAnnotation { .. }
             | DocAction::DeletedAnnotation { .. }
             | DocAction::UpdatedAnnotation { .. }
@@ -2349,6 +2363,8 @@ impl DocAction {
             | DocAction::CreatedGuide { .. }
             | DocAction::DeletedGuide { .. }
             | DocAction::DeletedGuides { .. }
+            | DocAction::TransformedGuide { .. }
+            | DocAction::DuplicatedGuides { .. }
             | DocAction::CreatedAnnotation { .. }
             | DocAction::DeletedAnnotation { .. }
             | DocAction::UpdatedAnnotation { .. } => Vec::new(),
@@ -2526,6 +2542,7 @@ impl DocAction {
                 actions.iter().flat_map(|a| a.created_guides()).collect()
             }
             DocAction::CreatedGuide { guide } => vec![*guide],
+            DocAction::DuplicatedGuides { guides } => guides.clone(),
             DocAction::Imported { guides, .. } => guides.clone(),
             _ => Vec::new(),
         }
@@ -8229,6 +8246,118 @@ impl Document {
             guides_touched: live,
             ..Default::default()
         })
+    }
+
+    /// Move one construction guide through `pose` — the kernel half of the
+    /// Move tool on a guide. The guide is carried as [`pose_guide`] places
+    /// it: a point's position and a line's origin move like any point, a
+    /// line's direction turns with the pose and its finite stretch follows.
+    /// The guide keeps its id and its tags. Undoable
+    /// ([`DocAction::TransformedGuide`]): undo restores the exact prior
+    /// geometry, redo the exact posed one. Clears the redo stack.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownGuide`] — stale, hidden, or from another
+    ///   Document.
+    /// - [`DocumentError::Transform`] — `pose` is singular.
+    /// - [`DocumentError::DegenerateGuide`] — the posed geometry is not a
+    ///   guide (a non-finite coordinate, or a line whose stretch collapses).
+    ///
+    /// On `Err` the document is untouched.
+    pub fn transform_guide(
+        &mut self,
+        guide: GuideId,
+        pose: &Transform,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "transform_guide");
+        let before = match self.guides.get(guide) {
+            Some(rec) if !rec.hidden => rec.guide,
+            _ => return Err(DocumentError::UnknownGuide),
+        };
+        pose.inverse().map_err(DocumentError::Transform)?;
+        let after = pose_guide(before, pose).ok_or(DocumentError::DegenerateGuide)?;
+        self.guides[guide].guide = after;
+        self.undo.push(DocAction::TransformedGuide {
+            guide,
+            before,
+            after,
+        });
+        self.commit_new_action();
+        self.debug_validate();
+        Ok(DocChange {
+            guides_touched: vec![guide],
+            ..Default::default()
+        })
+    }
+
+    /// Copy one construction guide `count` times along `step` — the kernel
+    /// half of the Move tool's copy (and of its "×N" / "/N" array) on a
+    /// guide. Copy `k` (1-based) is the source carried through `step`
+    /// composed `k` times, as [`Document::duplicate_nodes_array`] places
+    /// node copies, each posed as [`Document::transform_guide`] moves a
+    /// guide. Every copy carries the source's tags; the source is left
+    /// as it is.
+    ///
+    /// The whole array is recorded as one [`DocAction::DuplicatedGuides`]:
+    /// a single undo hides every copy, a single redo restores them all.
+    /// Returns the copies in order (copy 1 first). Clears the redo stack.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownGuide`] — stale, hidden, or from another
+    ///   Document.
+    /// - [`DocumentError::Transform`] — `step` is singular.
+    /// - [`DocumentError::DegenerateGuide`] — a copy's geometry is not a
+    ///   guide (a non-finite coordinate, or a line whose stretch collapses).
+    ///
+    /// On `Err` the document is untouched.
+    pub fn duplicate_guide_array(
+        &mut self,
+        guide: GuideId,
+        step: &Transform,
+        count: NonZeroU32,
+    ) -> Result<(Vec<GuideId>, DocChange), DocumentError> {
+        info!(
+            target: "kernel::op",
+            op = "duplicate_guide_array",
+            count = count.get(),
+        );
+        let (source, tags) = match self.guides.get(guide) {
+            Some(rec) if !rec.hidden => (rec.guide, rec.tags.clone()),
+            _ => return Err(DocumentError::UnknownGuide),
+        };
+        step.inverse().map_err(DocumentError::Transform)?;
+        // Every copy's geometry first, so a degenerate one refuses with
+        // nothing inserted (strong guarantee).
+        let mut copies: Vec<Guide> = Vec::with_capacity(count.get() as usize);
+        let mut placement = *step;
+        for k in 0..count.get() {
+            if k > 0 {
+                placement = placement.then(step);
+            }
+            copies.push(pose_guide(source, &placement).ok_or(DocumentError::DegenerateGuide)?);
+        }
+        let ids: Vec<GuideId> = copies
+            .into_iter()
+            .map(|g| {
+                self.insert_guide_record(GuideRecord {
+                    guide: g,
+                    hidden: false,
+                    tags: tags.clone(),
+                })
+            })
+            .collect();
+        self.undo.push(DocAction::DuplicatedGuides {
+            guides: ids.clone(),
+        });
+        self.commit_new_action();
+        self.debug_validate();
+        Ok((
+            ids.clone(),
+            DocChange {
+                guides_touched: ids,
+                ..Default::default()
+            },
+        ))
     }
 
     /// Live (visible) guide ids in slotmap key order (deterministic).
@@ -18593,6 +18722,8 @@ impl Document {
             DocAction::CreatedGuide { .. } => k("guide"),
             DocAction::DeletedGuide { .. } => k("delete-guide"),
             DocAction::DeletedGuides { guides } => k("delete-guides").count("count", guides.len()),
+            DocAction::TransformedGuide { .. } => k("move-guide"),
+            DocAction::DuplicatedGuides { guides } => k("copy-guides").count("count", guides.len()),
             DocAction::CreatedAnnotation { annotation } => {
                 k("add-annotation").text("what", self.annotation_label(*annotation))
             }
@@ -20411,6 +20542,26 @@ impl Document {
                     ..Default::default()
                 }
             }
+            &DocAction::TransformedGuide { guide, before, .. } => {
+                if let Some(rec) = self.guides.get_mut(guide) {
+                    rec.guide = before;
+                }
+                DocChange {
+                    guides_touched: vec![guide],
+                    ..Default::default()
+                }
+            }
+            DocAction::DuplicatedGuides { guides } => {
+                for &id in guides {
+                    if let Some(rec) = self.guides.get_mut(id) {
+                        rec.hidden = true;
+                    }
+                }
+                DocChange {
+                    guides_touched: guides.clone(),
+                    ..Default::default()
+                }
+            }
             &DocAction::CreatedAnnotation { annotation } => {
                 if let Some(rec) = self.annotations.get_mut(annotation) {
                     rec.hidden = true;
@@ -22006,6 +22157,26 @@ impl Document {
                     ..Default::default()
                 }
             }
+            &DocAction::TransformedGuide { guide, after, .. } => {
+                if let Some(rec) = self.guides.get_mut(guide) {
+                    rec.guide = after;
+                }
+                DocChange {
+                    guides_touched: vec![guide],
+                    ..Default::default()
+                }
+            }
+            DocAction::DuplicatedGuides { guides } => {
+                for &id in guides {
+                    if let Some(rec) = self.guides.get_mut(id) {
+                        rec.hidden = false;
+                    }
+                }
+                DocChange {
+                    guides_touched: guides.clone(),
+                    ..Default::default()
+                }
+            }
             &DocAction::CreatedAnnotation { annotation } => {
                 if let Some(rec) = self.annotations.get_mut(annotation) {
                     rec.hidden = false;
@@ -22560,6 +22731,40 @@ impl Document {
             self.debug_validate_sids();
             self.debug_validate_materials();
             self.debug_validate_owned_sketches();
+            self.debug_validate_guides();
+        }
+    }
+
+    /// Every live guide is a guide (rule 2 coverage for the guide
+    /// mutations, `transform_guide` and `duplicate_guide_array` among
+    /// them): finite coordinates, and for a line a unit direction and a
+    /// valid stretch.
+    fn debug_validate_guides(&self) {
+        for (gid, rec) in self.guides.iter().filter(|(_, r)| !r.hidden) {
+            match rec.guide {
+                Guide::Line {
+                    origin,
+                    direction,
+                    span,
+                } => {
+                    assert!(
+                        point_is_finite(origin) && vec_is_finite(direction),
+                        "guide {gid:?} has a non-finite coordinate — kernel bug"
+                    );
+                    assert!(
+                        (direction.length() - 1.0).abs() <= tol::NORMAL_DIRECTION,
+                        "guide {gid:?} has a non-unit direction — kernel bug"
+                    );
+                    assert!(
+                        span.is_valid(),
+                        "guide {gid:?} has an invalid span — kernel bug"
+                    );
+                }
+                Guide::Point { position } => assert!(
+                    point_is_finite(position),
+                    "guide {gid:?} has a non-finite coordinate — kernel bug"
+                ),
+            }
         }
     }
 
@@ -23847,6 +24052,47 @@ fn point_is_finite(p: Point3) -> bool {
 /// input (a NaN length compares false against the minimum-length tolerance).
 fn vec_is_finite(v: Vec3) -> bool {
     v.x.is_finite() && v.y.is_finite() && v.z.is_finite()
+}
+
+/// `guide` carried through `pose` ([`Document::transform_guide`],
+/// [`Document::duplicate_guide_array`]), or `None` when the result is not a
+/// guide. A point's position and a line's origin move like any point. A
+/// line's direction is run through the pose as a vector and renormalized,
+/// and its finite stretch scales by how much the pose stretches that
+/// direction — except when the pose leaves the direction exactly as it was
+/// (any translation), where both are kept bit-for-bit rather than put
+/// through a renormalization that could only add a rounding step, so
+/// repeated moves never drift a guide's direction. `None` for a non-finite
+/// coordinate, a direction too short to normalize, or a stretch that
+/// collapses (rule 4: refused, never nudged into shape).
+fn pose_guide(guide: Guide, pose: &Transform) -> Option<Guide> {
+    match guide {
+        Guide::Line {
+            origin,
+            direction,
+            span,
+        } => {
+            let origin = pose.apply_point(origin);
+            let posed = pose.apply_vector(direction);
+            let (direction, span) = if posed == direction {
+                (direction, span)
+            } else {
+                let dir = posed.normalized().ok()?;
+                (dir, span.scaled(posed.length()))
+            };
+            (point_is_finite(origin) && vec_is_finite(direction) && span.is_valid()).then_some(
+                Guide::Line {
+                    origin,
+                    direction,
+                    span,
+                },
+            )
+        }
+        Guide::Point { position } => {
+            let position = pose.apply_point(position);
+            point_is_finite(position).then_some(Guide::Point { position })
+        }
+    }
 }
 
 /// Scales a [`Guide`]'s geometry by `scale` (a positive uniform scale about

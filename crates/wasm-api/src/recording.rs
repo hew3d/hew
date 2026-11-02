@@ -589,6 +589,20 @@ pub enum RecordedCall {
     DeleteGuide { guide: u64 },
     /// `delete_all_guides()`.
     DeleteAllGuides,
+    /// `transform_guide(guide, affine)` — Move on a guide. Additive
+    /// variant (the [`RecordedCall::SketchBeginCurveWith`] posture): a
+    /// recording that never moves a guide replays on older builds
+    /// unchanged; one that does fails to parse there — loudly, never
+    /// silently divergent.
+    TransformGuide { guide: u64, affine: [f64; 12] },
+    /// `duplicate_guide_array(guide, affine, count)` — Move's copy and
+    /// ×N / /N array on a guide. Additive variant, as
+    /// [`RecordedCall::TransformGuide`].
+    DuplicateGuideArray {
+        guide: u64,
+        affine: [f64; 12],
+        count: u32,
+    },
     /// `add_linear_dimension(a_node_kind, a_node_id, a_point, b_node_kind,
     /// b_node_id, b_point, offset, plane, text_override)`. Additive variant
     /// (the [`RecordedCall::SketchBeginCurveWith`] posture): a recording
