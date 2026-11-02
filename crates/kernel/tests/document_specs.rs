@@ -5272,6 +5272,320 @@ fn delete_all_guides_on_empty_document_is_a_no_op() {
     assert!(!doc.can_undo(), "an empty delete-all pushes NO undo entry");
 }
 
+/// A document holding one guide line over the stretch `[-1, 2]` m along X
+/// through (0, 1, 0), tagged "Rig" — the shape a `.skp` import brings in,
+/// the only way to get a tagged, finite guide.
+fn doc_with_tagged_segment_guide() -> (Document, kernel::GuideId) {
+    use kernel::{GuideSpan, ImportGuide, ImportScene, ImportTag};
+    let mut doc = Document::new();
+    let scene = ImportScene {
+        materials: Vec::new(),
+        defs: Vec::new(),
+        roots: Vec::new(),
+        guides: vec![ImportGuide::Line {
+            origin: Point3::new(0.0, 1.0, 0.0),
+            direction: Vec3::new(1.0, 0.0, 0.0),
+            span: GuideSpan {
+                from: Some(-1.0),
+                to: Some(2.0),
+            },
+            tags: vec![vec!["Rig".to_string()]],
+        }],
+        tags: vec![ImportTag {
+            path: vec!["Rig".to_string()],
+            hidden: false,
+        }],
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
+        view_style: None,
+        extra: Default::default(),
+    };
+    doc.ingest(scene, Vec::new()).unwrap();
+    let id = doc.guide_ids()[0];
+    (doc, id)
+}
+
+#[test]
+fn transform_guide_translates_a_line_keeping_direction_and_span_exact() {
+    let mut doc = Document::new();
+    let id = doc
+        .add_guide_line(Point3::new(1.0, 2.0, 3.0), Vec3::new(0.3, 0.4, 0.0))
+        .unwrap();
+    let Guide::Line {
+        direction: dir0,
+        span: span0,
+        ..
+    } = *doc.guide(id).unwrap()
+    else {
+        panic!("expected a Line guide")
+    };
+
+    let change = doc
+        .transform_guide(id, &Transform::translation(Vec3::new(0.5, -1.0, 2.0)))
+        .expect("move");
+    assert_eq!(change.guides_touched, vec![id]);
+    assert_eq!(doc.guide_ids(), vec![id], "the guide keeps its id");
+    match *doc.guide(id).unwrap() {
+        Guide::Line {
+            origin,
+            direction,
+            span,
+        } => {
+            assert!(origin.approx_eq(Point3::new(1.5, 1.0, 5.0), 1e-12));
+            // A translation leaves the direction bit-for-bit as it was:
+            // repeated moves never drift it.
+            assert_eq!(direction, dir0);
+            assert_eq!(span, span0);
+        }
+        Guide::Point { .. } => panic!("expected a Line guide"),
+    }
+}
+
+#[test]
+fn transform_guide_moves_a_point() {
+    let mut doc = Document::new();
+    let id = doc.add_guide_point(Point3::new(1.0, 1.0, 1.0)).unwrap();
+    doc.transform_guide(id, &Transform::translation(Vec3::new(0.0, 0.0, -3.0)))
+        .expect("move");
+    match *doc.guide(id).unwrap() {
+        Guide::Point { position } => {
+            assert!(position.approx_eq(Point3::new(1.0, 1.0, -2.0), 1e-12));
+        }
+        Guide::Line { .. } => panic!("expected a Point guide"),
+    }
+}
+
+#[test]
+fn transform_guide_rotates_a_line_and_its_stretch_with_it() {
+    let (mut doc, id) = doc_with_tagged_segment_guide();
+    // A quarter turn about Z: X turns to Y, (0, 1, 0) to (-1, 0, 0).
+    let quarter =
+        Transform::rotation(Vec3::new(0.0, 0.0, 1.0), std::f64::consts::FRAC_PI_2).unwrap();
+    doc.transform_guide(id, &quarter).expect("rotate");
+    match *doc.guide(id).unwrap() {
+        Guide::Line {
+            origin,
+            direction,
+            span,
+        } => {
+            assert!(origin.approx_eq(Point3::new(-1.0, 0.0, 0.0), 1e-12));
+            assert!(direction.approx_eq(Vec3::new(0.0, 1.0, 0.0), 1e-12));
+            let (from, to) = (span.from.unwrap(), span.to.unwrap());
+            assert!((from + 1.0).abs() < 1e-12 && (to - 2.0).abs() < 1e-12);
+        }
+        Guide::Point { .. } => panic!("expected a Line guide"),
+    }
+    assert_eq!(doc.guide_tags(id), &[vec!["Rig".to_string()]], "tags stay");
+}
+
+#[test]
+fn transform_guide_undo_redo_restores_exact_geometry() {
+    let mut doc = Document::new();
+    let id = doc
+        .add_guide_line(Point3::new(0.1, 0.2, 0.3), Vec3::new(1.0, 1.0, 0.0))
+        .unwrap();
+    let before = *doc.guide(id).unwrap();
+    let pose = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), 0.7)
+        .unwrap()
+        .then(&Transform::translation(Vec3::new(0.3, 0.0, 1.1)));
+    doc.transform_guide(id, &pose).unwrap();
+    let after = *doc.guide(id).unwrap();
+    assert_ne!(before, after);
+
+    doc.undo().unwrap();
+    assert_eq!(*doc.guide(id).unwrap(), before, "undo is bit-exact");
+    doc.redo().unwrap();
+    assert_eq!(*doc.guide(id).unwrap(), after, "redo is bit-exact");
+}
+
+#[test]
+fn transform_guide_refusals_leave_the_document_untouched() {
+    let mut doc = Document::new();
+    let id = doc.add_guide_point(Point3::new(1.0e308, 0.0, 0.0)).unwrap();
+    let gone = doc.add_guide_point(Point3::ORIGIN).unwrap();
+    doc.delete_guide(gone).unwrap();
+    // A handle from another document, past every slot `doc` has (a
+    // slotmap key carries no document identity: a low one would alias).
+    let mut other = Document::new();
+    for _ in 0..2 {
+        other.add_guide_point(Point3::ORIGIN).unwrap();
+    }
+    let stray = other.add_guide_point(Point3::ORIGIN).unwrap();
+    let hash = doc.state_hash();
+    let move_x = Transform::translation(Vec3::new(1.0, 0.0, 0.0));
+
+    assert_eq!(
+        doc.transform_guide(gone, &move_x),
+        Err(DocumentError::UnknownGuide)
+    );
+    assert_eq!(
+        doc.transform_guide(stray, &move_x),
+        Err(DocumentError::UnknownGuide)
+    );
+    assert!(matches!(
+        doc.transform_guide(id, &Transform::uniform_scale(0.0)),
+        Err(DocumentError::Transform(_))
+    ));
+    // Overflows the position: refused, never clamped (rule 4).
+    assert_eq!(
+        doc.transform_guide(id, &Transform::translation(Vec3::new(1.0e308, 0.0, 0.0))),
+        Err(DocumentError::DegenerateGuide)
+    );
+    assert_eq!(doc.state_hash(), hash, "document untouched on Err");
+    doc.undo().unwrap();
+    assert_eq!(
+        doc.guide_ids(),
+        vec![id, gone],
+        "no undo entry pushed on Err"
+    );
+}
+
+#[test]
+fn duplicate_guide_array_places_copies_along_the_step_with_the_tags() {
+    let (mut doc, src) = doc_with_tagged_segment_guide();
+    let source = *doc.guide(src).unwrap();
+    let step = Transform::translation(Vec3::new(0.0, 0.5, 0.0));
+    let (copies, change) = doc
+        .duplicate_guide_array(src, &step, NonZeroU32::new(3).unwrap())
+        .expect("copy");
+    assert_eq!(copies.len(), 3);
+    assert_eq!(change.guides_touched, copies);
+    assert_eq!(*doc.guide(src).unwrap(), source, "the source stays put");
+    for (k, &c) in copies.iter().enumerate() {
+        match *doc.guide(c).unwrap() {
+            Guide::Line {
+                origin,
+                direction,
+                span,
+            } => {
+                let y = 1.0 + 0.5 * (k as f64 + 1.0);
+                assert!(origin.approx_eq(Point3::new(0.0, y, 0.0), 1e-12));
+                assert_eq!(direction, Vec3::new(1.0, 0.0, 0.0));
+                assert_eq!(span, source_span(&source));
+            }
+            Guide::Point { .. } => panic!("expected a Line guide"),
+        }
+        assert_eq!(doc.guide_tags(c), &[vec!["Rig".to_string()]]);
+    }
+}
+
+fn source_span(g: &Guide) -> kernel::GuideSpan {
+    match *g {
+        Guide::Line { span, .. } => span,
+        Guide::Point { .. } => panic!("expected a Line guide"),
+    }
+}
+
+#[test]
+fn duplicate_guide_array_is_one_undo_step_keeping_ids() {
+    let mut doc = Document::new();
+    let src = doc.add_guide_point(Point3::ORIGIN).unwrap();
+    let (copies, _) = doc
+        .duplicate_guide_array(
+            src,
+            &Transform::translation(Vec3::new(1.0, 0.0, 0.0)),
+            NonZeroU32::new(4).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(doc.guide_ids().len(), 5);
+
+    doc.undo().unwrap();
+    assert_eq!(doc.guide_ids(), vec![src], "one undo hides every copy");
+    doc.redo().unwrap();
+    let mut expected = copies.clone();
+    expected.insert(0, src);
+    assert_eq!(doc.guide_ids(), expected, "redo restores the same ids");
+}
+
+#[test]
+fn duplicate_guide_array_refusals_insert_nothing() {
+    let mut doc = Document::new();
+    let id = doc.add_guide_point(Point3::new(1.0e308, 0.0, 0.0)).unwrap();
+    let hash = doc.state_hash();
+    let one = NonZeroU32::new(1).unwrap();
+    assert!(matches!(
+        doc.duplicate_guide_array(id, &Transform::uniform_scale(0.0), one),
+        Err(DocumentError::Transform(_))
+    ));
+    // Copy 1 fits, copy 2 overflows: the whole array refuses.
+    assert_eq!(
+        doc.duplicate_guide_array(
+            id,
+            &Transform::translation(Vec3::new(0.6e308, 0.0, 0.0)),
+            NonZeroU32::new(2).unwrap(),
+        ),
+        Err(DocumentError::DegenerateGuide)
+    );
+    doc.delete_guide(id).unwrap();
+    assert_eq!(
+        doc.duplicate_guide_array(id, &Transform::translation(Vec3::ZERO), one),
+        Err(DocumentError::UnknownGuide)
+    );
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), hash, "document untouched on Err");
+    assert_eq!(doc.guide_ids(), vec![id]);
+}
+
+proptest! {
+    /// A rigid pose carries a guide line as a rigid body: a point `t`
+    /// along the line lands on the moved line at the same `t`, the
+    /// direction stays unit-length, and undo restores the exact geometry.
+    #[test]
+    fn transform_guide_is_rigid_and_undoes_exactly(
+        o in prop::array::uniform3(-10.0f64..10.0),
+        d in prop::array::uniform3(-1.0f64..1.0),
+        axis in prop::array::uniform3(-1.0f64..1.0),
+        angle in -6.3f64..6.3,
+        shift in prop::array::uniform3(-10.0f64..10.0),
+        t in -5.0f64..5.0,
+    ) {
+        let dir = Vec3::new(d[0], d[1], d[2]);
+        let axis = Vec3::new(axis[0], axis[1], axis[2]);
+        prop_assume!(dir.length() > 1e-3 && axis.length() > 1e-3);
+        let mut doc = Document::new();
+        let origin = Point3::new(o[0], o[1], o[2]);
+        let id = doc.add_guide_line(origin, dir).unwrap();
+        let before = *doc.guide(id).unwrap();
+        let Guide::Line { direction: d0, .. } = before else { unreachable!() };
+        let pose = Transform::rotation(axis, angle)
+            .unwrap()
+            .then(&Transform::translation(Vec3::new(shift[0], shift[1], shift[2])));
+
+        doc.transform_guide(id, &pose).unwrap();
+        let Guide::Line { origin: o1, direction: d1, .. } = *doc.guide(id).unwrap() else {
+            unreachable!()
+        };
+        prop_assert!((d1.length() - 1.0).abs() < 1e-12);
+        let on_line = pose.apply_point(origin + d0 * t);
+        prop_assert!(on_line.approx_eq(o1 + d1 * t, 1e-9));
+
+        doc.undo().unwrap();
+        prop_assert_eq!(*doc.guide(id).unwrap(), before);
+    }
+
+    /// Copy `k` of an array sits `k` steps from the source.
+    #[test]
+    fn duplicate_guide_array_spaces_copies_evenly(
+        p in prop::array::uniform3(-10.0f64..10.0),
+        s in prop::array::uniform3(-2.0f64..2.0),
+        count in 1u32..8,
+    ) {
+        let mut doc = Document::new();
+        let src = doc.add_guide_point(Point3::new(p[0], p[1], p[2])).unwrap();
+        let step = Vec3::new(s[0], s[1], s[2]);
+        let (copies, _) = doc
+            .duplicate_guide_array(src, &Transform::translation(step), NonZeroU32::new(count).unwrap())
+            .unwrap();
+        prop_assert_eq!(copies.len(), count as usize);
+        for (k, &c) in copies.iter().enumerate() {
+            let Guide::Point { position } = *doc.guide(c).unwrap() else { unreachable!() };
+            let expected = Point3::new(p[0], p[1], p[2]) + step * (k as f64 + 1.0);
+            prop_assert!(position.approx_eq(expected, 1e-9));
+        }
+    }
+}
+
 // ------------------------------------------------------------------ slice
 
 #[test]

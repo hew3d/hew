@@ -7986,6 +7986,85 @@ impl Scene {
         Ok(())
     }
 
+    /// Moves one construction guide through `affine` (undoable) — the Move
+    /// tool on a guide. `affine` is the same row-major 3×4 12-float matrix
+    /// as [`Scene::transform_object`]. The handle is unchanged; a point or
+    /// a line's origin moves like any point, a line's direction turns with
+    /// the pose. The guide's snap registration follows it.
+    ///
+    /// # Errors
+    /// - `BadAffine` — `affine` is not 12 floats.
+    /// - `UnknownGuide` — stale, hidden, or foreign handle.
+    /// - `Transform` — a singular `affine`.
+    /// - `DegenerateGuide` — the moved geometry is not a guide (a
+    ///   non-finite coordinate, or a line whose stretch collapses).
+    ///
+    /// On error the document is untouched.
+    pub fn transform_guide(&mut self, guide: u64, affine: &[f64]) -> Result<(), ApiError> {
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let change = self
+            .doc
+            .transform_guide(guide_id(guide), &t)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformGuide {
+            guide,
+            affine: *rows,
+        });
+        Ok(())
+    }
+
+    /// Copies one construction guide `count` times along `affine` — the
+    /// Move tool's copy (count 1) and its ×N / /N array on a guide. Copy
+    /// `k` lands at `affine` composed `k` times, as in
+    /// [`Scene::duplicate_selection_array`]; each copy carries the source's
+    /// tags. The whole array is **one undoable step**. Returns the copies'
+    /// handles, copy 1 first.
+    ///
+    /// # Errors
+    /// - `BadCount` — `count` is zero or exceeds [`MAX_ARRAY_COUNT`]
+    ///   (enforced here, at the trust boundary, for the same reason as
+    ///   [`Scene::duplicate_selection_array`]).
+    /// - `BadAffine` — `affine` is not 12 floats.
+    /// - `UnknownGuide` — stale, hidden, or foreign handle.
+    /// - `Transform` — a singular `affine`.
+    /// - `DegenerateGuide` — a copy's geometry is not a guide.
+    ///
+    /// On error the document is untouched.
+    pub fn duplicate_guide_array(
+        &mut self,
+        guide: u64,
+        affine: &[f64],
+        count: u32,
+    ) -> Result<Vec<u64>, ApiError> {
+        let count_nz = std::num::NonZeroU32::new(count)
+            .filter(|c| c.get() <= MAX_ARRAY_COUNT)
+            .ok_or_else(|| {
+                ApiError::new(
+                    "BadCount",
+                    &format!("count must be between 1 and {MAX_ARRAY_COUNT}"),
+                )
+            })?;
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let (copies, change) = self
+            .doc
+            .duplicate_guide_array(guide_id(guide), &t, count_nz)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DuplicateGuideArray {
+            guide,
+            affine: *rows,
+            count,
+        });
+        Ok(copies.into_iter().map(|g| g.data().as_ffi()).collect())
+    }
+
     /// Enable/disable snapping to construction guides (View ▸ Guides). A hidden
     /// guide must not snap or flash a cue, so toggling its visibility off also
     /// suppresses its inference candidates. The guides stay registered;
@@ -10353,6 +10432,16 @@ impl Scene {
                     }
                     DeleteAllGuides => {
                         self.delete_all_guides()?;
+                    }
+                    TransformGuide { guide, affine } => {
+                        self.transform_guide(guide, &affine)?;
+                    }
+                    DuplicateGuideArray {
+                        guide,
+                        affine,
+                        count,
+                    } => {
+                        self.duplicate_guide_array(guide, &affine, count)?;
                     }
                     AddLinearDimension {
                         a_node_kind,
@@ -17532,6 +17621,66 @@ mod tests {
             Some("on-guide".to_string()),
             "redone guide creation must re-register with inference"
         );
+    }
+
+    /// A moved guide snaps where it went, not where it was — and back
+    /// again across undo/redo.
+    #[test]
+    fn transform_guide_moves_its_snap_registration() {
+        let mut scene = Scene::new();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let on_guide_at = |scene: &Scene, x: f64| {
+            scene
+                .snap(
+                    x, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
+                    None, None,
+                )
+                .unwrap()
+                .is_some_and(|s| s.kind() == "on-guide")
+        };
+        let move_x = kernel::Transform::translation(kernel::Vec3::new(2.0, 0.0, 0.0)).to_affine();
+        scene.transform_guide(g, &move_x).unwrap();
+        assert!(on_guide_at(&scene, 7.0) && !on_guide_at(&scene, 5.0));
+
+        scene.scene_undo().unwrap();
+        assert!(on_guide_at(&scene, 5.0) && !on_guide_at(&scene, 7.0));
+        scene.scene_redo().unwrap();
+        assert!(on_guide_at(&scene, 7.0) && !on_guide_at(&scene, 5.0));
+
+        assert!(
+            scene
+                .transform_guide(g, &move_x[..11])
+                .unwrap_err()
+                .0
+                .starts_with("BadAffine:")
+        );
+    }
+
+    /// Copies of a guide are guides of their own: listed, snappable, and
+    /// gone again in one undo. A count past the cap refuses typed.
+    #[test]
+    fn duplicate_guide_array_adds_snappable_copies_in_one_step() {
+        let mut scene = Scene::new();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let step = kernel::Transform::translation(kernel::Vec3::new(1.0, 0.0, 0.0)).to_affine();
+        let copies = scene.duplicate_guide_array(g, &step, 3).unwrap();
+        assert_eq!(copies.len(), 3);
+        assert_eq!(scene.guide_ids().len(), 4);
+        let hit = scene
+            .snap(
+                8.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
+                None, None,
+            )
+            .unwrap();
+        assert_eq!(hit.map(|s| s.kind()), Some("on-guide".to_string()));
+
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.guide_ids(), vec![g]);
+
+        for bad in [0, MAX_ARRAY_COUNT + 1] {
+            let err = scene.duplicate_guide_array(g, &step, bad).unwrap_err();
+            assert!(err.0.starts_with("BadCount"), "{}", err.0);
+        }
     }
 
     /// A guide point registers as an `"endpoint"` snap (Endpoint-tier, like a

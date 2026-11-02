@@ -272,6 +272,10 @@ msgid "{n, plural, one {Close an opening} other {Close # openings}}"
 msgstr "{n, plural, one {Close an opening} other {Close # openings}}"
 
 #: src/i18n/historyLabels.ts
+msgid "{n, plural, one {Copy guide} other {Copy guide ×#}}"
+msgstr "{n, plural, one {Copy guide} other {Copy guide ×#}}"
+
+#: src/i18n/historyLabels.ts
 msgid "{n, plural, one {Delete # face} other {Delete # faces}}"
 msgstr "{n, plural, one {Delete # face} other {Delete # faces}}"
 
@@ -4590,6 +4594,10 @@ msgstr "Move Down"
 #: src/i18n/historyLabels.ts
 msgid "Move drawing axes"
 msgstr "Move drawing axes"
+
+#: src/i18n/historyLabels.ts
+msgid "Move guide"
+msgstr "Move guide"
 
 #: src/i18n/historyLabels.ts
 msgid "Move imprint"

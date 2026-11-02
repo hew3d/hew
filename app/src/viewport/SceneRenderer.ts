@@ -52,7 +52,7 @@ import { getResolvedTheme } from '../settings/theme'
 import { prefersReducedMotion } from '../platform'
 import { inlineTextQuaternion, TextBillboard } from './TextBillboard'
 import { GUIDE_COLOR } from './guideColors'
-import { windowFor, guideReach, guideSpanOf, stretchToUse, type GuideWindow } from './guideWindow'
+import { windowFor, guideReach, guideSpanOf, stretchToUse, guideOverlayPositions, GUIDE_POINT_MARKER_HALF_SIZE, type GuideWindow } from './guideWindow'
 
 /** What `updateGuideExtents` needs to know about the live camera. */
 export interface GuideView {
@@ -203,12 +203,6 @@ const GUIDE_VIEW_SPAN = 2
  *  render from their own cameras, so a window sized to the live view would
  *  crop them. */
 const GUIDE_PRINT_HALF_LENGTH = 50
-/** Half-length of the selected guide's highlight overlay (meters). It draws
- *  with the depth test off, so unlike the guide itself its length cannot
- *  disturb depth ordering and a long segment reads as infinite. */
-const GUIDE_HIGHLIGHT_HALF_LENGTH = 50
-/** Half-size of a point guide's cross marker (meters). */
-const GUIDE_POINT_MARKER_HALF_SIZE = 0.05
 
 /**
  * One in-flight opacity tween owned by `setHiddenFaded`/`tickFades` (Shop
@@ -2851,26 +2845,8 @@ export class SceneRenderer {
     const geometry = this.wasmScene.guide_geometry(this.selectedGuideId)
     if (kind === undefined || geometry === undefined) return
 
-    const pts: number[] = []
-    if (kind === 'line') {
-      const [ox, oy, oz, dx, dy, dz] = geometry
-      const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
-      if (len < 1e-9) return
-      const ux = dx / len
-      const uy = dy / len
-      const uz = dz / len
-      const { lo, hi } = guideSpanOf(geometry)
-      const span = stretchToUse(-GUIDE_HIGHLIGHT_HALF_LENGTH, GUIDE_HIGHLIGHT_HALF_LENGTH, lo, hi)
-      if (span === null) return
-      const [s0, s1] = span
-      pts.push(ox + ux * s0, oy + uy * s0, oz + uz * s0, ox + ux * s1, oy + uy * s1, oz + uz * s1)
-    } else if (kind === 'point') {
-      const [x, y, z] = geometry
-      const k = GUIDE_POINT_MARKER_HALF_SIZE
-      pts.push(x - k, y, z, x + k, y, z, x, y - k, z, x, y + k, z, x, y, z - k, x, y, z + k)
-    } else {
-      return
-    }
+    const pts = guideOverlayPositions(kind, geometry)
+    if (pts === null) return
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3))
     const mat = new THREE.LineBasicMaterial({ color: EDGE_COLOR_SELECTED, depthTest: false })

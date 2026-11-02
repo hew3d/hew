@@ -2433,6 +2433,8 @@ export default function Viewport({
   const lastPushedSessionRef = useRef<{ node: NodeRef; label: string }[]>([])
   // Latest selected ids, readable inside the stable event closures.
   const selectedIdsRef = useRef<NodeRef[]>(selectedIds)
+  // Latest selected construction guide — the Move tool's guide target.
+  const selectedGuideRef = useRef<bigint | null>(selectedGuide)
   // Latest current material id for the Paint tool.
   const currentMaterialIdRef = useRef<bigint>(currentMaterialId)
   // Polygon's last-used side count — session-lived across tool re-selection
@@ -3473,6 +3475,31 @@ export default function Viewport({
       onSelectRef.current?.(node, 'replace')
       scheduleRender()
       return [node]
+    }
+
+    /**
+     * Guide auto-select for the Move tool: with an empty selection, a guide
+     * under the first click is selected and moved — the Select click's own
+     * rule (`dispatchSelectPick`), so a drawn line lying along the guide
+     * still wins and is left to `acquireTransformTargets`.
+     */
+    function acquireMoveGuide(ray: Ray): bigint | null {
+      // Any point along the ray projects to the clicked pixel, in either
+      // projection.
+      const ndc = new THREE.Vector3(...ray.origin)
+        .add(new THREE.Vector3(...ray.direction))
+        .project(camera)
+      const g = pickGuide(ndc.x, ndc.y)
+      if (g === null) return null
+      const { snap } = snapService.resolve(
+        ray, el.clientHeight, apertureBasis(),
+        undefined, undefined, undefined, undefined, undefined, undefined, true,
+      )
+      const under = resolveSelectableRef(snap, ray, selectionDeps())
+      if (under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve')) return null
+      onSelectGuideRef.current?.(g)
+      scheduleRender()
+      return g
     }
 
     /**
@@ -6977,6 +7004,15 @@ export default function Viewport({
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
+      // A guide is a Move target too (Move only: Rotate/Scale take nodes).
+      // The node-selection branch above never sees one — a drag-move hands
+      // over nodes — so only a plain tool switch carries the guide in.
+      if (selection === undefined) tool.setGuideTarget(selectedGuideRef.current)
+      tool.setGuideHooks(acquireMoveGuide, (guide) => {
+        sceneRenderer.refreshGuides()
+        onSelectGuideRef.current?.(guide)
+        scheduleRender()
+      })
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }
@@ -11246,8 +11282,14 @@ export default function Viewport({
     scheduleRenderRef.current()
   }, [selectedIds, activeContext])
 
-  // Reflect the selected construction guide into the renderer highlight.
+  // Reflect the selected construction guide into the renderer highlight,
+  // and into the active tool (Move's guide target, like Tool.setSelection).
   useEffect(() => {
+    selectedGuideRef.current = selectedGuide
+    const activeTool = toolControllerRef.current?.activeTool
+    if (activeTool !== undefined && 'setGuideTarget' in activeTool) {
+      (activeTool as { setGuideTarget(guide: bigint | null): void }).setGuideTarget(selectedGuide)
+    }
     sceneRendererRef.current?.setSelectedGuide(selectedGuide)
     scheduleRenderRef.current()
   }, [selectedGuide])
