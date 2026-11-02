@@ -60,6 +60,15 @@ export interface Snap {
    *  edges — or an edge and a guide or axis — cross. The edge is the snap's
    *  provenance either way; a tool only words the point differently. */
   piercesFace?: boolean
+  /** For an `'on-intersection-line'` snap, or the `'midpoint'` of such a
+   *  line: the two ends of the stretch where a face of one owner meets a
+   *  face of another (the kernel's `meeting_line`), so the cue layer can
+   *  draw the virtual edge under the cursor. Its `elementKind` is
+   *  `'meeting-line'`, never `'face'`: it lies on two faces at once and is
+   *  a pick of neither, so no tool adopts a face's plane, normal or part
+   *  from it. `object`/`element` (or `sketch`/`sketchRegion`) still name
+   *  the first of the two faces, the line's owner of record. */
+  meetingLine?: [[number, number, number], [number, number, number]]
   object?: bigint
   /** Placing component instance handle, when the snap came from instanced
    *  geometry (pairs with `object`). */

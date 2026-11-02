@@ -5140,6 +5140,10 @@ msgstr ""
 msgid "On Guide"
 msgstr ""
 
+#: src/viewport/InferenceTooltip.tsx
+msgid "On Intersection Line"
+msgstr ""
+
 #: src/panels/PrintDialog.tsx
 #: src/shop/PrintSheet.tsx
 msgid "On paper"

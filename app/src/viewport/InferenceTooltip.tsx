@@ -25,6 +25,9 @@ const KIND_LABEL: Record<string, MessageDescriptor> = {
   midpoint: msg`Midpoint`,
   intersection: msg`Intersection`,
   'on-edge': msg`On Edge`,
+  /** The line where a face of one object meets a face of another — no
+   *  stored edge, since objects never merge, but a line a person sees. */
+  'on-intersection-line': msg`On Intersection Line`,
   'on-face': msg`On Face`,
   'on-guide': msg`On Guide`,
   'on-axis': msg`On Axis`,

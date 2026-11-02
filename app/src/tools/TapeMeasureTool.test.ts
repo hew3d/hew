@@ -406,6 +406,92 @@ describe('TapeMeasureTool — parallel guides from axes and guide lines (playtes
   })
 })
 
+describe('TapeMeasureTool — a first click on the line where two objects\' faces meet', () => {
+  const meeting: [[number, number, number], [number, number, number]] = [[0, 1, 5], [0, 1, 9]]
+  const onLine = (over: Partial<Snap> = {}): Snap => makeSnap({
+    x: 0, y: 1, z: 6, kind: 'on-intersection-line', elementKind: 'meeting-line',
+    object: 7n, element: 1n, meetingLine: meeting, ...over,
+  })
+
+  it('starts a parallel guide along the line, offset by the cursor, without any edge lookup', () => {
+    const { scene, guideLines, guidePoints } = makeWasmScene()
+    const { tool, onGuideCreated } = makeTool(scene)
+    tool.onPointerDown(onLine(), RAY)
+    tool.onPointerMove(makeSnap({ x: 3, y: 1, z: 6 }), RAY) // pull sideways
+    tool.onPointerDown(makeSnap({ x: 3, y: 1, z: 6 }), RAY)
+
+    expect(guideLines.length).toBe(1)
+    expect(guidePoints.length).toBe(0)
+    expect(onGuideCreated).toHaveBeenCalledTimes(1)
+    const [ox, oy, oz, dx, dy, dz] = guideLines[0]
+    expect([dx, dy, dz]).toEqual([0, 0, 1]) // along the line, a to b
+    expect(ox).toBeCloseTo(3, 12)
+    expect(oy).toBeCloseTo(1, 12)
+    expect(oz).toBeCloseTo(6, 12)
+    const wasm = scene as unknown as Record<string, ReturnType<typeof vi.fn>>
+    expect(wasm.edge_endpoints).not.toHaveBeenCalled()
+    expect(wasm.sketch_edge_endpoints).not.toHaveBeenCalled()
+    expect(wasm.edge_endpoints_in_instance).not.toHaveBeenCalled()
+  })
+
+  it('a typed offset commits the guide exactly that far from the line', () => {
+    const { scene, guideLines } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(onLine(), RAY)
+    tool.onPointerMove(makeSnap({ x: 0.5, y: 1, z: 6 }), RAY)
+    typeAndEnter(tool, '0.25')
+    expect(guideLines.length).toBe(1)
+    const [ox, oy, oz, dx, dy, dz] = guideLines[0]
+    expect([dx, dy, dz]).toEqual([0, 0, 1])
+    expect(ox).toBeCloseTo(0.25, 12)
+    expect(oy).toBeCloseTo(1, 12)
+    expect(oz).toBeCloseTo(6, 12)
+  })
+
+  it('Esc cancels the gesture with no guide', () => {
+    const { scene, guideLines } = makeWasmScene()
+    const { tool, onGuideCreated } = makeTool(scene)
+    tool.onPointerDown(onLine(), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 1, z: 6 }), RAY)
+    pressKey(tool, 'Escape')
+    tool.onPointerDown(makeSnap({ x: 4, y: 1, z: 6 }), RAY) // a fresh gesture starts, not a commit
+    expect(guideLines.length).toBe(0)
+    expect(onGuideCreated).not.toHaveBeenCalled()
+  })
+
+  it('a degenerate line falls back to measuring', () => {
+    const { scene, guideLines } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(onLine({ meetingLine: [[0, 1, 5], [0, 1, 5]] }), RAY)
+    tool.onPointerDown(makeSnap({ x: 3, y: 3, z: 0, kind: 'ground' }), RAY)
+    // measure mode in empty space drops the point and the line through p0..p1
+    const [, , , dx] = guideLines[0]
+    expect(dx).not.toBe(0)
+  })
+
+  it('its midpoint and its ends stay point snaps that measure', () => {
+    for (const kind of ['midpoint', 'intersection']) {
+      const { scene, guideLines } = makeWasmScene()
+      const { tool, onGuideCreated } = makeTool(scene)
+      tool.onPointerDown(onLine({ kind, z: 7 }), RAY)
+      tool.onPointerMove(makeSnap({ x: 3, y: 1, z: 7 }), RAY)
+      tool.onPointerDown(makeSnap({ x: 3, y: 1, z: 7, kind: 'endpoint', object: 8n }), RAY)
+      // Measured between two points on geometry: no guide.
+      expect(guideLines.length, kind).toBe(0)
+      expect(onGuideCreated, kind).not.toHaveBeenCalled()
+    }
+  })
+
+  it('Shop Mode (measure only) still measures from the clicked point', () => {
+    const { scene, guideLines } = makeWasmScene()
+    const { tool } = makeTool(scene, { measureOnly: true })
+    tool.onPointerDown(onLine(), RAY)
+    tool.onPointerMove(makeSnap({ x: 3, y: 1, z: 6, kind: 'endpoint', object: 8n }), RAY)
+    tool.onPointerDown(makeSnap({ x: 3, y: 1, z: 6, kind: 'endpoint', object: 8n }), RAY)
+    expect(guideLines.length).toBe(0)
+  })
+})
+
 // From-point axis inference (WP-5, Kurt's requirement #5 — the headline
 // feature of this work package): `anchor: p0` turns on the kernel's soft
 // 5°-cone `SnapKind::OnAxis` inference for a from-point measurement.
@@ -743,6 +829,29 @@ describe('TapeMeasureTool — scoped-rescale arm gate (adversarial-review findin
     expect(onRescaleArmed).not.toHaveBeenCalled()
     expect(onToast).toHaveBeenCalledTimes(2)
     expect(onToast.mock.calls[1][0]).toMatch(/outside the open group or component/i)
+  })
+
+  // The line where two owners' faces meet carries only the first face's
+  // provenance the same way, so it never anchors a scoped rescale either.
+  it('declines when an endpoint is on the middle of the line where two objects\' faces meet', () => {
+    const meeting: [[number, number, number], [number, number, number]] = [
+      [0, -1, 0],
+      [0, 1, 0],
+    ]
+    for (const kind of ['midpoint']) {
+      const { scene } = makeWasmScene()
+      const { tool, onRescaleArmed, onToast } = makeTool(scene)
+      tool.setSessionScope(inScope())
+      tool.onPointerDown(
+        makeSnap({ x: 0, y: 0, z: 0, kind, elementKind: 'meeting-line', object: 7n, element: 1n, meetingLine: meeting }),
+        RAY,
+      )
+      tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint', object: 7n }), RAY)
+      typeAndEnter(tool, '3')
+      expect(onRescaleArmed).not.toHaveBeenCalled()
+      expect(onToast).toHaveBeenCalledTimes(1)
+      expect(onToast.mock.calls[0][0]).toMatch(/outside the open group or component/i)
+    }
   })
 
   it('with no session open, a crossing arms the whole-model resize as before', () => {

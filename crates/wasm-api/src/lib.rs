@@ -2061,8 +2061,9 @@ impl SnapJs {
     }
 
     /// Snap kind for cue styling: "endpoint", "center", "quadrant",
-    /// "midpoint", "intersection", "tangent", "on-edge", "on-face",
-    /// "on-guide", "on-axis", "parallel", "perpendicular".
+    /// "midpoint", "intersection", "tangent", "on-edge",
+    /// "on-intersection-line", "on-face", "on-guide", "on-axis",
+    /// "parallel", "perpendicular".
     pub fn kind(&self) -> String {
         match self.snap.kind {
             SnapKind::Endpoint => "endpoint",
@@ -2072,6 +2073,7 @@ impl SnapJs {
             SnapKind::Intersection => "intersection",
             SnapKind::Tangent => "tangent",
             SnapKind::OnEdge => "on-edge",
+            SnapKind::OnIntersectionLine => "on-intersection-line",
             SnapKind::OnFace => "on-face",
             SnapKind::OnGuide => "on-guide",
             SnapKind::OnAxis => "on-axis",
@@ -2110,14 +2112,26 @@ impl SnapJs {
     }
 
     /// "vertex" | "edge" | "face" | "sketch-edge" | "sketch-region" |
-    /// "sketch-curve" for interpreting `element` / `sketch_region` /
-    /// `sketch_curve`.
+    /// "sketch-curve" | "meeting-line" for interpreting `element` /
+    /// `sketch_region` / `sketch_curve`.
     ///
     /// "sketch-curve" carries NO `element`: the analytic points of a drawn
     /// curve (a circle's center, its quadrants, an anchored tangent) belong
     /// to the curve CHAIN, not to any one facet edge — a center lies on no
     /// edge at all. Read `sketch_curve` (plus `sketch`) for it.
+    ///
+    /// "meeting-line" is a snap on the line where two owners' faces meet
+    /// (`"on-intersection-line"`, or the `"midpoint"` of such a line; see
+    /// `meeting_line`). It lies on two faces at once and is a pick of
+    /// neither, so it never reads as "face": a consumer that adopts the
+    /// plane or normal of a face under the cursor, or treats a face hit as
+    /// a part, must not take the first face's for it. `object`/`instance`/
+    /// `element` (or `sketch`/`sketch_region`) still name that first face,
+    /// the line's owner of record.
     pub fn element_kind(&self) -> Option<String> {
+        if self.snap.meeting_line.is_some() {
+            return Some("meeting-line".to_string());
+        }
         self.snap
             .source
             .map(|s| {
@@ -2211,6 +2225,19 @@ impl SnapJs {
     /// `false` for every other snap.
     pub fn pierces_face(&self) -> bool {
         self.snap.pierced_face.is_some()
+    }
+
+    /// The line where a face of one owner meets a face of another, when
+    /// this snap lies on one (`"on-intersection-line"`, or the
+    /// `"midpoint"` of such a line): its two ends as `[ax, ay, az, bx, by,
+    /// bz]`, for drawing the virtual edge under the cursor
+    /// (`inference::Snap::meeting_line`). The snap's `element_kind` is
+    /// `"meeting-line"`, and its `object`/`element` name the first of the
+    /// two faces. `undefined` for every other snap.
+    pub fn meeting_line(&self) -> Option<Vec<f64>> {
+        self.snap
+            .meeting_line
+            .map(|l| vec![l.a.x, l.a.y, l.a.z, l.b.x, l.b.y, l.b.z])
     }
 }
 
@@ -11733,6 +11760,75 @@ mod tests {
             .expect("snaps at the corner");
         assert_eq!(snap.kind(), "endpoint");
         assert!(!snap.pierces_face());
+    }
+
+    /// `SnapJs::kind` names the line where two Objects' faces meet, and
+    /// `SnapJs::meeting_line` hands the app its two ends for the cue; every
+    /// other snap has no line.
+    #[test]
+    fn a_snap_on_a_meeting_line_reports_the_lines_ends() {
+        let mut scene = Scene::new();
+        let _wall = scene_box(&mut scene, 1.0, 0.0, 1.5, 2.0, 1.0);
+        // A block half a metre tall standing through the wall's near face:
+        // its top meets the face along (1, 0.6..1.4, 0.5).
+        let _block = scene_box(&mut scene, 0.5, 0.6, 1.2, 1.4, 0.5);
+        // Aim at the top line a third of the way along, from in front of
+        // the wall and above.
+        let at = [1.0, 0.8667, 0.5];
+        let eye = [-1.0, 1.0, 1.4];
+        let d = [at[0] - eye[0] - 0.001, at[1] - eye[1], at[2] - eye[2]];
+        let snap = scene
+            .snap(
+                eye[0], eye[1], eye[2], d[0], d[1], d[2], 0.002, None, None, None, None, None,
+                None, None, None, None,
+            )
+            .unwrap()
+            .expect("snaps on the meeting line");
+        assert_eq!(snap.kind(), "on-intersection-line");
+        // On two faces at once: never reported as a face pick.
+        assert_eq!(snap.element_kind().as_deref(), Some("meeting-line"));
+        assert!(snap.object().is_some() && snap.element().is_some());
+        let line = snap.meeting_line().expect("the line's ends");
+        assert_eq!(line.len(), 6);
+        let mut ys = [line[1], line[4]];
+        ys.sort_by(f64::total_cmp);
+        assert!(
+            point_close([line[0], ys[0], line[2]], [1.0, 0.6, 0.5]),
+            "{line:?}"
+        );
+        assert!(
+            point_close([line[3], ys[1], line[5]], [1.0, 1.4, 0.5]),
+            "{line:?}"
+        );
+        assert!((snap.z() - 0.5).abs() < 1e-9 && (snap.x() - 1.0).abs() < 1e-9);
+        assert!(!snap.pierces_face());
+        // A plain face point carries no line.
+        let at = [1.0, 1.0, 0.8];
+        let d = [at[0] - eye[0] - 0.001, at[1] - eye[1], at[2] - eye[2]];
+        let snap = scene
+            .snap(
+                eye[0], eye[1], eye[2], d[0], d[1], d[2], 0.002, None, None, None, None, None,
+                None, None, None, None,
+            )
+            .unwrap()
+            .expect("snaps on the wall");
+        assert_eq!(snap.kind(), "on-face");
+        assert_eq!(snap.element_kind().as_deref(), Some("face"));
+        assert!(snap.meeting_line().is_none());
+        // The line's middle, a Midpoint carrying the line: no face pick
+        // either.
+        let at = [1.0, 1.0, 0.5];
+        let d = [at[0] - eye[0] - 0.001, at[1] - eye[1], at[2] - eye[2]];
+        let snap = scene
+            .snap(
+                eye[0], eye[1], eye[2], d[0], d[1], d[2], 0.002, None, None, None, None, None,
+                None, None, None, None,
+            )
+            .unwrap()
+            .expect("snaps on the line's middle");
+        assert_eq!(snap.kind(), "midpoint");
+        assert_eq!(snap.element_kind().as_deref(), Some("meeting-line"));
+        assert!(snap.meeting_line().is_some());
     }
 
     /// `Scene::export` reaches the exact same shared writer

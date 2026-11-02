@@ -84,6 +84,7 @@ const STICKY_KINDS = new Set([
   'intersection',
   'tangent',
   'on-edge',
+  'on-intersection-line',
   'on-guide',
   'on-axis',
 ])
@@ -102,8 +103,18 @@ function sameTarget(a: Snap, b: Snap): boolean {
     // analytic points carry no `element`, so without this the held snap on
     // one circle's center would be treated as still-current over a
     // neighbouring circle's.
-    a.sketchCurve === b.sketchCurve
+    a.sketchCurve === b.sketchCurve &&
+    // A face meets several others: the slab through a wall draws four lines
+    // on the wall's one face, and each names that face. The line's ends tell
+    // them apart — the kernel orders a pair of faces the same way at every
+    // cursor position, so one line's ends are the same numbers each query.
+    sameMeetingLine(a.meetingLine, b.meetingLine)
   )
+}
+
+function sameMeetingLine(a: Snap['meetingLine'], b: Snap['meetingLine']): boolean {
+  if (a === undefined || b === undefined) return a === b
+  return a.every((end, i) => end.every((c, j) => c === b[i][j]))
 }
 
 /**
@@ -114,6 +125,7 @@ function snapJsToSnap(s: SnapJs): Snap {
   try {
     const dir = s.direction()
     const from = s.projected_from()
+    const line = s.meeting_line()
     const elem = s.element()
     const elemKind = s.element_kind()
     return {
@@ -124,6 +136,13 @@ function snapJsToSnap(s: SnapJs): Snap {
       direction: dir !== undefined ? [dir[0], dir[1], dir[2]] : undefined,
       projectedFrom: from !== undefined ? [from[0], from[1], from[2]] : undefined,
       piercesFace: s.pierces_face(),
+      meetingLine:
+        line !== undefined
+          ? [
+              [line[0], line[1], line[2]],
+              [line[3], line[4], line[5]],
+            ]
+          : undefined,
       object: s.object(),
       instance: s.instance(),
       element: elem,

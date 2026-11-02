@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 306dc1f557c714600bfa33263f77530d4f62496a052aebc02aeacbdfaa0b55fe # shrinks to a = (Plane { normal: Vec3 { x: -1.0, y: 1.562688694595402e-17, z: 0.0 }, offset: 0.10890199530132308 }, [Point3 { x: -0.10890199530132308, y: -0.1358272575404921, z: 0.8527947409144712 }, Point3 { x: -0.10890199530132308, y: 0.5620533466086768, z: 0.6072089185525107 }, Point3 { x: -0.10890199530132308, y: 0.4534021387914552, z: -0.12460024293200372 }, Point3 { x: -0.10890199530132308, y: -0.23362901949225337, z: -0.2842747606152696 }, Point3 { x: -0.10890199530132308, y: -0.5977928135959795, z: 0.3197885598355063 }], []), b = (Plane { normal: Vec3 { x: 0.0, y: 0.0, z: 1.0 }, offset: 0.0 }, [Point3 { x: -0.11750954050190299, y: -0.6, z: 0.0 }, Point3 { x: 0.45312436927518907, y: -0.18541019662496847, z: 0.0 }, Point3 { x: 0.23516161087358095, y: 0.48541019662496837, z: 0.0 }, Point3 { x: -0.4701806918773868, y: 0.4854101966249684, z: 0.0 }, Point3 { x: -0.6881434502789952, y: -0.18541019662496833, z: 0.0 }], [[Point3 { x: -0.11750954050190299, y: -0.05, z: 0.0 }, Point3 { x: -0.07420827031268104, y: 0.024999999999999994, z: 0.0 }, Point3 { x: -0.1608108106911249, y: 0.025000000000000022, z: 0.0 }]])

@@ -89,6 +89,22 @@ pub const CONE_SLACK: f64 = 1e-7;
 /// person draws through a face is anywhere near it.
 pub const EDGE_FACE_GRAZING_SINE: f64 = 1e-6;
 
+/// Smallest sine of the angle between two faces' planes at which the
+/// inference layer offers the line where the faces meet (dimensionless).
+///
+/// Two planes meet along the line `p + t · (n₁ × n₂)`, and `|n₁ × n₂|` is
+/// this sine. A point of the line is recovered from the planes' offsets
+/// divided by that sine squared, so each offset's rounding (of order ε · X
+/// for coordinates of magnitude X) moves the line across the faces by about
+/// ε · X / sine. Below this sine the planes are parallel for every practical
+/// purpose — two faces a quantized import or a transform chain left a few
+/// nanoradians from coplanar — and the "line" is an arbitrary stripe of
+/// either face, which must not be offered as a snap. The same figure as
+/// [`EDGE_FACE_GRAZING_SINE`] for the same reason: at 1e-6 the error bound
+/// is a tenth of a nanometre at metre scale, and no two faces a person
+/// builds to meet are anywhere near it.
+pub const FACE_MEETING_PARALLEL_SINE: f64 = 1e-6;
+
 /// Relative depth skin for snap-occlusion culling in the inference layer
 /// (dimensionless fraction). When deciding whether an opaque face hides a snap
 /// candidate, a face counts as an occluder only if it lies at least this

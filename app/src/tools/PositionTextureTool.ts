@@ -170,6 +170,7 @@ const POINT_SNAP_KINDS = new Set([
   'intersection',
   'tangent',
   'on-edge',
+  'on-intersection-line',
   'on-guide',
   'on-axis',
 ])

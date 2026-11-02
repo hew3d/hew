@@ -43,7 +43,7 @@ The Tape Measure does two jobs, chosen by where your *first* click lands:
 
 Both jobs also take a drag: press on the first point or the edge, drag, and let go where the second click would go.
 
-**Drop a parallel guide.** Click on an **edge** — of a solid, a sketch you've drawn, a group member, or a component instance — then move sideways. A guide line parallel to that edge follows at the offset shown in the readout. Click to place it, or type an exact offset and press `Enter`. This is the classic SketchUp workflow for laying out a design before drawing it. A **world axis** works as the source edge too: click anywhere along the red, green, or blue axis (the On Axis cue confirms the pick) and pull sideways. So does an existing guide line — one guide can father a whole ladder of parallels.
+**Drop a parallel guide.** Click on an **edge** — of a solid, a sketch you've drawn, a group member, or a component instance — then move sideways. A guide line parallel to that edge follows at the offset shown in the readout. Click to place it, or type an exact offset and press `Enter`. This is the classic SketchUp workflow for laying out a design before drawing it. The **line where a face of one object meets a face of another** (the On Intersection Line cue) works the same way, even though no edge is stored there; its middle and ends are points, so a click on them measures instead. A **world axis** works as the source edge too: click anywhere along the red, green, or blue axis (the On Axis cue confirms the pick) and pull sideways. So does an existing guide line — one guide can father a whole ladder of parallels.
 
 ### Working off the ground plane
 

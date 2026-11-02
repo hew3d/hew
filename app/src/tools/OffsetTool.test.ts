@@ -906,6 +906,21 @@ describe('OffsetTool — a clicked distance is exactly the displayed distance', 
     }
   })
 
+  it('a click on the line where two objects\' faces meet keeps the exact projected distance, like an edge', () => {
+    setLengthUnit('mm')
+    try {
+      const meetingLine: Snap['meetingLine'] = [
+        [1, -0.0123456, -1],
+        [1, -0.0123456, 1],
+      ]
+      const r = drag(makeSnap({ kind: 'on-intersection-line', x: 1, y: -0.0123456, z: 0, meetingLine }), -0.0123456)
+      expect(r.d).toBeCloseTo(0.0123456, 15)
+      expect(r.d).not.toBe(12.346 * 0.001)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+
   it('a hard-snapped (endpoint) click keeps the exact projected distance', () => {
     setLengthUnit('mm')
     try {

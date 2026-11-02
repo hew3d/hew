@@ -60,6 +60,7 @@ const HARD_SNAP_KINDS = new Set([
   'midpoint',
   'intersection',
   'on-edge',
+  'on-intersection-line',
   'on-guide',
   'on-axis',
 ])

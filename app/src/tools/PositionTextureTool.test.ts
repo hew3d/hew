@@ -536,6 +536,19 @@ describe('PositionTextureTool — green corner drag (scale/rotate about the red 
     expect(green.position.y).toBeCloseTo(-1.3)
   })
 
+  it('the line where two objects\' faces meet is a point snap for the green corner, like an edge', () => {
+    const scene = texturedFixtureScene()
+    const { tool, previewFaceUv } = makeTool(scene)
+    enterIdle(tool)
+
+    tool.onPointerDown(makeSnap(), rayAt(0, -1))
+    tool.onPointerMove(pointSnapAt(1.5, -0.5, 0, 'on-intersection-line'), rayAt(1.4, -0.6))
+
+    const uv = applyFrame(lastPreviewFrame(previewFaceUv), [1.5, -0.5, 0])
+    expect(uv[0]).toBeCloseTo(1, 6)
+    expect(uv[1]).toBeCloseTo(0, 6)
+  })
+
   it('a point snap takes on the green corner too', () => {
     const scene = texturedFixtureScene()
     const { tool, previewFaceUv } = makeTool(scene)

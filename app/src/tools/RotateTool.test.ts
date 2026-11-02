@@ -371,6 +371,26 @@ describe('RotateTool — protractor widget (idle/hover)', () => {
     expect(ringColorHex(preview)).toBe(axisColorHex([1, 0, 0]))
     expect(ringColorHex(preview)).not.toBe(axisColorHex([0, 0, 1]))
   })
+
+  it('a snap on the line where two objects\' faces meet does not adopt the first face\'s axis', () => {
+    // The kernel names the first of the two faces as the line's owner of
+    // record (here a side face, +X); the line is on both and a pick of
+    // neither, so the axis comes from what is under the ray (nothing here
+    // → +Z), as for an edge.
+    const { tool, preview, wasmScene } = makeTool({ faceNormal: [1, 0, 0] })
+    const meetingLine: Snap['meetingLine'] = [
+      [0, -1, 0],
+      [0, 1, 0],
+    ]
+    for (const kind of ['on-intersection-line', 'midpoint']) {
+      tool.onPointerMove(
+        makeSnap({ kind, elementKind: 'meeting-line', object: 1n, element: 2n, meetingLine }),
+        rayThrough(0, 0),
+      )
+      expect(ringColorHex(preview)).toBe(axisColorHex([0, 0, 1]))
+    }
+    expect(wasmScene.face_normal).not.toHaveBeenCalledWith(1n, 2n)
+  })
 })
 
 describe('RotateTool — axis locking', () => {

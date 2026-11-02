@@ -536,10 +536,35 @@ below.
   their facets. Edges through the pick cone are paired with the faces the
   cone reaches, nearest pairs first, at most 2,000 pairs a query; the
   pairs a capped query leaves untested are counted and traced, like the
-  edge pairs. Candidates within a pixel of each other on screen rank by
-  depth, nearest first, so a stack of corners seen from a nearly-vertical
-  Top view — top plate, sole plate, slab — resolves to the one in front
-  rather than to whichever the camera's slight tilt happens to lean toward.
+  edge pairs. Where a face of one owner meets a face of another (a slab
+  passing through a wall draws four such lines on the wall's face), the
+  stretch of the two planes' intersection line inside both faces — outer
+  loops, outside their holes — is a virtual edge: the cursor slides along
+  it as On Intersection Line (the same pick reach and rank as a real edge),
+  its middle is a Midpoint, and its ends are the piercings and crossings
+  the intersection snaps already name. The line runs through both faces'
+  interiors: a face that only touches the other's plane along its own edge
+  (a box flush against a wall) makes no line, only that real edge, decided
+  with a named tolerance so a rotated pair behaves like an axis-aligned
+  one. On a chord facet of a curved surface (a slab through a cylinder)
+  each facet's piece is the line but offers no middle. Parallel and
+  coplanar faces make no line, one owner's own faces never pair, and a
+  selection pick is never offered one (two faces at once are nothing to
+  select). Both faces travel with the snap — reported as a meeting line,
+  never as a pick of either face, so no tool adopts one face's plane or
+  part from it — and the cue draws the stretch itself, since nothing in
+  the model does. The faces the cone reaches are paired across owners
+  front to back along the ray, so faces hidden behind the one in view
+  cannot crowd out the line in view; at most 2,000 pairs a query, each
+  rejected cheaply when its line clipped to both faces' boxes misses the
+  pick cone, counted and traced past the cap like the other two walks;
+  the piercing and meeting walks share one cone-face pool, built only
+  when faces of two owners have boxes in the cone (drawn regions carry
+  boxes of their own). Candidates
+  within a pixel of each other on screen rank by depth, nearest first, so
+  a stack of corners seen from a nearly-vertical Top view — top plate,
+  sole plate, slab — resolves to the one in front rather than to
+  whichever the camera's slight tilt happens to lean toward.
   Named points (endpoints, midpoints, centers, quadrants) capture from
   1.75 times as far as lines, so a corner on an edge or axis wins near it,
   and the soft axis is capped on screen to an edge's pick radius rather
@@ -557,7 +582,8 @@ below.
   way is selected only for the gesture
 - Tape Measure (point-to-point distance, or drop a parallel guide at an
   offset — sourced from an edge (a plain object's, a group member's, or a
-  component instance's), a sketch line, a world axis, or another guide
+  component instance's), a sketch line, the line where two Objects' faces
+  meet (On Intersection Line), a world axis, or another guide
   line) and Protractor (measure an angle, or drop an angular guide). A
   guide or measurement isn't confined to the ground plane: it follows a
   hovered sketch's plane, an idle arrow-key plane lock, or — for a
@@ -643,7 +669,8 @@ below.
 - A crossing outranks a midpoint and reaches as far as other named points;
   Tape Measure treats a crossing as a point (the first click measures from
   it, and the hover hint says so) while edges, sketch edges, axes, and
-  guides still start parallel guides, and a crossing never anchors a resize
+  guides, and the line where two Objects' faces meet (not its middle or
+  ends, which are points) still start parallel guides, and a crossing never anchors a resize
   scoped to an open group or component, since the snap names only one of its
   two edges
 - X-ray and Wireframe render modes (View menu on the web and native menus,

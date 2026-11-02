@@ -38,6 +38,12 @@ export function isVisiblePartSnap(
  * `elementKind: 'face'` hit on a non-hidden object. Shop Mode's Tape HOLD
  * rule keys the isolate-vs-magnify choice off this.
  *
+ * A snap on the line where two parts' faces meet (`'on-intersection-line'`,
+ * or the `'midpoint'` of such a line) is edge-class, not a face hit: it lies
+ * on two faces at once, the kernel reports it as `elementKind:
+ * 'meeting-line'`, and a hold there magnifies like a hold on an edge. The
+ * `meetingLine` check keeps that true whatever the element kind says.
+ *
  * CRITICAL (shop-mode playtest adversarial review): the caller MUST resolve
  * this `snap` from a NARROW, mouse-tuned aperture — NOT Tape Measure's own
  * touch-widened aperture, which the kernel resolves to `'edge'` for most
@@ -50,7 +56,12 @@ export function isClearFaceSnap(
   hiddenObjectIds: ReadonlySet<bigint>,
   hiddenInstanceIds: ReadonlySet<bigint>,
 ): boolean {
-  return snap !== null && snap.elementKind === 'face' && isVisiblePartSnap(snap, hiddenObjectIds, hiddenInstanceIds)
+  return (
+    snap !== null &&
+    snap.elementKind === 'face' &&
+    snap.meetingLine === undefined &&
+    isVisiblePartSnap(snap, hiddenObjectIds, hiddenInstanceIds)
+  )
 }
 
 /** What a HELD Tape Measure press resolves to, by target. */

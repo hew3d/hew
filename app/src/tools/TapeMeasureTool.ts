@@ -10,6 +10,10 @@
  *        mode. Remembers the edge's two endpoints (via
  *        `wasmScene.edge_endpoints` / `sketch_edge_endpoints`) and the
  *        picked point on it.
+ *      - On the line where two Objects' faces meet ('on-intersection-line'
+ *        snaps, which carry the line's two ends in `Snap.meetingLine`) →
+ *        the same PARALLEL-GUIDE mode: no edge is stored, but the ends give
+ *        the direction. Its midpoint and ends are point snaps and measure.
  *      - On a world axis or an existing guide line ('on-axis'/'on-guide'
  *        snaps, which carry the analytic line's direction) → the same
  *        PARALLEL-GUIDE mode, sourced from the infinite analytic line.
@@ -269,6 +273,10 @@ type GeometryAttribution =
 function attributionOf(snap: Snap): GeometryAttribution {
   if (!snapOnGeometry(snap)) return null
   if (isCrossingSnap(snap)) return null
+  // The line where two owners' faces meet, and its midpoint, lie on both
+  // faces and carry only the first's provenance: unattributable, exactly
+  // as a crossing.
+  if (snap.meetingLine !== undefined) return null
   if (snap.sketch !== undefined) return { kind: 'sketch', sketch: snap.sketch }
   if (snap.instance !== undefined) return { kind: 'instance', instance: snap.instance }
   if (snap.object !== undefined) return { kind: 'object', object: snap.object }
@@ -1895,6 +1903,21 @@ export class TapeMeasureTool implements Tool {
       const [dx, dy, dz] = snap.direction
       const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
       if (len < 1e-9) return null // degenerate direction — fall back
+      return {
+        edgePoint: [snap.x, snap.y, snap.z],
+        edgeDir: [dx / len, dy / len, dz / len],
+      }
+    }
+
+    // The line where two owners' faces meet is a virtual edge: no stored
+    // edge names it, but its two ends (carried by the snap) give the
+    // direction, and a guide is only a line in space. Only the line itself
+    // qualifies; its midpoint and ends are point snaps and measure.
+    if (snap.kind === 'on-intersection-line' && snap.meetingLine !== undefined) {
+      const [[ax, ay, az], [bx, by, bz]] = snap.meetingLine
+      const dx = bx - ax, dy = by - ay, dz = bz - az
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
+      if (len < 1e-9) return null // degenerate line — fall back
       return {
         edgePoint: [snap.x, snap.y, snap.z],
         edgeDir: [dx / len, dy / len, dz / len],

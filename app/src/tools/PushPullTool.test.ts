@@ -1278,6 +1278,22 @@ describe('PushPullTool — hard snaps that are not a depth (inference-permissive
     const { tool, scene } = armDrag()
     expect(commitAt(tool, scene, makeSnap({ x: 2, y: 2, z: 0.75, kind: 'on-guide' }), freeDragRay(0.9))).toBeCloseTo(0.75)
   })
+
+  it('the line where two objects\' faces meet is a depth reference, like a real edge', () => {
+    const { tool, scene } = armDrag()
+    const meetingLine: Snap['meetingLine'] = [
+      [2, 1, 0.5],
+      [2, 3, 0.5],
+    ]
+    expect(
+      commitAt(tool, scene, makeSnap({ x: 2, y: 2, z: 0.5, kind: 'on-intersection-line', meetingLine }), freeDragRay(0.9)),
+    ).toBe(0.5)
+  })
+
+  it('a face under the cursor is not: the drag follows the cursor past it', () => {
+    const { tool, scene } = armDrag()
+    expect(commitAt(tool, scene, makeSnap({ x: 2, y: 2, z: 0.5, kind: 'on-face' }), freeDragRay(0.9))).toBeCloseTo(0.9)
+  })
 })
 
 describe('PushPullTool — a drawn region in front of an object face wins the pick (GitHub issue 13)', () => {

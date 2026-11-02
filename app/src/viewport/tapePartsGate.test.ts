@@ -52,6 +52,33 @@ describe('isClearFaceSnap — Shop Mode Tape isolate-vs-magnify face test', () =
     expect(isClearFaceSnap(snap({ kind: 'on-face', elementKind: 'face', object: 5n }), new Set([5n]), NONE)).toBe(false)
   })
 
+  describe('the line where two parts\' faces meet', () => {
+    const meetingLine: Snap['meetingLine'] = [
+      [1, 0.6, 0.5],
+      [1, 1.4, 0.5],
+    ]
+
+    it('a hold on the line is edge-class: no clear face, so it magnifies', () => {
+      const onLine = snap({ kind: 'on-intersection-line', elementKind: 'meeting-line', object: 5n, element: 9n, meetingLine })
+      expect(isClearFaceSnap(onLine, NONE, NONE)).toBe(false)
+      expect(
+        classifyTapeHold({ grabEndpoint: null, midGesture: false, onClearFace: isClearFaceSnap(onLine, NONE, NONE) }),
+      ).toBe('magnify')
+      // Still a point on a visible part: the tape may land there.
+      expect(isVisiblePartSnap(onLine, NONE, NONE)).toBe(true)
+    })
+
+    it('a hold on the line\'s midpoint magnifies too', () => {
+      const middle = snap({ kind: 'midpoint', elementKind: 'meeting-line', object: 5n, element: 9n, meetingLine })
+      expect(isClearFaceSnap(middle, NONE, NONE)).toBe(false)
+    })
+
+    it('a meeting line is never a clear face, even reported with a face element kind', () => {
+      const asFace = snap({ kind: 'on-intersection-line', elementKind: 'face', object: 5n, element: 9n, meetingLine })
+      expect(isClearFaceSnap(asFace, NONE, NONE)).toBe(false)
+    })
+  })
+
   it('rejects a provenance-less face-less snap and null', () => {
     expect(isClearFaceSnap(snap({ kind: 'ground', elementKind: undefined, object: undefined }), NONE, NONE)).toBe(false)
     expect(isClearFaceSnap(null, NONE, NONE)).toBe(false)

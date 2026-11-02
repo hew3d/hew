@@ -162,6 +162,46 @@ impl Aabb {
         (tmin <= tmax).then_some(tmin)
     }
 
+    /// The parameter span `[t0, t1]` of the line `p + t·d` inside both this
+    /// box and `other` (slab test against their common box), or `None` when
+    /// the line misses it or the boxes share nothing. A zero direction
+    /// component leaves that axis to the line's fixed coordinate, inside
+    /// the slab or not.
+    pub(crate) fn line_span_in_both(self, other: Aabb, p: Point3, d: Vec3) -> Option<(f64, f64)> {
+        let lo = [
+            self.min.x.max(other.min.x),
+            self.min.y.max(other.min.y),
+            self.min.z.max(other.min.z),
+        ];
+        let hi = [
+            self.max.x.min(other.max.x),
+            self.max.y.min(other.max.y),
+            self.max.z.min(other.max.z),
+        ];
+        let o = [p.x, p.y, p.z];
+        let d = [d.x, d.y, d.z];
+        let mut t0 = f64::NEG_INFINITY;
+        let mut t1 = f64::INFINITY;
+        for axis in 0..3 {
+            if lo[axis] > hi[axis] {
+                return None; // the boxes share nothing
+            }
+            if d[axis] == 0.0 {
+                // Parallel to this slab: inside it everywhere or nowhere.
+                if o[axis] < lo[axis] || o[axis] > hi[axis] {
+                    return None;
+                }
+                continue;
+            }
+            let inv = 1.0 / d[axis];
+            let ta = (lo[axis] - o[axis]) * inv;
+            let tb = (hi[axis] - o[axis]) * inv;
+            t0 = t0.max(ta.min(tb));
+            t1 = t1.min(ta.max(tb));
+        }
+        (t0 <= t1).then_some((t0, t1))
+    }
+
     /// Conservative cone-vs-box test: `false` only when NO point of the box
     /// can pass [`crate::cone_test`] for a cone of half-angle `atan(tan_aperture)`
     /// around the (normalized) ray. `tan_aperture == None` means a half-angle
@@ -250,7 +290,7 @@ impl Aabb {
     /// per `tol` ([`PruneTolerance`]) — the single entry point [`Bvh`]'s
     /// generic collection walk uses, so it never needs to know which
     /// projection's tolerance shape is active.
-    fn admits(self, origin: Point3, dir: Vec3, tol: PruneTolerance) -> bool {
+    pub(crate) fn admits(self, origin: Point3, dir: Vec3, tol: PruneTolerance) -> bool {
         match tol {
             PruneTolerance::Cone(tan_aperture) => self.maybe_in_cone(origin, dir, tan_aperture),
             PruneTolerance::Cylinder(radius) => self.maybe_in_cylinder(origin, dir, radius),
@@ -770,12 +810,13 @@ impl SceneIndex {
         self.faces.ray_candidates(origin, dir)
     }
 
-    /// World face candidates for `resolve`'s edge × face piercing test
-    /// (superset, ascending). A piercing point lies on the face's plane
-    /// inside its boundary's shadow — inside the box [`face_aabb`] builds —
-    /// and is admitted only within the pick cone, so the cone/cylinder-vs-box
-    /// test covers it; unlike [`SceneIndex::faces_crossing_ray`] this is a
-    /// cone query, since the ray itself need not hit the pierced face.
+    /// World face candidates for `resolve`'s edge × face piercing and face
+    /// × face meeting-line tests (superset, ascending). A piercing point or
+    /// a meeting-line point lies on the face's plane inside its boundary's
+    /// shadow — inside the box [`face_aabb`] builds — and is admitted only
+    /// within the pick cone, so the cone/cylinder-vs-box test covers it;
+    /// unlike [`SceneIndex::faces_crossing_ray`] this is a cone query, since
+    /// the ray itself need not hit the face.
     pub(crate) fn faces_in_cone(
         &self,
         origin: Point3,
@@ -955,11 +996,20 @@ impl SceneIndex {
 /// plane bounds that region exactly (it is contained in the convex hull of
 /// the projections), with no scale-dependent guess.
 fn face_aabb(face: &SceneFace) -> Aabb {
-    let n = face.plane.normal();
+    region_aabb(&face.plane, &face.boundary)
+}
+
+/// The padded box of a planar region with `plane` and outer `boundary`:
+/// every boundary vertex and its projection onto the plane (the exact hit
+/// region), so every point a face test admits lies inside it. The world
+/// index boxes faces with it, and `resolve` boxes the linearly walked
+/// drawn regions with it too, so both prune by the same superset.
+pub(crate) fn region_aabb(plane: &kernel::Plane, boundary: &[Point3]) -> Aabb {
+    let n = plane.normal();
     let mut b = Aabb::EMPTY;
-    for &p in &face.boundary {
+    for &p in boundary {
         b.include(p);
-        b.include(p + n * -face.plane.signed_distance(p));
+        b.include(p + n * -plane.signed_distance(p));
     }
     b.padded()
 }
