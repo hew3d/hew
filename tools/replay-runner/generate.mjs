@@ -209,7 +209,7 @@ function buildHexPrism(scene) {
  * Draws a closed regular `n`-gon on a fresh sketch in the plane x = `x`
  * (normal +X), centered at (y = cy, z = cz) with circumradius `r`, and returns
  * `[sketchHandle, regionHandle]` — a disk drawn in the plane of a solid's
- * side face but out in empty space, the Getting Started guide's cutter.
+ * side face but out in empty space, a cutter built clear of its target.
  */
 function sidePlaneRegularPolygon(scene, n, x, cy, cz, r) {
   const sketch = scene.begin_sketch_on_plane(x, cy, cz, 1, 0, 0);
@@ -234,7 +234,7 @@ function sidePlaneRegularPolygon(scene, n, x, cy, cz, r) {
 }
 
 /**
- * The Getting Started guide's cutter, in meters: a 7 × 5 × 6 cm bin, a 2 cm
+ * A cutter built clear of its target, in meters: a 7 × 5 × 6 cm bin, a 2 cm
  * disk drawn in the plane of its right face (x = 0.07) 3 cm above the top
  * corner at y = 0 (the upper-left corner as the Right view shows it, eye at
  * +X looking toward -X with Z up, so screen-left is y = 0), pushed 7 cm

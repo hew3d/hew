@@ -50,7 +50,7 @@ Drives a fresh `Scene` through each named scenario in `generate.mjs`
   whose operand is itself a boolean result (handle reuse across a replacing op).
 - `hex-prism` — a 6-gon ground profile (the Circle tool's N-gon shape) extruded,
   exercising extrude over a non-quad loop.
-- `cutter-moved-into-bin` — the Getting Started guide's cutter: a disk drawn
+- `cutter-moved-into-bin` — a cutter built clear of its target: a disk drawn
   in the plane of a bin's side face but in empty space above it, extruded
   across the bin, moved down into it, and subtracted. The generator also
   asserts that subtracting the cutter *before* the move is refused as

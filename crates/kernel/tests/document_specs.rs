@@ -326,7 +326,7 @@ fn boolean_with_self_is_refused() {
 /// A Subtract whose cutter does not reach the target refuses as
 /// `NothingRemoved`, and the refusal is a true no-op on the document: both
 /// operands stay visible, no result object appears, and nothing was
-/// recorded for undo. This is the guide's "cutter drawn beside the bin"
+/// recorded for undo. This is the "cutter drawn beside the bin"
 /// case, through the node-level entry point the app calls.
 #[test]
 fn subtract_that_removes_nothing_leaves_the_document_untouched() {
