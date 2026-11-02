@@ -3422,6 +3422,16 @@ pub struct InsertOptions {
     /// document is REUSED (a new instance of the existing definition)
     /// rather than copied again.
     pub provenance: Option<LibraryProvenance>,
+    /// The same-document clipboard link. When present, a definition in the
+    /// item carrying a `hew.clipboard` origin stamp (written by
+    /// [`Document::extract_clipboard_item`]) whose `origin` equals this
+    /// string and whose `def_sid` names a LIVE definition in this document
+    /// is **linked** — the pasted instances place that existing definition,
+    /// exactly as Move+copy and Place Copy do — instead of being copied
+    /// (or provenance-matched). A stamp from another origin, or one whose
+    /// definition is gone, falls through to the ordinary copy. `None` for a
+    /// library insert.
+    pub origin: Option<String>,
 }
 
 /// What [`Document::purge_unused`] removed.
@@ -3442,6 +3452,14 @@ pub struct InsertReport {
     /// Definitions NOT copied because a live definition's stamped
     /// provenance matched (idempotent re-insert).
     pub definitions_reused: usize,
+    /// Definitions NOT copied because the item's `hew.clipboard` origin
+    /// stamp named a live definition of this document
+    /// ([`InsertOptions::origin`]): a same-document paste of a component
+    /// instance places the definition it was copied from. Counts DEFINITIONS
+    /// linked, one per stamped item definition that resolved to a live
+    /// original (a nested definition counts alongside the outer one), not
+    /// instances placed or definitions the paste ends up using.
+    pub definitions_linked: usize,
     /// Palette entries copied in.
     pub materials_added: usize,
     /// Item materials resolved to a content-equal entry already in the
@@ -6240,7 +6258,14 @@ impl Document {
     /// given, a definition whose stamped provenance matches a live
     /// definition here is reused outright — the idempotent re-insert — and
     /// created definitions and roots are stamped for future matches and for
-    /// "in this model" queries.
+    /// "in this model" queries. With [`InsertOptions::origin`] given, a
+    /// definition the item carries a matching `hew.clipboard` origin stamp
+    /// for is LINKED to the live definition it was copied from
+    /// ([`Document::extract_clipboard_item`]) — the same-document paste of
+    /// a component instance places the original definition, so the copy
+    /// and the original stay one shape, as a Move+copy duplicate does.
+    /// A linked definition is not part of the undo step (undo hides only
+    /// what the insert created).
     ///
     /// v1 scope, reported and never repaired: the item's world-owned
     /// sketches and its annotations are not carried
@@ -6287,8 +6312,9 @@ impl Document {
         }
 
         let mut ctx = LibraryCopy::new(options.provenance.clone());
+        ctx.origin = options.origin.clone();
 
-        // ── 1. Definitions: provenance-reuse or lossless copy ─────────────
+        // ── 1. Definitions: origin-link, provenance-reuse, or lossless copy
         // Slotmap (dense) order — deterministic for a loaded item. Copied
         // eagerly rather than on first instance reference: an item's
         // uninstanced definitions are part of its content, mirroring
@@ -6523,7 +6549,84 @@ impl Document {
         roots: &[NodeId],
         wrap_as_component: bool,
     ) -> Result<Document, DocumentError> {
-        let mut item = self.extract_item_copy(roots, wrap_as_component)?;
+        self.extract_item_origin(roots, wrap_as_component, None)
+    }
+
+    /// The clipboard copy: [`Document::extract_item`] unwrapped (a copied
+    /// plain box stays a plain box), with every definition the copy carries
+    /// stamped `hew.clipboard { origin, def_sid }` — `origin` verbatim, and
+    /// `def_sid` the stable id of the definition it was copied from, in
+    /// THIS document. [`Document::insert_document`] with the same
+    /// [`InsertOptions::origin`] reads those stamps back and LINKS each
+    /// such definition to the live original instead of copying it, so a
+    /// component instance copied and pasted within one document places the
+    /// definition it came from (SketchUp's copy/paste), while the same
+    /// bytes pasted anywhere else — another document, another window,
+    /// another origin — copy as an ordinary item would. Only definitions
+    /// with a source are stamped; a stamp never reaches a destination
+    /// document (the insert strips the namespace from every copy).
+    ///
+    /// `origin` is the caller's token for "this document, as it is open
+    /// right now": it must differ between documents and between windows,
+    /// and change when a window's document is replaced, because the
+    /// kernel's stable ids are per-document counters, not global ids.
+    ///
+    /// # Errors
+    /// Same as [`Document::extract_item`].
+    pub fn extract_clipboard_item(
+        &self,
+        roots: &[NodeId],
+        origin: &str,
+    ) -> Result<Document, DocumentError> {
+        self.extract_item_origin(roots, false, Some(origin))
+    }
+
+    /// What a clipboard paste of `item` would place in this document right
+    /// now, for a preview: a scratch copy of this document holding ONLY the
+    /// pasted roots, at the item's own coordinates (identity pose), so the
+    /// geometry and bounds read back are in item space. A definition the
+    /// paste links shows its LIVE content, which may have been edited since
+    /// the copy; the copy-time bytes would show the old shape. This
+    /// document is untouched.
+    ///
+    /// Returns `Ok(None)` when no definition links (the copy-time bytes are
+    /// then exactly what a paste places, so there is nothing to refresh).
+    ///
+    /// # Errors
+    /// Same as [`Document::insert_document`] (for instance, an open
+    /// component session refuses).
+    pub fn preview_clipboard_paste(
+        &self,
+        item: &Document,
+        origin: &str,
+    ) -> Result<Option<Document>, DocumentError> {
+        let mut scratch = self.clone();
+        let (report, _) = scratch.insert_document(
+            item,
+            &InsertOptions {
+                pose: Transform::IDENTITY,
+                provenance: None,
+                origin: Some(origin.to_string()),
+            },
+        )?;
+        if report.definitions_linked == 0 {
+            return Ok(None);
+        }
+        for node in scratch.top_level_nodes() {
+            if !report.roots.contains(&node) {
+                scratch.delete_node(node)?;
+            }
+        }
+        Ok(Some(scratch))
+    }
+
+    fn extract_item_origin(
+        &self,
+        roots: &[NodeId],
+        wrap_as_component: bool,
+        origin: Option<&str>,
+    ) -> Result<Document, DocumentError> {
+        let mut item = self.extract_item_copy(roots, wrap_as_component, origin)?;
 
         // Re-origin (playtest round 2): with the drawing axes UNMOVED — the
         // overwhelmingly common case — "insert at the axes origin" means
@@ -6639,7 +6742,7 @@ impl Document {
     pub fn extract_placement(&self, nodes: &[NodeId]) -> Option<Transform> {
         let axes = self.axes();
         if axes == AxesFrame::IDENTITY {
-            let item = self.extract_item_copy(nodes, false).ok()?;
+            let item = self.extract_item_copy(nodes, false, None).ok()?;
             let anchor = visible_world_bottom_center(&item)?;
             return Some(Transform::translation(Vec3::new(
                 anchor.x, anchor.y, anchor.z,
@@ -6677,12 +6780,16 @@ impl Document {
     /// return this directly to the outside world must finish those themselves
     /// (`extract_item` does).
     ///
+    /// `origin: Some` stamps every copied definition with its
+    /// `hew.clipboard` origin ([`Document::extract_clipboard_item`]).
+    ///
     /// # Errors
     /// Same as [`Document::extract_item`] (this IS its validation).
     fn extract_item_copy(
         &self,
         roots: &[NodeId],
         wrap_as_component: bool,
+        origin: Option<&str>,
     ) -> Result<Document, DocumentError> {
         info!(target: "kernel::op", op = "extract_item");
         self.refuse_during_component_session()?;
@@ -6770,7 +6877,10 @@ impl Document {
             // conjugates into the item frame — the component-item shape.
             [NodeId::Instance(iid)] => {
                 let src = &self.instances[iid];
-                let new_cid = library_copy_def(&mut item, self, src.def, &mut ctx);
+                // Through the resolver (no provenance, so always a copy)
+                // so the definition lands in `def_map` for the origin stamp
+                // below, like every definition the structural arm copies.
+                let new_cid = library_resolve_def(&mut item, self, src.def, &mut ctx);
                 let pose_item = src.pose.then(&frame);
                 let new_iid = item.insert_instance_record(InstanceRecord {
                     def: new_cid,
@@ -6832,6 +6942,40 @@ impl Document {
             }
         }
 
+        // The clipboard origin stamp (`extract_clipboard_item`): every
+        // definition copied from one of THIS document's — nested members
+        // included, since the resolver memoizes each in `def_map` — names
+        // the original by stable id, so a same-origin insert can link
+        // back to it. A wrap-minted definition has no source and gets no
+        // stamp. Written after the attribute copy, which strips the
+        // namespace from whatever it carries over.
+        if let Some(origin) = origin {
+            use crate::attr::AttrValue;
+            let stamps: Vec<(ComponentId, u64)> = ctx
+                .def_map
+                .iter()
+                .filter_map(|(&src_cid, &item_cid)| {
+                    self.sid_of(&EntityRef::Component(src_cid))
+                        .map(|sid| (item_cid, sid))
+                })
+                .collect();
+            for (item_cid, sid) in stamps {
+                let dict = item
+                    .attrs
+                    .entry(AttrTarget::Entity(EntityRef::Component(item_cid)))
+                    .or_default();
+                let ns = dict.entry(CLIPBOARD_ATTR_NS.to_string()).or_default();
+                ns.insert(
+                    CLIPBOARD_ORIGIN_KEY.to_string(),
+                    AttrValue::Text(origin.to_string()),
+                );
+                ns.insert(
+                    CLIPBOARD_DEF_SID_KEY.to_string(),
+                    AttrValue::Text(sid.to_string()),
+                );
+            }
+        }
+
         // A user-hidden ROOT would make the whole item invisible — saved
         // from the outliner while hidden, it would later insert as nothing
         // (adversarial review S4). The item's top level is always visible;
@@ -6882,6 +7026,42 @@ impl Document {
                 && text("content_hash") == Some(prov.content_hash.as_str())
                 && text("def_sid") == want_sid.as_deref())
             .then_some(cid)
+        })
+    }
+
+    /// The live definition of THIS document that `item`'s definition
+    /// `item_cid` was copied from, read off the item's `hew.clipboard`
+    /// stamp ([`Document::extract_clipboard_item`]): the stamp's `origin`
+    /// must equal `origin`, and its `def_sid` must name a live (not hidden,
+    /// not tombstoned) definition here. `None` for an unstamped definition,
+    /// a foreign origin, or a definition that is gone — every one of which
+    /// falls through to an ordinary copy.
+    fn find_origin_definition(
+        &self,
+        item: &Document,
+        item_cid: ComponentId,
+        origin: &str,
+    ) -> Option<ComponentId> {
+        use crate::attr::AttrValue;
+        let ns = item
+            .attrs
+            .get(&AttrTarget::Entity(EntityRef::Component(item_cid)))?
+            .get(CLIPBOARD_ATTR_NS)?;
+        let text = |key: &str| match ns.get(key) {
+            Some(AttrValue::Text(s)) => Some(s.as_str()),
+            _ => None,
+        };
+        if text(CLIPBOARD_ORIGIN_KEY) != Some(origin) {
+            return None;
+        }
+        let want: u64 = text(CLIPBOARD_DEF_SID_KEY)?.parse().ok()?;
+        self.sids.iter().find_map(|(entity, &sid)| match entity {
+            EntityRef::Component(cid)
+                if sid == want && self.components.get(*cid).is_some_and(|d| !d.hidden) =>
+            {
+                Some(*cid)
+            }
+            _ => None,
         })
     }
 
@@ -23916,6 +24096,17 @@ fn ingest_build_node(
 /// while no external client can).
 const LIBRARY_ATTR_NS: &str = "hew.library";
 
+/// The clipboard origin namespace [`Document::extract_clipboard_item`]
+/// stamps on an item's definitions — `origin` (the copying caller's
+/// document token) and `def_sid` (the source definition's stable id) — and
+/// [`Document::insert_document`] reads back to link a same-document paste
+/// to the definition it was copied from. It exists only inside clipboard
+/// bytes: the insert strips it from every copy, so it never lands in a
+/// document or a library file.
+const CLIPBOARD_ATTR_NS: &str = "hew.clipboard";
+const CLIPBOARD_ORIGIN_KEY: &str = "origin";
+const CLIPBOARD_DEF_SID_KEY: &str = "def_sid";
+
 /// Dense id of `oid` in the load-time dense table — error-message aid only.
 fn raw_dense_of_object(dense: &[ObjectId], oid: ObjectId) -> usize {
     dense.iter().position(|&o| o == oid).unwrap_or(usize::MAX)
@@ -23945,6 +24136,9 @@ struct LibraryCopy {
     /// Provenance to stamp on copied definitions (insert only; `None` when
     /// extracting).
     provenance: Option<LibraryProvenance>,
+    /// The same-document clipboard origin to link stamped definitions
+    /// against ([`InsertOptions::origin`]; insert only).
+    origin: Option<String>,
     report: InsertReport,
     all_objects: Vec<ObjectId>,
     all_components: Vec<ComponentId>,
@@ -23960,6 +24154,7 @@ impl LibraryCopy {
             mat_map: BTreeMap::new(),
             def_map: BTreeMap::new(),
             provenance,
+            origin: None,
             report: InsertReport::default(),
             all_objects: Vec::new(),
             all_components: Vec::new(),
@@ -23993,8 +24188,13 @@ fn library_copy_entity_attrs(dst: &mut Document, src: &Document, from: &EntityRe
         // blind cross-document copy would carry a stale stamp onto content
         // it no longer describes (adversarial review S1). The insert path
         // re-stamps what deserves a stamp; everything else must arrive
-        // clean. Client namespaces copy verbatim (docs/agents/HEW_API.md §8).
+        // clean. The `hew.clipboard` origin stamp is the same kind of
+        // assertion — it names a definition of the document the copy was
+        // taken FROM, meaningless anywhere it lands — and is written only
+        // by the clipboard extract, after this copy. Client namespaces
+        // copy verbatim (docs/agents/HEW_API.md §8).
         dict.remove(LIBRARY_ATTR_NS);
+        dict.remove(CLIPBOARD_ATTR_NS);
         if !dict.is_empty() {
             dst.attrs.insert(AttrTarget::Entity(to), dict);
         }
@@ -24221,7 +24421,8 @@ fn library_copy_def(
 }
 
 /// Resolves a source definition into `dst`: the memoized `def_map` entry,
-/// a provenance-matched live definition (insert only), or a fresh
+/// the live definition a same-origin clipboard stamp links it to (insert
+/// only), a provenance-matched live definition (insert only), or a fresh
 /// [`library_copy_def`] — in that order. Every cross-document definition
 /// reference (world instances, nested member instances, the insert's eager
 /// definition pass) goes through here, so one source definition grafts
@@ -24234,6 +24435,13 @@ fn library_resolve_def(
 ) -> ComponentId {
     if let Some(&d) = ctx.def_map.get(&cid) {
         return d;
+    }
+    if let Some(origin) = ctx.origin.as_deref()
+        && let Some(existing) = dst.find_origin_definition(src, cid, origin)
+    {
+        ctx.def_map.insert(cid, existing);
+        ctx.report.definitions_linked += 1;
+        return existing;
     }
     if let Some(prov) = ctx.provenance.clone()
         && let Some(existing) =

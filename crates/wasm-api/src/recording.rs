@@ -689,11 +689,11 @@ pub enum RecordedCall {
     /// `delete_annotation(id)`. Additive variant, same posture as
     /// [`RecordedCall::AddLinearDimension`].
     DeleteAnnotation { id: u64 },
-    /// `insert_item(bytes, affine, source_id, content_hash)` — a library
-    /// insert: embeds the item file, the placement pose, and the provenance
-    /// that drives idempotent definition reuse, so a session with an insert
-    /// replays self-contained AND reproduces the same reuse-vs-copy
-    /// decision. Additive variant (the
+    /// `insert_item(bytes, affine, source_id, content_hash, origin)` — a
+    /// library insert or a paste: embeds the item file, the placement pose,
+    /// and the provenance that drives idempotent definition reuse, so a
+    /// session with an insert replays self-contained AND reproduces the
+    /// same reuse-vs-copy decision. Additive variant (the
     /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
     /// replay unchanged; one that inserts a library item fails to parse on
     /// older builds — loudly, never silently divergent.
@@ -702,6 +702,15 @@ pub enum RecordedCall {
         affine: [f64; 12],
         source_id: Option<String>,
         content_hash: Option<String>,
+        /// The composed clipboard origin of a same-document paste
+        /// (`Scene::clipboard_origin`), absent for a library placement.
+        /// Recorded as composed, so replay compares it with the stamps
+        /// inside `bytes` exactly as the live session did, whatever the
+        /// replaying scene's own epoch is. Same additive posture as
+        /// `stop_len` above: absent in older recordings, which replay
+        /// unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
     },
     /// `insert_item_palette(bytes)` — a material item's Add-to-palette:
     /// embeds the item file. Additive variant, same posture as

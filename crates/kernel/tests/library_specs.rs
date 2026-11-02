@@ -10,8 +10,9 @@
 //! idempotent re-insert and content-deduplicated materials).
 
 use kernel::{
-    CurveGeom, Document, DocumentError, InsertOptions, InsertReport, LibraryProvenance, Material,
-    NodeId, Plane, Point3, Rgba8, Transform, TransformError, Vec3, WatertightState,
+    AttrTarget, CurveGeom, Document, DocumentError, EntityRef, InsertOptions, InsertReport,
+    LibraryProvenance, Material, NodeId, Plane, Point3, Rgba8, Transform, TransformError, Vec3,
+    WatertightState,
 };
 use proptest::prelude::*;
 use std::collections::HashSet;
@@ -98,6 +99,7 @@ fn insert_at_identity(prov: Option<LibraryProvenance>) -> InsertOptions {
     InsertOptions {
         pose: Transform::IDENTITY,
         provenance: prov,
+        origin: None,
     }
 }
 
@@ -434,6 +436,7 @@ fn insert_same_provenance_twice_reuses_the_definition() {
             &InsertOptions {
                 pose: Transform::translation(Vec3::new(3.0, 0.0, 0.0)),
                 provenance: prov,
+                origin: None,
             },
         )
         .unwrap();
@@ -579,6 +582,7 @@ fn insert_refuses_reflecting_pose_untouched() {
         &InsertOptions {
             pose: mirror,
             provenance: None,
+            origin: None,
         },
     );
     assert!(matches!(
@@ -602,6 +606,7 @@ fn insert_unwrapped_object_lands_as_world_object_at_pose() {
             &InsertOptions {
                 pose: Transform::translation(Vec3::new(10.0, 0.0, 0.0)),
                 provenance: None,
+                origin: None,
             },
         )
         .unwrap();
@@ -696,7 +701,7 @@ proptest! {
         let mut dst = Document::new();
         let pose = Transform::translation(Vec3::new(tx, ty, tz));
         let (report, _) = dst
-            .insert_document(&item, &InsertOptions { pose, provenance: None })
+            .insert_document(&item, &InsertOptions { pose, provenance: None, origin: None })
             .unwrap();
         let NodeId::Object(new_oid) = report.roots[0] else {
             panic!("expected a world object root");
@@ -962,6 +967,7 @@ fn stamp_library_source_makes_reinsert_reuse_the_source_definition() {
             &InsertOptions {
                 pose: Transform::translation(Vec3::new(3.0, 0.0, 0.0)),
                 provenance: Some(prov),
+                origin: None,
             },
         )
         .unwrap();
@@ -1143,6 +1149,7 @@ fn nested_insert_is_idempotent_per_definition() {
             &InsertOptions {
                 pose: Transform::translation(Vec3::new(5.0, 0.0, 0.0)),
                 provenance: prov,
+                origin: None,
             },
         )
         .unwrap();
@@ -1152,4 +1159,714 @@ fn nested_insert_is_idempotent_per_definition() {
     assert_eq!(second.objects_added, 0, "no geometry copied twice");
     assert_eq!(dst.instance_ids().len(), 2, "two world placements");
     assert_eq!(dst.expanded_placements().len(), 4);
+}
+
+// ------------------------------------------------- clipboard: same-document link
+
+/// The clipboard origin two halves of one copy/paste agree on.
+const ORIGIN: &str = "window-a#0";
+
+fn clipboard_insert(origin: &str, pose: Transform) -> InsertOptions {
+    InsertOptions {
+        pose,
+        // The app's clipboard provenance: a hash of the bytes themselves,
+        // so repeated pastes of ONE copy dedupe to one copied definition
+        // when no link applies.
+        provenance: provenance("clipboard:abc", "abc"),
+        origin: Some(origin.to_string()),
+    }
+}
+
+/// The `hew.clipboard` stamp on a definition, if any.
+fn clipboard_stamp(
+    doc: &Document,
+    cid: kernel::ComponentId,
+) -> Option<&std::collections::BTreeMap<String, kernel::AttrValue>> {
+    doc.attr_get(&AttrTarget::Entity(EntityRef::Component(cid)))
+        .expect("live definition")
+        .and_then(|dict| dict.get("hew.clipboard"))
+}
+
+/// A box folded into a component: `(definition, instance, member object)`.
+fn boxed_component(
+    doc: &mut Document,
+) -> (kernel::ComponentId, kernel::InstanceId, kernel::ObjectId) {
+    let oid = extrude_box(doc, 0.0, 0.0, 1.0, 1.0, 1.0);
+    let (cid, iid, _) = doc.make_component(&[NodeId::Object(oid)]).unwrap();
+    let member = doc.def_members(cid).unwrap()[0];
+    (cid, iid, member)
+}
+
+/// The bug as reported: without an origin, a pasted component instance is
+/// a copy of its definition — a NEW definition the original does not
+/// share. This stays the behavior of a paste with no same-document link
+/// (another window, another document), and of every library insert.
+#[test]
+fn paste_without_an_origin_copies_the_definition() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+    let item = doc.extract_item(&[NodeId::Instance(iid)], false).unwrap();
+
+    let (report, _) = doc
+        .insert_document(
+            &item,
+            &InsertOptions {
+                pose: Transform::translation(Vec3::new(3.0, 0.0, 0.0)),
+                provenance: provenance("clipboard:abc", "abc"),
+                origin: None,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(report.definitions_added, 1);
+    assert_eq!(report.definitions_linked, 0);
+    assert_eq!(
+        doc.component_ids().len(),
+        2,
+        "a second, unlinked definition"
+    );
+    let pasted = report.roots[0];
+    let NodeId::Instance(pasted) = pasted else {
+        panic!("a pasted instance");
+    };
+    assert_ne!(doc.instance_def(pasted), Some(cid));
+}
+
+/// SketchUp's copy/paste of a component: within one document the pasted
+/// instance places the SAME definition as the original — editing either
+/// edits both — and the definition count does not grow.
+#[test]
+fn clipboard_paste_in_the_same_document_links_the_original_definition() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(iid)], ORIGIN)
+        .unwrap();
+    // The clipboard bytes carry the stamp; the live document does not.
+    let item_cid = item.component_ids()[0];
+    let stamp = clipboard_stamp(&item, item_cid).expect("stamped for linking");
+    assert_eq!(
+        stamp.get("origin"),
+        Some(&kernel::AttrValue::Text(ORIGIN.to_string()))
+    );
+    assert_eq!(
+        stamp.get("def_sid"),
+        Some(&kernel::AttrValue::Text(
+            doc.sid_of(&EntityRef::Component(cid)).unwrap().to_string()
+        ))
+    );
+    assert!(clipboard_stamp(&doc, cid).is_none());
+
+    let (report, _) = doc
+        .insert_document(
+            &item,
+            &clipboard_insert(ORIGIN, Transform::translation(Vec3::new(3.0, 0.0, 0.0))),
+        )
+        .unwrap();
+
+    assert_eq!(report.definitions_linked, 1);
+    assert_eq!(report.definitions_added, 0);
+    assert_eq!(report.definitions_reused, 0);
+    assert_eq!(report.objects_added, 0, "no geometry copied");
+    assert_eq!(doc.component_ids().len(), 1, "still ONE definition");
+    let NodeId::Instance(pasted) = report.roots[0] else {
+        panic!("a pasted instance");
+    };
+    assert_eq!(doc.instance_def(pasted), Some(cid));
+    assert_eq!(doc.definition_usage(cid), 2);
+    // Linking never writes the stamp onto the live definition.
+    assert!(clipboard_stamp(&doc, cid).is_none());
+}
+
+/// The link is keyed on the origin: the same bytes pasted under another
+/// origin (another window, or this window after it opened another
+/// document) copy the definition as before — and that copy arrives with
+/// no stamp of its own.
+#[test]
+fn clipboard_paste_with_a_different_origin_copies_and_strips_the_stamp() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(iid)], ORIGIN)
+        .unwrap();
+
+    let (report, _) = doc
+        .insert_document(
+            &item,
+            &clipboard_insert(
+                "window-b#0",
+                Transform::translation(Vec3::new(3.0, 0.0, 0.0)),
+            ),
+        )
+        .unwrap();
+
+    assert_eq!(report.definitions_linked, 0);
+    assert_eq!(report.definitions_added, 1);
+    let NodeId::Instance(pasted) = report.roots[0] else {
+        panic!("a pasted instance");
+    };
+    let copied = doc.instance_def(pasted).unwrap();
+    assert_ne!(copied, cid);
+    assert!(
+        clipboard_stamp(&doc, copied).is_none(),
+        "the stamp never lands"
+    );
+}
+
+/// A foreign document whose definition happens to hold the same stable id
+/// is exactly the collision the origin guards against: same sid, other
+/// origin, no link.
+#[test]
+fn clipboard_paste_into_another_document_never_links_by_sid_alone() {
+    let mut a = Document::new();
+    let (_, iid_a, _) = boxed_component(&mut a);
+    let mut b = Document::new();
+    let (cid_b, _, _) = boxed_component(&mut b);
+    // Built identically, so the two definitions share a stable id.
+    assert_eq!(
+        a.sid_of(&EntityRef::Component(a.component_ids()[0])),
+        b.sid_of(&EntityRef::Component(cid_b))
+    );
+    let item = a
+        .extract_clipboard_item(&[NodeId::Instance(iid_a)], "window-a#0")
+        .unwrap();
+
+    let (report, _) = b
+        .insert_document(&item, &clipboard_insert("window-b#0", Transform::IDENTITY))
+        .unwrap();
+
+    assert_eq!(report.definitions_linked, 0);
+    assert_eq!(report.definitions_added, 1);
+    assert_eq!(b.component_ids().len(), 2);
+}
+
+/// Several instances of one definition copied together paste as several
+/// instances of that SAME definition — one link, not N copies.
+#[test]
+fn clipboard_paste_of_several_instances_shares_the_one_linked_definition() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+    let iid2 = doc
+        .place_instance(cid, Transform::translation(Vec3::new(2.0, 0.0, 0.0)))
+        .unwrap()
+        .0;
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(iid), NodeId::Instance(iid2)], ORIGIN)
+        .unwrap();
+    assert_eq!(
+        item.component_ids().len(),
+        1,
+        "the copy carries ONE definition"
+    );
+
+    let (report, _) = doc
+        .insert_document(
+            &item,
+            &clipboard_insert(ORIGIN, Transform::translation(Vec3::new(0.0, 3.0, 0.0))),
+        )
+        .unwrap();
+
+    assert_eq!(report.definitions_linked, 1);
+    assert_eq!(report.definitions_added, 0);
+    assert_eq!(report.roots.len(), 2);
+    for root in &report.roots {
+        let NodeId::Instance(i) = root else {
+            panic!("pasted instances");
+        };
+        assert_eq!(doc.instance_def(*i), Some(cid));
+    }
+    assert_eq!(doc.component_ids().len(), 1);
+    assert_eq!(doc.definition_usage(cid), 4);
+}
+
+/// A mixed selection: the plain object copies as a plain object (as every
+/// paste of a bare object does), the instance links.
+#[test]
+fn clipboard_paste_of_a_mixed_selection_copies_objects_and_links_instances() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+    let loose = extrude_box(&mut doc, 3.0, 0.0, 4.0, 1.0, 1.0);
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Object(loose), NodeId::Instance(iid)], ORIGIN)
+        .unwrap();
+
+    let (report, _) = doc
+        .insert_document(
+            &item,
+            &clipboard_insert(ORIGIN, Transform::translation(Vec3::new(0.0, 3.0, 0.0))),
+        )
+        .unwrap();
+
+    assert_eq!(report.definitions_linked, 1);
+    assert_eq!(report.definitions_added, 0);
+    assert_eq!(report.objects_added, 1, "the loose box, and only it");
+    assert_eq!(doc.visible_object_ids().len(), 2);
+    assert_eq!(doc.definition_usage(cid), 2);
+}
+
+/// Nested definitions link per definition: every stamped item definition
+/// that resolves to a live original links, the outer to the outer
+/// original and the nested inner to the inner original (so
+/// `definitions_linked` counts 2 for one pasted instance, and nothing is
+/// copied). With the outer original gone, the outer copies fresh and its
+/// nested member links to the still-live inner.
+#[test]
+fn clipboard_paste_links_nested_definitions_per_definition() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 1.0);
+    let b = extrude_box(&mut doc, 3.0, 0.0, 4.0, 1.0, 1.0);
+    let (inner, inner_inst, _) = doc.make_component(&[NodeId::Object(a)]).unwrap();
+    let (outer, outer_inst, _) = doc
+        .make_component(&[NodeId::Object(b), NodeId::Instance(inner_inst)])
+        .unwrap();
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(outer_inst)], ORIGIN)
+        .unwrap();
+    assert_eq!(item.component_ids().len(), 2);
+    for cid in item.component_ids() {
+        assert!(
+            clipboard_stamp(&item, cid).is_some(),
+            "both definitions stamped"
+        );
+    }
+
+    let (report, _) = doc
+        .insert_document(
+            &item,
+            &clipboard_insert(ORIGIN, Transform::translation(Vec3::new(0.0, 3.0, 0.0))),
+        )
+        .unwrap();
+    // The eager definition pass resolves BOTH item definitions; a link
+    // copies nothing, so linking the inner as well is free and leaves
+    // the document exactly as it was, plus one outer placement.
+    assert_eq!(report.definitions_linked, 2);
+    assert_eq!(report.definitions_added, 0);
+    assert_eq!(report.objects_added, 0);
+    assert_eq!(doc.component_ids().len(), 2);
+    assert_eq!(doc.definition_usage(outer), 2);
+    assert_eq!(
+        doc.definition_usage(inner),
+        1,
+        "still only the nested placement"
+    );
+
+    // Outer gone: the outer copies fresh, its nested member links inner.
+    doc.delete_definition(outer).unwrap();
+    let (report, _) = doc
+        .insert_document(
+            &item,
+            &clipboard_insert(ORIGIN, Transform::translation(Vec3::new(0.0, 6.0, 0.0))),
+        )
+        .unwrap();
+    assert_eq!(report.definitions_added, 1, "a fresh outer");
+    assert_eq!(report.definitions_linked, 1, "the inner");
+    let live: Vec<_> = doc.component_ids();
+    assert_eq!(live.len(), 2);
+    assert!(live.contains(&inner));
+    assert_eq!(
+        doc.definition_usage(inner),
+        1,
+        "one placement, inside the new outer"
+    );
+}
+
+/// Undo of a linked paste hides the pasted instance only: the shared
+/// definition stays live with its original placement, and redo brings the
+/// pasted instance back onto it.
+#[test]
+fn clipboard_paste_undo_leaves_the_linked_definition_alone() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(iid)], ORIGIN)
+        .unwrap();
+    let (report, _) = doc
+        .insert_document(
+            &item,
+            &clipboard_insert(ORIGIN, Transform::translation(Vec3::new(3.0, 0.0, 0.0))),
+        )
+        .unwrap();
+    let NodeId::Instance(pasted) = report.roots[0] else {
+        panic!("a pasted instance");
+    };
+    assert_eq!(doc.definition_usage(cid), 2);
+
+    doc.undo().unwrap();
+    assert_eq!(
+        doc.component_ids(),
+        vec![cid],
+        "the definition is untouched"
+    );
+    assert_eq!(doc.definition_usage(cid), 1);
+    assert_eq!(
+        doc.instance_def(pasted),
+        None,
+        "the pasted instance is gone"
+    );
+    assert!(doc.instance_ids().contains(&iid));
+
+    doc.redo().unwrap();
+    assert_eq!(doc.instance_def(pasted), Some(cid));
+    assert_eq!(doc.definition_usage(cid), 2);
+}
+
+/// Cut + paste: the cut instance is gone but its definition is still live
+/// (deleting an instance never deletes its definition), so the paste
+/// links back to it — the pasted instance IS a placement of the original
+/// definition, sharing it with every sibling that stayed.
+#[test]
+fn clipboard_cut_then_paste_links_to_the_still_live_definition() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+    let sibling = doc
+        .place_instance(cid, Transform::translation(Vec3::new(2.0, 0.0, 0.0)))
+        .unwrap()
+        .0;
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(iid)], ORIGIN)
+        .unwrap();
+    doc.delete_node(NodeId::Instance(iid)).unwrap();
+    assert_eq!(doc.definition_usage(cid), 1);
+
+    let (report, _) = doc
+        .insert_document(&item, &clipboard_insert(ORIGIN, Transform::IDENTITY))
+        .unwrap();
+
+    assert_eq!(report.definitions_linked, 1);
+    let NodeId::Instance(pasted) = report.roots[0] else {
+        panic!("a pasted instance");
+    };
+    assert_eq!(doc.instance_def(pasted), Some(cid));
+    assert_eq!(doc.instance_def(sibling), Some(cid));
+    assert_eq!(doc.component_ids().len(), 1);
+}
+
+/// The clipboard holds a REFERENCE to the definition, not a snapshot of
+/// its shape: edit the definition between Copy and Paste and the pasted
+/// instance shows the edit, because it places the live definition.
+#[test]
+fn clipboard_paste_after_editing_the_definition_places_the_edited_shape() {
+    let mut doc = Document::new();
+    let (cid, iid, member) = boxed_component(&mut doc);
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(iid)], ORIGIN)
+        .unwrap();
+    let top = {
+        let obj = doc.object(member).unwrap();
+        obj.faces()
+            .iter()
+            .max_by(|(_, a), (_, b)| {
+                a.plane
+                    .normal()
+                    .z
+                    .partial_cmp(&b.plane.normal().z)
+                    .expect("finite")
+            })
+            .map(|(id, _)| id)
+            .unwrap()
+    };
+    doc.push_pull_through_in_component(cid, member, top, 1.0)
+        .unwrap();
+    let members = doc.def_members(cid).unwrap();
+    let top_z = members
+        .iter()
+        .filter(|&&m| doc.object(m).is_some())
+        .map(|&m| object_bbox(&doc, m).1.z)
+        .fold(f64::MIN, f64::max);
+    assert!((top_z - 2.0).abs() < 1e-9, "the definition now reaches 2 m");
+
+    let (report, _) = doc
+        .insert_document(
+            &item,
+            &clipboard_insert(ORIGIN, Transform::translation(Vec3::new(3.0, 0.0, 0.0))),
+        )
+        .unwrap();
+
+    assert_eq!(report.definitions_linked, 1);
+    let NodeId::Instance(pasted) = report.roots[0] else {
+        panic!("a pasted instance");
+    };
+    assert_eq!(doc.instance_def(pasted), Some(cid));
+    assert_eq!(
+        doc.def_members(cid).unwrap(),
+        members,
+        "one shared, edited shape"
+    );
+}
+
+/// Once the original definition is deleted, the stamp names nothing live
+/// and the paste copies the definition the bytes carry — a paste is never
+/// refused for a stale link, and the copy is a real definition again.
+#[test]
+fn clipboard_paste_after_deleting_the_definition_copies_fresh() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(iid)], ORIGIN)
+        .unwrap();
+    doc.delete_definition(cid).unwrap();
+    assert!(doc.component_ids().is_empty());
+
+    let (report, _) = doc
+        .insert_document(&item, &clipboard_insert(ORIGIN, Transform::IDENTITY))
+        .unwrap();
+
+    assert_eq!(report.definitions_linked, 0);
+    assert_eq!(report.definitions_added, 1);
+    assert_eq!(doc.component_ids().len(), 1);
+    assert_ne!(doc.component_ids()[0], cid);
+}
+
+/// Save to Library's extract is not a clipboard copy: the library file
+/// carries no origin stamp, and a library insert (`origin: None`) of an
+/// item saved from THIS document never links to the original definition;
+/// it reuses by provenance only (a first insert copies, a repeat reuses).
+#[test]
+fn library_extract_carries_no_clipboard_stamp() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+    let item = doc.extract_item(&[NodeId::Instance(iid)], true).unwrap();
+    assert!(
+        !item.component_ids().is_empty(),
+        "the extract has a definition"
+    );
+    for c in item.component_ids() {
+        assert!(clipboard_stamp(&item, c).is_none());
+    }
+    let unwrapped = doc.extract_item(&[NodeId::Instance(iid)], false).unwrap();
+    assert!(!unwrapped.component_ids().is_empty());
+    for c in unwrapped.component_ids() {
+        assert!(clipboard_stamp(&unwrapped, c).is_none());
+    }
+
+    let opts = insert_at_identity(provenance("lib:box", "h1"));
+    let (first, _) = doc.insert_document(&item, &opts).unwrap();
+    assert_eq!(first.definitions_linked, 0, "no origin, no link");
+    assert_eq!(first.definitions_added, 1, "a copy, not the original");
+    assert_eq!(doc.component_ids().len(), 2);
+    assert!(doc.component_ids().contains(&cid));
+
+    let (second, _) = doc.insert_document(&item, &opts).unwrap();
+    assert_eq!(second.definitions_linked, 0);
+    assert_eq!(second.definitions_reused, 1, "provenance reuse only");
+    assert_eq!(second.definitions_added, 0);
+    assert_eq!(doc.component_ids().len(), 2);
+}
+
+/// Cutting the ONLY instance leaves its definition live with zero users
+/// (nothing hides or purges it on delete), so the paste still links to it
+/// instead of minting a fresh definition.
+#[test]
+fn clipboard_cut_of_the_only_instance_then_paste_links_to_the_definition() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(iid)], ORIGIN)
+        .unwrap();
+    doc.delete_node(NodeId::Instance(iid)).unwrap();
+    assert_eq!(doc.definition_usage(cid), 0);
+    assert_eq!(doc.component_ids(), vec![cid], "the definition remains");
+
+    let (report, _) = doc
+        .insert_document(&item, &clipboard_insert(ORIGIN, Transform::IDENTITY))
+        .unwrap();
+
+    assert_eq!(report.definitions_linked, 1);
+    assert_eq!(report.definitions_added, 0);
+    let NodeId::Instance(pasted) = report.roots[0] else {
+        panic!("a pasted instance");
+    };
+    assert_eq!(doc.instance_def(pasted), Some(cid));
+    assert_eq!(doc.component_ids(), vec![cid], "still the one definition");
+    assert_eq!(doc.definition_usage(cid), 1);
+}
+
+/// Copying a GROUP that holds a component instance: the group copies as
+/// structure and its inner instance links to the original definition.
+#[test]
+fn clipboard_paste_of_a_group_links_its_inner_instance() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+    let loose = extrude_box(&mut doc, 3.0, 0.0, 4.0, 1.0, 1.0);
+    let (gid, _) = doc
+        .group_nodes(&[NodeId::Instance(iid), NodeId::Object(loose)])
+        .unwrap();
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Group(gid)], ORIGIN)
+        .unwrap();
+    assert_eq!(item.component_ids().len(), 1);
+    assert!(clipboard_stamp(&item, item.component_ids()[0]).is_some());
+
+    let (report, _) = doc
+        .insert_document(
+            &item,
+            &clipboard_insert(ORIGIN, Transform::translation(Vec3::new(0.0, 5.0, 0.0))),
+        )
+        .unwrap();
+
+    assert_eq!(report.definitions_linked, 1);
+    assert_eq!(report.definitions_added, 0);
+    assert_eq!(report.objects_added, 1, "the group's loose box, copied");
+    assert!(matches!(report.roots[0], NodeId::Group(_)));
+    assert_eq!(doc.component_ids(), vec![cid], "no new definition");
+    assert_eq!(
+        doc.definition_usage(cid),
+        2,
+        "original plus the one in the copy"
+    );
+}
+
+/// A world-level selection of an instance AND a group holding another
+/// instance of the same definition: both pasted instances share the one
+/// original definition.
+#[test]
+fn clipboard_paste_of_a_world_instance_and_a_group_shares_the_definition() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+    let inner = doc
+        .place_instance(cid, Transform::translation(Vec3::new(2.0, 0.0, 0.0)))
+        .unwrap()
+        .0;
+    let (gid, _) = doc.group_nodes(&[NodeId::Instance(inner)]).unwrap();
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(iid), NodeId::Group(gid)], ORIGIN)
+        .unwrap();
+
+    let (report, _) = doc
+        .insert_document(
+            &item,
+            &clipboard_insert(ORIGIN, Transform::translation(Vec3::new(0.0, 5.0, 0.0))),
+        )
+        .unwrap();
+
+    assert_eq!(report.definitions_linked, 1);
+    assert_eq!(report.definitions_added, 0);
+    assert_eq!(report.roots.len(), 2);
+    assert_eq!(doc.component_ids(), vec![cid]);
+    assert_eq!(doc.definition_usage(cid), 4);
+}
+
+/// The paste preview shows what a paste will place: a linked definition
+/// edited since the copy appears with its LIVE shape (the copy-time bytes
+/// would show the old one), only the pasted roots are present, and the
+/// live document is untouched. With nothing to link there is no preview.
+#[test]
+fn clipboard_paste_preview_shows_the_live_edited_definition() {
+    let mut doc = Document::new();
+    let (cid, iid, member) = boxed_component(&mut doc);
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(iid)], ORIGIN)
+        .unwrap();
+    let top = {
+        let obj = doc.object(member).unwrap();
+        obj.faces()
+            .iter()
+            .max_by(|(_, a), (_, b)| {
+                a.plane
+                    .normal()
+                    .z
+                    .partial_cmp(&b.plane.normal().z)
+                    .expect("finite")
+            })
+            .map(|(id, _)| id)
+            .unwrap()
+    };
+    doc.push_pull_through_in_component(cid, member, top, 1.0)
+        .unwrap();
+    let before = doc.save();
+
+    let preview = doc
+        .preview_clipboard_paste(&item, ORIGIN)
+        .unwrap()
+        .expect("a linked paste has a preview");
+    assert_eq!(doc.save(), before, "the live document is untouched");
+    assert_eq!(preview.top_level_nodes().len(), 1, "only the pasted root");
+    let NodeId::Instance(shown) = preview.top_level_nodes()[0] else {
+        panic!("the pasted instance");
+    };
+    assert_eq!(preview.instance_def(shown), Some(cid));
+    let live_top = preview
+        .def_members(cid)
+        .unwrap()
+        .iter()
+        .filter(|&&m| preview.object(m).is_some())
+        .map(|&m| object_bbox(&preview, m).1.z)
+        .fold(f64::MIN, f64::max);
+    assert!((live_top - 2.0).abs() < 1e-9, "the edited, 2 m shape");
+
+    assert!(
+        doc.preview_clipboard_paste(&item, "another-window#0")
+            .unwrap()
+            .is_none(),
+        "nothing links, so the copy-time bytes already are the paste"
+    );
+}
+
+/// The clipboard copy survives its byte round trip with the stamp intact
+/// — the app holds BYTES, not the item document — and the clipboard
+/// provenance keeps deduping when no link applies: a second paste of the
+/// same bytes after the original is gone reuses the first paste's copy.
+#[test]
+fn clipboard_stamp_survives_save_load_and_provenance_still_dedupes() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+    let bytes = doc
+        .extract_clipboard_item(&[NodeId::Instance(iid)], ORIGIN)
+        .unwrap()
+        .save();
+    let item = Document::load(&bytes).unwrap();
+    assert!(clipboard_stamp(&item, item.component_ids()[0]).is_some());
+
+    let (linked, _) = doc
+        .insert_document(&item, &clipboard_insert(ORIGIN, Transform::IDENTITY))
+        .unwrap();
+    assert_eq!(linked.definitions_linked, 1);
+
+    doc.delete_definition(cid).unwrap();
+    let (first, _) = doc
+        .insert_document(&item, &clipboard_insert(ORIGIN, Transform::IDENTITY))
+        .unwrap();
+    assert_eq!(first.definitions_added, 1);
+    let (second, _) = doc
+        .insert_document(&item, &clipboard_insert(ORIGIN, Transform::IDENTITY))
+        .unwrap();
+    assert_eq!(second.definitions_reused, 1, "provenance dedupe, as before");
+    assert_eq!(second.definitions_added, 0);
+    assert_eq!(doc.component_ids().len(), 1);
+}
+
+/// Move+copy (`duplicate_node` of an instance) and a same-document paste
+/// agree: both place the original definition. The regression guard for
+/// the path that was already right.
+#[test]
+fn move_copy_and_clipboard_paste_both_place_the_original_definition() {
+    let mut doc = Document::new();
+    let (cid, iid, _) = boxed_component(&mut doc);
+
+    let (dup, _) = doc
+        .duplicate_node(
+            NodeId::Instance(iid),
+            &Transform::translation(Vec3::new(2.0, 0.0, 0.0)),
+        )
+        .unwrap();
+    let NodeId::Instance(dup) = dup else {
+        panic!("an instance duplicates as an instance");
+    };
+    assert_eq!(doc.instance_def(dup), Some(cid));
+
+    let item = doc
+        .extract_clipboard_item(&[NodeId::Instance(iid)], ORIGIN)
+        .unwrap();
+    let (report, _) = doc
+        .insert_document(
+            &item,
+            &clipboard_insert(ORIGIN, Transform::translation(Vec3::new(4.0, 0.0, 0.0))),
+        )
+        .unwrap();
+    let NodeId::Instance(pasted) = report.roots[0] else {
+        panic!("a pasted instance");
+    };
+    assert_eq!(doc.instance_def(pasted), Some(cid));
+    assert_eq!(doc.component_ids().len(), 1);
+    assert_eq!(doc.definition_usage(cid), 3);
 }

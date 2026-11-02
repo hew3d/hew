@@ -564,6 +564,7 @@ fn insert_report_to_js(report: &kernel::InsertReport) -> JsValue {
     Reflect::set(&js, &JsValue::from_str("rootIds"), &ids_arr).unwrap();
     set_num("definitionsAdded", report.definitions_added);
     set_num("definitionsReused", report.definitions_reused);
+    set_num("definitionsLinked", report.definitions_linked);
     set_num("materialsAdded", report.materials_added);
     set_num("materialsReused", report.materials_reused);
     set_num("objectsAdded", report.objects_added);
@@ -2297,6 +2298,13 @@ pub struct Scene {
     /// A `.skp` open under way between [`Scene::open_skp_begin`] and the
     /// [`Scene::open_skp_step`] that finishes it.
     pending_open: Option<PendingOpen>,
+    /// How many times [`Scene::load`] has replaced the document — the
+    /// scene-side half of the clipboard origin ([`Scene::clipboard_origin`]).
+    /// The kernel's stable ids are per-document counters, so an origin that
+    /// did not change with the document would let a copy taken from the
+    /// previous document of this window link to whatever definition now
+    /// holds the same id.
+    doc_epoch: u64,
 }
 
 impl Default for Scene {
@@ -2763,7 +2771,19 @@ impl Scene {
             skp_source: None,
             pending_skp_source: None,
             pending_open: None,
+            doc_epoch: 0,
         }
+    }
+
+    /// The clipboard origin token for `window_nonce` against THIS scene's
+    /// current document: the nonce (the app's per-window random id) plus
+    /// the document epoch, so it differs between windows AND between the
+    /// documents one window opens in turn. [`Scene::extract_item`] stamps
+    /// it into clipboard bytes and [`Scene::insert_item`] passes it to the
+    /// kernel, which links a pasted definition to its original only when
+    /// the two agree ([`kernel::InsertOptions::origin`]).
+    fn clipboard_origin(&self, window_nonce: &str) -> String {
+        format!("{window_nonce}#{}", self.doc_epoch)
     }
 
     /// Scope definition-sketch inference to the component instance currently
@@ -9566,6 +9586,16 @@ impl Scene {
     /// the single root node's. `meta_json`, when given, is a JSON object
     /// written verbatim into the item's document attrs under the
     /// `hew.library` namespace (id, category, keywords, collection, …).
+    ///
+    /// `origin`, when given, makes this a CLIPBOARD copy
+    /// ([`kernel::Document::extract_clipboard_item`]): the app's per-window
+    /// nonce, composed with this scene's document epoch
+    /// ([`Scene::clipboard_origin`]), is stamped on every definition the
+    /// copy carries so that [`Scene::insert_item`] with the same nonce,
+    /// into the same document, places the ORIGINAL definition (a linked
+    /// instance, as Move+copy makes) instead of a new one. A clipboard copy
+    /// is never wrapped (`wrap_as_component` is ignored). Save to Library
+    /// passes `None`: a library file carries no origin.
     pub fn extract_item(
         &self,
         kinds: &[u8],
@@ -9573,6 +9603,7 @@ impl Scene {
         wrap_as_component: bool,
         name: Option<String>,
         meta_json: Option<String>,
+        origin: Option<String>,
     ) -> Result<Vec<u8>, ApiError> {
         if kinds.len() != ids.len() {
             return Err(ApiError(
@@ -9584,10 +9615,16 @@ impl Scene {
             .zip(ids)
             .map(|(&k, &i)| node_id(k, i))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut item = self
-            .doc
-            .extract_item(&nodes, wrap_as_component)
-            .map_err(doc_err)?;
+        let mut item = match origin {
+            Some(nonce) => self
+                .doc
+                .extract_clipboard_item(&nodes, &self.clipboard_origin(&nonce))
+                .map_err(doc_err)?,
+            None => self
+                .doc
+                .extract_item(&nodes, wrap_as_component)
+                .map_err(doc_err)?,
+        };
         if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
             let cids = item.component_ids();
             if cids.len() == 1 {
@@ -9673,31 +9710,88 @@ impl Scene {
     /// definitions/roots are stamped for future matches and for
     /// [`Scene::library_placements_json`].
     ///
+    /// `origin` is the paste half of the clipboard link: the app's
+    /// per-window nonce, the same one it gave [`Scene::extract_item`] when
+    /// copying. Composed with this scene's document epoch
+    /// ([`Scene::clipboard_origin`]) and handed to the kernel, which links
+    /// each definition in `bytes` stamped with that exact origin to the
+    /// live definition it was copied from ([`kernel::InsertOptions::origin`])
+    /// — so a component instance copied and pasted in one document stays
+    /// one definition, while the same bytes pasted in another window or
+    /// after this window opened another document copy as a new one.
+    /// Library placements pass `None`.
+    ///
     /// Returns `{ rootKinds: number[], rootIds: string[] (decimal u64),
-    /// definitionsAdded, definitionsReused, materialsAdded, materialsReused,
-    /// objectsAdded, guidesAdded, worldSketchesSkipped, annotationsSkipped }`.
+    /// definitionsAdded, definitionsReused, definitionsLinked,
+    /// materialsAdded, materialsReused, objectsAdded, guidesAdded,
+    /// worldSketchesSkipped, annotationsSkipped }`.
     pub fn insert_item(
         &mut self,
         bytes: &[u8],
         affine: &[f64],
         source_id: Option<String>,
         content_hash: Option<String>,
+        origin: Option<String>,
     ) -> Result<JsValue, JsError> {
         let report = self
-            .insert_item_core(bytes, affine, source_id, content_hash)
+            .insert_item_composed(bytes, affine, source_id, content_hash, origin)
             .map_err(|e| JsError::new(&e.0))?;
         Ok(insert_report_to_js(&report))
+    }
+
+    /// What [`Scene::insert_item`] does minus the JS-value plumbing: composes
+    /// the app's window nonce with this scene's document epoch
+    /// ([`Scene::clipboard_origin`]) and inserts. The one place the
+    /// composition lives, so native tests exercise the same path the JS
+    /// entry point takes.
+    fn insert_item_composed(
+        &mut self,
+        bytes: &[u8],
+        affine: &[f64],
+        source_id: Option<String>,
+        content_hash: Option<String>,
+        nonce: Option<String>,
+    ) -> Result<kernel::InsertReport, ApiError> {
+        let origin = nonce.map(|n| self.clipboard_origin(&n));
+        self.insert_item_core(bytes, affine, source_id, content_hash, origin)
+    }
+
+    /// The document bytes of what pasting clipboard `bytes` (copied with
+    /// `origin`, [`Scene::extract_item`]) would place right now, for the
+    /// cursor-paste ghost: only the pasted roots, at the item's own
+    /// coordinates, with every linked definition showing its LIVE content
+    /// ([`kernel::Document::preview_clipboard_paste`]). `undefined` when
+    /// nothing links (the copy-time bytes are then already the paste) or
+    /// the preview cannot be built (for instance an open component
+    /// session); the caller falls back to the copy-time bytes. Read-only,
+    /// not recorded.
+    pub fn clipboard_paste_preview(
+        &self,
+        bytes: &[u8],
+        origin: String,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        let item = Document::load(bytes).map_err(|e: LoadError| api_err(&e, &e))?;
+        Ok(self
+            .doc
+            .preview_clipboard_paste(&item, &self.clipboard_origin(&origin))
+            .ok()
+            .flatten()
+            .map(|d| d.save()))
     }
 
     /// [`Scene::insert_item`] minus the JS-value plumbing: load, insert
     /// (additive), reconcile, and record. The replay arm re-issues inserts
     /// through this (no `JsValue`, so it also runs in native tests).
+    /// `origin` arrives already composed ([`Scene::clipboard_origin`]) and
+    /// is recorded verbatim, so a replay compares the recorded origin with
+    /// the recorded bytes' stamps — never the replaying scene's own epoch.
     fn insert_item_core(
         &mut self,
         bytes: &[u8],
         affine: &[f64],
         source_id: Option<String>,
         content_hash: Option<String>,
+        origin: Option<String>,
     ) -> Result<kernel::InsertReport, ApiError> {
         let item = Document::load(bytes).map_err(|e: LoadError| api_err(&e, &e))?;
         let pose = affine_transform(affine)?;
@@ -9710,7 +9804,14 @@ impl Scene {
         };
         let (report, change) = self
             .doc
-            .insert_document(&item, &kernel::InsertOptions { pose, provenance })
+            .insert_document(
+                &item,
+                &kernel::InsertOptions {
+                    pose,
+                    provenance,
+                    origin: origin.clone(),
+                },
+            )
             .map_err(doc_err)?;
         // Reconcile caches (additive — do NOT clear like `load`).
         self.reconcile(&change);
@@ -9722,6 +9823,7 @@ impl Scene {
             affine: rec_affine,
             source_id,
             content_hash,
+            origin,
         });
         Ok(report)
     }
@@ -10705,8 +10807,9 @@ impl Scene {
                         affine,
                         source_id,
                         content_hash,
+                        origin,
                     } => {
-                        self.insert_item_core(&bytes, &affine, source_id, content_hash)?;
+                        self.insert_item_core(&bytes, &affine, source_id, content_hash, origin)?;
                     }
                     InsertItemPalette { bytes } => {
                         self.insert_item_palette_core(&bytes)?;
@@ -11132,6 +11235,7 @@ impl Scene {
 
         // Swap is committed only after successful parse.
         self.doc = new_doc;
+        self.doc_epoch += 1;
         self.skp_source = None;
         self.pending_skp_source = None;
         // The app reads (and so checks) a file before it loads the blank
@@ -12739,6 +12843,7 @@ mod tests {
                 true,
                 Some("Chair".to_string()),
                 Some(r#"{"id":"lib-1","category":"component"}"#.to_string()),
+                None,
             )
             .unwrap();
 
@@ -12754,6 +12859,7 @@ mod tests {
                 &identity,
                 Some("lib-1".into()),
                 Some("hash-1".into()),
+                None,
             )
             .unwrap();
         assert_eq!(first.definitions_added, 1);
@@ -12763,6 +12869,7 @@ mod tests {
                 &shifted,
                 Some("lib-1".into()),
                 Some("hash-1".into()),
+                None,
             )
             .unwrap();
         assert_eq!(second.definitions_reused, 1, "same item version → reuse");
@@ -12780,6 +12887,156 @@ mod tests {
         let final_hash = replayed.replay(&json).unwrap();
         assert_eq!(final_hash, golden, "insert+undo replays to the golden hash");
         assert_eq!(replayed.save(), scene.save());
+    }
+
+    /// Copy/paste of a component instance within one document: the copy
+    /// (`extract_item` with the window nonce) and the paste (`insert_item`
+    /// with the same nonce) agree on the composed origin, so the paste
+    /// LINKS to the original definition; the recording carries the
+    /// composed origin and replays to the golden hash. The same bytes
+    /// pasted after `load` replaced this scene's document (a new epoch)
+    /// no longer link — the collision guard for per-document stable ids.
+    #[test]
+    fn clipboard_paste_links_the_original_definition_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(s, r, 1.0).unwrap();
+        let instance = scene.make_component(&[0u8], &[obj]).unwrap();
+        let def = scene.instance_def(instance).unwrap();
+
+        // Copy — with the window nonce, so the bytes carry the origin.
+        let bytes = scene
+            .extract_item(
+                &[2u8],
+                &[instance],
+                false,
+                None,
+                None,
+                Some("win".to_string()),
+            )
+            .unwrap();
+        // The paste composes the nonce exactly as the copy did — through
+        // the same composition `insert_item` (the JS entry) uses.
+        let origin = scene.clipboard_origin("win");
+        let shifted = [1.0, 0.0, 0.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let report = scene
+            .insert_item_composed(
+                &bytes,
+                &shifted,
+                Some("clipboard:h".into()),
+                Some("h".into()),
+                Some("win".to_string()),
+            )
+            .unwrap();
+        assert_eq!(report.definitions_linked, 1);
+        assert_eq!(report.definitions_added, 0);
+        assert_eq!(scene.component_ids(), vec![def], "still one definition");
+        assert_eq!(scene.definition_usage(def), 2);
+        let pasted = match report.roots[0] {
+            NodeId::Instance(i) => i.data().as_ffi(),
+            _ => panic!("a pasted instance"),
+        };
+        assert_eq!(scene.instance_def(pasted), Some(def));
+        scene.stop_recording();
+
+        // The recording carries the composed origin and replays exactly.
+        let json = scene.take_recording();
+        assert!(json.contains(&origin), "the composed origin is recorded");
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(final_hash, scene.state_hash());
+        assert_eq!(replayed.save(), scene.save());
+
+        // After `load` replaces the document, the epoch moves on: the same
+        // nonce composes a different origin and the bytes copy instead.
+        let saved = scene.save();
+        scene.load_core(&saved).unwrap();
+        assert_ne!(scene.clipboard_origin("win"), origin);
+        let foreign = scene
+            .insert_item_composed(
+                &bytes,
+                &shifted,
+                Some("clipboard:h".into()),
+                Some("h".into()),
+                Some("win".to_string()),
+            )
+            .unwrap();
+        assert_eq!(foreign.definitions_linked, 0);
+        assert_eq!(foreign.definitions_added, 1);
+        assert_eq!(scene.component_ids().len(), 2);
+    }
+
+    /// The cursor-paste ghost shows what the paste places: copy an
+    /// instance, edit its definition (taller), and the preview built for
+    /// the copy-time bytes has the EDITED bounds, equal to the bounds of
+    /// the instance the paste then places (the copy-time bytes alone
+    /// would show the old, shorter box). Nothing links, nothing to
+    /// refresh, for bytes from another window.
+    #[test]
+    fn clipboard_paste_preview_bounds_equal_the_placed_bounds() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(s, r, 1.0).unwrap();
+        let instance = scene.make_component(&[0u8], &[obj]).unwrap();
+        let def = scene.instance_def(instance).unwrap();
+        let bytes = scene
+            .extract_item(&[2u8], &[instance], false, None, None, Some("win".into()))
+            .unwrap();
+
+        // Edit the definition between Copy and Paste: pull the box up 1 m.
+        let _ = def;
+        let cid = scene.doc.component_ids()[0];
+        let member = scene.doc.def_members(cid).unwrap()[0];
+        let top = {
+            let o = scene.doc.object(member).unwrap();
+            o.faces()
+                .iter()
+                .max_by(|(_, a), (_, b)| {
+                    a.plane.normal().z.partial_cmp(&b.plane.normal().z).unwrap()
+                })
+                .map(|(id, _)| id)
+                .unwrap()
+        };
+        scene
+            .doc
+            .push_pull_through_in_component(cid, member, top, 1.0)
+            .unwrap();
+
+        let preview = scene
+            .clipboard_paste_preview(&bytes, "win".into())
+            .unwrap()
+            .expect("a linked paste has a preview");
+        let ghost = Document::load(&preview).unwrap();
+        let (glo, ghi) = softrender::document_bbox(&ghost);
+        let stale = Document::load(&bytes).unwrap();
+        let (_, shi) = softrender::document_bbox(&stale);
+        assert!(
+            (shi.z - 1.0).abs() < 1e-9,
+            "the copy-time bytes are 1 m tall"
+        );
+        assert!((ghi.z - 2.0).abs() < 1e-9, "the preview is the edited 2 m");
+
+        // Place it, shifted 10 m along x and y: the placed bounds are the ghost's
+        // bounds moved by exactly that.
+        let shifted = [1.0, 0.0, 0.0, 10.0, 0.0, 1.0, 0.0, 10.0, 0.0, 0.0, 1.0, 0.0];
+        let report = scene
+            .insert_item_composed(&bytes, &shifted, None, None, Some("win".into()))
+            .unwrap();
+        assert_eq!(report.definitions_linked, 1);
+        let (_, hi) = softrender::document_bbox(&scene.doc);
+        assert!((hi.x - (ghi.x + 10.0)).abs() < 1e-9);
+        assert!((hi.y - (ghi.y + 10.0)).abs() < 1e-9);
+        assert!((hi.z - ghi.z).abs() < 1e-9);
+        let _ = glo;
+
+        assert!(
+            scene
+                .clipboard_paste_preview(&bytes, "other-window".into())
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// The UI routes EVERY boolean through `boolean_nodes` — plain

@@ -5219,7 +5219,14 @@ export default function App() {
     if (sel === null) return null // unreachable — every entry is already structural
     let bytes: Uint8Array
     try {
-      bytes = scene.extract_item(sel.kinds, sel.ids, false, undefined, undefined)
+      // The window nonce makes this a CLIPBOARD copy: the kernel stamps
+      // every definition the copy carries with where it came from, so a
+      // paste back into this same document (handlePaste passes the same
+      // nonce) places the ORIGINAL definition — a linked instance, as
+      // Move+copy makes — instead of minting an unlinked duplicate. The
+      // scene composes its document epoch in, so a copy taken before
+      // File ▸ Open/New in this window never links into the new document.
+      bytes = scene.extract_item(sel.kinds, sel.ids, false, undefined, undefined, clipboardSourceIdRef.current)
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
@@ -5290,7 +5297,13 @@ export default function App() {
         )
         let raw: unknown
         try {
-          raw = scene.insert_item(content.bytes, affine, content.sourceId, content.contentHash)
+          raw = scene.insert_item(
+            content.bytes,
+            affine,
+            content.sourceId,
+            content.contentHash,
+            clipboardSourceIdRef.current,
+          )
         } catch (err) {
           const code = parseKernelErrorCode(err)
           const rawMsg = err instanceof Error ? err.message : String(err)
@@ -5314,9 +5327,22 @@ export default function App() {
 
       // Cursor placement: arm the same one-shot LibraryPlaceTool the Library
       // browser uses, with a ghost built straight from the clipboard bytes.
+      //
+      // A linked paste places the LIVE definition, which may have been
+      // edited since Copy, so the ghost (and the bounds the snap and the
+      // origin cue use) come from the kernel's preview of what the paste
+      // will place. No preview (nothing links, or it cannot be built)
+      // means the copy-time bytes already are the paste.
+      let previewBytes = content.bytes
+      try {
+        const live = scene.clipboard_paste_preview(content.bytes, clipboardSourceIdRef.current)
+        if (live !== undefined) previewBytes = live
+      } catch {
+        // Fall back to the copy-time bytes; the placement itself decides.
+      }
       let ghost: Awaited<ReturnType<typeof buildItemGhost>>
       try {
-        ghost = await buildItemGhost(content.bytes)
+        ghost = await buildItemGhost(previewBytes)
       } catch (err) {
         handleToast(t`Couldn't preview the paste: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
         return
@@ -5325,6 +5351,10 @@ export default function App() {
         bytes: content.bytes,
         sourceId: content.sourceId,
         contentHash: content.contentHash,
+        // The paste half of the clipboard link (see doCopy): the same
+        // window nonce, so an instance copied from THIS document places
+        // its original definition rather than an unlinked copy.
+        origin: clipboardSourceIdRef.current,
         displayName: t`Pasted objects`,
         ghost: ghost.group,
         bboxMin: ghost.bboxMin,

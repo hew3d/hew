@@ -298,6 +298,19 @@ below.
   Copy" — or after the instance's own name if it has one) and Explode
   (bake an instance back into ordinary geometry; a nested member
   surfaces as an ordinary instance, its geometry still shared)
+- Copy/Cut/Paste and Paste In Place of component instances stay linked
+  within a document: the clipboard bytes carry a `hew.clipboard` origin
+  stamp per definition (the copying window's document token plus the
+  source definition's stable id) and the paste links each stamped
+  definition back to the live original (`Document::extract_clipboard_item`
+  / `InsertOptions::origin`), so the pasted instance places the same
+  definition as Move+copy and Place Copy do — several copied instances of
+  one definition share it, nested definitions link per definition, a
+  mixed selection pastes its plain objects as independent copies, undo
+  removes only the pasted instances. A paste under another origin
+  (another window, or after File ▸ Open/New in this one) copies the
+  definition as before, with repeat pastes of the same copy reusing it by
+  clipboard provenance; Make Unique breaks a link on purpose
 - Slice: cut a solid along a plane into two independent watertight solids
 - Push/pull on any planar face of a solid, not just faces with
   perpendicular neighbors: it follows classic SketchUp translate-and-build —

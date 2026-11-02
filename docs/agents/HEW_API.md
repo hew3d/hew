@@ -1473,6 +1473,19 @@ writable only by first-party code):
   re-inserting the same item version reuse the in-document definition
   instead of copying it again, and what "in this model" queries count.
 
+A second first-party namespace, `hew.clipboard`, lives only inside
+clipboard bytes and never in a document or a library file. The app's Copy
+(`Document::extract_clipboard_item`) stamps every definition the copy
+carries with `origin` (the copying window's document token) and `def_sid`
+(the stable id of the definition it was copied from); Paste
+(`Document::insert_document` with the same `origin`) links each stamped
+definition back to the live original, so a component instance copied and
+pasted within one document places the same definition — editing either
+edits both, and Make Unique is the way to break the link. The insert
+strips the namespace from every copy it makes, and a paste under another
+origin (another window, or after the window opened another document)
+copies as an ordinary item would.
+
 Clients may read these dictionaries freely; external writes through
 `hew.attr.set` remain refused like every `hew.*` namespace. The wire-level `.hew` encoding is specified in
 HEW_FILE_FORMAT.md in the change that implements it (per that document's

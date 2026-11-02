@@ -433,9 +433,14 @@ fn insert_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         None => Transform::IDENTITY,
     };
 
-    let (report, _change) = ctx
-        .doc
-        .insert_document(&item_doc, &InsertOptions { pose, provenance })?;
+    let (report, _change) = ctx.doc.insert_document(
+        &item_doc,
+        &InsertOptions {
+            pose,
+            provenance,
+            origin: None,
+        },
+    )?;
 
     if let Some(name) = p.name.as_deref().map(str::trim).filter(|n| !n.is_empty())
         && let [only] = report.roots.as_slice()

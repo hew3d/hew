@@ -46,6 +46,12 @@ export interface LibraryPlacement {
   /** `hew.library` provenance; both or neither. */
   sourceId: string | null
   contentHash: string | null
+  /** The clipboard origin (the app's per-window nonce) of a PASTE — the
+   *  same nonce `extract_item` was given at Copy — so the kernel links a
+   *  pasted component instance to the definition it was copied from when
+   *  the paste lands in the same document. Library placements leave it
+   *  unset: a library item has no original to link to. */
+  origin?: string | null
   displayName: string
   /** Ghost meshes in ITEM coordinates (origin = the item's own origin). */
   ghost: THREE.Group
@@ -185,6 +191,7 @@ export class LibraryPlaceTool implements Tool {
         affine,
         this.placement.sourceId ?? undefined,
         this.placement.contentHash ?? undefined,
+        this.placement.origin ?? undefined,
       )
     } catch (err) {
       // A refusal (open component session, unloadable item) leaves the
