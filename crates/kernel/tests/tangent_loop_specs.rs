@@ -589,6 +589,126 @@ fn erasing_the_circle_merges_the_hole_back() {
     assert_exact_history(&mut w.doc, &bytes0);
 }
 
+/// The tangent circle drawn over a rectangle imprint that clips its right
+/// side: the part of the disc left of the rectangle is a face in the
+/// parent's hole, and the run it shares with that hole is the arc from one
+/// clip point, around through the rim vertex where the hole touches the
+/// parent's outer loop, to the other. Returns the wall, the clipped disc,
+/// and the parent.
+fn tangent_circle_clipped_by_an_imprint() -> (Wall, FaceId, FaceId) {
+    let mut w = top_2x2();
+    let seed = w.face;
+    let rect = w.rect(1.25, 0.03, 0.55, 1.37);
+    draw_region(&mut w, seed, rect, None);
+    let (ring, g) = tangent_circle(&w);
+    let seed = face_at(&w, 0.2, 1.8);
+    w.draw_loop(seed, &ring, Some(g)).expect("the circle draws");
+    let disc = face_at(&w, 0.7, 0.5);
+    let parent = face_at(&w, 0.2, 1.8);
+    let obj = w.obj();
+    obj.validate().expect("valid");
+    let rim = w.at(1.0, 0.0);
+    let on = |l: kernel::LoopId| {
+        obj.loop_positions(l)
+            .any(|p| p.approx_eq(rim, tol::POINT_MERGE))
+    };
+    let pf = &obj.faces()[parent];
+    assert!(
+        on(pf.outer_loop),
+        "the rim vertex is on the parent's outline"
+    );
+    assert!(
+        pf.inner_loops.len() == 1 && on(pf.inner_loops[0]),
+        "the parent's one hole touches its outline at the rim vertex"
+    );
+    assert!(
+        on(obj.faces()[disc].outer_loop),
+        "the clipped disc passes it"
+    );
+    (w, disc, parent)
+}
+
+/// An edge of the arc the clipped disc shares with the parent's hole.
+fn arc_edge(obj: &Object, disc: FaceId, parent: FaceId) -> kernel::EdgeId {
+    obj.loop_half_edges(obj.faces()[disc].outer_loop)
+        .find(|&h| {
+            obj.half_edges()[h]
+                .twin
+                .is_some_and(|t| obj.loops()[obj.half_edges()[t].loop_id].face == parent)
+        })
+        .map(|h| obj.half_edges()[h].edge)
+        .expect("the disc shares its arc with the parent")
+}
+
+#[test]
+fn merging_a_clipped_tangent_disc_across_its_arc_undoes_and_redoes() {
+    // The run the merge dissolves passes through the rim vertex, which the
+    // parent's outline keeps. Its undo used to replay a single cut whose
+    // interior ran through that boundary vertex, which `split_face`
+    // refuses ("path point is not on the face").
+    let (mut w, disc, parent) = tangent_circle_clipped_by_an_imprint();
+    let bytes0 = w.doc.save();
+    let id = w.id;
+    let edge = arc_edge(w.obj(), disc, parent);
+    w.doc
+        .apply_object_op(id, KernelOp::MergeFaces { edge })
+        .expect("the disc merges into the parent");
+    let obj = w.obj();
+    obj.validate().expect("valid after the merge");
+    assert!(
+        !has_touching_loops(obj, &w.plane),
+        "the hole no longer touches the outline"
+    );
+    let rim = w.at(1.0, 0.0);
+    assert!(
+        obj.vertices()
+            .values()
+            .all(|v| !v.position.approx_eq(rim, tol::POINT_MERGE)),
+        "the rim vertex heals away, as erasing the whole circle heals it"
+    );
+    assert_exact_history(&mut w.doc, &bytes0);
+}
+
+#[test]
+fn erasing_a_clipped_tangent_disc_arc_agrees_with_the_merge() {
+    // The user's way to the same result: erase the arc's edges in one
+    // draft. It lands on the geometry the recorded merge gives, so neither
+    // leaves a scar the other heals.
+    let (mut w, disc, parent) = tangent_circle_clipped_by_an_imprint();
+    let obj = w.obj();
+    let arc: Vec<(Point3, Point3)> = obj
+        .loop_half_edges(obj.faces()[disc].outer_loop)
+        .filter(|&h| {
+            obj.half_edges()[h]
+                .twin
+                .is_some_and(|t| obj.loops()[obj.half_edges()[t].loop_id].face == parent)
+        })
+        .map(|h| obj.edge_endpoints(obj.half_edges()[h].edge).expect("live"))
+        .collect();
+    let mut merged = obj.clone();
+    merged
+        .merge_faces(arc_edge(obj, disc, parent))
+        .expect("merges");
+    let bytes0 = w.doc.save();
+    let (plane, id) = (w.plane, w.id);
+    let objs = plane_objects(&w.doc, plane, None, id);
+    w.doc
+        .draft(plane, None, &objs, "Erase", |sk| {
+            for &(a, b) in &arc {
+                let e = sk.edge_at_positions(a, b).expect("an arc edge in the lift");
+                sk.remove_edge(e)?;
+            }
+            Ok(())
+        })
+        .expect("the arc erases");
+    w.obj().validate().expect("valid after the erase");
+    assert!(
+        objects_equivalent(w.obj(), &merged),
+        "the erase and the merge give the same face"
+    );
+    assert_exact_history(&mut w.doc, &bytes0);
+}
+
 // -------------------------------------------------------------- 4. move
 
 #[test]

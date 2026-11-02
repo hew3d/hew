@@ -1291,9 +1291,11 @@ type MergeRun = (Vec<Point3>, Vec<Option<CurveGeom>>);
 /// [`reconstruct_merge_path`] reconstructs one: exactly that function's
 /// answer when the two faces share one run (so the undo stays the
 /// `SplitFace` it has always been), and every run — each canonically
-/// oriented, sorted by first point — when they share several (the undo is
-/// then one `RetraceFace` inserting them all). Empty for an edge the merge
-/// will refuse.
+/// oriented, sorted by its points — when they share several, or one that
+/// passes through a vertex other edges also use, split there as
+/// `merge_faces` splits it (the undo is then one `RetraceFace` inserting
+/// them all, each boundary to boundary). Empty for an edge the merge will
+/// refuse.
 fn reconstruct_merge_runs(object: &Object, edge: EdgeId) -> Vec<MergeRun> {
     let (path, curves) = reconstruct_merge_path(object, edge);
     if path.is_empty() {
@@ -1313,53 +1315,38 @@ fn reconstruct_merge_runs(object: &Object, edge: EdgeId) -> Vec<MergeRun> {
         loop_b
     };
     let other = if walk == loop_a { loop_b } else { loop_a };
-    let hes: Vec<HalfEdgeId> = object.loop_half_edges(walk).collect();
-    let shared = |h: HalfEdgeId| {
-        object.half_edges()[h]
-            .twin
-            .is_some_and(|t| object.half_edges()[t].loop_id == other)
-    };
-    let n = hes.len();
-    let starts: Vec<usize> = (0..n)
-        .filter(|&i| shared(hes[i]) && !shared(hes[(i + n - 1) % n]))
-        .collect();
-    if starts.len() <= 1 {
+    let pieces = object.split_runs_at_touches(object.shared_run_half_edges(walk, other));
+    if pieces.len() <= 1 {
         return vec![(path, curves)];
     }
-    let mut runs: Vec<MergeRun> = starts
-        .into_iter()
-        .map(|i| {
-            let mut pts = Vec::new();
-            let mut cs = Vec::new();
-            let mut k = i;
-            while shared(hes[k % n]) {
-                let h = hes[k % n];
-                pts.push(object.vertices()[object.half_edges()[h].origin].position);
-                cs.push(object.edges()[object.half_edges()[h].edge].curve);
-                k += 1;
-            }
-            let last = hes[(k + n - 1) % n];
-            let dest = object.half_edges()[object.half_edges()[last].next].origin;
-            pts.push(object.vertices()[dest].position);
-            let key = |p: &Point3| (p.x, p.y, p.z);
-            let (f, l) = (key(&pts[0]), key(pts.last().expect("a run has points")));
-            if l.0
-                .total_cmp(&f.0)
-                .then(l.1.total_cmp(&f.1))
-                .then(l.2.total_cmp(&f.2))
-                == std::cmp::Ordering::Less
-            {
+    let lex = |p: &Point3, q: &Point3| {
+        p.x.total_cmp(&q.x)
+            .then(p.y.total_cmp(&q.y))
+            .then(p.z.total_cmp(&q.z))
+    };
+    let mut runs: Vec<MergeRun> = pieces
+        .iter()
+        .map(|piece| {
+            let mut pts = object.run_positions(piece);
+            let mut cs: Vec<Option<CurveGeom>> = piece
+                .iter()
+                .map(|&h| object.edges()[object.half_edges()[h].edge].curve)
+                .collect();
+            if lex(pts.last().expect("a run has points"), &pts[0]) == std::cmp::Ordering::Less {
                 pts.reverse();
                 cs.reverse();
             }
             (pts, cs)
         })
         .collect();
+    // By first point, then the rest: two pieces split at one vertex can
+    // both start there, and the order must not follow the loop's start.
     runs.sort_by(|a, b| {
-        let (p, q) = (a.0[0], b.0[0]);
-        p.x.total_cmp(&q.x)
-            .then(p.y.total_cmp(&q.y))
-            .then(p.z.total_cmp(&q.z))
+        a.0.iter()
+            .zip(&b.0)
+            .map(|(p, q)| lex(p, q))
+            .find(|o| o.is_ne())
+            .unwrap_or_else(|| a.0.len().cmp(&b.0.len()))
     });
     runs
 }

@@ -143,7 +143,9 @@ moment a drawn region is pushed or pulled it is solid geometry again.
 Three kernel ops carry the topology half of every lowered edit and stay
 the vocabulary of history replay: `split_face` (a boundary-to-boundary cut,
 or a cut with both ends on the same hole loop), `merge_faces` (its exact
-inverse, across one run or, through the re-trace, several), and
+inverse, across one run or, through the re-trace, several — a run passing
+through a vertex other edges also use counts as the pieces it splits
+into there, so its undo re-inserts each boundary to boundary), and
 `retrace_face`, which inserts several paths at once and rebuilds the
 face's loops by rotational order at each vertex, the half-edge form of the
 ground's region tracer. Every loop is simple (no vertex twice in one

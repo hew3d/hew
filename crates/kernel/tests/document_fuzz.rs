@@ -4124,6 +4124,60 @@ fn kb34_redo_split_after_tangent_circle() {
     run_doc_case(seeds, ops).expect("KB-34 replay holds every invariant");
 }
 
+/// A tangent circle drawn over two imprints and a loop bridging them,
+/// clipped by them, then merged into the face around it across its arc:
+/// the arc runs through the rim vertex where the hole touches the face's
+/// outline. Undoing the merge replayed one cut through that boundary vertex
+/// and refused ("path point is not on the face"). The minimized spec lives
+/// in `tangent_loop_specs.rs`; this replays the exact case under every
+/// harness invariant.
+#[test]
+fn merge_of_a_clipped_tangent_disc_unwinds() {
+    let seeds: Vec<BoxSeed> = vec![
+        ((0.0, 0.0), (2.2346752169091917, 1.0), 3.276568943736587),
+        ((0.0, 0.0), (1.0, 1.0), 0.5),
+        ((0.0, -3.507174267747308), (1.0, 1.0), 0.5),
+    ];
+    let ops = vec![
+        DocOp::SliceDefMember {
+            inst_sel: 66360466712461141,
+            member_sel: 6596232982742202595,
+            origin: (0.25223245092388275, -6.952412369336496, -0.7718551660407071),
+            direction: (
+                -0.07185658133522942,
+                -0.6647107021629067,
+                -0.45456653437751626,
+            ),
+        },
+        DocOp::BridgeLoop {
+            obj_sel: 1354774533126141447,
+            face_sel: 4288230138990121280,
+            ts: (0.15190935456390073, 0.8690961128556175),
+            frac: 0.963971482904148,
+            circle: false,
+        },
+        DocOp::Duplicate {
+            obj_sel: 4165769603963804333,
+            offset: (4.536789387423562, 6.760316351437082, -1.1763973855480325),
+        },
+        DocOp::Undo,
+        DocOp::TangentCircle {
+            obj_sel: 14941672070845138833,
+            face_sel: 3591855991437777439,
+            side: 9786374422185185391,
+            t: 0.5028176080342001,
+            frac: 0.3829567238869083,
+            twin: false,
+        },
+        DocOp::MergeCoplanar {
+            obj_sel: 3269655902696552490,
+            edge_sel: 5049629487782488163,
+            from_features: false,
+        },
+    ];
+    run_doc_case(seeds, ops).expect("the clipped-disc merge unwinds and replays");
+}
+
 proptest! {
     /// Random document-op sequences keep every visible object valid, survive
     /// save/load, and the document log unwinds and replays reproducibly.
