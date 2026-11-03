@@ -38,9 +38,10 @@ echo 'media-gfx/hew-bin ~amd64 ~arm64' | sudo tee /etc/portage/package.accept_ke
 sudo emerge media-gfx/hew-bin</code></pre>
 
 <h2>Flatpak</h2>
-<p>A self-hosted remote, added once:</p>
-<pre><code>flatpak remote-add --if-not-exists hew https://hew3d.github.io/hew-packages/flatpak/com.hew3d.Hew.flatpakrepo
-flatpak install hew com.hew3d.Hew</code></pre>
-<p>Or download the <a href="flatpak/hew.flatpak">single-file bundle</a> from the latest release and install it directly — it sets up the same remote automatically, so <code>flatpak update</code> keeps it current afterward.</p>
+<p>Install for your user, with Flathub providing the GNOME runtime:</p>
+<pre><code>flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak remote-add --user --if-not-exists hew https://hew3d.github.io/hew-packages/flatpak/com.hew3d.Hew.flatpakrepo
+flatpak install --user hew com.hew3d.Hew</code></pre>
+<p>Or download the <a href="flatpak/hew.flatpak">single-file bundle</a> from the latest release and install it with <code>flatpak install --user ./hew.flatpak</code> — it sets up the same remote automatically, so <code>flatpak update --user</code> keeps it current afterward.</p>
 </body>
 </html>
