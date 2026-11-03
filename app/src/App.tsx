@@ -7708,6 +7708,7 @@ export default function App() {
             display: 'flex',
             flexDirection: 'column',
             minHeight: 0,
+            overflowY: 'auto',
             background: 'var(--surface-panel)',
             borderLeft: '1px solid var(--border-hairline)',
           }}

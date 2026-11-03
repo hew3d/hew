@@ -151,3 +151,43 @@ test('dock: with it off, Object > Save Selection to Library… still saves a sel
   await page.getByTestId('menu-bar').getByText('Save Selection to Library…').click()
   await expect(page.getByRole('dialog', { name: 'Save to Library' })).toBeVisible()
 })
+
+test('tray: section heights drag independently and overflowing sections remain reachable', async ({ page }) => {
+  const tray = page.getByRole('complementary', { name: 'Tray' })
+  const outliner = page.getByRole('button', { name: 'Outliner', exact: true })
+  if (await outliner.getAttribute('aria-expanded') === 'false') await outliner.click()
+  const handle = page.getByRole('separator', { name: 'Outliner', exact: true })
+  const section = handle.locator('..')
+  const before = (await section.boundingBox())!.height
+  await handle.scrollIntoViewIfNeeded()
+  const box = (await handle.boundingBox())!
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + 100, { steps: 5 })
+  await page.mouse.up()
+  const chosen = (await section.boundingBox())!.height
+  expect(chosen).toBeCloseTo(before + 100, 0)
+  await outliner.click()
+  await outliner.click()
+  expect((await section.boundingBox())!.height).toBeCloseTo(chosen, 0)
+
+  // Grow beyond the entire tray with the accessible keyboard interaction.
+  await handle.focus()
+  for (let i = 0; i < 40; i++) await page.keyboard.press('ArrowDown')
+  await expect.poll(async () => tray.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true)
+  const changes = page.getByRole('button', { name: 'Changes', exact: true })
+  await changes.scrollIntoViewIfNeeded()
+  const last = (await changes.boundingBox())!
+  const bounds = (await tray.boundingBox())!
+  expect(last.y).toBeGreaterThanOrEqual(bounds.y)
+  expect(last.y + last.height).toBeLessThanOrEqual(bounds.y + bounds.height + 1)
+  expect(await tray.evaluate((el) => el.scrollTop)).toBeGreaterThan(0)
+
+  // Another section gets its own size without taking the Outliner's choice.
+  const info = page.getByRole('button', { name: 'Object Info', exact: true })
+  if (await info.getAttribute('aria-expanded') === 'false') await info.click()
+  const infoHandle = page.getByRole('separator', { name: 'Object Info', exact: true })
+  await infoHandle.focus()
+  await page.keyboard.press('ArrowDown')
+  expect((await section.boundingBox())!.height).toBeCloseTo(chosen + 800, 0)
+})
