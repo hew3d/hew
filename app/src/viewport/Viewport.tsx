@@ -159,7 +159,7 @@ import {
   readPlaneUnits,
   resolveDraft,
   keysToArray,
-  ctxOfSketch,
+  ctxOfSketchUnits,
   widenCurveRef,
 } from '../tools/planeUnits'
 import { runDraft } from '../tools/draftCommit'
@@ -3090,7 +3090,7 @@ export default function Viewport({
       const seenCtx = new Set<string>()
       for (const sid of Array.from(wasmScene.sketch_ids())) {
         if (inScope !== null && !inScope.has(sid)) continue
-        const ctx = ctxOfSketch(wasmScene, sid)
+        const ctx = ctxOfSketchUnits(wasmScene, sid)
         if (ctx === null || seenCtx.has(ctx)) continue
         seenCtx.add(ctx)
         const pu = readPlaneUnits(wasmScene, ctx)
@@ -6879,6 +6879,13 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
+        // Detached mode → badge the cursor with a `+`, the same cursorFor
+        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
+        // the tool-switch path re-sets the plain cursor.
+        (on: boolean) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
+          renderer.domElement.style.cursor = cursorFor('Rectangle', on)
+        },
       )
       // Scope the tool to the current editing context (component-edit-
       // parity.md phase A1 — the single channel every tool consults).
@@ -6903,6 +6910,13 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
+        // Detached mode → badge the cursor with a `+`, the same cursorFor
+        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
+        // the tool-switch path re-sets the plain cursor.
+        (on: boolean) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
+          renderer.domElement.style.cursor = cursorFor('Circle', on)
+        },
       )
       // Scope the tool to the current editing context (component-edit-
       // parity.md phase A1 — the single channel every tool consults).
@@ -6930,6 +6944,13 @@ export default function Viewport({
         // Side count persists across tool re-selection for the session
         // (design §1), the same way Paint's current material does.
         (sides) => { polygonSidesRef.current = sides },
+        // Detached mode → badge the cursor with a `+`, the same cursorFor
+        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
+        // the tool-switch path re-sets the plain cursor.
+        (on: boolean) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
+          renderer.domElement.style.cursor = cursorFor('Polygon', on)
+        },
       )
       tool.setSideCount(polygonSidesRef.current)
       // Scope the tool to the current editing context (component-edit-
@@ -6955,6 +6976,13 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
+        // Detached mode → badge the cursor with a `+`, the same cursorFor
+        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
+        // the tool-switch path re-sets the plain cursor.
+        (on: boolean) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
+          renderer.domElement.style.cursor = cursorFor('Arc', on)
+        },
       )
       // Scope the tool to the current editing context (component-edit-
       // parity.md phase A1 — the single channel every tool consults).
@@ -6979,6 +7007,13 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
+        // Detached mode → badge the cursor with a `+`, the same cursorFor
+        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
+        // the tool-switch path re-sets the plain cursor.
+        (on: boolean) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
+          renderer.domElement.style.cursor = cursorFor('Line', on)
+        },
       )
       // Scope the tool to the current editing context (component-edit-
       // parity.md phase A1 — the single channel every tool consults).
@@ -7200,7 +7235,7 @@ export default function Viewport({
       // A tool switch that bypasses switchToolRef (this one) still needs the
       // same mid-hold-tap reset — see switchToolRef's comment above.
       ctrlTap.reset()
-      pushPullModifierTap.reset()
+      modeModifierTap.reset()
       multiClick.reset()
       const tool = makeMoveTool(dm.nodes)
       toolController.setTool(tool)
@@ -7721,7 +7756,7 @@ export default function Viewport({
       // instance check covers switches that don't (e.g. beginDragMove's
       // direct toolController.setTool).
       ctrlTap.reset()
-      pushPullModifierTap.reset()
+      modeModifierTap.reset()
       multiClick.reset()
       switch (toolName) {
         case 'Rectangle':
@@ -8086,7 +8121,7 @@ export default function Viewport({
       if (baseBindingFor(ev.button, controls.mouseButtons.LEFT) === null) return
       forceBaseAfterPress(controls, ev, controls.mouseButtons.LEFT)
       ctrlTap.reset()
-      pushPullModifierTap.reset()
+      modeModifierTap.reset()
     }
     function attachControlsListeners(c: OrbitControls): void {
       renderer.domElement.removeEventListener('pointerdown', onOrbitPressForceBase)
@@ -8431,7 +8466,7 @@ export default function Viewport({
       const live = orbitDragState(controls)
       if (live === 'rotate' || live === 'pan') {
         ctrlTap.reset()
-        pushPullModifierTap.reset()
+        modeModifierTap.reset()
       }
       scheduleRender()
     }
@@ -8545,33 +8580,51 @@ export default function Viewport({
     // reason as Scale's tap guard (Ctrl+Z / Ctrl+A / etc. must not toggle
     // it as a side effect). Also tool-scoped at keydown/keyup for the same
     // mid-hold-switch reason documented on `ctrlTap` above.
-    const pushPullModifierTap = new CleanModifierTap<Tool>((key) => key === 'Control' || key === 'Meta')
-    function onPushPullModifierKeyDown(ev: KeyboardEvent): void {
-      pushPullModifierTap.onKeyDown(ev, toolController.activeTool)
+    //
+    // The same tap drives the draw tools' Detached toggle (Line, Rectangle,
+    // Circle, Polygon, Arc — separate-shapes design §6.2): Ctrl is unused on
+    // them, and Push/Pull's tap is the precedent for accepting Control or
+    // Meta on every platform.
+    const modeModifierTap = new CleanModifierTap<Tool>((key) => key === 'Control' || key === 'Meta')
+    function onModeModifierKeyDown(ev: KeyboardEvent): void {
+      modeModifierTap.onKeyDown(ev, toolController.activeTool)
     }
-    function onPushPullModifierKeyUp(ev: KeyboardEvent): void {
-      const armedTool = pushPullModifierTap.onKeyUp(ev, toolController.activeTool)
+    function onModeModifierKeyUp(ev: KeyboardEvent): void {
+      const armedTool = modeModifierTap.onKeyUp(ev, toolController.activeTool)
       if (armedTool === null) return
       if ('toggleExtrudeAsNew' in armedTool) {
         (armedTool as { toggleExtrudeAsNew(): void }).toggleExtrudeAsNew()
+        reportToolHint()
+        scheduleRender()
+      } else if ('toggleDetached' in armedTool) {
+        // Alt held while Ctrl/Cmd releases is the precision-snap chord, not a tap.
+        if (ev.altKey) return
+        (armedTool as { toggleDetached(): void }).toggleDetached()
+        reportToolHint()
+        drawPlaneCueLayer.update(queryDrawPlaneCue(armedTool), getDrawingAxes(wasmScene))
         scheduleRender()
       }
     }
-    window.addEventListener('keydown', onPushPullModifierKeyDown)
-    window.addEventListener('keyup', onPushPullModifierKeyUp)
+    window.addEventListener('keydown', onModeModifierKeyDown)
+    window.addEventListener('keyup', onModeModifierKeyUp)
+    // Blur swallows the keyup (Cmd-Tab): drop any stale arm.
+    function onWindowBlurClearsModeModifierTap(): void {
+      modeModifierTap.reset()
+    }
+    window.addEventListener('blur', onWindowBlurClearsModeModifierTap)
 
     // Ctrl/Cmd HELD during a Tape Measure gesture = measure WITHOUT
     // creating a guide (SketchUp parity, tape-measure-rework WP-7 item 1) —
     // a LIVE held-state dispatch, same posture as `onShiftKeyDown`/
     // `onShiftKeyUp` above, NOT the CLEAN-TAP dispatch `onCtrlKeyDown`/
-    // `onPushPullModifierKeyDown` use just above for Scale's/Push-Pull's own
+    // `onModeModifierKeyDown` use just above for Scale's/Push-Pull's own
     // Ctrl/Cmd bindings — those duck-type a DIFFERENT method
     // (`toggleCenterAnchor`/`toggleExtrudeAsNew`) that TapeMeasureTool
     // implements neither of, so a live hold here never reaches them, and
     // conversely a clean tap while TapeMeasureTool is active never reaches
     // `setGuideCreationSuppressed` (nothing here is TAP-scoped). Control and
     // Meta are treated as one logical modifier, same as
-    // `onPushPullModifierKeyDown` just above — Ctrl (Windows/Linux) and Cmd
+    // `onModeModifierKeyDown` just above — Ctrl (Windows/Linux) and Cmd
     // (macOS) both work, per this codebase's `metaKey || ctrlKey` convention
     // (see platform.ts).
     function onGuideSuppressKeyDown(ev: KeyboardEvent): void {
@@ -8678,7 +8731,7 @@ export default function Viewport({
     // inversion; a bare Control/Meta keydown arms Scale's center-anchor tap,
     // Move's/Rotate's copy toggle on Windows/Linux (`onCtrlKeyDown` above),
     // or, while Push/Pull is active, its extrude-as-new toggle
-    // (`onPushPullModifierKeyDown` above); a bare Alt keydown is Move's and
+    // (`onModeModifierKeyDown` above); a bare Alt keydown is Move's and
     // Rotate's durable copy toggle on macOS (`MoveTool.onKey` /
     // `RotateTool.onKey`) and ArcTool's completion-mode cycle
     // (`ArcTool.onKey`), all reached through onKeyDown's unconditional
@@ -11222,8 +11275,9 @@ export default function Viewport({
       window.removeEventListener('blur', onWindowBlurClearsShiftLock)
       window.removeEventListener('keydown', onCtrlKeyDown, true)
       window.removeEventListener('keyup', onCtrlKeyUp)
-      window.removeEventListener('keydown', onPushPullModifierKeyDown)
-      window.removeEventListener('keyup', onPushPullModifierKeyUp)
+      window.removeEventListener('keydown', onModeModifierKeyDown)
+      window.removeEventListener('keyup', onModeModifierKeyUp)
+      window.removeEventListener('blur', onWindowBlurClearsModeModifierTap)
       window.removeEventListener('keydown', onGuideSuppressKeyDown)
       window.removeEventListener('keyup', onGuideSuppressKeyUp)
       window.removeEventListener('blur', onWindowBlurClearsGuideSuppress)

@@ -24,6 +24,12 @@
 //! A solid's own edges are never drawing edges; moving or deleting one is
 //! topology editing, which the kernel refuses
 //! (`draft_boundary_edge_touched`).
+//!
+//! A **detached** sketch (detached shapes D5, D10) is in no plane's
+//! arrangement: it is its own drafting context. A `{sketch: id}` plane spec
+//! naming one lists and edits exactly that sketch, with no object and no
+//! other drawing taking part; a plane or face spec never sees it. A draw
+//! with `detached: true` ([`draw_detached`]) makes one new detached sketch.
 
 use super::{CmdError, Ctx, Handler};
 use crate::geom;
@@ -32,7 +38,8 @@ use crate::locate::{self, FaceRef, PlaneTarget};
 use crate::refusal::Refusal;
 use kernel::{
     ComponentId, CurveGeom, DocumentError, DraftEdge, DraftStore, EntityRef, ObjectId, Plane,
-    PlaneUnits, Point3, Sketch, SketchCurveKind, SketchEdgeId, SketchError, Transform, Vec3,
+    PlaneUnits, Point3, Sketch, SketchCurveKind, SketchEdgeId, SketchError, SketchId, Transform,
+    Vec3,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -58,11 +65,13 @@ fn parse_params<T: serde::de::DeserializeOwned>(params: &Value) -> Result<T, Cmd
 
 /// A resolved drafting context: the plane, the frame it lives in (`None`
 /// for the world, a component for a definition member), and every object
-/// with a drawable face on it.
+/// with a drawable face on it — or, for a detached sketch, that sketch
+/// alone (`detached`, with no objects).
 pub(super) struct DraftCtx {
     pub plane: Plane,
     pub frame: Option<ComponentId>,
     pub objects: Vec<ObjectId>,
+    pub detached: Option<SketchId>,
 }
 
 /// `addressed` is the object whose face the caller named: it always takes
@@ -85,6 +94,7 @@ pub(super) fn context_of(
         plane,
         frame,
         objects,
+        detached: None,
     }
 }
 
@@ -101,7 +111,8 @@ pub(super) fn face_plane(ctx: &Ctx, face: FaceRef) -> Result<Plane, CmdError> {
 }
 
 /// Resolves a plane spec (`{ground}`, `{origin,normal}`, `{face}`,
-/// `{sketch}`, or a bare sketch id string) to its drafting context.
+/// `{sketch}`, or a bare sketch id string) to its drafting context. A
+/// detached sketch's context is that sketch alone.
 pub(super) fn resolve_context(ctx: &Ctx, spec: &Value) -> Result<DraftCtx, CmdError> {
     let as_sketch;
     let spec = match spec.as_str() {
@@ -114,11 +125,19 @@ pub(super) fn resolve_context(ctx: &Ctx, spec: &Value) -> Result<DraftCtx, CmdEr
     match locate::resolve_plane(ctx, spec)? {
         PlaneTarget::NewPlane(plane) => Ok(context_of(ctx, plane, None, None)),
         PlaneTarget::Sketch(id) => {
-            let plane = ctx
+            let sk = ctx
                 .doc
                 .sketch(id)
-                .ok_or_else(|| CmdError::Internal("sketch vanished after resolve".into()))?
-                .plane();
+                .ok_or_else(|| CmdError::Internal("sketch vanished after resolve".into()))?;
+            let plane = sk.plane();
+            if sk.detached() {
+                return Ok(DraftCtx {
+                    plane,
+                    frame: ctx.doc.sketch_owner_component(id),
+                    objects: Vec::new(),
+                    detached: Some(id),
+                });
+            }
             let frame = ctx.doc.sketch_owner_component(id).or_else(|| {
                 ctx.doc
                     .sketch_owner_object(id)
@@ -132,6 +151,43 @@ pub(super) fn resolve_context(ctx: &Ctx, spec: &Value) -> Result<DraftCtx, CmdEr
             Ok(context_of(ctx, plane, frame, Some(face.object)))
         }
     }
+}
+
+/// The context's drawing as units: the plane's arrangement, or a detached
+/// sketch alone. A detached sketch an edit emptied (and so deleted) lists
+/// nothing.
+pub(super) fn units_of(ctx: &Ctx, dc: &DraftCtx) -> Result<PlaneUnits, CmdError> {
+    match dc.detached {
+        Some(s) if ctx.doc.sketch(s).is_none() => Ok(PlaneUnits::default()),
+        Some(s) => Ok(ctx.doc.detached_sketch_units(s)?),
+        None => {
+            // An edit may have consumed an object of the context.
+            let objects: Vec<ObjectId> = dc
+                .objects
+                .iter()
+                .copied()
+                .filter(|&o| ctx.doc.object(o).is_some())
+                .collect();
+            Ok(ctx.doc.plane_units(dc.plane, dc.frame, &objects)?)
+        }
+    }
+}
+
+/// Opens the draft for a context: the plane's arrangement, or a detached
+/// sketch's own context.
+fn begin(ctx: &mut Ctx, dc: &DraftCtx, label: &str) -> Result<(), CmdError> {
+    match dc.detached {
+        Some(s) => ctx.doc.begin_draft_detached(s, label)?,
+        None => ctx
+            .doc
+            .begin_draft(dc.plane, dc.frame, &dc.objects, label)?,
+    }
+    Ok(())
+}
+
+/// Whether `s` is a detached sketch.
+fn is_detached(ctx: &Ctx, s: SketchId) -> bool {
+    ctx.doc.sketch(s).is_some_and(Sketch::detached)
 }
 
 // ---------------------------------------------------------------- refusals
@@ -206,15 +262,27 @@ fn with_ids(mut v: Value, object_id: Option<String>, sketch_id: Option<String>) 
     v
 }
 
+/// Marks a free store that is a detached sketch (`"detached": true`;
+/// absent otherwise, so a plain listing reads as it always did).
+fn mark_detached(ctx: &Ctx, mut v: Value, store: &DraftStore) -> Value {
+    if let DraftStore::Free(s) = *store
+        && is_detached(ctx, s)
+    {
+        v["detached"] = Value::Bool(true);
+    }
+    v
+}
+
 /// The flat `{kind, key, store, object_id?, sketch_id?}` entry for a
 /// drawing edge.
 fn edge_entry(ctx: &Ctx, e: &DraftEdge) -> Value {
     let (store, object_id, sketch_id) = edge_store(ctx, &e.store);
-    with_ids(
+    let v = with_ids(
         json!({ "kind": "edge", "key": key_str("edg", e.key), "store": store }),
         object_id,
         sketch_id,
-    )
+    );
+    mark_detached(ctx, v, &e.store)
 }
 
 /// The flat entry for a region: topology when a face is it, owned when the
@@ -226,11 +294,15 @@ fn region_entry(ctx: &Ctx, r: &kernel::DraftRegion) -> Value {
         (None, Some((s, _))) => ("free", None, public_opt(ctx, EntityRef::Sketch(*s))),
         (None, None) => ("free", None, None),
     };
-    with_ids(
+    let v = with_ids(
         json!({ "kind": "region", "key": key_str("rgn", r.key), "store": store }),
         object_id,
         sketch_id,
-    )
+    );
+    match (&r.over, &r.extrude) {
+        (None, Some((s, _))) => mark_detached(ctx, v, &DraftStore::Free(*s)),
+        _ => v,
+    }
 }
 
 fn near_seg(p: Point3, a: Point3, b: Point3) -> bool {
@@ -322,15 +394,19 @@ fn units_json(ctx: &Ctx, plane: &Plane, pu: &PlaneUnits) -> Value {
                 .iter()
                 .map(|e| {
                     let (store, object_id, sketch_id) = edge_store(ctx, &e.store);
-                    let mut v = with_ids(
-                        json!({
-                            "key": key_str("edg", e.key),
-                            "a": pt(e.a),
-                            "b": pt(e.b),
-                            "store": store,
-                        }),
-                        object_id,
-                        sketch_id,
+                    let mut v = mark_detached(
+                        ctx,
+                        with_ids(
+                            json!({
+                                "key": key_str("edg", e.key),
+                                "a": pt(e.a),
+                                "b": pt(e.b),
+                                "store": store,
+                            }),
+                            object_id,
+                            sketch_id,
+                        ),
+                        &e.store,
                     );
                     if let (Some(g), Some(k)) = (e.curve, e.curve_key) {
                         v["curve"] = json!({
@@ -495,16 +571,6 @@ fn edge_key_in(w: &Sketch, e: SketchEdgeId) -> u64 {
     )
 }
 
-fn units_after(ctx: &Ctx, dc: &DraftCtx) -> Result<PlaneUnits, CmdError> {
-    let objects: Vec<ObjectId> = dc
-        .objects
-        .iter()
-        .copied()
-        .filter(|&o| ctx.doc.object(o).is_some())
-        .collect();
-    Ok(ctx.doc.plane_units(dc.plane, dc.frame, &objects)?)
-}
-
 /// Closes the open draft as one undo step; on a refusal the draft is
 /// cancelled so nothing stays open.
 fn finish_draft(ctx: &mut Ctx) -> Result<(), CmdError> {
@@ -531,11 +597,10 @@ fn edit_units(
         return Err(CmdError::Params("units needs at least one key".into()));
     }
     let dc = resolve_context(ctx, plane_spec)?;
-    let before = ctx.doc.plane_units(dc.plane, dc.frame, &dc.objects)?;
+    let before = units_of(ctx, &dc)?;
     let keys = expand_keys(&dc.plane, &before, raw)?;
 
-    ctx.doc
-        .begin_draft(dc.plane, dc.frame, &dc.objects, label)?;
+    begin(ctx, &dc, label)?;
     let ids = ctx.doc.draft_edges_by_key(&keys);
     let found: BTreeSet<u64> = {
         let w = ctx.doc.draft_sketch().expect("draft just opened");
@@ -551,7 +616,7 @@ fn edit_units(
         return Err(sketch_err(e));
     }
     finish_draft(ctx)?;
-    let after = units_after(ctx, &dc)?;
+    let after = units_of(ctx, &dc)?;
     Ok(json!({ "units": new_entries(ctx, &before, &after) }))
 }
 
@@ -672,7 +737,7 @@ fn units(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     }
     let p: P = parse_params(params)?;
     let dc = resolve_context(ctx, &p.plane)?;
-    let pu = ctx.doc.plane_units(dc.plane, dc.frame, &dc.objects)?;
+    let pu = units_of(ctx, &dc)?;
     Ok(units_json(ctx, &dc.plane, &pu))
 }
 
@@ -688,12 +753,11 @@ pub(super) fn offset_region_by_key(
         return Err(unknown_unit(region));
     }
     let dc = resolve_context(ctx, plane_spec)?;
-    let before = ctx.doc.plane_units(dc.plane, dc.frame, &dc.objects)?;
+    let before = units_of(ctx, &dc)?;
     if !before.regions.iter().any(|r| r.key == key) {
         return Err(unknown_unit(region));
     }
-    ctx.doc
-        .begin_draft(dc.plane, dc.frame, &dc.objects, "Offset")?;
+    begin(ctx, &dc, "Offset")?;
     let Some(rid) = ctx.doc.draft_region_by_key(key) else {
         ctx.doc.cancel_draft();
         return Err(unknown_unit(region));
@@ -708,7 +772,7 @@ pub(super) fn offset_region_by_key(
         return Err(sketch_err(e));
     }
     finish_draft(ctx)?;
-    let after = units_after(ctx, &dc)?;
+    let after = units_of(ctx, &dc)?;
     Ok(json!({ "units": new_entries(ctx, &before, &after) }))
 }
 
@@ -746,6 +810,81 @@ fn on_or_in(ring: &[Point3], normal: Vec3, p: Point3) -> bool {
     ring_edges(ring).any(|(a, b)| near_seg(p, a, b)) || geom::face_contains(ring, &[], normal, p)
 }
 
+/// Draws `runs` as ONE new detached sketch on `plane` in `frame` (detached
+/// shapes D3, D10): nothing on the plane is lifted, so the shape neither
+/// splits nor joins a face or other drawing, and extruding it always makes
+/// a new Object. Returns the new sketch and, when a run claimed a curve,
+/// the curve chain carrying it. One undo step; a refusal changes nothing.
+pub(super) fn draw_detached(
+    ctx: &mut Ctx,
+    plane: Plane,
+    frame: Option<ComponentId>,
+    label: &str,
+    runs: Vec<Run>,
+) -> Result<(SketchId, Option<kernel::SketchCurveId>), CmdError> {
+    let (report, _) = ctx.doc.draft_detached_new(plane, frame, label, |w| {
+        for run in &runs {
+            if let Some((g, kind)) = run.claim {
+                w.begin_curve_with_kind(g, kind)?;
+            }
+            for win in run.pts.windows(2) {
+                w.add_segment(win[0], win[1])?;
+            }
+            if run.claim.is_some() {
+                w.end_curve();
+            }
+        }
+        Ok(())
+    })?;
+    let sketch = *report
+        .sketches
+        .first()
+        .ok_or_else(|| CmdError::Internal("a detached draw made no sketch".into()))?;
+    // The lowering rebuilt the drawing, so the claimed curve is found in
+    // the sketch as stored (one claimed run per draw command).
+    let curve = runs
+        .iter()
+        .any(|r| r.claim.is_some())
+        .then(|| {
+            ctx.doc
+                .sketch(sketch)
+                .and_then(|sk| sk.edges().values().find_map(|e| e.curve))
+        })
+        .flatten();
+    Ok((sketch, curve))
+}
+
+/// [`draw_on_face`]'s sibling for `detached: true`: the same plane and frame
+/// as a face draw (and the same `point_not_on_face` check), but the shape
+/// becomes one new detached sketch ([`draw_detached`]) and the face is
+/// left whole.
+pub(super) fn draw_detached_on_face(
+    ctx: &mut Ctx,
+    face: FaceRef,
+    label: &str,
+    runs: Vec<Run>,
+) -> Result<(SketchId, Option<kernel::SketchCurveId>), CmdError> {
+    let plane = face_plane(ctx, face)?;
+    let frame = ctx.doc.object_owner_component(face.object);
+    check_on_face(&plane, &runs)?;
+    draw_detached(ctx, plane, frame, label, runs)
+}
+
+/// Refuses the first drawn point off the face's plane (`point_not_on_face`,
+/// indexed across every run).
+fn check_on_face(plane: &Plane, runs: &[Run]) -> Result<(), CmdError> {
+    let mut index = 0usize;
+    for run in runs {
+        for &p in &run.pts {
+            if plane.signed_distance(p).abs() > kernel::tol::PLANE_DIST {
+                return Err(point_not_on_face(index));
+            }
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
 /// Draws `runs` on the face's plane through the draft engine and answers
 /// `{object_id, units}`, minting face tokens from the faces the draw
 /// produced: for a closed shape `"face"` (the face carrying the drawn
@@ -760,15 +899,7 @@ pub(super) fn draw_on_face(
 ) -> Result<Value, CmdError> {
     let plane = face_plane(ctx, face)?;
     let frame = ctx.doc.object_owner_component(face.object);
-    let mut index = 0usize;
-    for run in &runs {
-        for &p in &run.pts {
-            if plane.signed_distance(p).abs() > kernel::tol::PLANE_DIST {
-                return Err(point_not_on_face(index));
-            }
-            index += 1;
-        }
-    }
+    check_on_face(&plane, &runs)?;
     let dc = context_of(ctx, plane, frame, Some(face.object));
     ctx.doc.draft(plane, frame, &dc.objects, label, |w| {
         for run in &runs {
@@ -785,7 +916,7 @@ pub(super) fn draw_on_face(
         Ok(())
     })?;
 
-    let pu = units_after(ctx, &dc)?;
+    let pu = units_of(ctx, &dc)?;
     let segs: Vec<(Point3, Point3)> = runs
         .iter()
         .flat_map(|r| r.pts.windows(2).map(|w| (w[0], w[1])))

@@ -59,6 +59,12 @@ export const COPY_MODIFIER_KEY: 'Alt' | 'Control' = isMac ? 'Alt' : 'Control'
 // oxlint-disable-next-line lingui/no-unlocalized-strings -- keyboard modifier key cap name, not translated
 export const COPY_MODIFIER_LABEL: string = isMac ? 'Option' : 'Ctrl'
 
+/** Label of the key whose clean tap toggles Detached on the draw tools: the
+ *  platform's natural Ctrl/Cmd (Push/Pull's extrude-as-new tap accepts both
+ *  on every platform, and so does this one). "⌘" on macOS, "Ctrl" elsewhere. */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- keyboard modifier key cap name, not translated
+export const DETACH_MODIFIER_LABEL: string = isMac ? '⌘' : 'Ctrl'
+
 /**
  * True on a coarse-pointer input device — touch, with no precise mouse —
  * per the `(pointer: coarse)` media feature. Two independent, unrelated

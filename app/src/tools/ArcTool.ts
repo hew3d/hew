@@ -103,13 +103,14 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
 import { facePlaneBasis } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
-import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
+import { makeFatSegments, disposeFatSegments } from '../viewport/fatLine'
 import { displayedLength, isFreePick, sagittaForDisplayedRadius } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { segmentLength, directionBetween, rehomePlaneNormal } from './lineInput'
 import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, axisLockColorName, radiusReadout } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import type { SketchTarget } from './sketchGesture'
+import { DetachedMode, type OnDetachedChange } from './detachedMode'
 import { runDraft, addDraftSegment, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
 import { drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
@@ -257,6 +258,9 @@ type RetypeSpec = {
   b: V3
   s: number
   completion: ArcCompletion
+  /** Detached mode the arc was drawn with — a retyped bulge re-commits with
+   *  the same mode (separate-shapes design §6.1). */
+  detached: boolean
 } & (
   | { mode: 'plane'; plane: DrawPlane; target: SketchTarget }
   | { mode: 'face'; object: bigint; face: bigint; normal: V3 }
@@ -269,6 +273,12 @@ export class ArcTool implements Tool {
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
+    const stage = this.faceStage.kind !== 'idle' ? this.faceStage.kind : this.planeStage.kind
+    const idle = stage === 'idle' && !this.retype.isOpen
+    return this.sep.hint(this._stageHint(), idle)
+  }
+
+  private _stageHint(): string {
     if (!this.capturingInput() && this.idlePlaneLock === null && this.retype.isOpen) {
       return t`Type an exact bulge to redraw the arc you just drew — or click the first point of the next one.`
     }
@@ -297,6 +307,8 @@ export class ArcTool implements Tool {
   private onFaceImprint: OnFaceImprint
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
+  /** Detached mode (Ctrl/Cmd tap): the next arc joins nothing. */
+  private readonly sep: DetachedMode
 
   /** The currently active editing context (entered object), or null at top level. */
   private _editContext: EditContext = { kind: 'top' }
@@ -367,13 +379,15 @@ export class ArcTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
+    onDetachedChange: OnDetachedChange = () => { /* no-op */ },
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.onCommit = onCommit
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
-    this.onMeasurementCb = onMeasurement
+    this.sep = new DetachedMode(onMeasurement, onDetachedChange)
+    this.onMeasurementCb = this.sep.report
     this.retype = new RetypeWindow(wasmScene)
   }
 
@@ -1005,6 +1019,18 @@ export class ArcTool implements Tool {
   onDocumentReset(): void {
     this.completion = 'open' // a fresh document starts with the default close
     this.cancel()
+    this.sep.reset()
+  }
+
+  /** Ctrl/Cmd clean tap (Viewport-driven; a bare Ctrl never reaches onKey):
+   *  flip Detached for the next arc (separate-shapes design §6.1). */
+  toggleDetached(): void {
+    this.sep.toggle()
+  }
+
+  /** Whether Detach is on. */
+  get detachedOn(): boolean {
+    return this.sep.on
   }
 
   /**
@@ -1058,7 +1084,7 @@ export class ArcTool implements Tool {
       this.onMeasurementCb(flatBulgeHint())
       return
     }
-    const committed = this._commitPlaneChain(target, chain)
+    const committed = this._commitPlaneChain(target, chain, plane)
     this.planeStage = { kind: 'idle' }
     this.typed = ''
     this._lastPlaneCursor = null
@@ -1066,7 +1092,7 @@ export class ArcTool implements Tool {
     this._clearPreview()
     this.onMeasurementCb('')
     if (committed) {
-      this.retype.arm({ mode: 'plane', plane, target, a, b, s: sign * distance, completion: this.completion })
+      this.retype.arm({ mode: 'plane', plane, target, a, b, s: sign * distance, completion: this.completion, detached: this.sep.on })
     }
   }
 
@@ -1109,7 +1135,7 @@ export class ArcTool implements Tool {
     this._clearPreview()
     this.onMeasurementCb('')
     if (this._commitFace(object, face, normal, verts, sign * distance)) {
-      this.retype.arm({ mode: 'face', object, face, normal, a, b, s: sign * distance, completion: this.completion })
+      this.retype.arm({ mode: 'face', object, face, normal, a, b, s: sign * distance, completion: this.completion, detached: this.sep.on })
     }
   }
 
@@ -1167,13 +1193,14 @@ export class ArcTool implements Tool {
     this.completion = hot.completion
     try {
       return 'chain' in geom
-        ? this._commitPlaneChain((hot as Extract<RetypeSpec, { mode: 'plane' }>).target, geom.chain)
+        ? this._commitPlaneChain((hot as Extract<RetypeSpec, { mode: 'plane' }>).target, geom.chain, (hot as Extract<RetypeSpec, { mode: 'plane' }>).plane, hot.detached)
         : this._commitFace(
             (hot as Extract<RetypeSpec, { mode: 'face' }>).object,
             (hot as Extract<RetypeSpec, { mode: 'face' }>).face,
             hot.mode === 'face' ? hot.normal : hot.plane.normal,
             geom.verts,
             s,
+            hot.detached,
           )
     } finally {
       this.completion = prev
@@ -1239,7 +1266,7 @@ export class ArcTool implements Tool {
       // Stage 2: rubber-band the chord A→cursor, report chord length.
       const { a } = this.planeStage
       this._clearPreview()
-      this._drawSegments([a, cursor])
+      this._drawSegments([a, cursor], false)
       this.onMeasurementCb(this._measurementText(formatLength(segmentLength(a, cursor))))
       return
     }
@@ -1260,12 +1287,12 @@ export class ArcTool implements Tool {
       const verts = s === null ? null : (this._groundChain(a2, b2, s)?.chain ?? null)
       if (verts === null) {
         this._clearPreview()
-        this._drawSegments([a, b])
+        this._drawSegments([a, b], false)
         this.onMeasurementCb(this._measurementText(''))
         return
       }
       this._clearPreview()
-      this._drawSegments(verts)
+      this._drawSegments(verts, false)
       this._reportRadius(a2, b2, s as number)
       return
     }
@@ -1275,12 +1302,12 @@ export class ArcTool implements Tool {
     const verts = this._facePolyline(a, b, plane.normal, cursor)
     if (verts === null || s === null) {
       this._clearPreview()
-      this._drawSegments([a, b])
+      this._drawSegments([a, b], false)
       this.onMeasurementCb(this._measurementText(''))
       return
     }
     this._clearPreview()
-    this._drawSegments(verts.concat(this._closingVerts(verts, this._faceCenter(a, b, plane.normal, s))))
+    this._drawSegments(verts.concat(this._closingVerts(verts, this._faceCenter(a, b, plane.normal, s))), false)
     this._reportRadiusFromChain(verts)
   }
 
@@ -1350,14 +1377,14 @@ export class ArcTool implements Tool {
       }
     }
 
-    const committed = this._commitPlaneChain(target, chain)
+    const committed = this._commitPlaneChain(target, chain, plane)
     this.planeStage = { kind: 'idle' }
     this.typed = ''
     this._lastPlaneCursor = null
     this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
-    if (committed) this.retype.arm({ mode: 'plane', plane, target, a, b, s, completion: this.completion })
+    if (committed) this.retype.arm({ mode: 'plane', plane, target, a, b, s, completion: this.completion, detached: this.sep.on })
   }
 
   /** Place chord endpoint B (plane mode) — shared by the pointer-click and
@@ -1501,8 +1528,8 @@ export class ArcTool implements Tool {
    *  rides on the chain (durable center/radius — the true-curves design).
    *  Used by plane mode — ground AND any other plane (sketch mode); real
    *  face mode commits through `_commitFace`. */
-  private _commitPlaneChain(target: SketchTarget, chain: ArcChain): boolean {
-    return this._runArcDraft(draftTargetFromSketchTarget(target), chain)
+  private _commitPlaneChain(target: SketchTarget, chain: ArcChain, plane: DrawPlane, detached = this.sep.on): boolean {
+    return this._runArcDraft(draftTargetFromSketchTarget(target, detached, plane), chain)
   }
 
   private _runArcDraft(
@@ -1617,7 +1644,7 @@ export class ArcTool implements Tool {
       const { a } = this.faceStage
       this._lastFaceCursor = cursor
       this._clearPreview()
-      this._drawSegments([a, cursor])
+      this._drawSegments([a, cursor], true)
       this.onMeasurementCb(this._measurementText(formatLength(segmentLength(a, cursor))))
       return
     }
@@ -1630,13 +1657,13 @@ export class ArcTool implements Tool {
     const verts = this._facePolyline(a, b, normal, cursor)
     this._clearPreview()
     if (verts === null || s === null) {
-      this._drawSegments([a, b])
+      this._drawSegments([a, b], true)
       this.onMeasurementCb(this._measurementText(''))
       return
     }
     // Preview the arc plus any completion-mode closing edges; the radius
     // readout still derives from the bare arc vertices.
-    this._drawSegments(verts.concat(this._closingVerts(verts, this._faceCenter(a, b, normal, s))))
+    this._drawSegments(verts.concat(this._closingVerts(verts, this._faceCenter(a, b, normal, s))), true)
     this._reportRadiusFromChain(verts)
   }
 
@@ -1707,7 +1734,7 @@ export class ArcTool implements Tool {
     this._clearPreview()
     this.onMeasurementCb('')
     if (this._commitFace(object, face, normal, verts, s)) {
-      this.retype.arm({ mode: 'face', object, face, normal, a, b, s, completion: this.completion })
+      this.retype.arm({ mode: 'face', object, face, normal, a, b, s, completion: this.completion, detached: this.sep.on })
     }
   }
 
@@ -1737,12 +1764,12 @@ export class ArcTool implements Tool {
    * whose center is unresolvable (degenerate basis — cannot happen when
    * `verts` built) falls back to the open arc. When the center can't be
    * resolved there is no analytic circle to carry. */
-  private _commitFace(object: bigint, face: bigint, normal: V3, verts: V3[], s: number): boolean {
+  private _commitFace(object: bigint, face: bigint, normal: V3, verts: V3[], s: number, detached = this.sep.on): boolean {
     const center = this._faceCenter(verts[0], verts[verts.length - 1], normal, s)
     const arcSegments = verts.length - 1
     const chain = verts.concat(this._closingVerts(verts, center))
     return this._runArcDraft(
-      { kind: 'face', object, face, instance: this._activeInstance },
+      { kind: 'face', object, face, instance: this._activeInstance, ...(detached ? { detached: true as const } : {}) },
       {
         chain,
         curveSegments: arcSegments,
@@ -1799,7 +1826,7 @@ export class ArcTool implements Tool {
    *
    * @param verts  Ordered world-space vertices (>= 2).
    */
-  private _drawSegments(verts: V3[]): void {
+  private _drawSegments(verts: V3[], joinsFace: boolean): void {
     const nSegs = verts.length - 1
     if (nSegs < 1) return
     const pts = new Float32Array(nSegs * 2 * 3)
@@ -1810,7 +1837,7 @@ export class ArcTool implements Tool {
       pts[base + 0] = a[0]; pts[base + 1] = a[1]; pts[base + 2] = a[2]
       pts[base + 3] = b[0]; pts[base + 4] = b[1]; pts[base + 5] = b[2]
     }
-    this.preview.add(makeFatSegments(pts, PREVIEW_LINE_STYLE))
+    this.preview.add(makeFatSegments(pts, this.sep.previewStyle(joinsFace)))
   }
 
   private _clearPreview(): void {

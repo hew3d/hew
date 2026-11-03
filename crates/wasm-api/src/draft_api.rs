@@ -16,7 +16,8 @@
 //!   exactly as `sketch_unit_keys` does.
 
 use kernel::{
-    ComponentId, DraftStore, FaceId, ObjectId, Plane, Point3, Sketch, SketchEdgeId, Transform, Vec3,
+    ComponentId, DraftStore, FaceId, ObjectId, Plane, PlaneUnits, Point3, Sketch, SketchEdgeId,
+    SketchId, Transform, Vec3,
 };
 use slotmap::{Key, KeyData};
 use wasm_bindgen::prelude::*;
@@ -66,13 +67,41 @@ pub(crate) struct OpenDraft {
     pose: Option<Pose>,
 }
 
+/// What a drafting context lifts (detached shapes §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DraftScope {
+    /// The plane's arrangement: its drawing and the objects taking part.
+    Plane,
+    /// A detached shape's own context, nothing else on the plane taking
+    /// part: `Some(s)` is detached sketch `s` alone; `None` draws ONE new
+    /// detached sketch ([`Scene::draft_begin_detached`]).
+    Detached(Option<SketchId>),
+}
+
+/// Which form of context JSON a [`DraftCtx`] was resolved from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CtxForm {
+    /// `{"plane":[..]}`, optionally with `"instance"`.
+    Plane,
+    /// `{"plane":[..],"object":id}`: one object's own drawing.
+    ObjectPlane,
+    /// `{"face":{..}}`, optionally with `"instance"`.
+    Face,
+    /// `{"sketch":id}`, optionally with `"instance"`.
+    Sketch,
+}
+
 /// A resolved drafting context: the plane in its frame, the frame, the
-/// instance pose (if any), and the objects that take part.
+/// instance pose (if any), the objects that take part, what it lifts, the
+/// form it was given in, and the instance it was seen through.
 struct DraftCtx {
     plane: Plane,
     frame: Option<ComponentId>,
     pose: Option<Pose>,
     objects: Vec<ObjectId>,
+    scope: DraftScope,
+    form: CtxForm,
+    instance: Option<u64>,
 }
 
 fn p3(a: [f64; 3]) -> Point3 {
@@ -102,6 +131,29 @@ fn world_json(pose: Option<Pose>, p: Point3) -> serde_json::Value {
 
 fn stale_draft() -> ApiError {
     stale("StaleDraft", "draft")
+}
+
+/// Parses a context's JSON.
+fn parse_ctx(ctx_json: &str) -> Result<serde_json::Value, ApiError> {
+    serde_json::from_str(ctx_json)
+        .map_err(|e| ApiError(format!("BadContext: malformed context JSON: {e}")))
+}
+
+/// The form of a context's JSON, as [`Scene::ctx_from_json`] reads it
+/// (`plane` before `face` before `sketch`); `None` for none of them.
+fn ctx_form(v: &serde_json::Value) -> Option<CtxForm> {
+    if v.get("plane").is_some() {
+        Some(match v.get("object") {
+            None | Some(serde_json::Value::Null) => CtxForm::Plane,
+            Some(_) => CtxForm::ObjectPlane,
+        })
+    } else if v.get("face").is_some() {
+        Some(CtxForm::Face)
+    } else if v.get("sketch").is_some() {
+        Some(CtxForm::Sketch)
+    } else {
+        None
+    }
 }
 
 /// Distance from `p` to the segment `a`-`b`.
@@ -140,6 +192,22 @@ fn in_ring(p: Point3, ring: &[Point3], normal: Vec3) -> bool {
         }
     }
     inside
+}
+
+/// The area of the polygon `ring` (its Newell normal along `normal`).
+fn ring_area(ring: &[Point3], normal: Vec3) -> f64 {
+    let n = ring.len();
+    let mut acc = Vec3::new(0.0, 0.0, 0.0);
+    for i in 0..n {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        acc = acc
+            + Vec3::new(
+                (a.y - b.y) * (a.z + b.z),
+                (a.z - b.z) * (a.x + b.x),
+                (a.x - b.x) * (a.y + b.y),
+            );
+    }
+    (acc.dot(normal) * 0.5).abs()
 }
 
 impl Scene {
@@ -189,6 +257,9 @@ impl Scene {
             frame,
             pose,
             objects,
+            scope: DraftScope::Plane,
+            form: CtxForm::Plane,
+            instance,
         })
     }
 
@@ -211,6 +282,9 @@ impl Scene {
             frame: self.doc.object_owner_component(oid),
             pose: None,
             objects: vec![oid],
+            scope: DraftScope::Plane,
+            form: CtxForm::ObjectPlane,
+            instance: None,
         })
     }
 
@@ -253,16 +327,22 @@ impl Scene {
             frame,
             pose,
             objects,
+            scope: DraftScope::Plane,
+            form: CtxForm::Face,
+            instance,
         })
     }
 
+    /// A sketch's context: its plane and frame. A plain sketch's context is
+    /// the whole plane's arrangement; a detached sketch's is the sketch
+    /// alone (detached shapes D5), with no object taking part.
     fn ctx_sketch(&self, sketch: u64, instance: Option<u64>) -> Result<DraftCtx, ApiError> {
         let sid = sketch_id(sketch);
-        let plane = self
+        let sk = self
             .doc
             .sketch(sid)
-            .ok_or_else(|| stale("UnknownSketch", "sketch"))?
-            .plane();
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
+        let (plane, detached) = (sk.plane(), sk.detached());
         let owner = self.doc.sketch_owner_component(sid);
         let (frame, pose) = match instance {
             Some(i) => {
@@ -277,20 +357,31 @@ impl Scene {
             }
             None => (owner, None),
         };
-        let objects = self.draft_participants(plane, frame);
+        let (objects, scope) = if detached {
+            (Vec::new(), DraftScope::Detached(Some(sid)))
+        } else {
+            (self.draft_participants(plane, frame), DraftScope::Plane)
+        };
         Ok(DraftCtx {
             plane,
             frame,
             pose,
             objects,
+            scope,
+            form: CtxForm::Sketch,
+            instance,
         })
     }
 
     /// Parses a `{"plane":[..]} | {"face":{..}} | {"sketch":id}` context,
-    /// each with an optional `"instance"`.
+    /// each with an optional `"instance"` (or `{"plane":[..],"object":id}`).
+    /// A detached sketch's context is that sketch alone.
     fn ctx_from_json(&self, ctx_json: &str) -> Result<DraftCtx, ApiError> {
-        let v: serde_json::Value = serde_json::from_str(ctx_json)
-            .map_err(|e| ApiError(format!("BadContext: malformed context JSON: {e}")))?;
+        self.ctx_from_value(&parse_ctx(ctx_json)?)
+    }
+
+    /// [`Scene::ctx_from_json`] of the parsed JSON.
+    fn ctx_from_value(&self, v: &serde_json::Value) -> Result<DraftCtx, ApiError> {
         let instance = match v.get("instance") {
             None | Some(serde_json::Value::Null) => None,
             Some(i) => Some(i.as_u64().ok_or_else(|| {
@@ -345,9 +436,16 @@ impl Scene {
         if self.open_draft.is_some() && self.doc.draft_sketch().is_none() {
             self.open_draft = None;
         }
-        self.doc
-            .begin_draft(ctx.plane, ctx.frame, &ctx.objects, label)
-            .map_err(doc_err)?;
+        match ctx.scope {
+            DraftScope::Plane => self
+                .doc
+                .begin_draft(ctx.plane, ctx.frame, &ctx.objects, label),
+            DraftScope::Detached(Some(s)) => self.doc.begin_draft_detached(s, label),
+            DraftScope::Detached(None) => self
+                .doc
+                .begin_draft_detached_new(ctx.plane, ctx.frame, label),
+        }
+        .map_err(doc_err)?;
         self.next_draft_handle += 1;
         let handle = self.next_draft_handle;
         self.open_draft = Some(OpenDraft {
@@ -535,7 +633,10 @@ impl Scene {
         Ok(handle)
     }
 
-    /// Opens the draft on `sketch`'s plane and frame.
+    /// Opens the draft on `sketch`'s plane and frame. On a detached sketch
+    /// the draft is that sketch's own context: nothing else on the plane
+    /// takes part, and everything lowers back into it (a Line chain
+    /// continues in the sketch its first segment created).
     pub fn draft_begin_sketch(&mut self, sketch: u64, label: &str) -> Result<u64, ApiError> {
         let ctx = self.ctx_sketch(sketch, None)?;
         let handle = self.draft_open(ctx, label)?;
@@ -551,11 +652,59 @@ impl Scene {
     /// takes it (`{"plane":[..]} | {"face":{..}} | {"sketch":id}`, each with
     /// an optional `"instance"`). A caller holding unit keys from
     /// `plane_units_json(ctx)` opens its edit with the SAME `ctx`, so both
-    /// resolve the identical plane and the keys name the same edges.
+    /// resolve the identical plane and the keys name the same edges. A
+    /// `{"sketch":id}` context on a detached sketch opens that sketch's own
+    /// context, as [`Scene::draft_begin_sketch`] does.
     pub fn draft_begin_ctx(&mut self, ctx_json: &str, label: &str) -> Result<u64, ApiError> {
         let ctx = self.ctx_from_json(ctx_json)?;
         let handle = self.draft_open(ctx, label)?;
         recording::record(recording::RecordedCall::DraftBeginCtx {
+            draft: handle,
+            ctx: ctx_json.to_string(),
+            label: label.to_string(),
+        });
+        Ok(handle)
+    }
+
+    /// Opens a draft that draws ONE new **detached** shape (detached shapes
+    /// §4): drawing that takes part in no plane arrangement, so it neither
+    /// splits nor joins the face or the drawing under it, and extruding it
+    /// always makes a new Object. `ctx_json` is a `{"plane":[..]}` or
+    /// `{"face":{"object":id,"face":id}}` context (each with an optional
+    /// `"instance"`), giving the plane and frame only: nothing on the plane
+    /// is lifted. Everything drawn until [`Scene::draft_end`] lowers into
+    /// one new detached sketch, which the report's `sketches` names; to
+    /// continue it, open it with [`Scene::draft_begin_ctx`] (`{"sketch":id}`)
+    /// or [`Scene::draft_begin_sketch`].
+    ///
+    /// # Errors
+    /// `BadContext` for a malformed context, a `{"sketch":id}` context, or
+    /// the object-scoped `{"plane":[..],"object":id}` form; otherwise as
+    /// [`Scene::draft_begin_ctx`].
+    pub fn draft_begin_detached(&mut self, ctx_json: &str, label: &str) -> Result<u64, ApiError> {
+        // The form is checked before anything resolves, so a wrong form is
+        // refused as one whatever it names.
+        let v = parse_ctx(ctx_json)?;
+        match ctx_form(&v) {
+            Some(CtxForm::Plane | CtxForm::Face) | None => {}
+            Some(CtxForm::Sketch) => {
+                return Err(ApiError::new(
+                    "BadContext",
+                    "a detached shape starts on a plane or a face; to continue a detached sketch open it with draft_begin_ctx",
+                ));
+            }
+            Some(CtxForm::ObjectPlane) => {
+                return Err(ApiError::new(
+                    "BadContext",
+                    "a detached shape starts on a plane or a face, not on one object's own drawing",
+                ));
+            }
+        }
+        let mut ctx = self.ctx_from_value(&v)?;
+        ctx.scope = DraftScope::Detached(None);
+        ctx.objects.clear();
+        let handle = self.draft_open(ctx, label)?;
+        recording::record(recording::RecordedCall::DraftBeginDetached {
             draft: handle,
             ctx: ctx_json.to_string(),
             label: label.to_string(),
@@ -947,7 +1096,7 @@ impl Scene {
     /// The drawing on a context's plane as units and regions, as JSON
     /// (all points world; keys lowercase 16-digit hex strings):
     /// `{"units":[{"key","edges":[{"key","a":[x,y,z],"b":[x,y,z],
-    /// "store":{"kind":"topology","object":id}|{"kind":"owned","object":id,"sketch":id}|{"kind":"free","sketch":id},
+    /// "store":{"kind":"topology","object":id}|{"kind":"owned","object":id,"sketch":id}|{"kind":"free","sketch":id[,"detached":true]},
     /// "curve":{"center":[..],"radius":r|null}|null}],
     /// "curves":[{"key","curve_key","kind":"circle"|"polygon","center":[..],"radius":r|null,"edges":["<hex>"..]}]}],
     /// (a radius is null inside a non-uniformly scaled instance, where the
@@ -961,7 +1110,11 @@ impl Scene {
     /// `ctx_json` is `{"plane":[px,py,pz,nx,ny,nz]}`, `{"face":{"object":id,"face":id}}`
     /// or `{"sketch":id}`, each with an optional `"instance":id`; or
     /// `{"plane":[..],"object":id}` — that plane in the object's own frame
-    /// with only that object taking part. Read-only.
+    /// with only that object taking part. A free store that is a detached
+    /// sketch carries `"detached":true` (omitted otherwise). A plane or face
+    /// context lists the plane's arrangement, which no detached sketch is
+    /// in; `{"sketch":id}` on a detached sketch lists exactly that sketch.
+    /// Read-only.
     pub fn plane_units_json(&self, ctx_json: &str) -> Result<String, ApiError> {
         let ctx = self.ctx_from_json(ctx_json)?;
         Ok(self.plane_units_value(&ctx)?.0.to_string())
@@ -973,18 +1126,27 @@ impl Scene {
     /// The Outliner reads the whole document's drawing through this in one
     /// call rather than one `plane_units_json` per plane, which on a model
     /// of tens of thousands of small sketches took minutes.
+    ///
+    /// A detached sketch (in no plane's arrangement) is its own entry,
+    /// after the planes: `{plane, sketch: id, detached: true, units}`.
     pub fn plane_units_all_json(&self) -> Result<String, ApiError> {
         let mut out = Vec::new();
-        for (plane, units) in self
+        for (listing, units) in self
             .doc
             .free_plane_units(None, &self.hidden_objects.iter().copied().collect())
         {
+            let plane = listing.plane();
             let n = plane.normal();
             let o = Point3::ORIGIN + n * (-plane.signed_distance(Point3::ORIGIN));
-            out.push(serde_json::json!({
+            let mut entry = serde_json::json!({
                 "plane": [o.x, o.y, o.z, n.x, n.y, n.z],
-                "units": Self::units_value(None, &units)?,
-            }));
+                "units": self.units_value(None, &units)?,
+            });
+            if let kernel::PlaneListing::Detached { sketch, .. } = listing {
+                entry["sketch"] = serde_json::json!(sketch.data().as_ffi());
+                entry["detached"] = serde_json::json!(true);
+            }
+            out.push(entry);
         }
         Ok(serde_json::Value::Array(out).to_string())
     }
@@ -994,7 +1156,8 @@ impl Scene {
     /// opening a draft: the kernel's offset loops in the legacy
     /// `[loopCount, n0, x,y,z * n0, n1, ...]` wire format, outer loop first,
     /// world coordinates. What `draft_offset_region` would then arrange into
-    /// the drawing starts from exactly these loops.
+    /// the drawing starts from exactly these loops. On a `{"sketch":id}`
+    /// context naming a detached sketch the region is that sketch's own.
     pub fn offset_region_preview(
         &self,
         ctx_json: &str,
@@ -1002,10 +1165,13 @@ impl Scene {
         distance: f64,
     ) -> Result<Vec<f64>, ApiError> {
         let ctx = self.ctx_from_json(ctx_json)?;
-        let profile = self
-            .doc
-            .plane_region_profile(ctx.plane, ctx.frame, &ctx.objects, region_key)
-            .map_err(doc_err)?;
+        let profile = match ctx.scope {
+            DraftScope::Detached(Some(s)) => self.doc.detached_region_profile(s, region_key),
+            _ => self
+                .doc
+                .plane_region_profile(ctx.plane, ctx.frame, &ctx.objects, region_key),
+        }
+        .map_err(doc_err)?;
         let d = match ctx.pose {
             Some(p) => distance / p.scale()?,
             None => distance,
@@ -1029,6 +1195,18 @@ impl Scene {
     /// the region holding the point gives `{"region":"<hex>"}`; else (or a
     /// parallel/behind-the-origin ray) `"null"`. A solid's own edges never
     /// pick.
+    ///
+    /// A `plane` or `face` context also probes the detached sketches on
+    /// that plane in that frame (detached shapes D16), which are in no
+    /// plane's arrangement: the nearest edge within tolerance wins, a tie
+    /// going to the detached sketch; with no edge in reach, a detached
+    /// region holding the point (the smallest, when several do) wins over
+    /// the plane's own. A hit on a detached sketch carries
+    /// `"ctx":{"sketch":id}` (plus `"instance":id` when the request had
+    /// one), the context its keys belong to; without `ctx` the keys are the
+    /// request's own context's. A world detached sketch that is hidden (by
+    /// a tag or a hidden group) is not probed. A `{"sketch":id}` context on
+    /// a detached sketch picks within that sketch only.
     pub fn pick_plane_unit(
         &self,
         ctx_json: &str,
@@ -1064,20 +1242,51 @@ impl Scene {
         }
         let hit = o + d * t;
         let hit_world = world(hit);
-        let units = self
-            .doc
-            .plane_units(ctx.plane, ctx.frame, &ctx.objects)
-            .map_err(doc_err)?;
-        let mut best: Option<(f64, &kernel::DraftUnit, &kernel::DraftEdge)> = None;
-        for u in &units.units {
-            for e in &u.edges {
-                let dist = dist_to_segment(hit_world, world(e.a), world(e.b));
-                if dist <= tolerance_world && best.is_none_or(|(b, _, _)| dist < b) {
-                    best = Some((dist, u, e));
+        // The context's own listing first, then (plane and face contexts)
+        // each detached sketch on the plane, in its own context.
+        let mut listings: Vec<(Option<SketchId>, PlaneUnits)> = vec![(None, self.ctx_units(&ctx)?)];
+        if matches!(ctx.form, CtxForm::Plane | CtxForm::Face) {
+            for s in self.doc.detached_sketches_on(ctx.plane, ctx.frame) {
+                // Only a shown shape takes a click from what is under it
+                // (a world sketch hidden by a tag or group, as
+                // `pick_sketch_region` skips; a definition's sketch is
+                // shown through its instances).
+                if ctx.frame.is_none() && !self.doc.sketch_shown(s) {
+                    continue;
+                }
+                listings.push((Some(s), self.doc.detached_sketch_units(s).map_err(doc_err)?));
+            }
+        }
+        let mut best: Option<(f64, usize, &kernel::DraftUnit, &kernel::DraftEdge)> = None;
+        for (i, (sep, units)) in listings.iter().enumerate() {
+            for u in &units.units {
+                for e in &u.edges {
+                    let dist = dist_to_segment(hit_world, world(e.a), world(e.b));
+                    if dist > tolerance_world {
+                        continue;
+                    }
+                    // Nearest wins; a tie goes to a detached sketch over
+                    // the plane's own drawing.
+                    let better = best.is_none_or(|(b, bi, _, _)| {
+                        dist < b || (dist <= b && sep.is_some() && listings[bi].0.is_none())
+                    });
+                    if better {
+                        best = Some((dist, i, u, e));
+                    }
                 }
             }
         }
-        if let Some((_, u, e)) = best {
+        let with_ctx = |mut v: serde_json::Value, i: usize| {
+            if let Some(s) = listings[i].0 {
+                let mut c = serde_json::json!({ "sketch": s.data().as_ffi() });
+                if let Some(inst) = ctx.instance {
+                    c["instance"] = serde_json::json!(inst);
+                }
+                v["ctx"] = c;
+            }
+            v.to_string()
+        };
+        if let Some((_, i, u, e)) = best {
             let curve = e
                 .curve_key
                 .map(|k| serde_json::Value::String(hex(k)))
@@ -1089,18 +1298,36 @@ impl Scene {
                 .find(|r| r.edges.contains(&e.key))
                 .map(|r| serde_json::Value::String(hex(r.key)))
                 .unwrap_or(serde_json::Value::Null);
-            return Ok(serde_json::json!({
-                "edge": hex(e.key),
-                "unit": hex(u.key),
-                "curve": curve,
-                "run": run,
-            })
-            .to_string());
+            return Ok(with_ctx(
+                serde_json::json!({
+                    "edge": hex(e.key),
+                    "unit": hex(u.key),
+                    "curve": curve,
+                    "run": run,
+                }),
+                i,
+            ));
         }
-        for reg in &units.regions {
-            if in_ring(hit, &reg.outer, n) && !reg.holes.iter().any(|h| in_ring(hit, h, n)) {
-                return Ok(serde_json::json!({ "region": hex(reg.key) }).to_string());
+        let holds = |reg: &kernel::DraftRegion| {
+            in_ring(hit, &reg.outer, n) && !reg.holes.iter().any(|h| in_ring(hit, h, n))
+        };
+        // A detached region holding the point is what the cursor is on
+        // (the tie goes to it); the innermost when detached shapes overlap.
+        let mut inner: Option<(f64, usize, u64)> = None;
+        for (i, (_, units)) in listings.iter().enumerate().skip(1) {
+            for reg in units.regions.iter().filter(|r| holds(r)) {
+                let area = ring_area(&reg.outer, n)
+                    - reg.holes.iter().map(|h| ring_area(h, n)).sum::<f64>();
+                if inner.is_none_or(|(a, _, _)| area < a) {
+                    inner = Some((area, i, reg.key));
+                }
             }
+        }
+        if let Some((_, i, key)) = inner {
+            return Ok(with_ctx(serde_json::json!({ "region": hex(key) }), i));
+        }
+        if let Some(reg) = listings[0].1.regions.iter().find(|r| holds(r)) {
+            return Ok(serde_json::json!({ "region": hex(reg.key) }).to_string());
         }
         Ok("null".to_string())
     }
@@ -1112,17 +1339,26 @@ impl Scene {
         &self,
         ctx: &DraftCtx,
     ) -> Result<(serde_json::Value, kernel::PlaneUnits), ApiError> {
-        let units = self
-            .doc
-            .plane_units(ctx.plane, ctx.frame, &ctx.objects)
-            .map_err(doc_err)?;
-        let value = Self::units_value(ctx.pose, &units)?;
+        let units = self.ctx_units(ctx)?;
+        let value = self.units_value(ctx.pose, &units)?;
         Ok((value, units))
+    }
+
+    /// The units of a context: its plane's arrangement, or a detached
+    /// sketch alone (a new detached shape's context lists nothing yet).
+    fn ctx_units(&self, ctx: &DraftCtx) -> Result<PlaneUnits, ApiError> {
+        match ctx.scope {
+            DraftScope::Plane => self.doc.plane_units(ctx.plane, ctx.frame, &ctx.objects),
+            DraftScope::Detached(Some(s)) => self.doc.detached_sketch_units(s),
+            DraftScope::Detached(None) => Ok(PlaneUnits::default()),
+        }
+        .map_err(doc_err)
     }
 
     /// The JSON of one plane's listing, points through `pose` when the
     /// plane is a definition's seen through a placement.
     fn units_value(
+        &self,
         pose: Option<Pose>,
         units: &kernel::PlaneUnits,
     ) -> Result<serde_json::Value, ApiError> {
@@ -1150,7 +1386,13 @@ impl Scene {
                         "kind":"owned","object":o.data().as_ffi(),"sketch":s.data().as_ffi()
                     }),
                     DraftStore::Free(s) => {
-                        serde_json::json!({"kind":"free","sketch":s.data().as_ffi()})
+                        let mut v = serde_json::json!({"kind":"free","sketch":s.data().as_ffi()});
+                        // A detached shape says so; omitted otherwise, so a
+                        // plain listing reads as it always did.
+                        if self.doc.sketch(s).is_some_and(Sketch::detached) {
+                            v["detached"] = serde_json::json!(true);
+                        }
+                        v
                     }
                 };
                 let curve = match e.curve {
@@ -1885,6 +2127,448 @@ mod tests {
                 .draft_begin_face_in_instance(inst + 1000, member, f, "x")
                 .is_err()
         );
+    }
+
+    /// Draws a detached circle of `n` facets in the plane z = `c[2]` through
+    /// `draft_begin_detached(ctx)` and returns the new sketch.
+    fn detached_circle(scene: &mut Scene, ctx: &str, c: [f64; 3], r: f64, n: usize) -> u64 {
+        let d = scene.draft_begin_detached(ctx, "Circle").unwrap();
+        scene.draft_begin_curve_with(d, &c, r).unwrap();
+        for i in 0..n {
+            let (a0, a1) = (
+                std::f64::consts::TAU * i as f64 / n as f64,
+                std::f64::consts::TAU * (i + 1) as f64 / n as f64,
+            );
+            scene
+                .draft_add_segment(
+                    d,
+                    c[0] + r * a0.cos(),
+                    c[1] + r * a0.sin(),
+                    c[2],
+                    c[0] + r * a1.cos(),
+                    c[1] + r * a1.sin(),
+                    c[2],
+                )
+                .unwrap();
+        }
+        scene.draft_end_curve(d).unwrap();
+        let report = json(&scene.draft_end(d).unwrap());
+        assert!(report["objects"].as_array().unwrap().is_empty(), "{report}");
+        let sketches = report["sketches"].as_array().unwrap();
+        assert_eq!(sketches.len(), 1, "one new detached sketch: {report}");
+        sketches[0].as_u64().unwrap()
+    }
+
+    fn sketch_ctx(s: u64) -> String {
+        format!(r#"{{"sketch":{s}}}"#)
+    }
+
+    /// Detached shapes §4: a detached circle centered on a box's top corner
+    /// leaves the face whole, lists only through its own sketch context
+    /// (every edge a free store marked detached, its one region extruding
+    /// as the sketch's own), lists as its own entry of the whole-document
+    /// listing, and extrudes into a new Object.
+    #[test]
+    fn a_detached_circle_on_a_face_leaves_the_face_whole() {
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let f = top_face(&scene, b);
+        let faces = scene.doc.object(object_id(b)).unwrap().faces().len();
+        let face_ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let s = detached_circle(&mut scene, &face_ctx, [2.0, 2.0, 1.0], 0.5, 48);
+        assert!(scene.doc.sketch(sketch_id(s)).unwrap().detached());
+        assert_eq!(
+            scene.doc.object(object_id(b)).unwrap().faces().len(),
+            faces,
+            "the face is not split"
+        );
+        let top = units(&scene, &face_ctx);
+        assert!(
+            top["units"].as_array().unwrap().is_empty(),
+            "the face's plane has no drawing: {top}"
+        );
+        assert_eq!(
+            top["regions"].as_array().unwrap().len(),
+            1,
+            "the face alone"
+        );
+
+        let own = units(&scene, &sketch_ctx(s));
+        assert_eq!(own["units"].as_array().unwrap().len(), 1);
+        let edges = own["units"][0]["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 48, "a whole circle");
+        assert!(
+            edges.iter().all(
+                |e| e["store"] == serde_json::json!({"kind":"free","sketch":s,"detached":true})
+            )
+        );
+        let regions = own["regions"].as_array().unwrap();
+        assert_eq!(regions.len(), 1);
+        assert!(regions[0]["over"].is_null());
+        assert_eq!(regions[0]["extrude"]["sketch"].as_u64().unwrap(), s);
+
+        let all = json(&scene.plane_units_all_json().unwrap());
+        let entry = all
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["sketch"].as_u64() == Some(s))
+            .expect("listed as its own entry");
+        assert_eq!(entry["detached"], true);
+        assert!((entry["plane"][2].as_f64().unwrap() - 1.0).abs() < 1e-12);
+
+        let region = regions[0]["extrude"]["region"].as_u64().unwrap();
+        let cutter = scene.extrude_region(s, region, -0.5).unwrap();
+        assert_ne!(cutter, b);
+        assert_eq!(scene.object_ids().len(), 2, "a new Object");
+        assert_eq!(
+            scene.doc.object(object_id(b)).unwrap().faces().len(),
+            faces,
+            "the box is untouched"
+        );
+    }
+
+    /// `draft_begin_detached` takes a plane or face context only; a plain
+    /// sketch's listing never shows a detached sketch beside it.
+    #[test]
+    fn draft_begin_detached_takes_a_plane_or_face_context() {
+        let mut scene = Scene::new();
+        let s = detached_circle(&mut scene, GROUND, [0.0, 0.0, 0.0], 1.0, 24);
+        for ctx in [
+            sketch_ctx(s),
+            r#"{"plane":[0,0,0,0,0,1],"object":1}"#.to_string(),
+            "{}".to_string(),
+        ] {
+            let err = scene.draft_begin_detached(&ctx, "Circle").unwrap_err();
+            assert!(err.0.starts_with("BadContext"), "{ctx}: {}", err.0);
+        }
+        assert!(
+            scene
+                .draft_begin_detached(&sketch_ctx(s), "x")
+                .unwrap_err()
+                .0
+                .contains("draft_begin_ctx"),
+            "the refusal names the way to continue it"
+        );
+        // A plain rectangle over the detached circle ignores it.
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Rectangle")
+            .unwrap();
+        rect(&mut scene, d, -0.5, -0.5, 2.0, 0.5, 0.0);
+        scene.draft_end(d).unwrap();
+        let ground = units(&scene, GROUND);
+        assert_eq!(ground["regions"].as_array().unwrap().len(), 1, "{ground}");
+        assert_eq!(edge_keys(&ground).len(), 4, "the rectangle alone");
+        assert_eq!(
+            edge_keys(&units(&scene, &sketch_ctx(s))).len(),
+            24,
+            "the circle is whole"
+        );
+    }
+
+    /// `sketch_is_detached` answers for any sketch handle: true for a
+    /// detached shape, false for an ordinary free sketch and for an unknown
+    /// handle.
+    #[test]
+    fn sketch_is_detached_reports_the_mode_of_any_sketch() {
+        let mut scene = Scene::new();
+        let s = detached_circle(
+            &mut scene,
+            r#"{"plane":[0,0,0,0,0,1]}"#,
+            [0.0, 0.0, 0.0],
+            0.5,
+            12,
+        );
+        assert!(scene.sketch_is_detached(s));
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 5.0, 0.0, 0.0, 1.0, "Line")
+            .unwrap();
+        scene
+            .draft_add_segment(d, 0.0, 0.0, 5.0, 1.0, 0.0, 5.0)
+            .unwrap();
+        let plain = json(&scene.draft_end(d).unwrap())["sketches"][0]
+            .as_u64()
+            .unwrap();
+        assert!(!scene.sketch_is_detached(plain));
+        assert!(!scene.sketch_is_detached(u64::MAX));
+    }
+
+    /// `sketch_owner_object` names the owning Object of an object-owned
+    /// sketch and is `None` for a free (detached) sketch and for an unknown
+    /// handle.
+    #[test]
+    fn sketch_owner_object_reports_ownership_of_any_sketch() {
+        let mut scene = Scene::new();
+        let free = detached_circle(
+            &mut scene,
+            r#"{"plane":[0,0,0,0,0,1]}"#,
+            [5.0, 5.0, 0.0],
+            0.5,
+            12,
+        );
+        assert_eq!(scene.sketch_owner_object(free), None);
+        assert_eq!(scene.sketch_owner_object(u64::MAX), None);
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let f = top_face(&scene, b);
+        let d = scene.draft_begin_face(b, f, "Line").unwrap();
+        scene
+            .draft_add_segment(d, 0.2, 0.2, 1.0, 0.8, 0.5, 1.0)
+            .unwrap();
+        scene.draft_end(d).unwrap();
+        let ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let u = units(&scene, &ctx);
+        let owned = u["units"][0]["edges"][0]["store"]["sketch"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(scene.sketch_owner_object(owned), Some(b));
+    }
+
+    /// A `{"sketch":id}` context on a detached sketch is the sketch alone:
+    /// a draft opened on it (by context or by handle) arranges with its own
+    /// drawing and lowers back into it, never into the face under it.
+    #[test]
+    fn a_detached_sketchs_context_edits_it_alone() {
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let f = top_face(&scene, b);
+        let faces = scene.doc.object(object_id(b)).unwrap().faces().len();
+        let face_ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let d = scene.draft_begin_detached(&face_ctx, "Rectangle").unwrap();
+        rect(&mut scene, d, 0.5, 0.5, 1.5, 1.5, 1.0);
+        let s = json(&scene.draft_end(d).unwrap())["sketches"][0]
+            .as_u64()
+            .unwrap();
+        // A line across it, continuing the sketch: two regions in it.
+        let d = scene.draft_begin_ctx(&sketch_ctx(s), "Line").unwrap();
+        scene
+            .draft_add_segment(d, 1.0, 0.5, 1.0, 1.0, 1.5, 1.0)
+            .unwrap();
+        let report = json(&scene.draft_end(d).unwrap());
+        assert_eq!(report["sketches"], serde_json::json!([s]), "{report}");
+        assert!(report["objects"].as_array().unwrap().is_empty());
+        let own = units(&scene, &sketch_ctx(s));
+        assert_eq!(own["regions"].as_array().unwrap().len(), 2);
+        // Move it by handle: still one detached sketch, face still whole.
+        let keys = edge_keys(&own);
+        let d = scene.draft_begin_sketch(s, "Move").unwrap();
+        let shift = [1.0, 0.0, 0.0, 0.25, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scene.draft_transform_edges(d, &keys, &shift).unwrap();
+        scene.draft_end(d).unwrap();
+        assert!(scene.doc.sketch(sketch_id(s)).unwrap().detached());
+        assert_eq!(scene.doc.object(object_id(b)).unwrap().faces().len(), faces);
+        assert!(
+            units(&scene, &face_ctx)["units"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        // Offset preview and offset in its own context.
+        let own = units(&scene, &sketch_ctx(s));
+        let key = u64::from_str_radix(own["regions"][0]["key"].as_str().unwrap(), 16).unwrap();
+        let data = scene
+            .offset_region_preview(&sketch_ctx(s), key, -0.1)
+            .unwrap();
+        assert_eq!(data[0], 1.0, "one loop");
+        assert!(
+            scene.offset_region_preview(&face_ctx, key, -0.1).is_err(),
+            "the face's plane does not hold the region"
+        );
+        let d = scene.draft_begin_ctx(&sketch_ctx(s), "Offset").unwrap();
+        scene.draft_offset_region(d, key, -0.1).unwrap();
+        scene.draft_end(d).unwrap();
+        assert_eq!(
+            units(&scene, &sketch_ctx(s))["regions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(scene.doc.object(object_id(b)).unwrap().faces().len(), faces);
+    }
+
+    /// Detached shapes D16: a pick on a face context also finds the detached
+    /// sketches on its plane and says so with `ctx`; a pick on the detached
+    /// sketch's own context is confined to it; through an instance the
+    /// returned context carries the instance.
+    #[test]
+    fn pick_plane_unit_probes_detached_sketches() {
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let f = top_face(&scene, b);
+        let face_ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let s = detached_circle(&mut scene, &face_ctx, [1.0, 1.0, 1.0], 0.5, 24);
+        let own = units(&scene, &sketch_ctx(s));
+        let down = |x: f64, y: f64| [x, y, 5.0, 0.0, 0.0, -1.0];
+
+        // Inside the disk: the detached region wins the tie with the face.
+        let hit = json(
+            &scene
+                .pick_plane_unit(&face_ctx, &down(1.0, 1.0), 0.01)
+                .unwrap(),
+        );
+        assert_eq!(hit["region"], own["regions"][0]["key"], "{hit}");
+        assert_eq!(hit["ctx"], serde_json::json!({ "sketch": s }));
+        // On the rim: its edge, with its context.
+        let hit = json(
+            &scene
+                .pick_plane_unit(&face_ctx, &down(1.5, 1.0), 0.01)
+                .unwrap(),
+        );
+        assert!(hit["edge"].is_string() && hit["run"].is_string(), "{hit}");
+        assert_eq!(hit["unit"], own["units"][0]["key"]);
+        assert_eq!(hit["ctx"], serde_json::json!({ "sketch": s }));
+        // Away from it: the face's own region, no ctx.
+        let hit = json(
+            &scene
+                .pick_plane_unit(&face_ctx, &down(0.1, 0.1), 0.01)
+                .unwrap(),
+        );
+        assert!(
+            hit["region"].is_string() && hit.get("ctx").is_none(),
+            "{hit}"
+        );
+        // The same on the plane form of the context.
+        let plane_ctx = r#"{"plane":[0,0,1,0,0,1]}"#;
+        let hit = json(
+            &scene
+                .pick_plane_unit(plane_ctx, &down(1.0, 1.0), 0.01)
+                .unwrap(),
+        );
+        assert_eq!(hit["ctx"], serde_json::json!({ "sketch": s }));
+        // The sketch's own context: confined, and no ctx (it is the request's).
+        let hit = json(
+            &scene
+                .pick_plane_unit(&sketch_ctx(s), &down(1.0, 1.0), 0.01)
+                .unwrap(),
+        );
+        assert_eq!(hit["region"], own["regions"][0]["key"]);
+        assert!(hit.get("ctx").is_none(), "{hit}");
+        assert_eq!(
+            scene
+                .pick_plane_unit(&sketch_ctx(s), &down(0.1, 0.1), 0.01)
+                .unwrap(),
+            "null",
+            "the face is not in a detached sketch's context"
+        );
+        // A smaller detached shape inside it is the one picked inside both.
+        let small = detached_circle(&mut scene, &face_ctx, [1.0, 1.0, 1.0], 0.2, 24);
+        let hit = json(
+            &scene
+                .pick_plane_unit(&face_ctx, &down(1.0, 1.0), 0.01)
+                .unwrap(),
+        );
+        assert_eq!(hit["ctx"], serde_json::json!({ "sketch": small }), "{hit}");
+        let hit = json(
+            &scene
+                .pick_plane_unit(&face_ctx, &down(1.0, 1.35), 0.01)
+                .unwrap(),
+        );
+        assert_eq!(hit["ctx"], serde_json::json!({ "sketch": s }), "{hit}");
+        // A hidden one (drawn into a group the user hid) takes no click.
+        let other = ground_box(&mut scene, 5.0, 5.0, 6.0, 6.0, 1.0);
+        let g = scene.group_nodes(&[0], &[other]).unwrap();
+        scene
+            .doc
+            .set_sketch_group(sketch_id(small), Some(crate::group_id(g)))
+            .unwrap();
+        scene.set_node_user_hidden(1, g, true).unwrap();
+        let hit = json(
+            &scene
+                .pick_plane_unit(&face_ctx, &down(1.0, 1.0), 0.01)
+                .unwrap(),
+        );
+        assert_eq!(hit["ctx"], serde_json::json!({ "sketch": s }), "{hit}");
+
+        // Through an instance: the detached sketch is the definition's, and
+        // the pick's context names the instance too.
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let inst = scene.make_component(&[0], &[b]).unwrap();
+        let def = scene.instance_def(inst).unwrap();
+        let member = scene.component_member_objects(def)[0];
+        let f = top_face(&scene, member);
+        let shift = [1.0, 0.0, 0.0, 10.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scene.transform_instance(inst, &shift).unwrap();
+        let ctx = format!(r#"{{"face":{{"object":{member},"face":{f}}},"instance":{inst}}}"#);
+        let s = detached_circle(&mut scene, &ctx, [11.0, 1.0, 1.0], 0.5, 24);
+        assert!(scene.doc.sketch(sketch_id(s)).unwrap().detached());
+        let hit = json(&scene.pick_plane_unit(&ctx, &down(11.0, 1.0), 0.01).unwrap());
+        assert_eq!(
+            hit["ctx"],
+            serde_json::json!({ "sketch": s, "instance": inst }),
+            "{hit}"
+        );
+        // Its listing through that context is in world space.
+        let own = units(&scene, &format!(r#"{{"sketch":{s},"instance":{inst}}}"#));
+        let x = own["units"][0]["edges"][0]["a"][0].as_f64().unwrap();
+        assert!(x > 10.0, "world x: {x}");
+    }
+
+    /// `SketchRegionPickJs.detached` says whether the picked region's sketch
+    /// is detached; the island copy export copies a detached unit, in plane
+    /// too, as a new detached sketch.
+    #[test]
+    fn region_pick_reports_detached_and_copy_makes_a_new_detached_sketch() {
+        let mut scene = Scene::new();
+        let s = detached_circle(&mut scene, GROUND, [0.0, 0.0, 0.0], 1.0, 24);
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Rectangle")
+            .unwrap();
+        rect(&mut scene, d, 5.0, 0.0, 6.0, 1.0, 0.0);
+        scene.draft_end(d).unwrap();
+        let pick = scene
+            .pick_sketch_region(0.0, 0.0, 5.0, 0.0, 0.0, -1.0)
+            .unwrap();
+        assert_eq!(pick.sketch(), s);
+        assert!(pick.detached());
+        let plain = scene
+            .pick_sketch_region(5.5, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .unwrap();
+        assert!(!plain.detached());
+
+        let islands = scene.sketch_island_ids(s);
+        let shift = [1.0, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let before = scene.doc.sketch(sketch_id(s)).unwrap().clone();
+        let copy = scene.copy_sketch_islands(s, &islands, &shift).unwrap();
+        assert_ne!(copy, s);
+        assert!(scene.doc.sketch(sketch_id(copy)).unwrap().detached());
+        assert_eq!(
+            scene.doc.sketch(sketch_id(s)).unwrap(),
+            &before,
+            "the overlapping original is untouched"
+        );
+        assert_eq!(edge_keys(&units(&scene, &sketch_ctx(copy))).len(), 24);
+    }
+
+    /// A recorded detached draw replays to the same document.
+    #[test]
+    fn detached_drafting_recording_round_trips() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let f = top_face(&scene, b);
+        let face_ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let s = detached_circle(&mut scene, &face_ctx, [2.0, 2.0, 1.0], 0.5, 24);
+        let d = scene.draft_begin_ctx(&sketch_ctx(s), "Line").unwrap();
+        scene
+            .draft_add_segment(d, 1.5, 2.0, 1.0, 2.5, 2.0, 1.0)
+            .unwrap();
+        scene.draft_end(d).unwrap();
+        let own = units(&scene, &sketch_ctx(s));
+        let ex = &own["regions"][0]["extrude"];
+        scene
+            .extrude_region(
+                ex["sketch"].as_u64().unwrap(),
+                ex["region"].as_u64().unwrap(),
+                -0.5,
+            )
+            .unwrap();
+        let hash = scene.doc.state_hash();
+        let rec = scene.take_recording();
+        assert!(rec.contains("\"method\":\"draft_begin_detached\""), "{rec}");
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&rec).unwrap(), hash);
     }
 
     #[test]

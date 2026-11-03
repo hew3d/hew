@@ -37,11 +37,12 @@ function makeFacePick(object: bigint, face: bigint, instance?: bigint, depth = 1
 
 /** A fake `SketchRegionPickJs` returning the seeded handles, `depth` in ray
  *  parameter units (RAY's direction is unit, so metres too). */
-function makeRegionPick(sketch: bigint, region: bigint, depth = 1) {
+function makeRegionPick(sketch: bigint, region: bigint, depth = 1, detached = false) {
   return {
     sketch: () => sketch,
     region: () => region,
     depth: () => depth,
+    detached: () => detached,
     free: vi.fn(),
   }
 }
@@ -1342,6 +1343,33 @@ describe('PushPullTool — a drawn region in front of an object face wins the pi
     }
   })
 
+  it('a DETACHED shape lying on an ELIGIBLE face wins the tie and extrudes into a new object (separate-shapes D8)', () => {
+    // Same depth: the disk was drawn on the face to stay apart from it.
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, undefined, 2.0),
+      facePlane: [1, 2, 3, 0, 0, 1],
+      regionPick: makeRegionPick(99n, 7n, 2.0, true),
+    })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 3, kind: 'on-face' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 4, kind: 'endpoint' }), RAY)
+    expect(scene.extrude_region).toHaveBeenCalledTimes(1)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+  })
+
+  it('an ORDINARY region lying on an eligible face still yields to the face (the tie-break is detached-only)', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, undefined, 2.0),
+      facePlane: [1, 2, 3, 0, 0, 1],
+      regionPick: makeRegionPick(99n, 7n, 2.0, false),
+    })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 3, kind: 'on-face' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 4, kind: 'endpoint' }), RAY)
+    expect(scene.push_pull).toHaveBeenCalledTimes(1)
+    expect(scene.extrude_region).not.toHaveBeenCalled()
+  })
+
   it('a region in front of an INELIGIBLE (grouped) face wins too — the fail-closed rule only guards regions behind the face', () => {
     const scene = makeWasmScene({
       facePick: makeFacePick(3n, 4n, undefined, 2.0),
@@ -1643,6 +1671,42 @@ describe('PushPullTool — preview tint per mode (#41)', () => {
     const asNew = ghostColor(true)
     expect(asNew).not.toBe(plain)
     expect(ghostColor(true, -1)).toBe(asNew) // pulling the other way is still "new"
+  })
+
+  it('a free-sketch region ghost is the new-object blue on both signs, never the red cut', () => {
+    const regionGhost = (z: number): number => {
+      const scene = makeWasmScene({ regionPick: makeRegionPick(50n, 51n) })
+      ;(scene.region_boundary as ReturnType<typeof vi.fn>).mockReturnValue(SQUARE)
+      const { tool, preview } = makeTool(scene)
+      tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+      tool.onPointerMove(makeSnap({ x: 0, y: 0, z, kind: 'endpoint' }), RAY)
+      const mesh = preview.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+      return (mesh.material as THREE.MeshBasicMaterial).color.getHex()
+    }
+    const asNew = ghostColor(true)
+    expect(regionGhost(1)).toBe(asNew)
+    expect(regionGhost(-1)).toBe(asNew)
+    // A face pushed in stays the default cut look (not the new-object blue).
+    expect(ghostColor(false, -1)).not.toBe(asNew)
+  })
+
+  it('inside a component edit the extrude-as-new toggle leaves the ghost on the push colors (the commit falls back to an ordinary push)', () => {
+    const INSTANCE = 42n
+    const inEdit = (extrudeAsNew: boolean): number => {
+      const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, INSTANCE) })
+      ;(scene.face_boundary as ReturnType<typeof vi.fn>).mockReturnValue(SQUARE)
+      const { tool, preview } = makeTool(scene)
+      tool.setEditContext({ kind: 'instance', id: INSTANCE, component: 5n })
+      tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
+      if (extrudeAsNew) tool.toggleExtrudeAsNew()
+      tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+      tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'endpoint' }), RAY)
+      const mesh = preview.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+      expect(mesh).toBeDefined()
+      return (mesh.material as THREE.MeshBasicMaterial).color.getHex()
+    }
+    expect(inEdit(true)).toBe(inEdit(false))
+    expect(inEdit(true)).not.toBe(ghostColor(true))
   })
 
   it('the arrow/cross fallback (no swept prism) follows the mode too', () => {

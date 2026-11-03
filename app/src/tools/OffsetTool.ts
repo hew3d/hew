@@ -46,7 +46,14 @@ import { markSessionGhost } from './transformPreview'
 import { signedOffsetDistance, decodeOffsetLoops, loopToSegmentPairs } from './offsetMath'
 import { runDraft, refreshAfterDraft } from './draftCommit'
 import { defaultFaceEligible, ineligibleFaceHint, sessionIsOpen, EDIT_CONTEXT_HINT_CODE, type FaceEligible } from './faceDraw'
-import { ctxOfFace, ctxOfSketch, keyToId, type PlaneUnitsScene } from './planeUnits'
+import { ctxOfFace, ctxOfSketchUnits, keyToId, type PlaneUnitsScene } from './planeUnits'
+import {
+  readPreviewTint,
+  PREVIEW_DETACHED_TOKEN,
+  PREVIEW_DETACHED_FALLBACK,
+  PREVIEW_DRAW_JOINED_TOKEN,
+  PREVIEW_DRAW_JOINED_FALLBACK,
+} from './previewTint'
 import { regionUnderRay, regionOfFreeProfile, regionOfSegment, type PickedRegion } from './regionPick'
 
 /** Snap kinds whose point is a deliberate reference for the offset distance
@@ -475,7 +482,7 @@ export class OffsetTool implements Tool {
     }
     try {
       const sketch = regionPick.sketch()
-      const ctx = ctxOfSketch(this.wasmScene, sketch, activeInstance)
+      const ctx = ctxOfSketchUnits(this.wasmScene, sketch, activeInstance)
       if (ctx === null) return // stale handle — stay idle
       const hit =
         regionOfFreeProfile(scene, ctx, sketch, regionPick.region()) ??
@@ -499,7 +506,7 @@ export class OffsetTool implements Tool {
       const sketch = edgePick.sketch()
       const ends = this.wasmScene.sketch_edge_endpoints(sketch, edgePick.edge())
       if (ends === undefined || ends.length < 6) return null
-      const ctx = ctxOfSketch(this.wasmScene, sketch, null)
+      const ctx = ctxOfSketchUnits(this.wasmScene, sketch, null)
       if (ctx === null) return null
       return regionOfSegment(
         this.wasmScene as unknown as PlaneUnitsScene,
@@ -598,11 +605,20 @@ export class OffsetTool implements Tool {
       return
     }
 
+    // The ghost takes the SOURCE's color: a region over a face is part of
+    // that solid (orange), a free region belongs to no solid (blue).
+    const attached = region.region.over !== null && region.region.extrude === null
+    const style = {
+      ...PREVIEW_LINE_STYLE,
+      color: attached
+        ? readPreviewTint(PREVIEW_DRAW_JOINED_TOKEN, PREVIEW_DRAW_JOINED_FALLBACK)
+        : readPreviewTint(PREVIEW_DETACHED_TOKEN, PREVIEW_DETACHED_FALLBACK),
+    }
     for (const loop of loops) {
       if (loop.length < 9) continue
       // The offset loops are the geometry the commit draws, so inside a
       // component session every other copy shows them too (markSessionGhost).
-      this.preview.add(markSessionGhost(makeFatSegments(loopToSegmentPairs(loop), PREVIEW_LINE_STYLE)))
+      this.preview.add(markSessionGhost(makeFatSegments(loopToSegmentPairs(loop), style)))
     }
   }
 

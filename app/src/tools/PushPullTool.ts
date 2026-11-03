@@ -89,7 +89,14 @@ const MIN_INWARD_DRAG_M = 1e-9
 
 /** A `pick_sketch_region` hit: the region handles plus its ray depth in
  *  metres along the normalized ray (the scale `pick_face` reports in). */
-type RegionPick = { sketch: bigint; region: bigint; depth: number }
+type RegionPick = {
+  sketch: bigint
+  region: bigint
+  depth: number
+  /** The region's sketch is a detached shape (separate-shapes design D8):
+   *  drawn to stay apart from the face it lies on. */
+  detached: boolean
+}
 
 /**
  * Whether a picked sketch region sits IN FRONT of the object face picked on
@@ -106,10 +113,12 @@ type RegionPick = { sketch: bigint; region: bigint; depth: number }
 function regionInFrontOfFace(region: RegionPick | null, face: RawFacePick | null, faceEligible = true): boolean {
   if (region === null) return false
   if (face === null) return true
-  // Free drawing lying ON a face that cannot be pushed from here (a group's
-  // or component's face, drawn on from outside) is what the cursor is on:
-  // a tie goes to the drawing, which pulls into a new object of its own.
-  if (!faceEligible) return region.depth <= face.depth + REGION_COPLANAR_EPS_M
+  // A detached shape lying on a face is what the cursor is on: it was drawn
+  // to stay apart from the face, so a tie goes to it (D8). So does free
+  // drawing lying ON a face that cannot be pushed from here (a group's or
+  // component's face, drawn on from outside). Either pulls into a new object
+  // of its own.
+  if (region.detached || !faceEligible) return region.depth <= face.depth + REGION_COPLANAR_EPS_M
   return region.depth < face.depth - REGION_IN_FRONT_EPS_M
 }
 
@@ -493,7 +502,7 @@ export class PushPullTool implements Tool {
         // direction's length itself) — scaling it again would double-count
         // any non-unit direction.
         const dirLen = activeInstance !== null ? 1 : Math.hypot(ray.direction[0], ray.direction[1], ray.direction[2])
-        region = { sketch: regionPick.sketch(), region: regionPick.region(), depth: regionPick.depth() * dirLen }
+        region = { sketch: regionPick.sketch(), region: regionPick.region(), depth: regionPick.depth() * dirLen, detached: regionPick.detached() }
       } finally {
         regionPick.free()
       }
@@ -1211,6 +1220,15 @@ export class PushPullTool implements Tool {
     this.onMeasurementCb(formatLength(distance))
   }
 
+  /** The ghost is blue ("a new object appears, nothing existing changes")
+   *  in extrude-as-new mode and for every region target — a free sketch
+   *  region always extrudes into a new object, whichever way it is pushed.
+   *  Inside a component edit the Ctrl toggle's commit falls back to an
+   *  ordinary push (see `_commit`), so the ghost stays on the push colors. */
+  private _ghostMakesNewObject(): boolean {
+    return (this.extrudeAsNewMode && this._activeComponent === null) || (this.stage.kind === 'dragging' && this.stage.target.kind === 'region')
+  }
+
   private _drawGhostPreview(
     anchor: [number, number, number],
     normal: [number, number, number],
@@ -1241,13 +1259,15 @@ export class PushPullTool implements Tool {
         // mid-drag) degrades to the arrow rather than drawing a misplaced
         // ghost — `worldBoundary` is null exactly then.
         if (worldBoundary !== null) {
-          // Extrude-as-new mode tints the ghost blue (both signs); plain
-          // push/pull keeps its orange add / red cut look.
+          // A new object (extrude-as-new mode, or any free-sketch region,
+          // which always extrudes into a new object) tints the ghost blue
+          // on both signs; a face push/pull keeps its orange add / red cut
+          // look.
           const prism = buildSweptPrismPreview(
             worldBoundary,
             normal,
             distance,
-            this.extrudeAsNewMode
+            this._ghostMakesNewObject()
               ? readPreviewTint(PREVIEW_EXTRUDE_NEW_TOKEN, PREVIEW_EXTRUDE_NEW_FALLBACK)
               : distance > 0
                 ? readPreviewTint(PREVIEW_PUSHPULL_TOKEN, PREVIEW_PUSHPULL_FALLBACK)
@@ -1313,7 +1333,7 @@ export class PushPullTool implements Tool {
     const pts = new Float32Array([ax, ay, az, ...tip])
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(pts, 3))
-    const arrowColor = this.extrudeAsNewMode
+    const arrowColor = this._ghostMakesNewObject()
       ? readPreviewTint(PREVIEW_EXTRUDE_NEW_TOKEN, PREVIEW_EXTRUDE_NEW_FALLBACK)
       : readPreviewTint(PREVIEW_PUSHPULL_TOKEN, PREVIEW_PUSHPULL_FALLBACK)
     const mat = new THREE.LineBasicMaterial({

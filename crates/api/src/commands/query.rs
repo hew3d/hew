@@ -267,13 +267,19 @@ fn sketch_summary(ctx: &Ctx, sketch_id: kernel::SketchId) -> Result<Value, CmdEr
     // circle" versus "one facet" is the client's own informed choice).
     let edges: Vec<Value> = sketch_edges_json(sk, sketch_sid);
 
-    Ok(json!({
+    let mut out = json!({
         "id": public_of_or_internal(ctx, &EntityRef::Sketch(sketch_id))?,
         "plane": plane_json(&sk.plane()),
         "regions": regions,
         "curves": curves,
         "edges": edges,
-    }))
+    });
+    // A detached shape (in no plane's arrangement; detached shapes D10)
+    // says so; a plain sketch's summary is unchanged.
+    if sk.detached() {
+        out["detached"] = json!(true);
+    }
+    Ok(out)
 }
 
 /// One sketch's edges as `{id, from, to, curve}` — the shape

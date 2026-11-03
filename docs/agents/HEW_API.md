@@ -739,7 +739,11 @@ Semantics notes, normative:
   are 3D world coordinates and must lie on the plane within kernel
   tolerance; off-plane input is refused typed, never projected silently
   (on a face: `point_not_on_face`). Any point parameter accepts a
-  derived-point locator (§5.3) in place of coordinates.
+  derived-point locator (§5.3) in place of coordinates. A `{"sketch": id}`
+  naming a **detached** sketch (below) is that sketch's own context:
+  `hew.sketch.units` lists exactly its units, and the unit verbs,
+  `hew.sketch.offset` and `hew.solid.extrude` with it act on that sketch
+  alone; a plane or face spec never includes a detached sketch.
 - **The plane is the drafting context.** With a `{"face": ...}` plane
   spec the draw goes through the drafting engine: everything drawn on the
   face's plane — the face edges of every solid with a face on it, the
@@ -779,6 +783,25 @@ Semantics notes, normative:
   that produced no face (a loose line, a shape wholly over the void) mints
   no token, and a later `{"$face": ...}` reference to one refuses
   `face_token_unknown`.
+- **Detached shapes.** `draw_line`, `draw_rect`, `draw_circle`,
+  `draw_arc` and `draw_polygon` take an optional `detached` (default
+  `false`). With `detached: true` on a `{"ground"}`, `{origin, normal}` or
+  `{"face"}` plane spec, the shape is drawn as one new **detached**
+  sketch: drawing that takes part in no plane arrangement, so it neither
+  splits nor joins the face or the drawing under it (a circle centered on
+  a face's corner stays a whole circle and the face stays whole), nothing
+  drawn later joins it, and extruding one of its regions always makes a
+  new Object. Snapping still sees it. The result is the sketch shape
+  `{sketch, region_ids, region_id?, curve_id?}` whatever the plane spec
+  (no face tokens: no face changed), so a following `hew.solid.extrude`
+  chains through `region_id` as on the ground. With a `{"sketch": id}`
+  plane spec `detached` is refused as invalid params ("detached is decided
+  by the sketch; omit it for a sketch target"): drawing into a sketch
+  continues it, and the sketch's own flag decides. Free stores of a
+  detached sketch carry `detached: true` in `hew.sketch.units` and in the
+  `units` a unit edit answers, and `hew.query.scene` marks such a sketch
+  `"detached": true`. A detached shape cannot be joined to a face later;
+  delete it and draw again without `detached`.
 - **Unit verbs.** `hew.sketch.units {plane}` (read-only) lists a plane's
   drawing: `units` — islands `{key: "isl_<hex16>", edges: [{key, a, b,
   store, object_id?, sketch_id?, curve?}]}` (`curve` is `{key:

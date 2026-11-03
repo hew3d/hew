@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `20`**, and **geometry buffer format version `8`**. Both are covered
+version `23`**, and **geometry buffer format version `8`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,7 +59,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 22,
+  "format_version": 23,
   "geometry_version": 8,
   "app": "hew",
   "app_version": "1.2.1",
@@ -114,6 +114,14 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "owner_group": 0, // v19+, optional; dense `groups[]` id. Omitted =
                        // in no group (the only possibility before v19)
       "tags": [["Site"]] // v20+, optional; omitted = untagged
+    },
+    { "id": 1, "sid": 12,
+      "plane": [0.0, 0.0, 1.0, 0.0],
+      "vertices": [ {"id":0, "p":[5.0, 0.0, 0.0]} ],
+      "edges":    [ {"id":0, "from":0, "to":1} ],
+      "regions":  [ {"id":0, "outer":[0,1,2], "holes":[]} ],
+      "detached": true // v23+, optional; omitted = the sketch joins its
+                       // plane's arrangement. Never with "owner_object"
     }
   ],
   "guides": [
@@ -172,7 +180,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `22`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `23`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `8`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -297,6 +305,7 @@ of the manifest:
 | `sketches[].regions[].faceless` | 21 | `false` (every closed loop has a face, the only possibility before v21) |
 | `guides[].tags` | 21 | empty list (the guide carries no tag) |
 | `guides[].from`, `guides[].to` | 22 | absent: the line runs on forever both ways, the only possibility before v22 |
+| `sketches[].detached` | 23 | `false` (every sketch joins its plane's arrangement, the only possibility before v23) |
 
 Four fields land in the same v13 bump (four efforts in flight at once) and
 are version-gated the same way the retired fields below are (just in the
@@ -846,6 +855,17 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   pre-v17 writer could not have produced it). A sketch whose owner object
   is not saved (deleted, or consumed by a boolean) is not saved either; a
   writer never emits an `owner_object` that names an unsaved object.
+- `detached` (v23+, optional, omitted when false) — the sketch is a
+  **detached shape**: drawing that takes part in no plane arrangement.
+  Drawing made later on the same plane does not split or merge with it,
+  moving it onto other drawing or onto a solid's face does not join it,
+  and extruding one of its regions always makes a new Object. It is a
+  free sketch in every other respect (`owner`, `owner_group`, `tags`
+  apply as usual). A detached sketch is never object-owned: a reader
+  MUST reject `detached` together with `owner_object` as a malformed
+  manifest, and MUST reject a manifest declaring `format_version < 23`
+  that sets `detached` (reject-not-repair: a pre-v23 writer could not
+  have produced it).
 
 - `owner_group` (v19+, optional) — the dense `groups[]` id of the group the
   sketch is drawn in: a `.skp` group of edges, or lines drawn while

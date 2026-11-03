@@ -32,16 +32,28 @@ export interface DraftReport {
 /** The drafting context a draw tool commits into. `instance` is the entered
  *  component instance's handle (definition-owned target) or `null`. */
 export type DraftTarget =
-  | { kind: 'plane'; plane: DrawPlane; instance: bigint | null }
-  | { kind: 'face'; object: bigint; face: bigint; instance: bigint | null }
+  | { kind: 'plane'; plane: DrawPlane; instance: bigint | null; detached?: true }
+  | { kind: 'face'; object: bigint; face: bigint; instance: bigint | null; detached?: true }
   | { kind: 'sketch'; handle: bigint; instance: bigint | null }
   /** The exact canonical plane context string a `plane_units_json` listing
    *  used (planeUnits.ts) — the one way to edit listed unit keys. */
   | { kind: 'ctx'; ctx: string }
 
 /** The draft target a tool's plane-mode `SketchTarget` commits into: a
- *  hover-adopted sketch opens as that sketch, a plane as the plane. */
-export function draftTargetFromSketchTarget(t: SketchTarget): DraftTarget {
+ *  hover-adopted sketch opens as that sketch, a plane as the plane. A
+ *  `detached` shape (separate-shapes design §6.4) always opens a fresh
+ *  detached sketch on its plane. */
+export function draftTargetFromSketchTarget(
+  t: SketchTarget,
+  detached = false,
+  /** The world plane the shape is drawn on; a detached shape opens as that
+   *  plane even when a hovered sketch was adopted (it joins nothing). */
+  plane?: DrawPlane,
+): DraftTarget {
+  if (detached) {
+    const on = t.kind === 'plane' ? t.plane : plane
+    if (on !== undefined) return { kind: 'plane', plane: on, instance: t.instance, detached: true }
+  }
   return t.kind === 'existing'
     ? { kind: 'sketch', handle: t.handle, instance: t.instance }
     : { kind: 'plane', plane: t.plane, instance: t.instance }
@@ -55,11 +67,31 @@ function openDraft(wasmScene: WasmScene, target: DraftTarget, label: string): bi
       const { plane, instance } = target
       const [px, py, pz] = plane.origin
       const [nx, ny, nz] = plane.normal
+      if (target.detached === true) {
+        // A detached shape: its own sketch, joined to no arrangement
+        // (detached shapes §6.4).
+        return wasmScene.draft_begin_detached(
+          JSON.stringify({
+            plane: [px, py, pz, nx, ny, nz],
+            ...(instance !== null ? { instance: Number(instance) } : {}),
+          }),
+          label,
+        )
+      }
       return instance !== null
         ? wasmScene.draft_begin_plane_in_instance(instance, px, py, pz, nx, ny, nz, label)
         : wasmScene.draft_begin_plane(px, py, pz, nx, ny, nz, label)
     }
     case 'face':
+      if (target.detached === true) {
+        return wasmScene.draft_begin_detached(
+          JSON.stringify({
+            face: { object: Number(target.object), face: Number(target.face) },
+            ...(target.instance !== null ? { instance: Number(target.instance) } : {}),
+          }),
+          label,
+        )
+      }
       return target.instance !== null
         ? wasmScene.draft_begin_face_in_instance(target.instance, target.object, target.face, label)
         : wasmScene.draft_begin_face(target.object, target.face, label)

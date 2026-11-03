@@ -1030,6 +1030,7 @@ export interface QuerySceneResult {
   document: UnspecifiedShape
   guides: unknown[]
   materials: unknown[]
+  /** each sketch's id, plane, regions, curves and edges; a detached sketch (a shape drawn with `detached`, in no plane's arrangement) also carries "detached": true */
   sketches: unknown[]
   tags: unknown[]
   tree: unknown[]
@@ -1168,7 +1169,7 @@ export interface SketchCopyParams {
 
 export interface SketchCopyResult {
   /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
-  units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
+  units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
 }
 
 /**
@@ -1185,7 +1186,7 @@ export interface SketchDeleteParams {
 
 export interface SketchDeleteResult {
   /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
-  units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
+  units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
 }
 
 /**
@@ -1197,6 +1198,8 @@ export interface SketchDrawArcParams {
   center: [number, number, number] | UnspecifiedShape
   /** how the arc's ends are closed: "open" (default, a bare arc), "pie" (closed wedge — two radii to the center), or "segment" (closed circular segment — the chord). "pie"/"segment" commit a closed profile (a region in plane/sketch mode, a SplitFaceInner loop in face mode) like draw_rect/draw_circle, and need at least 2 segments (see "segments"). Must be "open" when the sweep is a full turn (already closed). */
   close?: "open" | "pie" | "segment"
+  /** keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides */
+  detached?: boolean
   /** radians */
   end_angle: number
   /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
@@ -1208,7 +1211,7 @@ export interface SketchDrawArcParams {
   start_angle: number
 }
 
-export type SketchDrawArcResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
+export type SketchDrawArcResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.draw_circle` (v1) — Draw a circle on a plane spec.
@@ -1217,6 +1220,8 @@ export type SketchDrawArcResult = { curve_id?: string; region_id?: string; regio
  */
 export interface SketchDrawCircleParams {
   center: [number, number, number] | UnspecifiedShape
+  /** keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides */
+  detached?: boolean
   /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
   plane: UnspecifiedShape
   radius: number
@@ -1224,7 +1229,7 @@ export interface SketchDrawCircleParams {
   segments?: number
 }
 
-export type SketchDrawCircleResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
+export type SketchDrawCircleResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.draw_line` (v1) — Draw a line (chain) on a plane spec.
@@ -1232,12 +1237,14 @@ export type SketchDrawCircleResult = { curve_id?: string; region_id?: string; re
  * Refusals: point_off_plane, degenerate_segment, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
  */
 export interface SketchDrawLineParams {
+  /** keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides */
+  detached?: boolean
   /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
   plane: UnspecifiedShape
   points: ([number, number, number] | UnspecifiedShape)[]
 }
 
-export type SketchDrawLineResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
+export type SketchDrawLineResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.draw_polygon` (v1) — Draw a regular N-gon on a plane spec.
@@ -1246,13 +1253,15 @@ export type SketchDrawLineResult = { curve_id?: string; region_id?: string; regi
  */
 export interface SketchDrawPolygonParams {
   center: [number, number, number] | UnspecifiedShape
+  /** keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides */
+  detached?: boolean
   /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
   plane: UnspecifiedShape
   radius: number
   sides: number
 }
 
-export type SketchDrawPolygonResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
+export type SketchDrawPolygonResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.draw_rect` (v1) — Draw an axis-aligned rectangle on a plane spec.
@@ -1262,11 +1271,13 @@ export type SketchDrawPolygonResult = { curve_id?: string; region_id?: string; r
 export interface SketchDrawRectParams {
   corner_a: [number, number, number] | UnspecifiedShape
   corner_b: [number, number, number] | UnspecifiedShape
+  /** keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides */
+  detached?: boolean
   /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
   plane: UnspecifiedShape
 }
 
-export type SketchDrawRectResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
+export type SketchDrawRectResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.move` (v1) — Move drawing units (islands, edges, circles, regions) on a plane by an offset.
@@ -1284,7 +1295,7 @@ export interface SketchMoveParams {
 
 export interface SketchMoveResult {
   /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
-  units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
+  units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
 }
 
 /**
@@ -1301,7 +1312,7 @@ export interface SketchOffsetParams {
   region: string
 }
 
-export type SketchOffsetResult = { curve_ids: string[]; region_id?: string; region_ids: string[]; sketch: string } | { units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
+export type SketchOffsetResult = { curve_ids: string[]; region_id?: string; region_ids: string[]; sketch: string } | { units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.rotate` (v1) — Rotate drawing units on a plane about the plane normal through a point.
@@ -1320,7 +1331,7 @@ export interface SketchRotateParams {
 
 export interface SketchRotateResult {
   /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
-  units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
+  units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
 }
 
 /**
@@ -1342,7 +1353,7 @@ export interface SketchScaleParams {
 
 export interface SketchScaleResult {
   /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
-  units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
+  units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
 }
 
 /**
@@ -1351,13 +1362,13 @@ export interface SketchScaleResult {
  * Refusals: unknown_sketch, unknown_entity, locator_missed, ambiguous_locator
  */
 export interface SketchUnitsParams {
-  /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
+  /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}. A plane or face spec lists the plane's arrangement, which no detached sketch joins; {sketch:<id>} on a detached sketch lists exactly that sketch */
   plane: UnspecifiedShape
 }
 
 export interface SketchUnitsResult {
   regions: { extrudable: boolean; face?: UnspecifiedShape; holes: [number, number, number][][]; key: string; object_id?: string; outer: [number, number, number][] }[]
-  units: ({ edges: ({ a: [number, number, number]; b: [number, number, number]; curve?: { center?: [number, number, number]; key?: string; radius?: number }; key: string; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]; key: string })[]
+  units: ({ edges: ({ a: [number, number, number]; b: [number, number, number]; curve?: { center?: [number, number, number]; key?: string; radius?: number }; detached?: boolean; key: string; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]; key: string })[]
 }
 
 /**

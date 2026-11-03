@@ -1119,3 +1119,251 @@ fn extruding_a_ground_region_with_a_touching_hole_refuses_region_touches_hole() 
         json!({ "plane": ground(), "region": disc["key"], "distance": 0.05 }),
     );
 }
+
+// ------------------------------------------------------- detached shapes
+
+/// The sketch entries of `hew.query.scene` that are marked detached.
+fn detached_sketches(conn: &mut Connection, doc: &mut Document) -> Vec<Value> {
+    let scene = call_ok(conn, doc, 90, "hew.query.scene", json!({}));
+    scene["sketches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["detached"] == true)
+        .cloned()
+        .collect()
+}
+
+/// Detached shapes §5: a 2 cm circle drawn with `detached: true` centered on
+/// the box top's corner leaves the face whole (nothing drawn on the top's
+/// plane, the face its only region), answers the sketch result shape, and
+/// is one detached sketch whose regions extrude into a new Object.
+#[test]
+fn a_detached_circle_on_a_face_leaves_the_face_whole() {
+    let (mut conn, mut doc, object_id) = setup();
+    let r = call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.sketch.draw_circle",
+        json!({
+            "plane": top_plane(&object_id),
+            "center": [0.2, 0.2, 0.2], "radius": 0.02, "detached": true
+        }),
+    );
+    let drawn = first(&r);
+    assert!(drawn.get("object_id").is_none(), "no face changed: {drawn}");
+    assert!(drawn["sketch"].is_string() && drawn["curve_id"].is_string());
+    assert_eq!(drawn["region_ids"].as_array().unwrap().len(), 1, "{drawn}");
+
+    let top = units(&mut conn, &mut doc, top_plane(&object_id));
+    assert!(
+        top["units"].as_array().unwrap().is_empty(),
+        "the face's plane has no drawing: {top}"
+    );
+    assert_eq!(
+        top["regions"].as_array().unwrap().len(),
+        1,
+        "the face alone"
+    );
+
+    let seps = detached_sketches(&mut conn, &mut doc);
+    assert_eq!(seps.len(), 1);
+    assert_eq!(seps[0]["id"], drawn["sketch"]);
+    assert_eq!(seps[0]["edges"].as_array().unwrap().len(), 48, "whole");
+
+    // The same draw without `detached` splits at the face's edge.
+    let r = call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.sketch.draw_circle",
+        json!({
+            "plane": top_plane(&object_id),
+            "center": [0.0, 0.0, 0.2], "radius": 0.02
+        }),
+    );
+    assert!(has_unit(&first(&r)["units"], "region", "topology"));
+    assert!(has_unit(&first(&r)["units"], "region", "free"));
+    assert_eq!(detached_sketches(&mut conn, &mut doc).len(), 1);
+}
+
+/// With a `{sketch}` plane spec the sketch's own flag decides: `detached`
+/// is refused as invalid params, the document untouched; `false` is
+/// accepted as the default it is.
+#[test]
+fn detached_with_a_sketch_target_is_refused_as_invalid_params() {
+    let (mut conn, mut doc, _) = setup();
+    let r = call_ok(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.sketch.draw_rect",
+        rect_on(ground(), [1.0, 1.0, 0.0], [1.1, 1.1, 0.0]),
+    );
+    let sketch = first(&r)["sketch"].as_str().unwrap().to_string();
+    let before = doc.save();
+    let r = call(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.sketch.draw_circle",
+        json!({
+            "plane": { "sketch": sketch },
+            "center": [1.05, 1.05, 0.0], "radius": 0.02, "detached": true
+        }),
+    );
+    let err = r.error.expect("a sketch target refuses detached");
+    assert_eq!(err.code, codes::INVALID_PARAMS, "{err:?}");
+    assert!(
+        err.message.contains("detached is decided by the sketch"),
+        "{}",
+        err.message
+    );
+    assert_eq!(doc.save(), before, "nothing changed");
+    call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.sketch.draw_circle",
+        json!({
+            "plane": { "sketch": sketch },
+            "center": [1.05, 1.05, 0.0], "radius": 0.02, "detached": false
+        }),
+    );
+}
+
+/// `hew.sketch.units` never lists a detached sketch on its plane; a
+/// `{sketch}` spec on one lists exactly it, every free store marked
+/// `detached`, and the unit verbs with that spec edit it alone, leaving
+/// the plain drawing it overlaps untouched.
+#[test]
+fn units_of_a_detached_sketch_carry_the_flag_and_edit_it_alone() {
+    let (mut conn, mut doc, _) = setup();
+    let r = call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.sketch.draw_rect",
+        json!({
+            "plane": ground(), "corner_a": [1.0, 1.0, 0.0], "corner_b": [1.2, 1.2, 0.0],
+            "detached": true
+        }),
+    );
+    let sep = first(&r)["sketch"].as_str().unwrap().to_string();
+    // A plain rectangle through it.
+    call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.sketch.draw_rect",
+        rect_on(ground(), [1.1, 1.1, 0.0], [1.3, 1.3, 0.0]),
+    );
+    let plain_before = units(&mut conn, &mut doc, ground());
+    assert_eq!(all_edges(&plain_before).len(), 4, "the plain one alone");
+    assert!(
+        all_edges(&plain_before)
+            .iter()
+            .all(|e| e.get("detached").is_none())
+    );
+
+    let spec = json!({ "sketch": sep });
+    let own = units(&mut conn, &mut doc, spec.clone());
+    let edges = all_edges(&own);
+    assert_eq!(edges.len(), 4, "its own rectangle, unsplit: {own}");
+    assert!(
+        edges.iter().all(|e| e["store"] == "free"
+            && e["detached"] == true
+            && e["sketch_id"] == sep.as_str())
+    );
+    assert_eq!(own["regions"].as_array().unwrap().len(), 1);
+    assert_eq!(own["regions"][0]["extrudable"], true);
+
+    // Move it onto the plain one with its own spec: still whole, still
+    // detached, the plain drawing unchanged.
+    let isl = island_keys(&own);
+    let moved = call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.sketch.move",
+        json!({ "plane": spec.clone(), "units": isl, "offset": [0.05, 0.05, 0.0] }),
+    );
+    let made = first(&moved)["units"].as_array().unwrap().clone();
+    assert!(!made.is_empty());
+    assert!(made.iter().all(|u| u["detached"] == true), "{made:?}");
+    let own = units(&mut conn, &mut doc, spec.clone());
+    assert_eq!(all_edges(&own).len(), 4);
+    let (lo, hi) = extent(&own);
+    assert!(close(lo[0], 1.05) && close(hi[1], 1.25), "{lo:?} {hi:?}");
+    assert_eq!(units(&mut conn, &mut doc, ground()), plain_before);
+    assert_eq!(detached_sketches(&mut conn, &mut doc).len(), 1);
+
+    // Deleting all of it empties and removes the sketch.
+    let isl = island_keys(&own);
+    call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        6,
+        "hew.sketch.delete",
+        json!({ "plane": spec, "units": isl }),
+    );
+    assert!(detached_sketches(&mut conn, &mut doc).is_empty());
+    assert_eq!(units(&mut conn, &mut doc, ground()), plain_before);
+}
+
+/// Draw-then-extrude in one transaction, as on the ground: the detached
+/// circle's `region_id` extrudes into a new Object beside the box; and a
+/// detached region extrudes by unit key through its `{sketch}` spec.
+#[test]
+fn extruding_a_detached_region_makes_a_new_object() {
+    let (mut conn, mut doc, object_id) = setup();
+    let r = call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.doc.transact",
+        json!({ "commands": [
+            { "method": "hew.sketch.draw_circle", "as": "c", "params": {
+                "plane": top_plane(&object_id),
+                "center": [0.2, 0.2, 0.2], "radius": 0.02, "detached": true
+            }},
+            { "method": "hew.solid.extrude", "params": {
+                "region": { "$ref": "c#/region_id" }, "distance": -0.07
+            }}
+        ]}),
+    );
+    let cutter = r["results"][1]["object_id"].as_str().unwrap();
+    assert_ne!(cutter, object_id, "a new Object, not the box");
+    assert_eq!(doc.visible_object_ids().len(), 2);
+    let top = units(&mut conn, &mut doc, top_plane(&object_id));
+    assert!(top["units"].as_array().unwrap().is_empty(), "{top}");
+    assert!(
+        detached_sketches(&mut conn, &mut doc).is_empty(),
+        "the extruded sketch is consumed"
+    );
+
+    // By unit key through the sketch's own spec.
+    let r = call_ok(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.sketch.draw_polygon",
+        json!({
+            "plane": top_plane(&object_id),
+            "center": [0.1, 0.1, 0.2], "radius": 0.03, "sides": 6, "detached": true
+        }),
+    );
+    let spec = json!({ "sketch": first(&r)["sketch"] });
+    let own = units(&mut conn, &mut doc, spec.clone());
+    let key = own["regions"][0]["key"].clone();
+    let made = call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.solid.extrude",
+        json!({ "plane": spec, "region": key, "distance": 0.05 }),
+    );
+    assert_ne!(first(&made)["object_id"].as_str().unwrap(), object_id);
+    assert_eq!(doc.visible_object_ids().len(), 3);
+}

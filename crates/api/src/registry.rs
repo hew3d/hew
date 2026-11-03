@@ -1141,7 +1141,7 @@ impl Registry {
                 "properties": {
                     "document": { "type": "object" },
                     "tree": { "type": "array" },
-                    "sketches": { "type": "array" },
+                    "sketches": { "type": "array", "description": "each sketch's id, plane, regions, curves and edges; a detached sketch (a shape drawn with `detached`, in no plane's arrangement) also carries \"detached\": true" },
                     "guides": { "type": "array" },
                     "materials": { "type": "array" },
                     "tags": { "type": "array" },
@@ -3466,8 +3466,13 @@ impl Registry {
                 "type": "object",
                 "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}"
             });
+            let detached_schema = serde_json::json!({
+                "type": "boolean",
+                "description": "keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides"
+            });
             let sketch_result_schema = serde_json::json!({
                 "type": "object",
+                "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec",
                 "properties": {
                     "sketch": { "type": "string" },
                     "region_ids": { "type": "array", "items": { "type": "string" } },
@@ -3494,7 +3499,8 @@ impl Registry {
                         "key": { "type": "string", "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them" },
                         "store": { "type": "string", "enum": ["topology", "owned", "free"], "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face" },
                         "object_id": { "type": "string", "description": "the owning solid, for topology and owned" },
-                        "sketch_id": { "type": "string", "description": "the sketch holding the drawing, for owned and free when it has one" }
+                        "sketch_id": { "type": "string", "description": "the sketch holding the drawing, for owned and free when it has one" },
+                        "detached": { "type": "boolean", "description": "true on a free store that is a detached sketch; absent otherwise" }
                     },
                     "required": ["kind", "key", "store"]
                 }
@@ -3538,7 +3544,8 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "plane": plane_schema,
-                    "points": { "type": "array", "items": point_schema, "minItems": 2 }
+                    "points": { "type": "array", "items": point_schema, "minItems": 2 },
+                    "detached": detached_schema.clone()
                 },
                 "required": ["plane", "points"]
             });
@@ -3567,7 +3574,8 @@ impl Registry {
                 "properties": {
                     "plane": plane_schema,
                     "corner_a": point_schema,
-                    "corner_b": point_schema
+                    "corner_b": point_schema,
+                    "detached": detached_schema.clone()
                 },
                 "required": ["plane", "corner_a", "corner_b"]
             });
@@ -3600,7 +3608,8 @@ impl Registry {
                     "segments": {
                         "type": "integer",
                         "description": "facet count; defaults to 48, must fall in [MIN_CIRCLE_SEGMENTS, MAX_CIRCLE_SEGMENTS] = [24, 1024]"
-                    }
+                    },
+                    "detached": detached_schema.clone()
                 },
                 "required": ["plane", "center", "radius"]
             });
@@ -3644,7 +3653,8 @@ impl Registry {
                         "type": "string",
                         "enum": ["open", "pie", "segment"],
                         "description": "how the arc's ends are closed: \"open\" (default, a bare arc), \"pie\" (closed wedge — two radii to the center), or \"segment\" (closed circular segment — the chord). \"pie\"/\"segment\" commit a closed profile (a region in plane/sketch mode, a SplitFaceInner loop in face mode) like draw_rect/draw_circle, and need at least 2 segments (see \"segments\"). Must be \"open\" when the sweep is a full turn (already closed)."
-                    }
+                    },
+                    "detached": detached_schema.clone()
                 },
                 "required": ["plane", "center", "radius", "start_angle", "end_angle"]
             });
@@ -3686,7 +3696,8 @@ impl Registry {
                     "plane": plane_schema,
                     "center": point_schema,
                     "radius": { "type": "number", "exclusiveMinimum": 0 },
-                    "sides": { "type": "integer", "minimum": 3, "maximum": 120 }
+                    "sides": { "type": "integer", "minimum": 3, "maximum": 120 },
+                    "detached": detached_schema.clone()
                 },
                 "required": ["plane", "center", "radius", "sides"]
             });
@@ -3785,7 +3796,12 @@ impl Registry {
             cmd.implemented = true;
             cmd.params_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "plane": plane_schema.clone() },
+                "properties": {
+                    "plane": {
+                        "type": "object",
+                        "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}. A plane or face spec lists the plane's arrangement, which no detached sketch joins; {sketch:<id>} on a detached sketch lists exactly that sketch"
+                    }
+                },
                 "required": ["plane"]
             });
             let point_array = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
@@ -3809,6 +3825,7 @@ impl Registry {
                                             "store": { "type": "string", "enum": ["topology", "owned", "free"] },
                                             "object_id": { "type": "string" },
                                             "sketch_id": { "type": "string" },
+                                            "detached": { "type": "boolean", "description": "true on a free store that is a detached sketch (listed only by a {sketch} plane spec naming it); absent otherwise" },
                                             "curve": {
                                                 "type": "object",
                                                 "description": "present when the edge is a facet of an analytic circle",

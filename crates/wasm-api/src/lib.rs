@@ -1931,6 +1931,7 @@ pub struct SketchRegionPickJs {
     sketch: u64,
     region: u64,
     depth: f64,
+    detached: bool,
 }
 
 #[wasm_bindgen]
@@ -1948,6 +1949,13 @@ impl SketchRegionPickJs {
     /// Radial distance along the normalized pick ray.
     pub fn depth(&self) -> f64 {
         self.depth
+    }
+
+    /// Whether the region's sketch is a detached shape (detached shapes
+    /// D8): drawn to stay apart from the face it lies on, so a pick that
+    /// ties with that face goes to the region.
+    pub fn detached(&self) -> bool {
+        self.detached
     }
 }
 
@@ -3777,7 +3785,10 @@ impl Scene {
     /// new sketch's handle. This is Move+Alt's OUT-OF-PLANE sketch copy: an
     /// in-plane copy replays into the source sketch (the UI's gesture-replay
     /// path), but a sketch is planar, so islands copied off its plane land on
-    /// a sketch of their own — on the transformed plane. Passing every island
+    /// a sketch of their own — on the transformed plane. A detached sketch's
+    /// copy is a new detached sketch, and is made here in plane too (an
+    /// in-plane affine is accepted): a copy landing in the source would
+    /// arrange with the original where they overlap (detached shapes D7). Passing every island
     /// of the sketch copies it whole; passing a subset copies just those.
     /// Keeping a sketch's islands together on one call is what preserves a
     /// region's HOLES (a hole boundary is its own island). Curve chains keep
@@ -3830,6 +3841,25 @@ impl Scene {
         let p = plane.point();
         let n = plane.normal();
         Some(vec![p.x, p.y, p.z, n.x, n.y, n.z])
+    }
+
+    /// Whether `sketch` is a detached shape (separate-shapes design D16).
+    /// `false` for an unknown sketch. Unlike the world-frame batch listing
+    /// this also answers for a component-definition member sketch.
+    pub fn sketch_is_detached(&self, sketch: u64) -> bool {
+        self.doc
+            .sketch(sketch_id(sketch))
+            .is_some_and(kernel::Sketch::detached)
+    }
+
+    /// The Object that owns `sketch`'s edges (a loose sketch drawn on a
+    /// solid's face), or `None` when the sketch is unowned (a world,
+    /// detached, group-held or component-member sketch) or unknown. Read-only;
+    /// the viewport uses it to color owned sketch edges as part of a face.
+    pub fn sketch_owner_object(&self, sketch: u64) -> Option<u64> {
+        self.doc
+            .sketch_owner_object(sketch_id(sketch))
+            .map(|o| o.data().as_ffi())
     }
 
     /// All sketch edges as xyz line-segment endpoint pairs, for drawing.
@@ -7466,6 +7496,7 @@ impl Scene {
             sketch: s.data().as_ffi(),
             region: r.data().as_ffi(),
             depth,
+            detached: self.doc.sketch(s).is_some_and(kernel::Sketch::detached),
         })
     }
 }
@@ -7539,6 +7570,7 @@ impl Scene {
             sketch: s.data().as_ffi(),
             region: r.data().as_ffi(),
             depth: local_depth * kernel::Vec3::new(dx, dy, dz).length(),
+            detached: self.doc.sketch(s).is_some_and(kernel::Sketch::detached),
         })
     }
 
@@ -11104,6 +11136,10 @@ impl Scene {
                     DraftBeginCtx { draft, ctx, label } => {
                         self.draft_set_next_handle(draft);
                         self.draft_begin_ctx(&ctx, &label)?;
+                    }
+                    DraftBeginDetached { draft, ctx, label } => {
+                        self.draft_set_next_handle(draft);
+                        self.draft_begin_detached(&ctx, &label)?;
                     }
                     DraftEnd { draft } => {
                         self.draft_end(draft)?;

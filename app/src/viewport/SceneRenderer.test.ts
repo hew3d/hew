@@ -3002,3 +3002,50 @@ describe('SceneRenderer — whole-model render mode (X-ray / Wireframe)', () => 
     expect(m.depthWrite).toBe(false)
   })
 })
+
+describe('SceneRenderer — draw color language (free blue / attached orange)', () => {
+  // The Draw color language: a sketch whose edges an Object owns is part of a
+  // solid's face (orange); every other sketch (world, detached, group-held,
+  // member) is free (blue). Reads the colour the renderer actually paints.
+  const FREE = 0x2266cc
+  const ATTACHED = 0xe0761c
+  const SQUARE = new Float32Array([0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0])
+
+  function drawingLines(renderer: SceneRenderer): { kind: string; color: number }[] {
+    const out: { kind: string; color: number }[] = []
+    renderer.sketchGroup.traverse((o) => {
+      if (!('isLineSegments2' in o)) return
+      const mat = (o as unknown as { material: LineMaterial }).material
+      out.push({ kind: mat.userData.drawKind as string, color: mat.color.getHex() })
+    })
+    return out
+  }
+
+  function sketchRenderer(owners: Record<string, bigint | undefined>): SceneRenderer {
+    const scene = makeScene({}) as unknown as Record<string, unknown>
+    scene.sketch_ids = () => BigUint64Array.from(Object.keys(owners).map(BigInt))
+    scene.sketch_owner_object = (s: bigint) => owners[s.toString()]
+    scene.sketch_lines = () => SQUARE
+    scene.sketch_regions = () => new BigUint64Array()
+    scene.region_boundary = () => new Float32Array()
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refresh()
+    renderer.refreshAllSketches()
+    return renderer
+  }
+
+  it('a sketch owned by an Object draws in the attached orange ink', () => {
+    expect(drawingLines(sketchRenderer({ '5': 7n }))).toEqual([{ kind: 'attached', color: ATTACHED }])
+  })
+
+  it('a sketch with no owning Object draws in the free blue ink', () => {
+    expect(drawingLines(sketchRenderer({ '5': undefined }))).toEqual([{ kind: 'free', color: FREE }])
+  })
+
+  it('mixed sketches split into one orange and one blue batch', () => {
+    const lines = drawingLines(sketchRenderer({ '5': 7n, '6': undefined }))
+    expect(lines).toHaveLength(2)
+    expect(lines).toContainEqual({ kind: 'attached', color: ATTACHED })
+    expect(lines).toContainEqual({ kind: 'free', color: FREE })
+  })
+})

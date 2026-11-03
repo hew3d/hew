@@ -26,7 +26,7 @@ import type { NodeRef } from '../panels/treeModel'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
   ctxOfFace,
-  ctxOfSketch,
+  ctxOfSketchUnits,
   draftRef,
   objectsOf,
   pickDraftRef,
@@ -567,7 +567,7 @@ function underRay(ray: Ray, snap: Snap | null, topLevel: boolean, deps: ResolveD
 /** A sketch's plane context, or null: a scene double without `sketch_plane`
  * cannot name a sketch's plane. */
 function sketchCtxOf(sketch: bigint, instance: bigint | undefined, deps: ResolveDeps): string | null {
-  return deps.scene.sketch_plane === undefined ? null : ctxOfSketch(wasm(deps), sketch, instance ?? null)
+  return deps.scene.sketch_plane === undefined ? null : ctxOfSketchUnits(wasm(deps), sketch, instance ?? null)
 }
 
 /** `ray` moved sideways to pass through `point`, same direction: exact for an

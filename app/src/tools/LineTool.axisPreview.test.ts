@@ -21,6 +21,7 @@ import type { Ray } from '../viewport/math'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
 import { PREVIEW_LINE_STYLE } from '../viewport/fatLine'
+import { PREVIEW_DETACHED_FALLBACK } from './previewTint'
 import type { DrawingAxes } from './drawingAxes'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
@@ -95,19 +96,19 @@ function expectedAxisColorHex(dir: [number, number, number], frame?: DrawingAxes
 }
 
 describe('LineTool — soft/hard axis preview colour and weight (design §2c)', () => {
-  it('a free (non-axis) rubber band stays the default blue, default width', () => {
+  it('a free (non-axis) rubber band stays the default free (blue) tint, default width', () => {
     const { tool, preview } = makeTool(makeWasmScene())
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
     tool.onPointerMove(makeSnap({ x: 3, y: 5, z: 0 }), RAY) // no `direction` on this snap
     const line = previewLine(preview)
     expect(line).toBeDefined()
     expect(line!.material.color.getHex()).toBe(
-      new THREE.LineBasicMaterial({ color: PREVIEW_LINE_STYLE.color }).color.getHex(),
+      new THREE.LineBasicMaterial({ color: PREVIEW_DETACHED_FALLBACK }).color.getHex(),
     )
     expect(line!.material.linewidth).toBe(PREVIEW_LINE_STYLE.widthPx)
   })
 
-  it('a direction that reads as no particular axis (45 degrees off) also stays the default blue', () => {
+  it('a direction that reads as no particular axis (45 degrees off) also stays the default free (blue) tint', () => {
     const { tool, preview } = makeTool(makeWasmScene())
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
     // A diagonal direction, comfortably outside the 10-degree label tolerance.
@@ -115,7 +116,7 @@ describe('LineTool — soft/hard axis preview colour and weight (design §2c)', 
     tool.onPointerMove(makeSnap({ x: 3, y: 3, z: 0, direction: diagonal }), RAY)
     const line = previewLine(preview)
     expect(line!.material.color.getHex()).toBe(
-      new THREE.LineBasicMaterial({ color: PREVIEW_LINE_STYLE.color }).color.getHex(),
+      new THREE.LineBasicMaterial({ color: PREVIEW_DETACHED_FALLBACK }).color.getHex(),
     )
   })
 

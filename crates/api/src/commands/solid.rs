@@ -149,7 +149,9 @@ pub(super) fn extrude(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> 
 /// region is one of the drafting plane's units (`hew.sketch.units`). A
 /// region over the void extrudes as a new Object; a region that IS a face
 /// of a solid push/pulls that face; a region over a face that cannot hold
-/// it (a sliver kept as drawing) refuses `region_not_pushable`.
+/// it (a sliver kept as drawing) refuses `region_not_pushable`. With a
+/// `{sketch: id}` spec on a detached sketch the regions are that sketch's
+/// own, every one over no face: each extrudes as a new Object.
 fn extrude_plane_region(
     ctx: &mut Ctx,
     plane_spec: &Value,
@@ -161,7 +163,7 @@ fn extrude_plane_region(
         return Err(draft::unknown_unit(region));
     }
     let dc = draft::resolve_context(ctx, plane_spec)?;
-    let pu = ctx.doc.plane_units(dc.plane, dc.frame, &dc.objects)?;
+    let pu = draft::units_of(ctx, &dc)?;
     let r = pu
         .regions
         .iter()

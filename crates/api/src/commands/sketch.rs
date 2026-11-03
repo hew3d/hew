@@ -46,6 +46,13 @@
 //! that names an instance, which does not exist yet. Adding one is
 //! additive future work, not a behavior change here.
 //!
+//! `detached: true` (detached shapes §5) draws the shape as ONE new
+//! detached sketch instead: on a face's plane (the face is left whole) or a
+//! new plane, through [`kernel::Document::draft_detached_new`], taking part
+//! in no arrangement; its result is the sketch shape `{sketch, region_ids,
+//! …}` whatever the target. A sketch target refuses it: the sketch named is
+//! the drawing being continued, and its own flag decides.
+//!
 //! There are no circle/rect/arc/polygon primitives in the kernel — every
 //! shape is faceted here into a chain of `Sketch::add_segment` calls (or,
 //! on a face, a `Vec<Point3>` path/loop), circles/arcs/polygons in
@@ -127,6 +134,47 @@ fn commit_target(ctx: &mut Ctx, target: PlaneTarget) -> Result<(SketchId, Plane)
                 .into(),
         )),
     }
+}
+
+/// The plane a `detached: true` draw lands on: a face's, or a new plane's.
+/// A sketch target refuses `detached` (invalid params): the sketch named
+/// is the drawing being continued, and its own flag decides (detached
+/// shapes D10).
+fn detached_plane(ctx: &Ctx, target: &PlaneTarget) -> Result<Plane, CmdError> {
+    match *target {
+        PlaneTarget::NewPlane(plane) => Ok(plane),
+        PlaneTarget::Face(face) => draft::face_plane(ctx, face),
+        PlaneTarget::Sketch(_) => Err(CmdError::Params(
+            "detached is decided by the sketch; omit it for a sketch target".into(),
+        )),
+    }
+}
+
+/// Draws `runs` as one new detached sketch on the target's plane
+/// ([`detached_plane`] resolved it) and answers the sketch result shape.
+fn draw_detached(
+    ctx: &mut Ctx,
+    target: PlaneTarget,
+    label: &str,
+    runs: Vec<Run>,
+) -> Result<Value, CmdError> {
+    let (sketch, curve) = match target {
+        PlaneTarget::Face(face) => draft::draw_detached_on_face(ctx, face, label, runs)?,
+        PlaneTarget::NewPlane(plane) => draft::draw_detached(ctx, plane, None, label, runs)?,
+        PlaneTarget::Sketch(_) => {
+            return Err(CmdError::Internal(
+                "draw_detached called with a sketch target — detached_plane refuses it first"
+                    .into(),
+            ));
+        }
+    };
+    // Every region of the new sketch is new.
+    let regions: Vec<SketchRegionId> = ctx
+        .doc
+        .sketch(sketch)
+        .map(|sk| sk.regions().keys().collect())
+        .unwrap_or_default();
+    Ok(draw_result(ctx, sketch, &regions, curve))
 }
 
 /// `n` evenly spaced points around a circle's circumference in `plane`'s
@@ -261,6 +309,8 @@ pub(super) fn draw_line(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     struct P {
         plane: Value,
         points: Vec<Value>,
+        #[serde(default)]
+        detached: Option<bool>,
     }
     let p: P = parse_params(params)?;
     if p.points.len() < 2 {
@@ -272,6 +322,11 @@ pub(super) fn draw_line(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         .iter()
         .map(|v| locate::resolve_point(ctx, v))
         .collect::<Result<_, _>>()?;
+
+    if p.detached == Some(true) {
+        detached_plane(ctx, &target)?;
+        return draw_detached(ctx, target, "Draw line", vec![Run::plain(pts)]);
+    }
 
     if let PlaneTarget::Face(face_ref) = target {
         return draft::draw_on_face(ctx, face_ref, "Draw line", vec![Run::plain(pts)]);
@@ -297,11 +352,19 @@ pub(super) fn draw_rect(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         plane: Value,
         corner_a: Value,
         corner_b: Value,
+        #[serde(default)]
+        detached: Option<bool>,
     }
     let p: P = parse_params(params)?;
     let target = locate::resolve_plane(ctx, &p.plane)?;
     let a = locate::resolve_point(ctx, &p.corner_a)?;
     let b = locate::resolve_point(ctx, &p.corner_b)?;
+
+    if p.detached == Some(true) {
+        let plane = detached_plane(ctx, &target)?;
+        let ring = draft::closed(rect_corners(&plane, a, b).to_vec());
+        return draw_detached(ctx, target, "Draw rectangle", vec![Run::plain(ring)]);
+    }
 
     if let PlaneTarget::Face(face_ref) = target {
         let plane = draft::face_plane(ctx, face_ref)?;
@@ -334,6 +397,8 @@ pub(super) fn draw_circle(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdErr
         radius: f64,
         #[serde(default)]
         segments: Option<usize>,
+        #[serde(default)]
+        detached: Option<bool>,
     }
     let p: P = parse_params(params)?;
     let n = match p.segments {
@@ -359,6 +424,12 @@ pub(super) fn draw_circle(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdErr
         radius: p.radius,
     };
 
+    if p.detached == Some(true) {
+        let plane = detached_plane(ctx, &target)?;
+        let ring = draft::closed(ring_points(&plane, center, p.radius, n));
+        let runs = vec![Run::curve(ring, geom, SketchCurveKind::Circle)];
+        return draw_detached(ctx, target, "Draw circle", runs);
+    }
     if let PlaneTarget::Face(face_ref) = target {
         let plane = draft::face_plane(ctx, face_ref)?;
         let ring = draft::closed(ring_points(&plane, center, p.radius, n));
@@ -430,6 +501,8 @@ pub(super) fn draw_arc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError>
         segments: Option<usize>,
         #[serde(default)]
         close: Option<String>,
+        #[serde(default)]
+        detached: Option<bool>,
     }
     let p: P = parse_params(params)?;
     let close = ArcClose::parse(p.close.as_deref())?;
@@ -531,34 +604,36 @@ pub(super) fn draw_arc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError>
         radius: p.radius,
     };
 
-    if let PlaneTarget::Face(face_ref) = target {
-        let plane = draft::face_plane(ctx, face_ref)?;
-        let mut pts = arc_points(&plane, center, p.radius, p.start_angle, sweep, n);
+    // The face-mode (and detached) runs: a full turn is one closed curve
+    // run; otherwise the arc's own chain carries its circle and the closing
+    // edges of a pie or segment are plain lines, so the shape keeps its arc
+    // on a face as it does on the ground.
+    let arc_runs = |plane: &Plane| -> Vec<Run> {
+        let mut pts = arc_points(plane, center, p.radius, p.start_angle, sweep, n);
         let circle = SketchCurveKind::Circle;
         if closes_a_full_turn {
             pts.pop(); // last point coincides with the first at a full turn
-            let ring = draft::closed(pts);
-            return draft::draw_on_face(
-                ctx,
-                face_ref,
-                "Draw arc",
-                vec![Run::curve(ring, geom, circle)],
-            );
+            return vec![Run::curve(draft::closed(pts), geom, circle)];
         }
-        // The arc's own chain carries its circle; the closing edges of a
-        // pie or segment are plain lines, so the shape keeps its arc on a
-        // face as it does on the ground.
         let first = pts[0];
         let last = pts[pts.len() - 1];
-        let runs = match close {
+        match close {
             ArcClose::Open => vec![Run::curve(pts, geom, circle)],
             ArcClose::Segment => vec![Run::curve(pts, geom, circle), Run::plain(vec![last, first])],
             ArcClose::Pie => vec![
                 Run::curve(pts, geom, circle),
                 Run::plain(vec![last, center, first]),
             ],
-        };
-        return draft::draw_on_face(ctx, face_ref, "Draw arc", runs);
+        }
+    };
+    if p.detached == Some(true) {
+        let plane = detached_plane(ctx, &target)?;
+        let runs = arc_runs(&plane);
+        return draw_detached(ctx, target, "Draw arc", runs);
+    }
+    if let PlaneTarget::Face(face_ref) = target {
+        let plane = draft::face_plane(ctx, face_ref)?;
+        return draft::draw_on_face(ctx, face_ref, "Draw arc", arc_runs(&plane));
     }
     let (sketch, plane) = commit_target(ctx, target)?;
     let pts = arc_points(&plane, center, p.radius, p.start_angle, sweep, n);
@@ -608,6 +683,8 @@ pub(super) fn draw_polygon(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdEr
         center: Value,
         radius: f64,
         sides: usize,
+        #[serde(default)]
+        detached: Option<bool>,
     }
     let p: P = parse_params(params)?;
     if p.sides < 3 {
@@ -634,6 +711,12 @@ pub(super) fn draw_polygon(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdEr
     };
     let n = p.sides;
 
+    if p.detached == Some(true) {
+        let plane = detached_plane(ctx, &target)?;
+        let ring = draft::closed(ring_points(&plane, center, p.radius, n));
+        let runs = vec![Run::curve(ring, geom, SketchCurveKind::Polygon)];
+        return draw_detached(ctx, target, "Draw polygon", runs);
+    }
     if let PlaneTarget::Face(face_ref) = target {
         let plane = draft::face_plane(ctx, face_ref)?;
         let ring = draft::closed(ring_points(&plane, center, p.radius, n));

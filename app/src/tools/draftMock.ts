@@ -14,7 +14,7 @@ import { vi } from 'vitest'
 
 export interface DraftLog {
   /** Every begin call, in order, with its kind and raw args. */
-  begins: Array<{ kind: 'plane' | 'plane_in_instance' | 'face' | 'face_in_instance' | 'sketch' | 'ctx'; args: unknown[] }>
+  begins: Array<{ kind: 'plane' | 'plane_in_instance' | 'face' | 'face_in_instance' | 'sketch' | 'ctx' | 'detached'; args: unknown[] }>
   /** Every segment: [ax, ay, az, bx, by, bz]. */
   segments: Array<[number, number, number, number, number, number]>
   /** Curve brackets, in order: 'circle' | 'polygon' (begin) and 'end'. */
@@ -74,6 +74,8 @@ export function draftMock(opts: DraftMockOpts = {}) {
       begin('sketch', [sketch, ...rest], [], null)),
     draft_begin_ctx: vi.fn((ctx: string, ...rest: unknown[]) =>
       begin('ctx', [ctx, ...rest], opts.ctxObjects ?? [], null)),
+    draft_begin_detached: vi.fn((ctx: string, ...rest: unknown[]) =>
+      begin('detached', [ctx, ...rest], [], null)),
     draft_offset_region: vi.fn((d: bigint, key: bigint, distance: number) => {
       if (open === null || open.handle !== d) throw new Error('StaleDraft: no such draft')
       log.offsets.push([key, distance])

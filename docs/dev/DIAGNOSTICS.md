@@ -209,6 +209,7 @@ longer replay.
 | `duplicate_node` | `kind`, `id`, `affine[12]` (row-major 3×4) | deep-copy a node (Move+Alt) at the affine offset |
 | `slice_object` | `object`, `plane[6]` (`[px,py,pz,nx,ny,nz]`) | slice an Object by a plane |
 | `draft_begin_plane` / `draft_begin_face` / `draft_begin_sketch` / `draft_begin_ctx` | `draft` (the handle replay re-mints), the plane (`px..nz`), `object`/`face`, `sketch`, or `ctx` (JSON), `label` | open a drafting gesture on a plane (draw on the ground or on a face); `_in_instance` forms also carry `instance` and take world coordinates |
+| `draft_begin_detached` | `draft`, `ctx` (JSON: a `plane` or `face` context), `label` | open a drafting gesture that draws one new detached shape (it joins nothing on the plane) |
 | `draft_add_segment` | `draft`, `a[3]`, `b[3]` | add a segment to the open draft's drawing |
 | `draft_begin_curve` / `draft_begin_curve_with` / `draft_begin_polygon_with` / `draft_end_curve` | `draft`, plus `center[3]`, `radius` for the `_with` forms | bracket segments into one curve chain (a plain run such as a flat arc), circle, or regular polygon |
 | `draft_remove_edges` / `draft_transform_edges` / `draft_copy_edges` | `draft`, `keys[]` (edge keys), `affine[12]` | erase, move, or copy drawing by edge key |

@@ -285,6 +285,64 @@ function buildCutterMovedIntoBin(scene) {
   return scene.take_recording();
 }
 
+/**
+ * The same cutter drawn the way the Getting Started guide now draws it: the
+ * bin as above, then a 2 cm disk centered on the right face's upper corner
+ * at y = 0 drawn as a DETACHED shape (`draft_begin_detached` on the face),
+ * so the face's edge does not split it and the face stays whole; the disk is
+ * pushed 7 cm across the bin into a cylinder whose axis runs along the top
+ * edge, and subtracted. The fixture locks a recording holding
+ * `draft_begin_detached` and the cut it makes.
+ */
+function buildDetachedCutterOnBin(scene) {
+  scene.start_recording();
+
+  const bin = scene.begin_ground_sketch();
+  const footprint = [
+    [0, 0, 0.07, 0],
+    [0.07, 0, 0.07, 0.05],
+    [0.07, 0.05, 0, 0.05],
+    [0, 0.05, 0, 0],
+  ];
+  let binRegion = null;
+  for (const [ax, ay, bx, by] of footprint) {
+    const created = scene.sketch_add_segment(bin, ax, ay, 0, bx, by, 0).regions_created();
+    if (created.length > 0) binRegion = created[0];
+  }
+  if (binRegion === null) throw new Error('closing the bin footprint did not create a region');
+  const block = scene.extrude_region(bin, binRegion, 0.06);
+
+  // The right face (x = 0.07, normal +X), found by a ray from +X.
+  const face = scene.pick_face_geometry(1, 0.025, 0.03, -1, 0, 0);
+  if (!face) throw new Error("the ray missed the bin's right face");
+  // Ids are u64 (BigInt here): written into the JSON by their digits.
+  const ctx = `{"face":{"object":${face.object()},"face":${face.face()}}}`;
+
+  const [cy, cz, r, n] = [0.0, 0.06, 0.02, 48];
+  const d = scene.draft_begin_detached(ctx, 'Circle');
+  scene.draft_begin_curve_with(d, [0.07, cy, cz], r);
+  const at = (i) => {
+    const t = (2 * Math.PI * i) / n;
+    return [cy + r * Math.cos(t), cz + r * Math.sin(t)];
+  };
+  for (let i = 0; i < n; i++) {
+    const [ay, az] = at(i);
+    const [by, bz] = at((i + 1) % n);
+    scene.draft_add_segment(d, 0.07, ay, az, 0.07, by, bz);
+  }
+  scene.draft_end_curve(d);
+  scene.draft_end(d);
+
+  // The whole disk is one detached region on the face's plane.
+  const pick = scene.pick_sketch_region(1, 0.005, 0.055, -1, 0, 0);
+  if (!pick || !pick.detached()) throw new Error('expected to pick the detached disk');
+  const cutter = scene.extrude_region(pick.sketch(), pick.region(), -0.07);
+  scene.boolean_nodes(1 /* subtract */, 0, block, 0, cutter);
+
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
 /** Named scenarios, each producing a `take_recording()` JSON string. */
 const SCENARIOS = {
   'two-boxes-union-slice': buildTwoBoxesUnionSlice,
@@ -296,6 +354,7 @@ const SCENARIOS = {
   'chained-boolean': buildChainedBoolean,
   'hex-prism': buildHexPrism,
   'cutter-moved-into-bin': buildCutterMovedIntoBin,
+  'detached-cutter-on-bin': buildDetachedCutterOnBin,
 };
 
 /** Runs scenario `name`'s build and writes `fixtures/<name>.json`. */

@@ -59,13 +59,17 @@ import {
 import {
   allFree,
   ctxOfObjectPlane,
-  ctxOfSketch,
+  ctxOfSketchOnly,
+  ctxOfSketchUnits,
   ctxThroughAffine,
   draftRef,
   isDraftRef,
   keysToArray,
   planeOfCtx,
+  planeOfCtxIn,
   readPlaneUnits,
+  detachedSketchIds,
+  sketchOfCtx,
   resolveDraft,
   segmentsOf,
   storesOf,
@@ -136,6 +140,9 @@ export interface DraftGroup {
   /** True when some of a shape's edges ride with a selected owner: only the
    *  rest is drafted: erased and drawn again around the owners' move. */
   mixed: boolean
+  /** The plane of a detached shape's own (sketch-only) context, which has no
+   *  plane string; null for an ordinary plane context. */
+  sketchPlane: { point: V3; normal: V3 } | null
 }
 
 /** The owners a selection carries drawing along with: objects selected
@@ -248,7 +255,11 @@ export function planDraftTransforms(wasmScene: WasmScene, selection: readonly No
     if (own.length === 0) continue
     let g = groups.get(node.ctx)
     if (g === undefined) {
-      g = { ctx: node.ctx, nodes: [], unitKeys: [], edges: [], mixed: false }
+      const own = planeOfCtx(node.ctx) === null ? planeOfCtxIn(wasmScene, node.ctx) : null
+      g = {
+        ctx: node.ctx, nodes: [], unitKeys: [], edges: [], mixed: false,
+        sketchPlane: own === null ? null : { point: own.point, normal: own.normal },
+      }
       groups.set(node.ctx, g)
     }
     g.nodes.push(node)
@@ -263,7 +274,7 @@ export function planDraftTransforms(wasmScene: WasmScene, selection: readonly No
 /** Largest distance any of the group's endpoints (and circle centers) lands
  *  from its plane under `affine` — an in-plane transform keeps this ~0. */
 function offPlaneAfter(group: DraftGroup, affine: Float64Array): number {
-  const pl = planeOfCtx(group.ctx)
+  const pl = planeOfCtx(group.ctx) ?? group.sketchPlane
   if (pl === null) return 0
   let worst = 0
   const check = (p: V3) => {
@@ -472,6 +483,23 @@ function refsAtAnchors(wasmScene: WasmScene, ctx: string | null, anchors: readon
   return unitsAtSegments(pu, anchors).map((u) => draftRef('draft-island', ctx, u.key))
 }
 
+/** The refs of a pure-void shape that left its plane, found again by
+ *  geometry. A plain shape is listed on its moved plane. A detached shape
+ *  has no plane string: it stays the sketch it was (a whole-sketch move) or
+ *  becomes a new detached sketch (a subset detached), so the moved anchors
+ *  are looked for in its own context, then in every detached sketch. */
+function refsAfterLeavingPlane(wasmScene: WasmScene, g: DraftGroup, affine: Float64Array): NodeRef[] {
+  const anchors = movedAnchors(g, affine)
+  if (sketchOfCtx(g.ctx) === null) return refsAtAnchors(wasmScene, ctxThroughAffine(g.ctx, affine), anchors)
+  const own = refsAtAnchors(wasmScene, g.ctx, anchors)
+  if (own.length > 0) return own
+  for (const sketch of detachedSketchIds(wasmScene)) {
+    const refs = refsAtAnchors(wasmScene, ctxOfSketchOnly(sketch), anchors)
+    if (refs.length > 0) return refs
+  }
+  return []
+}
+
 /** Replace each group's nodes in `committed` with the refs found at its
  *  moved anchors (in the position of the group's first node), dropping a
  *  group that cannot be re-found. Duplicate refs collapse. */
@@ -662,7 +690,7 @@ export function commitSelectionTransform(
         found.set(g, refsAtAnchors(wasmScene, g.ctx, movedAnchors(g, affineF64)))
       }
       for (const g of detaching) {
-        found.set(g, refsAtAnchors(wasmScene, ctxThroughAffine(g.ctx, affineF64), movedAnchors(g, affineF64)))
+        found.set(g, refsAfterLeavingPlane(wasmScene, g, affineF64))
       }
       for (const { node, segs } of riding) {
         if (!isDraftRef(node) || segs.length === 0) continue
@@ -719,7 +747,7 @@ function ridingCtx(ctx: string, affine: Float64Array): string | null {
  *  how a copy made through the sketch machinery is handed back as a drawn
  *  shape. `null` when it cannot be found. */
 function draftRefOfSketchIsland(wasmScene: WasmScene, sketch: bigint, island: bigint): NodeRef | null {
-  const ctx = ctxOfSketch(wasmScene, sketch)
+  const ctx = ctxOfSketchUnits(wasmScene, sketch)
   if (ctx === null) return null
   const anchors: [V3, V3][] = []
   for (const edge of wasmScene.sketch_island_edges(sketch, island)) {
@@ -769,6 +797,10 @@ interface CopyPlan {
   /** Free islands of shapes that leave their plane: detach-copied. */
   detachIslands: SketchIslandGroup[]
   wholeSketchSources: NodeRef[]
+  /** Detached shapes (each wholly one detached sketch): copied through
+   *  `copy_sketch_islands` whether or not the copy leaves the plane — a copy
+   *  landing in the source sketch would arrange with the original (D7). */
+  detached: DraftGroup[]
 }
 
 function planCopy(wasmScene: WasmScene, selection: readonly NodeRef[], affines: readonly Float64Array[]): CopyPlan {
@@ -777,9 +809,12 @@ function planCopy(wasmScene: WasmScene, selection: readonly NodeRef[], affines: 
     mixed: new Map(),
     detachIslands: [],
     wholeSketchSources: selection.filter((n) => n.kind === 'sketch'),
+    detached: [],
   }
   for (const g of planDraftTransforms(wasmScene, selection)) {
-    if (affines.every((a) => inPlane(g, a))) {
+    if (detachedSketchOfGroup(g) !== null) {
+      plan.detached.push(g)
+    } else if (affines.every((a) => inPlane(g, a))) {
       if (g.mixed) plan.mixed.set(g, captureDrawing(wasmScene, g))
       else plan.pure.push(g)
     } else if (g.edges.every((e) => e.store.kind === 'free')) {
@@ -791,10 +826,41 @@ function planCopy(wasmScene: WasmScene, selection: readonly NodeRef[], affines: 
   return plan
 }
 
+/** The detached sketch a group's shapes are wholly in (a world sketch), or
+ *  null for any other group. */
+function detachedSketchOfGroup(g: DraftGroup): bigint | null {
+  const of = sketchOfCtx(g.ctx)
+  if (of === null || of.instance !== null || g.edges.length === 0) return null
+  return g.edges.every((e) => e.store.kind === 'free' && e.store.detached === true && e.store.sketch === of.sketch)
+    ? of.sketch
+    : null
+}
+
+/** Copy a detached shape at every affine: each copy is a NEW detached sketch
+ *  made by `copy_sketch_islands` (the unit keys are mapped to the sketch's
+ *  island handles through `sketch_unit_keys`). */
+function copyDetachedShapes(wasmScene: WasmScene, g: DraftGroup, affines: readonly Float64Array[]): NodeRef[] {
+  const sketch = detachedSketchOfGroup(g)
+  if (sketch === null) return []
+  const keys = JSON.parse(wasmScene.sketch_unit_keys(sketch)) as { islands: [number, string][] }
+  const islands = keys.islands.filter(([, key]) => g.unitKeys.includes(key)).map(([id]) => BigInt(id))
+  if (islands.length === 0) {
+    throw new Error('StaleReference: could not find the shape to copy; nothing was changed')
+  }
+  const out: NodeRef[] = []
+  for (const affine of affines) {
+    const copy = wasmScene.copy_sketch_islands(sketch, new BigUint64Array(islands), affine)
+    const ctx = ctxOfSketchOnly(copy)
+    for (const u of readPlaneUnits(wasmScene, ctx)?.units ?? []) out.push(draftRef('draft-island', ctx, u.key))
+  }
+  return out
+}
+
 /** The shapes of a plane context copied by `draft_copy_edges`, and the whole
  *  sketches / detaching islands. */
 function copyWholeDrawing(wasmScene: WasmScene, plan: CopyPlan, affines: readonly Float64Array[]): NodeRef[] {
   const committed: NodeRef[] = []
+  for (const g of plan.detached) committed.push(...copyDetachedShapes(wasmScene, g, affines))
   for (const g of plan.pure) {
     const seen = new Set<string>()
     const addRefs = (affine: Float64Array) => {
@@ -1066,7 +1132,9 @@ export function duplicateSketchSelectionByAffineArray(
 ): NodeRef[] {
   const plan = planCopy(wasmScene, selection, affines)
   const sketchPart = plan.wholeSketchSources.length > 0 || plan.detachIslands.length > 0
-  const steps = plan.pure.length + plan.mixed.size + (affines.length > 1 && plan.pure.length > 0 ? 1 : 0)
+  const steps =
+    plan.pure.length + plan.mixed.size + (affines.length > 1 && plan.pure.length > 0 ? 1 : 0) +
+    plan.detached.length * affines.length
   return inHistoryBracket(
     wasmScene,
     t`Copy`,

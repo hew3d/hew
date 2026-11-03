@@ -25,7 +25,7 @@ import {
 } from './transformSelection'
 import { isSessionGhost } from './transformPreview'
 import { affineToFloat64, applyAffineToPoint, rotateAboutPivotAxis, translationAffine } from './transformMath'
-import { ctxGround, ctxOfPlane, draftRef } from './planeUnits'
+import { ctxGround, ctxOfPlane, ctxOfSketchOnly, draftRef } from './planeUnits'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
 
@@ -51,7 +51,7 @@ const dc = (key: bigint, ctx: string = CTX): NodeRef => draftRef('draft-curve', 
 type FakeStore =
   | { kind: 'topology'; object: number }
   | { kind: 'owned'; object: number; sketch: number }
-  | { kind: 'free'; sketch: number }
+  | { kind: 'free'; sketch: number; detached?: true }
 interface FakeEdge {
   key: bigint
   a: V3
@@ -2258,5 +2258,70 @@ describe('draftEdgesToErase (Delete)', () => {
     expect([...withBox.huskCandidates]).toEqual([3n])
     const withSketch = draftEdgesToErase(scene, [{ kind: 'sketch', id: 3n }, di(60n, CTX_UP)], new Set([3n]))
     expect([...withSketch.draftEdgeKeys.get(CTX_UP)!]).toEqual([hex(30n)])
+  })
+})
+
+// Detached shapes (docs/design/separate-shapes.md §6.6, D5, D7): a detached
+// unit's refs carry its own sketch context; moves run in that scope, a move
+// out of the sketch's plane is seen as one, and copies are NEW sketches.
+describe('detached shapes', () => {
+  const SEP: FakeStore = { kind: 'free', sketch: 5, detached: true }
+  const SCTX = ctxOfSketchOnly(5)
+  const disk = (unit: bigint, keys: bigint[]): FakeUnit => chain(unit, keys, [0, 0, 0], SEP)
+
+  function sepScene(opts: FakeOpts = {}) {
+    const m = makeScene({ listing: { [SCTX]: [disk(40n, [7n, 8n])] }, islands: { '5': [40n] }, ...opts })
+    const extra = {
+      sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
+      sketch_unit_keys: vi.fn(() => JSON.stringify({ edges: [], islands: [[40, hex(40n)], [41, hex(41n)]], curves: [], regions: [] })),
+      copy_sketch_islands: vi.fn(() => 6n),
+    }
+    Object.assign(m.raw, extra)
+    return { ...m, extra }
+  }
+
+  it('groups a detached unit by its own sketch context and knows its plane', () => {
+    const { scene } = sepScene()
+    const [g] = planDraftTransforms(scene, [di(40n, SCTX)])
+    expect(g.ctx).toBe(SCTX)
+    expect(g.sketchPlane).toEqual({ point: [0, 0, 0], normal: [0, 0, 1] })
+  })
+
+  it('an in-plane move drafts inside the sketch-only context', () => {
+    const { scene, raw } = sepScene()
+    commitSelectionTransform(scene, [di(40n, SCTX)], AFFINE)
+    expect(raw.draft_begin_ctx).toHaveBeenCalledWith(SCTX, expect.any(String))
+    expect(raw.draft_transform_edges).toHaveBeenCalledTimes(1)
+    expect(raw.transform_selection).not.toHaveBeenCalled()
+  })
+
+  it('a move OFF the sketch plane is out-of-plane (detaches through the sketch machinery), never a draft', () => {
+    const { scene, raw, calls } = sepScene()
+    commitSelectionTransform(scene, [di(40n, SCTX)], AFFINE_UP)
+    expect(raw.draft_transform_edges).not.toHaveBeenCalled()
+    // The whole sketch (its one island) moves as a handle-stable bake.
+    expect(calls.map((c) => c.name)).toEqual(['transform_selection'])
+  })
+
+  it('copy: a detached unit becomes a NEW sketch through copy_sketch_islands, in plane or not', () => {
+    for (const affine of [AFFINE, AFFINE_UP]) {
+      const { scene, raw, extra } = sepScene()
+      raw.plane_units_json.mockImplementation(() => listingJson([disk(40n, [7n, 8n])]))
+      const out = duplicateSketchSelectionByAffineArray(scene, [di(40n, SCTX)], [affine])
+      expect(raw.draft_copy_edges).not.toHaveBeenCalled()
+      expect(extra.copy_sketch_islands).toHaveBeenCalledTimes(1)
+      const [sketch, islands, a] = extra.copy_sketch_islands.mock.calls[0] as unknown as [bigint, BigUint64Array, Float64Array]
+      expect(sketch).toBe(5n)
+      expect([...islands]).toEqual([40n]) // unit key -> island handle through sketch_unit_keys
+      expect(a).toBe(affine)
+      expect(out.map((r) => r.ctx)).toEqual([ctxOfSketchOnly(6n)])
+    }
+  })
+
+  it('an array of N copies is N new sketches', () => {
+    const { scene, raw, extra } = sepScene()
+    raw.plane_units_json.mockImplementation(() => listingJson([disk(40n, [7n, 8n])]))
+    duplicateSketchSelectionByAffineArray(scene, [di(40n, SCTX)], [AFFINE, AFFINE_UP, AFFINE])
+    expect(extra.copy_sketch_islands).toHaveBeenCalledTimes(3)
   })
 })

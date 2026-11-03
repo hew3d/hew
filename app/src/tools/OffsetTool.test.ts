@@ -18,6 +18,9 @@ import { draftMock, type DraftLog } from './draftMock'
 import { planeUnitsMock, ringUnit, hexKey, type MockListing, type MockRegion } from './planeUnitsMock'
 import { SiblingPreviewMirror } from '../viewport/siblingPreview'
 import { isSessionGhost } from './transformPreview'
+import { PREVIEW_DETACHED_FALLBACK, PREVIEW_DRAW_JOINED_FALLBACK } from './previewTint'
+import type { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
+import type { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 
 /** Ray straight down at (x, y). */
 function rayAt(x: number, y: number): Ray {
@@ -190,6 +193,20 @@ describe('OffsetTool — Path B (sketch region)', () => {
     expect(preview.children.length).toBeGreaterThan(0)
     // Nothing reaches the kernel until the commit click.
     expect(scene.draft_begin_ctx).not.toHaveBeenCalled()
+  })
+
+  it('the offset ghost takes the source color: blue for a free profile, orange for a face drawing', () => {
+    const ghostHex = (scene: WasmScene) => {
+      const { tool, preview } = makeTool(scene)
+      tool.onPointerDown(null, rayAt(1, 1))
+      tool.onPointerMove(null, rayAt(1, 0.5))
+      const line = preview.children[0] as LineSegments2
+      return (line.material as LineMaterial).color.getHex()
+    }
+    const free = ghostHex(makeWasmScene({ regionPick: makeRegionPick(9n, 7n) }))
+    const face = ghostHex(makeWasmScene({ facePick: makeFacePick(3n, 4n) }))
+    expect(free).toBe(new THREE.Color(PREVIEW_DETACHED_FALLBACK).getHex())
+    expect(face).toBe(new THREE.Color(PREVIEW_DRAW_JOINED_FALLBACK).getHex())
   })
 
   it('a collapsing distance draws no ghost but keeps the drag alive', () => {

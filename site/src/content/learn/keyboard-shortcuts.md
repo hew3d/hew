@@ -73,6 +73,7 @@ These keys change what the *current tool operation* does. Each is covered in mor
 | `Shift` | Lock to the dominant axis (Line mid-chain, Move, Tape Measure) · pin the drawing plane under the cursor before the first click (Line, Rectangle, Circle, Polygon, Arc; `Shift` again or `Esc` releases) · lock the axis/plane (Rotate, Protractor, Slice) · pan while orbiting (Orbit tool; can be pressed or released mid-drag, switching orbit and pan back and forth) |
 | `→` / `←` / `↑` | Lock to the X / Y / Z axis (Line, Move, Rotate, Protractor, Slice, Tape Measure); `↓` clears |
 | `⌘`/`Ctrl` (held) | Measure without dropping a guide (Tape Measure) · turn off inertia for a precise, 1:1 orbit or pan (Orbit/Pan tools and middle-button orbit); pressing it while the camera is still coasting stops it dead |
+| `⌘`/`Ctrl` (tap) | Line, Rectangle, Circle, Polygon, and Arc toggle **Detached**: the shape stays apart from the face or drawing under it (the cursor gains a `+`; stays on until tapped again or the tool changes) · Push/Pull toggles extruding a new object instead of changing the clicked one |
 | `Option` (Mac) / `Ctrl` (Windows, Linux) (tap) | Move/Rotate toggles between moving/rotating and copying (stays on until tapped again) |
 | `Option`/`Alt` (press) | Arc cycles how the arc closes: open · pie · segment |
 | `3x` or `3/` + `Enter` | Right after a copy commits: multiply it into 3 copies / divide the distance into 3 (Move; `x3` and `/3` work too) |

@@ -53,7 +53,7 @@ pub use document::{
     DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore, DraftUnit, EntityRef,
     FollowMePath, HistoryArg, HistoryEntries, HistoryEntryInfo, HistoryKind, HistoryOrigin,
     IngestJob, IngestProgress, InsertOptions, InsertReport, LibraryProvenance, MAX_COMPONENT_DEPTH,
-    MaterialScope, NodeId, PendingActionKind, PlaneUnits, PurgeReport,
+    MaterialScope, NodeId, PendingActionKind, PlaneListing, PlaneUnits, PurgeReport,
 };
 pub use error::TopologyError;
 pub use guide::{Guide, GuideSpan};

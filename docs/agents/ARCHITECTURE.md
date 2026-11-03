@@ -279,6 +279,13 @@ all inside the same undo step (`Document::complete_change` adds owned
 sketches to a change). The file records an owned sketch's owner as
 `owner_object` (HEW_FILE_FORMAT.md 4.6, v17).
 
+A free sketch may be **detached**: it takes part in no plane arrangement
+(`Sketch::detached`, format v23), is its own drafting context, and
+extrudes only to a new Object. It is the one way to draw on a face
+without joining it; nothing joins it later. The viewport draws a
+detached sketch, like any free sketch, in blue, and the edges and regions
+of a solid's face (imprints, object-owned sketches) in orange.
+
 Imports are the one source of open Objects, and many of them are
 **surfaces**: a single sheet SketchUp let someone draw on purpose (a pane
 of glass, a sign, terrain). Model Health (`kernel::health`) reports that as

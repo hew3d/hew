@@ -1066,6 +1066,15 @@ pub enum RecordedCall {
         ctx: String,
         label: String,
     },
+    /// `draft_begin_detached(ctx_json, label)`: a draft that draws one new
+    /// detached shape (detached shapes §3.7). Additive (the posture above):
+    /// a recording that never draws a detached shape replays on older builds
+    /// unchanged; one that does fails to parse there, loudly.
+    DraftBeginDetached {
+        draft: u64,
+        ctx: String,
+        label: String,
+    },
     /// `draft_end(draft)`.
     DraftEnd { draft: u64 },
     /// `draft_cancel(draft)`.

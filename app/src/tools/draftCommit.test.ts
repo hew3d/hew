@@ -14,6 +14,7 @@ function mockScene(over: Record<string, unknown> = {}) {
     draft_begin_face: rec('begin_face', 1n),
     draft_begin_face_in_instance: rec('begin_face_in_instance', 1n),
     draft_begin_sketch: rec('begin_sketch', 1n),
+    draft_begin_detached: rec('begin_detached', 1n),
     draft_end: rec('end', REPORT),
     draft_cancel: rec('cancel', true),
     sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
@@ -76,6 +77,26 @@ describe('runDraft', () => {
     m = mockScene()
     runDraft(m.scene, { kind: 'sketch', handle: 4n, instance: null }, 'L', () => 0)
     expect(m.raw.draft_begin_sketch).toHaveBeenCalledWith(4n, 'L')
+  })
+
+  it('routes a detached plane or face target to draft_begin_detached with the exact context JSON', () => {
+    let m = mockScene()
+    runDraft(m.scene, { kind: 'plane', plane: groundDrawPlane(), instance: null, detached: true }, 'C', () => 0)
+    expect(m.raw.draft_begin_detached).toHaveBeenCalledWith('{"plane":[0,0,0,0,0,1]}', 'C')
+    expect(m.raw.draft_begin_plane).not.toHaveBeenCalled()
+
+    m = mockScene()
+    runDraft(m.scene, { kind: 'plane', plane: groundDrawPlane(), instance: 8n, detached: true }, 'C', () => 0)
+    expect(m.raw.draft_begin_detached).toHaveBeenCalledWith('{"plane":[0,0,0,0,0,1],"instance":8}', 'C')
+
+    m = mockScene()
+    runDraft(m.scene, { kind: 'face', object: 2n, face: 3n, instance: null, detached: true }, 'C', () => 0)
+    expect(m.raw.draft_begin_detached).toHaveBeenCalledWith('{"face":{"object":2,"face":3}}', 'C')
+    expect(m.raw.draft_begin_face).not.toHaveBeenCalled()
+
+    m = mockScene()
+    runDraft(m.scene, { kind: 'face', object: 2n, face: 3n, instance: 8n, detached: true }, 'C', () => 0)
+    expect(m.raw.draft_begin_detached).toHaveBeenCalledWith('{"face":{"object":2,"face":3},"instance":8}', 'C')
   })
 
   it('opens a definition-owned sketch as its world plane inside the instance', () => {

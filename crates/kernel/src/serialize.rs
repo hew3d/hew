@@ -251,7 +251,18 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 8;
 /// document whose guides are all whole lines writes the same manifest as
 /// v21 apart from the version. Gated by [`GUIDE_SPAN_MIN_VERSION`].
 /// Geometry buffer unchanged.
-pub const MANIFEST_FORMAT_VERSION: u32 = 22;
+/// **v23**: `sketches[].detached` — the sketch is a detached shape
+/// (`Sketch::detached`): drawing that takes part in no plane arrangement,
+/// never object-owned. Optional and omitted when false, so a document with
+/// no detached sketch writes the same manifest as v22 apart from the
+/// version. Gated by [`DETACHED_SKETCH_MIN_VERSION`]; a reader also rejects
+/// `detached` together with `owner_object`. Geometry buffer unchanged.
+pub const MANIFEST_FORMAT_VERSION: u32 = 23;
+
+/// The manifest version at which `sketches[].detached` was introduced. A
+/// file declaring an older version that sets it is malformed for its own
+/// declared version and rejected (reject-not-repair).
+pub(crate) const DETACHED_SKETCH_MIN_VERSION: u32 = 23;
 
 /// The manifest version at which `sketches[].tags` was introduced. A file
 /// declaring an older version that carries one is malformed for its own
@@ -2289,6 +2300,11 @@ pub(crate) struct SketchDto {
     /// object-owned — every sketch before v17.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_object: Option<u32>,
+    /// A detached shape (manifest v23+, `Sketch::detached`): drawing that
+    /// takes part in no plane arrangement. Omitted when false; `true` in an
+    /// older file, or together with `owner_object`, is rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
     /// The GROUP the sketch is drawn in (manifest v19+): the dense
     /// `groups[]` id of the group that holds it — a `.skp` group of edges,
     /// or lines drawn while editing a group. The sketch keeps its frame
@@ -3028,8 +3044,9 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
         curves: curve_dtos,
         owner: None,
         owner_object: None, // patched by the caller (`encode_document`), like `id`
-        owner_group: None,  // likewise
-        tags: Vec::new(),   // likewise
+        detached: sk.detached(),
+        owner_group: None, // patched by the caller, like `owner_object`
+        tags: Vec::new(),  // likewise
     }
 }
 
@@ -3930,6 +3947,21 @@ fn validate_manifest_references(
                 what: format!("sketch {} owner object id {} out of range", sk.id, owner),
             });
         }
+        if sk.detached && manifest.format_version < DETACHED_SKETCH_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} is detached in a v{} manifest (introduced at v{})",
+                    sk.id, manifest.format_version, DETACHED_SKETCH_MIN_VERSION
+                ),
+            });
+        }
+        // A detached sketch is never object-owned (invariant I9): a file
+        // claiming both is malformed, never resolved by dropping either.
+        if sk.detached && sk.owner_object.is_some() {
+            return Err(LoadError::MalformedManifest {
+                what: format!("sketch {} is both detached and owned by an object", sk.id),
+            });
+        }
         if sk.owner_group.is_some() && manifest.format_version < VIEW_MIN_VERSION {
             return Err(LoadError::MalformedManifest {
                 what: format!(
@@ -4186,7 +4218,7 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
         }
     })?;
 
-    let mut sk = Sketch::reconstruct(plane);
+    let mut sk = Sketch::reconstruct(plane, dto.detached);
 
     // Insert vertices in dense id order.
     let mut vert_ids: Vec<SketchVertexId> = Vec::with_capacity(dto.vertices.len());

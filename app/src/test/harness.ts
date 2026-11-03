@@ -888,6 +888,8 @@ export interface HewTestHarness {
   /** Every live sketch handle, as decimal strings — lets a spec find the
    * sketch a TOOL created (the tool's cached handle is internal). */
   getSketchIds(): string[]
+  /** The Object (handle string) whose face owns the sketch's edges, or null for a free sketch. */
+  getSketchOwnerObject(sketch: string): string | null
 
   /** All of `sketch`'s edges as flat endpoint pairs
    * `[ax,ay,az, bx,by,bz, ...]` — the geometry probe for asserting where a
@@ -2073,6 +2075,11 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     },
 
     getSketchIds: () => query((s) => Array.from(s.sketch_ids(), (id) => id.toString())),
+    getSketchOwnerObject: (sketch) =>
+      query((s) => {
+        const o = s.sketch_owner_object(BigInt(sketch))
+        return o === undefined ? null : o.toString()
+      }),
 
     getSketchLines: (sketch) => query((s) => Array.from(s.sketch_lines(BigInt(sketch)))),
     getSketchPlane: (sketch) =>

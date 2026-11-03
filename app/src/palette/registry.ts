@@ -121,11 +121,11 @@ const TOOL_ACTION_ID: Record<ToolName, string> = {
 
 const TOOL_DESCRIPTIONS: Record<ToolName, MessageDescriptor> = {
   'Select': msg`Pick faces, edges, and objects in the model.`,
-  'Line': msg`Draw a straight edge between two points.`,
-  'Rectangle': msg`Draw a rectangular face on the ground or a face.`,
-  'Circle': msg`Draw a faceted circular face.`,
-  'Polygon': msg`Draw a regular N-sided polygon from a center point.`,
-  'Arc': msg`Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment.`,
+  'Line': msg`Draw a straight edge between two points. Ctrl detaches the shape from the face.`,
+  'Rectangle': msg`Draw a rectangular face on the ground or a face. Ctrl detaches the shape from the face.`,
+  'Circle': msg`Draw a faceted circular face. Ctrl detaches the shape from the face.`,
+  'Polygon': msg`Draw a regular N-sided polygon from a center point. Ctrl detaches the shape from the face.`,
+  'Arc': msg`Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment. Ctrl detaches the shape from the face.`,
   'Push/Pull': msg`Extrude a face into a solid, or reshape one.`,
   'Follow Me': msg`Sweep a profile along a path into a solid.`,
   'Offset': msg`Copy a face or profile's boundary inward or outward at a set distance.`,

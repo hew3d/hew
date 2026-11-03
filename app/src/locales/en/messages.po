@@ -7,14 +7,6 @@ msgstr ""
 "X-Generator: @lingui/cli\n"
 "Language: en\n"
 
-#: src/tools/TapeMeasureTool.ts
-#~ msgid " — measuring only, no guide will be created."
-#~ msgstr " — measuring only, no guide will be created."
-
-#: src/tools/FollowMeTool.ts
-#~ msgid "— will land at the top level, not inside the group you’re editing"
-#~ msgstr "— will land at the top level, not inside the group you’re editing"
-
 #: src/panels/WelcomeScreen.tsx
 msgid ".hew, or import SketchUp, COLLADA, glTF, or STL."
 msgstr ".hew, or import SketchUp, COLLADA, glTF, or STL."
@@ -46,10 +38,6 @@ msgstr "{bytes} B"
 #: src/tools/RotateTool.ts
 msgid "{cap, plural, one {Array copy is limited to {limit} copy} other {Array copy is limited to {limit} copies}}"
 msgstr "{cap, plural, one {Array copy is limited to {limit} copy} other {Array copy is limited to {limit} copies}}"
-
-#: src/panels/LibraryDialog.tsx
-#~ msgid "{categoryName} items"
-#~ msgstr "{categoryName} items"
 
 #: src/App.tsx
 msgid "{copiedCount, plural, one {Copied # object} other {Copied # objects}}"
@@ -786,10 +774,6 @@ msgstr "A mirrored instance can't be exploded — baking the mirror would turn t
 msgid "A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis."
 msgstr "A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis."
 
-#: src/kernelErrors.ts
-#~ msgid "A placement of this component sits inside a group, so it opens in the in-context editing mode instead."
-#~ msgstr "A placement of this component sits inside a group, so it opens in the in-context editing mode instead."
-
 #: src/panels/WelcomeScreen.tsx
 msgid "A round table with a textured oak top, walnut cylinder legs, crossed stretchers, and a resting pen cup."
 msgstr "A round table with a textured oak top, walnut cylinder legs, crossed stretchers, and a resting pen cup."
@@ -1442,10 +1426,6 @@ msgstr "Click a point for the new origin."
 msgid "Click a point to dimension from, a line to dimension it, or a drawn circle/arc for a radius dimension."
 msgstr "Click a point to dimension from, a line to dimension it, or a drawn circle/arc for a radius dimension."
 
-#: src/tools/DimensionTool.ts
-#~ msgid "Click a point to dimension from, or click a drawn circle/arc for a radius dimension."
-#~ msgstr "Click a point to dimension from, or click a drawn circle/arc for a radius dimension."
-
 #: src/tools/TapeMeasureTool.ts
 msgid "Click a point to measure from — or click an edge to drop a parallel guide."
 msgstr "Click a point to measure from — or click an edge to drop a parallel guide."
@@ -1643,8 +1623,8 @@ msgid "Click to sweep it, or drag along the path for a partial sweep."
 msgstr "Click to sweep it, or drag along the path for a partial sweep."
 
 #: src/palette/registry.ts
-msgid "Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment."
-msgstr "Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment."
+msgid "Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment. Ctrl detaches the shape from the face."
+msgstr "Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment. Ctrl detaches the shape from the face."
 
 #: src/tools/MoveTool.ts
 msgid "Click where the copy lands — type an exact distance, arrow keys lock an axis, tap {COPY_MODIFIER_LABEL} to move instead."
@@ -1841,10 +1821,6 @@ msgstr "Contextual Dock"
 #: src/panels/SaveFormatDialog.tsx
 msgid "Continue"
 msgstr "Continue"
-
-#: src/settings/UnitsPane.tsx
-#~ msgid "Controls how lengths are displayed (e.g. the Move tool's live measurement). Model geometry is always stored in meters internally."
-#~ msgstr "Controls how lengths are displayed (e.g. the Move tool's live measurement). Model geometry is always stored in meters internally."
 
 #: src/settings/UnitsPane.tsx
 msgid "Controls how lengths are displayed (e.g. the Move tool's live measurement). Precision sets how far readouts are rounded: a number of decimals, or a fraction of an inch. A rounded readout is marked with ~, and Exact shows every digit a length needs. Each format remembers its own choice. Model geometry is always stored in meters internally."
@@ -2400,6 +2376,19 @@ msgstr "deselect all"
 msgid "Deselect everything."
 msgstr "Deselect everything."
 
+#: src/tools/detachedMode.ts
+msgid "Detach is on — the shape stays apart from the face until you push it."
+msgstr "Detach is on — the shape stays apart from the face until you push it."
+
+#. Measurements box readout while Detach is on, followed by the measured value
+#: src/tools/detachedMode.ts
+msgid "Detached · {text}"
+msgstr "Detached · {text}"
+
+#: src/tools/detachedMode.ts
+msgid "Detached applies to the next line."
+msgstr "Detached applies to the next line."
+
 #: src/health/healthCopy.ts
 msgid "Details ({details})"
 msgstr "Details ({details})"
@@ -2681,20 +2670,20 @@ msgid "draw {drawCalls}"
 msgstr "draw {drawCalls}"
 
 #: src/palette/registry.ts
-msgid "Draw a faceted circular face."
-msgstr "Draw a faceted circular face."
+msgid "Draw a faceted circular face. Ctrl detaches the shape from the face."
+msgstr "Draw a faceted circular face. Ctrl detaches the shape from the face."
 
 #: src/palette/registry.ts
-msgid "Draw a rectangular face on the ground or a face."
-msgstr "Draw a rectangular face on the ground or a face."
+msgid "Draw a rectangular face on the ground or a face. Ctrl detaches the shape from the face."
+msgstr "Draw a rectangular face on the ground or a face. Ctrl detaches the shape from the face."
 
 #: src/palette/registry.ts
-msgid "Draw a regular N-sided polygon from a center point."
-msgstr "Draw a regular N-sided polygon from a center point."
+msgid "Draw a regular N-sided polygon from a center point. Ctrl detaches the shape from the face."
+msgstr "Draw a regular N-sided polygon from a center point. Ctrl detaches the shape from the face."
 
 #: src/palette/registry.ts
-msgid "Draw a straight edge between two points."
-msgstr "Draw a straight edge between two points."
+msgid "Draw a straight edge between two points. Ctrl detaches the shape from the face."
+msgstr "Draw a straight edge between two points. Ctrl detaches the shape from the face."
 
 #: src/i18n/historyLabels.ts
 msgid "Draw on face"
@@ -3788,10 +3777,6 @@ msgstr "Import report"
 #: src/panels/MenuBar.tsx
 msgid "Import…"
 msgstr "Import…"
-
-#: src/io/documentSession.ts
-#~ msgid "Imported '{name}'"
-#~ msgstr "Imported '{name}'"
 
 #: src/io/documentSession.ts
 msgid "Imported {quoted}"
@@ -7483,6 +7468,10 @@ msgstr "Tags"
 msgid "Tangent"
 msgstr "Tangent"
 
+#: src/tools/detachedMode.ts
+msgid "Tap {key} to detach the shape from the face."
+msgstr "Tap {key} to detach the shape from the face."
+
 #: src/shop/SettingsMenu.tsx
 msgid "Tap a part — its size · Double-tap — zoom · Hold — isolate<0/>One finger orbits · Two fingers pan · Pinch zooms"
 msgstr "Tap a part — its size · Double-tap — zoom · Hold — isolate<0/>One finger orbits · Two fingers pan · Pinch zooms"
@@ -7744,10 +7733,6 @@ msgstr "That picture would be too small to place: each side needs to be at least
 msgid "That point is no longer there — the model changed since it was picked. Click it again."
 msgstr "That point is no longer there — the model changed since it was picked. Click it again."
 
-#: src/tools/LineTool.ts
-#~ msgid "That point is the same as the last one — move the cursor before clicking"
-#~ msgstr "That point is the same as the last one — move the cursor before clicking"
-
 #: src/kernelErrors.ts
 msgid "That point isn't on the drawing surface. Draw on the highlighted face or the ground plane."
 msgstr "That point isn't on the drawing surface. Draw on the highlighted face or the ground plane."
@@ -7771,10 +7756,6 @@ msgstr "That section plane isn't valid. Place it again on a face or the ground."
 #: src/kernelErrors.ts
 msgid "That selection has no solids to combine. Pick a solid object or a group of solids."
 msgstr "That selection has no solids to combine. Pick a solid object or a group of solids."
-
-#: src/kernelErrors.ts
-#~ msgid "That shape can't be pushed or pulled: it touches another shape, itself, or the face's edge at a single point, so the face would pinch there. Make it touch along a whole edge, or not at all."
-#~ msgstr "That shape can't be pushed or pulled: it touches another shape, itself, or the face's edge at a single point, so the face would pinch there. Make it touch along a whole edge, or not at all."
 
 #: src/kernelErrors.ts
 msgid "That shape can't be pushed or pulled: part of it is drawn on the solid's face and part is loose, so the face can't hold it. Move the drawing clear of the edge, or push/pull the neighboring pieces instead."
@@ -8257,6 +8238,10 @@ msgstr "This is already solid, so there's nothing to close. Use Push/Pull to cha
 #: src/kernelErrors.ts
 msgid "This is the component's only member — deleting it would leave every instance empty. Delete the instances instead, or add another member first."
 msgstr "This is the component's only member — deleting it would leave every instance empty. Delete the instances instead, or add another member first."
+
+#: src/tools/LineTool.ts
+msgid "This line stays detached; the next one will not."
+msgstr "This line stays detached; the next one will not."
 
 #: src/kernelErrors.ts
 msgid "This loop of lines has no face to push or pull. Draw over one of its lines with the Line tool to give it a face."

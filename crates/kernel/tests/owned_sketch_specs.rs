@@ -303,7 +303,7 @@ fn owner_object_round_trips_through_save_and_load() {
     let bytes = doc.save();
 
     let manifest = manifest_of(&bytes);
-    assert_eq!(manifest["format_version"], serde_json::json!(22));
+    assert_eq!(manifest["format_version"], serde_json::json!(23));
     let sk = &manifest["sketches"][0];
     assert!(sk["owner_object"].is_number(), "owner_object is written");
     assert!(sk.get("owner").is_none());

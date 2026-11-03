@@ -168,6 +168,20 @@
      blindness, and the blue is darker so they differ in lightness too) -- */
   --preview-pushpull: #f29a1f;
   --preview-extrude-new: #3d7fe6;
+  /* Draw-tool preview while Detach is on: the same "new, apart" blue. */
+  --preview-detached: #3d7fe6;
+  /* Draw-tool preview while the shape joins the drawing under it (default):
+     the plain-pull orange. Set to #4d90ff to restore the old blue. */
+  --preview-draw-joined: #f29a1f;
+
+  /* ---- Draw color language: drawing that belongs to no solid is blue
+     (free), drawing that is part of a solid's face is orange (attached).
+     The attached line is a deeper, redder orange than the amber selection
+     color so a selected imprint still pops. ----------------------------- */
+  --draw-free: #2266cc;
+  --draw-free-fill: #88aadd;
+  --draw-attached: #d9591a;
+  --draw-attached-fill: #e8a66a;
 
   /* ---- Borders / dividers ---------------------------------------------*/
   --border-hairline: rgba(255, 255, 255, 0.06);
@@ -301,6 +315,12 @@
   /* Push/Pull preview tints, deepened for the light viewport. */
   --preview-pushpull: #d97800;
   --preview-extrude-new: #1f5fc9;
+  --preview-detached: #1f5fc9;
+  --preview-draw-joined: #d97800;
+  --draw-free: #1f5fc9;
+  --draw-free-fill: #7f9fd6;
+  --draw-attached: #b85a0e;
+  --draw-attached-fill: #d9975a;
 
   /* ---- Borders -----------------------------------------------------*/
   --border-hairline: rgba(20, 40, 70, 0.08);

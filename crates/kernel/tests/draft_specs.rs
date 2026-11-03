@@ -2804,9 +2804,10 @@ fn the_free_planes_listed_at_once_match_the_listing_plane_by_plane() {
 
     let all = doc.free_plane_units(None, &std::collections::BTreeSet::new());
     assert_eq!(all.len(), 3, "three planes carry free drawing");
-    for (plane, units) in &all {
-        let objects = doc.drawable_objects_on_plane(*plane, None);
-        let one = doc.plane_units(*plane, None, &objects).unwrap();
+    for (listing, units) in &all {
+        let plane = listing.plane();
+        let objects = doc.drawable_objects_on_plane(plane, None);
+        let one = doc.plane_units(plane, None, &objects).unwrap();
         assert_eq!(units.units.len(), one.units.len(), "units on {plane:?}");
         assert_eq!(
             units.units.iter().map(|u| u.key).collect::<Vec<_>>(),
@@ -2823,6 +2824,7 @@ fn the_free_planes_listed_at_once_match_the_listing_plane_by_plane() {
     let top_units = all
         .iter()
         .find(|(pl, _)| {
+            let pl = pl.plane();
             (pl.normal() - up()).length() < 1e-9
                 && pl.signed_distance(p(0.0, 0.0, 3.0)).abs() < 1e-9
         })
@@ -2839,6 +2841,7 @@ fn the_free_planes_listed_at_once_match_the_listing_plane_by_plane() {
     let top_without = without
         .iter()
         .find(|(pl, _)| {
+            let pl = pl.plane();
             (pl.normal() - up()).length() < 1e-9
                 && pl.signed_distance(p(0.0, 0.0, 3.0)).abs() < 1e-9
         })
@@ -2885,10 +2888,11 @@ fn the_one_pass_listing_finds_an_object_across_a_bucket_edge() {
         }
     }
     let all = doc.free_plane_units(None, &std::collections::BTreeSet::new());
-    let (listed_plane, units) = all
+    let (listed, units) = all
         .iter()
-        .find(|(pl, _)| pl.signed_distance(p(0.0, 0.0, height)).abs() < 1e-6)
+        .find(|(pl, _)| pl.plane().signed_distance(p(0.0, 0.0, height)).abs() < 1e-6)
         .expect("the top plane");
+    let listed_plane = &listed.plane();
     let objects = doc.drawable_objects_on_plane(*listed_plane, None);
     assert_eq!(objects, vec![b], "the box has a face on the plane");
     let one = doc.plane_units(*listed_plane, None, &objects).unwrap();

@@ -36,7 +36,7 @@ use std::num::NonZeroU32;
 mod draft;
 pub use draft::{
     DraftCurveRun, DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore, DraftUnit,
-    PlaneUnits,
+    PlaneListing, PlaneUnits,
 };
 
 use slotmap::SlotMap;
@@ -7487,8 +7487,9 @@ impl Document {
     /// - [`DocumentError::UnknownSketch`] — stale or dead sketch.
     /// - [`DocumentError::UnknownObject`] — stale or hidden object.
     /// - [`DocumentError::SketchOwnerMismatch`] — the sketch's definition
-    ///   ownership differs from the object's, or no face of the object lies
-    ///   on the sketch's plane.
+    ///   ownership differs from the object's, no face of the object lies
+    ///   on the sketch's plane, or the sketch is a detached shape (never
+    ///   object-owned, invariant I9).
     pub fn set_sketch_object_owner(
         &mut self,
         sketch: SketchId,
@@ -7505,6 +7506,7 @@ impl Document {
                 .ok_or(DocumentError::UnknownObject)?;
             if self.object_owner_component(o) != self.sketch_owner_component(sketch)
                 || !object_has_face_on_plane(&rec.object, &self.sketches[sketch].plane())
+                || self.sketches[sketch].detached()
             {
                 return Err(DocumentError::SketchOwnerMismatch);
             }
@@ -23397,9 +23399,11 @@ impl Document {
     /// Every live object-owned sketch (unified drafting §3.3): its owner is
     /// a live object in the same frame (the sketch's definition, if any, is
     /// the owner's); its plane carries at least one coplanar, same-facing
-    /// face of the owner (I8); and none of its edges duplicates an edge of
+    /// face of the owner (I8); none of its edges duplicates an edge of
     /// the owner (I7 — drawing the solid already holds is topology, never
-    /// sketch).
+    /// sketch); and it is not a detached shape (I9 of detached shapes —
+    /// checked for every owner row, live or not, since no path may ever
+    /// give a detached sketch an object owner).
     fn debug_validate_owned_sketches(&self) {
         for (&sid, &gid) in &self.group_sketches {
             if self.sketch_tombstoned(&sid) {
@@ -23419,6 +23423,10 @@ impl Document {
             );
         }
         for (&sid, &oid) in &self.object_sketches {
+            assert!(
+                self.sketches.get(sid).is_none_or(|sk| !sk.detached()),
+                "sketch {sid:?} is detached and owned by {oid:?} (I9) — kernel bug"
+            );
             if self.sketch_tombstoned(&sid) {
                 continue;
             }

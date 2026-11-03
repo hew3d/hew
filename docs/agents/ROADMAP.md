@@ -165,7 +165,7 @@ below.
   still welds watertight
 - Editable shapes on faces (imprints): a shape drawn on a solid's face and
   not yet pushed or pulled is selectable (click inside it; the object is
-  one click away anywhere else), fills blue like a ground sketch, lists in
+  one click away anywhere else), fills and outlines in the attached orange (part of the solid's face; a free sketch is blue), lists in
   the Outliner under its object as a named child row (Circle, Rectangle,
   Shape, Arc shape, Line, Arc, Edge shape), and moves, rotates, scales, and deletes ON its
   face — Move constrains the drop to the face's plane. (Superseded by
@@ -193,7 +193,7 @@ below.
   this (`face_features`, `transform_sub_face`, `transform_chord` /
   `dissolve_imprint`) is gone: the drafting engine (ARCHITECTURE.md 2.4)
   lists and edits the same drawing as plane units, and the
-  `hew.solid.imprints` / `*_imprint` API commands run over it. Instanced geometry gets the selection highlight but no blue
+  `hew.solid.imprints` / `*_imprint` API commands run over it. Instanced geometry gets the selection highlight but no orange
   fill overlay
 - Drawing-like sketch editing: lines are selectable and deletable
   (merging the regions they separated), a drawn arc or circle selects
@@ -242,6 +242,10 @@ below.
   the per-edge polygon mark (`docs/dev/HEW_FILE_FORMAT.md`); the wasm and
   Hew API surfaces address drawing by plane context and unit key
   (`plane_units`, `draft_*`)
+- Detached shapes: Ctrl/Cmd on a draw tool keeps the shape apart from the
+  plane's drawing (`Sketch::detached`, sketch-only draft scope,
+  `draft_begin_detached`, API `detached`); Push/Pull on it makes a new
+  Object; the Getting Started cutter is drawn this way
 - Push/pull to extrude a closed profile into a solid, with a live preview
   that borrows its depth only from references OFF the face's own plane (a
   face's own edges and the drawing axes are never a depth), and picks a
@@ -511,7 +515,14 @@ below.
 - Push/pull's preview is tinted per mode through two theme tokens, orange
   for a plain pull, blue for extrude-as-new, red for a cut, in light and
   dark; toggling Ctrl mid-gesture changes the hue, and the bare arrow drawn
-  with no swept prism follows the mode
+  with no swept prism follows the mode. A free-sketch region always extrudes
+  into a new object, so its ghost is the new-object blue in both directions
+- Draw color language (`--draw-free`/`--draw-attached` and their fill tokens):
+  drawing that belongs to no solid is blue and pushes into a new object;
+  drawing that is part of a solid's face (an imprint, an object-owned sketch
+  edge) is orange and pushes the solid itself. The viewport colors each edge
+  by its store (`Scene::sketch_owner_object`); the rubber band is orange only
+  when the shape would join a face, and Offset's ghost takes its source's color
 
 ### Inference & precision
 

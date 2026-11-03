@@ -56,6 +56,11 @@ Drives a fresh `Scene` through each named scenario in `generate.mjs`
   asserts that subtracting the cutter *before* the move is refused as
   `nothing_removed` (a refused call never enters a recording, so the fixture
   itself holds only the successful cut).
+- `detached-cutter-on-bin` — the same cutter drawn as a detached shape: a
+  2 cm disk centered on the bin's right-face corner through
+  `draft_begin_detached`, so the face's edge does not split it, pushed
+  across the bin and subtracted. Locks a recording holding
+  `draft_begin_detached`.
 
 To regenerate a single scenario: `node generate.mjs <name>` (or
 `node generate.mjs` with no arg to run every scenario, same as

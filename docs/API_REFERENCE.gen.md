@@ -4190,6 +4190,7 @@ The document tree with per-entity summaries.
       "type": "array"
     },
     "sketches": {
+      "description": "each sketch's id, plane, regions, curves and edges; a detached sketch (a shape drawn with `detached`, in no plane's arrangement) also carries \"detached\": true",
       "type": "array"
     },
     "tags": {
@@ -5128,6 +5129,10 @@ Copy drawing units on a plane by an offset.
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
         "properties": {
+          "detached": {
+            "description": "true on a free store that is a detached sketch; absent otherwise",
+            "type": "boolean"
+          },
           "key": {
             "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
             "type": "string"
@@ -5230,6 +5235,10 @@ Delete drawing units from a plane.
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
         "properties": {
+          "detached": {
+            "description": "true on a free store that is a detached sketch; absent otherwise",
+            "type": "boolean"
+          },
           "key": {
             "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
             "type": "string"
@@ -5326,6 +5335,10 @@ Draw an arc on a plane spec.
       ],
       "type": "string"
     },
+    "detached": {
+      "description": "keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides",
+      "type": "boolean"
+    },
     "end_angle": {
       "description": "radians",
       "type": "number"
@@ -5364,6 +5377,7 @@ Draw an arc on a plane spec.
 {
   "oneOf": [
     {
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
@@ -5399,6 +5413,10 @@ Draw an arc on a plane spec.
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
           "items": {
             "properties": {
+              "detached": {
+                "description": "true on a free store that is a detached sketch; absent otherwise",
+                "type": "boolean"
+              },
               "key": {
                 "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
                 "type": "string"
@@ -5495,6 +5513,10 @@ Draw a circle on a plane spec.
         }
       ]
     },
+    "detached": {
+      "description": "keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides",
+      "type": "boolean"
+    },
     "plane": {
       "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
       "type": "object"
@@ -5523,6 +5545,7 @@ Draw a circle on a plane spec.
 {
   "oneOf": [
     {
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
@@ -5558,6 +5581,10 @@ Draw a circle on a plane spec.
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
           "items": {
             "properties": {
+              "detached": {
+                "description": "true on a free store that is a detached sketch; absent otherwise",
+                "type": "boolean"
+              },
               "key": {
                 "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
                 "type": "string"
@@ -5639,6 +5666,10 @@ Draw a line (chain) on a plane spec.
 ```json
 {
   "properties": {
+    "detached": {
+      "description": "keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides",
+      "type": "boolean"
+    },
     "plane": {
       "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
       "type": "object"
@@ -5678,6 +5709,7 @@ Draw a line (chain) on a plane spec.
 {
   "oneOf": [
     {
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
@@ -5713,6 +5745,10 @@ Draw a line (chain) on a plane spec.
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
           "items": {
             "properties": {
+              "detached": {
+                "description": "true on a free store that is a detached sketch; absent otherwise",
+                "type": "boolean"
+              },
               "key": {
                 "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
                 "type": "string"
@@ -5806,6 +5842,10 @@ Draw a regular N-gon on a plane spec.
         }
       ]
     },
+    "detached": {
+      "description": "keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides",
+      "type": "boolean"
+    },
     "plane": {
       "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
       "type": "object"
@@ -5836,6 +5876,7 @@ Draw a regular N-gon on a plane spec.
 {
   "oneOf": [
     {
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
@@ -5871,6 +5912,10 @@ Draw a regular N-gon on a plane spec.
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
           "items": {
             "properties": {
+              "detached": {
+                "description": "true on a free store that is a detached sketch; absent otherwise",
+                "type": "boolean"
+              },
               "key": {
                 "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
                 "type": "string"
@@ -5982,6 +6027,10 @@ Draw an axis-aligned rectangle on a plane spec.
         }
       ]
     },
+    "detached": {
+      "description": "keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides",
+      "type": "boolean"
+    },
     "plane": {
       "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
       "type": "object"
@@ -6002,6 +6051,7 @@ Draw an axis-aligned rectangle on a plane spec.
 {
   "oneOf": [
     {
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
@@ -6037,6 +6087,10 @@ Draw an axis-aligned rectangle on a plane spec.
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
           "items": {
             "properties": {
+              "detached": {
+                "description": "true on a free store that is a detached sketch; absent otherwise",
+                "type": "boolean"
+              },
               "key": {
                 "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
                 "type": "string"
@@ -6155,6 +6209,10 @@ Move drawing units (islands, edges, circles, regions) on a plane by an offset.
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
         "properties": {
+          "detached": {
+            "description": "true on a free store that is a detached sketch; absent otherwise",
+            "type": "boolean"
+          },
           "key": {
             "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
             "type": "string"
@@ -6288,6 +6346,10 @@ Offset a region boundary within its sketch, or a face or plane region by its uni
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
           "items": {
             "properties": {
+              "detached": {
+                "description": "true on a free store that is a detached sketch; absent otherwise",
+                "type": "boolean"
+              },
               "key": {
                 "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
                 "type": "string"
@@ -6414,6 +6476,10 @@ Rotate drawing units on a plane about the plane normal through a point.
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
         "properties": {
+          "detached": {
+            "description": "true on a free store that is a detached sketch; absent otherwise",
+            "type": "boolean"
+          },
           "key": {
             "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
             "type": "string"
@@ -6546,6 +6612,10 @@ Scale drawing units on a plane about a center, uniformly or per axis.
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
         "properties": {
+          "detached": {
+            "description": "true on a free store that is a detached sketch; absent otherwise",
+            "type": "boolean"
+          },
           "key": {
             "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
             "type": "string"
@@ -6618,7 +6688,7 @@ List a plane's drawing as units: islands of edges (with where each is stored) an
 {
   "properties": {
     "plane": {
-      "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
+      "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}. A plane or face spec lists the plane's arrangement, which no detached sketch joins; {sketch:<id>} on a detached sketch lists exactly that sketch",
       "type": "object"
     }
   },
@@ -6731,6 +6801,10 @@ List a plane's drawing as units: islands of edges (with where each is stored) an
                     }
                   },
                   "type": "object"
+                },
+                "detached": {
+                  "description": "true on a free store that is a detached sketch (listed only by a {sketch} plane spec naming it); absent otherwise",
+                  "type": "boolean"
                 },
                 "key": {
                   "description": "edg_<hex16>",
