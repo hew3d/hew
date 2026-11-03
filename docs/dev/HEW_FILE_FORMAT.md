@@ -561,6 +561,15 @@ contents do not describe valid geometry.
 - **Bad magic** (first 4 bytes not `"HEWG"`) is a fatal, immediate error.
 - **Truncation** (buffer ends before its own announced counts are
   satisfied) is a fatal error, distinct from corruption.
+- **Count bounds before allocation.** Before reserving a collection, a reader
+  must check that its count fits the remaining encoded bytes: at least 24 bytes
+  per vertex, 4 per loop index, 16 per hole (its count and at least three
+  indices), and 24 per face (the v1 minimum, with later versions adding
+  fields). Compare against `remaining_bytes / minimum_item_bytes` rather than
+  multiplying an untrusted count. Insufficient bytes are truncation, detected
+  before allocating for the announced count. Decoder collection reservations
+  must be fallible and report allocation failure as a typed decode error.
+  These checks do not change the encoding or its version.
 - **Structural corruption** — an out-of-range vertex index, a loop under 3
   vertices (`outer_count`/`hole_vertex_count < 3`), a `watertight`/
   `uv_frame`/`imported`/`surface`/`edge_curves` byte outside its 0-1 range,
