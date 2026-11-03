@@ -150,7 +150,7 @@ import {
 } from './zoomWindowDrag'
 import { CleanModifierTap } from './cleanModifierTap'
 import { MultiClickTracker } from './multiClick'
-import { resolveSelectableRef, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
+import { resolveSelectableRef, selectionScopeActive, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
 import {
   draftRef,
   geometryOf,
@@ -187,6 +187,7 @@ import { getResolvedTheme, subscribe as subscribeTheme, type ResolvedTheme } fro
 import { buildShopGradientTextureFromToken } from './shopGradientBackground'
 import { readAppliedTheme } from '../theme/applyTheme'
 import { setPickRenderMode } from '../tools/pickPolicy'
+import { pushActiveScope } from './pickScope'
 import { leftCanvasBounds, replaysWithoutSnap, shouldReplayHeldPointer } from './heldPointerReplay'
 import { getLengthSystem, getLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit } from '../settings/units'
 import { InfiniteGrid } from './InfiniteGrid'
@@ -2929,6 +2930,9 @@ export default function Viewport({
         worldPerPixelAt: (p) =>
           rig.worldPerPixel(camera.position.distanceTo(new THREE.Vector3(p[0], p[1], p[2])), el.clientHeight),
         facesOcclude: sceneRenderer.getRenderMode() === 'shaded',
+        scopeActive: selectionScopeActive(
+          sceneRenderer.getRenderMode(), activeContextRef.current.length, sessionScopeKeysRef.current !== null,
+        ),
       }
     }
 
@@ -5244,7 +5248,7 @@ export default function Viewport({
       }
 
       if (activeContextRef.current.length === 0) {
-        sceneRenderer.setActiveContext(explodeSessionObjectIdsRef.current, sessionInstanceIdsRef.current)
+        pushActiveScope(sceneRenderer, wasmScene, explodeSessionObjectIdsRef.current, sessionInstanceIdsRef.current, true)
       }
 
       // Tape Measure scoped-rescale gating (finding 6): push the fresh
@@ -11447,7 +11451,9 @@ export default function Viewport({
     const inSession = activeContext.length === 0
     const objectLit = inSession ? explodeSessionObjectIdsRef.current ?? activeLitSet ?? null : activeLitSet ?? null
     const instanceLit = inSession ? sessionInstanceIdsRef.current ?? litInstances : litInstances
-    sceneRendererRef.current?.setActiveContext(objectLit, instanceLit)
+    // Frame free sketches are in scope only for the session itself; an
+    // object or legacy-instance context (even atop a session) excludes them.
+    pushActiveScope(sceneRendererRef.current, wasmSceneRef.current, objectLit, instanceLit, inSession)
     const tool = toolControllerRef.current?.activeTool
     if (tool !== undefined) {
       // The single editing-context channel (component-edit-parity.md phase

@@ -442,7 +442,13 @@ temporarily ARE, and lets the unmodified tool set do the rest. Entering a
 container opens a **session frame** on a kernel-held stack; frames nest
 one per container level and close strictly LIFO (Escape, double-click
 outside). Both frame kinds lean on the same structural insight: the
-contents are already real Objects, merely attached to a container.
+contents are already real Objects, merely attached to a container. While
+a frame is open, picks favor its own geometry in Shaded and X-ray alike
+(the editing view draws everything outside it translucent): the kernel
+skips faces and drawing outside the frame (`PickScope`, plus the frame's
+own sketches from `Document::session_frame_sketches`) so a tool reaches a
+buried face of the component or group being edited through whatever
+encloses it.
 
 Entering a **Group** is a transient *ungroup*: the group's direct members
 have their parents cleared to the top level and the group record hides

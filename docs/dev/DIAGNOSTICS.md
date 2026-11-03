@@ -257,6 +257,7 @@ longer replay.
 | `import_skp` | `bytes[]` | additive `.skp` import (embeds the file) |
 | `import_stl` | `bytes[]`, `unit_scale`, `name` (string or null) | additive STL import (embeds the file); `unit_scale` is meters-per-STL-unit since STL carries no units of its own, and `name` is the file stem the Objects are named from (STL carries no names) — both embedded so replay reproduces the same geometry size and Object names |
 | `load` | `bytes[]` | replace the whole document — a mid-session File ▸ Open/New (embeds the `.hew` bytes) |
+| `set_pick_scope` / `clear_pick_scope` | `objects[]`, `instances[]`, `frame_sketches` (set only; empty lists are a scope, only `clear_pick_scope` clears; a recording without `frame_sketches` replays as before it existed: both lists empty clear, otherwise the session frame's drawing is in scope) | set or clear the editing scope the Shaded and X-ray picks favor (session-only view state, recorded so a replayed session ends with the same scope as the original; changes nothing the state hash covers, and the recording stores no pick results) |
 
 **Coverage rule** (ratified with the recording audit): every `Scene` method
 that pushes the document undo stack or mutates state included in
@@ -265,7 +266,14 @@ that pushes the document undo stack or mutates state included in
 stack and silently reproduce a different session. Session-only state that
 is neither undoable nor saved (inference hide sets, transient snap
 segments, guide/axis snappability, torture mode) is deliberately not
-recorded. Calls that carry file or image payloads (`import_*`, `load`,
+recorded. The one exception is the editing scope (`set_pick_scope` /
+`clear_pick_scope`), recorded so a replayed session ends up with the
+same scope as the original, and a probe after replay sees the same scoped
+picks. The recording proves no pick result (it stores none, and replay
+issues no picks); the render mode is not recorded either, so a probe sets
+the mode it means to test itself (the scope applies in Shaded and X-ray,
+not in Wireframe).
+Calls that carry file or image payloads (`import_*`, `load`,
 `add_texture_material`) embed the raw bytes so a recording stays
 self-contained and replayable from a fresh document; recordings that span
 imports, mid-session opens, or texture additions are correspondingly

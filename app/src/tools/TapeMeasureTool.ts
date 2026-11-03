@@ -225,6 +225,7 @@ import {
 } from './tapeOffset'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
+import { pickPolicyGeneration } from './pickPolicy'
 import { GUIDE_COLOR } from '../viewport/guideColors'
 
 /** Whether a snap landed on real picked geometry, as opposed to a broad
@@ -1640,11 +1641,13 @@ export class TapeMeasureTool implements Tool {
    *  `SketchPickCache.pickFor` in drawPlane.ts for the same pattern), so
    *  reference identity is a valid per-event cache key. Keeps the same ray
    *  from being picked twice in a frame where both `onPointerMove` (via
-   *  `_resolveFaceAnchor`'s callers) and `snapConstraint` consult case 3. */
-  private _facePickCache: { ray: Ray; pick: RawFacePick | null } | null = null
+   *  `_resolveFaceAnchor`'s callers) and `snapConstraint` consult case 3.
+   *  Also keyed on `pickPolicyGeneration()`: an editing-scope push or a
+   *  render-mode change re-picks for the same Ray. */
+  private _facePickCache: { ray: Ray; gen: number; pick: RawFacePick | null } | null = null
 
   private _pickFaceFor(ray: Ray): RawFacePick | null {
-    if (this._facePickCache !== null && this._facePickCache.ray === ray) {
+    if (this._facePickCache !== null && this._facePickCache.ray === ray && this._facePickCache.gen === pickPolicyGeneration()) {
       return this._facePickCache.pick
     }
     const pick = this.wasmScene.pick_face(
@@ -1664,7 +1667,7 @@ export class TapeMeasureTool implements Tool {
         pick.free()
       }
     }
-    this._facePickCache = { ray, pick: raw }
+    this._facePickCache = { ray, gen: pickPolicyGeneration(), pick: raw }
     return raw
   }
 

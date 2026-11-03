@@ -824,6 +824,88 @@ fn a_sibling_renders_the_definition_sketch_and_mid_session_drawing() {
     let _ = instance_a;
 }
 
+/// **The frame's own drawing, as one query** (`session_frame_sketches`):
+/// while a component frame is innermost it is exactly the set a sibling
+/// renders (`def_rendered_sketches`) — the baked definition sketch, a
+/// free sketch drawn mid-session, an owned sketch of a member — and never
+/// a free sketch drawn before the open. Empty with no frame open; a group
+/// frame's own drawing is specified in `group_sketch_specs.rs`.
+#[test]
+fn the_session_frame_sketches_are_the_sibling_rendered_set() {
+    let mut doc = Document::new();
+    // Drawn as a recorded gesture (the app's path), so it is history
+    // before the open, not a fresh sketch.
+    let outside = doc.add_sketch(ground());
+    doc.begin_sketch_gesture(outside).expect("gesture");
+    draw_rect(
+        &mut doc,
+        outside,
+        [
+            Point3::new(-5.0, 0.0, 0.0),
+            Point3::new(-4.0, 0.0, 0.0),
+            Point3::new(-4.0, 1.0, 0.0),
+            Point3::new(-5.0, 1.0, 0.0),
+        ],
+    );
+    doc.end_sketch_gesture(outside).expect("gesture recorded");
+    let (component, instance, member_a, _b) = two_member_component(&mut doc);
+    let (def_sketch, _) = doc
+        .begin_sketch_on_plane_in_instance(instance, ground())
+        .expect("def sketch");
+    draw_rect(
+        &mut doc,
+        def_sketch,
+        [
+            Point3::new(8.0, 0.0, 0.0),
+            Point3::new(9.0, 0.0, 0.0),
+            Point3::new(9.0, 1.0, 0.0),
+            Point3::new(8.0, 1.0, 0.0),
+        ],
+    );
+    assert!(doc.session_frame_sketches().is_empty(), "no frame open");
+
+    doc.open_explode_session(instance).expect("open");
+    // An owned sketch on member A's top face (z = 1).
+    let top = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 1.0),
+        Point3::new(1.0, 0.0, 1.0),
+        Point3::new(0.0, 1.0, 1.0),
+    ])
+    .expect("top plane");
+    let owned = doc.add_sketch(top);
+    doc.set_sketch_object_owner(owned, Some(member_a))
+        .expect("owned by member A");
+    let drawn = doc.add_sketch(ground());
+    let frame = doc.session_frame_sketches();
+    let (rendered, _) = doc.def_rendered_sketches(component).expect("live");
+    assert_eq!(frame, rendered, "one set, shared with the sibling render");
+    for s in [def_sketch, owned, drawn] {
+        assert!(frame.contains(&s), "{s:?} is the frame's drawing");
+    }
+    assert!(!frame.contains(&outside), "pre-session drawing is context");
+
+    doc.close_explode_session().expect("close");
+    assert!(doc.session_frame_sketches().is_empty(), "closed");
+
+    // A group frame's own drawing is its own (group_sketch_specs.rs): the
+    // component frame's drawing and the pre-session line stay out of it.
+    let c = build_box(&mut doc, 10.0, 0.0, 0.0, 11.0, 1.0, 1.0);
+    let d = build_box(&mut doc, 12.0, 0.0, 0.0, 13.0, 1.0, 1.0);
+    let (group, _) = doc
+        .group_nodes(&[NodeId::Object(c), NodeId::Object(d)])
+        .expect("group");
+    doc.open_group_session(group).expect("open group");
+    let in_group = doc.add_sketch(ground());
+    let frame = doc.session_frame_sketches();
+    // (A fresh sketch minted before the open and never drawn into, like
+    // `drawn` above, rides along by the fresh-sketch rule; it is empty,
+    // so there is nothing in it to pick.)
+    assert!(frame.contains(&in_group), "group frame: its own drawing");
+    for s in [outside, def_sketch, owned] {
+        assert!(!frame.contains(&s), "{s:?} is not the group frame's");
+    }
+}
+
 /// **A sibling is not an operand while its definition is on loan**: the
 /// definition-level surfaces addressed through a live sibling (or by
 /// component id) refuse typed with `ExplodeSessionOpen`, document

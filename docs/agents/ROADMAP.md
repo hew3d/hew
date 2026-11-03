@@ -691,9 +691,27 @@ below.
   faces occlude, only visible geometry snaps or picks. X-ray (faces at 0.4
   opacity, depth writes off): every edge, endpoint, midpoint, crossing,
   center, and quadrant is snappable and selectable, faces stay targets with
-  the nearest along the ray winning off an edge or point. Wireframe (no
-  faces, every edge): no On Face snaps, face hover, selection, push/pull, or
-  paint; drawing lands on the ground, a locked plane, or an edge or point.
+  the nearest along the ray winning off an edge or point. With an editing
+  scope open (a component or group session, an object context, or a legacy
+  in-context instance), Shaded and X-ray picks land on the nearest face,
+  sketch region, sketch edge, sketch vertex or sketch inside the scope and
+  skip what lies outside it (the editing view draws the outside
+  translucent, so what is in scope can be seen and so picked); the scope is
+  the renderer's lit set plus, for a session's own scope, the frame's own
+  drawing (`Document::session_frame_sketches`: a component frame's
+  definition drawing and lines drawn since the open, a group frame's held
+  drawing and lines drawn since the open), pushed to the kernel by
+  `Scene::set_pick_scope(objects, instances, frame_sketches)` /
+  `clear_pick_scope` (`PickScope` in the inference crate); empty lists are
+  still a scope (a component with only drawing left), only
+  `clear_pick_scope` clears; an object context on top of a session passes
+  `frame_sketches = false`. With nothing in scope under the cursor the pick
+  is the nearest of any owner, so the tools' refusal hints still run;
+  Wireframe, the top level, snapping and the geometry-only camera picks
+  ignore the scope.
+  Wireframe (no faces, every edge): no On Face snaps, face hover, selection,
+  push/pull, or paint; drawing lands on the ground, a locked plane, or an edge
+  or point.
   The orbit pivot and in-session sketch selection use geometry-only picks
   (`pick_face_geometry`, `pick_sketch_region_geometry`). The five draw tools
   that drop an off-plane snap onto their plane opt in to hidden points

@@ -379,6 +379,27 @@ pub enum RecordedCall {
     OpenExplodeSession { instance: u64 },
     /// `close_explode_session()`.
     CloseExplodeSession,
+    /// `set_pick_scope(objects, instances, frame_sketches)` — the editing
+    /// scope the picks favor. Session-only view state, neither undoable
+    /// nor saved, and recorded anyway (unlike the inference hide sets) so
+    /// a replayed session ends up with the same scope as the original (a
+    /// probe after replay then sees the same scoped picks). A recording
+    /// stores no pick results and replay issues no picks. Changes nothing
+    /// the state hash covers. Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture).
+    SetPickScope {
+        objects: Vec<u64>,
+        instances: Vec<u64>,
+        /// Whether the open session frame's own drawing is in scope.
+        /// Additive field, always written by a current recorder: a
+        /// recording made before it has none and replays with that call's
+        /// original meaning (both lists empty cleared the scope; otherwise
+        /// the frame's drawing was in it). The format version is unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame_sketches: Option<bool>,
+    },
+    /// `clear_pick_scope()` — same posture as [`RecordedCall::SetPickScope`].
+    ClearPickScope,
     /// `open_group_session(group)` (docs/design/group-session.md).
     OpenGroupSession { group: u64 },
     /// `close_group_session()`.

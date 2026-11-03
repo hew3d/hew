@@ -34,7 +34,8 @@ import {
   PREVIEW_PUSHPULL_TOKEN,
 } from './previewTint'
 import { defaultFaceEligible, ineligibleFaceHint, sessionIsOpen, worldFaceNormal, EDIT_CONTEXT_HINT_CODE, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
-import { ctxOfFace, type PlaneUnitsScene } from './planeUnits'
+import { ctxOfFace, ctxOfSketch, readPlaneUnits, type PlaneUnitsScene } from './planeUnits'
+import { pickPolicyGeneration, pickRenderMode } from './pickPolicy'
 import { regionUnderRay } from './regionPick'
 
 /** Snap kinds whose point is a deliberate depth reference for push/pull — the
@@ -110,9 +111,23 @@ type RegionPick = {
  * extruding on the rest). No face on the ray at all also counts as "in
  * front"; no region never does.
  */
-function regionInFrontOfFace(region: RegionPick | null, face: RawFacePick | null, faceEligible = true): boolean {
+export function regionInFrontOfFace(
+  region: RegionPick | null,
+  face: RawFacePick | null,
+  faceEligible = true,
+  regionInScope: boolean | null = null,
+): boolean {
   if (region === null) return false
   if (face === null) return true
+  // Shaded or X-ray with an editing scope: the kernel's picks landed on the nearest
+  // thing INSIDE the scope, falling back to the nearest of any owner when
+  // nothing in scope lay under the ray. When exactly one of the two is the
+  // in-scope one it wins, whatever the depth — depth only orders two
+  // candidates of the same standing.
+  if (regionInScope !== null) {
+    if (faceEligible && !regionInScope) return false
+    if (!faceEligible && regionInScope) return true
+  }
   // A detached shape lying on a face is what the cursor is on: it was drawn
   // to stay apart from the face, so a tie goes to it (D8). So does free
   // drawing lying ON a face that cannot be pushed from here (a group's or
@@ -388,7 +403,7 @@ export class PushPullTool implements Tool {
     // never inside an OBJECT editing context.
     const activeInstance = this._activeInstance
     const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
-    if (!regionInFrontOfFace(region, raw, eligible !== null)) {
+    if (!regionInFrontOfFace(region, raw, eligible !== null, this._regionInScope(region, activeInstance))) {
       if (eligible !== null) {
         const a = this.wasmScene.face_plane(eligible.object, eligible.face)
         return {
@@ -469,14 +484,46 @@ export class PushPullTool implements Tool {
   private _regionPickCache: {
     ray: Ray
     instance: bigint | null
+    /** `pickPolicyGeneration()` at pick time: a render-mode or editing-scope
+     *  change invalidates the memo even when the ray is the same object. */
+    gen: number
     region: RegionPick | null
   } | null = null
+
+  /**
+   * Whether the picked region is inside the editing scope, or null when the
+   * question does not apply (Wireframe, or nothing is open for editing) or
+   * cannot be answered (the region is not in its plane's listing — then the
+   * plain depth rule stands). Only a non-Wireframe mode with a scope makes the kernel's
+   * picks prefer in-scope candidates, so only there can a region and a face
+   * differ in standing. A region picked through the entered instance
+   * (`_in_instance`) is in scope by construction; a world region is in scope
+   * when it is drawn on an eligible object's face, or is a free sketch of
+   * the open session.
+   */
+  private _regionInScope(region: RegionPick | null, activeInstance: bigint | null): boolean | null {
+    if (region === null || pickRenderMode() === 'wireframe') return null
+    if (activeInstance !== null) return true
+    try {
+      if (!sessionIsOpen(this.wasmScene)) return null
+      const ctx = ctxOfSketch(this.wasmScene, region.sketch)
+      if (ctx === null) return null
+      const pu = readPlaneUnits(this.wasmScene as unknown as PlaneUnitsScene, ctx)
+      const hit = pu?.regions.find((r) => r.extrude?.sketch === region.sketch && r.extrude.region === region.region)
+      if (hit === undefined) return null
+      if (hit.over !== null) return this._isEligible(hit.over.object, undefined)
+      return Array.from(this.wasmScene.explode_session_sketches() ?? []).includes(region.sketch)
+    } catch {
+      return null
+    }
+  }
 
   private _pickRegionFor(ray: Ray, activeInstance: bigint | null): RegionPick | null {
     if (
       this._regionPickCache !== null &&
       this._regionPickCache.ray === ray &&
-      this._regionPickCache.instance === activeInstance
+      this._regionPickCache.instance === activeInstance &&
+      this._regionPickCache.gen === pickPolicyGeneration()
     ) {
       return this._regionPickCache.region
     }
@@ -507,7 +554,7 @@ export class PushPullTool implements Tool {
         regionPick.free()
       }
     }
-    this._regionPickCache = { ray, instance: activeInstance, region }
+    this._regionPickCache = { ray, instance: activeInstance, gen: pickPolicyGeneration(), region }
     return region
   }
 
@@ -558,7 +605,7 @@ export class PushPullTool implements Tool {
       if (raw !== null && eligible === null) {
         const activeInstance = this._activeInstance
         const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
-        if (!regionInFrontOfFace(region, raw, false)) next = this._ineligibleFaceHint(raw.instance)
+        if (!regionInFrontOfFace(region, raw, false, this._regionInScope(region, activeInstance))) next = this._ineligibleFaceHint(raw.instance)
       }
     } catch {
       next = null
@@ -598,7 +645,7 @@ export class PushPullTool implements Tool {
       // as `snapConstraint` skips it at hover time. The two must agree.
       const activeInstance = this._activeInstance
       const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
-      const regionWins = regionInFrontOfFace(region, raw, eligible !== null)
+      const regionWins = regionInFrontOfFace(region, raw, eligible !== null, this._regionInScope(region, activeInstance))
       if (raw !== null && !regionWins) {
         // Same face-eligibility policy as the draw tools (faceDraw.ts): at
         // the top level only PLAIN objects are directly push/pullable —

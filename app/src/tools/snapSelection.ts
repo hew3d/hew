@@ -164,6 +164,23 @@ export interface ResolveDeps {
    *  where nothing occludes (the render mode's face policy). Omitted means
    *  they do (Shaded). */
   facesOcclude?: boolean
+  /** Whether an editing scope is open (an entered context or a component /
+   *  group session). In Shaded and X-ray the kernel's face pick then lands on the
+   *  nearest face INSIDE the scope, so a snap on an out-of-scope object that
+   *  resolves to nothing falls through to that scoped pick instead of
+   *  selecting nothing. Omitted means no scope. */
+  scopeActive?: boolean
+}
+
+/** The `scopeActive` dep: the kernel scopes picks wherever faces are pick
+ *  targets (Shaded and X-ray; Wireframe picks as before), so a scope counts
+ *  in those modes only. */
+export function selectionScopeActive(
+  renderMode: string,
+  contextDepth: number,
+  sessionScopeOpen: boolean,
+): boolean {
+  return renderMode !== 'wireframe' && (contextDepth > 0 || sessionScopeOpen)
 }
 
 /** Screen distance (pixels) within which a click counts as ON a drawn line —
@@ -470,7 +487,14 @@ export function resolveSelectableRef(
       const refinable =
         (resolved !== null && resolved.kind === 'object' && resolved.id === pick.object) ||
         (resolved === null && deps.imprintEligible?.(pick.object, pick.instance) === true)
-      if (!refinable) return resolved
+      if (!refinable) {
+        // With an editing scope (Shaded or X-ray): the snap landed on geometry outside
+        // the scope (it resolves to nothing), but the scoped face pick may
+        // reach an in-scope solid behind it. Click, hover and drag-acquire
+        // all come through here, so they agree.
+        if (resolved === null && deps.scopeActive === true) break
+        return resolved
+      }
       const facePick = deps.scene.pick_face(
         ray.origin[0], ray.origin[1], ray.origin[2],
         ray.direction[0], ray.direction[1], ray.direction[2],

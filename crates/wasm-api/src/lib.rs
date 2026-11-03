@@ -30,8 +30,8 @@ mod scenes_api;
 
 use dae_import::ImageMap;
 use inference::{
-    ApertureMode, Axis, ElementRef, FacePolicy, InferenceScene, PickRay, SketchRegionFace,
-    SnapKind, SnapLock, SnapQuery, SnapWeights,
+    ApertureMode, Axis, ElementRef, FacePolicy, InferenceScene, PickRay, PickScope,
+    SketchRegionFace, SnapKind, SnapLock, SnapQuery, SnapWeights,
 };
 use js_sys::{Object as JsObject, Reflect, Uint8Array};
 use kernel::{
@@ -2281,6 +2281,13 @@ pub struct Scene {
     /// scoped avoids duplicate/ghost inference at sibling placements.
     active_inference_instance: Option<InstanceId>,
     active_inference_sketches: Vec<SketchId>,
+    /// Whether the innermost open session frame's own drawing
+    /// ([`Document::session_frame_sketches`]) is in the editing scope the
+    /// sketch picks favor — the `frame_sketches` argument of
+    /// [`Scene::set_pick_scope`]. Per window and never saved, like the
+    /// scope itself (which lives on `inference`); meaningful only while a
+    /// scope is set, and reset with it.
+    pick_scope_frame_sketches: bool,
     /// Open live API connections (docs/agents/HEW_API.md §11.2), keyed by the id
     /// [`Scene::api_connection_open`] minted. Each holds its own
     /// `api::Connection` dispatch state (granted profile, hello/attach
@@ -2794,6 +2801,7 @@ impl Scene {
             hidden_instances: std::collections::HashSet::new(),
             active_inference_instance: None,
             active_inference_sketches: Vec::new(),
+            pick_scope_frame_sketches: false,
             api_connections: std::collections::HashMap::new(),
             next_api_conn_id: 0,
             pending_view_directive: None,
@@ -3026,16 +3034,19 @@ impl Scene {
     }
 
     /// An empty [`InferenceScene`] that keeps the current one's per-window
-    /// view switches — guide and axis snapping (View ▸ Guides / Axes) and
-    /// the render mode's face policy ([`Scene::set_render_mode`]). Those
-    /// belong to the window, not the document, so rebuilding the candidates
-    /// (a load, a live-API resync) must not quietly turn hidden guides or
-    /// axes snappable again, or drop X-ray or Wireframe picking.
+    /// view switches — guide and axis snapping (View ▸ Guides / Axes), the
+    /// render mode's face policy ([`Scene::set_render_mode`]) and the
+    /// editing scope ([`Scene::set_pick_scope`]). Those belong to the
+    /// window, not the document, so rebuilding the candidates (a live-API
+    /// resync) must not quietly turn hidden guides or axes snappable again,
+    /// drop X-ray or Wireframe picking, or forget the open edit. A load
+    /// drops the scope itself (its ids name the old document).
     fn fresh_inference(&self) -> InferenceScene {
         let mut fresh = InferenceScene::new();
         fresh.set_guides_enabled(self.inference.guides_enabled());
         fresh.set_axes_enabled(self.inference.axes_enabled());
         fresh.set_face_policy(self.inference.face_policy());
+        fresh.set_pick_scope(self.inference.pick_scope().cloned());
         fresh
     }
 
@@ -7290,7 +7301,9 @@ impl Scene {
     /// tool). Unlike `snap`, this ignores the drawing snap-priority model, so
     /// it reliably returns the surface under the cursor rather than a nearby
     /// vertex or edge. `undefined` when the ray hits no face, and always
-    /// `undefined` in Wireframe ([`Scene::set_render_mode`]).
+    /// `undefined` in Wireframe ([`Scene::set_render_mode`]). With an
+    /// editing scope set ([`Scene::set_pick_scope`]), Shaded or X-ray, the
+    /// nearest face inside the scope, else the nearest face.
     pub fn pick_face(
         &self,
         ox: f64,
@@ -7328,19 +7341,27 @@ impl Scene {
     /// (`SKETCH_PICK_APERTURE`) stands in for screen-derived aperture (the `snap`
     /// convention) — picking a thin line by exact ray intersection alone would
     /// be unreasonably precise to hit.
+    ///
+    /// With an editing scope set ([`Scene::set_pick_scope`]), Shaded or
+    /// X-ray, a sketch inside the scope wins over a nearer one outside it,
+    /// as [`Scene::pick_face`] does for faces. Wireframe ignores the scope.
     pub fn pick_sketch(&self, ox: f64, oy: f64, oz: f64, dx: f64, dy: f64, dz: f64) -> Option<u64> {
         let ray = PickRay {
             origin: Point3::new(ox, oy, oz),
             direction: kernel::Vec3::new(dx, dy, dz),
         };
+        let scope = self.sketch_pick_scope();
         self.inference
-            .pick_sketch(&ray, SKETCH_PICK_APERTURE)
-            .map(|id| id.data().as_ffi())
+            .pick_sketch_edge_preferring(&ray, SKETCH_PICK_APERTURE, &|s| {
+                scope.as_ref().is_some_and(|sc| sc.contains(s))
+            })
+            .map(|(id, _)| id.data().as_ffi())
     }
 
     /// Picks the nearest live sketch edge under the ray (same aperture and
     /// ranking as `pick_sketch`), returning both the owning sketch and the
-    /// edge — the Select tool's per-edge pick. `undefined` on a miss.
+    /// edge — the Select tool's per-edge pick. `undefined` on a miss. Scoped
+    /// like [`Scene::pick_sketch`].
     pub fn pick_sketch_edge(
         &self,
         ox: f64,
@@ -7354,8 +7375,11 @@ impl Scene {
             origin: Point3::new(ox, oy, oz),
             direction: kernel::Vec3::new(dx, dy, dz),
         };
+        let scope = self.sketch_pick_scope();
         self.inference
-            .pick_sketch_edge(&ray, SKETCH_PICK_APERTURE)
+            .pick_sketch_edge_preferring(&ray, SKETCH_PICK_APERTURE, &|s| {
+                scope.as_ref().is_some_and(|sc| sc.contains(s))
+            })
             .and_then(|(sid, eid)| {
                 let sketch = self.doc.sketch(sid)?;
                 let edge = sketch.edges().get(eid)?;
@@ -7383,6 +7407,11 @@ impl Scene {
     /// The "any sketch" targeting primitive: push/pull region targeting,
     /// select-by-interior, and dock hover all resolve through this, replacing
     /// the app's old single-active-sketch bookkeeping.
+    ///
+    /// With an editing scope set ([`Scene::set_pick_scope`]), Shaded or
+    /// X-ray, the nearest region of a sketch inside the scope wins over a
+    /// nearer one outside it; with none in scope under the ray, the
+    /// unscoped answer.
     pub fn pick_sketch_region(
         &self,
         ox: f64,
@@ -7396,13 +7425,15 @@ impl Scene {
         if !self.inference.face_policy().faces_are_targets() {
             return None;
         }
-        self.sketch_region_under_ray(ox, oy, oz, dx, dy, dz)
+        let scope = self.sketch_pick_scope();
+        self.sketch_region_under_ray(ox, oy, oz, dx, dy, dz, scope.as_ref())
     }
 
     /// [`Scene::pick_sketch_region`] ignoring the render mode's face policy
-    /// ([`Scene::set_render_mode`]): the sketch region under the ray even in
-    /// Wireframe, where a fill is no input target. For camera questions (the
-    /// orbit pivot over a drawn, not yet extruded shape).
+    /// ([`Scene::set_render_mode`]) and the editing scope: the sketch region
+    /// under the ray even in Wireframe, where a fill is no input target. For
+    /// camera questions (the orbit pivot over a drawn, not yet extruded
+    /// shape).
     pub fn pick_sketch_region_geometry(
         &self,
         ox: f64,
@@ -7412,14 +7443,15 @@ impl Scene {
         dy: f64,
         dz: f64,
     ) -> Option<SketchRegionPickJs> {
-        self.sketch_region_under_ray(ox, oy, oz, dx, dy, dz)
+        self.sketch_region_under_ray(ox, oy, oz, dx, dy, dz, None)
     }
 
     /// [`Scene::pick_face`] ignoring the render mode's face policy
-    /// ([`Scene::set_render_mode`]): the nearest face the ray passes through,
-    /// even in Wireframe. For questions about where the geometry IS rather
-    /// than what is an input target — the orbit pivot, and which face a
-    /// snapped edge or corner lies on when a draw tool starts there.
+    /// ([`Scene::set_render_mode`]) and the editing scope: the nearest face
+    /// the ray passes through, even in Wireframe. For questions about where
+    /// the geometry IS rather than what is an input target — the orbit
+    /// pivot, and which face a snapped edge or corner lies on when a draw
+    /// tool starts there.
     pub fn pick_face_geometry(
         &self,
         ox: f64,
@@ -7448,9 +7480,58 @@ impl Scene {
     }
 }
 
+/// Which world sketches are inside the editing scope, for the scoped
+/// sketch picks ([`Scene::sketch_pick_scope`]): a sketch owned by an object
+/// in the scope, or — when the scope takes in the frame's drawing
+/// (`frame_sketches`, [`Scene::set_pick_scope`]) — one of the innermost
+/// session frame's own sketches ([`Document::session_frame_sketches`]).
+/// Membership only, like [`PickScope`]; the frame's set is read on the
+/// first sketch that needs it, so a pick with no candidate pays nothing
+/// for it.
+struct SketchPickScope<'a> {
+    doc: &'a Document,
+    scope: &'a PickScope,
+    frame_sketches: bool,
+    frame: std::cell::OnceCell<std::collections::BTreeSet<SketchId>>,
+}
+
+impl SketchPickScope<'_> {
+    fn contains(&self, sketch: SketchId) -> bool {
+        self.doc
+            .sketch_owner_object(sketch)
+            .is_some_and(|o| self.scope.objects.contains(&o))
+            || (self.frame_sketches
+                && self
+                    .frame
+                    .get_or_init(|| self.doc.session_frame_sketches().into_iter().collect())
+                    .contains(&sketch))
+    }
+}
+
 impl Scene {
+    /// The sketch membership test for the sketch picks, when they are
+    /// scoped: wherever faces are targets ([`FacePolicy::Opaque`] and
+    /// [`FacePolicy::SeeThrough`], as for [`Scene::pick_face`]) with an
+    /// editing scope set ([`Scene::set_pick_scope`]). `None` otherwise —
+    /// in Wireframe, or at the top level — and the picks are then exactly
+    /// the unscoped ones.
+    fn sketch_pick_scope(&self) -> Option<SketchPickScope<'_>> {
+        if !self.inference.face_policy().faces_are_targets() {
+            return None;
+        }
+        Some(SketchPickScope {
+            doc: &self.doc,
+            scope: self.inference.pick_scope()?,
+            frame_sketches: self.pick_scope_frame_sketches,
+            frame: std::cell::OnceCell::new(),
+        })
+    }
+
     /// The body of [`Scene::pick_sketch_region`], without the face-policy
-    /// gate.
+    /// gate. With a `scope`, two running bests by the same rule — the
+    /// nearest region of any sketch and the nearest of an in-scope sketch —
+    /// and the in-scope one wins when there is one.
+    #[allow(clippy::too_many_arguments)]
     fn sketch_region_under_ray(
         &self,
         ox: f64,
@@ -7459,10 +7540,17 @@ impl Scene {
         dx: f64,
         dy: f64,
         dz: f64,
+        scope: Option<&SketchPickScope<'_>>,
     ) -> Option<SketchRegionPickJs> {
         let origin = Point3::new(ox, oy, oz);
         let dir = kernel::Vec3::new(dx, dy, dz);
         let mut best: Option<(f64, f64, SketchId, SketchRegionId)> = None;
+        let mut best_in_scope: Option<(f64, f64, SketchId, SketchRegionId)> = None;
+        let beats = |best: &Option<(f64, f64, SketchId, SketchRegionId)>, t: f64, area: f64| {
+            best.is_none_or(|(best_t, best_area, _, _)| {
+                t < best_t || ((t - best_t).abs() < kernel::tol::PLANE_DIST && area < best_area)
+            })
+        };
         for sid in self.doc.visible_sketch_ids() {
             let Some(sketch) = self.doc.sketch(sid) else {
                 continue;
@@ -7485,19 +7573,22 @@ impl Scene {
                     continue;
                 }
                 let area = sketch.region_area(rid).unwrap_or(f64::INFINITY);
-                if best.is_none_or(|(best_t, best_area, _, _)| {
-                    t < best_t || ((t - best_t).abs() < kernel::tol::PLANE_DIST && area < best_area)
-                }) {
+                if beats(&best, t, area) {
                     best = Some((t, area, sid, rid));
+                }
+                if beats(&best_in_scope, t, area) && scope.is_some_and(|sc| sc.contains(sid)) {
+                    best_in_scope = Some((t, area, sid, rid));
                 }
             }
         }
-        best.map(|(depth, _, s, r)| SketchRegionPickJs {
-            sketch: s.data().as_ffi(),
-            region: r.data().as_ffi(),
-            depth,
-            detached: self.doc.sketch(s).is_some_and(kernel::Sketch::detached),
-        })
+        best_in_scope
+            .or(best)
+            .map(|(depth, _, s, r)| SketchRegionPickJs {
+                sketch: s.data().as_ffi(),
+                region: r.data().as_ffi(),
+                depth,
+                detached: self.doc.sketch(s).is_some_and(kernel::Sketch::detached),
+            })
     }
 }
 
@@ -7641,6 +7732,7 @@ impl Scene {
     /// as [`Scene::pick_sketch`] (a vertex is a point — exact ray intersection
     /// would be unhittable). Returns the sketch, the vertex handle to drag, and
     /// its world position, or `undefined` if no vertex is within the aperture.
+    /// Scoped like [`Scene::pick_sketch`].
     pub fn pick_sketch_vertex(
         &self,
         ox: f64,
@@ -7654,8 +7746,11 @@ impl Scene {
             origin: Point3::new(ox, oy, oz),
             direction: kernel::Vec3::new(dx, dy, dz),
         };
+        let scope = self.sketch_pick_scope();
         self.inference
-            .pick_sketch_vertex(&ray, SKETCH_PICK_APERTURE)
+            .pick_sketch_vertex_preferring(&ray, SKETCH_PICK_APERTURE, &|s| {
+                scope.as_ref().is_some_and(|sc| sc.contains(s))
+            })
             .map(|(sid, vid, pos)| SketchVertexPickJs {
                 sketch: sid.data().as_ffi(),
                 vertex: vid.data().as_ffi(),
@@ -8306,6 +8401,58 @@ impl Scene {
         };
         self.inference.set_face_policy(policy);
         Ok(())
+    }
+
+    /// Sets the editing scope, per window and never saved: the world
+    /// objects and component instances the open edit can touch — exactly
+    /// the set the viewport keeps lit while the rest dims — and whether the
+    /// innermost open session frame's own drawing is in it. Wherever faces
+    /// are targets (Shaded and X-ray, [`Scene::set_render_mode`])
+    /// `pick_face`, `pick_sketch_region`, `pick_sketch`, `pick_sketch_edge`
+    /// and `pick_sketch_vertex` then return the nearest candidate inside
+    /// the scope, passing over nearer ones outside it: the editing view
+    /// draws everything outside the scope translucent, so what is inside
+    /// it can be seen, and what can be seen can be picked. With nothing in
+    /// scope under the ray they answer exactly as without a scope.
+    /// Wireframe ignores the scope (faces are not targets there), as do
+    /// `snap` and the `_geometry` and `_in_instance` picks.
+    ///
+    /// A face is in scope when its object (a world object) or its instance
+    /// (a placement) is listed. A sketch is in scope when its owning object
+    /// is listed, or, with `frame_sketches`, when it is the innermost open
+    /// session frame's own drawing ([`Document::session_frame_sketches`]:
+    /// for a component frame the definition's drawing and every line drawn
+    /// since the open; for a group frame the drawing the group holds and
+    /// every line drawn since the open). Pass `frame_sketches` for a scope
+    /// that IS the open session; an object context pushed on top of a
+    /// session narrows the scope to that object and its own drawing, so it
+    /// passes `false`.
+    ///
+    /// Replaces the previous scope. Empty lists are a scope, not a clear:
+    /// a session with no solid yet still scopes to its drawing, and with
+    /// nothing in scope every pick answers as without one. Only
+    /// [`Scene::clear_pick_scope`] (and a document load) clears it. Ids
+    /// are only compared, so a stale or unknown id is harmless.
+    pub fn set_pick_scope(&mut self, objects: Vec<u64>, instances: Vec<u64>, frame_sketches: bool) {
+        let scope = PickScope {
+            objects: objects.iter().map(|&o| object_id(o)).collect(),
+            instances: instances.iter().map(|&i| instance_id(i)).collect(),
+        };
+        recording::record(recording::RecordedCall::SetPickScope {
+            objects,
+            instances,
+            frame_sketches: Some(frame_sketches),
+        });
+        self.inference.set_pick_scope(Some(scope));
+        self.pick_scope_frame_sketches = frame_sketches;
+    }
+
+    /// Clears the editing scope ([`Scene::set_pick_scope`]): the top level,
+    /// where every pick is the nearest candidate of any owner.
+    pub fn clear_pick_scope(&mut self) {
+        recording::record(recording::RecordedCall::ClearPickScope);
+        self.inference.set_pick_scope(None);
+        self.pick_scope_frame_sketches = false;
     }
 
     /// Handles of every construction guide to draw: live, and not hidden
@@ -10480,6 +10627,25 @@ impl Scene {
                     OpenExplodeSession { instance } => {
                         self.open_explode_session(instance)?;
                     }
+                    SetPickScope {
+                        objects,
+                        instances,
+                        frame_sketches,
+                    } => match frame_sketches {
+                        Some(frame_sketches) => {
+                            self.set_pick_scope(objects, instances, frame_sketches);
+                        }
+                        // A recording from before the flag: both lists
+                        // empty meant "clear", and the frame's drawing was
+                        // always in scope.
+                        None if objects.is_empty() && instances.is_empty() => {
+                            self.clear_pick_scope();
+                        }
+                        None => self.set_pick_scope(objects, instances, true),
+                    },
+                    ClearPickScope => {
+                        self.clear_pick_scope();
+                    }
                     CloseExplodeSession => {
                         self.close_explode_session()?;
                     }
@@ -11318,9 +11484,13 @@ impl Scene {
         self.face_range_cache = SecondaryMap::new();
         self.inference = self.fresh_inference();
         // Hidden sets key by dense ids the new document reuses; drop them so a
-        // stale id can't keep a fresh object out of inference.
+        // stale id can't keep a fresh object out of inference. The editing
+        // scope keys the same way: a stale id would quietly favor whatever
+        // the new document put in that slot.
         self.hidden_objects.clear();
         self.hidden_instances.clear();
+        self.inference.set_pick_scope(None);
+        self.pick_scope_frame_sketches = false;
         self.open_draft = None;
         self.active_inference_instance = None;
         self.active_inference_sketches.clear();
@@ -19713,6 +19883,706 @@ mod tests {
         let mut replayed = Scene::new();
         assert_eq!(replayed.replay(&json).unwrap(), golden);
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    // -----------------------------------------------------------------
+    // Editing scope: wherever faces are targets (Shaded and X-ray), the
+    // picks pass over geometry outside the open edit and land on the
+    // nearest candidate inside it (docs/design/xray-edit-scope-pick.md):
+    // the editing view draws what is outside the scope translucent, so
+    // what is inside it can be seen. Wireframe ignores the scope; with
+    // nothing in scope under the ray, every pick answers exactly as it
+    // does without one.
+    // -----------------------------------------------------------------
+
+    /// A ray from x = 10 straight down -x, at height `y`, `z`.
+    const RAY_X0: f64 = 10.0;
+
+    fn pick_face_x(scene: &Scene, y: f64, z: f64) -> Option<FacePickJs> {
+        scene.pick_face(RAY_X0, y, z, -1.0, 0.0, 0.0)
+    }
+
+    fn pick_region_x(scene: &Scene, y: f64, z: f64) -> Option<SketchRegionPickJs> {
+        scene.pick_sketch_region(RAY_X0, y, z, -1.0, 0.0, 0.0)
+    }
+
+    /// Draws a square `[y0,y1]×[z0,z1]` on `obj`'s +x face (at `x`) through
+    /// the draft family the app's draw tools use. A closed loop inside a
+    /// face imprints: it becomes a sub-face of `obj`, not a sketch.
+    fn square_on_x_face(scene: &mut Scene, obj: u64, x: f64, y0: f64, y1: f64, z0: f64, z1: f64) {
+        let face = wasm_face_matching(scene, obj, kernel::Vec3::new(1.0, 0.0, 0.0));
+        let pts = [x, y0, z0, x, y1, z0, x, y1, z1, x, y0, z1];
+        draft_loop(scene, None, obj, face, &pts, None).expect("draws on the face");
+    }
+
+    /// A free square `[y0,y1]×[z0,z1]` on the plane x = `x`, drawn the way
+    /// the app draws on an empty plane.
+    fn free_square_at_x(scene: &mut Scene, x: f64, y0: f64, y1: f64, z0: f64, z1: f64) {
+        let d = scene
+            .draft_begin_plane(x, 0.0, 0.0, 1.0, 0.0, 0.0, "Rectangle")
+            .unwrap();
+        let pts = [(y0, z0), (y1, z0), (y1, z1), (y0, z1)];
+        for i in 0..4 {
+            let (a, b) = (pts[i], pts[(i + 1) % 4]);
+            scene
+                .draft_add_segment(d, x, a.0, a.1, x, b.0, b.1)
+                .unwrap();
+        }
+        scene.draft_end(d).unwrap();
+    }
+
+    /// The object that owns a region pick's sketch, if any.
+    fn region_owner(scene: &Scene, pick: &SketchRegionPickJs) -> Option<u64> {
+        scene
+            .doc
+            .sketch_owner_object(sketch_id(pick.sketch()))
+            .map(|o| o.data().as_ffi())
+    }
+
+    /// Pushes the scope exactly as the app's `refreshSessionScope` does:
+    /// the innermost frame's direct members, groups flattened to their leaf
+    /// objects and instances (`flattenSessionScope`), with the frame's own
+    /// drawing in scope.
+    fn push_session_scope_as_the_app(scene: &mut Scene) {
+        let mut objects = Vec::new();
+        let mut instances = Vec::new();
+        let mut stack = scene.doc.session_direct_members().unwrap_or_default();
+        while let Some(node) = stack.pop() {
+            match node {
+                NodeId::Object(o) => objects.push(o.data().as_ffi()),
+                NodeId::Instance(i) => instances.push(i.data().as_ffi()),
+                NodeId::Group(g) => stack.extend(scene.doc.group_members(g).unwrap_or_default()),
+            }
+        }
+        scene.set_pick_scope(objects, instances, true);
+    }
+
+    /// Every pick the scope touches, as comparable values.
+    #[derive(Debug, PartialEq)]
+    struct Picks {
+        face: Option<(u64, u64, Option<u64>, u64)>,
+        region: Option<(u64, u64, u64)>,
+        sketch: Option<u64>,
+        edge: Option<(u64, u64)>,
+        vertex: Option<(u64, u64)>,
+    }
+
+    fn picks_x(scene: &Scene, y: f64, z: f64) -> Picks {
+        let (o, d) = ([RAY_X0, y, z], [-1.0, 0.0, 0.0]);
+        Picks {
+            face: scene
+                .pick_face(o[0], o[1], o[2], d[0], d[1], d[2])
+                .map(|p| (p.object(), p.face(), p.instance(), p.depth().to_bits())),
+            region: scene
+                .pick_sketch_region(o[0], o[1], o[2], d[0], d[1], d[2])
+                .map(|p| (p.sketch(), p.region(), p.depth().to_bits())),
+            sketch: scene.pick_sketch(o[0], o[1], o[2], d[0], d[1], d[2]),
+            edge: scene
+                .pick_sketch_edge(o[0], o[1], o[2], d[0], d[1], d[2])
+                .map(|p| (p.sketch(), p.edge())),
+            vertex: scene
+                .pick_sketch_vertex(o[0], o[1], o[2], d[0], d[1], d[2])
+                .map(|p| (p.sketch(), p.vertex())),
+        }
+    }
+
+    /// The scope API: empty lists are a scope (not a clear),
+    /// `clear_pick_scope` clears it and the frame flag, a load clears both,
+    /// and a live-API resync keeps both.
+    #[test]
+    fn the_pick_scope_sets_clears_and_drops_on_load() {
+        let mut scene = Scene::new();
+        let a = scene_box(&mut scene, 0.0, 0.0, 1.0, 1.0, 1.0);
+        assert_eq!(scene.inference.pick_scope(), None);
+        assert!(!scene.pick_scope_frame_sketches);
+        scene.set_pick_scope(vec![a], vec![], false);
+        assert!(scene.inference.pick_scope().is_some());
+        assert!(!scene.pick_scope_frame_sketches);
+        scene.set_pick_scope(vec![], vec![], true);
+        assert_eq!(
+            scene.inference.pick_scope(),
+            Some(&PickScope::default()),
+            "empty lists are a scope, not a clear"
+        );
+        assert!(scene.pick_scope_frame_sketches);
+        scene.clear_pick_scope();
+        assert_eq!(scene.inference.pick_scope(), None);
+        assert!(!scene.pick_scope_frame_sketches, "a clear drops the flag");
+
+        scene.set_pick_scope(vec![a], vec![], true);
+        scene.full_resync();
+        assert_eq!(
+            scene.inference.pick_scope().map(|s| s.objects.len()),
+            Some(1),
+            "a resync keeps the window's scope"
+        );
+        assert!(scene.pick_scope_frame_sketches, "and its frame flag");
+        let bytes = scene.save();
+        scene.load(&bytes).unwrap();
+        assert_eq!(scene.inference.pick_scope(), None, "a load drops it");
+        assert!(!scene.pick_scope_frame_sketches, "and its frame flag");
+    }
+
+    /// An open line drawn on `obj`'s +x face (at `x`) from `(y0, z)` to
+    /// `(y1, z)`: it splits nothing, so the draft keeps it as a sketch the
+    /// object owns.
+    fn owned_line_on_x_face(scene: &mut Scene, obj: u64, x: f64, y0: f64, y1: f64, z: f64) -> u64 {
+        let face = wasm_face_matching(scene, obj, kernel::Vec3::new(1.0, 0.0, 0.0));
+        let d = scene.draft_begin_face(obj, face, "Line").unwrap();
+        scene.draft_add_segment(d, x, y0, z, x, y1, z).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&scene.draft_end(d).unwrap()).unwrap();
+        let sketch = report["sketches"][0].as_u64().expect("kept as a sketch");
+        assert_eq!(
+            scene.doc.sketch_owner_object(sketch_id(sketch)),
+            Some(object_id(obj)),
+            "an owned sketch"
+        );
+        sketch
+    }
+
+    /// A closed square on the plane x = `x` made a sketch owned by `obj`
+    /// (one of whose faces lies on that plane) through the kernel's owner
+    /// call: drawing on a face imprints a closed loop into the face, so an
+    /// owned sketch REGION is reached only this way (or by a load).
+    fn owned_square_at_x(scene: &mut Scene, obj: u64, x: f64, y0: f64, y1: f64, z0: f64, z1: f64) {
+        let plane =
+            Plane::from_point_normal(Point3::new(x, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)).unwrap();
+        let s = scene.doc.add_sketch(plane);
+        let sk = scene.doc.sketch_mut(s).unwrap();
+        let pts = [(y0, z0), (y1, z0), (y1, z1), (y0, z1)];
+        for i in 0..4 {
+            let (a, b) = (pts[i], pts[(i + 1) % 4]);
+            sk.add_segment(Point3::new(x, a.0, a.1), Point3::new(x, b.0, b.1))
+                .unwrap();
+        }
+        scene
+            .doc
+            .set_sketch_object_owner(s, Some(object_id(obj)))
+            .unwrap();
+    }
+
+    /// A region drawn on the FRONT box's face (it imprints: a sub-face of
+    /// the front box) with a free drawing in front of it, the REAR box in
+    /// scope, under each policy. In Shaded and X-ray alike the face pick
+    /// reaches the rear box; the region pick has nothing in scope under
+    /// the ray and answers as without a scope, until the rear box owns a
+    /// region there. Wireframe ignores the scope. Owned lines on both
+    /// faces drive the edge, vertex and whole-sketch picks.
+    #[test]
+    fn a_region_on_the_front_box_with_the_rear_box_in_scope_under_each_policy() {
+        let mut scene = Scene::new();
+        let rear = scene_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 2.0);
+        let front = scene_box(&mut scene, 4.0, 0.0, 6.0, 2.0, 2.0);
+        square_on_x_face(&mut scene, front, 6.0, 0.5, 1.5, 0.5, 1.5);
+        free_square_at_x(&mut scene, 7.0, 0.25, 1.75, 0.25, 1.75);
+        let front_line = owned_line_on_x_face(&mut scene, front, 6.0, 0.6, 1.4, 0.4);
+        let rear_line = owned_line_on_x_face(&mut scene, rear, 2.0, 0.6, 1.4, 0.4);
+        let (y, z) = (1.0, 1.0);
+        let modes = ["shaded", "xray", "wireframe"];
+
+        let mut unscoped = Vec::new();
+        for mode in modes {
+            scene.set_render_mode(mode).unwrap();
+            unscoped.push(picks_x(&scene, y, z));
+        }
+        scene.set_pick_scope(vec![rear], vec![], false);
+        for (k, mode) in modes.into_iter().enumerate() {
+            scene.set_render_mode(mode).unwrap();
+            let face = pick_face_x(&scene, y, z);
+            let region = pick_region_x(&scene, y, z);
+            match mode {
+                "wireframe" => {
+                    assert!(face.is_none() && region.is_none(), "{mode}");
+                    assert_eq!(picks_x(&scene, y, z), unscoped[k], "{mode}: scope ignored");
+                }
+                _ => {
+                    let face = face.expect("the rear box's face");
+                    assert_eq!(face.object(), rear, "{mode}: through the front box");
+                    assert!((face.depth() - 8.0).abs() < 1e-9);
+                    let unscoped_face = unscoped[k].face.expect("front");
+                    assert_eq!(unscoped_face.0, front, "unscoped: the imprinted face");
+                    // Nothing in scope among the regions: as without one.
+                    let region = region.expect("the free drawing, as before");
+                    assert_eq!(region_owner(&scene, &region), None);
+                    assert!((region.depth() - 3.0).abs() < 1e-9);
+                    assert_eq!(picks_x(&scene, y, z).region, unscoped[k].region);
+                }
+            }
+        }
+
+        // Edge, vertex and whole-sketch picks: the owned lines sit on one
+        // axis-parallel ray, the front one nearer.
+        let (ey, ez) = (1.0, 0.4);
+        let edge_sketch = |scene: &Scene| {
+            scene
+                .pick_sketch_edge(RAY_X0, ey, ez, -1.0, 0.0, 0.0)
+                .map(|p| p.sketch())
+        };
+        let whole = |scene: &Scene| scene.pick_sketch(RAY_X0, ey, ez, -1.0, 0.0, 0.0);
+        let vertex_sketch = |scene: &Scene| {
+            scene
+                .pick_sketch_vertex(RAY_X0, 0.6, 0.4, -1.0, 0.0, 0.0)
+                .map(|p| p.sketch())
+        };
+        for mode in modes {
+            scene.set_render_mode(mode).unwrap();
+            let want = if mode == "wireframe" {
+                front_line
+            } else {
+                rear_line
+            };
+            assert_eq!(edge_sketch(&scene), Some(want), "{mode} edge");
+            assert_eq!(whole(&scene), Some(want), "{mode} sketch");
+            assert_eq!(vertex_sketch(&scene), Some(want), "{mode} vertex");
+        }
+        scene.clear_pick_scope();
+        for mode in ["shaded", "xray"] {
+            scene.set_render_mode(mode).unwrap();
+            assert_eq!(edge_sketch(&scene), Some(front_line), "unscoped {mode}");
+        }
+        scene.set_render_mode("xray").unwrap();
+
+        // The rear box owns a region under the same ray: Shaded and X-ray
+        // land on it.
+        owned_square_at_x(&mut scene, rear, 2.0, 0.5, 1.5, 0.5, 1.5);
+        scene.set_pick_scope(vec![rear], vec![], false);
+        for mode in modes {
+            scene.set_render_mode(mode).unwrap();
+            let region = pick_region_x(&scene, y, z);
+            match mode {
+                "wireframe" => assert!(region.is_none()),
+                _ => {
+                    let region = region.expect("the rear box's region");
+                    assert_eq!(region_owner(&scene, &region), Some(rear), "{mode}");
+                    assert!((region.depth() - 8.0).abs() < 1e-9);
+                }
+            }
+        }
+        // The front box in scope: it owns no region, so the free drawing;
+        // a scope of stale ids: the unscoped picks, bit for bit.
+        scene.set_render_mode("xray").unwrap();
+        scene.set_pick_scope(vec![front], vec![], false);
+        assert_eq!(
+            region_owner(&scene, &pick_region_x(&scene, y, z).unwrap()),
+            None
+        );
+        assert_eq!(pick_face_x(&scene, y, z).unwrap().object(), front);
+        for mode in ["shaded", "xray"] {
+            scene.set_render_mode(mode).unwrap();
+            scene.clear_pick_scope();
+            let bare = picks_x(&scene, y, z);
+            scene.set_pick_scope(vec![999_999], vec![888_888], true);
+            assert_eq!(
+                picks_x(&scene, y, z),
+                bare,
+                "{mode}: stale ids are harmless"
+            );
+            scene.set_pick_scope(vec![], vec![], true);
+            assert_eq!(picks_x(&scene, y, z), bare, "{mode}: an empty scope too");
+        }
+        scene.set_render_mode("xray").unwrap();
+        // The camera's geometry picks never consult the scope.
+        scene.set_pick_scope(vec![rear], vec![], false);
+        let geom = scene
+            .pick_face_geometry(RAY_X0, y, z, -1.0, 0.0, 0.0)
+            .unwrap();
+        assert_eq!(geom.object(), front);
+        let geom_region = scene
+            .pick_sketch_region_geometry(RAY_X0, y, z, -1.0, 0.0, 0.0)
+            .unwrap();
+        assert_eq!(region_owner(&scene, &geom_region), None);
+        assert!((geom_region.depth() - 3.0).abs() < 1e-9);
+    }
+
+    /// The reporter's scene: a component buried half inside an enclosing
+    /// box, a sibling copy in front of the box, a free drawing in front of
+    /// that. With an explode session open on the buried copy and the scope
+    /// pushed as the app pushes it, X-ray picks pass over the sibling and
+    /// the box to the session's own face, and the frame's own drawing (a
+    /// sketch drawn mid-session, owned by no object) beats the drawing in
+    /// front of it. Shaded picks the same way; Wireframe as before.
+    #[test]
+    fn an_explode_session_frame_picks_its_own_geometry_through_the_context() {
+        let mut scene = Scene::new();
+        let enclosing = scene_box(&mut scene, 0.0, 0.0, 4.0, 2.0, 2.0);
+        free_square_at_x(&mut scene, 4.5, 0.25, 1.75, 0.25, 1.75);
+        let member = scene_box(&mut scene, 1.0, 0.5, 2.0, 1.5, 1.0);
+        let entered = scene.make_component(&[0], &[member]).unwrap();
+        let component = scene.instance_def(entered).unwrap();
+        let sibling = scene
+            .place_instance(
+                component,
+                &[1.0, 0.0, 0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let (y, z) = (1.0, 0.5);
+
+        scene.set_render_mode("xray").unwrap();
+        let top_level = picks_x(&scene, y, z);
+        assert_eq!(top_level.face.map(|f| f.2), Some(Some(sibling)));
+
+        scene.open_explode_session(entered).unwrap();
+        push_session_scope_as_the_app(&mut scene);
+        let scope = scene.inference.pick_scope().cloned().expect("a scope");
+        assert!(scope.objects.contains(&object_id(member)));
+        let face = pick_face_x(&scene, y, z).expect("the session's face");
+        assert_eq!((face.object(), face.instance()), (member, None));
+        assert!((face.depth() - 8.0).abs() < 1e-9);
+        // Nothing drawn in the frame yet: the region pick is unscoped.
+        let region = pick_region_x(&scene, y, z).expect("the free drawing");
+        assert!((region.depth() - 5.5).abs() < 1e-9);
+
+        // Nothing of the frame under the ray: the enclosing box, as today.
+        let off = pick_face_x(&scene, 1.75, 1.5).expect("the enclosing box");
+        assert_eq!(off.object(), enclosing);
+
+        // Drawing mid-session, on the plane x = 3 inside the box: the
+        // frame's own sketch. X-ray takes it over the drawing in front.
+        free_square_at_x(&mut scene, 3.0, 0.5, 1.5, 0.25, 1.25);
+        push_session_scope_as_the_app(&mut scene);
+        let region = pick_region_x(&scene, y, z).expect("the session's drawing");
+        assert_eq!(region_owner(&scene, &region), None, "a free sketch");
+        assert!((region.depth() - 7.0).abs() < 1e-9);
+        assert!(
+            scene
+                .doc
+                .session_frame_sketches()
+                .contains(&sketch_id(region.sketch()))
+        );
+
+        // Shaded: the editing view draws the context translucent, so the
+        // scope applies just as in X-ray.
+        let xray = picks_x(&scene, y, z);
+        scene.set_render_mode("shaded").unwrap();
+        let shaded = picks_x(&scene, y, z);
+        assert_eq!(shaded, xray, "Shaded picks the frame's own geometry too");
+        assert_eq!(shaded.face.map(|f| (f.0, f.2)), Some((member, None)));
+        // Wireframe: the scope is ignored, exactly the unscoped answers.
+        scene.set_render_mode("wireframe").unwrap();
+        let wire = picks_x(&scene, y, z);
+        scene.clear_pick_scope();
+        assert_eq!(picks_x(&scene, y, z), wire, "Wireframe ignores the scope");
+        // And unscoped Shaded is the sibling's face and the drawing in
+        // front, as at the top level.
+        scene.set_render_mode("shaded").unwrap();
+        assert_eq!(
+            pick_face_x(&scene, y, z).and_then(|f| f.instance()),
+            Some(sibling)
+        );
+        assert!((pick_region_x(&scene, y, z).unwrap().depth() - 5.5).abs() < 1e-9);
+
+        // Closed, with the scope cleared as the app clears it: top level.
+        scene.close_innermost_session().unwrap();
+        scene.clear_pick_scope();
+        scene.set_render_mode("xray").unwrap();
+        assert_eq!(
+            pick_face_x(&scene, y, z).and_then(|f| f.instance()),
+            Some(sibling)
+        );
+    }
+
+    /// A group session: the group's members are the scope, flattened to
+    /// leaf objects as the app pushes them. Shaded and X-ray reach a
+    /// member's face, a nested member's face, and a member's owned line
+    /// through the box in front; Wireframe does not scope the line.
+    #[test]
+    fn a_group_session_frame_picks_its_members_through_the_context() {
+        let mut scene = Scene::new();
+        let enclosing = scene_box(&mut scene, 0.0, 0.0, 4.0, 2.0, 2.0);
+        let box_line = owned_line_on_x_face(&mut scene, enclosing, 4.0, 0.6, 1.4, 0.4);
+        let a = scene_box(&mut scene, 1.0, 0.5, 2.0, 1.5, 1.0);
+        let b = scene_box(&mut scene, 1.0, 1.6, 2.0, 1.9, 1.0);
+        let a_line = owned_line_on_x_face(&mut scene, a, 2.0, 0.6, 1.4, 0.4);
+        let inner = scene.group_nodes(&[0], &[b]).unwrap();
+        let group = scene.group_nodes(&[0, 1], &[a, inner]).unwrap();
+        let (y, z) = (1.0, 0.5);
+        let edge_sketch = |scene: &Scene| {
+            scene
+                .pick_sketch_edge(RAY_X0, 1.0, 0.4, -1.0, 0.0, 0.0)
+                .map(|p| p.sketch())
+        };
+
+        scene.set_render_mode("xray").unwrap();
+        assert_eq!(pick_face_x(&scene, y, z).unwrap().object(), enclosing);
+        assert_eq!(edge_sketch(&scene), Some(box_line));
+        scene.open_group_session(group).unwrap();
+        push_session_scope_as_the_app(&mut scene);
+        let scope = scene.inference.pick_scope().cloned().unwrap();
+        assert!(
+            scope.objects.contains(&object_id(a)) && scope.objects.contains(&object_id(b)),
+            "the nested group's leaf is in scope too: {scope:?}"
+        );
+        for mode in ["xray", "shaded"] {
+            scene.set_render_mode(mode).unwrap();
+            assert_eq!(pick_face_x(&scene, y, z).unwrap().object(), a, "{mode}");
+            assert_eq!(
+                pick_face_x(&scene, 1.75, 0.5).unwrap().object(),
+                b,
+                "{mode}"
+            );
+            assert_eq!(edge_sketch(&scene), Some(a_line), "{mode}");
+        }
+        scene.set_render_mode("wireframe").unwrap();
+        assert_eq!(edge_sketch(&scene), Some(box_line), "Wireframe: unscoped");
+        scene.close_innermost_session().unwrap();
+        scene.clear_pick_scope();
+        scene.set_render_mode("shaded").unwrap();
+        assert_eq!(pick_face_x(&scene, y, z).unwrap().object(), enclosing);
+        assert_eq!(edge_sketch(&scene), Some(box_line), "top level");
+    }
+
+    /// The legacy in-context edit of a mirrored placement (no explode
+    /// session for a mirrored pose): the scope is that one instance. Shaded
+    /// and X-ray reach its face through the box in front and pass over a
+    /// sibling copy; the member's object id alone names no placement.
+    #[test]
+    fn a_legacy_context_on_a_mirrored_placement_picks_that_instance_only() {
+        let mut scene = Scene::new();
+        let member = scene_box(&mut scene, 0.0, 0.0, 1.0, 1.0, 1.0);
+        let first = scene.make_component(&[0], &[member]).unwrap();
+        let component = scene.instance_def(first).unwrap();
+        scene.delete_node(2, first).unwrap();
+        // Mirrored in y, inside the enclosing box (x 1..2, y -1.5..-0.5).
+        let mirrored = scene
+            .place_instance(
+                component,
+                &[1.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, -0.5, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        assert!(scene.open_explode_session(mirrored).is_err(), "pose gate");
+        let enclosing = scene_box(&mut scene, 0.0, -2.0, 4.0, 0.0, 2.0);
+        let sibling = scene
+            .place_instance(
+                component,
+                &[1.0, 0.0, 0.0, 6.0, 0.0, 1.0, 0.0, -1.5, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let (y, z) = (-1.0, 0.5);
+
+        scene.set_render_mode("xray").unwrap();
+        assert_eq!(pick_face_x(&scene, y, z).unwrap().instance(), Some(sibling));
+        scene.set_pick_scope(vec![member], vec![], false);
+        assert_eq!(
+            pick_face_x(&scene, y, z).unwrap().instance(),
+            Some(sibling),
+            "the member's object id names no placement"
+        );
+        scene.set_pick_scope(vec![], vec![mirrored], false);
+        for mode in ["xray", "shaded"] {
+            scene.set_render_mode(mode).unwrap();
+            let face = pick_face_x(&scene, y, z).expect("the mirrored copy");
+            assert_eq!(
+                (face.object(), face.instance()),
+                (member, Some(mirrored)),
+                "{mode}"
+            );
+            assert!((face.depth() - 8.0).abs() < 1e-9);
+        }
+        scene.clear_pick_scope();
+        assert_eq!(pick_face_x(&scene, y, z).unwrap().instance(), Some(sibling));
+        let _ = enclosing;
+    }
+
+    /// The scope calls record and replay, so a replayed session re-asks a
+    /// scoped pick with the scope it was asked under.
+    #[test]
+    fn the_pick_scope_records_and_replays() {
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let rear = scene_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 2.0);
+        let _front = scene_box(&mut scene, 4.0, 0.0, 6.0, 2.0, 2.0);
+        scene.set_pick_scope(vec![rear], vec![], true);
+        scene.stop_recording();
+        let json = scene.take_recording();
+        assert!(json.contains("\"method\":\"set_pick_scope\""), "{json}");
+        assert!(json.contains("\"frame_sketches\":true"), "{json}");
+        let golden = scene.state_hash();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert!(replayed.pick_scope_frame_sketches);
+        replayed.set_render_mode("xray").unwrap();
+        scene.set_render_mode("xray").unwrap();
+        assert_eq!(picks_x(&replayed, 1.0, 1.0), picks_x(&scene, 1.0, 1.0));
+        assert_eq!(pick_face_x(&replayed, 1.0, 1.0).unwrap().object(), rear);
+
+        scene.start_recording();
+        scene.clear_pick_scope();
+        scene.stop_recording();
+        let json = scene.take_recording();
+        assert!(json.contains("\"method\":\"clear_pick_scope\""), "{json}");
+        replayed.replay(&json).unwrap();
+        assert_eq!(replayed.inference.pick_scope(), None);
+    }
+
+    /// A recording made before `frame_sketches` existed replays with its
+    /// original meaning: both lists empty cleared the scope, and otherwise
+    /// the frame's drawing was in scope.
+    #[test]
+    fn a_pick_scope_recorded_without_the_frame_flag_replays_as_it_meant() {
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let rear = scene_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 2.0);
+        scene.set_pick_scope(vec![rear], vec![], false);
+        scene.stop_recording();
+        let json = scene.take_recording();
+        let golden = scene.state_hash();
+        let flagged = "\"frame_sketches\":false";
+        assert!(json.contains(flagged), "{json}");
+
+        let legacy = json.replace(&format!(",{flagged}"), "");
+        assert!(!legacy.contains("frame_sketches"), "{legacy}");
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&legacy).unwrap(), golden);
+        assert_eq!(
+            replayed.inference.pick_scope().map(|s| s.objects.len()),
+            Some(1)
+        );
+        assert!(
+            replayed.pick_scope_frame_sketches,
+            "legacy: frame drawing in"
+        );
+
+        let rear_list = format!("\"objects\":[{rear}]");
+        assert!(legacy.contains(&rear_list), "{legacy}");
+        let legacy_empty = legacy.replace(&rear_list, "\"objects\":[]");
+        let mut replayed = Scene::new();
+        replayed.replay(&legacy_empty).unwrap();
+        assert_eq!(
+            replayed.inference.pick_scope(),
+            None,
+            "legacy: empty cleared"
+        );
+        assert!(!replayed.pick_scope_frame_sketches);
+    }
+
+    /// The reporter's component, entered, with drawing of its own: a free
+    /// square drawn mid-session inside the enclosing box (plane x = 3),
+    /// and a region the member owns on its +x face (x = 2) behind it.
+    /// Returns (scene, member, entered instance).
+    fn entered_component_with_drawing() -> (Scene, u64, u64) {
+        let mut scene = Scene::new();
+        let _enclosing = scene_box(&mut scene, 0.0, 0.0, 4.0, 2.0, 2.0);
+        free_square_at_x(&mut scene, 4.5, 0.25, 1.75, 0.25, 1.75);
+        let member = scene_box(&mut scene, 1.0, 0.5, 2.0, 1.5, 1.0);
+        let entered = scene.make_component(&[0], &[member]).unwrap();
+        scene.open_explode_session(entered).unwrap();
+        free_square_at_x(&mut scene, 3.0, 0.5, 1.5, 0.25, 1.25);
+        owned_square_at_x(&mut scene, member, 2.0, 0.6, 1.4, 0.25, 0.75);
+        (scene, member, entered)
+    }
+
+    /// (a) An object context pushed on top of a component session scopes
+    /// to that object and its own drawing: the session frame's free
+    /// drawing is context there (`frame_sketches` false), so the region
+    /// pick passes over it to the object's own region. The session's own
+    /// scope keeps the frame's drawing in.
+    #[test]
+    fn an_object_context_on_a_component_session_leaves_the_frames_drawing_out() {
+        let (mut scene, member, _) = entered_component_with_drawing();
+        let (y, z) = (1.0, 0.5);
+        for mode in ["shaded", "xray"] {
+            scene.set_render_mode(mode).unwrap();
+            push_session_scope_as_the_app(&mut scene);
+            let region = pick_region_x(&scene, y, z).expect("the frame's drawing");
+            assert_eq!(region_owner(&scene, &region), None, "{mode}: free");
+            assert!((region.depth() - 7.0).abs() < 1e-9, "{mode}");
+
+            // Double-click the member: an object context on the session.
+            scene.set_pick_scope(vec![member], vec![], false);
+            let region = pick_region_x(&scene, y, z).expect("the member's region");
+            assert_eq!(region_owner(&scene, &region), Some(member), "{mode}");
+            assert!((region.depth() - 8.0).abs() < 1e-9, "{mode}");
+            let face = pick_face_x(&scene, y, z).expect("the member's face");
+            assert_eq!(face.object(), member, "{mode}");
+
+            // The flag alone is what leaves the frame's drawing out.
+            scene.set_pick_scope(vec![member], vec![], true);
+            let region = pick_region_x(&scene, y, z).unwrap();
+            assert!((region.depth() - 7.0).abs() < 1e-9, "{mode}");
+        }
+    }
+
+    /// (b) An open component with no solid left, only drawing: the scope
+    /// is empty of objects and instances but still a scope, so its
+    /// drawing beats the context drawn in front of it (before, empty lists
+    /// cleared the scope and left the drawing unscoped).
+    #[test]
+    fn an_open_component_with_only_drawing_is_scoped_to_its_drawing() {
+        let (mut scene, member, _) = entered_component_with_drawing();
+        let (y, z) = (1.0, 0.5);
+        scene.delete_node(0, member).unwrap();
+        push_session_scope_as_the_app(&mut scene);
+        let scope = scene.inference.pick_scope().cloned().expect("a scope");
+        assert!(scope.objects.is_empty() && scope.instances.is_empty());
+        for mode in ["shaded", "xray"] {
+            scene.set_render_mode(mode).unwrap();
+            let region = pick_region_x(&scene, y, z).expect("the frame's drawing");
+            assert!((region.depth() - 7.0).abs() < 1e-9, "{mode}");
+            assert!(
+                scene
+                    .doc
+                    .session_frame_sketches()
+                    .contains(&sketch_id(region.sketch()))
+            );
+            // No solid in scope: the face pick is the unscoped one.
+            let scoped_face = pick_face_x(&scene, y, z).map(|f| f.object());
+            scene.clear_pick_scope();
+            assert_eq!(pick_face_x(&scene, y, z).map(|f| f.object()), scoped_face);
+            let unscoped = pick_region_x(&scene, y, z).unwrap();
+            assert!((unscoped.depth() - 5.5).abs() < 1e-9, "{mode}: in front");
+            push_session_scope_as_the_app(&mut scene);
+        }
+        scene.set_render_mode("wireframe").unwrap();
+        assert!(pick_region_x(&scene, y, z).is_none(), "Wireframe: no fills");
+    }
+
+    /// (c) A group session: the drawing the group holds and a line drawn
+    /// while it is open are the frame's own drawing, in scope through
+    /// `frame_sketches` — they pass over the context drawn in front. An
+    /// object context on top (`frame_sketches` false) leaves them out.
+    #[test]
+    fn a_group_sessions_own_drawing_is_in_scope() {
+        let mut scene = Scene::new();
+        let _enclosing = scene_box(&mut scene, 0.0, 0.0, 4.0, 2.0, 2.0);
+        let a = scene_box(&mut scene, 1.0, 0.5, 2.0, 1.5, 1.0);
+        let (y, z) = (1.0, 0.5);
+        free_square_at_x(&mut scene, 3.0, 0.5, 1.5, 0.25, 1.25);
+        let held = pick_region_x(&scene, y, z).expect("the square").sketch();
+        free_square_at_x(&mut scene, 4.5, 0.25, 1.75, 0.25, 1.75);
+        let g = scene.group_nodes(&[0], &[a]).unwrap();
+        scene
+            .doc
+            .set_sketch_group(sketch_id(held), Some(group_id(g)))
+            .unwrap();
+
+        scene.open_group_session(g).unwrap();
+        push_session_scope_as_the_app(&mut scene);
+        for mode in ["shaded", "xray"] {
+            scene.set_render_mode(mode).unwrap();
+            let region = pick_region_x(&scene, y, z).expect("the group's drawing");
+            assert_eq!(region.sketch(), held, "{mode}");
+            assert!((region.depth() - 7.0).abs() < 1e-9, "{mode}");
+        }
+
+        // A square drawn while the group is open, nearer than the held one.
+        free_square_at_x(&mut scene, 3.5, 0.5, 1.5, 0.25, 1.25);
+        push_session_scope_as_the_app(&mut scene);
+        for mode in ["shaded", "xray"] {
+            scene.set_render_mode(mode).unwrap();
+            let region = pick_region_x(&scene, y, z).expect("the new drawing");
+            assert_ne!(region.sketch(), held);
+            assert!((region.depth() - 6.5).abs() < 1e-9, "{mode}");
+            // An object context on top: only that object's drawing.
+            scene.set_pick_scope(vec![a], vec![], false);
+            let region = pick_region_x(&scene, y, z).unwrap();
+            assert!((region.depth() - 5.5).abs() < 1e-9, "{mode}: context");
+            push_session_scope_as_the_app(&mut scene);
+        }
+
+        scene.close_innermost_session().unwrap();
+        scene.clear_pick_scope();
+        let region = pick_region_x(&scene, y, z).unwrap();
+        assert!((region.depth() - 5.5).abs() < 1e-9, "top level");
     }
 }
 

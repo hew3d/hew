@@ -87,6 +87,7 @@
 //! |---|---|---|
 //! | [`FacePolicy::Opaque`] (shaded) | yes | yes |
 //! | [`FacePolicy::SeeThrough`] (X-ray) | no | yes, nearest face along the ray |
+//! | [`FacePolicy::Opaque`] or [`FacePolicy::SeeThrough`] with a [`PickScope`] | as above | yes; `pick_face` returns the nearest in-scope face along the ray, else the nearest |
 //! | [`FacePolicy::Absent`] (wireframe) | no | none |
 //!
 //! Under `SeeThrough` every edge and named point in the model is reachable,
@@ -94,6 +95,20 @@
 //! is under the cursor: face candidates all sit at angular distance zero, so
 //! the nearest-depth tie-break picks the front one. Under `Absent` faces do
 //! not exist for input at all, sketch-region fills included.
+//!
+//! While something is open for editing, the caller sets the editing scope
+//! ([`InferenceScene::set_pick_scope`]): the owners the open edit can touch.
+//! Wherever faces are targets (`Opaque` and `SeeThrough`) a
+//! [`InferenceScene::pick_face`] then passes over every face outside the
+//! scope and lands on the nearest one inside it, so a tool reaches the open
+//! component's face through the solid in front of it. The editing view
+//! draws everything outside the scope translucent, so what is in scope is
+//! visible through it even when the view mode is shaded: what can be seen
+//! can be picked. When no in-scope face lies along the ray, the pick is
+//! exactly what it is without a scope. Under `Absent` faces are not targets
+//! and the scope changes nothing, and snapping ([`InferenceScene::resolve`])
+//! and the geometry-only picks ([`InferenceScene::pick_face_geometry_from`])
+//! never consult it.
 //!
 //! # Locking
 //!
@@ -727,6 +742,19 @@ pub struct SnapSource {
     /// instances of one definition coexist without colliding, and tells the UI
     /// which placement was hit (for selection/highlight).
     pub instance: Option<InstanceId>,
+}
+
+impl SnapSource {
+    /// Whether this candidate's owner is inside `scope`: a placement's
+    /// candidate by its instance, a world object's by its object id (crate
+    /// docs, *Occlusion*). Membership only, so a stale id in the scope
+    /// matches nothing.
+    pub fn in_scope(&self, scope: &PickScope) -> bool {
+        match self.instance {
+            Some(i) => scope.instances.contains(&i),
+            None => scope.objects.contains(&self.object),
+        }
+    }
 }
 
 /// A resolved snap: where the cursor should land and why.
@@ -1648,6 +1676,22 @@ impl FacePolicy {
     }
 }
 
+/// What an open edit can touch: wherever faces are targets
+/// ([`FacePolicy::Opaque`] and [`FacePolicy::SeeThrough`]),
+/// [`InferenceScene::pick_face`] lands on the nearest face inside it (crate
+/// docs, *Occlusion*). Set with [`InferenceScene::set_pick_scope`]; no scope
+/// (`None`) is the top level, where nothing is skipped. Membership, not
+/// eligibility: a candidate is in scope when its owner is listed
+/// ([`SnapSource::in_scope`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PickScope {
+    /// World objects: a session frame's members, or the entered object.
+    pub objects: BTreeSet<ObjectId>,
+    /// Placements whose geometry is in scope: a session frame's surfaced
+    /// member instances, or the one instance of a legacy in-context edit.
+    pub instances: BTreeSet<InstanceId>,
+}
+
 /// Kinds of sketch candidate a registered sketch can have, as bits of
 /// `InferenceScene::sketch_kinds`.
 const SKETCH_SEGMENTS: u8 = 1;
@@ -1766,6 +1810,11 @@ pub struct InferenceScene {
     /// pushed by [`InferenceScene::set_face_policy`]). Defaults to
     /// [`FacePolicy::Opaque`].
     face_policy: FacePolicy,
+    /// The editing scope [`InferenceScene::pick_face`] favors wherever
+    /// faces are targets (pushed by
+    /// [`InferenceScene::set_pick_scope`]). `None` (the default) is the top
+    /// level: no scope.
+    pick_scope: Option<PickScope>,
     /// Lazily rebuilt spatial index over `points`/`segments`/`faces`; `None`
     /// means dirty (a mutator ran since the last build). Interior mutability
     /// because the hot pointer-move queries (`resolve`, `pick_face`) take
@@ -1851,6 +1900,7 @@ impl Default for InferenceScene {
             axes_enabled: true,
             axes_frame: AxesFrame::IDENTITY,
             face_policy: FacePolicy::Opaque,
+            pick_scope: None,
             spatial: RefCell::new(None),
             occlusion_tests: Cell::new(0),
             world_owners: BTreeSet::new(),
@@ -1905,6 +1955,24 @@ impl InferenceScene {
     /// The current [`FacePolicy`].
     pub fn face_policy(&self) -> FacePolicy {
         self.face_policy
+    }
+
+    /// Sets the editing scope (crate docs, *Occlusion*): under
+    /// [`FacePolicy::Opaque`] and [`FacePolicy::SeeThrough`], every later
+    /// [`Self::pick_face`] returns the nearest face whose owner is in
+    /// `scope`, or the nearest face of any owner when none in scope lies
+    /// along the ray. `None` clears it; an empty scope is a scope (it holds
+    /// nothing, so every pick falls back to the nearest face). Ignored
+    /// under [`FacePolicy::Absent`] (no face is a target), by snapping, and
+    /// by the geometry-only picks. View state like the face policy: the registered
+    /// geometry is untouched.
+    pub fn set_pick_scope(&mut self, scope: Option<PickScope>) {
+        self.pick_scope = scope;
+    }
+
+    /// The current editing scope ([`Self::set_pick_scope`]), if any.
+    pub fn pick_scope(&self) -> Option<&PickScope> {
+        self.pick_scope.as_ref()
     }
 
     /// Sets the movable drawing axes frame (tool-parity design §4) that
@@ -4380,6 +4448,10 @@ impl InferenceScene {
     /// never move an object off-screen).
     ///
     /// Always `None` under [`FacePolicy::Absent`]: faces are not targets.
+    /// With a [`PickScope`] set (under [`FacePolicy::Opaque`] or
+    /// [`FacePolicy::SeeThrough`]), the nearest face whose owner is in
+    /// scope wins; with none in scope along the ray, the nearest face of
+    /// any owner (crate docs, *Occlusion*).
     pub fn pick_face(&self, ray: &PickRay) -> Option<(SnapSource, f64)> {
         self.pick_face_from(ray, &|_| None)
     }
@@ -4395,10 +4467,11 @@ impl InferenceScene {
         self.pick_face_impl(ray, Some(&index), source, true)
     }
 
-    /// [`Self::pick_face_from`] that ignores the [`FacePolicy`]: the
-    /// nearest face the ray passes through, even in Wireframe. For camera
-    /// questions (where to orbit around), not editing ones — a face that is
-    /// no input target is still where the geometry is.
+    /// [`Self::pick_face_from`] that ignores the [`FacePolicy`] and the
+    /// [`PickScope`]: the nearest face the ray passes through, even in
+    /// Wireframe. For camera questions (where to orbit around), not editing
+    /// ones — a face that is no input target is still where the geometry
+    /// is.
     pub fn pick_face_geometry_from(
         &self,
         ray: &PickRay,
@@ -4417,10 +4490,53 @@ impl InferenceScene {
         self.pick_face_impl(ray, None, &|_| None, true)
     }
 
+    /// Every face the ray passes through, nearest first, ties in candidate
+    /// order — the full hit list [`Self::pick_face`] chooses from, on the
+    /// linear path, ignoring the policy and the scope. The reference the
+    /// property tests check the scoped pick against (DEVELOPMENT.md rule
+    /// 3). Not part of the supported API.
+    #[doc(hidden)]
+    pub fn pick_face_hits_linear(&self, ray: &PickRay) -> Vec<(SnapSource, f64)> {
+        let Ok(dir) = ray.direction.normalized() else {
+            return Vec::new();
+        };
+        let origin = ray.origin;
+        let none: MemberSource<'_> = &|_| None;
+        let geom = |member: ObjectId| self.geometry(member, none);
+        let placed: Vec<SceneFace> = self
+            .all_placed(none, |g| g.faces.len())
+            .into_iter()
+            .filter_map(|(pi, li)| {
+                let pl = &self.placements[pi];
+                geom(pl.member)?.face_at(li, pl)
+            })
+            .collect();
+        let mut hits: Vec<(SnapSource, f64)> = self
+            .faces
+            .iter()
+            .chain(placed.iter())
+            .filter_map(|face| {
+                face_cone_hit(origin, dir, &face.plane, &face.boundary, &face.holes, 0.0)
+                    .map(|(_pos, _ang, depth)| (face.source, depth))
+            })
+            .collect();
+        // Stable: equal depths keep candidate order, matching the picks'
+        // strict `<` (lowest candidate index wins a tie).
+        hits.sort_by(|a, b| a.1.total_cmp(&b.1));
+        hits
+    }
+
     /// Shared body of `pick_face`/`pick_face_linear`. The indexed superset
     /// is scanned in ascending order with the same strict `<` depth
     /// comparison, so equal-depth ties resolve to the lowest candidate
     /// index on both paths.
+    ///
+    /// Two running bests: the nearest face of any owner, and the nearest
+    /// whose owner is in the [`PickScope`]. The in-scope one is returned
+    /// for a policy-respecting pick with a scope set (faces are targets, so
+    /// the policy is `Opaque` or `SeeThrough`: `Absent` returned above);
+    /// otherwise (and whenever nothing in scope is hit) the overall
+    /// nearest, exactly as without a scope.
     fn pick_face_impl(
         &self,
         ray: &PickRay,
@@ -4453,19 +4569,39 @@ impl InferenceScene {
                 geom(pl.member)?.face_at(li, pl)
             })
             .collect();
+        // Faces are targets here (`Absent` returned above), so the scope
+        // applies under both `Opaque` and `SeeThrough`: the editing view
+        // draws what is outside the scope translucent, so what is inside it
+        // is visible either way.
+        let scope = if respect_policy {
+            self.pick_scope.as_ref()
+        } else {
+            None
+        };
         let mut best: Option<(f64, SnapSource)> = None;
+        let mut best_in_scope: Option<(f64, SnapSource)> = None;
         let world_faces = face_ids.iter().map(|&fi| &self.faces[fi]);
         for face in world_faces.chain(placed_faces.iter()) {
             // `face_cone_hit` ignores its aperture arg for faces (a face hit
             // is pure ray-polygon containment), so any value works here.
-            if let Some((_pos, _ang, depth)) =
+            let Some((_pos, _ang, depth)) =
                 face_cone_hit(origin, dir, &face.plane, &face.boundary, &face.holes, 0.0)
-                && best.as_ref().is_none_or(|(d, _)| depth < *d)
-            {
+            else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(d, _)| depth < *d) {
                 best = Some((depth, face.source));
             }
+            if let Some(scope) = scope
+                && face.source.in_scope(scope)
+                && best_in_scope.as_ref().is_none_or(|(d, _)| depth < *d)
+            {
+                best_in_scope = Some((depth, face.source));
+            }
         }
-        best.map(|(depth, source)| (source, depth))
+        best_in_scope
+            .or(best)
+            .map(|(depth, source)| (source, depth))
     }
 
     /// Every `(placement, member-local)` candidate pair of one class, in
@@ -4604,21 +4740,48 @@ impl InferenceScene {
         ray: &PickRay,
         aperture: f64,
     ) -> Option<(SketchId, SketchEdgeId)> {
+        self.pick_sketch_edge_preferring(ray, aperture, &|_| false)
+    }
+
+    /// [`InferenceScene::pick_sketch_edge`] that favors the sketches
+    /// `prefer` accepts: the best-ranked edge of a preferred sketch when one
+    /// is within `aperture`, else the best-ranked edge of any sketch — the
+    /// sketch analog of the scoped [`InferenceScene::pick_face`] (crate
+    /// docs, *Occlusion*). The caller decides when to prefer (an editing
+    /// scope, wherever faces are targets); with nothing preferred within
+    /// reach the result is exactly `pick_sketch_edge`'s.
+    pub fn pick_sketch_edge_preferring(
+        &self,
+        ray: &PickRay,
+        aperture: f64,
+        prefer: &dyn Fn(SketchId) -> bool,
+    ) -> Option<(SketchId, SketchEdgeId)> {
         let dir = ray.direction.normalized().ok()?;
         let origin = ray.origin;
         // (angular_dist, depth, sketch, edge)
         let mut best: Option<(f64, f64, SketchId, SketchEdgeId)> = None;
+        let mut best_preferred: Option<(f64, f64, SketchId, SketchEdgeId)> = None;
         for &(id, eid, _cid, ref seg) in &self.sketch_segments {
-            if let Some((_pos, ang, depth)) =
+            let Some((_pos, ang, depth)) =
                 segment_cone_hit(origin, dir, seg.a, seg.b, aperture, ApertureMode::Cone)
-                && best
-                    .as_ref()
-                    .is_none_or(|&(a, d, _, _)| (ang, depth) < (a, d))
+            else {
+                continue;
+            };
+            if best
+                .as_ref()
+                .is_none_or(|&(a, d, _, _)| (ang, depth) < (a, d))
             {
                 best = Some((ang, depth, id, eid));
             }
+            if best_preferred
+                .as_ref()
+                .is_none_or(|&(a, d, _, _)| (ang, depth) < (a, d))
+                && prefer(id)
+            {
+                best_preferred = Some((ang, depth, id, eid));
+            }
         }
-        best.map(|(_, _, id, eid)| (id, eid))
+        best_preferred.or(best).map(|(_, _, id, eid)| (id, eid))
     }
 
     /// Picks the committed sketch *vertex* nearest the ray (Phase D per-vertex
@@ -4632,20 +4795,47 @@ impl InferenceScene {
         ray: &PickRay,
         aperture: f64,
     ) -> Option<(SketchId, SketchVertexId, Point3)> {
+        self.pick_sketch_vertex_preferring(ray, aperture, &|_| false)
+    }
+
+    /// [`InferenceScene::pick_sketch_vertex`] that favors the sketches
+    /// `prefer` accepts, with the same rule as
+    /// [`InferenceScene::pick_sketch_edge_preferring`]: the best-ranked
+    /// vertex of a preferred sketch when one is within `aperture`, else
+    /// exactly `pick_sketch_vertex`'s result.
+    pub fn pick_sketch_vertex_preferring(
+        &self,
+        ray: &PickRay,
+        aperture: f64,
+        prefer: &dyn Fn(SketchId) -> bool,
+    ) -> Option<(SketchId, SketchVertexId, Point3)> {
         let dir = ray.direction.normalized().ok()?;
         let origin = ray.origin;
         // (angular_dist, depth, id, vertex, position)
         let mut best: Option<(f64, f64, SketchId, SketchVertexId, Point3)> = None;
+        let mut best_preferred: Option<(f64, f64, SketchId, SketchVertexId, Point3)> = None;
         for &(id, vid, pos) in &self.sketch_vertices {
-            if let Some((ang, depth)) = cone_test(origin, dir, pos, aperture, ApertureMode::Cone)
-                && best
-                    .as_ref()
-                    .is_none_or(|&(a, d, _, _, _)| (ang, depth) < (a, d))
+            let Some((ang, depth)) = cone_test(origin, dir, pos, aperture, ApertureMode::Cone)
+            else {
+                continue;
+            };
+            if best
+                .as_ref()
+                .is_none_or(|&(a, d, _, _, _)| (ang, depth) < (a, d))
             {
                 best = Some((ang, depth, id, vid, pos));
             }
+            if best_preferred
+                .as_ref()
+                .is_none_or(|&(a, d, _, _, _)| (ang, depth) < (a, d))
+                && prefer(id)
+            {
+                best_preferred = Some((ang, depth, id, vid, pos));
+            }
         }
-        best.map(|(_, _, id, vid, pos)| (id, vid, pos))
+        best_preferred
+            .or(best)
+            .map(|(_, _, id, vid, pos)| (id, vid, pos))
     }
 }
 

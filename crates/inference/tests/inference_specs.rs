@@ -8,7 +8,8 @@
 
 use inference::{
     ApertureMode, CrossedEdge, ElementRef, FacePolicy, InferenceScene, POINT_SNAP_REACH, PickRay,
-    PiercedFace, SOFT_AXIS_SCREEN_REACH, Snap, SnapKind, SnapLock, SnapQuery, SnapWeights,
+    PickScope, PiercedFace, SOFT_AXIS_SCREEN_REACH, Snap, SnapKind, SnapLock, SnapQuery,
+    SnapSource, SnapWeights,
 };
 use kernel::{
     AxesFrame, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchEdgeId, SketchId,
@@ -7528,4 +7529,452 @@ fn a_meeting_with_a_curved_surface_offers_no_middle_per_facet() {
     assert_eq!(snap.kind, SnapKind::Midpoint, "{snap:?}");
     assert_at(&snap, mid);
     assert!(snap.meeting_line.is_some(), "{snap:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Pick scope: while something is open for editing, a pick wherever faces
+// are targets (Shaded `Opaque` and X-ray `SeeThrough`) passes over faces
+// outside the editing scope and lands on the nearest one inside it; with
+// nothing in scope along the ray it is the unscoped pick. Wireframe has no
+// face to pick, and snapping and the geometry-only pick ignore the scope
+// (crate docs, *Occlusion*).
+// ---------------------------------------------------------------------------
+
+/// Distinct opaque ids for the scope specs, minted like the app's.
+fn scope_ids(n: usize) -> (Vec<ObjectId>, Vec<InstanceId>) {
+    let mut objects: slotmap::SlotMap<ObjectId, ()> = slotmap::SlotMap::with_key();
+    let mut instances: slotmap::SlotMap<InstanceId, ()> = slotmap::SlotMap::with_key();
+    (
+        (0..n).map(|_| objects.insert(())).collect(),
+        (0..n).map(|_| instances.insert(())).collect(),
+    )
+}
+
+fn scope_of(objects: &[ObjectId], instances: &[InstanceId]) -> PickScope {
+    PickScope {
+        objects: objects.iter().copied().collect(),
+        instances: instances.iter().copied().collect(),
+    }
+}
+
+fn lift(z: f64) -> Transform {
+    Transform::translation(Vec3::new(0.0, 0.0, z))
+}
+
+/// How two unit boxes are arranged along the downward ray: `gap` is the
+/// space between the rear box's top and the front box's bottom (0 = the
+/// rear box's front face coincides with the front box's back face).
+#[derive(Debug, Clone, Copy)]
+enum Pair {
+    Stacked,
+    Touching,
+}
+
+impl Pair {
+    fn front_lift(self) -> f64 {
+        match self {
+            Pair::Stacked => 2.0,
+            Pair::Touching => 1.0,
+        }
+    }
+}
+
+/// Owners in a scope spec: the rear box (z 0..1), the front box above it,
+/// as world objects or as placements of one definition member.
+struct TwoBoxes {
+    scene: InferenceScene,
+    /// (rear, front) owners, as the `SnapSource` reports them.
+    rear: (ObjectId, Option<InstanceId>),
+    front: (ObjectId, Option<InstanceId>),
+    front_lift: f64,
+}
+
+fn two_world_boxes(pair: Pair) -> TwoBoxes {
+    let (o, _) = scope_ids(2);
+    let mut scene = InferenceScene::new();
+    scene.add_object(o[0], &unit_cube(), &Transform::IDENTITY);
+    scene.add_object(o[1], &unit_cube(), &lift(pair.front_lift()));
+    TwoBoxes {
+        scene,
+        rear: (o[0], None),
+        front: (o[1], None),
+        front_lift: pair.front_lift(),
+    }
+}
+
+fn two_placed_boxes(pair: Pair) -> TwoBoxes {
+    let (o, i) = scope_ids(2);
+    let mut scene = InferenceScene::new();
+    scene.set_def_member(o[0], &unit_cube());
+    scene.add_placement(i[0], o[0], &Transform::IDENTITY);
+    scene.add_placement(i[1], o[0], &lift(pair.front_lift()));
+    TwoBoxes {
+        scene,
+        rear: (o[0], Some(i[0])),
+        front: (o[0], Some(i[1])),
+        front_lift: pair.front_lift(),
+    }
+}
+
+/// The scope naming `owner`: its instance for a placement, else its object.
+fn naming(owners: &[(ObjectId, Option<InstanceId>)]) -> PickScope {
+    let mut scope = PickScope::default();
+    for &(o, i) in owners {
+        match i {
+            Some(i) => {
+                scope.instances.insert(i);
+            }
+            None => {
+                scope.objects.insert(o);
+            }
+        }
+    }
+    scope
+}
+
+fn owner(source: &SnapSource) -> (ObjectId, Option<InstanceId>) {
+    (source.object, source.instance)
+}
+
+const DOWN_EYE_Z: f64 = 5.0;
+
+fn down_ray() -> PickRay {
+    ray_at(
+        Point3::new(0.4, 0.6, DOWN_EYE_Z),
+        Point3::new(0.4, 0.6, -1.0),
+    )
+}
+
+/// Both pick paths agree and return (owner, depth).
+fn scoped_pick(
+    scene: &InferenceScene,
+    ray: &PickRay,
+) -> Option<((ObjectId, Option<InstanceId>), f64)> {
+    let indexed = scene.pick_face(ray);
+    assert_eq!(indexed, scene.pick_face_linear(ray), "indexed == linear");
+    indexed.map(|(s, d)| {
+        assert!(matches!(s.element, ElementRef::Face(_)), "{s:?}");
+        (owner(&s), d)
+    })
+}
+
+fn assert_depth(got: f64, want: f64) {
+    assert!((got - want).abs() < 1e-9, "depth {got} != {want}");
+}
+
+#[test]
+fn the_pick_scope_defaults_to_none_and_round_trips() {
+    let mut scene = InferenceScene::new();
+    assert_eq!(scene.pick_scope(), None);
+    let (o, i) = scope_ids(1);
+    let scope = scope_of(&o, &i);
+    scene.set_pick_scope(Some(scope.clone()));
+    assert_eq!(scene.pick_scope(), Some(&scope));
+    scene.set_pick_scope(None);
+    assert_eq!(scene.pick_scope(), None);
+}
+
+#[test]
+fn in_scope_tests_a_placement_by_instance_and_a_world_object_by_object() {
+    let (o, i) = scope_ids(2);
+    let world = SnapSource {
+        object: o[0],
+        element: ElementRef::Face(Default::default()),
+        instance: None,
+    };
+    let placed = SnapSource {
+        object: o[0],
+        element: ElementRef::Face(Default::default()),
+        instance: Some(i[0]),
+    };
+    // Naming the object brings the world object in, not a placement whose
+    // member happens to carry the same id.
+    assert!(world.in_scope(&scope_of(&[o[0]], &[])));
+    assert!(!placed.in_scope(&scope_of(&[o[0]], &[])));
+    // Naming the instance brings the placement in, not the world object.
+    assert!(placed.in_scope(&scope_of(&[], &[i[0]])));
+    assert!(!world.in_scope(&scope_of(&[], &[i[0]])));
+    // Another instance or object: out.
+    assert!(!placed.in_scope(&scope_of(&[o[0]], &[i[1]])));
+    assert!(!world.in_scope(&scope_of(&[o[1]], &[i[0]])));
+    assert!(!world.in_scope(&PickScope::default()));
+}
+
+/// Stacked and touching boxes, as world objects and as placements, under
+/// every policy, with the scope naming the rear box, the front box, both,
+/// or neither (and no scope at all). The scope applies wherever faces are
+/// targets, Shaded and X-ray alike (the editing view draws what is outside
+/// it translucent); Wireframe has no face to pick.
+#[test]
+fn a_scoped_pick_lands_on_the_nearest_in_scope_face_wherever_faces_are_targets() {
+    for pair in [Pair::Stacked, Pair::Touching] {
+        for build in [two_world_boxes, two_placed_boxes] {
+            let TwoBoxes {
+                mut scene,
+                rear,
+                front,
+                front_lift,
+            } = build(pair);
+            // Front box's top, and the rear box's top (its front face).
+            let front_top = DOWN_EYE_Z - (front_lift + 1.0);
+            let rear_top = DOWN_EYE_Z - 1.0;
+            let scopes: [(&str, Option<PickScope>); 5] = [
+                ("none", None),
+                ("rear", Some(naming(&[rear]))),
+                ("front", Some(naming(&[front]))),
+                ("both", Some(naming(&[rear, front]))),
+                ("neither", Some(PickScope::default())),
+            ];
+            for policy in POLICIES {
+                scene.set_face_policy(policy);
+                for (label, scope) in &scopes {
+                    scene.set_pick_scope(scope.clone());
+                    let ctx = format!("{pair:?} {policy:?} scope={label}");
+                    let got = scoped_pick(&scene, &down_ray());
+                    match policy {
+                        FacePolicy::Absent => assert_eq!(got, None, "{ctx}"),
+                        FacePolicy::Opaque | FacePolicy::SeeThrough if *label == "rear" => {
+                            let (who, depth) = got.expect(&ctx);
+                            assert_eq!(who, rear, "{ctx}");
+                            assert_depth(depth, rear_top);
+                        }
+                        // The front box in scope, both, neither, or none is
+                        // the unscoped pick: the front box's top.
+                        _ => {
+                            let (who, depth) = got.expect(&ctx);
+                            assert_eq!(who, front, "{ctx}");
+                            assert_depth(depth, front_top);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Touching boxes: the rear box's top and the front box's bottom share the
+/// plane z = 1. Scoped to the rear, the pick is the rear box's own face on
+/// that plane, never the coincident front-box face.
+#[test]
+fn a_scoped_pick_through_a_coincident_face_takes_the_in_scope_one() {
+    for build in [two_world_boxes, two_placed_boxes] {
+        for policy in [FacePolicy::Opaque, FacePolicy::SeeThrough] {
+            let TwoBoxes {
+                mut scene, rear, ..
+            } = build(Pair::Touching);
+            scene.set_face_policy(policy);
+            scene.set_pick_scope(Some(naming(&[rear])));
+            let (source, depth) = scene.pick_face(&down_ray()).expect("the rear box");
+            assert_eq!(owner(&source), rear, "{policy:?}");
+            assert_depth(depth, DOWN_EYE_Z - 1.0);
+            assert_eq!(scene.pick_face_linear(&down_ray()), Some((source, depth)));
+        }
+    }
+}
+
+/// A world box in front of a placement and the reverse: the scope crosses
+/// the world/placement boundary both ways.
+#[test]
+fn a_scoped_pick_reaches_a_placement_behind_a_world_object_and_back() {
+    let (o, i) = scope_ids(2);
+    for placed_in_front in [false, true] {
+        let mut scene = InferenceScene::new();
+        let (world_z, placed_z) = if placed_in_front {
+            (0.0, 2.0)
+        } else {
+            (2.0, 0.0)
+        };
+        scene.add_object(o[0], &unit_cube(), &lift(world_z));
+        scene.set_def_member(o[1], &unit_cube());
+        scene.add_placement(i[0], o[1], &lift(placed_z));
+        scene.set_face_policy(FacePolicy::SeeThrough);
+        let rear = if placed_in_front {
+            (o[0], None)
+        } else {
+            (o[1], Some(i[0]))
+        };
+        scene.set_pick_scope(Some(naming(&[rear])));
+        let (who, depth) = scoped_pick(&scene, &down_ray()).expect("the rear owner");
+        assert_eq!(who, rear, "placed_in_front={placed_in_front}");
+        assert_depth(depth, DOWN_EYE_Z - 1.0);
+    }
+}
+
+/// Sibling placements of one definition are distinct owners: naming one
+/// instance does not bring its sibling in, and naming the shared member's
+/// object id brings in neither.
+#[test]
+fn a_scoped_pick_skips_a_sibling_placement_of_the_scoped_instance() {
+    let TwoBoxes {
+        mut scene,
+        rear,
+        front,
+        ..
+    } = two_placed_boxes(Pair::Stacked);
+    scene.set_face_policy(FacePolicy::SeeThrough);
+    scene.set_pick_scope(Some(naming(&[rear])));
+    assert_eq!(scoped_pick(&scene, &down_ray()).map(|(w, _)| w), Some(rear));
+    // The member's object id names no placement.
+    scene.set_pick_scope(Some(scope_of(&[rear.0], &[])));
+    assert_eq!(
+        scoped_pick(&scene, &down_ray()).map(|(w, _)| w),
+        Some(front)
+    );
+}
+
+/// A lone box: in scope or not, the pick is its front face.
+#[test]
+fn a_scoped_pick_on_a_lone_box_is_its_nearest_face() {
+    let (o, i) = scope_ids(2);
+    let mut scene = InferenceScene::new();
+    scene.add_object(o[0], &unit_cube(), &Transform::IDENTITY);
+    scene.set_face_policy(FacePolicy::SeeThrough);
+    for scope in [
+        None,
+        Some(scope_of(&[o[0]], &[])),
+        Some(scope_of(&[o[1]], &[i[0]])),
+    ] {
+        scene.set_pick_scope(scope.clone());
+        let (who, depth) = scoped_pick(&scene, &down_ray()).expect("the box");
+        assert_eq!(who, (o[0], None), "{scope:?}");
+        assert_depth(depth, DOWN_EYE_Z - 1.0);
+    }
+    // A ray that misses the box misses with any scope.
+    scene.set_pick_scope(Some(scope_of(&[o[0]], &[])));
+    let miss = ray_at(Point3::new(5.0, 5.0, 5.0), Point3::new(5.0, 5.0, 0.0));
+    assert_eq!(scoped_pick(&scene, &miss), None);
+}
+
+/// A scope of ids no candidate carries (an object or instance since
+/// deleted, or never registered) is the unscoped pick, bit for bit.
+#[test]
+fn a_scope_of_stale_ids_is_the_unscoped_pick() {
+    let (stale_o, stale_i) = scope_ids(4);
+    for build in [two_world_boxes, two_placed_boxes] {
+        let TwoBoxes { mut scene, .. } = build(Pair::Stacked);
+        scene.set_face_policy(FacePolicy::SeeThrough);
+        let unscoped = scene.pick_face(&down_ray());
+        // `scope_ids` mints the same leading keys the builders used, so
+        // skip them: only keys 3 and 4 are stale.
+        scene.set_pick_scope(Some(scope_of(&stale_o[2..], &stale_i[2..])));
+        assert_eq!(scene.pick_face(&down_ray()), unscoped);
+        assert_eq!(scene.pick_face_linear(&down_ray()), unscoped);
+    }
+}
+
+/// A removed owner left in the scope is harmless: the pick falls back.
+#[test]
+fn a_scope_naming_a_removed_owner_falls_back() {
+    let TwoBoxes {
+        mut scene,
+        rear,
+        front,
+        ..
+    } = two_world_boxes(Pair::Stacked);
+    scene.set_face_policy(FacePolicy::SeeThrough);
+    scene.set_pick_scope(Some(naming(&[rear])));
+    scene.remove_object(rear.0);
+    assert_eq!(
+        scoped_pick(&scene, &down_ray()).map(|(w, _)| w),
+        Some(front)
+    );
+}
+
+/// Snapping and the geometry-only pick never consult the scope, Shaded or
+/// X-ray.
+#[test]
+fn snapping_and_the_geometry_pick_ignore_the_scope() {
+    for policy in [FacePolicy::Opaque, FacePolicy::SeeThrough] {
+        snapping_and_the_geometry_pick_ignore_the_scope_under(policy);
+    }
+}
+
+fn snapping_and_the_geometry_pick_ignore_the_scope_under(policy: FacePolicy) {
+    let TwoBoxes {
+        mut scene,
+        rear,
+        front,
+        ..
+    } = two_world_boxes(Pair::Stacked);
+    scene.set_face_policy(policy);
+    let q = query(down_ray(), NARROW);
+    let unscoped_snap = scene.resolve(&q);
+    let unscoped_geometry = scene.pick_face_geometry_from(&down_ray(), &|_| None);
+    assert_eq!(unscoped_geometry.map(|(s, _)| owner(&s)), Some(front));
+    scene.set_pick_scope(Some(naming(&[rear])));
+    assert_eq!(scene.resolve(&q), unscoped_snap);
+    assert_eq!(scene.resolve_linear(&q), unscoped_snap);
+    assert_eq!(
+        scene.pick_face_geometry_from(&down_ray(), &|_| None),
+        unscoped_geometry
+    );
+    // While the editing pick does move to the rear box.
+    assert_eq!(
+        scene.pick_face(&down_ray()).map(|(s, _)| owner(&s)),
+        Some(rear)
+    );
+}
+
+/// The full hit list, nearest first, is what the scoped pick chooses from.
+#[test]
+fn the_hit_list_is_depth_sorted_and_heads_the_unscoped_pick() {
+    let TwoBoxes {
+        scene, rear, front, ..
+    } = two_world_boxes(Pair::Stacked);
+    let hits = scene.pick_face_hits_linear(&down_ray());
+    let owners: Vec<_> = hits.iter().map(|(s, _)| owner(s)).collect();
+    assert_eq!(owners, vec![front, front, rear, rear]);
+    assert!(hits.windows(2).all(|w| w[0].1 <= w[1].1));
+    assert_eq!(hits.first().copied(), scene.pick_face(&down_ray()));
+}
+
+/// The sketch picks' preferring forms: a preferred sketch's edge or vertex
+/// wins when one is within reach, else the plain pick's answer.
+#[test]
+fn preferring_sketch_picks_favor_the_preferred_sketch_else_match_the_plain_pick() {
+    let mut mint: slotmap::SlotMap<SketchId, ()> = slotmap::SlotMap::with_key();
+    let (near, far) = (mint.insert(()), mint.insert(()));
+    let mut edges: slotmap::SlotMap<SketchEdgeId, ()> = slotmap::SlotMap::with_key();
+    let mut verts: slotmap::SlotMap<kernel::SketchVertexId, ()> = slotmap::SlotMap::with_key();
+    let mut scene = InferenceScene::new();
+    // Two parallel lines on the downward ray's axis, the near one at z = 2.
+    let (en, ef) = (edges.insert(()), edges.insert(()));
+    let (vn, vf) = (verts.insert(()), verts.insert(()));
+    scene.add_sketch(
+        near,
+        &[(en, Point3::new(0.4, 0.0, 2.0), Point3::new(0.4, 1.0, 2.0))],
+    );
+    scene.add_sketch(
+        far,
+        &[(ef, Point3::new(0.4, 0.0, 0.0), Point3::new(0.4, 1.0, 0.0))],
+    );
+    scene.add_sketch_vertices(near, &[(vn, Point3::new(0.4, 0.6, 2.0))]);
+    scene.add_sketch_vertices(far, &[(vf, Point3::new(0.4, 0.6, 0.0))]);
+    let ray = down_ray();
+    assert_eq!(scene.pick_sketch_edge(&ray, WIDE), Some((near, en)));
+    assert_eq!(
+        scene.pick_sketch_edge_preferring(&ray, WIDE, &|s| s == far),
+        Some((far, ef))
+    );
+    assert_eq!(
+        scene.pick_sketch_edge_preferring(&ray, WIDE, &|_| false),
+        scene.pick_sketch_edge(&ray, WIDE)
+    );
+    assert_eq!(scene.pick_sketch_vertex(&ray, WIDE).map(|v| v.1), Some(vn));
+    assert_eq!(
+        scene
+            .pick_sketch_vertex_preferring(&ray, WIDE, &|s| s == far)
+            .map(|v| v.1),
+        Some(vf)
+    );
+    assert_eq!(
+        scene.pick_sketch_vertex_preferring(&ray, WIDE, &|_| false),
+        scene.pick_sketch_vertex(&ray, WIDE)
+    );
+    // A preferred sketch out of reach: the plain pick.
+    let other = mint.insert(());
+    assert_eq!(
+        scene.pick_sketch_edge_preferring(&ray, WIDE, &|s| s == other),
+        Some((near, en))
+    );
 }

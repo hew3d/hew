@@ -16846,6 +16846,79 @@ impl Document {
         }
     }
 
+    /// The INNERMOST open frame's own live world sketches, in world
+    /// coordinates. Empty when no frame is open. The scoped picks read it
+    /// to tell the frame's own drawing from the dimmed context. Read-only.
+    ///
+    /// - A component explode session: the definition's sketches baked at
+    ///   open, every free sketch drawn since (fresh ones included), and the
+    ///   owned sketches of the frame's objects — the same set
+    ///   [`Document::def_rendered_sketches`] draws on a sibling placement
+    ///   (ARCHITECTURE.md 2.11).
+    /// - A group session: the drawing the group holds
+    ///   ([`Document::group_member_sketches`]) and the drawing of every
+    ///   group inside the frame, the owned sketches of the frame's objects
+    ///   at any depth, and every free sketch created since the open, every
+    ///   fresh sketch (any age; it has nothing to pick yet), or released to the top by a mid-session ungroup —
+    ///   what the close folds into the group ([`Document::close_group_session`]).
+    pub fn session_frame_sketches(&self) -> Vec<SketchId> {
+        match self.sessions.last() {
+            Some(SessionFrame::Component(_)) => self.frame_sketches(self.sessions.len() - 1),
+            Some(SessionFrame::Group(session)) => self.group_frame_sketches(session),
+            None => Vec::new(),
+        }
+    }
+
+    /// [`Document::session_frame_sketches`] for an innermost group frame.
+    fn group_frame_sketches(&self, session: &GroupSession) -> Vec<SketchId> {
+        let scope = self
+            .group_session_scope()
+            .expect("innermost frame is a group session");
+        let world_live = |s: SketchId| {
+            self.sketches.contains_key(s)
+                && !self.sketch_tombstoned(&s)
+                && !self.def_sketches.contains_key(&s)
+        };
+        let group_in_frame =
+            |g: GroupId| g == session.group || self.node_in_group_scope(&scope, NodeId::Group(g));
+        let mut out: Vec<SketchId> = Vec::new();
+        let mut seen: BTreeSet<SketchId> = BTreeSet::new();
+        let mut push = |out: &mut Vec<SketchId>, s: SketchId| {
+            if world_live(s) && seen.insert(s) {
+                out.push(s);
+            }
+        };
+        for (&s, &g) in &self.group_sketches {
+            if group_in_frame(g) {
+                push(&mut out, s);
+            }
+        }
+        for (&s, &o) in &self.object_sketches {
+            if self.node_in_group_scope(&scope, NodeId::Object(o)) {
+                push(&mut out, s);
+            }
+        }
+        // Free drawing made since the open: the close's fold-in walk. A
+        // sketch that landed in a group or on an object is judged by its
+        // owner above, not here.
+        let from = session.undo_len_at_open.min(self.undo.actions.len());
+        let mut free: Vec<SketchId> = Vec::new();
+        for action in &self.undo.actions[from..] {
+            free.extend(action.created_objects_and_sketches().1);
+            free.extend(action.released_sketches());
+        }
+        // A FRESH sketch (minted, no gesture recorded yet) belongs to the
+        // innermost frame by construction — the rule `frame_sketches`
+        // applies.
+        free.extend(self.fresh_sketches.iter().copied());
+        for s in free {
+            if !self.object_sketches.contains_key(&s) && !self.group_sketches.contains_key(&s) {
+                push(&mut out, s);
+            }
+        }
+        out
+    }
+
     /// Whether a WORLD node is hidden from view by itself or by a group it
     /// sits in — [`Document::member_node_hidden`] walked up the parent
     /// chain, for the session geometry a sibling placement renders (the
