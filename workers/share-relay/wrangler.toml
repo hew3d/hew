@@ -14,6 +14,10 @@ compatibility_date = "2026-08-01"
 name = "SHARE_DROP"
 class_name = "ShareDrop"
 
+[[durable_objects.bindings]]
+name = "UPLOAD_BUDGET"
+class_name = "UploadBudget"
+
 # Creates the SQLite storage backend for `ShareDrop` on first deploy. Every
 # Durable Object class ever bound needs exactly one `new_sqlite_classes` (or
 # `new_classes`) entry across this file's migration history — this is that
@@ -21,6 +25,10 @@ class_name = "ShareDrop"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ShareDrop"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["UploadBudget"]
 
 # The public route (README.md's deploy checklist) — requires hew3d.com to
 # already be a Cloudflare-managed zone on the same account.

@@ -198,7 +198,8 @@ export class DropStore {
    *  which browsers never transmit). Throws if this drop is already populated:
    *  a token is single-use for write (a practically impossible 128-bit
    *  collision, not a normal-path guard). */
-  async store(name: string, chunkCount: number, totalBytes: number, chunks: Uint8Array[]): Promise<void> {
+  async store(name: string, chunkCount: number, totalBytes: number, chunks: Uint8Array[], deadline?: number): Promise<void> {
+    if (deadline !== undefined && Date.now() >= deadline) throw new Error('ShareDrop.store: upload deadline exceeded')
     this.migrate()
     if (this.readMeta() !== null) {
       throw new Error('ShareDrop already populated for this token')
@@ -223,7 +224,8 @@ export class DropStore {
   /** Appends the next batch of chunk rows to a drop begun by `store`,
    *  continuing at the current row count. Throws on a drop that was never
    *  begun (or was already wiped) or would overflow its declared count. */
-  async append(chunks: Uint8Array[]): Promise<void> {
+  async append(chunks: Uint8Array[], deadline?: number): Promise<void> {
+    if (deadline !== undefined && Date.now() >= deadline) throw new Error('ShareDrop.append: upload deadline exceeded')
     const meta = this.ensureSchema() ? this.readMeta() : null
     if (meta === null) {
       throw new Error('ShareDrop.append: no drop in progress')

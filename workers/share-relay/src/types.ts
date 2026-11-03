@@ -63,8 +63,8 @@ export interface DurableObjectId {
  *  interface is exactly `ShareDrop`'s six public methods (`dropStore.ts`'s
  *  batched write/read protocol — no single call ever carries a whole drop). */
 export interface ShareDropStub {
-  store(name: string, chunkCount: number, totalBytes: number, chunks: Uint8Array[]): Promise<void>
-  append(chunks: Uint8Array[]): Promise<void>
+  store(name: string, chunkCount: number, totalBytes: number, chunks: Uint8Array[], deadline?: number): Promise<void>
+  append(chunks: Uint8Array[], deadline?: number): Promise<void>
   consume(): Promise<{ name: string; totalBytes: number; chunkCount: number } | null>
   take(from: number, count: number): Promise<Uint8Array[]>
   destroy(): Promise<void>
@@ -78,12 +78,12 @@ export interface DurableObjectNamespace<T> {
   get(id: DurableObjectId): T
 }
 
-/** The Worker's env bindings — the one Durable Object namespace
- *  (`wrangler.toml`'s `SHARE_DROP` binding, `new_sqlite_classes`
- *  migration). Replaces the old `BUCKET: R2Bucket` binding entirely — this
- *  Worker no longer touches R2 at all. */
+/** The Worker's Durable Object namespaces: per-token ciphertext storage and
+ *  the singleton admission ledger. Both bindings and SQLite migrations are
+ *  declared in `wrangler.toml`; no R2 bucket is used. */
 export interface DropEnv {
   SHARE_DROP: DurableObjectNamespace<ShareDropStub>
+  UPLOAD_BUDGET: DurableObjectNamespace<UploadBudgetStub>
   /** Optional comma-separated extra CORS origins, merged onto the base
    *  allowlist by `handlers.ts`'s `resolveAllowedOrigins`. Set via a
    *  Cloudflare Worker var (dashboard or `wrangler.toml [vars]`) to let a
@@ -96,4 +96,16 @@ export interface DropEnv {
    *  HEW_RELAY_UPLOAD_KEY`), never a plaintext var, and unset in production
    *  — the public relay stays open by design. */
   HEW_RELAY_UPLOAD_KEY?: string
+}
+
+export type UploadAdmission =
+  | { ok: true }
+  | { ok: false; reason: 'full' }
+  | { ok: false; reason: 'rate-limited'; retryAfter: number }
+
+export interface UploadBudgetStub {
+  reserve(token: string, clientHash: string, bytes: number): Promise<UploadAdmission>
+  resize(token: string, bytes: number): Promise<boolean>
+  release(token: string): Promise<void>
+  commit(token: string): Promise<boolean>
 }
