@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Request, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -53,7 +53,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const LINGER_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct AppState {
-    pub store: Store,
+    pub store: Arc<Store>,
     pub max_bytes: usize,
     pub allowed_origins: HashSet<String>,
     /// `None` = uploads are open (the public relay's posture). `Some` = PUT
@@ -312,11 +312,44 @@ struct Reservation<'a> {
     held: usize,
 }
 
+impl Reservation<'_> {
+    /// Grow geometrically, reserving the capacity before the allocation.
+    /// No Content-Length-controlled allocation, and no uncharged Vec slack.
+    fn grow(&mut self, buf: &mut Vec<u8>, required: usize, max_bytes: usize) -> bool {
+        if required <= buf.capacity() {
+            return true;
+        }
+        let target = required
+            .checked_next_power_of_two()
+            .unwrap_or(max_bytes)
+            .min(max_bytes);
+        let additional = target - buf.capacity();
+        if !self.store.reserve(additional) {
+            return false;
+        }
+        self.held += additional;
+        if buf.try_reserve_exact(target - buf.len()).is_err() {
+            return false;
+        }
+        // reserve_exact may provide more capacity than requested. Account
+        // that too, or refuse the upload and release the entire buffer.
+        let excess = buf.capacity().saturating_sub(target);
+        if excess > 0 {
+            if !self.store.reserve(excess) {
+                return false;
+            }
+            self.held += excess;
+        }
+        true
+    }
+}
+
 impl Drop for Reservation<'_> {
     fn drop(&mut self) {
         if self.held > 0 {
             self.store.release(self.held);
         }
+        self.store.release_upload();
     }
 }
 
@@ -350,39 +383,57 @@ async fn put(state: &AppState, req: Request) -> (Response, usize) {
         }
     }
 
+    if !state.store.begin_upload() {
+        return (
+            reject_early(relay_full(), req.into_body(), state.max_bytes),
+            0,
+        );
+    }
+
     // Read the body frame by frame, capping while streaming: an oversized
     // (or lying-length / chunked) upload never buffers past `max_bytes`,
     // and on overflow the SAME body handle goes to `reject_early` so the
     // client gets its 413 instead of a reset — a chunked request has no
     // Content-Length for the fast path above to catch.
     let mut body = req.into_body();
-    let mut buf: Vec<u8> =
-        Vec::with_capacity(declared.map_or(0, |d| d as usize).min(state.max_bytes));
     // Global-budget claim for THIS upload, grown frame by frame. Released on
     // every early return below (its Drop), consumed by put_reserved on success.
     let mut reservation = Reservation {
         store: &state.store,
         held: 0,
     };
+    // Drop the allocation before returning its reservation on early exits.
+    let mut buf: Vec<u8> = Vec::new();
     loop {
         match body.frame().await {
             None => break,
             Some(Ok(frame)) => {
                 if let Some(data) = frame.data_ref() {
-                    if buf.len() + data.len() > state.max_bytes {
+                    let Some(required) = buf.len().checked_add(data.len()) else {
+                        return (
+                            reject_early(
+                                json(
+                                    StatusCode::PAYLOAD_TOO_LARGE,
+                                    serde_json::json!({ "error": "payload too large" }),
+                                ),
+                                body,
+                                state.max_bytes,
+                            ),
+                            0,
+                        );
+                    };
+                    if required > state.max_bytes {
                         let response = json(
                             StatusCode::PAYLOAD_TOO_LARGE,
                             serde_json::json!({ "error": "payload too large" }),
                         );
                         return (reject_early(response, body, state.max_bytes), 0);
                     }
-                    // Claim these bytes against the global cap before buffering
-                    // them — concurrent uploads share one budget, so this is
-                    // what a per-request cap alone cannot enforce.
-                    if !state.store.reserve(data.len()) {
+                    // Claim the capacity (including spare growth room) before
+                    // allocating it. Concurrent uploads share the same budget.
+                    if !reservation.grow(&mut buf, required, state.max_bytes) {
                         return (reject_early(relay_full(), body, state.max_bytes), 0);
                     }
-                    reservation.held += data.len();
                     buf.extend_from_slice(data);
                 }
             }
@@ -432,7 +483,7 @@ fn get(state: &AppState, token: &str) -> (Response, usize) {
             0,
         );
     }
-    match state.store.take(token) {
+    match state.store.take_for_response(token) {
         None => (
             json(
                 StatusCode::NOT_FOUND,
@@ -440,7 +491,8 @@ fn get(state: &AppState, token: &str) -> (Response, usize) {
             ),
             0,
         ),
-        Some(bytes) => {
+        Some(owner) => {
+            let bytes = Bytes::from_owner(owner);
             let size = bytes.len();
             let response = Response::builder()
                 .status(StatusCode::OK)
@@ -514,7 +566,7 @@ mod tests {
 
     fn state(upload_key: Option<&str>) -> Arc<AppState> {
         Arc::new(AppState {
-            store: Store::new(64, Duration::from_secs(60)),
+            store: Arc::new(Store::new(64, Duration::from_secs(60))),
             max_bytes: 16,
             allowed_origins: HashSet::from(["https://app.hew3d.com".to_owned()]),
             upload_key: upload_key.map(str::to_owned),
@@ -712,6 +764,78 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
         let res = send(&app, Method::PUT, "/drop", vec![0; 16], &[]).await;
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn declared_length_does_not_allocate_unused_upload_capacity() {
+        let state = state(None);
+        let app = router(Arc::clone(&state));
+        let res = send(
+            &app,
+            Method::PUT,
+            "/drop",
+            vec![1],
+            &[("content-length", "16")],
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(state.store.remaining(), 63);
+    }
+
+    #[tokio::test]
+    async fn outgoing_bytes_keep_their_budget_until_the_last_frame_clone_drops() {
+        let state = state(None);
+        let app = router(Arc::clone(&state));
+        let res = send(&app, Method::PUT, "/drop", vec![7; 16], &[]).await;
+        let token = body_json(res).await["token"].as_str().unwrap().to_owned();
+        let res = send(&app, Method::GET, &format!("/drop/{token}"), vec![], &[]).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(state.store.remaining(), 48);
+        for _ in 0..1023 {
+            assert!(state.store.begin_upload());
+        }
+        assert!(!state.store.begin_upload());
+        let mut body = res.into_body();
+        let bytes = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        let retained = bytes.clone();
+        drop(body);
+        drop(bytes);
+        assert_eq!(retained.as_ref(), &[7; 16]);
+        assert_eq!(state.store.remaining(), 48);
+        drop(retained);
+        assert_eq!(state.store.remaining(), 64);
+        assert!(state.store.begin_upload());
+    }
+
+    #[tokio::test]
+    async fn rejected_empty_uploads_release_their_metadata_slots() {
+        let state = state(None);
+        let app = router(Arc::clone(&state));
+        for _ in 0..1025 {
+            let res = send(&app, Method::PUT, "/drop", vec![], &[]).await;
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        }
+        let res = send(&app, Method::PUT, "/drop", vec![1], &[]).await;
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn buffer_growth_reserves_spare_capacity_and_abort_releases_it() {
+        let state = state(None);
+        assert!(state.store.begin_upload());
+        {
+            let mut reservation = Reservation {
+                store: &state.store,
+                held: 0,
+            };
+            let mut buf = Vec::new();
+            assert!(reservation.grow(&mut buf, 3, 16));
+            buf.extend_from_slice(&[1, 2, 3]);
+            assert_eq!(state.store.remaining(), 60);
+            assert!(reservation.grow(&mut buf, 5, 16));
+            assert_eq!(state.store.remaining(), 56);
+        }
+        assert_eq!(state.store.remaining(), 64);
     }
 
     #[tokio::test]
