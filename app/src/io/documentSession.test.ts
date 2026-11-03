@@ -184,6 +184,13 @@ describe('documentSession', () => {
   })
 
   describe('afterSave', () => {
+    it('keeps a non-undoable reason added while the write was pending', () => {
+      const edited = markNonUndoableDirty(INITIAL_SESSION, NON_UNDOABLE_REASON.scenesEdited, NOW)
+      const next = afterSave(mockRef('saved.hew'), NOW + 1, false, edited)
+      expect(next.dirty).toBe(true)
+      expect(next.nonUndoableReasons).toContain(NON_UNDOABLE_REASON.scenesEdited)
+      expect(next.lastEditAt).toBe(NOW)
+    })
     it('clears dirty flag when atSavedMark is true', () => {
       const ref = mockRef('saved.hew')
       const next = afterSave(ref, NOW, true)

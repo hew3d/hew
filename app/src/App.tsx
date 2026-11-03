@@ -371,16 +371,17 @@ async function writeExport(
   }
   return host.exportBinary(bytes, name, fileType)
 }
-/** Calls `scene.mark_saved()` ONLY when the document's undo depth hasn't
- * moved since `undoDepthAtCapture` — every save flow here grabs the bytes
+/** Calls `scene.mark_saved()` ONLY when the document generation hasn't
+ * moved since the bytes were captured — every save flow here grabs the bytes
  * to write, then awaits a host write that can take a while (Tauri fs,
  * a browser download, a Library write-through). An edit landing during
  * that await must never be silently marked clean: the written bytes
  * predate it. Always returns the CURRENT `scene.at_saved_mark()` reading —
  * a skipped mark correctly reports the document as still dirty, which
  * `afterSave`/`applyWriteThroughSave`'s `atSavedMark` parameter honors. */
-function markSavedIfUnmoved(scene: Scene, undoDepthAtCapture: number): boolean {
-  if (scene.undo_depth() === undoDepthAtCapture) scene.mark_saved()
+function markSavedIfUnmoved(scene: Scene, generationAtCapture: number, currentGeneration: number): boolean {
+  if (currentGeneration !== generationAtCapture) return false
+  scene.mark_saved()
   return scene.at_saved_mark()
 }
 
@@ -990,6 +991,10 @@ export default function App() {
   // (or since the last explicit Save, which also resets it). Avoids redundant
   // writes when the document hasn't changed between ticks.
   const dirtySinceAutosaveRef = useRef(false)
+  // Every dirty/undo reconciliation and non-undoable edit arms autosave.
+  // Unlike undo depth, this never returns to an earlier value after undo.
+  const documentGenerationRef = useRef(0)
+  const documentIdentityRef = useRef(0)
   // The autosave write currently in flight (never rejects), or null before
   // the first write. clearRecoverySnapshot awaits it so a discard's clear
   // can't interleave with a write of the very snapshot being discarded.
@@ -1011,6 +1016,7 @@ export default function App() {
   // effect.
   const runAutosaveTickRef = useRef<() => void>(() => {})
   const armAutosaveTick = useCallback((): void => {
+    documentGenerationRef.current += 1
     dirtySinceAutosaveRef.current = true
     if (autosaveTimerRef.current === null) {
       autosaveTimerRef.current = setTimeout(() => {
@@ -1154,6 +1160,7 @@ export default function App() {
     // same posture as an explicit Save (docs/design/camera.md §5).
     pushCameraStateToScene(scene)
     const bytes = new Uint8Array(scene.save())
+    const generationAtWrite = documentGenerationRef.current
     const meta: RecoveryMeta = {
       version: 1,
       name: session.currentRef?.name ?? session.importedName ?? 'Untitled',
@@ -1191,7 +1198,7 @@ export default function App() {
       // Only mark clean while this write is still the latest — a stale
       // disarm could suppress the re-write that follows a superseding
       // edit-plus-clear interleave.
-      if (autosaveWriteRef.current === write) dirtySinceAutosaveRef.current = false
+      if (autosaveWriteRef.current === write && documentGenerationRef.current === generationAtWrite) dirtySinceAutosaveRef.current = false
     }).catch(() => {
       // Best effort — re-arm so the next tick retries instead of going
       // permanently silent (the old setInterval retried every 12s
@@ -2079,10 +2086,12 @@ export default function App() {
       reconcileVisibility: () => reconcileVisibilityRef.current(),
       // A live `hew.library.insert` of a material item: dirty for the same
       // reason as the Library's own "Add to palette".
-      markLibraryMaterialsDirty: () =>
-        setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.libraryMaterials, Date.now())),
+      markLibraryMaterialsDirty: () => {
+        setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.libraryMaterials, Date.now()))
+        armAutosaveTick()
+      },
     })
-  }, [])
+  }, [armAutosaveTick])
 
   const handleToast = useCallback((message: string, code?: string) => {
     // Severity lives beside the copy table in kernelErrors.ts (one source; a
@@ -2621,6 +2630,10 @@ export default function App() {
       handleToast(friendlyErrorText(loaded.error))
       return false
     }
+    // Scene.load reuses the WASM Scene handle. A pending Save of the prior
+    // document must not bind its old file to this newly loaded document.
+    documentGenerationRef.current += 1
+    documentIdentityRef.current += 1
     // Any successful load supersedes the welcome screen — e.g. a warm
     // file-association open delivered while it was showing. The ref covers
     // the other ordering: a load that lands while the startup-handoff effect
@@ -2809,6 +2822,7 @@ export default function App() {
   // it) on disk. Also used after Save/Save As: the same ordering guarantee
   // applies to clearing the snapshot of a just-saved document.
   const clearRecoverySnapshot = useCallback(async (): Promise<void> => {
+    const generationAtClear = documentGenerationRef.current
     dirtySinceAutosaveRef.current = false
     // Cancel any pending timer outright — a discard/Save has nothing left
     // for it to do, and letting it fire anyway (to find `dirtySinceAutosave
@@ -2823,7 +2837,7 @@ export default function App() {
     // A newer write while we awaited means the document changed under us
     // (e.g. a first edit to the replacement document re-armed the tick) —
     // the slot no longer holds the discarded document, so leave it alone.
-    if (autosaveWriteRef.current !== inFlight) return
+    if (autosaveWriteRef.current !== inFlight || documentGenerationRef.current !== generationAtClear) return
     await recoveryStoreRef.current.clear().catch(() => { /* best effort */ })
     // The slot's `.skp` source went with the snapshot: the next autosave of
     // a `.skp` document must write it again.
@@ -3472,6 +3486,15 @@ export default function App() {
   /** Why the last `saveToRef` failed — the live API reports it to its client. */
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English
   const lastSaveErrorRef = useRef('the document could not be saved')
+  // Serialize document writes in capture order. Without this, a slow Save A
+  // can finish after a newer Save B and overwrite B's current bytes on disk.
+  // A failed/cancelled write still releases the queue for the next attempt.
+  const documentWriteTailRef = useRef<Promise<void>>(Promise.resolve())
+  const queueDocumentWrite = useCallback((write: () => Promise<FileRef | null>): Promise<FileRef | null> => {
+    const result = documentWriteTailRef.current.then(write)
+    documentWriteTailRef.current = result.then(() => {}, () => {})
+    return result
+  }, [])
 
   /** Writes the document to `ref`, in `ref.format`, and commits the post-save
    * session state. The one save path: Save is this with the document's own
@@ -3490,7 +3513,8 @@ export default function App() {
       // serializes as-if-closed, so saving mid-session needs no special
       // handling here (the session, and its dimming/scoping, is untouched).
       pushCameraStateToScene(scene)
-      const undoDepthAtSave = scene.undo_depth()
+      const generationAtSave = documentGenerationRef.current
+      const identityAtSave = documentIdentityRef.current
       try {
         // A `.skp` file saves in its own container — NEVER the `.hew` bytes
         // (they would corrupt the file). `save_skp` builds on the file the
@@ -3506,8 +3530,13 @@ export default function App() {
         } else {
           bytes = new Uint8Array(scene.save())
         }
-        const newRef = await fileHostRef.current.save(bytes, ref)
+        const newRef = await queueDocumentWrite(() => fileHostRef.current.save(bytes, ref))
         if (newRef === null) return false // user cancelled
+        if (sceneRef.current !== scene || documentIdentityRef.current !== identityAtSave) {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- live API refusal text, English
+          lastSaveErrorRef.current = 'the document changed during save; save again'
+          return false
+        }
         // The document is now bound to `newRef`: a `.skp` takes the written
         // file as the source of its next save; a `.hew` has none.
         if (skp) scene.commit_skp_save()
@@ -3516,11 +3545,15 @@ export default function App() {
         // See `markSavedIfUnmoved`'s doc comment: only claim the kernel's own
         // saved mark when nothing has edited the document since the bytes
         // above were grabbed.
-        const atSavedMark = markSavedIfUnmoved(scene, undoDepthAtSave)
-        setDocSession(afterSave(newRef, Date.now(), atSavedMark))
+        const atSavedMark = markSavedIfUnmoved(scene, generationAtSave, documentGenerationRef.current)
+        if (!atSavedMark) {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- live API refusal text, English
+          lastSaveErrorRef.current = 'the document changed during save; save again'
+        }
+        setDocSession((prev) => afterSave(newRef, Date.now(), atSavedMark, prev))
         LogStore.log.info('app', `Saved: ${newRef.name}`)
         // The work is now safely on disk — drop the autosave snapshot.
-        void clearRecoverySnapshot()
+        if (atSavedMark) void clearRecoverySnapshot()
         if (isTauri && typeof newRef.handle === 'string') {
           import('@tauri-apps/api/core').then(({ invoke }) =>
             invoke('push_recent', { path: newRef.handle as string })
@@ -3528,14 +3561,14 @@ export default function App() {
         }
         if (newRef.format === 'hew') persistSceneThumbnails(bytes)
         noteSkpSimplified(simplified)
-        return true
+        return atSavedMark
       } catch (err: unknown) {
         lastSaveErrorRef.current = friendlyErrorText(err)
         handleToast(t`Save failed: ${ph({ reason: friendlyErrorText(err) })}`)
         return false
       }
     },
-    [handleToast, clearRecoverySnapshot, pushCameraStateToScene, noteSkpSimplified],
+    [handleToast, clearRecoverySnapshot, pushCameraStateToScene, noteSkpSimplified, queueDocumentWrite],
   )
 
   const saveDocument = useCallback(
@@ -3586,7 +3619,8 @@ export default function App() {
       format = chosen
     }
     pushCameraStateToScene(scene)
-    const undoDepthAtSave = scene.undo_depth()
+    const generationAtSave = documentGenerationRef.current
+    const identityAtSave = documentIdentityRef.current
     // When saving an imported model (currentRef=null, importedName set), suggest
     // the imported filename so the user sees a sensible default in the Save As
     // dialog — its known extension (.skp/.dae/…) swapped for the chosen
@@ -3606,21 +3640,23 @@ export default function App() {
         bytes = new Uint8Array(scene.save())
       }
       const host = fileHostRef.current
-      const newRef =
+      const newRef = await queueDocumentWrite(() =>
         target !== null && host.writeTo !== undefined
-          ? await host.writeTo(target, bytes, format)
-          : await host.saveAs(bytes, suggestedName, format)
+          ? host.writeTo(target, bytes, format)
+          : host.saveAs(bytes, suggestedName, format)
+      )
       if (newRef === null) return false // user cancelled
+      if (sceneRef.current !== scene || documentIdentityRef.current !== identityAtSave) return false
       // The document is now bound to `newRef`: a `.skp` takes the written
       // file as the source of its next save; a `.hew` has none.
       if (isSkpFormat(format)) scene.commit_skp_save()
       else scene.set_skp_source(undefined)
       skpSourceGenRef.current += 1
-      const atSavedMark = markSavedIfUnmoved(scene, undoDepthAtSave)
-      setDocSession(afterSave(newRef, Date.now(), atSavedMark))
+      const atSavedMark = markSavedIfUnmoved(scene, generationAtSave, documentGenerationRef.current)
+      setDocSession((prev) => afterSave(newRef, Date.now(), atSavedMark, prev))
       LogStore.log.info('app', `Saved as: ${newRef.name}`)
       // The work is now safely on disk — drop the autosave snapshot.
-      void clearRecoverySnapshot()
+      if (atSavedMark) void clearRecoverySnapshot()
       if (isTauri && typeof newRef.handle === 'string') {
         import('@tauri-apps/api/core').then(({ invoke }) =>
           invoke('push_recent', { path: newRef.handle as string })
@@ -3628,12 +3664,12 @@ export default function App() {
       }
       if (format === 'hew') persistSceneThumbnails(bytes)
       noteSkpSimplified(simplified)
-      return true
+      return atSavedMark
     } catch (err: unknown) {
       handleToast(t`Save As failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return false
     }
-  }, [docSession.currentRef, handleToast, clearRecoverySnapshot, pushCameraStateToScene, promptSaveFormat, noteSkpSimplified])
+  }, [docSession.currentRef, handleToast, clearRecoverySnapshot, pushCameraStateToScene, promptSaveFormat, noteSkpSimplified, queueDocumentWrite])
 
   // The loss notice's "Save a .hew copy": write the document as `.hew`
   // through the Save As picker WITHOUT rebinding — `currentRef` (and the
@@ -4567,12 +4603,8 @@ export default function App() {
             const ref = docSessionRef.current.currentRef
             const hash = await sha256Hex(bytes)
             const summary = await readItemSummary(bytes)
-            // `stamp_library_source` pushes no undo entry (it's session
-            // metadata, not a document action) — capture the undo depth
-            // now so a write-through below can tell whether some OTHER,
-            // genuinely undoable edit raced ahead of it before claiming
-            // the kernel's saved mark (`markSavedIfUnmoved`'s doc comment).
-            const undoDepthAtStamp = scene.undo_depth()
+            // `stamp_library_source` pushes no undo entry. The write-through
+            // captures the document generation after serializing the stamp.
             scene.stamp_library_source(
               target.nodeKinds,
               target.nodeIds,
@@ -4581,6 +4613,7 @@ export default function App() {
               summary.first_component_sid ?? undefined,
             )
             stamped = true
+            armAutosaveTick()
             // The stamp is the "in this model" association — if it only
             // lives in memory, closing without a save silently severs it
             // (and the stamp-only "unsaved changes?" prompt reads as
@@ -4607,16 +4640,16 @@ export default function App() {
               // Camera-state parity with every other save path.
               pushCameraStateToScene(scene)
               const docBytes = new Uint8Array(scene.save())
-              const newRef = await fileHostRef.current.save(docBytes, ref)
+              const generationAtWrite = documentGenerationRef.current
+              const newRef = await queueDocumentWrite(() => fileHostRef.current.save(docBytes, ref))
               if (newRef !== null) {
                 // An edit may have landed DURING the save — its dirty
                 // state must never be clobbered clean (that would be
                 // silent, autosave-suppressed data loss: the written
                 // bytes predate the edit). Apply afterSave only when the
                 // session is still exactly the one this flow captured, AND
-                // only claim the kernel's saved mark when nothing moved
-                // the undo stack out from under the stamp.
-                const atSavedMark = markSavedIfUnmoved(scene, undoDepthAtStamp)
+                // only claim the kernel's saved mark when no later edit ran.
+                const atSavedMark = markSavedIfUnmoved(scene, generationAtWrite, documentGenerationRef.current)
                 setDocSession((prev) => applyWriteThroughSave(prev, sessionAtSave, newRef, Date.now(), atSavedMark))
                 setDocRev((r) => r + 1)
               } else {
@@ -4653,7 +4686,7 @@ export default function App() {
         renderAndWriteThumbnail(toastId, name, bytes)
       })()
     },
-    [saveToLibraryTarget, handleToast, pushStickyToast, renderAndWriteThumbnail, pushCameraStateToScene],
+    [saveToLibraryTarget, handleToast, pushStickyToast, renderAndWriteThumbnail, pushCameraStateToScene, armAutosaveTick, queueDocumentWrite],
   )
 
   /** MaterialPalette's "Save to Library" button — no thumbnail render (a

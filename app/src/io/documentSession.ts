@@ -220,19 +220,18 @@ export function applyWriteThroughSave(
  * by the host (may be a new ref for Save As). `atSavedMark` is the CALLER's
  * `scene.at_saved_mark()` read taken right after (conditionally) calling
  * `scene.mark_saved()` — see docs/agents/HEW_API.md §7's `hew.doc.save`
- * note: the kernel mark is only set when the write really did correspond to
- * the document's CURRENT undo depth (no edit raced ahead of the write), so
- * a caller that skipped `mark_saved()` for that reason passes `false` here
- * and this function honestly reports the document as still dirty rather
- * than silently losing the edit that raced ahead.
+ * note: the kernel mark is only set when the write corresponds to the
+ * document's current generation (no edit raced ahead). A skipped mark
+ * passes `false`; the prior session supplies any non-undoable reasons and
+ * edit time so the later edit remains visibly dirty and eligible for recovery.
  */
-export function afterSave(ref: FileRef, now: number, atSavedMark: boolean): DocSessionState {
+export function afterSave(ref: FileRef, now: number, atSavedMark: boolean, previous?: DocSessionState): DocSessionState {
   return {
     currentRef: ref,
     dirty: !atSavedMark,
-    lastEditAt: atSavedMark ? null : now,
+    lastEditAt: atSavedMark ? null : previous?.lastEditAt ?? now,
     lastSavedAt: now,
-    nonUndoableReasons: EMPTY_REASONS,
+    nonUndoableReasons: atSavedMark ? EMPTY_REASONS : previous?.nonUndoableReasons ?? EMPTY_REASONS,
   }
 }
 
