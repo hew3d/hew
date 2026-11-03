@@ -425,18 +425,10 @@ fn effective_own_slot(app: &tauri::AppHandle, label: &str) -> String {
 /// an explicit user gesture.
 ///
 /// `read_dirs` approves a directory for listing and for reading its files
-/// (and one subdirectory level below it) — requested by `pick_open_path`'s
-/// `approve_dir` flag, which every import-format pick sets (their texture
-/// scan legitimately reads siblings like `textures/wood.png`, though only
-/// COLLADA's actually does) and which the unified Open dialog's pick also
-/// sets unconditionally, since the picked extension isn't known until the
-/// dialog resolves — so a plain `.hew` open now grants this too, unlike the
-/// narrower `.hew`-only open path. A real but bounded widening (read-only,
-/// scoped to a directory the user just navigated to via a native dialog);
-/// tightening `pick_open_path` to gate this on the resolved path's own
-/// extension, so a `.hew`/`.skp`/`.glb`/`.gltf`/`.stl` pick never grants it
-/// at all, is a reasonable follow-up but changes this trust boundary and
-/// hasn't been signed off.
+/// (and one subdirectory level below it). Only a native dialog pick of a
+/// COLLADA file grants this scope: its external texture scan needs siblings
+/// such as `textures/wood.png`. The renderer cannot request this authority
+/// for other formats.
 #[derive(Default)]
 struct ApprovedPaths {
     read_files: HashSet<PathBuf>,
@@ -1209,6 +1201,12 @@ async fn create_document_window(
     recover_slot: Option<String>,
     focus: bool,
 ) -> Result<String, String> {
+    if recover_slot
+        .as_deref()
+        .is_some_and(|slot| !valid_recovery_slot(slot))
+    {
+        return Err("invalid recovery slot".into());
+    }
     let label = {
         let state = app.state::<Mutex<WindowCounter>>();
         let mut guard = state.lock().map_err(|e| e.to_string())?;
@@ -1484,8 +1482,8 @@ fn sync_menu_state(
 //
 // One snapshot pair per document window in the app config dir:
 // recovery-<label>.hew (geometry bytes, the same format scene.save()
-// produces) and recovery-<label>.json (the RecoveryMeta JSON verbatim,
-// opaque to Rust — we never parse it here). The un-suffixed
+// produces) and recovery-<label>.json (the RecoveryMeta JSON). Metadata is
+// untrusted; claiming it can never grant a new filesystem permission. The un-suffixed
 // "recovery.hew"/"recovery.json" pair is the pre-multi-window legacy name,
 // listed under the reserved slot name "legacy".
 //
@@ -1502,6 +1500,45 @@ fn sync_menu_state(
 
 /// Reserved slot name for the legacy un-suffixed snapshot pair.
 const LEGACY_SLOT: &str = "legacy";
+
+/// Only labels generated for document windows, their deferred side-slots,
+/// and the legacy pair may be addressed through recovery commands.
+fn valid_recovery_slot(slot: &str) -> bool {
+    if slot == LEGACY_SLOT {
+        return true;
+    }
+    let label = slot.strip_suffix("-deferred").unwrap_or(slot);
+    if label == "main" {
+        return true;
+    }
+    label.strip_prefix("main-").is_some_and(|digits| {
+        !digits.is_empty()
+            && digits.bytes().all(|c| c.is_ascii_digit())
+            && digits.parse::<u32>().is_ok_and(|n| n > 0)
+    })
+}
+
+/// Keep a recovered document bound to its path only when native state already
+/// permits writing that path. Everything else recovers as an unsaved document
+/// and uses the normal Save As picker; metadata is never an authorization source.
+fn recovery_meta_for_approved_paths(
+    meta: Option<String>,
+    approved: &ApprovedPaths,
+) -> Option<String> {
+    let meta = meta?;
+    let mut value: serde_json::Value = serde_json::from_str(&meta).ok()?;
+    let object = value.as_object_mut()?;
+    let path_approved = object
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|path| canonical_or_synthesized(Path::new(path)))
+        .is_some_and(|path| approved.write_files.contains(&path));
+    if path_approved {
+        return Some(meta);
+    }
+    object.insert("path".into(), serde_json::Value::Null);
+    serde_json::to_string(&value).ok()
+}
 
 /// The `.hew`/`.json` file pair backing a snapshot slot. Pure path mapping —
 /// no filesystem access (unit-tested below).
@@ -1535,7 +1572,7 @@ fn slot_of_filename(name: &str) -> Option<String> {
     }
     let label = name.strip_prefix("recovery-")?.strip_suffix(".hew")?;
     // Never let a stray file alias the reserved legacy slot.
-    if label.is_empty() || label == LEGACY_SLOT {
+    if label == LEGACY_SLOT || !valid_recovery_slot(label) {
         return None;
     }
     Some(label.to_string())
@@ -1671,7 +1708,7 @@ fn recovery_source_read(
     app: tauri::AppHandle,
     slot: String,
 ) -> Result<tauri::ipc::Response, String> {
-    if slot.is_empty() || slot.contains(['/', '\\']) || slot.contains("..") {
+    if !valid_recovery_slot(&slot) {
         return Err(format!("recovery_source_read: invalid slot {slot:?}"));
     }
     let config_dir = app
@@ -1739,15 +1776,18 @@ fn recovery_list(app: tauri::AppHandle) -> Vec<RecoveryEntry> {
 /// move is skipped entirely when the caller's own slot still holds someone
 /// else's undecided snapshot (it must never be clobbered; the caller's
 /// autosaves divert to the deferred side-slot in that case, so the adopted
-/// document is still protected). Recovering a document whose meta carries an
-/// original file path also approves that path for write, since Save on a
-/// recovered document writes back to it without a new dialog.
+/// document is still protected). An original file path is retained only when
+/// native state already approves writing it (for example, a persisted recent).
+/// Other snapshots recover as unsaved documents without granting file access.
 #[tauri::command]
 fn recovery_claim(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     slot: String,
 ) -> Option<RecoveryPayload> {
+    if !valid_recovery_slot(&slot) {
+        return None;
+    }
     let config_dir = app.path().app_config_dir().ok()?;
     let (src_hew, src_json) = slot_paths(&config_dir, &slot);
     let (dst_hew, dst_json) = slot_paths(&config_dir, window.label());
@@ -1760,7 +1800,11 @@ fn recovery_claim(
     let contents = std::fs::read(&src_hew).ok()?;
     // The sidecar may be missing (torn write on an old build) — the
     // geometry alone is still worth recovering.
-    let meta = std::fs::read_to_string(&src_json).ok();
+    let meta = {
+        let approved = app.state::<Mutex<ApprovedPaths>>();
+        let approved = approved.lock().ok()?;
+        recovery_meta_for_approved_paths(std::fs::read_to_string(&src_json).ok(), &approved)
+    };
     let mut own_slot_adopted = true;
     if src_hew != dst_hew {
         let dst_protected = app
@@ -1791,14 +1835,6 @@ fn recovery_claim(
         protected.0.remove(&slot);
         if own_slot_adopted {
             protected.0.remove(window.label());
-        }
-    }
-    // Save writes back to the recovered document's original path.
-    if let Some(meta_json) = &meta {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(meta_json) {
-            if let Some(path) = value.get("path").and_then(|p| p.as_str()) {
-                approve_file(&app, Path::new(path), true);
-            }
         }
     }
     Some(RecoveryPayload {
@@ -1998,11 +2034,8 @@ fn approve_file(app: &tauri::AppHandle, path: &Path, write: bool) {
 }
 
 /// Record read approval for a directory (listing + reading files in it and
-/// one level below it). Called by `pick_open_path` whenever its caller sets
-/// `approve_dir` — every import-format pick (whose COLLADA texture scan
-/// reads siblings of the picked model and `textures/`-style subfolders) and,
-/// since the unified Open dialog, every plain `.hew` pick too (see the
-/// `ApprovedPaths::read_dirs` doc comment for why, and the open follow-up).
+/// one level below it). Called only for a picked COLLADA file, whose texture
+/// scan reads siblings and `textures/`-style subfolders.
 fn approve_dir_reads(app: &tauri::AppHandle, dir: &Path) {
     let Ok(canon) = std::fs::canonicalize(dir) else {
         return;
@@ -2187,19 +2220,25 @@ struct DialogFilter {
     extensions: Vec<String>,
 }
 
+/// External texture lookup is needed only for COLLADA. Decide this from the
+/// path returned by the native picker, never a renderer-supplied scope flag.
+fn pick_needs_directory_reads(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("dae"))
+}
+
 /// Show the native open-file dialog and, when the user picks a file, record
 /// its approval before returning the path. Approval happens HERE, at the
 /// only place that knows a real dialog interaction occurred — the JS side
 /// merely receives the already-approved path. `write` additionally approves
 /// write-back (opening a .hew implies Save may later overwrite it);
-/// `approve_dir` extends read approval to the picked file's directory
-/// (import texture scans).
+/// A picked COLLADA file additionally approves sibling texture reads; other
+/// formats approve only the selected file.
 #[tauri::command]
 async fn pick_open_path(
     app: tauri::AppHandle,
     filters: Vec<DialogFilter>,
     write: bool,
-    approve_dir: bool,
 ) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
     let mut dialog = app.dialog().file();
@@ -2215,7 +2254,7 @@ async fn pick_open_path(
         .flatten()?;
     let path = picked.into_path().ok()?;
     approve_file(&app, &path, write);
-    if approve_dir {
+    if pick_needs_directory_reads(&path) {
         if let Some(dir) = path.parent() {
             approve_dir_reads(&app, dir);
         }
@@ -4757,6 +4796,112 @@ mod tests {
     fn percent_decode_rejects_a_truncated_or_invalid_escape() {
         assert!(percent_decode("abc%2").is_err());
         assert!(percent_decode("abc%zz").is_err());
+    }
+
+    #[test]
+    fn recovery_metadata_cannot_authorize_a_new_write_target() {
+        let dir = library_scratch_dir("recovery-authorization");
+        let path = dir.join("private.txt");
+        std::fs::write(&path, b"private").unwrap();
+        let approved = ApprovedPaths::default();
+        let meta = serde_json::json!({
+            "version": 1, "savedAt": 1, "name": "Recovered", "path": path,
+            "format": "hew"
+        });
+        let filtered = recovery_meta_for_approved_paths(Some(meta.to_string()), &approved).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&filtered).unwrap();
+        assert!(value["path"].is_null());
+        assert_eq!(value["name"], "Recovered");
+        assert!(approved.write_files.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), b"private");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn recovery_preserves_only_a_previously_approved_write_target() {
+        let dir = library_scratch_dir("recovery-approved");
+        let path = dir.join("model.hew");
+        std::fs::write(&path, b"model").unwrap();
+        let mut approved = ApprovedPaths::default();
+        approved
+            .write_files
+            .insert(std::fs::canonicalize(&path).unwrap());
+        let meta = serde_json::json!({ "path": path, "name": "Model" }).to_string();
+        assert_eq!(
+            recovery_meta_for_approved_paths(Some(meta.clone()), &approved),
+            Some(meta)
+        );
+        // A read-only approval (for example, an imported file) never becomes
+        // permission to overwrite it just because a snapshot names it.
+        approved.read_files = std::mem::take(&mut approved.write_files);
+        let filtered = recovery_meta_for_approved_paths(
+            Some(serde_json::json!({ "path": path }).to_string()),
+            &approved,
+        )
+        .unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&filtered).unwrap()["path"].is_null());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn invalid_recovery_metadata_never_supplies_a_file_target() {
+        let approved = ApprovedPaths::default();
+        assert_eq!(recovery_meta_for_approved_paths(None, &approved), None);
+        for meta in ["not json", "[]", "null", "42"] {
+            assert_eq!(
+                recovery_meta_for_approved_paths(Some(meta.into()), &approved),
+                None
+            );
+        }
+        for meta in [r#"{"path":42,"name":"Model"}"#, r#"{"name":"Model"}"#] {
+            let filtered = recovery_meta_for_approved_paths(Some(meta.into()), &approved).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&filtered).unwrap();
+            assert!(value["path"].is_null());
+            assert_eq!(value["name"], "Model");
+        }
+    }
+
+    #[test]
+    fn recovery_slots_accept_only_generated_document_slot_names() {
+        for slot in [
+            "main",
+            "main-2",
+            "main-deferred",
+            "main-23-deferred",
+            LEGACY_SLOT,
+        ] {
+            assert!(valid_recovery_slot(slot), "{slot}");
+        }
+        for slot in [
+            "",
+            "../main",
+            "main/../../secret",
+            "main\\secret",
+            "main-",
+            "main-0",
+            "main-2-extra",
+            "settings",
+            "main\0",
+        ] {
+            assert!(!valid_recovery_slot(slot), "{slot:?}");
+        }
+        assert_eq!(slot_of_filename("recovery-main-2-extra.hew"), None);
+    }
+
+    #[test]
+    fn only_collada_picks_grant_sibling_directory_reads() {
+        assert!(pick_needs_directory_reads(Path::new("/models/House.DAE")));
+        for path in [
+            "/models/house.hew",
+            "/models/house.skp",
+            "/models/house.glb",
+            "/models/house.gltf",
+            "/models/house.stl",
+            "/models/house.dae.txt",
+            "/models/house",
+        ] {
+            assert!(!pick_needs_directory_reads(Path::new(path)), "{path}");
+        }
     }
 
     #[test]
