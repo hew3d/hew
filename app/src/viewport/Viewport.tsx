@@ -7406,6 +7406,11 @@ export default function Viewport({
           // Rebuild sketch buffers so a scaled sketch's lines follow (see
           // makeMoveTool).
           sceneRenderer.refreshAllSketches()
+          // Select the committed nodes: a scaled drawn shape is re-found by
+          // its new geometry, so the old ref no longer names it and the
+          // selection would otherwise be pruned to nothing.
+          if (nodes.length === 1) onSelectRef.current?.(nodes[0], 'replace')
+          else if (nodes.length > 1) onSelectManyRef.current?.(nodes, 'replace')
         },
         handleToast,
         (id: bigint) => sceneRenderer.getInstanceGroup(id),

@@ -1420,6 +1420,7 @@ export class ScaleTool implements Tool {
         return false
       }
     }
+    this.selection = committed
     this.onCommit(committed)
     // Redraw the gizmo at the (possibly new) size so a follow-up grip can be
     // grabbed right away — handles stay stable through a transform (kernel
