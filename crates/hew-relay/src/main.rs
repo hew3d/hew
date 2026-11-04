@@ -197,7 +197,7 @@ async fn main() {
         .collect();
 
     let state = Arc::new(AppState {
-        store: Store::new(config.max_total_bytes, ttl),
+        store: Arc::new(Store::new(config.max_total_bytes, ttl)),
         max_bytes: config.max_bytes,
         allowed_origins,
         upload_key,

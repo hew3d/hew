@@ -11,8 +11,13 @@
 //! someone asks about it — the memory cap is what makes the sweep matter.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Bounds token, map and request overhead independently of payload size.
+const MAX_DROPS: usize = 1024;
+/// Body frames and refused uploads must not each scan the entire map.
+const SWEEP_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A valid token is exactly what `generate_token` produces: 22 base64url
 /// characters (16 random bytes, unpadded). Same grammar as the Worker.
@@ -56,10 +61,33 @@ struct Entry {
     expires_at: Instant,
 }
 
+/// Owns an outgoing buffer's quota until the transport drops its last copy.
+/// `Bytes::from_owner` keeps this owner alive even after the response body
+/// hands a frame to hyper, so slow readers cannot free quota prematurely.
+pub struct ResponseBytes {
+    bytes: Vec<u8>,
+    store: Arc<Store>,
+}
+
+impl AsRef<[u8]> for ResponseBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for ResponseBytes {
+    fn drop(&mut self) {
+        let capacity = self.bytes.capacity();
+        drop(std::mem::take(&mut self.bytes));
+        let mut inner = self.store.lock();
+        inner.total -= capacity;
+        inner.active_responses -= 1;
+    }
+}
+
 struct Inner {
     drops: HashMap<String, Entry>,
-    /// Sum of `bytes.len()` over `drops` — maintained on every insert/remove
-    /// so `remaining` is O(1).
+    /// Capacity of stored drops AND buffers still owned by GET responses.
     total: usize,
     /// Bytes claimed by uploads still streaming in but not yet stored. Both
     /// `total` and `reserved` count against `max_total_bytes`, so N
@@ -69,6 +97,9 @@ struct Inner {
     /// arrive, released by `Reservation`'s drop, and converted into `total`
     /// by `put_reserved` on success.
     reserved: usize,
+    active_uploads: usize,
+    active_responses: usize,
+    next_sweep: Instant,
 }
 
 /// Why a `put` was refused. Test-only: production uploads go through
@@ -77,7 +108,7 @@ struct Inner {
 #[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum PutError {
-    /// Storing this drop would exceed the total memory cap. Fail closed:
+    /// Storing this drop would exceed a byte or metadata limit. Fail closed:
     /// the caller answers `503 {"error":"relay full"}` + `Retry-After`.
     Full,
 }
@@ -95,6 +126,9 @@ impl Store {
                 drops: HashMap::new(),
                 total: 0,
                 reserved: 0,
+                active_uploads: 0,
+                active_responses: 0,
+                next_sweep: Instant::now(),
             }),
             max_total_bytes,
             ttl,
@@ -116,23 +150,44 @@ impl Store {
     /// Bytes still available under the cap — what a declared `Content-Length`
     /// is checked against before a body is read.
     pub fn remaining(&self) -> usize {
-        let inner = self.lock();
+        let mut inner = self.lock();
+        self.sweep_if_due(&mut inner);
         self.max_total_bytes
             .saturating_sub(inner.total)
             .saturating_sub(inner.reserved)
     }
 
+    /// Reserve one bounded metadata slot before accepting an upload body.
+    /// The slot becomes a stored drop on success, or is released on abort.
+    pub fn begin_upload(&self) -> bool {
+        let mut inner = self.lock();
+        self.sweep_if_due(&mut inner);
+        if inner.drops.len() + inner.active_uploads + inner.active_responses >= MAX_DROPS {
+            return false;
+        }
+        inner.active_uploads += 1;
+        true
+    }
+
+    pub fn release_upload(&self) {
+        let mut inner = self.lock();
+        inner.active_uploads -= 1;
+    }
+
     /// Claim `n` more in-flight bytes against the global budget for a body
     /// currently streaming in. Returns `false` (claim nothing) when the
     /// stored plus already-reserved bytes leave no room — the caller then
-    /// answers 503 and aborts the upload. Sweeps expired drops first, so a
-    /// store full only of dead drops still admits a new upload. Pair every
-    /// successful reserve with exactly one release (via [`Reservation`]) or
-    /// a [`Store::put_reserved`] that consumes it.
+    /// answers 503 and aborts the upload. Sweeps expired drops when due.
+    /// Pair every successful reserve with exactly one release (via
+    /// [`Reservation`]) or a [`Store::put_reserved`] that consumes it.
     pub fn reserve(&self, n: usize) -> bool {
         let mut inner = self.lock();
-        Self::sweep_locked(&mut inner, Instant::now());
-        if inner.total.saturating_add(inner.reserved).saturating_add(n) > self.max_total_bytes {
+        self.sweep_if_due(&mut inner);
+        let total = inner
+            .total
+            .checked_add(inner.reserved)
+            .and_then(|v| v.checked_add(n));
+        if total.is_none_or(|total| total > self.max_total_bytes) {
             return false;
         }
         inner.reserved += n;
@@ -146,23 +201,23 @@ impl Store {
         inner.reserved = inner.reserved.saturating_sub(n);
     }
 
-    /// Store `bytes` whose length was already reserved via [`Store::reserve`]:
+    /// Store `bytes` whose capacity was reserved via [`Store::reserve`]:
     /// move `reserved_bytes` out of the reservation and into `total`, then
-    /// insert under a fresh token. Cannot fail on the cap (the space was held
-    /// the whole time the body streamed), so — unlike [`Store::put`] — it
-    /// returns the token directly.
+    /// insert under a fresh token, consuming one upload slot. Cannot fail on
+    /// the cap (the space was held the whole time the body streamed), so —
+    /// unlike [`Store::put`] — it returns the token directly.
     pub fn put_reserved(&self, bytes: Vec<u8>, reserved_bytes: usize) -> String {
         let now = Instant::now();
         let mut inner = self.lock();
-        Self::sweep_locked(&mut inner, now);
         inner.reserved = inner.reserved.saturating_sub(reserved_bytes);
+        inner.active_uploads -= 1;
         let token = loop {
             let t = generate_token();
             if !inner.drops.contains_key(&t) {
                 break t;
             }
         };
-        inner.total += bytes.len();
+        inner.total += bytes.capacity();
         inner.drops.insert(
             token.clone(),
             Entry {
@@ -180,40 +235,46 @@ impl Store {
     /// in-flight bodies share the budget.
     #[cfg(test)]
     pub fn put(&self, bytes: Vec<u8>) -> Result<String, PutError> {
-        let now = Instant::now();
-        let mut inner = self.lock();
-        Self::sweep_locked(&mut inner, now);
-        if inner.total.saturating_add(bytes.len()) > self.max_total_bytes {
+        if !self.begin_upload() {
             return Err(PutError::Full);
         }
-        // Loop on the practically-impossible 128-bit collision rather than
-        // silently overwriting a live drop.
-        let token = loop {
-            let t = generate_token();
-            if !inner.drops.contains_key(&t) {
-                break t;
-            }
-        };
-        inner.total += bytes.len();
-        inner.drops.insert(
-            token.clone(),
-            Entry {
-                bytes,
-                expires_at: now + self.ttl,
-            },
-        );
-        Ok(token)
+        let capacity = bytes.capacity();
+        if !self.reserve(capacity) {
+            self.release_upload();
+            return Err(PutError::Full);
+        }
+        Ok(self.put_reserved(bytes, capacity))
     }
 
-    /// One-shot read: removes and returns the drop, or `None` if it is
+    /// One-shot read that retains the buffer and metadata charge for the
+    /// lifetime of the returned transport owner, rather than freeing quota
+    /// while a slow reader still holds the allocation.
+    pub fn take_for_response(self: &Arc<Self>, token: &str) -> Option<ResponseBytes> {
+        let now = Instant::now();
+        let mut inner = self.lock();
+        let entry = inner.drops.remove(token)?;
+        if entry.expires_at <= now {
+            inner.total -= entry.bytes.capacity();
+            return None;
+        }
+        inner.active_responses += 1;
+        Some(ResponseBytes {
+            bytes: entry.bytes,
+            store: Arc::clone(self),
+        })
+    }
+
+    /// Test-only convenience for consuming and immediately releasing a drop.
+    /// Removes and returns the drop, or `None` if it is
     /// unknown, already taken, or expired (an expired entry is dropped on
     /// the way out). Atomic under the lock — of two concurrent `take`s for
     /// one token exactly one gets `Some`.
+    #[cfg(test)]
     pub fn take(&self, token: &str) -> Option<Vec<u8>> {
         let now = Instant::now();
         let mut inner = self.lock();
         let entry = inner.drops.remove(token)?;
-        inner.total -= entry.bytes.len();
+        inner.total -= entry.bytes.capacity();
         if entry.expires_at <= now {
             return None;
         }
@@ -229,7 +290,7 @@ impl Store {
             None => false,
             Some(entry) if entry.expires_at <= now => {
                 let dead = inner.drops.remove(token).expect("just found");
-                inner.total -= dead.bytes.len();
+                inner.total -= dead.bytes.capacity();
                 false
             }
             Some(_) => true,
@@ -240,7 +301,7 @@ impl Store {
     pub fn delete(&self, token: &str) {
         let mut inner = self.lock();
         if let Some(entry) = inner.drops.remove(token) {
-            inner.total -= entry.bytes.len();
+            inner.total -= entry.bytes.capacity();
         }
     }
 
@@ -248,14 +309,24 @@ impl Store {
     /// the top of `put`.
     pub fn sweep(&self) {
         let mut inner = self.lock();
-        Self::sweep_locked(&mut inner, Instant::now());
+        let now = Instant::now();
+        Self::sweep_locked(&mut inner, now);
+        inner.next_sweep = now + self.ttl.min(SWEEP_INTERVAL);
+    }
+
+    fn sweep_if_due(&self, inner: &mut Inner) {
+        let now = Instant::now();
+        if now >= inner.next_sweep {
+            Self::sweep_locked(inner, now);
+            inner.next_sweep = now + self.ttl.min(SWEEP_INTERVAL);
+        }
     }
 
     fn sweep_locked(inner: &mut Inner, now: Instant) {
         let mut freed = 0usize;
         inner.drops.retain(|_, entry| {
             if entry.expires_at <= now {
-                freed += entry.bytes.len();
+                freed += entry.bytes.capacity();
                 false
             } else {
                 true
@@ -329,6 +400,8 @@ mod tests {
         // reduce `remaining` and block a further reservation past the cap,
         // even though nothing has been stored yet (audit sec-relay).
         let store = Store::new(10, Duration::from_secs(60));
+        assert!(store.begin_upload());
+        assert!(store.begin_upload());
         assert!(store.reserve(6));
         assert_eq!(store.remaining(), 4);
         assert!(store.reserve(4));
@@ -342,6 +415,7 @@ mod tests {
         assert_eq!(store.remaining(), 0);
         // The other aborts: releasing its reservation frees that space.
         store.release(4);
+        store.release_upload();
         assert_eq!(store.remaining(), 4);
         assert_eq!(store.take(&token).map(|v| v.len()), Some(6));
         assert_eq!(store.remaining(), 10);
@@ -360,6 +434,45 @@ mod tests {
         assert_eq!(store.remaining(), 6);
         assert!(store.put(vec![0; 6]).is_ok());
         assert_eq!(store.take(&b).map(|v| v.len()), Some(4));
+    }
+
+    #[test]
+    fn spare_buffer_capacity_counts_against_the_budget() {
+        let store = Store::new(64, Duration::from_secs(60));
+        let mut bytes = Vec::with_capacity(64);
+        bytes.push(7);
+        let token = store.put(bytes).unwrap();
+        assert_eq!(store.remaining(), 0);
+        assert_eq!(store.put(vec![1]), Err(PutError::Full));
+        assert_eq!(store.take(&token), Some(vec![7]));
+        assert_eq!(store.remaining(), 64);
+    }
+
+    #[test]
+    fn tiny_drops_have_a_separate_entry_limit() {
+        let store = Store::new(1 << 20, Duration::from_secs(60));
+        let mut tokens = Vec::new();
+        for _ in 0..1024 {
+            tokens.push(store.put(vec![1]).unwrap());
+        }
+        assert_eq!(store.put(vec![1]), Err(PutError::Full));
+        store.delete(&tokens[0]);
+        assert!(store.put(vec![1]).is_ok());
+    }
+
+    #[test]
+    fn active_uploads_and_stored_drops_share_the_entry_limit() {
+        let store = Store::new(1 << 20, Duration::from_secs(60));
+        for _ in 0..1023 {
+            assert!(store.begin_upload());
+        }
+        let token = store.put(vec![1]).unwrap();
+        assert!(!store.begin_upload());
+        store.release_upload();
+        assert!(store.begin_upload());
+        assert!(!store.begin_upload());
+        store.delete(&token);
+        assert!(store.begin_upload());
     }
 
     #[test]
