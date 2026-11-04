@@ -92,7 +92,10 @@ describe('MoveTool — moving a selected guide', () => {
   it('commits one transform_guide by the clicked vector and keeps the guide selected', () => {
     const t = makeTool({ selected: 7n })
     t.tool.onPointerDown(snapAt(0), ray)
-    expect(t.preview.children).toHaveLength(1) // the guide's ghost
+    // The guide's ghost, and the dashed base→destination line.
+    expect(t.preview.children).toHaveLength(2)
+    expect(t.preview.children.filter((c) => (c as THREE.LineSegments).material instanceof THREE.LineDashedMaterial))
+      .toHaveLength(1)
     t.tool.onPointerMove(snapAt(2), ray)
     t.tool.onPointerDown(snapAt(2), ray)
 

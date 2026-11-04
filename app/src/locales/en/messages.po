@@ -2562,8 +2562,12 @@ msgid "Drag a corner pin, or type the absolute skew/V-scale (blue): degrees, or 
 msgstr "Drag a corner pin, or type the absolute skew/V-scale (blue): degrees, or 2x for scale. Enter commits, Esc cancels."
 
 #: src/tools/ScaleTool.ts
-msgid "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center."
-msgstr "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center."
+#~ msgid "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center."
+#~ msgstr "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center."
+
+#: src/tools/ScaleTool.ts
+msgid "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center. Click another object to scale it instead."
+msgstr "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center. Click another object to scale it instead."
 
 #: src/palette/registry.ts
 msgid "Drag a rectangle to zoom the camera onto it, then return to Select."

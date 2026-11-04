@@ -141,6 +141,20 @@ export interface SnapConstraint {
 }
 
 /**
+ * What a click right now would pick up from under the cursor — the
+ * transform tools' empty-selection auto-acquire (Move/Rotate/Scale) — so the
+ * viewport can highlight it on hover before the click (SketchUp's
+ * pre-selection highlight). A tool offers it through an optional
+ * `clickAcquire(): ClickAcquire | null` (null: a click acquires nothing).
+ * `guides` before `nodes`, as Move's click takes a guide over the object
+ * beneath it.
+ */
+export interface ClickAcquire {
+  guides: boolean
+  nodes: boolean
+}
+
+/**
  * One active tool at a time. ToolController owns the routing; each method
  * is called with the resolved snap result (or null when snap is unavailable
  * and fallback was also null).
