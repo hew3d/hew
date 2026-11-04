@@ -342,13 +342,9 @@ fn build_recipes(
     warnings: &mut SplitWarnings,
 ) -> Vec<MeshRecipe> {
     let no_holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); raw.faces.len()];
-    // Bake the node/world transform BEFORE choosing the weld tolerance: the
-    // heal pass welds post-bake coordinates, so a tolerance computed from the
-    // raw (mesh-local) positions is wrong by the node's scale factor — a
-    // scale=100 node would weld world-scale f32 gaps with a local-scale
-    // tolerance and leave every seam split. Baking here once (heal then gets
-    // the identity) keeps the tolerance and the welded coordinates in the
-    // same space.
+    // Heal uses baked coordinates. Derive its tolerance from the mesh-local
+    // span after the linear transform; neither node translation nor the mesh's
+    // coordinate origin should erase a small but representable feature.
     let baked: Vec<Point3> = raw.positions.iter().map(|&p| bake.apply_point(p)).collect();
     let (positions, faces, face_materials, healed_uvs, face_holes, dropped_degenerate) =
         heal_mesh_with_tol(
@@ -358,7 +354,7 @@ fn build_recipes(
             &raw.face_corner_uvs,
             &no_holes,
             &Transform::IDENTITY,
-            gltf_weld_tol(&baked),
+            gltf_weld_tol(&raw.positions, &raw.faces, bake),
             // Merge coplanar triangles at the kernel's import planarity (1 mm), not
             // the 1 nm native tolerance — f32 flat surfaces sit microns off-plane,
             // so the strict gate would leave every wall/floor as triangle soup
@@ -458,22 +454,60 @@ fn recipe_from_arrays(
 
 /// Choose a weld tolerance for f32-sourced glTF positions.
 ///
-/// glTF `POSITION` is float32, so vertices that were coincident in the authoring
-/// tool land up to ~`magnitude · 2.4e-7` apart after the round-trip. The kernel's
-/// native 1 nm `POINT_MERGE` is far too tight and would leave every shared edge
-/// split (a "leaky" shell), so we scale the tolerance to the mesh's coordinate
-/// magnitude (≈4× the worst-case f32 gap), floored for tiny meshes.
-///
-/// `positions` must be the POST-BAKE (world-space) coordinates the weld will
-/// actually run on: welding happens after the node transform is applied, so a
-/// tolerance derived from pre-transform locals would be off by the node's
-/// scale factor.
-fn gltf_weld_tol(positions: &[Point3]) -> f64 {
-    let max_abs = positions
-        .iter()
-        .flat_map(|p| [p.x.abs(), p.y.abs(), p.z.abs()])
+/// glTF `POSITION` is float32, so separately encoded vertices that were
+/// coincident in the authoring tool can land apart after rounding. The kernel's
+/// native 1 nm `POINT_MERGE` is far too tight and would leave shared edges
+/// split. Scale the tolerance from the mesh's per-axis span after the linear
+/// transform. This follows node scale and rotation without counting node
+/// translation or the mesh's coordinate origin, neither of which may erase a
+/// smaller representable feature merely because it sits far from zero.
+/// Cap it at the same f32-scale fraction of the shortest valid triangle edge
+/// so distant outliers in the same mesh cannot make nearby features merge.
+/// At large mesh-local offsets, f32 quantization can exceed this bound; such
+/// seams may remain open rather than collapsing nearby valid features.
+fn gltf_weld_tol(positions: &[Point3], faces: &[Vec<usize>], bake: &Transform) -> f64 {
+    if positions.is_empty() {
+        return 1e-7;
+    }
+    let mut local_min = [f64::INFINITY; 3];
+    let mut local_max = [f64::NEG_INFINITY; 3];
+    for p in positions {
+        local_min[0] = local_min[0].min(p.x);
+        local_min[1] = local_min[1].min(p.y);
+        local_min[2] = local_min[2].min(p.z);
+        local_max[0] = local_max[0].max(p.x);
+        local_max[1] = local_max[1].max(p.y);
+        local_max[2] = local_max[2].max(p.z);
+    }
+    let span = [0, 1, 2].map(|i| local_max[i] - local_min[i]);
+    let matrix = bake.to_affine();
+    let max_span = [0, 4, 8]
+        .into_iter()
+        .map(|i| {
+            matrix[i].abs() * span[0]
+                + matrix[i + 1].abs() * span[1]
+                + matrix[i + 2].abs() * span[2]
+        })
         .fold(0.0_f64, f64::max);
-    (max_abs * 1e-6).max(1e-7)
+    let mut shortest_edge = f64::INFINITY;
+    for face in faces {
+        if face.len() < 2 {
+            continue;
+        }
+        for i in 0..face.len() {
+            let (Some(&a), Some(&b)) = (
+                positions.get(face[i]),
+                positions.get(face[(i + 1) % face.len()]),
+            ) else {
+                continue;
+            };
+            let length = bake.apply_vector(b - a).length();
+            if length > 0.0 && length.is_finite() {
+                shortest_edge = shortest_edge.min(length);
+            }
+        }
+    }
+    (max_span * 1e-6).max(1e-7).min(shortest_edge * 1e-6)
 }
 
 /// Merge every triangle primitive of a glTF mesh into one raw position/face list.
