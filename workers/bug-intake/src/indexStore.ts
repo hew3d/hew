@@ -45,6 +45,8 @@ import {
   EMAIL_DAY_MAX,
   STORE_CEILING_BYTES,
   UPLOAD_LIFETIME_MS,
+  CLIENT_PENDING_BYTES,
+  IDLE_PRUNE_TIMEOUT_MS,
 } from './constants.ts'
 
 export interface ReportRow {
@@ -128,9 +130,20 @@ export class IndexStore {
          sizeBytes INTEGER NOT NULL,
          triaged INTEGER NOT NULL DEFAULT 0,
          committed INTEGER NOT NULL DEFAULT 0,
-         lastActivity INTEGER NOT NULL DEFAULT 0
+         lastActivity INTEGER NOT NULL DEFAULT 0,
+         clientHash TEXT NOT NULL DEFAULT ''
        )`,
     )
+    // Older deployments did not retain an upload's owner. Their existing
+    // rows remain subject to the global ceiling and normal abandonment
+    // cleanup; ownership cannot be inferred retroactively. Keep the hash
+    // only while uploading, clearing it on commit rather than linking an
+    // IP-derived identifier to a retained report.
+    const columns = this.storage.sql.exec<{ name: string }>('PRAGMA table_info(reports)').toArray()
+    if (!columns.some((column) => column.name === 'clientHash')) {
+      this.storage.sql.exec("ALTER TABLE reports ADD COLUMN clientHash TEXT NOT NULL DEFAULT ''")
+    }
+    this.storage.sql.exec('CREATE INDEX IF NOT EXISTS reports_upload_client ON reports (clientHash, committed)')
     this.storage.sql.exec(
       `CREATE TABLE IF NOT EXISTS rate_window (
          clientHash TEXT NOT NULL,
@@ -214,6 +227,16 @@ export class IndexStore {
       return { ok: false, reason: 'full' }
     }
 
+    const pending = this.storage.sql
+      .exec<{ total: number | null }>('SELECT SUM(sizeBytes) AS total FROM reports WHERE clientHash = ? AND committed = 0', clientHash)
+      .toArray()[0]?.total ?? 0
+    if (pending + entry.sizeBytes > CLIENT_PENDING_BYTES) {
+      // The existing rate-limited response keeps this admission limit in
+      // the same wire contract. Abandonment/pruning releases stalled
+      // reservations; a successful commit or delete releases it sooner.
+      return { ok: false, reason: 'rate-limited', retryAfterMs: IDLE_PRUNE_TIMEOUT_MS }
+    }
+
     this.storage.sql.exec(
       `INSERT INTO rate_window (clientHash, bucket, count) VALUES (?, ?, 1)
        ON CONFLICT (clientHash, bucket) DO UPDATE SET count = count + 1`,
@@ -227,8 +250,8 @@ export class IndexStore {
       day,
     )
     this.storage.sql.exec(
-      `INSERT INTO reports (id, receivedAt, appVersion, platform, descriptionPreview, sizeBytes, triaged, committed, lastActivity)
-       VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+      `INSERT INTO reports (id, receivedAt, appVersion, platform, descriptionPreview, sizeBytes, triaged, committed, lastActivity, clientHash)
+       VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
       entry.id,
       entry.receivedAt,
       entry.appVersion,
@@ -236,6 +259,7 @@ export class IndexStore {
       entry.descriptionPreview,
       entry.sizeBytes,
       now,
+      clientHash,
     )
     return { ok: true }
   }
@@ -259,7 +283,7 @@ export class IndexStore {
     const row = this.storage.sql.exec<{ committed: number }>('SELECT committed FROM reports WHERE id = ?', id).toArray()[0]
     if (row === undefined) return 'not-found'
     if (row.committed !== 0) return 'already-committed'
-    this.storage.sql.exec('UPDATE reports SET committed = 1 WHERE id = ?', id)
+    this.storage.sql.exec("UPDATE reports SET committed = 1, clientHash = '' WHERE id = ?", id)
     return 'flipped'
   }
 

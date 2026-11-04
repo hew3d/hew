@@ -62,6 +62,13 @@ export const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000
  *  with a file that would not open, and those files are big. */
 export const STORE_CEILING_BYTES = 3 * 1024 * 1024 * 1024
 
+/** A client may reserve at most one maximum-size report's worth of bytes
+ *  across its unfinished uploads. Completed reports still count against
+ *  the global ceiling, but no longer hold this temporary budget. This
+ *  prevents a few small START pieces from one client reserving the entire
+ *  store before any of their declared report bytes have actually arrived. */
+export const CLIENT_PENDING_BYTES = MAX_UPLOAD_BYTES
+
 /** A `ReportDrop` mid-upload arms its alarm for this long after every piece
  *  (and after the start piece) — if no new piece or commit arrives before
  *  it fires, the alarm treats the upload as abandoned: it deletes the

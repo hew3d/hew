@@ -223,6 +223,30 @@ call) calls `deleteReport(id)` instead to release the reservation —
 treat a committed row as a real report. `POST /report/` returns `507` once
 a reservation would pass the ceiling.
 
+**Unfinished uploads per client**: `CLIENT_PENDING_BYTES` bounds the sum of
+declared bytes across one client's uncommitted reports to 1 GiB, enough for
+one maximum-size report or several smaller ones. This check is part of the
+same synchronous reservation call as the rate limits and global ceiling;
+concurrent STARTs cannot each claim the same remaining client budget. A
+client already holding the budget gets the existing `429 rate-limited`
+response. Other clients can continue using the remaining global capacity.
+Clients sharing a public IP also share this budget, just as they share the
+existing submission rate limits.
+
+The identity rotates at UTC midnight, so one IP can briefly hold two daily
+budgets (2 GiB) across that boundary. The absolute eight-hour upload lifetime
+and pruning before each START prevent a third day's budget from overlapping.
+This limits unfinished reservations; completed reports and multiple client
+IPs can still fill the global ceiling.
+
+Commit releases the temporary client budget while retaining the report's
+bytes against the global ceiling. Deletion and abandonment release both.
+The index records only the daily-salted client hash while an upload is in
+progress and clears it on commit; completed reports do not retain that
+linkage. Existing index databases gain the ownership column automatically.
+Old unfinished rows have no inferable owner, so they keep counting against
+the global ceiling and expire through the existing abandonment backstops.
+
 ## Abandonment
 
 An upload that stops partway — the user closes the dialog, the network

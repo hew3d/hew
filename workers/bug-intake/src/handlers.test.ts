@@ -30,6 +30,7 @@ import assert from 'node:assert/strict'
 import { handleRequest, handleIdentity, handleStart, handleCommit } from './handlers.ts'
 import { ReportStore } from './reportStore.ts'
 import { IndexStore } from './indexStore.ts'
+import { hashClient } from './clientHash.ts'
 import {
   MAX_UPLOAD_BYTES,
   PIECE_BYTES,
@@ -547,18 +548,48 @@ describe('START: rate limiting and storage ceiling', () => {
   test('507 once stored reports would pass STORE_CEILING_BYTES', async () => {
     const env = makeEnv()
     const index = env.REPORT_INDEX.get(env.REPORT_INDEX.idFromName(INDEX_DO_NAME))
-    await index.reserveReport('filler-client', Date.now(), {
-      id: 'HEW-FFFF-FFFF',
-      receivedAt: Date.now(),
-      appVersion: '1.0.0',
-      platform: 'web',
-      descriptionPreview: 'filler',
-      sizeBytes: STORE_CEILING_BYTES,
-    })
-    await index.commitReport('HEW-FFFF-FFFF')
+    for (let left = STORE_CEILING_BYTES, i = 0; left > 0; i++) {
+      const sizeBytes = Math.min(left, MAX_UPLOAD_BYTES)
+      const id = `HEW-FFFF-000${i}`
+      assert.deepEqual(await index.reserveReport('filler-client', Date.now(), {
+        id,
+        receivedAt: Date.now(),
+        appVersion: '1.0.0',
+        platform: 'web',
+        descriptionPreview: 'filler',
+        sizeBytes,
+      }), { ok: true })
+      await index.commitReport(id)
+      left -= sizeBytes
+    }
     const { res } = await startBundle(env, validBundle())
     assert.equal(res.status, 507)
     assert.deepEqual(await res.json(), { error: 'full' })
+  })
+
+  test('429 while the same client holds its upload budget, then permits it after completion', async () => {
+    const env = makeEnv()
+    const ip = '203.0.113.77'
+    const index = env.REPORT_INDEX.get(env.REPORT_INDEX.idFromName(INDEX_DO_NAME))
+    const clientHash = await hashClient(env.IP_HASH_SECRET!, ip, Date.now())
+    assert.deepEqual(await index.reserveReport(clientHash, Date.now(), {
+      id: 'HEW-BUDG-0000',
+      receivedAt: Date.now(),
+      appVersion: '1.0.0',
+      platform: 'web',
+      descriptionPreview: 'upload in progress',
+      sizeBytes: MAX_UPLOAD_BYTES,
+    }), { ok: true })
+    const blocked = await startBundle(env, validBundle(), { 'cf-connecting-ip': ip })
+    assert.equal(blocked.res.status, 429)
+    assert.deepEqual(await blocked.res.json(), { error: 'rate-limited' })
+    assert.ok(Number(blocked.res.headers.get('retry-after')) > 0)
+
+    const other = await startBundle(env, validBundle(), { 'cf-connecting-ip': '203.0.113.78' })
+    assert.equal(other.res.status, 201)
+    await index.commitReport('HEW-BUDG-0000')
+    const next = await startBundle(env, validBundle(), { 'cf-connecting-ip': ip })
+    assert.equal(next.res.status, 201)
   })
 })
 
