@@ -16,7 +16,7 @@
  * "Security model" section for the full argument.
  */
 
-import type { DropEnv } from './types.ts'
+import type { DropEnv, UploadBudgetStub } from './types.ts'
 import { RPC_BATCH_CHUNKS, TTL_MS } from './dropStore.ts'
 
 /** Upload size ceiling — PUT /drop rejects anything larger with a 413. */
@@ -300,6 +300,43 @@ export function handleIdentity(env: DropEnv): Response {
  *  `Content-Length` can't be trusted alone). */
 /** Sentinel returned by `readBodyCapped` when the body exceeds the cap. */
 const TOO_LARGE = Symbol('too-large')
+const TOO_SLOW = Symbol('too-slow')
+// Matches relay_client.rs's native upload timeout, including slow connections.
+const UPLOAD_TIMEOUT_MS = 180_000
+
+async function beforeDeadline<T>(operation: Promise<T>, deadline: number): Promise<T | typeof TOO_SLOW> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<typeof TOO_SLOW>((resolve) => {
+        timer = setTimeout(() => resolve(TOO_SLOW), Math.max(0, deadline - Date.now()))
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+function uploadBudget(env: DropEnv): UploadBudgetStub {
+  return env.UPLOAD_BUDGET.get(env.UPLOAD_BUDGET.idFromName('global'))
+}
+
+/** Only Cloudflare's trusted client-IP header is used. Persist a daily hash,
+ *  never the raw address; missing headers share one conservative local bucket.
+ *  This is a short-lived rate key, not an anonymization guarantee. */
+async function clientHash(request: Request): Promise<string> {
+  const day = Math.floor(Date.now() / (24 * 60 * 60 * 1000))
+  const bytes = new TextEncoder().encode(`${day}:${request.headers.get('cf-connecting-ip') ?? 'unknown'}`)
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
+  return Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+async function releaseBudget(env: DropEnv, token: string): Promise<void> {
+  // A failed release keeps a conservative reservation until its alarm; it
+  // must not turn an already-consumed drop into an apparent failed download.
+  try { await uploadBudget(env).release(token) } catch { /* expires automatically */ }
+}
 
 /** Read a request body chunk by chunk, aborting as soon as the running total
  *  exceeds `maxBytes` so an oversized or unlabelled (chunked) upload never
@@ -309,22 +346,33 @@ const TOO_LARGE = Symbol('too-large')
 async function readBodyCapped(
   request: Request,
   maxBytes: number,
-): Promise<Uint8Array | typeof TOO_LARGE> {
+  deadline: number,
+): Promise<Uint8Array | typeof TOO_LARGE | typeof TOO_SLOW> {
   const reader = request.body?.getReader()
   if (!reader) return new Uint8Array(0)
   const chunks: Uint8Array[] = []
   let total = 0
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    if (value) {
-      total += value.byteLength
-      if (total > maxBytes) {
-        await reader.cancel()
-        return TOO_LARGE
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    void reader.cancel().catch(() => {})
+  }, Math.max(0, deadline - Date.now()))
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (timedOut) return TOO_SLOW
+      if (done) break
+      if (value) {
+        total += value.byteLength
+        if (total > maxBytes) {
+          await reader.cancel()
+          return TOO_LARGE
+        }
+        chunks.push(value)
       }
-      chunks.push(value)
     }
+  } finally {
+    clearTimeout(timer)
   }
   const out = new Uint8Array(total)
   let offset = 0
@@ -350,33 +398,61 @@ export async function handlePutDrop(request: Request, env: DropEnv): Promise<Res
     }
   }
 
-  // Stream the body with a running cap instead of buffering it whole: a
-  // request with no (or a lying) Content-Length — trivially produced with
-  // Transfer-Encoding: chunked — would otherwise sail past the pre-check
-  // above and have `arrayBuffer()` buffer the entire payload before any size
-  // check ran. This mirrors the Rust relay's frame-by-frame cap.
-  const capped = await readBodyCapped(request, MAX_BYTES)
-  if (capped === TOO_LARGE) {
-    return jsonResponse(413, { error: 'payload too large' })
-  }
-  if (capped.byteLength === 0) {
-    return jsonResponse(400, { error: 'empty body' })
-  }
-  const body = capped
-
   const token = generateToken()
-  const chunks = chunkBytes(body, CHUNK_BYTES)
-  const id = env.SHARE_DROP.idFromName(token)
-  const stub = env.SHARE_DROP.get(id)
-  // Batched: one RPC call may not carry more than 32 MiB of arguments, and a
-  // maximum-size drop is exactly that (`dropStore.ts`'s protocol note). The
-  // first batch rides `store` (which declares the full count, so the DO can
-  // tell "still uploading" from "complete"); the rest ride `append`.
-  await stub.store(DROP_NAME, chunks.length, body.byteLength, rpcBatch(chunks, 0))
-  for (let from = RPC_BATCH_CHUNKS; from < chunks.length; from += RPC_BATCH_CHUNKS) {
-    await stub.append(rpcBatch(chunks, from))
+  let budget: UploadBudgetStub
+  try {
+    budget = uploadBudget(env)
+    // Reserve the maximum BEFORE reading: missing/lying Content-Length cannot
+    // make concurrent bodies escape the global memory/storage budget.
+    const admitted = await budget.reserve(token, await clientHash(request), MAX_BYTES)
+    if (!admitted.ok) {
+      if (admitted.reason === 'full') return jsonResponse(503, { error: 'relay full' })
+      const response = jsonResponse(429, { error: 'rate limited' })
+      response.headers.set('retry-after', String(admitted.retryAfter))
+      return response
+    }
+  } catch {
+    return jsonResponse(503, { error: 'unavailable' })
   }
-  return jsonResponse(200, { token })
+
+  const stub = env.SHARE_DROP.get(env.SHARE_DROP.idFromName(token))
+  let stored = false
+  let attemptedStore = false
+  const deadline = Date.now() + UPLOAD_TIMEOUT_MS
+  try {
+    const body = await readBodyCapped(request, MAX_BYTES, deadline)
+    if (body === TOO_LARGE) return jsonResponse(413, { error: 'payload too large' })
+    if (body === TOO_SLOW) return jsonResponse(408, { error: 'upload timed out' })
+    if (body.byteLength === 0) return jsonResponse(400, { error: 'empty body' })
+    if (!await budget.resize(token, body.byteLength)) return jsonResponse(503, { error: 'unavailable' })
+    if (Date.now() >= deadline) return jsonResponse(408, { error: 'upload timed out' })
+
+    const chunks = chunkBytes(body, CHUNK_BYTES)
+    attemptedStore = true
+    const persisted = await beforeDeadline((async () => {
+      await stub.store(DROP_NAME, chunks.length, body.byteLength, rpcBatch(chunks, 0), deadline)
+      for (let from = RPC_BATCH_CHUNKS; from < chunks.length; from += RPC_BATCH_CHUNKS) {
+        await stub.append(rpcBatch(chunks, from), deadline)
+      }
+      return budget.commit(token)
+    })(), deadline)
+    if (persisted === TOO_SLOW) return jsonResponse(408, { error: 'upload timed out' })
+    if (!persisted) return jsonResponse(503, { error: 'unavailable' })
+    stored = true
+    return jsonResponse(200, { token })
+  } catch {
+    return jsonResponse(503, { error: 'unavailable' })
+  } finally {
+    if (!stored) {
+      // Do not free capacity while partially stored bytes may remain. If
+      // cleanup itself fails the ledger retains the reservation until expiry.
+      let cleaned = !attemptedStore
+      if (attemptedStore) {
+        try { await stub.destroy(); cleaned = true } catch { /* keep reservation */ }
+      }
+      if (cleaned) await releaseBudget(env, token)
+    }
+  }
 }
 
 /** One RPC batch of `chunks` starting at `from`, each chunk COPIED into its
@@ -432,6 +508,8 @@ export async function handleGetDrop(token: string, env: DropEnv): Promise<Respon
     return jsonResponse(404, { error: 'not found' })
   }
 
+  await releaseBudget(env, token)
+
   return new Response(bytes, {
     status: 200,
     headers: { 'content-type': 'application/octet-stream', 'cache-control': 'no-store' },
@@ -474,6 +552,7 @@ export async function handleDeleteDrop(token: string, env: DropEnv): Promise<Res
     const id = env.SHARE_DROP.idFromName(token)
     const stub = env.SHARE_DROP.get(id)
     await stub.destroy()
+    await releaseBudget(env, token)
   }
   return new Response(null, { status: 204 })
 }

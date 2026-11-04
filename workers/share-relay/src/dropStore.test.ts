@@ -21,6 +21,20 @@ function makeDrop(): { drop: DropStore; storage: FakeDurableObjectStorage } {
   return { drop, storage }
 }
 
+test('a delayed write after its request deadline cannot recreate deleted storage', async () => {
+  const { drop, storage } = makeDrop()
+  await drop.destroy()
+  await assert.rejects(drop.store('drop', 1, 1, [new Uint8Array([1])], Date.now() - 1), /deadline exceeded/)
+  assert.equal(storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table'").toArray()[0].n, 0)
+})
+
+test('a delayed append cannot persist chunks after its request deadline', async () => {
+  const { drop } = makeDrop()
+  await drop.store('drop', 2, 2, [new Uint8Array([1])])
+  await assert.rejects(drop.append([new Uint8Array([2])], Date.now() - 1), /deadline exceeded/)
+  assert.deepEqual(await drop.peek(), { exists: false })
+})
+
 function chunksOf(bytes: Uint8Array, size: number): Uint8Array[] {
   const chunks: Uint8Array[] = []
   for (let offset = 0; offset < bytes.byteLength; offset += size) {

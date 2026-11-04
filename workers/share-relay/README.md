@@ -138,6 +138,46 @@ document took to get there.
 
 ## Storage: a Durable Object per token, not R2 or KV
 
+### Upload admission and abuse budgets
+
+Public uploads stay keyless, but a singleton `UploadBudget` Durable Object
+now admits them atomically across both hostnames and all edge locations.
+Before reading a body it reserves its full 32 MiB maximum; after reading,
+the reservation shrinks to the actual byte count. The ledger admits at
+most 256 MiB and 256 outstanding drops, 60 upload starts per client per
+10 minutes, and 1,000 starts per UTC day globally. Deleting or fully
+consuming a drop releases its bytes and slot, but never refunds its rate
+allowance. Empty, oversized, interrupted, or failed uploads return their
+reservation after cleanup. Body reading and persistence share a 180-second
+deadline, matching the desktop client's upload timeout. Drop write RPCs also
+check that deadline, so delayed writes cannot recreate storage after timeout
+cleanup. Persistence must finish with a live admission; its successful commit
+renews the reservation from completion.
+
+Client identity uses only Cloudflare's trusted `CF-Connecting-IP` header.
+The ledger stores a daily SHA-256 rate key rather than the raw address;
+this is a short-lived identifier, not a guarantee of anonymization. A
+missing header shares one conservative rate bucket. Rejected identities
+create no limiter rows, so the daily start allowance also bounds rate
+state. Client counters expire after ten minutes. Reservations left by a
+disconnected request or delayed cleanup expire after twenty minutes,
+conservatively outliving the drop's ten-minute storage alarm.
+
+A per-client or daily limit returns `429` with `Retry-After`; aggregate
+capacity or admission-storage failure returns `503`. Admission fails
+closed if its binding is unavailable. These bounds reduce storage and
+write amplification; they do not replace the dashboard WAF rule, protect
+against distributed request floods, or reserve Cloudflare account quota
+for other Workers. A public attacker can still consume the finite daily
+allowance and deny new uploads until it resets.
+
+Deployment adds `UPLOAD_BUDGET` and the `v2` SQLite migration in
+`wrangler.toml`; deploy the code and binding together. No secret or upload
+key is required. Existing drops remain readable after the upgrade; they
+expire within ten minutes and are not retroactively entered in the new
+ledger, so temporary storage can include both legacy drops and the new
+budget. No deployment has been performed by this patch.
+
 Cloudflare KV is eventually consistent across PoPs — a value written in one
 data center is not guaranteed to be immediately visible from a `GET` in
 another. For a flow where the phone scans the QR and fetches within
@@ -235,6 +275,8 @@ on a foundation that's actually atomic instead of merely narrowed.
 - `src/shareDrop.ts` — the `ShareDrop` Durable Object class: `store`,
   `consume`, `peek`, `destroy`, and the `alarm` handler. This is the drop
   store itself; see "Storage" above for the design.
+- `src/uploadBudget.ts`, `src/uploadBudgetStore.ts` — the singleton Durable
+  Object wrapper and SQLite admission ledger for aggregate and client limits.
 - `src/handlers.ts` — all the HTTP-facing logic (routing, CORS, the three
   `/drop` operations), written as plain functions over a `DropEnv` binding
   interface. No global state, no direct dependency on the `fetch` Worker

@@ -42,13 +42,13 @@ export class ShareDrop extends DurableObject<DropEnv> {
   /** RPC — `handlers.ts` `handlePutDrop`, first batch (see `dropStore.ts`'s
    *  batched-protocol note: every RPC argument list stays under the 32 MiB
    *  serialization cap). */
-  store(name: string, chunkCount: number, totalBytes: number, chunks: Uint8Array[]): Promise<void> {
-    return this.store_.store(name, chunkCount, totalBytes, chunks)
+  store(name: string, chunkCount: number, totalBytes: number, chunks: Uint8Array[], deadline?: number): Promise<void> {
+    return this.store_.store(name, chunkCount, totalBytes, chunks, deadline)
   }
 
   /** RPC — `handlers.ts` `handlePutDrop`, every batch after the first. */
-  append(chunks: Uint8Array[]): Promise<void> {
-    return this.store_.append(chunks)
+  append(chunks: Uint8Array[], deadline?: number): Promise<void> {
+    return this.store_.append(chunks, deadline)
   }
 
   /** RPC — `handlers.ts` `handleGetDrop` (the one-shot claim). */
