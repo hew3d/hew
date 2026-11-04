@@ -73,7 +73,7 @@
  * no nodes selected, a click on a guide starts moving that guide
  * (`setGuideHooks`), before the node acquirer runs — as a Select click
  * takes a guide over the object beneath. A guide taken that way is
- * selected only for the gesture (`guideRestore`): afterwards the selection
+ * selected only for the gesture (guideTarget.ts): afterwards the selection
  * is what it was before the click.
  * On commit: one kernel transform call, then handleSceneRefresh + onDocumentChanged.
  */
@@ -107,6 +107,7 @@ import {
 } from './moveInput'
 import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
 import { buildGuidePreview } from './guidePreview'
+import { GuideTarget, type OnGuideCommit } from './guideTarget'
 import type { NodeRef } from '../panels/treeModel'
 import { isSketchScopedKind, nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
 import { displayedLength, isFreePick } from './displayedValue'
@@ -114,9 +115,6 @@ import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '
 import { isMac, COPY_MODIFIER_LABEL } from '../platform'
 
 export type OnMoveCommit = (nodes: NodeRef[]) => void
-/** A guide move/copy landed, or a gesture on a guide ended: redraw the
- *  guides and make `guide` the selected guide (null: none). */
-export type OnGuideCommit = (guide: bigint | null) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
 export type OnCopyModeChange = (on: boolean) => void
@@ -174,7 +172,7 @@ export class MoveTool implements Tool {
       if (this.arrayHot !== null) {
         return t`Type 3x to make 3 copies, or 3/ to divide the distance — Enter applies.`
       }
-      if (this.selection.length === 0 && this.guide === null) {
+      if (this.selection.length === 0 && this.guides.selected === null) {
         return t`Click the object you want to move.`
       }
       return this.copyMode
@@ -252,33 +250,16 @@ export class MoveTool implements Tool {
     this.acquireSelection = acquire
   }
 
-  /** The selected construction guide, pushed by the Viewport like
-   *  `setSelection` (the app selects a guide OR nodes, never both). */
-  private guide: bigint | null = null
+  /** The construction guide this tool acts on instead of nodes (see
+   *  guideTarget.ts). */
+  private readonly guides = new GuideTarget()
+  /** The app's selected guide, pushed by the Viewport like `setSelection`. */
   setGuideTarget(guide: bigint | null): void {
-    this.guide = guide
+    this.guides.selected = guide
   }
-  /**
-   * Guide auto-select, injected by the Viewport: given the click ray, pick
-   * the guide under the cursor, select it in the app, and return it — or
-   * null when there is none (then the node acquirer runs).
-   */
-  private acquireGuide: ((ray: Ray) => bigint | null) | null = null
-  /** Host refresh after a guide commit (redraw guides, select the result). */
-  private onGuideCommit: OnGuideCommit = () => { /* no-op */ }
-  /**
-   * Set while the guide being moved (or just moved) was taken by the click
-   * rather than selected beforehand: its selection is ephemeral, a
-   * highlight for the gesture only. `to` is the guide selected before the
-   * click (null: none), which the selection returns to once the gesture is
-   * over — committed, cancelled, or clicked in place. Kept through the
-   * post-commit windows (a retype or ×N lands the same way) until the next
-   * gesture starts.
-   */
-  private guideRestore: { to: bigint | null } | null = null
+  /** The Viewport's guide click pick and post-commit refresh. */
   setGuideHooks(acquire: ((ray: Ray) => bigint | null) | null, onCommit: OnGuideCommit): void {
-    this.acquireGuide = acquire
-    this.onGuideCommit = onCommit
+    this.guides.setHooks(acquire, onCommit)
   }
 
   /** The current editing context (component-edit-parity.md phase A1). When
@@ -567,22 +548,12 @@ export class MoveTool implements Tool {
 
     if (this.stage.kind === 'idle') {
       let nodes = this.selection
-      let guide = nodes.length === 0 ? this.guide : null
-      this.guideRestore = null
-      if (nodes.length === 0 && this.acquireGuide !== null) {
-        // No nodes selected: a click on a guide takes THAT guide, whether
-        // another one is selected or none — selecting and moving it in one
-        // gesture. A click elsewhere moves the selected guide from there.
-        // With nodes selected the click is their base point, a guide's
-        // snap included.
-        const before = this.guide
-        const hit = this.acquireGuide(ray)
-        if (hit !== null) {
-          guide = hit
-          this.guide = hit
-          if (hit !== before) this.guideRestore = { to: before }
-        }
-      }
+      // No nodes selected: a click on a guide takes THAT guide, whether
+      // another one is selected or none — selecting and moving it in one
+      // gesture. A click elsewhere moves the selected guide from there.
+      // With nodes selected the click is their base point, a guide's snap
+      // included.
+      const guide = this.guides.start(ray, nodes.length === 0, true)
       if (nodes.length === 0 && guide === null && this.acquireSelection !== null) {
         // Empty selection: auto-select whatever the click landed on and
         // start the move on it in the same gesture (no separate Select step).
@@ -619,7 +590,7 @@ export class MoveTool implements Tool {
       // Degenerate: no movement
       if (Math.abs(tx) < 1e-9 && Math.abs(ty) < 1e-9 && Math.abs(tz) < 1e-9) {
         this._resetToIdle()
-        this._endEphemeralGuide()
+        this.guides.ended()
         return
       }
 
@@ -738,26 +709,7 @@ export class MoveTool implements Tool {
   cancel(): void {
     const live = this.stage.kind === 'base'
     this._resetToIdle()
-    if (live) this._endEphemeralGuide()
-  }
-
-  /** A gesture on a click-taken guide ended without landing: give the
-   *  selection back to what it was before the click. */
-  private _endEphemeralGuide(): void {
-    const restore = this.guideRestore
-    if (restore === null) return
-    this.guideRestore = null
-    this.guide = restore.to
-    this.onGuideCommit(restore.to)
-  }
-
-  /** A guide move/copy landed on `guide` (the moved guide, or the last
-   *  copy): it becomes the selected guide — unless the click took it, then
-   *  the selection returns to what it was before. */
-  private _guideLanded(guide: bigint): void {
-    const selected = this.guideRestore !== null ? this.guideRestore.to : guide
-    this.guide = selected
-    this.onGuideCommit(selected)
+    if (live) this.guides.ended()
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────────
@@ -914,11 +866,11 @@ export class MoveTool implements Tool {
           historyGen: this.wasmScene.history_generation().toString(),
         }
         this.arrayTyped = ''
-        this._guideLanded(copy)
+        this.guides.landed(copy)
         this.retype.arm({ nodes: [], guide, vector: [tx, ty, tz], copy: true })
       } else {
         this.wasmScene.transform_guide(guide, affineF64)
-        this._guideLanded(guide)
+        this.guides.landed(guide)
         this.retype.arm({ nodes: [], guide, vector: [tx, ty, tz], copy: false })
       }
       return true
@@ -1082,7 +1034,7 @@ export class MoveTool implements Tool {
    *  a guide's last copy the selected guide. */
   private _landArray(landed: ArrayLanding): void {
     if ('guide' in landed) {
-      this._guideLanded(landed.guide)
+      this.guides.landed(landed.guide)
     } else {
       this.selection = landed.nodes
       this.onArrayCommit(landed.nodes)
