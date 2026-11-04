@@ -3478,12 +3478,12 @@ export default function Viewport({
     }
 
     /**
-     * Guide auto-select for the Move tool: with an empty selection, a guide
-     * under the first click is selected and moved — the Select click's own
-     * rule (`dispatchSelectPick`), so a drawn line lying along the guide
+     * Guide auto-select for Move and Rotate (guideTarget.ts): the guide
+     * under the first click is selected and transformed — the Select click's
+     * own rule (`dispatchSelectPick`), so a drawn line lying along the guide
      * still wins and is left to `acquireTransformTargets`.
      */
-    function acquireMoveGuide(ray: Ray): bigint | null {
+    function acquireGuideTarget(ray: Ray): bigint | null {
       // Any point along the ray projects to the clicked pixel, in either
       // projection.
       const ndc = new THREE.Vector3(...ray.origin)
@@ -3500,6 +3500,14 @@ export default function Viewport({
       onSelectGuideRef.current?.(g)
       scheduleRender()
       return g
+    }
+
+    /** A guide transform landed (or a gesture on a guide ended): redraw the
+     *  guides and select `guide` (null: none). */
+    function landGuideTransform(guide: bigint | null): void {
+      sceneRenderer.refreshGuides()
+      onSelectGuideRef.current?.(guide)
+      scheduleRender()
     }
 
     /**
@@ -7004,15 +7012,10 @@ export default function Viewport({
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
-      // A guide is a Move target too (Move only: Rotate/Scale take nodes).
-      // The node-selection branch above never sees one — a drag-move hands
-      // over nodes — so only a plain tool switch carries the guide in.
+      // A guide is a Move target too. A drag-move hands over nodes, never
+      // a guide, so only a plain tool switch carries the selected one in.
       if (selection === undefined) tool.setGuideTarget(selectedGuideRef.current)
-      tool.setGuideHooks(acquireMoveGuide, (guide) => {
-        sceneRenderer.refreshGuides()
-        onSelectGuideRef.current?.(guide)
-        scheduleRender()
-      })
+      tool.setGuideHooks(acquireGuideTarget, landGuideTransform)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }
@@ -7079,6 +7082,8 @@ export default function Viewport({
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
+      tool.setGuideTarget(selectedGuideRef.current)
+      tool.setGuideHooks(acquireGuideTarget, landGuideTransform)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }
