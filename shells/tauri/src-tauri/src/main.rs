@@ -690,16 +690,98 @@ fn load_window_state(app: &tauri::AppHandle) -> Option<WindowState> {
     serde_json::from_str(&text).ok()
 }
 
-/// Write `text` to `path` atomically (temp file + rename), so a crash
-/// mid-write can never leave a half-written file — the reader sees either
-/// the old content or the new, never a torn one.
+/// Write beside the destination, then replace it in one rename. A unique
+/// create-new temp file keeps concurrent writers from sharing scratch space.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => format!("{ext}.tmp"),
-        None => "tmp".to_string(),
-    });
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    use std::io::Write;
+    write_atomic_with(path, |file| file.write_all(bytes))
+}
+
+fn write_atomic_with(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let permissions = match std::fs::metadata(path) {
+        Ok(meta) => {
+            if !meta.is_file() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "destination is not a regular file",
+                ));
+            }
+            if meta.permissions().readonly() {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    "destination is read-only",
+                ));
+            }
+            // A writable parent directory can permit rename over a file
+            // that this user cannot write directly (for example, another
+            // user's 0644 file). Match std::fs::write's access check without
+            // opening with truncate, before creating the replacement temp.
+            drop(std::fs::OpenOptions::new().write(true).open(path)?);
+            Some(meta.permissions())
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(path) {
+                // A dangling symlink is an existing path. Fail rather than
+                // replacing the link itself; also fail if the path appeared
+                // between the two metadata calls.
+                Ok(_) => return Err(e),
+                Err(e) if e.kind() == ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "destination has no file name"))?;
+    let mut writer = Some(write);
+    loop {
+        let mut temp_name = name.to_os_string();
+        temp_name.push(format!(
+            ".{}.{}.tmp",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let temp = path.with_file_name(temp_name);
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // A private existing document must never be copied into a temp
+            // that is readable under the process's usual 022 umask.
+            options.mode(0o600);
+        }
+        let mut file = match options.open(&temp) {
+            Ok(file) => file,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        let write_result = (|| {
+            writer.take().expect("writer called once")(&mut file)?;
+            if let Some(permissions) = permissions {
+                file.set_permissions(permissions)?;
+            }
+            file.sync_all()
+        })();
+        drop(file);
+        let result = write_result.and_then(|()| {
+            // std::fs::rename replaces an existing file on Unix and Windows;
+            // the temp lives in the same directory, hence on the same volume.
+            std::fs::rename(&temp, path)
+        });
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        return result;
+    }
 }
 
 /// Minimum interval between unforced window-state writes; Moved/Resized fire
@@ -2053,18 +2135,18 @@ fn list_allowed(app: &tauri::AppHandle, dir: &Path) -> bool {
             .is_some_and(|p| approved.read_dirs.contains(p))
 }
 
-/// Whether `path` may be written: approved for write via a save dialog, an
-/// open pick (Save writes back to the opened file), a file association,
-/// drag-drop, or the recents list.
-fn write_allowed(app: &tauri::AppHandle, path: &Path) -> bool {
-    let Some(canon) = canonical_or_synthesized(path) else {
-        return false;
-    };
+/// Return the approved canonical write target. Resolving it once also keeps
+/// Save through a symlink aimed at its original target: renaming over the
+/// symlink itself would change the link rather than the document it opened.
+/// Approval comes from a save dialog, open pick, file association, drag-drop,
+/// or the recents list.
+fn write_allowed_target(app: &tauri::AppHandle, path: &Path) -> Option<PathBuf> {
+    let canon = canonical_or_synthesized(path)?;
     let state = app.state::<Mutex<ApprovedPaths>>();
     let Ok(approved) = state.lock() else {
-        return false;
+        return None;
     };
-    approved.write_files.contains(&canon)
+    approved.write_files.contains(&canon).then_some(canon)
 }
 
 /// Read a user-approved file and return its raw bytes.
@@ -2087,10 +2169,9 @@ fn read_file(app: tauri::AppHandle, path: String) -> Result<tauri::ipc::Response
 /// Write raw bytes to a user-approved file, creating or overwriting it.
 #[tauri::command]
 fn write_file(app: tauri::AppHandle, path: String, contents: Vec<u8>) -> Result<(), String> {
-    if !write_allowed(&app, Path::new(&path)) {
-        return Err(format!("write_file: {path:?} is not a user-approved path"));
-    }
-    std::fs::write(&path, &contents).map_err(|e| format!("write_file failed for {path:?}: {e}"))
+    let target = write_allowed_target(&app, Path::new(&path))
+        .ok_or_else(|| format!("write_file: {path:?} is not a user-approved path"))?;
+    write_atomic(&target, &contents).map_err(|e| format!("write_file failed for {path:?}: {e}"))
 }
 
 /// Percent-decode (the inverse of JS's `encodeURIComponent`) a string carried
@@ -2133,7 +2214,7 @@ fn percent_decode(s: &str) -> Result<String, String> {
 /// `relay_client.rs::relay_put`, the same pattern), so the destination path
 /// can't ride along as a normal argument — it comes in the `path` request
 /// header instead, percent-encoded by the caller. Gated by the exact same
-/// `write_allowed` approval check `write_file` uses, not a looser one: this
+/// `write_allowed_target` approval check `write_file` uses, not a looser one: this
 /// is still arbitrary-file-write from the webview's perspective if that
 /// check were skipped or reimplemented more permissively.
 #[tauri::command]
@@ -2153,12 +2234,9 @@ fn write_file_bytes(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> 
         }
     };
 
-    if !write_allowed(&app, Path::new(&path)) {
-        return Err(format!(
-            "write_file_bytes: {path:?} is not a user-approved path"
-        ));
-    }
-    std::fs::write(&path, bytes).map_err(|e| format!("write_file_bytes failed for {path:?}: {e}"))
+    let target = write_allowed_target(&app, Path::new(&path))
+        .ok_or_else(|| format!("write_file_bytes: {path:?} is not a user-approved path"))?;
+    write_atomic(&target, bytes).map_err(|e| format!("write_file_bytes failed for {path:?}: {e}"))
 }
 
 /// List the direct children of a user-approved directory, returning their
@@ -4718,12 +4796,104 @@ fn main() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn atomic_save_keeps_original_and_cleans_temp_after_partial_write_failure() {
+        use std::io::{Error, Write};
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "hew-atomic-save-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("document.hew");
+        std::fs::write(&path, b"original document").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let result = write_atomic_with(&path, |file| {
+            file.write_all(b"partial")?;
+            #[cfg(unix)]
+            assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
+            Err(Error::other("injected write failure"))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original document");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_through_symlink_replaces_approved_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = std::env::temp_dir().join(format!(
+            "hew-atomic-link-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let target = dir.join("model.hew");
+        let link = dir.join("shortcut.hew");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let approved_target = canonical_or_synthesized(&link).unwrap();
+        assert_eq!(approved_target, std::fs::canonicalize(&target).unwrap());
+        write_atomic(&approved_target, b"new").unwrap();
+
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_does_not_replace_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!(
+            "hew-atomic-dangling-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let target = dir.join("missing.hew");
+        let link = dir.join("shortcut.hew");
+        symlink(&target, &link).unwrap();
+
+        assert!(write_atomic(&link, b"new").is_err());
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     // `write_file_bytes` itself needs a live `AppHandle` for its
     // `write_allowed` check, which a plain `#[test]` can't construct (see
     // the library_* tests below for the same limitation) — `percent_decode`
     // is the part of it that's pure and worth pinning directly. The
-    // approval gate itself is exactly `write_file`'s own `write_allowed`
-    // call, unchanged and untouched by this addition.
+    // approval gate itself is exactly `write_file`'s own
+    // `write_allowed_target` call.
     #[test]
     fn percent_decode_round_trips_encodeuricomponent_output() {
         let cases = [
