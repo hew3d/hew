@@ -268,7 +268,7 @@ import { recordRecent } from './io/recents'
 import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/trayLayout'
 import { setShowWelcome } from './settings/welcomeScreen'
 import { resetStlImportUnitForTest } from './settings/stlImportUnit'
-import { makeFileHost, type DocFormat, type FileHost } from './io/fileHost'
+import { makeFileHost, type DocFormat, type FileHost, type FileRef } from './io/fileHost'
 import * as savePanel from './io/savePanel'
 import { isPristineDocument, sameSessionStackIdentity, AUTOSAVE_INTERVAL_MS } from './App'
 import type { DocSessionState } from './io/documentSession'
@@ -3661,6 +3661,7 @@ describe('App — confirmDiscard: Save-then-continue (File ▸ New)', () => {
 
   it('a successful Save in the dialog lets File ▸ New proceed', async () => {
     await dirtyTheDocument()
+    mockScene.mark_saved.mockImplementationOnce(() => { mockScene.at_saved_mark = () => true })
     vi.mocked(fakeFileHost.saveAs).mockResolvedValue({ name: 'house.hew', format: 'hew', handle: '/tmp/house.hew' })
 
     triggerNew()
@@ -3859,6 +3860,31 @@ describe('App — recovery snapshot clearing on clean', () => {
     resolveWrite()
     await waitFor(() => expect(recoveryState.clear).toHaveBeenCalled())
   })
+
+  it('does not clear recovery when a new edit lands while an older clear awaits a write', async () => {
+    let resolveWrite!: () => void
+    recoveryState.write.mockImplementationOnce(() => new Promise<void>((resolve) => { resolveWrite = resolve }))
+    await renderAndLoad()
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void; undo: () => void }
+    }).__hew_test
+
+    act(() => harness.addNodeTag('object', '1', ['before']))
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000) })
+    expect(recoveryState.write).toHaveBeenCalledOnce()
+
+    mockScene.at_saved_mark = () => true
+    ;(mockScene as Record<string, unknown>).scene_undo = () => ({ free: () => {} })
+    act(() => harness.undo()) // starts clearRecoverySnapshot, awaiting the first write
+    mockScene.at_saved_mark = () => false
+    act(() => harness.addNodeTag('object', '1', ['after']))
+
+    resolveWrite()
+    await act(async () => { await Promise.resolve() })
+    expect(recoveryState.clear).not.toHaveBeenCalled()
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000) })
+    expect(recoveryState.write).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('App — v1.1 assets lane: viewport resync + current-material reset after delete/purge', () => {
@@ -4032,6 +4058,110 @@ describe('App — the native save panel chooses the format', () => {
     // Bound to the file it wrote (the mock's saved mark never clears the
     // dirty dot; documentSession.test.ts covers that).
     await waitFor(() => expect(document.title).toMatch(/m\.skp — Hew$/))
+  })
+
+  it('keeps an edit made during Save As dirty at the same undo depth and retains recovery', async () => {
+    let finishWrite!: (ref: FileRef) => void
+    vi.mocked(fakeFileHost.writeTo).mockImplementationOnce(() => new Promise((resolve) => { finishWrite = resolve }))
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/m.hew', format: 'hew', options: {} })
+    await renderAndLoad()
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void }
+    }).__hew_test
+
+    fileMenu('Save As…')
+    await waitFor(() => expect(fakeFileHost.writeTo).toHaveBeenCalledOnce())
+    // The mock keeps undo_depth at zero. This change must still invalidate
+    // the bytes captured before the host write began.
+    act(() => harness.addNodeTag('object', '1', ['after-capture']))
+    finishWrite({ name: 'm.hew', format: 'hew', handle: '/tmp/m.hew' })
+
+    await waitFor(() => expect(document.title).toMatch(/m\.hew — Hew$/))
+    expect(document.title.startsWith('•')).toBe(true)
+    expect(mockScene.mark_saved).not.toHaveBeenCalled()
+    expect(recoveryState.clear).not.toHaveBeenCalled()
+  })
+
+  it('reports a changed-during-save conflict to the live API after the file write lands', async () => {
+    let finishWrite!: (ref: FileRef) => void
+    vi.mocked(fakeFileHost.save).mockImplementationOnce(() => new Promise((resolve) => { finishWrite = resolve }))
+    await renderAndLoad()
+    await waitFor(() => expect(liveBridge.runOp).not.toBeNull())
+    const result = liveBridge.runOp!('save', { path: '/tmp/live.hew' })
+    await waitFor(() => expect(fakeFileHost.save).toHaveBeenCalledOnce())
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void }
+    }).__hew_test
+    act(() => harness.addNodeTag('object', '1', ['during-save']))
+    finishWrite({ name: 'live.hew', format: 'hew', handle: '/tmp/live.hew' })
+
+    expect(await result).toEqual({
+      ok: false,
+      refusal: 'save_failed',
+      message: 'the document changed during save; save again',
+    })
+    expect(mockScene.mark_saved).not.toHaveBeenCalled()
+    expect(recoveryState.clear).not.toHaveBeenCalled()
+  })
+
+  it('writes a newer Save only after an older Save has finished', async () => {
+    const originalSave = mockScene.save
+    const originalAtSavedMark = mockScene.at_saved_mark
+    let currentBytes = new Uint8Array([1])
+    const finishWrites: Array<(ref: FileRef) => void> = []
+    const written: number[] = []
+    mockScene.save = () => currentBytes
+    vi.mocked(fakeFileHost.save).mockImplementation((bytes) => new Promise((resolve) => {
+      finishWrites.push((ref) => { written.push(bytes[0]); resolve(ref) })
+    }))
+    try {
+      await renderAndLoad()
+      await waitFor(() => expect(liveBridge.runOp).not.toBeNull())
+      const first = liveBridge.runOp!('save', { path: '/tmp/model.hew' })
+      await waitFor(() => expect(finishWrites).toHaveLength(1))
+
+      const harness = (window as unknown as {
+        __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void }
+      }).__hew_test
+      currentBytes = new Uint8Array([2])
+      act(() => harness.addNodeTag('object', '1', ['newer']))
+      const second = liveBridge.runOp!('save', { path: '/tmp/model.hew' })
+      await act(async () => { await Promise.resolve() })
+      const callsBeforeFirstFinished = finishWrites.length
+
+      finishWrites[0]({ name: 'model.hew', format: 'hew', handle: '/tmp/model.hew' })
+      await waitFor(() => expect(finishWrites).toHaveLength(2))
+      mockScene.mark_saved.mockImplementationOnce(() => { mockScene.at_saved_mark = () => true })
+      finishWrites[1]({ name: 'model.hew', format: 'hew', handle: '/tmp/model.hew' })
+      expect(await first).toMatchObject({ ok: false, refusal: 'save_failed' })
+      expect(await second).toEqual({ ok: true })
+      expect(callsBeforeFirstFinished).toBe(1)
+      expect(written).toEqual([1, 2])
+    } finally {
+      mockScene.save = originalSave
+      mockScene.at_saved_mark = originalAtSavedMark
+    }
+  })
+
+  it('does not bind an old save result after New replaces the document in the same Scene', async () => {
+    let finishWrite!: (ref: FileRef) => void
+    vi.mocked(fakeFileHost.save).mockImplementationOnce(() => new Promise((resolve) => { finishWrite = resolve }))
+    await renderAndLoad()
+    await waitFor(() => expect(liveBridge.runOp).not.toBeNull())
+    const result = liveBridge.runOp!('save', { path: '/tmp/old.hew' })
+    await waitFor(() => expect(fakeFileHost.save).toHaveBeenCalledOnce())
+
+    fileMenu('New')
+    await waitFor(() => expect(mockScene.load).toHaveBeenCalledOnce())
+    finishWrite({ name: 'old.hew', format: 'hew', handle: '/tmp/old.hew' })
+
+    expect(await result).toEqual({
+      ok: false,
+      refusal: 'save_failed',
+      message: 'the document changed during save; save again',
+    })
+    expect(document.title).not.toMatch(/old\.hew/)
+    expect(mockScene.mark_saved).not.toHaveBeenCalled()
   })
 
   it('Export writes the format picked in the panel to the path it picked', async () => {
