@@ -4,7 +4,7 @@ description: "Every default shortcut on one page, including the modifier keys th
 order: 23
 ---
 
-Tool shortcuts are plain letters, the same on every platform, matching SketchUp's defaults wherever SketchUp has one. Command shortcuts use `⌘` on macOS and `Ctrl` on Windows, Linux, and the web.
+Tool shortcuts are plain letters, the same on every platform, matching SketchUp's defaults wherever SketchUp has one. Command shortcuts use `⌘` on macOS and `Ctrl` on Windows, Linux, and the web. Every key on this page is a default: you can change any of them, or give a key to a command that has none, in **Settings ▸ Controls** (see [Changing shortcuts](#changing-shortcuts) below).
 
 ## Tools
 
@@ -27,7 +27,7 @@ Tool shortcuts are plain letters, the same on every platform, matching SketchUp'
 | Pan | `H` |
 | Zoom | `Z` |
 
-Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key, same as in SketchUp — reach them via the Draw/Tools menu or the command palette. On macOS the menus also display `⌘`-combination accelerators beside the tools; those work too, but the letters above are the ones worth learning.
+Polygon, Follow Me, Dimension, Protractor, Slice, Section Plane, and Edit Vertex have no default key, same as in SketchUp — reach them via the Draw/Tools menu or the command palette, or give them one in Settings ▸ Controls. On the macOS desktop app the tools also answer to SketchUp for Mac's `⌘`-combinations (`⌘K` Rectangle, `⌘D` Tape Measure, `⌘B` Orbit, …); those work too, but the letters above are the ones worth learning.
 
 ## Commands
 
@@ -39,7 +39,7 @@ Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key, 
 | Save | `⌘S` | `Ctrl+S` |
 | Save As | `⇧⌘S` | `Ctrl+Shift+S` |
 | Print | `⌘P` | `Ctrl+P` |
-| Close window | `⌘W` (desktop) | — |
+| Close window | `⌘W` (desktop) | `Ctrl+W` (desktop) |
 | Undo | `⌘Z` | `Ctrl+Z` |
 | Redo | `⇧⌘Z` | `Ctrl+Shift+Z` |
 | Select All | `⌘A` | `Ctrl+A` |
@@ -60,6 +60,19 @@ Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key, 
 | Next Scene / Previous Scene | `Page Down` / `Page Up` | `Page Down` / `Page Up` |
 | Library | `⇧L` (viewport) / `⇧⌘L` | `Shift+L` (viewport) / `Ctrl+Shift+L` |
 | Settings | `⌘,` | `Ctrl+,` |
+
+## Changing shortcuts
+
+Open **Settings ▸ Controls**. The list shows every tool and command with its keys, and the search field finds a command by name, the same way the command palette does.
+
+- **Add a key**: hover a command, click **+**, and press the key or combination you want. `Esc` cancels.
+- **Remove a key**: hover the command and click the **×** on that key.
+- **A key that is already taken**: Hew says which command uses it and asks before moving it. Choose **Reassign** to move it, or **Cancel** to keep things as they were.
+- **Back to the defaults**: a changed command is marked with a dot and gets a **Reset** button; **Reset All** puts every key back.
+
+A command can have several keys. The first one is the key the menus, the tool rail, and the command palette show. Changes apply at once, in every open window, and are kept for the next launch.
+
+`Esc`, `Enter`, `Tab`, and the arrow keys can't be shortcuts: the tools need them to cancel, commit, and lock an axis. While you type a value into the Measurements box, plain keys go to the value, not to shortcuts.
 
 ## During a gesture
 

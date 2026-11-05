@@ -102,6 +102,8 @@ import {
   type ShopIconProps,
 } from './icons'
 import type { Snap } from '../tools/types'
+import { useKeymapDispatch } from '../keymap/useKeymap'
+import { isMac } from '../platform'
 import { beginOpenAttempt, clearOpenAttempt, openAttemptFailed } from '../log/failedOpen'
 
 /** `loadHewBytes` for a `.hew` the user opened, keeping the file for a bug
@@ -119,6 +121,10 @@ function loadUserHewBytes(scene: Scene, name: string, bytes: Uint8Array): Return
  *  (design §"Composition") — Draw/Modify tools, Paint, Section Plane, etc.
  *  are all editor-only and unreachable here. */
 type ShopToolName = 'Select' | 'Orbit' | 'Tape Measure'
+
+/** Keymap command id → Shop Mode tool (keymap/defaults.ts ids). */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- command ids and ToolName identifiers
+const SHOP_TOOL_BY_COMMAND: Readonly<Record<string, ShopToolName>> = { 'tool-select': 'Select', 'tool-orbit': 'Orbit', 'tool-tape-measure': 'Tape Measure' }
 
 /** Long-press duration (ms) before an untouched, unmoved press on a part
  *  triggers isolate — comfortably past the ~300-500ms a deliberate
@@ -530,6 +536,19 @@ export function ShopApp() {
     dismissInspectInstant()
     setInspectPos(null)
   }, [dismissInspectInstant])
+  // Keyboard: the keymap's shortcuts for Shop Mode's three tools (Space and
+  // 1 for Select, O, T, or whatever the person bound them to). Every other
+  // command is editor-only and left alone.
+  useKeymapDispatch({
+    isMac,
+    nativeMenu: false,
+    run: (id) => {
+      const name = SHOP_TOOL_BY_COMMAND[id]
+      if (name !== undefined) activateTool(name)
+    },
+    allow: (id) => SHOP_TOOL_BY_COMMAND[id] !== undefined,
+    toolCapturesKey: (key) => viewportApi.current?.isCapturingInput?.(key) ?? false,
+  })
   const handleInternalToolChange = useCallback((name: string) => {
     // Defense-in-depth allowlist (see `SHOP_TOOL_NAMES`'s own doc comment) —
     // ignore anything outside the 3-tool registry rather than blind-casting

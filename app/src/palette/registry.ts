@@ -30,7 +30,8 @@
 import { i18n, type MessageDescriptor } from '@lingui/core'
 import { msg, t } from '@lingui/core/macro'
 import { MENU } from '../health/healthCopy'
-import { TOOL_REGISTRY, shortcutFor, type ToolName } from '../tools/toolRegistry'
+import { TOOL_REGISTRY, type ToolName } from '../tools/toolRegistry'
+import { shortcutLabel } from '../keymap/keymap'
 
 /** 'Model' entries are dynamic (built per-document by App.tsx from the
  * scene's object/group/component/tag names) and passed to the palette as
@@ -87,37 +88,7 @@ export interface PaletteEntry {
   toolName?: ToolName
 }
 
-const TOOL_ACTION_ID: Record<ToolName, string> = {
-  'Select': 'tool-select',
-  'Line': 'tool-line',
-  'Rectangle': 'tool-rectangle',
-  'Circle': 'tool-circle',
-  'Polygon': 'tool-polygon',
-  'Arc': 'tool-arc',
-  'Push/Pull': 'tool-pushpull',
-  'Follow Me': 'tool-follow-me',
-  'Offset': 'tool-offset',
-  'Paint': 'tool-paint',
-  'Position Texture': 'tool-position-texture',
-  'Move': 'tool-move',
-  'Rotate': 'tool-rotate',
-  'Scale': 'tool-scale',
-  'Tape Measure': 'tool-tape-measure',
-  'Dimension': 'tool-dimension',
-  'Protractor': 'tool-protractor',
-  'Slice': 'tool-slice',
-  'Section Plane': 'tool-section-plane',
-  'Edit Vertex': 'tool-edit-vertex',
-  'Drawing Axes': 'tool-axes',
-  'Text': 'tool-text',
-  'Orbit': 'tool-orbit',
-  'Pan': 'tool-pan',
-  'Zoom': 'tool-zoom',
-  'Position Camera': 'tool-position-camera',
-  'Walk': 'tool-walk',
-  'Look Around': 'tool-look-around',
-  'Zoom Window': 'tool-zoom-window',
-}
+const TOOL_ACTION_ID = Object.fromEntries(TOOL_REGISTRY.map((t) => [t.name, t.actionId])) as Record<ToolName, string>
 
 const TOOL_DESCRIPTIONS: Record<ToolName, MessageDescriptor> = {
   'Select': msg`Pick faces, edges, and objects in the model.`,
@@ -309,9 +280,8 @@ export function paletteEntries(): PaletteEntry[] {
   return [...toolEntries(), ...actionEntries()]
 }
 
-/** Convenience for callers (e.g. the palette UI) that also want the
- * platform-correct shortcut string to display next to a tool result. */
-export function paletteShortcut(entry: PaletteEntry, isMac: boolean): string {
-  const tool = TOOL_REGISTRY.find((t) => TOOL_ACTION_ID[t.name] === entry.id)
-  return tool === undefined ? '' : shortcutFor(tool.name, isMac)
+/** The shortcut to display next to a palette result — the first key of its
+ * command in the keymap, for tools and actions alike; '' when it has none. */
+export function paletteShortcut(entry: PaletteEntry): string {
+  return shortcutLabel(entry.id)
 }

@@ -1366,6 +1366,185 @@ fn relabel_menu_items(items: Vec<MenuItemKind<tauri::Wry>>, labels: &MenuLabels)
     }
 }
 
+/// The app command (`menuActionRef` payload) a native menu item dispatches,
+/// or `None` for an id the shell handles itself or that runs nothing.
+/// Shared by `on_menu_event` and `set_menu_accelerators`, so the keymap's
+/// command ids reach the same items a click does.
+fn menu_action_for(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "app-settings" => "open-settings",
+        "file-new" => "new",
+        "file-open" => "open",
+        "file-import" => "import",
+        "file-import-image" => "import-image",
+        "file-export" => "export",
+        "file-print" => "print",
+        "file-open-on-phone" => "open-on-phone",
+        "file-save" => "save",
+        "file-save-as" => "save-as",
+        "file-revert" => "revert-to-saved",
+        "file-save-to-library" => "save-to-library-doc",
+        "file-purge-unused" => "purge-unused",
+        "file-close" => "close",
+        "edit-undo" => "undo",
+        "edit-redo" => "redo",
+        "edit-cut" => "edit-cut",
+        "edit-copy" => "edit-copy",
+        "edit-paste" => "edit-paste",
+        "edit-paste-in-place" => "edit-paste-in-place",
+        "edit-delete" => "edit-delete",
+        "edit-delete-guides" => "edit-delete-guides",
+        "edit-select-all" => "edit-select-all",
+        "edit-select-none" => "edit-select-none",
+        "edit-invert-selection" => "edit-invert-selection",
+        "edit-group" => "edit-group",
+        "edit-ungroup" => "edit-ungroup",
+        "edit-make-component" => "edit-make-component",
+        "edit-place-copy" => "edit-place-copy",
+        "edit-save-selection-to-library" => "save-to-library",
+        "edit-explode" => "edit-explode",
+        "edit-make-unique" => "edit-make-unique",
+        "edit-union" => "edit-union",
+        "edit-subtract" => "edit-subtract",
+        "edit-intersect" => "edit-intersect",
+        "object-make-solid" => "make-solid",
+        "object-model-health" => "model-health",
+        "view-axes" => "toggle-axes",
+        "view-reset-axes" => "reset-axes",
+        "view-grid" => "toggle-grid",
+        "view-guides" => "toggle-guides",
+        "view-section-plane" => "toggle-section-active",
+        "view-xray" => "toggle-xray",
+        "view-wireframe" => "toggle-wireframe",
+        "scenes-add" => "scenes-add",
+        "scenes-update" => "scenes-update",
+        "scenes-next" => "scenes-next",
+        "scenes-previous" => "scenes-previous",
+        "scenes-transitions" => "scenes-transitions",
+        "view-palette" => "open-palette",
+        "draw-rectangle" => "tool-rectangle",
+        "draw-circle" => "tool-circle",
+        "draw-polygon" => "tool-polygon",
+        "draw-arc" => "tool-arc",
+        "draw-line" => "tool-line",
+        "draw-3d-text" => "draw-3d-text",
+        "tool-select" => "tool-select",
+        "tool-paint" => "tool-paint",
+        "tool-position-texture" => "tool-position-texture",
+        "tool-move" => "tool-move",
+        "tool-rotate" => "tool-rotate",
+        "tool-scale" => "tool-scale",
+        "tool-pushpull" => "tool-pushpull",
+        "tool-follow-me" => "tool-follow-me",
+        "tool-offset" => "tool-offset",
+        "tool-tape-measure" => "tool-tape-measure",
+        "tool-dimension" => "tool-dimension",
+        "tool-protractor" => "tool-protractor",
+        "tool-slice" => "tool-slice",
+        "tool-section-plane" => "tool-section-plane",
+        "tool-edit-vertex" => "tool-edit-vertex",
+        "tool-axes" => "tool-axes",
+        "tool-text" => "tool-text",
+        "cam-orbit" => "tool-orbit",
+        "cam-pan" => "tool-pan",
+        "cam-zoom" => "tool-zoom",
+        "cam-position-camera" => "tool-position-camera",
+        "cam-walk" => "tool-walk",
+        "cam-look-around" => "tool-look-around",
+        "cam-fly" => "toggle-fly",
+        "cam-zoom-window" => "tool-zoom-window",
+        "cam-zoom-extents" => "zoom-extents",
+        "cam-parallel-projection" => "toggle-parallel-projection",
+        "cam-view-top" => "view-top",
+        "cam-view-bottom" => "view-bottom",
+        "cam-view-front" => "view-front",
+        "cam-view-back" => "view-back",
+        "cam-view-left" => "view-left",
+        "cam-view-right" => "view-right",
+        "cam-view-iso" => "view-iso",
+        "view-compact-rail" => "toggle-compact-rail",
+        "view-tray" => "toggle-tray",
+        "view-dock" => "toggle-dock",
+        "win-model-info" => "toggle-model-info",
+        "win-materials" => "toggle-materials",
+        "win-components" => "toggle-components",
+        "win-tags" => "toggle-tags",
+        "win-scenes" => "toggle-scenes",
+        "win-changes" => "toggle-changes",
+        "win-object-info" => "toggle-object-info",
+        "win-library" => "toggle-library",
+        "win-debug-log" => "toggle-debug-log",
+        "help-report-bug" => "report-bug",
+        "help-guide" => "open-guide",
+        _ => return None,
+    })
+}
+
+/// Apply the keymap's accelerators (Settings ▸ Controls) to the native menu
+/// bar in place: `accelerators` maps an app command id to the accelerator
+/// its item should carry, `None` to carry none. Commands with no native item
+/// are ignored. Returns the command ids whose item took the new accelerator,
+/// so the webview leaves exactly those chords to the menu and handles every
+/// other one itself (a string the menu library cannot parse is refused).
+///
+/// macOS only: it is the one platform where the menu bar is attached; on
+/// Windows and Linux the menu library's accelerators would run before the
+/// webview, even while typing in a text field.
+#[tauri::command]
+fn set_menu_accelerators(
+    app: tauri::AppHandle,
+    accelerators: HashMap<String, Option<String>>,
+) -> Result<Vec<String>, String> {
+    let mut applied = Vec::new();
+    if !cfg!(target_os = "macos") {
+        return Ok(applied);
+    }
+    if let Some(menu) = app.menu() {
+        let items = menu.items().map_err(|e| e.to_string())?;
+        apply_menu_accelerators(items, &accelerators, &mut applied);
+    }
+    Ok(applied)
+}
+
+fn apply_menu_accelerators(
+    items: Vec<MenuItemKind<tauri::Wry>>,
+    accelerators: &HashMap<String, Option<String>>,
+    applied: &mut Vec<String>,
+) {
+    for item in items {
+        let (id, result) = match &item {
+            MenuItemKind::MenuItem(i) => {
+                let Some(action) = menu_action_for(i.id().as_ref()) else {
+                    continue;
+                };
+                let Some(accel) = accelerators.get(action) else {
+                    continue;
+                };
+                (action, i.set_accelerator(accel.as_deref()))
+            }
+            MenuItemKind::Check(i) => {
+                let Some(action) = menu_action_for(i.id().as_ref()) else {
+                    continue;
+                };
+                let Some(accel) = accelerators.get(action) else {
+                    continue;
+                };
+                (action, i.set_accelerator(accel.as_deref()))
+            }
+            MenuItemKind::Submenu(sub) => {
+                if let Ok(children) = sub.items() {
+                    apply_menu_accelerators(children, accelerators, applied);
+                }
+                continue;
+            }
+            MenuItemKind::Predefined(_) | MenuItemKind::Icon(_) => continue,
+        };
+        if result.is_ok() {
+            applied.push(id.to_string());
+        }
+    }
+}
+
 /// Switch the native menu bar to `locale`'s labels in place — no rebuild,
 /// so ids, accelerators, check states, and enabled states all survive —
 /// and remember the locale so the next launch starts in it
@@ -2945,6 +3124,7 @@ fn main() {
             library_popup_menu,
             library_confirm,
             sync_menu_state,
+            set_menu_accelerators,
             set_menu_locale,
             clipboard_set,
             clipboard_get,
@@ -4548,112 +4728,8 @@ fn main() {
                 tauri::async_runtime::spawn(async move { updater::run_check(app, true).await });
                 return;
             }
-            let action = match id {
-                "app-settings" => "open-settings",
-                "file-new" => "new",
-                "file-open" => "open",
-                "file-import" => "import",
-                "file-import-image" => "import-image",
-                "file-export" => "export",
-                "file-print" => "print",
-                "file-open-on-phone" => "open-on-phone",
-                "file-save" => "save",
-                "file-save-as" => "save-as",
-                "file-revert" => "revert-to-saved",
-                "file-save-to-library" => "save-to-library-doc",
-                "file-purge-unused" => "purge-unused",
-                "file-close" => "close",
-                "edit-undo" => "undo",
-                "edit-redo" => "redo",
-                "edit-cut" => "edit-cut",
-                "edit-copy" => "edit-copy",
-                "edit-paste" => "edit-paste",
-                "edit-paste-in-place" => "edit-paste-in-place",
-                "edit-delete" => "edit-delete",
-                "edit-delete-guides" => "edit-delete-guides",
-                "edit-select-all" => "edit-select-all",
-                "edit-select-none" => "edit-select-none",
-                "edit-invert-selection" => "edit-invert-selection",
-                "edit-group" => "edit-group",
-                "edit-ungroup" => "edit-ungroup",
-                "edit-make-component" => "edit-make-component",
-                "edit-place-copy" => "edit-place-copy",
-                "edit-save-selection-to-library" => "save-to-library",
-                "edit-explode" => "edit-explode",
-                "edit-make-unique" => "edit-make-unique",
-                "edit-union" => "edit-union",
-                "edit-subtract" => "edit-subtract",
-                "edit-intersect" => "edit-intersect",
-                "object-make-solid" => "make-solid",
-                "object-model-health" => "model-health",
-                "view-axes" => "toggle-axes",
-                "view-reset-axes" => "reset-axes",
-                "view-grid" => "toggle-grid",
-                "view-guides" => "toggle-guides",
-                "view-section-plane" => "toggle-section-active",
-                "view-xray" => "toggle-xray",
-                "view-wireframe" => "toggle-wireframe",
-                "scenes-add" => "scenes-add",
-                "scenes-update" => "scenes-update",
-                "scenes-next" => "scenes-next",
-                "scenes-previous" => "scenes-previous",
-                "scenes-transitions" => "scenes-transitions",
-                "view-palette" => "open-palette",
-                "draw-rectangle" => "tool-rectangle",
-                "draw-circle" => "tool-circle",
-                "draw-polygon" => "tool-polygon",
-                "draw-arc" => "tool-arc",
-                "draw-line" => "tool-line",
-                "draw-3d-text" => "draw-3d-text",
-                "tool-select" => "tool-select",
-                "tool-paint" => "tool-paint",
-                "tool-position-texture" => "tool-position-texture",
-                "tool-move" => "tool-move",
-                "tool-rotate" => "tool-rotate",
-                "tool-scale" => "tool-scale",
-                "tool-pushpull" => "tool-pushpull",
-                "tool-follow-me" => "tool-follow-me",
-                "tool-offset" => "tool-offset",
-                "tool-tape-measure" => "tool-tape-measure",
-                "tool-dimension" => "tool-dimension",
-                "tool-protractor" => "tool-protractor",
-                "tool-slice" => "tool-slice",
-                "tool-section-plane" => "tool-section-plane",
-                "tool-edit-vertex" => "tool-edit-vertex",
-                "tool-axes" => "tool-axes",
-                "tool-text" => "tool-text",
-                "cam-orbit" => "tool-orbit",
-                "cam-pan" => "tool-pan",
-                "cam-zoom" => "tool-zoom",
-                "cam-position-camera" => "tool-position-camera",
-                "cam-walk" => "tool-walk",
-                "cam-look-around" => "tool-look-around",
-                "cam-fly" => "toggle-fly",
-                "cam-zoom-window" => "tool-zoom-window",
-                "cam-zoom-extents" => "zoom-extents",
-                "cam-parallel-projection" => "toggle-parallel-projection",
-                "cam-view-top" => "view-top",
-                "cam-view-bottom" => "view-bottom",
-                "cam-view-front" => "view-front",
-                "cam-view-back" => "view-back",
-                "cam-view-left" => "view-left",
-                "cam-view-right" => "view-right",
-                "cam-view-iso" => "view-iso",
-                "view-compact-rail" => "toggle-compact-rail",
-                "view-tray" => "toggle-tray",
-                "view-dock" => "toggle-dock",
-                "win-model-info" => "toggle-model-info",
-                "win-materials" => "toggle-materials",
-                "win-components" => "toggle-components",
-                "win-tags" => "toggle-tags",
-                "win-scenes" => "toggle-scenes",
-                "win-changes" => "toggle-changes",
-                "win-object-info" => "toggle-object-info",
-                "win-library" => "toggle-library",
-                "win-debug-log" => "toggle-debug-log",
-                "help-report-bug" => "report-bug",
-                "help-guide" => "open-guide",
-                _ => return,
+            let Some(action) = menu_action_for(id) else {
+                return;
             };
             emit_to_active(app, "menu-action", action);
         })

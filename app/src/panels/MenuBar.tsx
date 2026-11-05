@@ -20,8 +20,9 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useLingui } from '@lingui/react/macro'
-import { modLabel, isMac } from '../platform'
-import { shortcutFor, toolLabel, type ToolName } from '../tools/toolRegistry'
+import { toolLabel, toolSpec, type ToolName } from '../tools/toolRegistry'
+import { shortcutLabel } from '../keymap/keymap'
+import { useKeymap } from '../keymap/useKeymap'
 import type { StandardView } from '../viewport/Viewport'
 import { MENU } from '../health/healthCopy'
 import { isComposingKey } from '../input/keyboard'
@@ -339,39 +340,16 @@ const T = {
 }
 /* oxlint-enable lingui/no-unlocalized-strings */
 
-/* oxlint-disable lingui/no-unlocalized-strings -- keyboard shortcut glyphs, not translated (docs/LOCALIZATION.md) */
-const scModA = `${modLabel}A`
-const scModC = `${modLabel}C`
-const scModG = `${modLabel}G`
-const scModN = `${modLabel}N`
-const scModO = `${modLabel}O`
-const scModP = `${modLabel}P`
-const scModS = `${modLabel}S`
-const scModShiftG = `${modLabel}⇧G`
-const scModShiftS = `${modLabel}⇧S`
-const scModShiftZ = `${modLabel}⇧Z`
-const scModSlash = `${modLabel}/`
-const scModV = `${modLabel}V`
-const scModW = `${modLabel}W`
-const scModX = `${modLabel}X`
-const scModZ = `${modLabel}Z`
-const scPageDown = 'Page Down'
-const scPageUp = 'Page Up'
-const scShiftModA = `⇧${modLabel}A`
-const scShiftModC = `⇧${modLabel}C`
-const scShiftModI = `⇧${modLabel}I`
-const scShiftModL = `⇧${modLabel}L`
-const scShiftModM = `⇧${modLabel}M`
-const scShiftModO = `⇧${modLabel}O`
-const scShiftModT = `⇧${modLabel}T`
-const scShiftModV = `⇧${modLabel}V`
-/* oxlint-enable lingui/no-unlocalized-strings */
-
-/** Shortcut display for a tool-registry entry — mac vs. the
- * Windows/Linux/Web bare-letter scheme, `undefined` when the tool has none. */
-function keyFor(name: ToolName): string | undefined {
-  const s = shortcutFor(name, isMac)
+/** The shortcut a menu item shows: the first key of its command in the
+ * keymap (keymap/), `undefined` when it has none. */
+function sc(id: string): string | undefined {
+  const s = shortcutLabel(id)
   return s === '' ? undefined : s
+}
+
+/** Shortcut display for a tool-registry entry, `undefined` when it has none. */
+function keyFor(name: ToolName): string | undefined {
+  return sc(toolSpec(name).actionId)
 }
 
 /** Filename portion of a path (handles / and \ separators). */
@@ -506,13 +484,13 @@ function MenuTrigger({
 /** Gear button at the far right of the bar — opens the Settings surface
  *  (the Fluent settings page on Windows), per the modern convention of a
  *  settings gear on the menu bar's trailing edge. */
-function GearButton({ onClick, shortcutHint }: { onClick: () => void; shortcutHint: string }) {
+function GearButton({ onClick, shortcutHint }: { onClick: () => void; shortcutHint: string | undefined }) {
   const { t } = useLingui()
   const [hovered, setHovered] = useState(false)
   return (
     <button
       aria-label={t`Settings`}
-      title={t`Settings (${shortcutHint})`}
+      title={shortcutHint === undefined ? t`Settings` : t`Settings (${shortcutHint})`}
       onClick={onClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -799,8 +777,8 @@ export function MenuBar({
   const { t } = useLingui()
   const [openMenu, setOpenMenu] = useState<MenuId>(null)
   const barRef = useRef<HTMLDivElement>(null)
-
-  const mod = modLabel
+  // Re-render on a keymap change so every shortcut shown stays true.
+  useKeymap()
 
   const close = useCallback(() => setOpenMenu(null), [])
 
@@ -863,8 +841,8 @@ export function MenuBar({
         <MenuTrigger id="file" label={t`File`} openMenu={openMenu} onToggle={toggle} onActivate={activate} />
         {openMenu === 'file' && (
           <div style={DROPDOWN_STYLE}>
-            <MenuItem label={t`New`} shortcut={scModN} onClick={withClose(onNew)} />
-            <MenuItem label={t`Open…`} shortcut={scModO} onClick={withClose(onOpen)} />
+            <MenuItem label={t`New`} shortcut={sc('new')} onClick={withClose(onNew)} />
+            <MenuItem label={t`Open…`} shortcut={sc('open')} onClick={withClose(onOpen)} />
             {recentFiles !== undefined && (
               <SubMenu label={t`Open Recent`}>
                 {recentFiles.length === 0 ? (
@@ -890,13 +868,14 @@ export function MenuBar({
                 then Print… — with Exit still the absolute last item on
                 Windows/Linux. */}
             {onClose !== undefined && (
-              <MenuItem label={t`Close`} shortcut={scModW} onClick={withClose(onClose)} />
+              <MenuItem label={t`Close`} shortcut={sc('close')} onClick={withClose(onClose)} />
             )}
-            <MenuItem label={t`Save`} shortcut={scModS} onClick={withClose(onSave)} />
-            <MenuItem label={t`Save As…`} shortcut={scModShiftS} onClick={withClose(onSaveAs)} />
+            <MenuItem label={t`Save`} shortcut={sc('save')} onClick={withClose(onSave)} />
+            <MenuItem label={t`Save As…`} shortcut={sc('save-as')} onClick={withClose(onSaveAs)} />
             {onRevertToSaved !== undefined && (
               <MenuItem
                 label={t`Revert to Saved`}
+                shortcut={sc('revert-to-saved')}
                 disabled={revertToSavedDisabled}
                 onClick={withClose(onRevertToSaved)}
               />
@@ -904,6 +883,7 @@ export function MenuBar({
             {onSaveToLibrary !== undefined && (
               <MenuItem
                 label={t`Save to Library…`}
+                shortcut={sc('save-to-library-doc')}
                 disabled={saveToLibraryDisabled}
                 onClick={withClose(onSaveToLibrary)}
               />
@@ -911,35 +891,38 @@ export function MenuBar({
             {onPurgeUnused !== undefined && (
               <>
                 <div style={SEPARATOR_STYLE} />
-                <MenuItem label={t`Purge Unused…`} onClick={withClose(onPurgeUnused)} />
+                <MenuItem label={t`Purge Unused…`} shortcut={sc('purge-unused')} onClick={withClose(onPurgeUnused)} />
               </>
             )}
             <div style={SEPARATOR_STYLE} />
             <MenuItem
               label={t`Import…`}
+              shortcut={sc('import')}
               disabled={editGates?.canImport === false}
               onClick={withClose(onImport)}
             />
             {onImportImage !== undefined && (
               <MenuItem
                 label={t`Import Image…`}
+                shortcut={sc('import-image')}
                 disabled={editGates?.canImport === false}
                 onClick={withClose(onImportImage)}
               />
             )}
-            <MenuItem label={t`Export…`} onClick={withClose(onExport)} />
+            <MenuItem label={t`Export…`} shortcut={sc('export')} onClick={withClose(onExport)} />
             {onOpenOnPhone !== undefined && (
               <>
                 <div style={SEPARATOR_STYLE} />
                 <MenuItem
                   label={t`Open on Phone…`}
+                  shortcut={sc('open-on-phone')}
                   disabled={openOnPhoneDisabled}
                   onClick={withClose(onOpenOnPhone)}
                 />
               </>
             )}
             <div style={SEPARATOR_STYLE} />
-            <MenuItem label={t`Print…`} shortcut={scModP} onClick={withClose(onPrint)} />
+            <MenuItem label={t`Print…`} shortcut={sc('print')} onClick={withClose(onPrint)} />
             {onExit !== undefined && (
               <>
                 <div style={SEPARATOR_STYLE} />
@@ -957,64 +940,66 @@ export function MenuBar({
           <div style={DROPDOWN_STYLE}>
             <MenuItem
               label={canUndo && undoLabel !== undefined ? undoLabel : t`Undo`}
-              shortcut={scModZ}
+              shortcut={sc('undo')}
               disabled={!canUndo}
               onClick={withClose(onUndo)}
             />
             <MenuItem
               label={canRedo && redoLabel !== undefined ? redoLabel : t`Redo`}
-              shortcut={scModShiftZ}
+              shortcut={sc('redo')}
               disabled={!canRedo}
               onClick={withClose(onRedo)}
             />
             <div style={SEPARATOR_STYLE} />
             <MenuItem
               label={t`Cut`}
-              shortcut={scModX}
+              shortcut={sc('edit-cut')}
               disabled={!(editGates?.hasStructuralSelection ?? false)}
               onClick={withClose(() => onEditAction?.('edit-cut'))}
             />
             <MenuItem
               label={t`Copy`}
-              shortcut={scModC}
+              shortcut={sc('edit-copy')}
               disabled={!(editGates?.hasStructuralSelection ?? false)}
               onClick={withClose(() => onEditAction?.('edit-copy'))}
             />
             <MenuItem
               label={t`Paste`}
-              shortcut={scModV}
+              shortcut={sc('edit-paste')}
               disabled={!(editGates?.clipboardHasContent ?? false)}
               onClick={withClose(() => onEditAction?.('edit-paste'))}
             />
             <MenuItem
               label={t`Paste In Place`}
-              shortcut={scShiftModV}
+              shortcut={sc('edit-paste-in-place')}
               disabled={!(editGates?.clipboardHasContent ?? false)}
               onClick={withClose(() => onEditAction?.('edit-paste-in-place'))}
             />
             <div style={SEPARATOR_STYLE} />
             <MenuItem
               label={t`Delete`}
-              shortcut="⌫"
+              shortcut={sc('edit-delete')}
               onClick={withClose(() => onDelete?.())}
             />
             <MenuItem
               label={t`Select All`}
-              shortcut={scModA}
+              shortcut={sc('edit-select-all')}
               onClick={withClose(() => onEditAction?.('edit-select-all'))}
             />
             <MenuItem
               label={t`Select None`}
-              shortcut={scShiftModA}
+              shortcut={sc('edit-select-none')}
               onClick={withClose(() => onEditAction?.('edit-select-none'))}
             />
             <MenuItem
               label={t`Invert Selection`}
+              shortcut={sc('edit-invert-selection')}
               onClick={withClose(() => onEditAction?.('edit-invert-selection'))}
             />
             <div style={SEPARATOR_STYLE} />
             <MenuItem
               label={t`Delete Guide Lines`}
+              shortcut={sc('edit-delete-guides')}
               onClick={withClose(() => onDeleteGuides?.())}
             />
           </div>
@@ -1033,65 +1018,75 @@ export function MenuBar({
           <div style={DROPDOWN_STYLE}>
             <MenuItem
               label={t`Group`}
-              shortcut={scModG}
+              shortcut={sc('edit-group')}
               disabled={!(editGates?.canGroup ?? false)}
               onClick={withClose(() => onEditAction?.('edit-group'))}
             />
             <MenuItem
               label={t`Ungroup`}
-              shortcut={scModShiftG}
+              shortcut={sc('edit-ungroup')}
               disabled={!(editGates?.canUngroup ?? false)}
               onClick={withClose(() => onEditAction?.('edit-ungroup'))}
             />
             <div style={SEPARATOR_STYLE} />
             <MenuItem
               label={t`Make Component`}
+              shortcut={sc('edit-make-component')}
               disabled={!(editGates?.canMakeComponent ?? false)}
               onClick={withClose(() => onEditAction?.('edit-make-component'))}
             />
             <MenuItem
               label={t`Make Unique`}
+              shortcut={sc('edit-make-unique')}
               disabled={!(editGates?.canMakeUnique ?? false)}
               onClick={withClose(() => onEditAction?.('edit-make-unique'))}
             />
             <MenuItem
               label={t`Place Copy`}
+              shortcut={sc('edit-place-copy')}
               disabled={!(editGates?.canPlaceCopy ?? false)}
               onClick={withClose(() => onEditAction?.('edit-place-copy'))}
             />
             <MenuItem
               label={t`Explode`}
+              shortcut={sc('edit-explode')}
               disabled={!(editGates?.canExplode ?? false)}
               onClick={withClose(() => onEditAction?.('edit-explode'))}
             />
             <MenuItem
               label={t`Save Selection to Library…`}
+              shortcut={sc('save-to-library')}
               disabled={!(editGates?.canSaveSelectionToLibrary ?? false)}
               onClick={withClose(() => onEditAction?.('save-to-library'))}
             />
             <div style={SEPARATOR_STYLE} />
             <MenuItem
               label={t`Union`}
+              shortcut={sc('edit-union')}
               disabled={!(editGates?.canBoolean ?? false)}
               onClick={withClose(() => onEditAction?.('edit-union'))}
             />
             <MenuItem
               label={t`Subtract`}
+              shortcut={sc('edit-subtract')}
               disabled={!(editGates?.canBoolean ?? false)}
               onClick={withClose(() => onEditAction?.('edit-subtract'))}
             />
             <MenuItem
               label={t`Intersect`}
+              shortcut={sc('edit-intersect')}
               disabled={!(editGates?.canBoolean ?? false)}
               onClick={withClose(() => onEditAction?.('edit-intersect'))}
             />
             <div style={SEPARATOR_STYLE} />
             <MenuItem
               label={MENU.makeSolid}
+              shortcut={sc('make-solid')}
               onClick={withClose(() => onEditAction?.('make-solid'))}
             />
             <MenuItem
               label={MENU.modelHealthItem}
+              shortcut={sc('model-health')}
               onClick={withClose(() => onEditAction?.('model-health'))}
             />
           </div>
@@ -1105,20 +1100,24 @@ export function MenuBar({
           <div style={DROPDOWN_STYLE}>
             <CheckMenuItem
               label={t`Axes`}
+              shortcut={sc('toggle-axes')}
               checked={showAxes}
               onClick={withClose(() => onToggleAxes?.())}
             />
             <MenuItem
               label={t`Reset Drawing Axes`}
+              shortcut={sc('reset-axes')}
               onClick={withClose(() => onResetAxes?.())}
             />
             <CheckMenuItem
               label={t`Grid`}
+              shortcut={sc('toggle-grid')}
               checked={showGrid}
               onClick={withClose(() => onToggleGrid?.())}
             />
             <CheckMenuItem
               label={t`Guides`}
+              shortcut={sc('toggle-guides')}
               checked={showGuides}
               onClick={withClose(() => onToggleGuides?.())}
             />
@@ -1128,17 +1127,20 @@ export function MenuBar({
                 Tools ▸ Section Plane naming split. */}
             <CheckMenuItem
               label={t`Section Cut`}
+              shortcut={sc('toggle-section-active')}
               checked={sectionPlaneChecked}
               disabled={!sectionPlaneExists}
               onClick={withClose(() => onToggleSectionActive?.())}
             />
             <CheckMenuItem
               label={t`X-ray`}
+              shortcut={sc('toggle-xray')}
               checked={xray}
               onClick={withClose(() => onToggleXray?.())}
             />
             <CheckMenuItem
               label={t`Wireframe`}
+              shortcut={sc('toggle-wireframe')}
               checked={wireframe}
               onClick={withClose(() => onToggleWireframe?.())}
             />
@@ -1153,47 +1155,50 @@ export function MenuBar({
                 for its trays either. */}
             <CheckMenuItem
               label={t`Compact Tool Rail`}
+              shortcut={sc('toggle-compact-rail')}
               checked={compactRail}
               onClick={withClose(() => onToggleCompactRail?.())}
             />
             <CheckMenuItem
               label={t`Tray`}
+              shortcut={sc('toggle-tray')}
               checked={showTray}
               onClick={withClose(() => onToggleTray?.())}
             />
             <CheckMenuItem
               label={t`Contextual Dock`}
+              shortcut={sc('toggle-dock')}
               checked={showDock}
               onClick={withClose(() => onToggleDock?.())}
             />
             <div style={SEPARATOR_STYLE} />
             <CheckMenuItem
               label={t`Model Info`}
-              shortcut={scShiftModI}
+              shortcut={sc('toggle-model-info')}
               checked={showModelInfo}
               onClick={withClose(() => onToggleModelInfo?.())}
             />
             <CheckMenuItem
               label={t`Object Info`}
-              shortcut={scShiftModO}
+              shortcut={sc('toggle-object-info')}
               checked={showObjectInfo}
               onClick={withClose(() => onToggleObjectInfo?.())}
             />
             <CheckMenuItem
               label={t`Materials`}
-              shortcut={scShiftModC}
+              shortcut={sc('toggle-materials')}
               checked={showMaterials}
               onClick={withClose(() => onToggleMaterials?.())}
             />
             <CheckMenuItem
               label={t`Components`}
-              shortcut={scShiftModM}
+              shortcut={sc('toggle-components')}
               checked={showComponents}
               onClick={withClose(() => onToggleComponents?.())}
             />
             <CheckMenuItem
               label={t`Tags`}
-              shortcut={scShiftModT}
+              shortcut={sc('toggle-tags')}
               checked={showTags}
               onClick={withClose(() => onToggleTags?.())}
             />
@@ -1201,38 +1206,42 @@ export function MenuBar({
             <SubMenu label={t`Scenes`}>
               <CheckMenuItem
                 label={t`Scenes Panel`}
+                shortcut={sc('toggle-scenes')}
                 checked={showScenes}
                 onClick={withClose(() => onToggleScenes?.())}
               />
               <div style={SEPARATOR_STYLE} />
-              <MenuItem label={t`Add Scene`} onClick={withClose(() => onScenesAdd?.())} />
+              <MenuItem label={t`Add Scene`} shortcut={sc('scenes-add')} onClick={withClose(() => onScenesAdd?.())} />
               <MenuItem
                 label={t`Update Scene`}
+                shortcut={sc('scenes-update')}
                 disabled={!sceneUpdateEnabled}
                 onClick={withClose(() => onScenesUpdate?.())}
               />
               <div style={SEPARATOR_STYLE} />
               <MenuItem
                 label={t`Next Scene`}
-                shortcut={scPageDown}
+                shortcut={sc('scenes-next')}
                 disabled={!scenesNavEnabled}
                 onClick={withClose(() => onScenesNext?.())}
               />
               <MenuItem
                 label={t`Previous Scene`}
-                shortcut={scPageUp}
+                shortcut={sc('scenes-previous')}
                 disabled={!scenesNavEnabled}
                 onClick={withClose(() => onScenesPrevious?.())}
               />
               <div style={SEPARATOR_STYLE} />
               <CheckMenuItem
                 label={t`Scene Transitions`}
+                shortcut={sc('scenes-transitions')}
                 checked={sceneTransitionsChecked}
                 onClick={withClose(() => onToggleSceneTransitions?.())}
               />
             </SubMenu>
             <CheckMenuItem
               label={t`Changes`}
+              shortcut={sc('toggle-changes')}
               checked={showChanges}
               onClick={withClose(() => onToggleChanges?.())}
             />
@@ -1242,7 +1251,7 @@ export function MenuBar({
             {onOpenPalette !== undefined && (
               <MenuItem
                 label={t`Command Palette…`}
-                shortcut={scModSlash}
+                shortcut={sc('open-palette')}
                 onClick={withClose(onOpenPalette)}
               />
             )}
@@ -1284,16 +1293,19 @@ export function MenuBar({
                 either), same as Zoom Window below. */}
             <CheckMenuItem
               label={toolLabel(T.PositionCamera)}
+              shortcut={keyFor(T.PositionCamera)}
               checked={activeTool === T.PositionCamera}
               onClick={withClose(() => onSelectTool?.(T.PositionCamera))}
             />
             <CheckMenuItem
               label={toolLabel(T.Walk)}
+              shortcut={keyFor(T.Walk)}
               checked={activeTool === T.Walk}
               onClick={withClose(() => onSelectTool?.(T.Walk))}
             />
             <CheckMenuItem
               label={toolLabel(T.LookAround)}
+              shortcut={keyFor(T.LookAround)}
               checked={activeTool === T.LookAround}
               onClick={withClose(() => onSelectTool?.(T.LookAround))}
             />
@@ -1302,6 +1314,7 @@ export function MenuBar({
                 flight on for trackpads (§10) — a check, not a tool. */}
             <CheckMenuItem
               label={t`Fly`}
+              shortcut={sc('toggle-fly')}
               checked={flyChecked ?? false}
               onClick={withClose(() => onToggleFly?.())}
             />
@@ -1312,28 +1325,31 @@ export function MenuBar({
                 camera-playtest2.md §3), never a separate menu item. */}
             <MenuItem
               label={toolLabel(T.ZoomWindow)}
+              shortcut={keyFor(T.ZoomWindow)}
               onClick={withClose(() => onSelectTool?.(T.ZoomWindow))}
             />
             <MenuItem
               label={t`Zoom Extents`}
+              shortcut={sc('zoom-extents')}
               onClick={withClose(() => onZoomExtents?.())}
             />
             <div style={SEPARATOR_STYLE} />
             <CheckMenuItem
               label={t`Parallel Projection`}
+              shortcut={sc('toggle-parallel-projection')}
               checked={parallelProjectionChecked}
               onClick={withClose(() => onToggleParallelProjection?.())}
             />
             <div style={SEPARATOR_STYLE} />
             <SubMenu label={t`Standard Views`}>
-              <MenuItem label={t`Top`} onClick={withClose(() => onStandardView?.('top'))} />
-              <MenuItem label={t`Bottom`} onClick={withClose(() => onStandardView?.('bottom'))} />
-              <MenuItem label={t`Front`} onClick={withClose(() => onStandardView?.('front'))} />
-              <MenuItem label={t`Back`} onClick={withClose(() => onStandardView?.('back'))} />
-              <MenuItem label={t`Left`} onClick={withClose(() => onStandardView?.('left'))} />
-              <MenuItem label={t`Right`} onClick={withClose(() => onStandardView?.('right'))} />
+              <MenuItem label={t`Top`} shortcut={sc('view-top')} onClick={withClose(() => onStandardView?.('top'))} />
+              <MenuItem label={t`Bottom`} shortcut={sc('view-bottom')} onClick={withClose(() => onStandardView?.('bottom'))} />
+              <MenuItem label={t`Front`} shortcut={sc('view-front')} onClick={withClose(() => onStandardView?.('front'))} />
+              <MenuItem label={t`Back`} shortcut={sc('view-back')} onClick={withClose(() => onStandardView?.('back'))} />
+              <MenuItem label={t`Left`} shortcut={sc('view-left')} onClick={withClose(() => onStandardView?.('left'))} />
+              <MenuItem label={t`Right`} shortcut={sc('view-right')} onClick={withClose(() => onStandardView?.('right'))} />
               <div style={SEPARATOR_STYLE} />
-              <MenuItem label={t`Iso`} onClick={withClose(() => onStandardView?.('iso'))} />
+              <MenuItem label={t`Iso`} shortcut={sc('view-iso')} onClick={withClose(() => onStandardView?.('iso'))} />
             </SubMenu>
           </div>
         )}
@@ -1380,6 +1396,7 @@ export function MenuBar({
             <div style={SEPARATOR_STYLE} />
             <MenuItem
               label={t`3D Text…`}
+              shortcut={sc('draw-3d-text')}
               disabled={editGates?.canDrawText === false}
               onClick={withClose(() => onDrawText?.())}
             />
@@ -1429,6 +1446,7 @@ export function MenuBar({
             />
             <CheckMenuItem
               label={toolLabel(T.FollowMe)}
+              shortcut={keyFor(T.FollowMe)}
               checked={activeTool === T.FollowMe}
               onClick={withClose(() => onSelectTool?.(T.FollowMe))}
             />
@@ -1440,11 +1458,13 @@ export function MenuBar({
             />
             <CheckMenuItem
               label={toolLabel(T.Slice)}
+              shortcut={keyFor(T.Slice)}
               checked={activeTool === T.Slice}
               onClick={withClose(() => onSelectTool?.(T.Slice))}
             />
             <CheckMenuItem
               label={toolLabel(T.EditVertex)}
+              shortcut={keyFor(T.EditVertex)}
               checked={activeTool === T.EditVertex}
               onClick={withClose(() => onSelectTool?.(T.EditVertex))}
             />
@@ -1457,16 +1477,19 @@ export function MenuBar({
             />
             <CheckMenuItem
               label={toolLabel(T.Protractor)}
+              shortcut={keyFor(T.Protractor)}
               checked={activeTool === T.Protractor}
               onClick={withClose(() => onSelectTool?.(T.Protractor))}
             />
             <CheckMenuItem
               label={toolLabel(T.Dimension)}
+              shortcut={keyFor(T.Dimension)}
               checked={activeTool === T.Dimension}
               onClick={withClose(() => onSelectTool?.(T.Dimension))}
             />
             <CheckMenuItem
               label={toolLabel(T.Text)}
+              shortcut={keyFor(T.Text)}
               checked={activeTool === T.Text}
               onClick={withClose(() => onSelectTool?.(T.Text))}
             />
@@ -1479,17 +1502,20 @@ export function MenuBar({
             />
             <CheckMenuItem
               label={toolLabel(T.PositionTexture)}
+              shortcut={keyFor(T.PositionTexture)}
               checked={activeTool === T.PositionTexture}
               onClick={withClose(() => onSelectTool?.(T.PositionTexture))}
             />
             <div style={SEPARATOR_STYLE} />
             <CheckMenuItem
               label={toolLabel(T.DrawingAxes)}
+              shortcut={keyFor(T.DrawingAxes)}
               checked={activeTool === T.DrawingAxes}
               onClick={withClose(() => onSelectTool?.(T.DrawingAxes))}
             />
             <CheckMenuItem
               label={toolLabel(T.SectionPlane)}
+              shortcut={keyFor(T.SectionPlane)}
               checked={activeTool === T.SectionPlane}
               onClick={withClose(() => onSelectTool?.(T.SectionPlane))}
             />
@@ -1510,7 +1536,7 @@ export function MenuBar({
               {onToggleLibrary !== undefined && (
                 <CheckMenuItem
                   label={t`Library`}
-                  shortcut={scShiftModL}
+                  shortcut={sc('open-library')}
                   checked={showLibrary}
                   onClick={withClose(() => onToggleLibrary())}
                 />
@@ -1551,16 +1577,18 @@ export function MenuBar({
             )}
             {onOpenGuide !== undefined && (
               <>
-                <MenuItem label={t`Hew Help`} onClick={withClose(onOpenGuide)} />
+                <MenuItem label={t`Hew Help`} shortcut={sc('open-guide')} onClick={withClose(onOpenGuide)} />
                 <div style={SEPARATOR_STYLE} />
               </>
             )}
             <MenuItem
               label={t`Report Bug…`}
+              shortcut={sc('report-bug')}
               onClick={withClose(() => onReportBug?.())}
             />
             <CheckMenuItem
               label={t`Debug Log`}
+              shortcut={sc('toggle-debug-log')}
               checked={showDebugLog}
               onClick={withClose(() => onToggleDebugLog?.())}
             />
@@ -1632,7 +1660,7 @@ export function MenuBar({
       {/* Settings gear on the trailing edge — the modern menu-bar convention
           for reaching Settings (macOS reaches it via the app menu). */}
       {onOpenSettings !== undefined && (
-        <GearButton onClick={onOpenSettings} shortcutHint={`${mod},`} />
+        <GearButton onClick={onOpenSettings} shortcutHint={sc('open-settings')} />
       )}
     </div>
   )
