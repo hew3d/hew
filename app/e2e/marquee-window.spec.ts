@@ -51,7 +51,9 @@ async function drag(page: Page, x0: number, y0: number, x1: number, y1: number, 
 
 async function clearSel(page: Page): Promise<void> {
   const box = (await page.locator('canvas').first().boundingBox())!
-  await page.mouse.click(box.x + box.width - 40, box.y + box.height - 40)
+  // Top-right, below the view chips: the floating selection toolbar can reach
+  // the bottom corners on narrower-font renderers and swallow the click.
+  await page.mouse.click(box.x + box.width - 40, box.y + 120)
 }
 
 const sel = (page: Page) => page.evaluate(() => window.__hew_test!.getSelection().map((s) => s.id))
