@@ -15,12 +15,73 @@ body,
 body {
   background: var(--surface-canvas-page, #1a1a1a);
   overflow: hidden;
+  font-family: var(--font-family-ui, sans-serif);
   /* Native-app feel (macOS HIG): UI chrome text — labels, menus, panel
    * rows — is not selectable like a web page. Editable fields opt back in
    * below. */
   -webkit-user-select: none;
   user-select: none;
 }
+
+/* ---- Right-to-left (Arabic) ---------------------------------------------
+ *
+ * Mirroring is driven by `dir="rtl"` on <html>, which `i18n/direction.ts`
+ * sets together with `lang` the moment an RTL catalog activates. Because
+ * the shell is built from flex rows and logical properties, that attribute
+ * alone reverses the menu bar, the tool rail, the tray, and every panel
+ * row; the rules below cover only what CSS cannot infer.
+ *
+ * Three things deliberately stay left-to-right inside a mirrored UI:
+ *
+ *  - Measurements and coordinates (`1200mm`, `3' 6"`, `100, 200`, `X, Y, Z`,
+ *    `1:50`). Bidi would otherwise move a leading minus sign or split a
+ *    unit from its number, and the Measurements box parses ASCII digits
+ *    regardless of language.
+ *  - Keyboard-shortcut chips (`Ctrl+Z`, `L`, `P`): the keys are physical
+ *    and are read in the order they are pressed.
+ *  - The 3D viewport's own screen math. The canvas and the overlays
+ *    anchored to projected 3D points (snap dot, inference chip, inspect
+ *    card) are positioned from projected pixel coordinates; nothing about
+ *    them may depend on the document's writing direction.
+ *
+ * `.hew-ltr` is the isolation primitive: `direction` restores the reading
+ * order inside the run, `unicode-bidi: isolate` stops it from reordering
+ * its neighbours (a number sitting between two Arabic words would
+ * otherwise drag punctuation across the boundary). */
+
+.hew-ltr {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* Numeric readouts: isolated LTR digits, tabular so a live value does not
+ * jitter as it counts. */
+.hew-numeric {
+  direction: ltr;
+  unicode-bidi: isolate;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Directional glyphs — tree chevrons, submenu arrows, back/next — point
+ * along the reading direction, so they mirror. 3D axis glyphs and the
+ * Red/Green/Blue axis legend never carry this class: they describe the
+ * coordinate system, which does not mirror.
+ * `display: inline-block` because a transform has no effect on a plain
+ * inline box. */
+.hew-flip-icon {
+  display: inline-block;
+}
+[dir='rtl'] .hew-flip-icon {
+  transform: scaleX(-1);
+}
+
+/* The viewport canvas is purely a raster surface its renderer positions
+ * from camera math; pinning its direction keeps any future DOM overlay
+ * inside the container from inheriting a mirrored inline base. */
+.hew-viewport-canvas {
+  direction: ltr;
+}
+
 
 input,
 textarea,

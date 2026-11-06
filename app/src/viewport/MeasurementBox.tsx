@@ -21,6 +21,7 @@
 import { i18n } from '@lingui/core'
 import type { MessageDescriptor } from '@lingui/core'
 import { msg, t } from '@lingui/core/macro'
+import { useIsRtl } from '../i18n/direction'
 const VCB_LABEL: Record<string, MessageDescriptor> = {
   'Move': msg`Distance`,
   'Push/Pull': msg`Push depth`,
@@ -129,6 +130,7 @@ export function MeasurementBox({
   if (value === '') return null
   const toolLabel = VCB_LABEL[toolName]
   const label = labelOverride ?? (toolLabel !== undefined ? i18n._(toolLabel) : t`Value`)
+  const rtl = useIsRtl()
 
   if (variant === 'shop') {
     const positionStyle: React.CSSProperties =
@@ -194,7 +196,8 @@ export function MeasurementBox({
       style={{
         position: 'absolute',
         ...(position === 'bottom-right' ? { bottom: '16px' } : { top: '16px' }),
-        right: '16px',
+        ...(rtl ? { left: '16px' } : { right: '16px' }),
+        insetInlineEnd: '16px',
         display: 'flex',
         alignItems: 'center',
         gap: '8px',
@@ -209,6 +212,12 @@ export function MeasurementBox({
     >
       <span style={{ fontSize: '11px', color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>{label}</span>
       <span
+        // A dimension value is a number with a unit: `1200mm`, `3' 6"`,
+        // `1:50`, or a list of them. It keeps its own left-to-right order
+        // inside the mirrored interface — its minus sign stays on the digit
+        // it negates and its unit stays after its number (index.css
+        // `.hew-numeric`).
+        className="hew-numeric"
         style={{
           fontFamily: 'var(--font-family-mono)',
           fontSize: 'var(--font-size-measurement, 14px)',

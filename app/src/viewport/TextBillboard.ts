@@ -62,6 +62,7 @@
  * own comment for the full mechanism.
  */
 import * as THREE from 'three'
+import { isRtl } from '../i18n/direction'
 
 /** Screen-constant world-space HALF-extent (at `dist` from the camera, along
  * the vertical FOV direction) that projects to `screenPx` on-screen pixels as
@@ -508,6 +509,7 @@ export class TextBillboard {
     this.canvas.width = w
     this.canvas.height = h
     ctx.font = `${fontPx}px ${UI_FONT_STACK}`
+    ctx.direction = isRtl() ? 'rtl' : 'ltr'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     ctx.clearRect(0, 0, w, h)
@@ -616,7 +618,7 @@ export function makeLabelTexture(canvas: HTMLCanvasElement): THREE.CanvasTexture
 /** Matches `--font-family-ui` (theme/tokens.css) — canvas text has no
  * webfont-loading race since every listed face is a system stack. */
 // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS font stack
-const UI_FONT_STACK = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif'
+const UI_FONT_STACK = "'IBM Plex Sans Arabic', Cairo, 'Noto Sans Arabic', 'Noto Naskh Arabic', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif"
 
 /** A halo/stroke color contrasting with `fill` — dark fill gets a light
  * halo and vice versa, so the label reads over either theme's background

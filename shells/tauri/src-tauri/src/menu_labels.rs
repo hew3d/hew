@@ -20,6 +20,7 @@ use std::path::Path;
 /// `nativeMenuParity.test.ts` checks the two lists agree.
 const MENU_LOCALES: &[(&str, &str)] = &[
     ("en", include_str!("../locales/menu.en.json")),
+    ("ar", include_str!("../locales/menu.ar.json")),
     // Debug aid: the pseudo-locale's menu, so the native menu bar can be
     // checked like every other surface. Never offered to users.
     (

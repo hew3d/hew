@@ -25,7 +25,7 @@ export interface PrintPageModel {
 export const PRINT_ROOT_ID = 'hew-print-root'
 
 // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS font stack
-const PAGE_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif'
+const PAGE_FONT = "'IBM Plex Sans Arabic', Cairo, 'Noto Sans Arabic', 'Noto Naskh Arabic', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif"
 
 function gray(g: number): string {
   const v = Math.round(Math.max(0, Math.min(1, g)) * 255)

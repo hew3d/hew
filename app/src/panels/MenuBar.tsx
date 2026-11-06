@@ -429,7 +429,10 @@ const DROPDOWN_STYLE: React.CSSProperties = {
   // so an auto-height wrapper sits ~8px down and a pixel offset here would
   // open the menu detached from the bar (regression fixed).
   top: '100%',
-  left: 0,
+  // Inline start of the trigger, so a dropdown opens toward the reading
+  // direction: left-aligned under its trigger in English, right-aligned in
+  // Arabic.
+  insetInlineStart: 0,
   minWidth: '180px',
   background: 'var(--surface-overlay, #2a2a2a)',
   backdropFilter: 'blur(12px)',
@@ -468,6 +471,12 @@ const SHORTCUT_STYLE: React.CSSProperties = {
   fontSize: 'var(--font-size-kbd, 11px)',
   color: 'var(--text-faint, #888)',
   whiteSpace: 'nowrap',
+  // The keys are physical and are read in the order they are pressed, so the
+  // hint stays left-to-right inside a mirrored menu — and isolated, so an
+  // Arabic menu label beside it cannot drag the chord's punctuation across
+  // the boundary (index.css `.hew-ltr` holds the same rules).
+  direction: 'ltr',
+  unicodeBidi: 'isolate',
 }
 
 /**
@@ -653,10 +662,12 @@ function SubMenu({ label, children }: { label: string; children: React.ReactNode
           <span style={{ width: '12px' }} aria-hidden="true" />
           {label}
         </span>
-        <span style={SHORTCUT_STYLE}>▸</span>
+        {/* The flyout arrow points at the edge its submenu opens toward, so
+            it mirrors with the menu (index.css `.hew-flip-icon`). */}
+        <span className="hew-flip-icon" style={SHORTCUT_STYLE}>▸</span>
       </div>
       {hovered && (
-        <div style={{ ...DROPDOWN_STYLE, top: -4, left: '100%', borderRadius: '4px' }}>
+        <div style={{ ...DROPDOWN_STYLE, top: -4, insetInlineStart: '100%', borderRadius: '4px' }}>
           {children}
         </div>
       )}

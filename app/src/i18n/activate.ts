@@ -21,6 +21,7 @@ import { isTauri } from '../io/fileHost'
 import { getDebugMode, subscribe as subscribeDebugMode } from '../settings/debugMode'
 import { messages as englishMessages } from '../locales/en/messages.po'
 import { SOURCE_LOCALE, type Locale } from './locales'
+import { applyDocumentDirection } from './direction'
 import { getLanguageSetting, resolveLocale, subscribe as subscribeLanguage, systemLanguages } from './language'
 
 const loaded = new Set<Locale>()
@@ -51,7 +52,10 @@ async function loadCatalog(locale: Locale): Promise<void> {
 
 function apply(locale: Locale): void {
   i18n.activate(locale)
-  if (typeof document !== 'undefined') document.documentElement.lang = locale
+  // `lang` and `dir` move together: an RTL locale (Arabic) mirrors the whole
+  // interface at this one point, and switching back un-mirrors it. The 3D
+  // session is untouched — nothing reloads (i18n/direction.ts).
+  applyDocumentDirection(locale)
   syncNativeMenu(locale)
 }
 
