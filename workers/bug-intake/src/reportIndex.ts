@@ -12,7 +12,14 @@
 
 import { DurableObject } from 'cloudflare:workers'
 
-import { IndexStore, type ReportRow, type ReportReservation, type ReserveResult, type CommitReportOutcome } from './indexStore.ts'
+import {
+  IndexStore,
+  type ReportRow,
+  type ReportReservation,
+  type ReserveResult,
+  type CommitReportOutcome,
+  type ThreadCachePatch,
+} from './indexStore.ts'
 import { IDLE_PRUNE_TIMEOUT_MS } from './constants.ts'
 import type { BugIntakeEnv, DurableObjectStorage } from './types.ts'
 
@@ -45,8 +52,8 @@ export class ReportIndex extends DurableObject<BugIntakeEnv> {
     }
   }
 
-  commitReport(id: string): Promise<CommitReportOutcome> {
-    return this.store_.commitReport(id)
+  commitReport(id: string, following?: boolean): Promise<CommitReportOutcome> {
+    return this.store_.commitReport(id, following)
   }
 
   touchActivity(id: string, now: number): Promise<void> {
@@ -69,7 +76,31 @@ export class ReportIndex extends DurableObject<BugIntakeEnv> {
     return this.store_.setTriaged(id, triaged)
   }
 
-  reserveEmail(now: number): Promise<boolean> {
-    return this.store_.reserveEmail(now)
+  reserveEmail(now: number, purpose: 'report' | 'thread' = 'report'): Promise<boolean> {
+    return this.store_.reserveEmail(now, purpose)
+  }
+
+  bundleExpired(id: string): Promise<boolean> {
+    return this.store_.bundleExpired(id)
+  }
+
+  threadEnded(id: string): Promise<void> {
+    return this.store_.threadEnded(id)
+  }
+
+  setThreadCache(id: string, patch: ThreadCachePatch): Promise<void> {
+    return this.store_.setThreadCache(id, patch)
+  }
+
+  markAdminViewed(id: string, now: number): Promise<void> {
+    return this.store_.markAdminViewed(id, now)
+  }
+
+  listChildren(parentId: string): Promise<ReportRow[]> {
+    return this.store_.listChildren(parentId)
+  }
+
+  countThreadRequest(clientHash: string, now: number): Promise<{ ok: true } | { ok: false; retryAfterMs: number }> {
+    return this.store_.countThreadRequest(clientHash, now)
   }
 }

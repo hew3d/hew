@@ -79,6 +79,18 @@ msgstr "{count, plural, one {Showing # object} other {Showing # objects}}"
 msgid "{count} + {extraPages} cut list"
 msgstr "{count} + {extraPages} cut list"
 
+#: src/panels/FollowNoticeBar.tsx
+msgid "{count} of your bug reports have news."
+msgstr "{count} of your bug reports have news."
+
+#: src/panels/FollowNoticeBar.tsx
+msgid "{count} of your bug reports have replies."
+msgstr "{count} of your bug reports have replies."
+
+#: src/panels/FollowNoticeBar.tsx
+msgid "{count} of your bug reports have updates."
+msgstr "{count} of your bug reports have updates."
+
 #: src/log/RenderStatsReadout.tsx
 msgid "{cpuMs} cpu ms"
 msgstr "{cpuMs} cpu ms"
@@ -1094,6 +1106,19 @@ msgstr "Ask again…"
 msgid "At the cursor"
 msgstr "At the cursor"
 
+#. placeholder {0}: failedOpen.name
+#: src/panels/SentReportsDialog.tsx
+#~ msgid "Attach {0} (the file that didn’t open)"
+#~ msgstr "Attach {0} (the file that didn’t open)"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Attach {failedName} (the file that didn’t open)"
+msgstr "Attach {failedName} (the file that didn’t open)"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Attach a file…"
+msgstr "Attach a file…"
+
 #: src/i18n/historyLabels.ts
 msgid "Attach sketch"
 msgstr "Attach sketch"
@@ -1202,6 +1227,10 @@ msgstr "Browse and insert saved components, materials, and models"
 msgid "Browser storage"
 msgstr "Browser storage"
 
+#: src/palette/registry.ts
+msgid "bug"
+msgstr "bug"
+
 #: src/panels/ImportingOverlay.tsx
 msgid "Building objects: {done} of {total}"
 msgstr "Building objects: {done} of {total}"
@@ -1242,6 +1271,7 @@ msgstr "cancel"
 #: src/panels/RescaleConfirmDialog.tsx
 #: src/panels/SaveFormatDialog.tsx
 #: src/panels/ScenesPanel.tsx
+#: src/panels/SentReportsDialog.tsx
 #: src/panels/StlUnitsDialog.tsx
 #: src/panels/TextDialog.tsx
 #: src/panels/UnsavedChangesDialog.tsx
@@ -1310,8 +1340,13 @@ msgstr "check"
 
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
+#: src/panels/SentReportsDialog.tsx
 msgid "Check for Updates…"
 msgstr "Check for Updates…"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Check now"
+msgstr "Check now"
 
 #: src/viewport/gpuCapability.ts
 msgid "Check that 'Use graphics acceleration when available' is turned on in the browser's system settings, then relaunch it."
@@ -1325,6 +1360,10 @@ msgstr "Check that your graphics drivers are installed and that hardware acceler
 msgid "Checking the objects"
 msgstr "Checking the objects"
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Checking…"
+msgstr "Checking…"
+
 #: src/settings/FluentSettingsPage.tsx
 msgid "Checks that the address serves a Hew relay and, if it needs one, that your upload key is accepted. Over plain http:// the phone's in-app scanner can't open the camera; scan with the camera app instead. A certificate from your own authority must be trusted on this computer and on the phone."
 msgstr "Checks that the address serves a Hew relay and, if it needs one, that your upload key is accepted. Over plain http:// the phone's in-app scanner can't open the camera; scan with the camera app instead. A certificate from your own authority must be trusted on this computer and on the phone."
@@ -1332,6 +1371,10 @@ msgstr "Checks that the address serves a Hew relay and, if it needs one, that yo
 #: src/settings/FluentSettingsPage.tsx
 msgid "Checks that the Hew cloud relay is reachable from this computer."
 msgstr "Checks that the Hew cloud relay is reachable from this computer."
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Choose a file to attach"
+msgstr "Choose a file to attach"
 
 #: src/panels/MaterialPalette.tsx
 msgid "Choose an image file first."
@@ -1667,6 +1710,7 @@ msgstr "clip"
 #: src/panels/MenuBar.tsx
 #: src/panels/PhoneShareDialog.tsx
 #: src/panels/ReportBugDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 #: src/TitleBar.tsx
 msgid "Close"
 msgstr "Close"
@@ -1718,6 +1762,10 @@ msgstr "Close this opening"
 #: src/settings/ControlsPane.tsx
 msgid "Close Window"
 msgstr "Close Window"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Closed"
+msgstr "Closed"
 
 #: src/palette/registry.ts
 msgid "cnc"
@@ -1963,6 +2011,10 @@ msgid "Couldn't close: {reason}"
 msgstr "Couldn't close: {reason}"
 
 #: src/log/reportBundle.ts
+msgid "Couldn’t compress this file."
+msgstr "Couldn’t compress this file."
+
+#: src/log/reportBundle.ts
 msgid "Couldn’t compress this report. Save it to a file instead."
 msgstr "Couldn’t compress this report. Save it to a file instead."
 
@@ -2047,9 +2099,17 @@ msgstr "Couldn't preview the paste: {reason}"
 msgid "Couldn't print: {errorText}"
 msgstr "Couldn't print: {errorText}"
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Couldn’t reach the report service. Check your internet connection and try again."
+msgstr "Couldn’t reach the report service. Check your internet connection and try again."
+
 #: src/App.tsx
 msgid "Couldn't read library item: {reason}"
 msgstr "Couldn't read library item: {reason}"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Couldn’t read that file."
+msgstr "Couldn’t read that file."
 
 #: src/App.tsx
 msgid "Couldn't read that picture. Check that the file is still there, then pick it again."
@@ -3026,6 +3086,10 @@ msgstr "Fast"
 msgid "Faster"
 msgstr "Faster"
 
+#: src/palette/registry.ts
+msgid "feedback"
+msgstr "feedback"
+
 #: src/viewport/MeasurementBox.tsx
 msgid "Field of View"
 msgstr "Field of View"
@@ -3034,6 +3098,10 @@ msgstr "Field of View"
 #: src/panels/MenuBar.tsx
 msgid "File"
 msgstr "File"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "File attached"
+msgstr "File attached"
 
 #: src/panels/SaveFormatDialog.tsx
 msgid "File format"
@@ -3124,6 +3192,14 @@ msgstr "Fit the camera to all scene geometry."
 msgid "fix"
 msgstr "fix"
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Fixed"
+msgstr "Fixed"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Fixed in Hew {v}"
+msgstr "Fixed in Hew {v}"
+
 #: src/health/healthCopy.ts
 msgid "Flat panel"
 msgstr "Flat panel"
@@ -3213,6 +3289,22 @@ msgstr "Font — {selectedLabel}"
 #: src/panels/TextDialog.tsx
 msgid "Font family"
 msgstr "Font family"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Forget"
+msgstr "Forget"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Forget this report?"
+msgstr "Forget this report?"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Forget this report? Hew stops checking for replies and the thread is removed from the service. The report itself stays with Hew’s developer."
+msgstr "Forget this report? Hew stops checking for replies and the thread is removed from the service. The report itself stays with Hew’s developer."
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Forget this report…"
+msgstr "Forget this report…"
 
 #: src/panels/ExportDialog.tsx
 #: src/settings/UnitsPane.tsx
@@ -3549,6 +3641,10 @@ msgstr "Hew hit an error"
 msgid "Hew is already checking for updates."
 msgstr "Hew is already checking for updates."
 
+#: src/panels/ReportBugDialog.tsx
+msgid "Hew keeps a private key for this report on this computer and checks for a reply when it starts. No account, no email. You can stop any time under Help ▸ Sent Reports."
+msgstr "Hew keeps a private key for this report on this computer and checks for a reply when it starts. No account, no email. You can stop any time under Help ▸ Sent Reports."
+
 #: src/io/docFormat.ts
 #: src/io/tauriFileHost.ts
 #: src/io/webFileHost.ts
@@ -3578,6 +3674,14 @@ msgstr "Hew tried to turn this dimension or label into a different kind of entit
 #: src/kernelErrors.ts
 msgid "Hew tries to stand the profile up automatically, but couldn't square it to the path here. Move the profile closer to where the sweep should start — on a drawn circle, near the rim, in line with the circle's center."
 msgstr "Hew tries to stand the profile up automatically, but couldn't square it to the path here. Move the profile closer to where the sweep should start — on a drawn circle, near the rim, in line with the circle's center."
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Hew’s developer"
+msgstr "Hew’s developer"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Hew’s developer asked for something. See below."
+msgstr "Hew’s developer asked for something. See below."
 
 #: src/kernelErrors.ts
 msgid "Hew's own request to the model kernel asked for a combine style it doesn't recognize. If this keeps happening, use Report Bug."
@@ -4090,6 +4194,7 @@ msgid "Last steps:"
 msgstr "Last steps:"
 
 #: src/i18n/nativeMenu.ts
+#: src/panels/FollowNoticeBar.tsx
 msgid "Later"
 msgstr "Later"
 
@@ -4164,6 +4269,10 @@ msgstr "Length"
 #: src/settings/FluentSettingsPage.tsx
 msgid "Length format"
 msgstr "Length format"
+
+#: src/panels/ReportBugDialog.tsx
+msgid "Let me know what happens with this report"
+msgstr "Let me know what happens with this report"
 
 #: src/print/paper.ts
 msgid "Letter"
@@ -4780,6 +4889,10 @@ msgstr "needs a selection"
 msgid "Needs at least {DESCRIPTION_MIN} characters ({trimmedLength} so far)"
 msgstr "Needs at least {DESCRIPTION_MIN} characters ({trimmedLength} so far)"
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Needs your help"
+msgstr "Needs your help"
+
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
 #: src/panels/MenuBar.tsx
@@ -4882,6 +4995,10 @@ msgstr "No items match your search."
 msgid "No log entries"
 msgstr "No log entries"
 
+#: src/panels/SentReportsDialog.tsx
+msgid "No longer available"
+msgstr "No longer available"
+
 #: src/palette/CommandPalette.tsx
 #: src/settings/ControlsPane.tsx
 msgid "No matches for “{query}”."
@@ -4894,6 +5011,10 @@ msgstr "No materials here yet."
 #: src/panels/MaterialPalette.tsx
 msgid "No materials match"
 msgstr "No materials match"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "No messages yet."
+msgstr "No messages yet."
 
 #: src/panels/LibraryDialog.tsx
 msgid "No models here yet."
@@ -4926,6 +5047,10 @@ msgstr "No recorded steps available."
 #: src/log/reportBundle.ts
 msgid "no recording available"
 msgstr "no recording available"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "No reports from this computer are being followed. When you send one with “Let me know what happens” ticked, it appears here along with any reply."
+msgstr "No reports from this computer are being followed. When you send one with “Let me know what happens” ticked, it appears here along with any reply."
 
 #: src/scenes/scenesModel.ts
 msgid "No Scenes yet. Add Scene saves the current camera, visibility, and section cut."
@@ -5275,6 +5400,7 @@ msgid "Opacity for {selectedName}"
 msgstr "Opacity for {selectedName}"
 
 #: src/panels/LibraryDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 #: src/panels/WelcomeScreen.tsx
 #: src/shop/ReceiveConfirmSheet.tsx
 msgid "Open"
@@ -6205,6 +6331,10 @@ msgstr "reload"
 msgid "Reload"
 msgstr "Reload"
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Reload Hew"
+msgstr "Reload Hew"
+
 #: src/palette/registry.ts
 msgid "remove"
 msgstr "remove"
@@ -6320,6 +6450,14 @@ msgstr "reorient"
 #: src/palette/registry.ts
 msgid "repair"
 msgstr "repair"
+
+#: src/palette/registry.ts
+msgid "reply"
+msgstr "reply"
+
+#: src/palette/registry.ts
+msgid "report"
+msgstr "report"
 
 #: src/panels/ReportBugDialog.tsx
 msgid "Report a Bug"
@@ -6870,6 +7008,10 @@ msgid "Section Plane"
 msgstr "Section Plane"
 
 #: src/palette/registry.ts
+msgid "See replies and the status of bug reports you sent from this computer."
+msgstr "See replies and the status of bug reports you sent from this computer."
+
+#: src/palette/registry.ts
 msgid "see through"
 msgstr "see through"
 
@@ -6967,17 +7109,38 @@ msgstr "Selection"
 msgid "Self-hosted"
 msgstr "Self-hosted"
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Send reply"
+msgstr "Send reply"
+
 #: src/panels/ReportBugDialog.tsx
 msgid "Send report"
 msgstr "Send report"
 
 #: src/panels/ReportBugDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 msgid "Sending…"
 msgstr "Sending…"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sending… {attachPercent}%"
+msgstr "Sending… {attachPercent}%"
 
 #: src/panels/ReportBugDialog.tsx
 msgid "Sending… {sendPercent}%"
 msgstr "Sending… {sendPercent}%"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent {attachedName}."
+msgstr "Sent {attachedName}."
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent {date} from Hew {version}."
+msgstr "Sent {date} from Hew {version}."
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent {date} from Hew {version}. No reply yet."
+msgstr "Sent {date} from Hew {version}. No reply yet."
 
 #: src/log/reportBundle.ts
 msgid "sent only with recorded steps"
@@ -6986,6 +7149,28 @@ msgstr "sent only with recorded steps"
 #: src/panels/ReportBugDialog.tsx
 msgid "Sent privately to the Hew developer. Not posted publicly."
 msgstr "Sent privately to the Hew developer. Not posted publicly."
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent reports"
+msgstr "Sent reports"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent Reports"
+msgstr "Sent Reports"
+
+#: src/i18n/nativeMenu.ts
+msgid "Sent Reports ({n} new)…"
+msgstr "Sent Reports ({n} new)…"
+
+#: src/panels/MenuBar.tsx
+msgid "Sent Reports ({sentReportsNew} new)…"
+msgstr "Sent Reports ({sentReportsNew} new)…"
+
+#: src/i18n/nativeMenu.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+msgid "Sent Reports…"
+msgstr "Sent Reports…"
 
 #: src/settings/AdvancedPane.tsx
 #: src/settings/FluentSettingsPage.tsx
@@ -7742,6 +7927,10 @@ msgstr "That face isn't part of what you are editing — press Esc to finish fir
 msgid "That face isn’t part of what you’re editing — press Esc to step out first."
 msgstr "That face isn’t part of what you’re editing — press Esc to step out first."
 
+#: src/panels/SentReportsDialog.tsx
+msgid "That file is too large to send."
+msgstr "That file is too large to send."
+
 #: src/kernelErrors.ts
 msgid "That group is no longer there — the model changed since it was picked. Click it again."
 msgstr "That group is no longer there — the model changed since it was picked. Click it again."
@@ -8047,15 +8236,24 @@ msgstr "The profile only touches the solid at an edge or corner — left as a se
 msgid "The relay is full — try again in a minute, or ask its admin to raise the memory cap."
 msgstr "The relay is full — try again in a minute, or ask its admin to raise the memory cap."
 
+#: src/panels/SentReportsDialog.tsx
+msgid "The report service didn’t accept that."
+msgstr "The report service didn’t accept that."
+
 #: src/panels/ReportBugDialog.tsx
 msgid "The report service is temporarily full — try again later."
 msgstr "The report service is temporarily full — try again later."
+
+#: src/panels/SentReportsDialog.tsx
+msgid "The report service is temporarily full. Try again later."
+msgstr "The report service is temporarily full. Try again later."
 
 #: src/panels/ReportBugDialog.tsx
 msgid "The report service is unavailable right now."
 msgstr "The report service is unavailable right now."
 
 #: src/panels/ReportBugDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 msgid "The report service’s certificate isn’t trusted by this computer."
 msgstr "The report service’s certificate isn’t trusted by this computer."
 
@@ -8228,6 +8426,10 @@ msgstr "This browser couldn't reach your graphics hardware, and Chromium-based b
 msgid "This build can’t send reports directly. Save the file below and attach it to a GitHub issue instead."
 msgstr "This build can’t send reports directly. Save the file below and attach it to a GitHub issue instead."
 
+#: src/panels/SentReportsDialog.tsx
+msgid "This build can’t send reports, so there is nothing to follow."
+msgstr "This build can’t send reports, so there is nothing to follow."
+
 #: src/panels/PhoneShareDialog.tsx
 msgid "This code expired — reopen to try again."
 msgstr "This code expired — reopen to try again."
@@ -8255,6 +8457,14 @@ msgstr "This document is too large to share this way ({maxMegabytes} MB max)."
 #: src/kernelErrors.ts
 msgid "This edge has a face on only one side — there's nothing to merge it with."
 msgstr "This edge has a face on only one side — there's nothing to merge it with."
+
+#: src/panels/SentReportsDialog.tsx
+msgid "This file can’t be sent."
+msgstr "This file can’t be sent."
+
+#: src/log/reportBundle.ts
+msgid "This file is {size} compressed, over the {limit} limit."
+msgstr "This file is {size} compressed, over the {limit} limit."
 
 #: src/kernelErrors.ts
 msgid "This file is damaged and can't be opened."
@@ -8412,6 +8622,10 @@ msgstr "This report can’t be sent. Save it to a file instead."
 msgid "This report is {size} compressed, over the {limit} limit. Save it to a file instead."
 msgstr "This report is {size} compressed, over the {limit} limit. Save it to a file instead."
 
+#: src/panels/SentReportsDialog.tsx
+msgid "This report is no longer available from the service. Hew has stopped checking it."
+msgstr "This report is no longer available from the service. Hew has stopped checking it."
+
 #: src/panels/ReportBugDialog.tsx
 msgid "This report is too large to send."
 msgstr "This report is too large to send."
@@ -8427,6 +8641,10 @@ msgstr "This shape touches another shape at a point, so it can't be pulled as on
 #: src/kernelErrors.ts
 msgid "This step couldn't be undone or redone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
 msgstr "This step couldn't be undone or redone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
+
+#: src/log/reportBundle.ts
+msgid "This system can’t compress reports, so it can’t send them."
+msgstr "This system can’t compress reports, so it can’t send them."
 
 #: src/log/reportBundle.ts
 msgid "This system can’t compress reports, so it can’t send them. Save the report to a file instead."
@@ -8543,6 +8761,14 @@ msgstr "Too large to send; still included in Save to file."
 #: src/panels/ReportBugDialog.tsx
 msgid "Too many reports sent recently — try again in a few minutes."
 msgstr "Too many reports sent recently — try again in a few minutes."
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Too many requests right now. Try again in {secs} seconds."
+msgstr "Too many requests right now. Try again in {secs} seconds."
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Too many requests right now. Try again in a few minutes."
+msgstr "Too many requests right now. Try again in a few minutes."
 
 #: src/palette/registry.ts
 msgid "tool names"
@@ -8765,6 +8991,7 @@ msgid "Unexpected response from the report service ({status})."
 msgstr "Unexpected response from the report service ({status})."
 
 #: src/panels/ReportBugDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 msgid "Unexpected response from the report service."
 msgstr "Unexpected response from the report service."
 
@@ -8816,6 +9043,10 @@ msgstr "unknown GPU"
 msgid "unknown OS"
 msgstr "unknown OS"
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Unread"
+msgstr "Unread"
+
 #: src/panels/UnsavedChangesDialog.tsx
 msgid "Unsaved changes"
 msgstr "Unsaved changes"
@@ -8841,6 +9072,10 @@ msgstr "Up"
 #: src/i18n/nativeMenu.ts
 msgid "Update available"
 msgstr "Update available"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Update Hew through your package manager."
+msgstr "Update Hew through your package manager."
 
 #: src/i18n/nativeMenu.ts
 msgid "Update in progress"
@@ -8935,6 +9170,7 @@ msgstr "vertex"
 #: src/i18n/nativeMenu.ts
 #: src/io/savePanel.ts
 #: src/panels/ExportDialog.tsx
+#: src/panels/FollowNoticeBar.tsx
 #: src/panels/LibraryDialog.tsx
 #: src/panels/MenuBar.tsx
 #: src/panels/PrintDialog.tsx
@@ -9092,6 +9328,10 @@ msgstr "Working…"
 msgid "World size must be positive numbers."
 msgstr "World size must be positive numbers."
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Write a reply"
+msgstr "Write a reply"
+
 #: src/settings/DebugPane.tsx
 msgid "Written to the app log directory as <0>diagnostic.log</0>."
 msgstr "Written to the app log directory as <0>diagnostic.log</0>."
@@ -9114,9 +9354,38 @@ msgstr "Y-up, meters"
 msgid "Y-up, meters, for AR Quick Look and USD pipelines"
 msgstr "Y-up, meters, for AR Quick Look and USD pipelines"
 
+#: src/panels/SentReportsDialog.tsx
+msgid "You"
+msgstr "You"
+
+#: src/panels/ReportBugDialog.tsx
+msgid "You’ll find replies and the report’s status under <0>Help ▸ Sent Reports…</0>"
+msgstr "You’ll find replies and the report’s status under <0>Help ▸ Sent Reports…</0>"
+
+#: src/panels/SentReportsDialog.tsx
+msgid "You’re on {running}."
+msgstr "You’re on {running}."
+
+#. placeholder {0}: only.id
+#: src/panels/FollowNoticeBar.tsx
+#~ msgid "Your bug report {0} has a reply from Hew’s developer."
+#~ msgstr "Your bug report {0} has a reply from Hew’s developer."
+
+#: src/panels/FollowNoticeBar.tsx
+msgid "Your bug report {onlyId} has a reply from Hew’s developer."
+msgstr "Your bug report {onlyId} has a reply from Hew’s developer."
+
+#: src/panels/FollowNoticeBar.tsx
+msgid "Your bug report {onlyId} has an update from Hew’s developer."
+msgstr "Your bug report {onlyId} has an update from Hew’s developer."
+
 #: src/panels/LibraryDialog.tsx
 msgid "Your library folder needs permission again."
 msgstr "Your library folder needs permission again."
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Your reply"
+msgstr "Your reply"
 
 #: src/io/savePanel.ts
 msgid "Z-up, millimeters, for 3D printing"

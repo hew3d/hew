@@ -52,6 +52,7 @@ export const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   'purge-unused', 'redo', 'report-bug', 'reset-axes', 'revert-to-saved',
   'save', 'save-as', 'save-to-library', 'save-to-library-doc', 'scenes-add',
   'scenes-next', 'scenes-previous', 'scenes-transitions', 'scenes-update',
+  'sent-reports',
   'toggle-axes', 'toggle-changes', 'toggle-compact-rail', 'toggle-components',
   'toggle-debug-log', 'toggle-dock', 'toggle-fly', 'toggle-grid',
   'toggle-guides', 'toggle-library', 'toggle-materials', 'toggle-model-info',

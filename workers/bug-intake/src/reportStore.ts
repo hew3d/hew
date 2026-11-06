@@ -59,6 +59,8 @@ interface MetaRow {
   description: string
   appVersion: string
   platform: string
+  followHash: string | null
+  parentId: string | null
 }
 
 interface PieceRow {
@@ -73,6 +75,13 @@ export interface StartFields {
   description: string
   appVersion: string
   platform: string
+  /** SHA-256 hex of the follow secret START minted (`Hew-Follow: 1`), or
+   *  absent. Kept until COMMIT creates the report's thread from it
+   *  (docs/design/follow-a-report.md §4.1, D4). */
+  followHash?: string | null
+  /** The parent report id of a follow-up attachment (`Hew-Follow-Up`), or
+   *  absent. COMMIT appends the attachment to that report's thread. */
+  parentId?: string | null
 }
 
 export type PutPieceResult =
@@ -86,7 +95,15 @@ export type PutPieceResult =
   | { ok: false; reason: 'out-of-order'; expected: number }
 
 export type CommitResult =
-  | { ok: true; description: string; appVersion: string; platform: string; sizeBytes: number }
+  | {
+      ok: true
+      description: string
+      appVersion: string
+      platform: string
+      sizeBytes: number
+      followHash: string | null
+      parentId: string | null
+    }
   | { ok: false; reason: 'not-found' }
   | { ok: false; reason: 'forbidden' }
   | { ok: false; reason: 'incomplete' }
@@ -116,6 +133,8 @@ export class ReportStore {
    *  — `PIECE_BYTES` in production; a small number in unit tests so the
    *  protocol can be exercised with ten-byte pieces. */
   private readonly pieceBytes: number
+  /** Whether `ensureColumns` has already run against the current schema. */
+  private columnsChecked = false
 
   constructor(storage: DurableObjectStorage, pieceBytes: number = PIECE_BYTES) {
     this.storage = storage
@@ -129,11 +148,26 @@ export class ReportStore {
    *  (see the class doc). Every read path checks this INSTEAD of creating
    *  tables it would then have to treat as empty anyway. */
   private hasSchema(): boolean {
-    return (
+    const present =
       this.storage.sql
         .exec<{ n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'meta'")
         .toArray()[0].n > 0
+    if (present) this.ensureColumns()
+    return present
+  }
+
+  /** Adds the follow columns (`followHash`, `parentId`) to a `meta` table
+   *  created before they existed — a report stored by the previous deploy
+   *  is read for up to `RETENTION_DAYS` after this one. Runs only on a DO
+   *  that already HAS a schema (never creates one), once per instance. */
+  private ensureColumns(): void {
+    if (this.columnsChecked) return
+    const names = new Set(
+      this.storage.sql.exec<{ name: string }>('PRAGMA table_info(meta)').toArray().map((r) => r.name),
     )
+    if (!names.has('followHash')) this.storage.sql.exec('ALTER TABLE meta ADD COLUMN followHash TEXT')
+    if (!names.has('parentId')) this.storage.sql.exec('ALTER TABLE meta ADD COLUMN parentId TEXT')
+    this.columnsChecked = true
   }
 
   /** `CREATE TABLE IF NOT EXISTS` — idempotent, run by `startUpload` only
@@ -157,7 +191,9 @@ export class ReportStore {
          committed INTEGER NOT NULL DEFAULT 0,
          description TEXT NOT NULL,
          appVersion TEXT NOT NULL,
-         platform TEXT NOT NULL
+         platform TEXT NOT NULL,
+         followHash TEXT,
+         parentId TEXT
        )`,
     )
     this.storage.sql.exec(
@@ -173,7 +209,7 @@ export class ReportStore {
     const rows = this.storage.sql
       .exec<MetaRow>(
         `SELECT reportId, receivedAt, declaredTotal, tokenHash, nextIndex, receivedBytes, lastActivity, committed,
-                description, appVersion, platform
+                description, appVersion, platform, followHash, parentId
          FROM meta`,
       )
       .toArray()
@@ -198,14 +234,15 @@ export class ReportStore {
     fields: StartFields,
   ): Promise<void> {
     this.migrate()
+    this.ensureColumns()
     if (this.readMeta() !== null) {
       throw new Error('ReportStore already populated')
     }
     const receivedAt = Date.now()
     this.storage.sql.exec(
       `INSERT INTO meta (id, reportId, receivedAt, declaredTotal, tokenHash, nextIndex, receivedBytes, lastActivity,
-                          committed, description, appVersion, platform)
-       VALUES (0, ?, ?, ?, ?, 1, ?, ?, 0, ?, ?, ?)`,
+                          committed, description, appVersion, platform, followHash, parentId)
+       VALUES (0, ?, ?, ?, ?, 1, ?, ?, 0, ?, ?, ?, ?, ?)`,
       reportId,
       receivedAt,
       declaredTotal,
@@ -215,6 +252,8 @@ export class ReportStore {
       fields.description,
       fields.appVersion,
       fields.platform,
+      fields.followHash ?? null,
+      fields.parentId ?? null,
     )
     this.insertPiece(0, firstPiece)
     await this.storage.setAlarm(abandonAlarmAt(receivedAt, receivedAt))
@@ -318,6 +357,8 @@ export class ReportStore {
         appVersion: meta.appVersion,
         platform: meta.platform,
         sizeBytes: meta.declaredTotal,
+        followHash: meta.followHash,
+        parentId: meta.parentId,
       }
     }
     if (meta.receivedBytes !== meta.declaredTotal) {
@@ -331,6 +372,8 @@ export class ReportStore {
       appVersion: meta.appVersion,
       platform: meta.platform,
       sizeBytes: meta.declaredTotal,
+      followHash: meta.followHash,
+      parentId: meta.parentId,
     }
   }
 
@@ -421,5 +464,17 @@ export class ReportStore {
   async destroy(): Promise<void> {
     await this.storage.deleteAll()
     await this.storage.deleteAlarm()
+    this.columnsChecked = false
+  }
+
+  /** The alarm handler's logic (abandonment or retention — `ReportDrop`'s
+   *  class doc): hand the report id to `onExpire` FIRST (the DO wrapper
+   *  points it at `ReportIndex.bundleExpired`), then wipe. A drop with no
+   *  `head()` left (already deleted) skips the callback, so a stale alarm
+   *  never touches an index row. See `ReportDrop.alarm` for why this order. */
+  async expire(onExpire: (reportId: string) => Promise<void>): Promise<void> {
+    const head = await this.head()
+    if (head !== null) await onExpire(head.reportId)
+    await this.destroy()
   }
 }

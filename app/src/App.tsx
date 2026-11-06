@@ -168,6 +168,10 @@ import type { SceneSource } from './print/printJob'
 import * as diagnosticLog from './log/diagnosticLog'
 import * as inputRecorder from './recording/inputRecorder'
 import { ReportBugDialog } from './panels/ReportBugDialog'
+import { SentReportsDialog } from './panels/SentReportsDialog'
+import { FollowNoticeBar, useFollowedReports } from './panels/FollowNoticeBar'
+import { getFollowHost, totalUnread } from './io/followHost'
+import { startWebLaunchCheck } from './io/webFollowHost'
 import { TOOLS, isToolAction, toolLabel, type ToolName } from './tools/toolRegistry'
 
 /** Autosave tick interval (ms). Exported as a test seam (App.autosave.test.tsx
@@ -2178,6 +2182,21 @@ export default function App() {
   const [reportBugOpen, setReportBugOpen] = useState(false)
   const handleReportBug = useCallback(() => {
     setReportBugOpen(true)
+  }, [])
+
+  // Help ▸ Sent Reports… (docs/design/follow-a-report.md §2.2). `id` selects a
+  // report first (the notice bar's View with exactly one report).
+  const [sentReports, setSentReports] = useState<{ id: string | null } | null>(null)
+  const handleSentReports = useCallback((id: string | null = null) => {
+    setSentReports({ id })
+  }, [])
+  const followedReports = useFollowedReports()
+  const sentReportsNew = totalUnread(followedReports)
+  // The web build checks followed reports once per launch (the desktop shell
+  // does its own); a no-op when this build has nothing to follow.
+  useEffect(() => {
+    if (isTauri) return
+    return startWebLaunchCheck(getFollowHost())
   }, [])
 
   // Whether this desktop build carries the auto-updater (package-manager
@@ -5608,6 +5627,7 @@ export default function App() {
       case 'view-iso':            viewportApi.current?.setStandardView('iso'); break
       case 'open-settings':       openSettingsRef.current(); break
       case 'report-bug': handleReportBug(); break
+      case 'sent-reports': handleSentReports(); break
       case 'open-guide': handleOpenGuide(); break
       case 'open-library':   openLibraryEntry(); break
       case 'toggle-library': openLibraryEntry(); break
@@ -6987,6 +7007,8 @@ export default function App() {
         onOpenPalette={() => openPalette()}
         onHelpSearch={(q) => openPalette(q)}
         onReportBug={handleReportBug}
+        onSentReports={() => handleSentReports()}
+        sentReportsNew={sentReportsNew}
         onCheckForUpdates={updaterAvailable ? handleCheckForUpdates : undefined}
         onOpenOnPhone={isTauri ? () => setPhoneShareOpen(true) : undefined}
         openOnPhoneDisabled={phoneShareDisabled}
@@ -6994,6 +7016,9 @@ export default function App() {
         windowList={isTauri ? windowList : undefined}
         onFocusWindow={focusWindow}
       />
+
+      {/* Reply notice for followed bug reports (follow-a-report §2.3). */}
+      <FollowNoticeBar onView={handleSentReports} />
 
       {/* Kernel panic sticky banner */}
       {kernelPanicked && (
@@ -8025,6 +8050,14 @@ export default function App() {
           documentName={documentName(docSession)}
           crash={kernelPanicked ? getPanicCapture() : null}
           onClose={() => setReportBugOpen(false)}
+        />
+      )}
+
+      {sentReports !== null && (
+        <SentReportsDialog
+          initialId={sentReports.id}
+          onCheckForUpdates={updaterAvailable ? handleCheckForUpdates : undefined}
+          onClose={() => setSentReports(null)}
         />
       )}
 

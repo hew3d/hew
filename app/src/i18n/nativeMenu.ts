@@ -178,6 +178,8 @@ export const NATIVE_MENU_LABELS: Record<string, MessageDescriptor> = {
   // Help
   'help-guide': msg`Hew Help`,
   'help-report-bug': msg`Report Bug…`,
+  'help-sent-reports': msg`Sent Reports…`,
+  'help-sent-reports-new': msg`Sent Reports ({n} new)…`,
 
   // Native window titles and dialogs the shell builds itself
   'window:settings': msg`Settings`,

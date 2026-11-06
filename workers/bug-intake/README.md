@@ -35,15 +35,21 @@ first), then **COMMIT**.
 
 | Route | Method | Purpose | Response |
 |---|---|---|---|
-| `/report/` (also `/report`) | `GET` | identity | `200 {"service":"hew-bug-intake","format":1,"maxBytes":94371840,"pieceBytes":1900000}` |
+| `/report/` (also `/report`) | `GET` | identity | `200 {"service":"hew-bug-intake","format":1,"maxBytes":1073741824,"pieceBytes":1900000}` |
 | `/report/` (also `/report`) | `POST` | **START** — begins an upload with its first piece | `201 {"id":"HEW-XXXX-XXXX","token":"<43-char base64url>","pieceBytes":1900000}` / `400` invalid (including a first piece that is neither the whole report nor exactly `pieceBytes`) / `411` no Content-Length / `413` too large / `429` rate limited / `507` full / `5xx` unavailable |
 | `/report/<id>/<index>` (`index` ≥ 1) | `PUT` | **PIECE** — uploads one following piece | `204` stored (or an accepted idempotent retry) / `400` invalid (piece too large, past the declared total, a non-final piece that is not exactly `pieceBytes`, or an upload older than `UPLOAD_LIFETIME_MS` — all WITH the correct upload token — **abandons the upload**) / `403` forbidden (missing/wrong token — never abandons anything, even an oversized piece) / `404` not found (unknown, committed, or already abandoned) / `409 {"error":"out-of-order","expected":<n>}` / `5xx` unavailable |
 | `/report/<id>/commit` | `POST` | **COMMIT** — finishes the upload | `201 {"id":"HEW-XXXX-XXXX"}` — idempotent for the token holder: a retry against an already-committed report answers `201` again (with no second notification email), not `404` / `400` invalid (fewer bytes arrived than declared — **abandons the upload**) / `403` forbidden / `404` not found / `5xx` unavailable |
 | `/report/admin/` | `GET` | the reports list (HTML), Access-protected | |
 | `/report/admin/<id>` | `GET` | one report's detail (HTML) — reads and decompresses only piece 0's HEAD, never the whole bundle | |
 | `/report/admin/<id>/download` | `GET` | the exact stored, still-**compressed** bundle bytes, streamed straight out of the `ReportDrop` as `<id>.json.gz`, `Content-Disposition: attachment` | |
-| `/report/admin/<id>/delete` | `POST` | deletes the report; redirects to the list | |
+| `/report/admin/<id>/delete` | `POST` | deletes the report, its thread, and its follow-up attachments; redirects to the list | |
 | `/report/admin/<id>/triage` | `POST` | toggles the triaged flag; redirects to the detail page | |
+| `/report/<id>/thread?after=<seq>` | `GET` | a followed report's thread (header `Hew-Follow-Secret`) — see "Following a report" | `200` view / `400` bad `after` / `403` / `429` / `5xx` |
+| `/report/<id>/thread` | `POST` | a reporter message, JSON `{"text":"…"}` | `201 {"seq":<n>}` / `400` / `403` / `409 {"error":"full"}` / `429` / `5xx` |
+| `/report/<id>/thread/seen` | `POST` | JSON `{"upTo":<seq>}` | `204` / `400` / `403` / `429` / `5xx` |
+| `/report/<id>/thread` | `DELETE` | Forget: revoke the secret and destroy the thread | `204` / `403` (also the answer to a second call) / `5xx` |
+| `/report/admin/<id>/reply` | `POST` | form `text`, or `canned=ask-file` / `canned=ask-steps`; redirects to the detail page | |
+| `/report/admin/<id>/status` | `POST` | form `status` (`open`/`need-info`/`fixed`/`closed`), `version` (required for `fixed`), `note`; redirects to the detail page | |
 
 Every response carries `Cache-Control: no-store`; none carry CORS headers
 — the web build posts same-origin under `app.hew3d.com`, and the desktop
@@ -104,6 +110,124 @@ identifies a report; it authorizes nothing (no public route reads by ID) —
 that's what the upload token, minted fresh per upload and never persisted
 in the clear, is for.
 
+## Following a report
+
+The design is `docs/design/follow-a-report.md` (§5 is the service). A
+report sent with the request header `Hew-Follow: 1` on START gets a
+**follow secret**: 32 random bytes, base64url, 43 characters, minted by the
+same generator as the upload token and returned once as `"follow"` in the
+START `201` body. The Worker keeps only its SHA-256 hex, first in the
+drop's meta row and then, once COMMIT succeeds, in a third Durable Object,
+**`ReportThread`** (one per followed report, `src/reportThread.ts` over
+`src/threadStore.ts`). Minting at START means a retried COMMIT after a lost
+`201` needs no new secret: the client already holds it, and thread creation
+is idempotent. The secret travels only in the `Hew-Follow-Secret` header,
+is compared in constant time, and is never logged or emailed.
+
+**The thread** is a single ordered timeline (`seq`): maintainer replies,
+reporter messages, follow-up attachments, and status changes
+(`open`/`need-info`/`fixed`/`closed`, each a `system` message). Storage is
+lazy exactly like `ReportStore`: a request naming an id with no thread
+reads `sqlite_master` and persists nothing. **Every** thread-route failure
+— no secret, wrong or revoked secret, unknown or malformed id, a report
+nobody follows — is the same `403 {"error":"forbidden"}`, so no public
+route says whether a report exists.
+
+**GET thread** answers
+`{"format":1,"status":"…","statusVersion":"1.3.2"|null,"statusAt":<ms>,"latest":<seq>,"messages":[…],"now":<ms>}`;
+each message is `{"seq","at","author":"maintainer"|"reporter"|"system","kind":"text"|"status"|"attachment","text"}`
+plus `"attachmentReportId"` on attachments only. Polling is a write (it
+records `lastPolledAt` for retention). A reporter message on a `fixed` or
+`closed` thread reopens it (status `open` plus a `system` line); on a
+`need-info` thread it moves the status to `open`, as an attachment does.
+
+**Limits** (`src/constants.ts`): messages 1–4,000 characters (code
+points); 200 messages per thread, of which the last 10 are kept for the
+maintainer — a reporter message (two slots when it reopens the thread) or
+a follow-up attachment message is `409 full` once it would take the thread
+past 190, while maintainer replies and status changes may use all 200, so a
+reporter can never fill a thread the maintainer still has to answer or
+close; 20 reporter messages per thread per UTC
+day (`429` with `Retry-After` to midnight); 60 thread-route requests per
+client hash per 10 minutes across all threads, counted in `ReportIndex`'s
+`rate_window` under a `thread:` key prefix **only after** the thread DO has
+accepted the secret, so a wrong-secret flood never writes to the index. A
+reporter post checks the secret with `verifySecret` before counting, so a
+rate-limited post stores nothing; a `GET` or `seen` over the limit has
+already been served by the thread DO and answers `429` anyway; `DELETE` is
+never turned into a `429`.
+
+**Follow-up attachments** reuse the whole upload protocol. START carries
+`Hew-Follow-Up: <parentId>` and `Hew-Follow-Secret: <parent's secret>`; the
+parent thread's `verifySecret` runs, and the parent's index row must exist
+and be committed, before the body is read or anything is reserved (`403`
+otherwise), `Hew-Follow` is ignored (attachments never get
+threads), and the new row records `parentId`. COMMIT appends an
+`attachment` message to the parent thread (idempotent per child id, so a
+retried COMMIT adds nothing) whose text is `"<name> (<size>)"`: the name is
+read from the bundle description's first line, which clients write as
+`File for report HEW-XXXX-XXXX: <name>`, and the size is the stored
+compressed bundle; another description shape gives `"A file (<size>)"`.
+It flips a `need-info` parent to `open`; on a `fixed`/`closed` parent the
+status stays but the 30-day grace clock stops; it starts over from the
+reporter's next `seen`. A parent thread already full, or gone,
+leaves the attachment a plain child report with no thread message. It
+sends the attachment email
+**instead of** the new-report email. A follow-up counts against the
+ordinary submission limits and the storage ceiling like any report.
+
+**Retention.** The thread's alarm is re-armed on every write to the
+earlier of 30 days after the reporter's client acknowledged a final status
+(`seen` through the last status message while `fixed`/`closed`) and 365
+days after the last activity (any message, status change, poll, or seen).
+Forget, admin delete, and that alarm destroy it; the alarm and Forget tell
+`ReportIndex` first (`threadEnded`, which also resets the row's cached
+status to `open`) and only then wipe. Before that call they mark the
+thread `dying`, so a post that reaches the DO while the call is in flight
+is refused (`403`, or not-found for the maintainer) rather than written
+into a thread about to vanish; a failed call clears the mark so the retry
+starts clean, and a mark left by a destroy that died mid-flight makes the
+alarm due at once (Forget also accepts the secret to finish it). The bundle keeps its
+own 90-day alarm, but its retention now calls `ReportIndex.bundleExpired`:
+a followed, committed row stays with `bundleDeleted = 1` and `sizeBytes =
+0` (the ceiling frees) so the maintainer can still answer and set "fixed
+in"; any other row is deleted as before, and when the row goes, the
+maintainer-only thread a reply or status on an unfollowed report created
+is destroyed with it (`expireReport` in `src/handlers.ts`; a no-op for a
+report with no thread). When the thread later ends, a
+bundle-less row is deleted and a live one just stops showing as followed.
+
+**Index caches.** `reports` gains `following`, `status`, `statusVersion`,
+`reporterActivityAt`, `adminViewedAt`, `parentId`, and `bundleDeleted`,
+added to an existing table by `ALTER TABLE … ADD COLUMN` guarded by
+`PRAGMA table_info` (`ReportDrop`'s `meta` gains `followHash`/`parentId`
+the same way). They are display caches; the thread is the source of truth.
+
+**Admin.** The list gains Status and Following columns, a **new** marker
+(the reporter wrote or attached something since the maintainer last opened
+the report), and a "↳ for HEW-…" marker on follow-up rows. The detail page
+shows Following yes/no, the thread (every message escaped, the
+maintainer's own included), a reply form with two canned-reply submit
+buttons, a status form, and the report's attachments; opening it moves the
+thread's admin cursor and the row's `adminViewedAt`. A reply or status on a
+report nobody follows creates a thread with no secret, kept for the
+maintainer only. A bundle-less row shows its metadata and thread with no
+download. Delete destroys the thread first, so the reporter's key stops
+working at once, and then deletes the report's follow-up attachments with
+it (they are the reporter's material for that report; a deletion request
+quoting the ID covers them). A status change whose list-cache update fails still
+answers `303` (the thread has the status; only the badge is stale), so a
+retried form never writes a second status message. Still no script on any
+admin page.
+
+**Email.** Two more subjects share the 50-a-day counter and the
+best-effort rule, but stop at 35 (`EMAIL_THREAD_RESERVE` = 15 is kept for
+new-report emails, which may use the whole cap), so a chatty thread never
+starves the notification for a new report: `[Hew bug report] HEW-… — reply from the reporter` (the
+message text in the body) and `[Hew bug report] HEW-… — file attached
+(46.5 MB)` (the size in the subject, the reporter-chosen file name only in
+the body).
+
 ## Chunked upload
 
 **The numbers.** The Workers Free plan caps CPU time at a hard,
@@ -161,9 +285,11 @@ input is still coming, which is what actually keeps this bounded.
 
 ## Storage
 
-Two Durable Object classes, both SQLite-backed, both bound in
-`wrangler.toml` with a `new_sqlite_classes` migration — no R2 bucket, same
-free-tier-fails-closed posture as `share-relay`'s `ShareDrop`:
+Three Durable Object classes, all SQLite-backed, all bound in
+`wrangler.toml` with `new_sqlite_classes` migrations (`v1`: `ReportDrop`,
+`ReportIndex`; `v2`: `ReportThread`, described under "Following a
+report") — no R2 bucket, same free-tier-fails-closed posture as
+`share-relay`'s `ShareDrop`:
 
 - **`ReportDrop`** (`src/reportDrop.ts`, `src/reportStore.ts`) — one
   instance per report, running its own small state machine over two
@@ -319,7 +445,8 @@ tier's least generous quota (100k/day account-wide):
   entirely.
 - **Email cap**: 50 notifications a day, account-wide (`EMAIL_DAY_MAX`),
   independent of the per-client counters — many distinct-IP spammers each
-  submitting once should not multiply into many emails. Reports past the
+  submitting once should not multiply into many emails. Thread-event
+  emails stop at `EMAIL_DAY_MAX - EMAIL_THREAD_RESERVE` (35). Reports past the
   cap still store and appear in the admin list; only the email is skipped.
 - Both rate tables prune stale rows opportunistically on write, not on a
   schedule, so they stay small without this DO needing its own alarm
@@ -466,6 +593,14 @@ runner and native TypeScript stripping, `.node-version` pins 26.7.0);
   (the framework-free logic behind `ReportDrop`/`ReportIndex`) satisfy the
   DO stub interfaces directly, so tests wrap them with no DO-class
   boilerplate at all.
+- `src/testSupport/testEnv.ts`'s `buildTestEnv()` is the whole Worker
+  in-process: `handleRequest` over fake namespaces for all three DO
+  classes (wired like the real wrappers: the thread's destroy hook calls
+  `ReportIndex.threadEnded`), a recording mailer, and a test Access JWKS
+  plus signed JWT (`makeTestAccess`) passed as `VerifyOptions`. It also
+  exposes each DO's storage and alarm time and fires alarms on demand
+  (`runThreadAlarm`, `runDropAlarm`). `src/follow.test.ts` uses it; an
+  end-to-end harness can put a small HTTP server in front of `handle`.
 - `src/handlers.test.ts` drives `handleRequest` end to end against that
   fake namespace, with real gzip'd pieces built via `CompressionStream`
   (the same runtime API the Worker uses, not a shortcut): every status in
@@ -569,6 +704,15 @@ a purely logic-level suite would.
 
 ## Deploy checklist (maintainer)
 
+**Upgrading an existing deployment to following (migration `v2`)**: a
+plain `npx wrangler deploy` from this directory applies `[[migrations]]
+tag = "v2"` (`new_sqlite_classes = ["ReportThread"]`) and binds
+`REPORT_THREAD`. No new secrets. Existing reports keep working: the new
+index and drop columns are added in place on first use. Then check each
+new route from a real client (a report sent with following on, a reply
+from the admin page, the client's next check, an attachment, a status
+change, Forget).
+
 Manual, one-time-per-environment, same posture as `share-relay`'s checklist
 (that Worker's `README.md` has the fuller version of steps 1–3 below). This
 Worker runs entirely on the Workers **Free** plan — the whole point of the
@@ -616,7 +760,7 @@ so there is no Paid-plan requirement anywhere in this checklist.
 8. **Verify**:
    ```sh
    curl -s https://app.hew3d.com/report/
-   # {"service":"hew-bug-intake","format":1,"maxBytes":94371840,"pieceBytes":1900000}
+   # {"service":"hew-bug-intake","format":1,"maxBytes":1073741824,"pieceBytes":1900000}
 
    # The body of each request must be real gzip. With a local bundle.json:
    gzip -c bundle.json > bundle.json.gz

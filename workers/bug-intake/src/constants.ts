@@ -107,6 +107,12 @@ export const RATE_LIMIT_DAY_MAX = 20
  *  in the admin list; only the email is skipped. */
 export const EMAIL_DAY_MAX = 50
 
+/** Of `EMAIL_DAY_MAX`, this many are kept for new-report emails: a thread
+ *  event (a reporter reply, a follow-up attachment) is refused an email once
+ *  the day's count reaches `EMAIL_DAY_MAX - EMAIL_THREAD_RESERVE`, so a
+ *  chatty thread can never starve the notification for a new report. */
+export const EMAIL_THREAD_RESERVE = 15
+
 /** `system.appVersion` / `system.platform` length bound. Both are stored
  *  verbatim in the `ReportIndex` row for every report (the admin list and
  *  the email subject), and that row's bytes are NOT what `STORE_CEILING_BYTES`
@@ -142,3 +148,56 @@ export const JWKS_CACHE_MS = 5 * 60 * 1000
  *  only its own upload's pieces and commit; the Worker never stores it
  *  directly, only its SHA-256 (`uploadToken.ts`). */
 export const UPLOAD_TOKEN_BYTES = 32
+
+// ---------------------------------------------------------------------------
+// Following a report (docs/design/follow-a-report.md §5.4)
+// ---------------------------------------------------------------------------
+
+/** A follow secret is this many random bytes, base64url (43 characters) —
+ *  the same shape and the same generator as an upload token. Minted at
+ *  START when the request carries `Hew-Follow: 1`; the Worker keeps only
+ *  its SHA-256 hex, first in the drop's meta row and then in the report's
+ *  `ReportThread`. */
+export const FOLLOW_SECRET_BYTES = 32
+
+/** A thread message (reporter, maintainer, or status note) is 1 to this
+ *  many characters, counted as Unicode code points. */
+export const THREAD_MESSAGE_MAX_CHARS = 4_000
+
+/** A thread holds at most this many messages of every kind together; a
+ *  reporter post past it is `409 full`. */
+export const THREAD_MAX_MESSAGES = 200
+
+/** The last this-many of `THREAD_MAX_MESSAGES` are the maintainer's: a
+ *  reporter text post (two slots when it reopens) or a follow-up
+ *  attachment message is `full` once it would take the thread past
+ *  `THREAD_MAX_MESSAGES - THREAD_MAINTAINER_RESERVE`, so a reporter can
+ *  never fill a thread so the maintainer cannot answer or close it.
+ *  Maintainer replies and status changes may use the whole cap. */
+export const THREAD_MAINTAINER_RESERVE = 10
+
+/** Reporter text posts per thread per UTC day (`429` past it). */
+export const THREAD_REPORTER_POSTS_DAY_MAX = 20
+
+/** Thread-route requests per client hash per `RATE_LIMIT_WINDOW_MS`, across
+ *  every thread — a quota guard, not what keeps secrets secret. Counted in
+ *  `ReportIndex`'s `rate_window` under a `thread:` key prefix, only after
+ *  the thread DO has accepted the secret. */
+export const THREAD_RATE_WINDOW_MAX = 60
+
+/** A thread nobody has read or written for this long is destroyed. */
+export const THREAD_IDLE_MS = 365 * 24 * 60 * 60 * 1000
+
+/** A thread is destroyed this long after the reporter's client acknowledged
+ *  a final (`fixed`/`closed`) status. */
+export const THREAD_FINAL_SEEN_GRACE_MS = 30 * 24 * 60 * 60 * 1000
+
+/** `GET /report/<id>/thread`'s payload version. */
+export const THREAD_FORMAT = 1
+
+/** A thread route's JSON body is read capped at this many bytes — far past
+ *  a `THREAD_MESSAGE_MAX_CHARS` message even with every character escaped. */
+export const THREAD_BODY_MAX_BYTES = 64 * 1024
+
+/** The admin status form's version field ("Fixed in 1.3.2"). */
+export const STATUS_VERSION_MAX_CHARS = 64

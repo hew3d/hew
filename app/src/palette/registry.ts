@@ -248,6 +248,7 @@ function actionEntries(): PaletteEntry[] {
     { id: 'purge-unused', label: t`Purge Unused…`, description: t`Delete every unused palette material and component definition.`, group: 'Actions', synonyms: [t`cleanup`, t`clean up`, t`materials`, t`components`] },
     { id: 'open-settings', label: t`Settings…`, description: t`Open Hew Settings.`, group: 'Actions', synonyms: [t`preferences`] },
     { id: 'report-bug', label: t`Report Bug…`, description: t`Review and send a bug report, or save it to a file.`, group: 'Actions' },
+    { id: 'sent-reports', label: t`Sent Reports…`, description: t`See replies and the status of bug reports you sent from this computer.`, group: 'Actions', synonyms: [t`bug`, t`report`, t`reply`, t`feedback`] },
     { id: 'open-guide', label: t`Hew Help`, description: t`Open the online user guide in your browser.`, group: 'Actions', synonyms: [t`help`, t`guide`, t`documentation`, t`docs`, t`manual`, t`learn`, t`user guide`] },
   ]
 }

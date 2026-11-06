@@ -126,6 +126,8 @@
   "win-debug-log": "Debug Log",
   "help-guide": "Hew Help",
   "help-report-bug": "Report Bug…",
+  "help-sent-reports": "Sent Reports…",
+  "help-sent-reports-new": "Sent Reports ({n} new)…",
   "window:settings": "Settings",
   "dialog:choose-library-folder": "Choose Library Folder",
   "fallback:untitled": "Untitled",

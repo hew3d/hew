@@ -775,3 +775,36 @@ describe('scrubHomeDir: home-shaped paths that are not this user\'s own', () => 
     expect(scrubHomeDir('see https://example.com/home/page', '/Users/kurt')).toBe('see https://example.com/home/page')
   })
 })
+
+describe('follow-up bundles', () => {
+  const att = { kind: 'attachment' as const, name: 'kitchen.skp', label: 'SketchUp model (.skp)', bytes: new Uint8Array([1, 2, 3, 250]) }
+  const base = { reportId: 'HEW-7K3F-Q9XB', note: '', appVersion: '1.3.1', platform: 'web-linux' }
+
+  it('carries the attachment key after report and system, with base64 bytes', async () => {
+    const { encodeFollowUpBundle } = await import('./reportBundle')
+    const text = new TextDecoder().decode(encodeFollowUpBundle({ ...base, file: att }))
+    const obj = JSON.parse(text)
+    expect(Object.keys(obj)).toEqual(['format', 'report', 'system', 'attachment'])
+    expect(obj.report.description).toBe('File for report HEW-7K3F-Q9XB: kitchen.skp')
+    expect(obj.attachment).toEqual({ name: 'kitchen.skp', label: 'SketchUp model (.skp)', size: 4, bytes: 'AQID+g==' })
+  })
+
+  it('appends the note and uses the failedFile row for a file that did not open', async () => {
+    const { encodeFollowUpBundle } = await import('./reportBundle')
+    const failed = { name: 'bad.skp', label: 'SketchUp model (.skp)', bytes: new Uint8Array([9, 9]), error: 'boom' }
+    const obj = JSON.parse(new TextDecoder().decode(encodeFollowUpBundle({ ...base, note: ' here you go ', file: { kind: 'failedFile', failed }, segmentChars: 4 })))
+    expect(obj.report.description).toBe('File for report HEW-7K3F-Q9XB: bad.skp\n\nhere you go')
+    expect(obj.attachment).toBeUndefined()
+    expect(obj.failedFile).toMatchObject({ name: 'bad.skp', size: 2, error: 'boom', bytes: 'CQk=' })
+  })
+
+  it('builds a gzip upload, or says why not when over the cap', async () => {
+    const { buildFollowUpUpload } = await import('./reportBundle')
+    const ok = await buildFollowUpUpload({ ...base, file: att })
+    expect(ok.gzip).not.toBeNull()
+    expect(ok.gzip![0]).toBe(0x1f)
+    const big = await buildFollowUpUpload({ ...base, file: att, maxSendBytes: 10 })
+    expect(big.gzip).toBeNull()
+    expect(big.unavailableReason).not.toBeNull()
+  })
+})

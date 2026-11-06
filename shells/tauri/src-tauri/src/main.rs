@@ -49,6 +49,7 @@ mod save_panel;
 // The "Open on Phone" relay client + the server setting it is bound to
 // (Settings ▸ Advanced ▸ Server) — see its module doc for why the requests
 // live in Rust rather than behind an HTTP plugin scope.
+mod follow;
 mod relay_client;
 mod report_client;
 
@@ -1475,6 +1476,7 @@ fn menu_action_for(id: &str) -> Option<&'static str> {
         "win-library" => "toggle-library",
         "win-debug-log" => "toggle-debug-log",
         "help-report-bug" => "report-bug",
+        "help-sent-reports" => "sent-reports",
         "help-guide" => "open-guide",
         _ => return None,
     })
@@ -1587,6 +1589,9 @@ fn set_menu_locale(app: tauri::AppHandle, locale: String) -> Result<(), String> 
                 *guard = labels;
             }
         }
+        // The relabel above reset Sent Reports to its plain form; put the
+        // unread count back (in the new language).
+        follow::refresh_menu_label(&app);
     }
     Ok(())
 }
@@ -3167,6 +3172,12 @@ fn main() {
             relay_client::relay_peek,
             relay_client::relay_delete,
             report_client::report_submit,
+            follow::follow_list,
+            follow::follow_check,
+            follow::follow_post,
+            follow::follow_seen,
+            follow::follow_attach,
+            follow::follow_forget,
         ])
         // Build and attach the native menu bar; wire menu-item clicks to
         // `menu-action` events emitted to the webview.
@@ -4379,11 +4390,19 @@ fn main() {
             // plugin (the WelcomeScreen's guide-link pattern).
             let help_guide =
                 MenuItemBuilder::with_id("help-guide", lbl!("help-guide")).build(handle)?;
+            // Follow a bug report: opens the Sent Reports list. Relabeled
+            // "Sent Reports (n new)…" from follow.rs when replies are unread.
+            let help_sent_reports = MenuItemBuilder::with_id(
+                follow::MENU_ID,
+                follow::menu_text_with(lbl!("help-sent-reports"), lbl!("help-sent-reports-new"), 0),
+            )
+            .build(handle)?;
 
             let help_menu = SubmenuBuilder::with_id(handle, "submenu:help", lbl!("submenu:help"))
                 .item(&help_guide)
                 .separator()
                 .item(&help_report_bug)
+                .item(&help_sent_reports)
                 .item(&win_debug_log)
                 .build()?;
             // ----------------------------------------------------------------
@@ -4549,6 +4568,10 @@ fn main() {
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move { updater::run_check(handle, false).await });
             }
+
+            // Follow a bug report (docs/design/follow-a-report.md §6.3): once
+            // per process, 15 s from now, poll followed reports that are due.
+            follow::spawn_launch_check(handle.clone());
 
             // `--live` (docs/agents/HEW_API.md §11.2): sweep stale discovery files
             // from a previous unclean exit, then bind this launch's own

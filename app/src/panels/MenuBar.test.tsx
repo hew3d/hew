@@ -571,6 +571,20 @@ describe('MenuBar', () => {
     expect(onReportBug).toHaveBeenCalledOnce()
   })
 
+  it('Help > Sent Reports… calls onSentReports and carries the (n new) suffix', () => {
+    const onSentReports = vi.fn()
+    const { unmount } = render(<MenuBar {...defaultProps} onSentReports={onSentReports} />)
+    fireEvent.click(screen.getByRole('button', { name: /help/i }))
+    fireEvent.mouseDown(screen.getByText('Sent Reports…'))
+    expect(onSentReports).toHaveBeenCalledOnce()
+    unmount()
+
+    render(<MenuBar {...defaultProps} onSentReports={onSentReports} sentReportsNew={2} />)
+    fireEvent.click(screen.getByRole('button', { name: /help/i }))
+    expect(screen.getByText('Sent Reports (2 new)…')).toBeInTheDocument()
+    expect(screen.queryByText('Sent Reports…')).not.toBeInTheDocument()
+  })
+
   // --- Native menu-mode semantics ---
 
   it('hovering another trigger while a menu is open switches to it (menu mode)', () => {
