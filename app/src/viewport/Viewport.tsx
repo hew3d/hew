@@ -13,13 +13,15 @@
  *   - SceneRenderer (live object + sketch geometry, refreshed after commits)
  *   - ToolController routing pointer events to the active Tool
  *   - RectangleTool + PushPullTool + SelectTool + Move/Rotate/Scale
- *   - Undo/redo keyboard shortcuts (Cmd/Ctrl+Z, Shift+Cmd/Ctrl+Z)
+ *   - runUndo/runRedo (the keymap's Undo/Redo commands land here via App)
  *   - Ground grid
  *   - : context path navigation, group-aware picking
  */
 
 import { plural, t } from '@lingui/core/macro'
-import { isComposingKey, shortcutLetter } from '../input/keyboard'
+import { isComposingKey } from '../input/keyboard'
+import { chordFromEvent, chordToString } from '../keymap/chord'
+import { commandForChord } from '../keymap/keymap'
 import { shownAnnotationIds } from './shownAnnotations'
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import * as THREE from 'three'
@@ -4270,14 +4272,13 @@ export default function Viewport({
     }
 
     /**
-     * Routes a keydown to the FOV typed-entry buffer while the Zoom camera
-     * mode is active. Returns true when the key was consumed (the caller
-     * should treat it like a tool's own `capturesKey`/`onKey` handling —
-     * `scheduleRender()` and stop further processing) — the shape a real
-     * Tool would use, but Zoom has no Tool instance of its own to host it
-     * (see the module doc above).
+     * Whether the FOV typed entry takes `key` right now — the one reading
+     * both `handleFovEntryKey` (which acts on it) and `isCapturingInput`
+     * (App's keymap dispatcher) go by. The dispatcher needs it before the
+     * buffer opens: the FIRST digit must start the entry, not run its
+     * keymap command ("5" is Rotate).
      */
-    function handleFovEntryKey(ev: KeyboardEvent): boolean {
+    function fovEntryCapturesKey(key: string): boolean {
       if (activeCameraTool !== 'Zoom') return false
       // Field of View is a no-op under parallel projection (design §2) — a
       // parallel camera has no fov to set. The Zoom tool itself stays
@@ -4288,42 +4289,40 @@ export default function Viewport({
       // ignores it), surfacing later as an unexplained camera jump the next
       // time the user toggles back to perspective.
       if (rig.projection === 'parallel') return false
-      if (ev.key === 'Enter') {
-        if (fovEntryBuffer === null) return false
-        commitFovEntry()
-        ev.preventDefault()
-        return true
-      }
-      if (ev.key === 'Escape') {
-        if (fovEntryBuffer === null) return false
-        cancelFovEntry()
-        ev.preventDefault()
-        return true
-      }
-      if (ev.key === 'Backspace') {
-        if (fovEntryBuffer === null) return false
-        fovEntryBuffer = fovEntryBuffer.slice(0, -1)
-        onMeasurementRef.current?.(fovEntryBuffer)
-        ev.preventDefault()
-        return true
-      }
       // A leading digit or '.' opens the buffer; once open, letters (deg/
       // mm), the degree glyph, and an internal space are also accepted —
       // mirrors SketchUp's typed-degree VCB entry, extended for
       // camera-playtest2.md §1's "45deg or 50mm" spellings. A bare
-      // letter/space/° can never START a buffer (`fovEntryBuffer === null`
-      // gate on the second branch) — only digits/'.' can.
-      if (
-        /^[0-9.]$/.test(ev.key) ||
-        (fovEntryBuffer !== null && /^[a-z°]$/i.test(ev.key)) ||
-        (fovEntryBuffer !== null && ev.key === ' ')
-      ) {
+      // letter/space/° can never START a buffer — only digits/'.' can — and
+      // Enter/Escape/Backspace only act on an open one.
+      if (/^[0-9.]$/.test(key)) return true
+      if (fovEntryBuffer === null) return false
+      return key === 'Enter' || key === 'Escape' || key === 'Backspace' || key === ' ' || /^[a-z°]$/i.test(key)
+    }
+
+    /**
+     * Routes a keydown to the FOV typed-entry buffer while the Zoom camera
+     * mode is active. Returns true when the key was consumed (the caller
+     * should treat it like a tool's own `capturesKey`/`onKey` handling —
+     * `scheduleRender()` and stop further processing) — the shape a real
+     * Tool would use, but Zoom has no Tool instance of its own to host it
+     * (see the module doc above).
+     */
+    function handleFovEntryKey(ev: KeyboardEvent): boolean {
+      if (!fovEntryCapturesKey(ev.key)) return false
+      ev.preventDefault()
+      if (ev.key === 'Enter') {
+        commitFovEntry()
+      } else if (ev.key === 'Escape') {
+        cancelFovEntry()
+      } else if (ev.key === 'Backspace') {
+        fovEntryBuffer = (fovEntryBuffer ?? '').slice(0, -1)
+        onMeasurementRef.current?.(fovEntryBuffer)
+      } else {
         fovEntryBuffer = (fovEntryBuffer ?? '') + ev.key
         onMeasurementRef.current?.(fovEntryBuffer)
-        ev.preventDefault()
-        return true
       }
-      return false
+      return true
     }
 
     // ------------------------------------------------------------------ Zoom Window (camera.md §3)
@@ -6722,8 +6721,10 @@ export default function Viewport({
         // own (see the module doc above `activeCameraTool`) but must still
         // own its keys the same way a tool mid-VCB-entry does — the App-level
         // Delete/Backspace handler must not steal Backspace while a FOV
-        // digit buffer is open.
+        // digit buffer is open — nor may the keymap take the digit that
+        // opens one.
         if (fovEntryBuffer !== null) return true
+        if (key !== undefined && fovEntryCapturesKey(key)) return true
         const t = toolController.activeTool
         // With a key, honor a tool's per-key capture (Tool.capturesKey) so
         // App-level shortcut gates (Space→Select, Delete/Backspace) agree
@@ -10244,64 +10245,20 @@ export default function Viewport({
         }
       }
 
-      // Number keys / shortcuts: switch tools (SketchUp muscle memory)
-      // Space = Select, 1 = Select, 2 = Rectangle, 3 = Push/Pull, 4 = Move, 5 = Rotate, 6 = Scale
       const target = ev.target as HTMLElement
       const isTyping = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
+      // A keymap command's chord (keymap/: the tool letters, Space, the
+      // digits, Delete, …) never reaches the tool — the app's keymap
+      // dispatcher runs it; tools' onKey treats bare letters as typed
+      // measurement input, so "r" would otherwise also land in a buffer.
+      // Space is swallowed here too so the page never scrolls on it.
       if (!isMod && !ev.altKey && !isTyping && !fieldOrDialogOwnsKeys) {
-        // Same letter resolution as App.tsx's window handler (produced ASCII
-        // letter first, physical key as the fallback) so the two listeners
-        // on `window` never disagree about which tool a keydown names.
-        const letter = shortcutLetter(ev)
-        /* oxlint-disable lingui/no-unlocalized-strings -- key values and tool ids are identifiers */
-        if (ev.key === ' ') { ev.preventDefault(); switchToolRef.current?.('Select'); return }
-        if (ev.key === '1') { switchToolRef.current?.('Select'); return }
-        if (ev.key === '2') { switchToolRef.current?.('Rectangle'); return }
-        if (ev.key === '3') { switchToolRef.current?.('Push/Pull'); return }
-        if (ev.key === '4') { switchToolRef.current?.('Move'); return }
-        if (ev.key === '5') { switchToolRef.current?.('Rotate'); return }
-        if (ev.key === '6') { switchToolRef.current?.('Scale'); return }
-        if (letter === 'r') { switchToolRef.current?.('Rectangle'); return }
-        if (letter === 'c') { switchToolRef.current?.('Circle'); return }
-        if (letter === 'a') { switchToolRef.current?.('Arc'); return }
-        /* oxlint-enable lingui/no-unlocalized-strings */
-        // ⇧L belongs to the Library dialog (App's global handler) — only an
-        // UNSHIFTED l/L reaches Line here. The other shifted letters keep
-        // their historical tool-switch tolerance.
-        /* oxlint-disable lingui/no-unlocalized-strings -- key values and tool ids are identifiers */
-        if (letter === 'l' && !ev.shiftKey) { switchToolRef.current?.('Line'); return }
-        if (letter === 'p') { switchToolRef.current?.('Push/Pull'); return }
-        if (letter === 'f') { switchToolRef.current?.('Offset'); return }
-        if (letter === 'm') { switchToolRef.current?.('Move'); return }
-        if (letter === 'q') { switchToolRef.current?.('Rotate'); return }
-        if (letter === 's') { switchToolRef.current?.('Scale'); return }
-        /* oxlint-enable lingui/no-unlocalized-strings */
-      }
-
-      // Undo: Cmd/Ctrl+Z — document-level, covers creations + per-object ops.
-      // Shop Mode read-only (shop-mode adversarial review, CRITICAL finding
-      // 1b): Undo/Redo bypass switchToolRef entirely (they call runUndo/
-      // runRedo directly, never a tool switch), so the allowlist check
-      // guarding switchToolRef's top never sees them — a dedicated check is
-      // needed here too. Still swallows the keystroke (preventDefault) so
-      // nothing else on the page reacts to it; only the document mutation
-      // itself is skipped.
-      if (isMod && !ev.shiftKey && ev.key === 'z') {
-        ev.preventDefault()
-        if (readOnlyRef.current) return
-        runUndo()
-        return
-      }
-
-      // Redo: Shift+Cmd/Ctrl+Z — document-level. With Shift held, ev.key is
-      // the UPPERCASE letter, so compare case-insensitively (a bare === 'z'
-      // never fires on a physical keyboard — caught by the input-pipeline
-      // E2E redo spec). Same read-only guard as Undo just above.
-      if (isMod && ev.shiftKey && ev.key.toLowerCase() === 'z') {
-        ev.preventDefault()
-        if (readOnlyRef.current) return
-        runRedo()
-        return
+        const chord = chordFromEvent(ev, isMac)
+        if (chord !== null && commandForChord(chordToString(chord)) !== undefined) {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- KeyboardEvent.key identifier
+          if (ev.key === ' ') ev.preventDefault()
+          return
+        }
       }
 
       // Mod-combos never reach the tool: tools' onKey treats bare letters

@@ -53,6 +53,8 @@ import { libraryStore } from '../io/libraryStore'
 import { describeIdentity, useServerSettingForm } from './serverForm'
 import { CLOUD_ORIGIN } from './server'
 import { isComposingKey } from '../input/keyboard'
+import { ControlsPane } from './ControlsPane'
+import { isRecordingChord } from '../keymap/keymap'
 
 // Windows 11 app type ramp (Segoe UI Variable falls back to Segoe UI in
 // webviews that don't expose the variable face).
@@ -470,6 +472,8 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (isComposingKey(e)) return
+      // Controls is recording a shortcut: its Escape cancels the recording.
+      if (isRecordingChord()) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -554,6 +558,11 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
               })}
             </select>
           </SettingsCard>
+
+          <div style={sectionHeaderStyle}>{t`Controls`}</div>
+          <div style={{ ...cardStyle, display: 'block' }}>
+            <ControlsPane />
+          </div>
 
           <div style={sectionHeaderStyle}>{t`Appearance`}</div>
           <SettingsCard title={t`App theme`} htmlFor="fluent-theme">

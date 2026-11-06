@@ -209,7 +209,10 @@ produced wins when it is a plain ASCII letter, so the key cap the tool
 rail shows is the one that works on AZERTY and Dvorak too. When the
 keystroke produced no ASCII letter (an idle IME yielding a full-width
 character, a dead key, a non-Latin layout) the physical key position
-stands in. Option/Alt combinations are never bare-letter shortcuts. While
+stands in. Digits follow the same rule (the produced digit, else the
+physical digit key). The keymap (`app/src/keymap/chord.ts`) applies this
+to every shortcut, including the ones a person binds in Settings ▸
+Controls. Option/Alt combinations are never bare-letter shortcuts. While
 an input method editor is composing, the global shortcut handler, the
 viewport, the Measurements box, the command palette, and every text
 field's Enter/Escape/arrow handling ignore the keystroke, including the

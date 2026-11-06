@@ -3,7 +3,9 @@ import { i18n } from '@lingui/core'
 import { ph, plural, t } from '@lingui/core/macro'
 import { Trans, useLingui } from '@lingui/react/macro'
 import { historyLabel } from './i18n/historyLabels'
-import { isComposingKey, shortcutLetter } from './input/keyboard'
+import { useKeymap, useKeymapDispatch } from './keymap/useKeymap'
+import { currentKeymap, defaultKeymapBindings, shortcutLabel, subscribeKeymap } from './keymap/keymap'
+import { startNativeMenuSync } from './keymap/nativeMenu'
 import { flushSync } from 'react-dom'
 import { loadKernel, type Scene } from './wasm/loader'
 import Viewport, {
@@ -170,7 +172,7 @@ import { SentReportsDialog } from './panels/SentReportsDialog'
 import { FollowNoticeBar, useFollowedReports } from './panels/FollowNoticeBar'
 import { getFollowHost, totalUnread } from './io/followHost'
 import { startWebLaunchCheck } from './io/webFollowHost'
-import { TOOLS, toolLabel, type ToolName } from './tools/toolRegistry'
+import { TOOLS, isToolAction, toolLabel, type ToolName } from './tools/toolRegistry'
 
 /** Autosave tick interval (ms). Exported as a test seam (App.autosave.test.tsx
  *  drives fake timers by this exact value rather than hardcoding it). */
@@ -517,9 +519,10 @@ export default function App() {
   /** The one entry point every camera-tool selection (Camera menu, native
    * menu, keyboard shortcut, the ViewportHUD orbit button) should go
    * through — see `toolActivationSeq`'s doc comment. Scoped to the camera
-   * group: forcing every tool to re-apply on a same-name reselect would
-   * also reset in-progress non-camera gestures (e.g. a multi-click Line
-   * chain), which nothing here calls for. */
+   * group: forcing every tool to re-apply on a same-name reselect from a
+   * menu or the rail would also reset in-progress non-camera gestures (e.g.
+   * a multi-click Line chain). Only a tool's keyboard shortcut does that,
+   * on purpose (the keymap dispatcher's `run` below). */
   const activateTool = useCallback((name: ToolName) => {
     setActiveTool(name)
     if (CAMERA_HANDOFF_TOOL_NAMES.has(name)) setToolActivationSeq((s) => s + 1)
@@ -6102,307 +6105,44 @@ export default function App() {
   }, []) // openPath accessed via openPathRef — no dep needed
 
   // ---------------------------------------------------------------- global keyboard shortcuts
+  // Every command shortcut — tools, File/Edit/Window commands, scenes, the
+  // palette, Delete and the clipboard keys — runs through the keymap
+  // (keymap/), which the person can change in Settings ▸ Controls. The
+  // dispatcher keeps the guards the old hand-written handlers applied: IME
+  // composition, the modal welcome screen, focused text fields, a tool typing
+  // a measurement, open dialogs, and the macOS native menu's own
+  // accelerators (keymap/dispatch.ts).
+  // Re-render on a keymap change (Settings ▸ Controls, possibly in another
+  // window) so the rail's palette chip and every shortcut shown stay true.
+  useKeymap()
+  // macOS desktop: keep the native menu's accelerators equal to the keymap.
   useEffect(() => {
-    // On macOS Tauri the native menu bar owns every MODIFIER shortcut
-    // (Cmd-combos) — the JS handler must not double-fire those. But the
-    // bare-letter tool shortcuts below have no native accelerator on macOS
-    // (a native bare-letter accelerator would fire even while typing), so
-    // they are handled here on EVERY platform — this is what makes the
-    // shortcuts the tool rail advertises (C for Circle, B for Paint, …)
-    // actually work on macOS. Windows/Linux Tauri and the web build use
-    // this handler for everything.
-    const nativeMenuOwnsModCombos = isTauri && isMac
-
-    const onKeyDown = (ev: KeyboardEvent) => {
-      // An input method composing (Japanese, Chinese, Korean) owns every
-      // keystroke until it commits; none of them are commands
-      // (docs/LOCALIZATION.md "Keyboard and input methods").
-      if (isComposingKey(ev)) return
-      const isMod = ev.metaKey || ev.ctrlKey
-
-      // The welcome screen is modal: its overlay blocks pointer events but
-      // not the keyboard, so app shortcuts must not fire behind it (a stray
-      // 'r' silently switching tools, Ctrl+K stacking the palette invisibly
-      // underneath the higher-z overlay). Mod-combos are still swallowed so
-      // the browser doesn't act on them either (Ctrl+S "save page").
-      if (welcomeOpenRef.current) {
-        if (isMod && !nativeMenuOwnsModCombos) ev.preventDefault()
-        return
-      }
-
-      // Don't fire shortcuts while typing in an input/textarea
-      const target = ev.target as HTMLElement
-      const isTyping = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
-
-      // A tool mid-measurement-entry (VCB typed buffer) owns the keyboard:
-      // letters may be unit suffixes ("1cm", "5' 2-1/4\""), not tool switches.
-      // Per-key: a tool may own only some keys (Move's armed array window
-      // takes digits/x/*// but never Space — Space always resets to Select).
-      const toolIsTyping = viewportApi.current?.isCapturingInput?.(ev.key) ?? false
-
-      // Option/Alt combos are not bare letters: with physical-key dispatch
-      // `ev.code` would still read KeyL under Option+L.
-      if (!isMod && !ev.altKey && !isTyping && !toolIsTyping) {
-        // Space → Select (no modifier required; guard against typing contexts).
-        if (ev.key === ' ') {
-          ev.preventDefault()
-          setActiveTool('Select')
-          return
-        }
-        // SketchUp-for-Windows bare-letter tool shortcuts — the
-        // letter-keyed tools from `tools/toolRegistry.ts`'s `winKey`s. Real
-        // SketchUp reserves these as unmodified keys; Hew's other tools
-        // (Protractor/Slice/Edit Vertex/camera) keep their existing
-        // Ctrl-combo shortcuts below instead — the design spec doesn't cover
-        // bare letters for them.
-        // The PHYSICAL key: SketchUp's bare-letter shortcuts are key
-        // positions, so they hold on any layout and with an IME active
-        // (where `ev.key` would be a full-width or composed character).
-        const key = shortcutLetter(ev)
-        // Bare ⇧L opens the Library (the design mock's own binding) — safe
-        // here specifically because this whole block is already gated on
-        // `!isTyping` (a focused input/textarea never reaches it), unlike a
-        // native accelerator, which would fire regardless of focus (see
-        // main.rs's win-library comment for why the NATIVE menu instead
-        // advertises ⇧⌘L). Checked before the bare 'l' -> Line binding below,
-        // since Shift capitalizes `ev.key` the same way either binding's
-        // lowercase comparison would match.
-        if (key === 'l' && ev.shiftKey) { ev.preventDefault(); openLibraryEntry(); return }
-        /* oxlint-disable lingui/no-unlocalized-strings -- ToolName identifiers, not copy */
-        if (key === 'l' && !ev.shiftKey) { ev.preventDefault(); setActiveTool('Line'); return }
-        if (key === 'r') { ev.preventDefault(); setActiveTool('Rectangle'); return }
-        if (key === 'c') { ev.preventDefault(); setActiveTool('Circle'); return }
-        if (key === 'a') { ev.preventDefault(); setActiveTool('Arc'); return }
-        if (key === 'p') { ev.preventDefault(); setActiveTool('Push/Pull'); return }
-        if (key === 'f') { ev.preventDefault(); setActiveTool('Offset'); return }
-        if (key === 'm') { ev.preventDefault(); setActiveTool('Move'); return }
-        if (key === 'q') { ev.preventDefault(); setActiveTool('Rotate'); return }
-        if (key === 's') { ev.preventDefault(); setActiveTool('Scale'); return }
-        if (key === 't') { ev.preventDefault(); setActiveTool('Tape Measure'); return }
-        if (key === 'b') { ev.preventDefault(); setActiveTool('Paint'); return }
-        // Camera tools: SketchUp's real O / H / Z — replaces the old
-        // Ctrl+B / Ctrl+R / Ctrl+\ Hew inventions so the rail, the menus,
-        // and actual dispatch all advertise the same keys.
-        if (key === 'o') { ev.preventDefault(); activateTool('Orbit'); return }
-        if (key === 'h') { ev.preventDefault(); activateTool('Pan'); return }
-        if (key === 'z') { ev.preventDefault(); activateTool('Zoom'); return }
-        /* oxlint-enable lingui/no-unlocalized-strings */
-        // Scenes: Page Down/Up = Next/Previous (docs/design/scenes.md §5,
-        // SketchUp's own default). Unmodified — no native-menu accelerator
-        // conflict, so this fires identically on web and desktop.
-        if (ev.key === 'PageDown') { ev.preventDefault(); scenesRef.current.next(); return }
-        if (ev.key === 'PageUp') { ev.preventDefault(); scenesRef.current.previous(); return }
-      }
-
-      // (Delete/Backspace handled by a dedicated always-on effect below.)
-
-      if (!isMod) return
-      if (isTyping) return
-      // macOS Tauri: the native menu's accelerators own all Cmd-combos.
-      if (nativeMenuOwnsModCombos) return
-
-      if (ev.key === 'p' && !ev.shiftKey && !ev.altKey) {
-        ev.preventDefault()
-        setPrintDialogOpen(true)
-        return
-      }
-      if (ev.key === 's' && !ev.shiftKey) {
-        ev.preventDefault()
-        saveDocument()
-        return
-      }
-      if (ev.key === 's' && ev.shiftKey) {
-        ev.preventDefault()
-        saveAsDocument()
-        return
-      }
-      if (ev.key.toLowerCase() === 'o' && !ev.shiftKey) {
-        ev.preventDefault()
-        openDocument()
-        return
-      }
-      if (ev.key === 'n') {
-        ev.preventDefault()
-        newDocument()
-        return
-      }
-      // Group / Ungroup. The in-app Edit menu has always advertised these
-      // accelerators, but nothing dispatched them outside the macOS native
-      // menu — the shortcut was display-only on Windows/Linux/web. Route
-      // through the same menuActionRef dispatch the menu items use; the
-      // handlers no-op on an ineligible selection, matching a disabled item.
-      if (ev.key.toLowerCase() === 'g') {
-        ev.preventDefault()
-        menuActionRef.current(ev.shiftKey ? 'edit-ungroup' : 'edit-group')
-        return
-      }
-      // (Camera tools moved from Ctrl+B/R/\ to SketchUp's bare O / H / Z in
-      //  — see the bare-letter block above.)
-      // Window pane toggles. Note: with Shift held, ev.key is the UPPERCASE
-      // letter, so compare case-insensitively (else these never fire).
-      if (ev.key.toLowerCase() === 'i' && ev.shiftKey) {
-        ev.preventDefault()
-        toggleSection(setShowModelInfo, trayTitle.outliner)
-        return
-      }
-      if (ev.key.toLowerCase() === 'c' && ev.shiftKey) {
-        ev.preventDefault()
-        toggleSection(setShowMaterials, trayTitle.materials)
-        return
-      }
-      if (ev.key.toLowerCase() === 'm' && ev.shiftKey) {
-        ev.preventDefault()
-        toggleSection(setShowComponents, trayTitle.components)
-        return
-      }
-      if (ev.key.toLowerCase() === 't' && ev.shiftKey) {
-        ev.preventDefault()
-        toggleSection(setShowTags, trayTitle.tags)
-        return
-      }
-      if (ev.key.toLowerCase() === 'o' && ev.shiftKey) {
-        ev.preventDefault()
-        toggleSection(setShowObjectInfo, trayTitle.objectInfo)
-        return
-      }
-      if (ev.key.toLowerCase() === 'l' && ev.shiftKey) {
-        ev.preventDefault()
-        openLibraryEntry()
-        return
-      }
-      if (ev.key === ',') {
-        ev.preventDefault()
-        openSettingsRef.current()
-        return
-      }
-      // Command palette — Cmd/Ctrl+`/` on every platform and both shells.
-      // The palette is app chrome, not a tool, so it doesn't answer to the
-      // SketchUp key scheme the tools follow; `/` is the one key free of that
-      // scheme on all of them, which is what lets a single binding be true
-      // everywhere. On the macOS desktop this branch never runs (the native
-      // menu owns mod-combos there) — main.rs binds the same Cmd+`/`.
-      if (ev.key === '/' && !ev.shiftKey) {
-        ev.preventDefault()
-        openPalette()
-        return
-      }
-      // Ctrl+K stays as an unadvertised alias for the muscle memory of
-      // everyone who used it before `/` became the documented key. Not bound
-      // on the macOS desktop, where Cmd+K is Rectangle's classic SketchUp
-      // accelerator and keeps that job.
-      if (ev.key.toLowerCase() === 'k' && !ev.shiftKey) {
-        ev.preventDefault()
-        openPalette()
-        return
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [saveDocument, saveAsDocument, openDocument, newDocument, toggleSection])
-
-  // Delete / Backspace → delete the current selection (guides).
-  // Registered SEPARATELY from the global-shortcut effect above because that one
-  // is disabled under Tauri (the native menu owns accelerators) — but Edit ▸
-  // Delete's key must be handled in JS on BOTH web and desktop: on macOS the
-  // native item shows ⌫ yet WebKit hands the keydown to the page first, and on
-  // Windows/Linux the item has no accelerator at all (a native bare
-  // Delete/Backspace there would bypass the typing guard and collide with the
-  // tools' VCB Backspace — see main.rs's comment by `edit_delete`). It deletes
-  // from any tool; only a tool mid-VCB entry (isCapturingInput) keeps Backspace
-  // for the typed buffer.
-  useEffect(() => {
-    const onDeleteKey = (ev: KeyboardEvent) => {
-      if (isComposingKey(ev)) return
-      if (ev.key !== 'Delete' && ev.key !== 'Backspace') return
-      const target = ev.target as HTMLElement
-      const isTyping =
-        target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
-      if (isTyping) return // let the focused field edit text normally
-      // ALWAYS swallow Delete/Backspace outside text fields: the webview
-      // otherwise treats Backspace as "navigate back", which silently wedges
-      // the whole app until restart.
-      ev.preventDefault()
-      // …but never delete anything from behind the modal welcome screen.
-      if (welcomeOpenRef.current) return
-      // Delete the current selection — from ANY tool and however it was selected
-      // (viewport or Object list), NOT just the Select tool. The one exception
-      // is a tool mid-VCB entry (e.g. typing a Move distance), where Backspace
-      // must edit the typed buffer instead; the Viewport routes the key to that
-      // tool and reports it here via isCapturingInput so we don't also delete.
-      if (!(viewportApi.current?.isCapturingInput?.(ev.key) ?? false)) {
-        menuActionRef.current('edit-delete')
-      }
-    }
-    window.addEventListener('keydown', onDeleteKey)
-    return () => window.removeEventListener('keydown', onDeleteKey)
+    if (!(isTauri && isMac)) return
+    return startNativeMenuSync({
+      isMac,
+      defaults: defaultKeymapBindings(),
+      current: () => currentKeymap().bindings,
+      subscribe: subscribeKeymap,
+      invoke: (accelerators) =>
+        import('@tauri-apps/api/core').then(({ invoke }) =>
+          invoke<string[]>('set_menu_accelerators', { accelerators }),
+        ),
+    })
   }, [])
-
-  // Cmd/Ctrl+A → Select All. Like Delete above, this is handled in JS on
-  // BOTH web and desktop: the native menu item deliberately carries no
-  // accelerator, because a native CmdOrCtrl+A fires even while typing in a
-  // text field and would hijack select-all-text into a scene-wide selection.
-  // Here a focused text field keeps the browser's own select-all.
-  // ⇧⌘A / Ctrl+Shift+A → Select None (SketchUp's macOS binding; its Windows
-  // Ctrl+T is a browser-reserved new-tab key, so the Shift chord is the one
-  // that works in the web app and the desktop shell alike). Same handler,
-  // same typing guard: a focused text field keeps the key.
-  useEffect(() => {
-    const onSelectAllKey = (ev: KeyboardEvent) => {
-      if (isComposingKey(ev)) return
-      if (!(ev.metaKey || ev.ctrlKey) || ev.altKey) return
-      if (ev.key.toLowerCase() !== 'a') return
-      // Modal welcome screen: swallow (no scene select-all, no page-wide
-      // text selection of the app behind the overlay).
-      if (welcomeOpenRef.current) { ev.preventDefault(); return }
-      const target = ev.target as HTMLElement
-      const isTyping =
-        target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
-      if (isTyping) return // let the focused field select its own text
-      ev.preventDefault()
-      menuActionRef.current(ev.shiftKey ? 'edit-select-none' : 'edit-select-all')
-    }
-    window.addEventListener('keydown', onSelectAllKey)
-    return () => window.removeEventListener('keydown', onSelectAllKey)
-  }, [])
-
-  // Cmd/Ctrl+C / +X / +V / Shift+Cmd/Ctrl+V → Copy / Cut / Paste / Paste In
-  // Place. Same posture as Delete/Select All above: handled in JS on BOTH
-  // web and desktop. The native macOS items show these keys, but WebKit
-  // still hands the keydown to the page (and a focused text field's own
-  // copy/cut/paste) before the menu fires; on Windows/Linux the items carry
-  // no accelerator at all, because a native CmdOrCtrl+C/X/V there fires even
-  // while typing in a text field or renaming a node, hijacking the OS's own
-  // text clipboard — see main.rs's comment by `edit_delete`. A focused text
-  // field keeps the browser's own copy/cut/paste.
-  // Shift+Cmd/Ctrl+C is Toggle Materials (MenuBar/main.rs) — never claimed
-  // here.
-  useEffect(() => {
-    const onClipboardKey = (ev: KeyboardEvent) => {
-      if (isComposingKey(ev)) return
-      if (!(ev.metaKey || ev.ctrlKey) || ev.altKey) return
-      const key = ev.key.toLowerCase()
-      if (key !== 'c' && key !== 'x' && key !== 'v') return
-      if (welcomeOpenRef.current) return // let the modal alone; no scene action underneath it
-      const target = ev.target as HTMLElement
-      const isTyping =
-        target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
-      if (isTyping) return // let the focused field's own copy/cut/paste run
-      if (key === 'c') {
-        if (ev.shiftKey) return // Shift+Cmd/Ctrl+C is Toggle Materials
-        ev.preventDefault()
-        menuActionRef.current('edit-copy')
-      } else if (key === 'x') {
-        if (ev.shiftKey) return
-        ev.preventDefault()
-        menuActionRef.current('edit-cut')
-      } else {
-        ev.preventDefault()
-        menuActionRef.current(ev.shiftKey ? 'edit-paste-in-place' : 'edit-paste')
-      }
-    }
-    window.addEventListener('keydown', onClipboardKey)
-    return () => window.removeEventListener('keydown', onClipboardKey)
-  }, [])
+  useKeymapDispatch({
+    isMac,
+    nativeMenu: isTauri && isMac,
+    run: (id) => {
+      // A tool's key restarts the tool even when it is already active
+      // (SketchUp's habit): it drops a sticky idle plane lock or a half-made
+      // gesture. A tool mid-measurement keeps its letters through
+      // `toolCapturesKey`, so this never cuts a typed entry short.
+      if (isToolAction(id)) setToolActivationSeq((s) => s + 1)
+      menuActionRef.current(id)
+    },
+    welcomeOpen: () => welcomeOpenRef.current,
+    toolCapturesKey: (key) => viewportApi.current?.isCapturingInput?.(key) ?? false,
+  })
 
   // Mirror the View ▸ Axes / Grid / Guides toggles into the viewport. The
   // viewport API ref is populated once the viewport mounts; all default to
@@ -7345,12 +7085,11 @@ export default function App() {
           onSelectTool={(name) => activateTool(name)}
           // The resting palette field lives at the top of the rail on every
           // platform ( — macOS forced it here since it has no in-window
-          // menu bar, and the rest follow for consistency). One shortcut
-          // everywhere now: Cmd/Ctrl+`/`, dispatched by the global keydown
-          // handler above and by the native menu on the macOS desktop.
+          // menu bar, and the rest follow for consistency). The chip shows
+          // the palette's key from the keymap (Cmd/Ctrl+`/` by default).
           onOpenPalette={() => openPalette()}
-          // oxlint-disable-next-line lingui/no-unlocalized-strings -- keyboard shortcut label, not translated
-          paletteKbd={isMac ? '⌘/' : 'Ctrl /'}
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- command id
+          paletteKbd={shortcutLabel('open-palette') || undefined}
           // The BROWSE entry point stays visible on every platform — the
           // dialog itself reports the web build's storage honestly
           // unavailable (matching Settings ▸ Folders' posture); only the

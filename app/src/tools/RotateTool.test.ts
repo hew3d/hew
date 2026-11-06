@@ -1467,8 +1467,8 @@ describe('RotateTool — ×N / /N array copy', () => {
     tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot placed, mid-gesture
 
-    // What App.tsx's onDeleteKey does: skip menuActionRef('edit-delete')
-    // when isCapturingInput(ev.key) is true. It must be true here, or the
+    // What the keymap dispatcher (keymap/dispatch.ts) does: skip Delete's
+    // command when isCapturingInput(ev.key) is true. It must be true here, or the
     // pivoted node gets deleted out from under the live gesture.
     expect(isCapturingInputLike(tool, 'Delete')).toBe(true)
     expect(isCapturingInputLike(tool, 'Backspace')).toBe(true)

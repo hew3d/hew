@@ -39,6 +39,14 @@ msgstr ""
 msgid "{cap, plural, one {Array copy is limited to {limit} copy} other {Array copy is limited to {limit} copies}}"
 msgstr ""
 
+#: src/settings/ControlsPane.tsx
+msgid "{chordLabel} belongs to the tools and can’t be a shortcut."
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "{chordLabel} is used by {ownerLabel}."
+msgstr ""
+
 #: src/App.tsx
 msgid "{copiedCount, plural, one {Copied # object} other {Copied # objects}}"
 msgstr ""
@@ -839,6 +847,7 @@ msgid "action bar"
 msgstr ""
 
 #: src/palette/CommandPalette.tsx
+#: src/settings/ControlsPane.tsx
 msgid "Actions"
 msgstr ""
 
@@ -872,6 +881,14 @@ msgstr ""
 
 #: src/scenes/scenesModel.ts
 msgid "Add a description — it shows on the phone."
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "Add a shortcut"
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "Add a shortcut to {label}"
 msgstr ""
 
 #: src/panels/MaterialPalette.tsx
@@ -1258,6 +1275,7 @@ msgstr ""
 #: src/panels/StlUnitsDialog.tsx
 #: src/panels/TextDialog.tsx
 #: src/panels/UnsavedChangesDialog.tsx
+#: src/settings/ControlsPane.tsx
 #: src/shop/ReceiveConfirmSheet.tsx
 #: src/shop/ScanSheet.tsx
 msgid "Cancel"
@@ -1304,6 +1322,10 @@ msgstr ""
 #: src/settings/FluentSettingsPage.tsx
 #: src/settings/FoldersPane.tsx
 msgid "Change…"
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "Changed from the default"
 msgstr ""
 
 #: src/App.tsx
@@ -1729,8 +1751,16 @@ msgstr ""
 msgid "Close the pieces where they meet and remove the inside walls between them"
 msgstr ""
 
+#: src/settings/ControlsPane.tsx
+msgid "Close this document window."
+msgstr ""
+
 #: src/health/healthCopy.ts
 msgid "Close this opening"
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "Close Window"
 msgstr ""
 
 #: src/panels/SentReportsDialog.tsx
@@ -1787,6 +1817,7 @@ msgstr ""
 
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
+#: src/settings/ControlsPane.tsx
 msgid "Command Palette…"
 msgstr ""
 
@@ -1868,6 +1899,11 @@ msgstr ""
 
 #: src/panels/SaveFormatDialog.tsx
 msgid "Continue"
+msgstr ""
+
+#: src/settings/FluentSettingsPage.tsx
+#: src/settings/SettingsWindow.tsx
+msgid "Controls"
 msgstr ""
 
 #: src/settings/UnitsPane.tsx
@@ -2890,6 +2926,10 @@ msgstr ""
 
 #: src/palette/CommandPalette.tsx
 msgid "esc to close"
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "Esc, Enter, Tab and the arrow keys stay with the tools (cancel, commit, axis lock), and so does the Measurements box while you type a value."
 msgstr ""
 
 #: src/health/healthCopy.ts
@@ -4094,6 +4134,10 @@ msgstr ""
 msgid "Keeps everything Hew stores."
 msgstr ""
 
+#: src/settings/ControlsPane.tsx
+msgid "Keyboard shortcuts"
+msgstr ""
+
 #: src/panels/library/LibraryDetailPane.tsx
 msgid "Keywords"
 msgstr ""
@@ -4954,6 +4998,7 @@ msgid "No longer available"
 msgstr ""
 
 #: src/palette/CommandPalette.tsx
+#: src/settings/ControlsPane.tsx
 msgid "No matches for “{query}”."
 msgstr ""
 
@@ -5912,6 +5957,10 @@ msgstr ""
 msgid "Preparing…"
 msgstr ""
 
+#: src/settings/ControlsPane.tsx
+msgid "Press a key…"
+msgstr ""
+
 #: src/tools/TapeMeasureTool.ts
 msgid "Press Enter to resize the model to the typed distance — Esc to keep the measurement as it is."
 msgstr ""
@@ -6137,6 +6186,10 @@ msgstr ""
 msgid "Ready"
 msgstr ""
 
+#: src/settings/ControlsPane.tsx
+msgid "Reassign"
+msgstr ""
+
 #: src/panels/WelcomeScreen.tsx
 msgid "Recent"
 msgstr ""
@@ -6282,6 +6335,14 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "remove"
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "Remove"
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "Remove {shown} from {label}"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -6434,6 +6495,14 @@ msgstr ""
 
 #: src/shop/ScanSheet.tsx
 msgid "Requesting camera access…"
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "Reset"
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "Reset All"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -6873,8 +6942,20 @@ msgstr ""
 msgid "Search"
 msgstr ""
 
+#: src/settings/ControlsPane.tsx
+msgid "Search commands"
+msgstr ""
+
 #: src/panels/MenuBar.tsx
 msgid "Search commands and help"
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "Search commands…"
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "Search every tool and action."
 msgstr ""
 
 #: src/panels/LibraryDialog.tsx
@@ -8705,6 +8786,7 @@ msgstr ""
 #: src/palette/CommandPalette.tsx
 #: src/panels/MenuBar.tsx
 #: src/panels/ToolRail.tsx
+#: src/settings/ControlsPane.tsx
 msgid "Tools"
 msgstr ""
 
@@ -8749,6 +8831,10 @@ msgstr ""
 
 #: src/log/RenderStatsReadout.tsx
 msgid "tri {triangles}"
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "Try Another"
 msgstr ""
 
 #: src/viewport/gpuCapability.ts

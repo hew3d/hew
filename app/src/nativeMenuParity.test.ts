@@ -27,6 +27,7 @@ import { dockVerbsFor } from './panels/dockLogic'
 import { paletteEntries } from './palette/registry'
 import { NATIVE_MENU_LABELS } from './i18n/nativeMenu'
 import { PSEUDO_LOCALE, SHIPPED_LOCALES } from './i18n/locales'
+import { NATIVE_ALIASES, NATIVE_COMMANDS } from './keymap/nativeMenu'
 
 const MAIN_RS = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -561,5 +562,33 @@ describe('Import Image menu item parity', () => {
     expect(paletteEntries().map((e) => e.id)).toContain('import-image')
     expect(appSource.includes("case 'import-image'")).toBe(true)
     expect(appSource.includes("'file-import-image': !componentFrameOpen")).toBe(true)
+  })
+})
+
+describe('native menu ↔ keymap', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const fnStart = source.indexOf('fn menu_action_for(')
+  const fnBody = source.slice(fnStart, source.indexOf('_ => return None', fnStart))
+  const arms = new Set([...fnBody.matchAll(/"[^"]+"\s*=>\s*"([^"]+)"/g)].map((m) => m[1]))
+
+  it('found menu_action_for (guards the extraction against a refactor)', () => {
+    expect(fnStart).toBeGreaterThan(0)
+    expect(arms.size).toBeGreaterThan(80)
+  })
+
+  it('NATIVE_COMMANDS is exactly the set of commands the native menu dispatches', () => {
+    // The keymap leaves a chord to the native menu only for these commands;
+    // a drift either way would run a chord twice or not at all on macOS.
+    expect([...NATIVE_COMMANDS].sort()).toEqual([...arms].sort())
+  })
+
+  it('every native alias names a command the menu dispatches', () => {
+    for (const nativeId of Object.values(NATIVE_ALIASES)) expect(arms).toContain(nativeId)
+  })
+
+  it('on_menu_event and set_menu_accelerators both go through menu_action_for', () => {
+    expect(/let Some\(action\) = menu_action_for\(id\) else/.test(source)).toBe(true)
+    expect(/fn set_menu_accelerators\(/.test(source)).toBe(true)
+    expect(/generate_handler!\[[^\]]*\bset_menu_accelerators\b/s.test(source)).toBe(true)
   })
 })
