@@ -4272,14 +4272,13 @@ export default function Viewport({
     }
 
     /**
-     * Routes a keydown to the FOV typed-entry buffer while the Zoom camera
-     * mode is active. Returns true when the key was consumed (the caller
-     * should treat it like a tool's own `capturesKey`/`onKey` handling —
-     * `scheduleRender()` and stop further processing) — the shape a real
-     * Tool would use, but Zoom has no Tool instance of its own to host it
-     * (see the module doc above).
+     * Whether the FOV typed entry takes `key` right now — the one reading
+     * both `handleFovEntryKey` (which acts on it) and `isCapturingInput`
+     * (App's keymap dispatcher) go by. The dispatcher needs it before the
+     * buffer opens: the FIRST digit must start the entry, not run its
+     * keymap command ("5" is Rotate).
      */
-    function handleFovEntryKey(ev: KeyboardEvent): boolean {
+    function fovEntryCapturesKey(key: string): boolean {
       if (activeCameraTool !== 'Zoom') return false
       // Field of View is a no-op under parallel projection (design §2) — a
       // parallel camera has no fov to set. The Zoom tool itself stays
@@ -4290,42 +4289,40 @@ export default function Viewport({
       // ignores it), surfacing later as an unexplained camera jump the next
       // time the user toggles back to perspective.
       if (rig.projection === 'parallel') return false
-      if (ev.key === 'Enter') {
-        if (fovEntryBuffer === null) return false
-        commitFovEntry()
-        ev.preventDefault()
-        return true
-      }
-      if (ev.key === 'Escape') {
-        if (fovEntryBuffer === null) return false
-        cancelFovEntry()
-        ev.preventDefault()
-        return true
-      }
-      if (ev.key === 'Backspace') {
-        if (fovEntryBuffer === null) return false
-        fovEntryBuffer = fovEntryBuffer.slice(0, -1)
-        onMeasurementRef.current?.(fovEntryBuffer)
-        ev.preventDefault()
-        return true
-      }
       // A leading digit or '.' opens the buffer; once open, letters (deg/
       // mm), the degree glyph, and an internal space are also accepted —
       // mirrors SketchUp's typed-degree VCB entry, extended for
       // camera-playtest2.md §1's "45deg or 50mm" spellings. A bare
-      // letter/space/° can never START a buffer (`fovEntryBuffer === null`
-      // gate on the second branch) — only digits/'.' can.
-      if (
-        /^[0-9.]$/.test(ev.key) ||
-        (fovEntryBuffer !== null && /^[a-z°]$/i.test(ev.key)) ||
-        (fovEntryBuffer !== null && ev.key === ' ')
-      ) {
+      // letter/space/° can never START a buffer — only digits/'.' can — and
+      // Enter/Escape/Backspace only act on an open one.
+      if (/^[0-9.]$/.test(key)) return true
+      if (fovEntryBuffer === null) return false
+      return key === 'Enter' || key === 'Escape' || key === 'Backspace' || key === ' ' || /^[a-z°]$/i.test(key)
+    }
+
+    /**
+     * Routes a keydown to the FOV typed-entry buffer while the Zoom camera
+     * mode is active. Returns true when the key was consumed (the caller
+     * should treat it like a tool's own `capturesKey`/`onKey` handling —
+     * `scheduleRender()` and stop further processing) — the shape a real
+     * Tool would use, but Zoom has no Tool instance of its own to host it
+     * (see the module doc above).
+     */
+    function handleFovEntryKey(ev: KeyboardEvent): boolean {
+      if (!fovEntryCapturesKey(ev.key)) return false
+      ev.preventDefault()
+      if (ev.key === 'Enter') {
+        commitFovEntry()
+      } else if (ev.key === 'Escape') {
+        cancelFovEntry()
+      } else if (ev.key === 'Backspace') {
+        fovEntryBuffer = (fovEntryBuffer ?? '').slice(0, -1)
+        onMeasurementRef.current?.(fovEntryBuffer)
+      } else {
         fovEntryBuffer = (fovEntryBuffer ?? '') + ev.key
         onMeasurementRef.current?.(fovEntryBuffer)
-        ev.preventDefault()
-        return true
       }
-      return false
+      return true
     }
 
     // ------------------------------------------------------------------ Zoom Window (camera.md §3)
@@ -6724,8 +6721,10 @@ export default function Viewport({
         // own (see the module doc above `activeCameraTool`) but must still
         // own its keys the same way a tool mid-VCB-entry does — the App-level
         // Delete/Backspace handler must not steal Backspace while a FOV
-        // digit buffer is open.
+        // digit buffer is open — nor may the keymap take the digit that
+        // opens one.
         if (fovEntryBuffer !== null) return true
+        if (key !== undefined && fovEntryCapturesKey(key)) return true
         const t = toolController.activeTool
         // With a key, honor a tool's per-key capture (Tool.capturesKey) so
         // App-level shortcut gates (Space→Select, Delete/Backspace) agree
