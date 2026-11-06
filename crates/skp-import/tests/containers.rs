@@ -16,7 +16,7 @@
 //! it converts; the ids stay consistent within each file, so a scene's
 //! hidden set is compared by the nodes it resolves to, not by number).
 //!
-//! Anything else that differs is an OpenSKP gap and gets filed upstream,
+//! Anything else that differs is an Skpwright gap and gets filed upstream,
 //! never papered over here (docs/agents/ROADMAP.md).
 
 use std::collections::BTreeMap;
@@ -552,11 +552,11 @@ fn every_2026_twin_ingests_to_the_same_document_as_its_2017_original() {
 #[test]
 fn a_2026_file_is_identified_and_read_as_the_zip_container() {
     let bytes = fixture("2026/box.skp");
-    let (version, _) = skp_import::openskp::header_info(&bytes).expect("a SketchUp header");
+    let (version, _) = skp_import::skpwright::header_info(&bytes).expect("a SketchUp header");
     assert!(version.starts_with("{26."), "got {version}");
     assert_eq!(
-        skp_import::openskp::detect_container(&bytes),
-        skp_import::openskp::Container::Zip
+        skp_import::skpwright::detect_container(&bytes),
+        skp_import::skpwright::Container::Zip
     );
     let out = import("2026/box.skp");
     let mut doc = Document::new();
@@ -572,7 +572,7 @@ fn scenes_and_the_saved_view_arrive_from_the_2026_container() {
     let mut doc = Document::new();
     doc.ingest(out.scene, out.textures_missing).unwrap();
     let cam = doc.camera_state().expect("saved view adopted");
-    let inch = skp_import::openskp::INCH;
+    let inch = skp_import::skpwright::INCH;
     assert!((cam.eye.x - 326.1769714 / inch).abs() < 1e-6);
     assert!((cam.eye.y - -250.1695099 / inch).abs() < 1e-6);
     assert!((cam.eye.z - 154.6123047 / inch).abs() < 1e-6);

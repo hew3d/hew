@@ -1,10 +1,10 @@
-# skp-import — SketchUp `.skp` -> Hew Objects, via the clean-room OpenSKP reader.
+# skp-import — SketchUp `.skp` -> Hew Objects, via the clean-room Skpwright reader.
 #
-# The `openskp` dependency is a crates.io semver pin on the hosted OpenSKP
-# releases (https://github.com/hew3d/openskp — clean-room reader for the
+# The `skpwright` dependency is a crates.io semver pin on the hosted Skpwright
+# releases (https://github.com/hew3d/skpwright — clean-room reader for the
 # SketchUp 2026 container and the 2017 format; local development clone
-# lives at ../openskp). Bump the pin
-# deliberately: import-quality gaps are fixed in OpenSKP first, then the pin
+# lives at ../skpwright). Bump the pin
+# deliberately: import-quality gaps are fixed in Skpwright first, then the pin
 # advances here.
 [package]
 name = "skp-import"
@@ -15,7 +15,7 @@ license.workspace = true
 [dependencies]
 kernel = { workspace = true }
 mesh-heal = { workspace = true }
-openskp = "0.5.0"
+skpwright = "0.5.0"
 # JSON text Hew stores for an attribute value SketchUp has no type for.
 serde_json = { workspace = true }
 

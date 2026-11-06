@@ -1781,6 +1781,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new()).expect("ingest a plain box");
         doc
@@ -1809,6 +1810,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new()).expect("ingest a painted box");
         let ids = doc.material_ids();
@@ -1842,6 +1844,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest a textured box");
@@ -1880,6 +1883,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new()).expect("ingest an open quad");
         doc
@@ -2029,6 +2033,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest a second, painted box");
@@ -2046,6 +2051,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest the component source box");
@@ -2719,6 +2725,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest an awkwardly named box");
@@ -2764,6 +2771,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest two colliding-sanitized boxes");
@@ -2891,6 +2899,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest a second, painted box");
@@ -2906,6 +2915,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest the component source box");

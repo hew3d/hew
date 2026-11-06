@@ -170,6 +170,7 @@ fn undo_of_merge_inner_face_restores_the_sub_faces_own_paint() {
         name: "Red".to_string(),
         color: kernel::Rgba8::rgb(220, 40, 40),
         texture: None,
+        pbr: None,
     });
 
     // A plain box to imprint on.
@@ -250,11 +251,13 @@ fn undo_of_merge_faces_restores_each_sides_own_paint() {
         name: "Red".to_string(),
         color: kernel::Rgba8::rgb(220, 40, 40),
         texture: None,
+        pbr: None,
     });
     let blue = doc.add_material(kernel::Material {
         name: "Blue".to_string(),
         color: kernel::Rgba8::rgb(40, 40, 220),
         texture: None,
+        pbr: None,
     });
 
     let s = doc.add_sketch(ground());

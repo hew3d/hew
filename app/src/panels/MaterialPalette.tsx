@@ -9,6 +9,9 @@
  *   - Opacity slider — adjusts the selected swatch's alpha (color or
  *     texture alike) → set_material_alpha(). Live while dragging, but only
  *     commits to the kernel (one undo step) on release.
+ *   - Metallic and Roughness sliders — the selected swatch's physically based
+ *     surface factors → set_material_pbr(). Same drag-then-commit shape as
+ *     opacity; the viewport applies them in place through `onAlphaCommitted`.
  *   - Per-swatch Rename (✎ button, or double-click the name — Finder-style,
  *     like TagsPanel) and Delete (× button; the caller decides whether to
  *     confirm, based on `material_usage`).
@@ -361,6 +364,21 @@ export function MaterialPalette({
   commitAlphaRef.current = commitAlpha
   useEffect(() => () => commitAlphaRef.current(), [])
 
+  // --- Surface (metallic / roughness) state ---
+  // Same shape as the opacity drag: values live here mid-gesture and commit
+  // as one undo step on release.
+  const [draggingSurface, setDraggingSurface] = useState<{ metallic: number; roughness: number } | null>(null)
+  useEffect(() => setDraggingSurface(null), [currentMaterialId])
+  function commitSurface() {
+    if (draggingSurface === null || selectedMaterialInfo === undefined) return
+    scene.set_material_pbr(currentMaterialId, draggingSurface.metallic, draggingSurface.roughness)
+    setDraggingSurface(null)
+    onAlphaCommitted()
+  }
+  const commitSurfaceRef = useRef(commitSurface)
+  commitSurfaceRef.current = commitSurface
+  useEffect(() => () => commitSurfaceRef.current(), [])
+
   // --- Add sub-pane collapse state ---
   // Independent per sub-pane, session-only (no persistence) — both start
   // collapsed so the pane opens compact and the user opts into either flow.
@@ -703,6 +721,57 @@ export function MaterialPalette({
           {alphaToDisplayPercent(draggingAlpha ?? selectedMaterialInfo?.a() ?? 255)}%
         </span>
       </div>
+
+      {/* Surface: metallic and roughness */}
+      {(['metallic', 'roughness'] as const).map((which) => {
+        const stored =
+          selectedMaterialInfo === undefined
+            ? which === 'metallic' ? 0 : 1
+            : which === 'metallic' ? selectedMaterialInfo.metallic() : selectedMaterialInfo.roughness()
+        const value = draggingSurface?.[which] ?? stored
+        const label = which === 'metallic' ? t`Metallic` : t`Roughness`
+        return (
+          <div key={which} style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+            <span style={{ width: '58px', color: 'var(--text-tertiary, #aaa)', fontSize: '10px' }}>{label}</span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              disabled={selectedMaterialInfo === undefined}
+              value={Math.round(value * 100)}
+              onChange={(e) => {
+                const v = Number(e.target.value) / 100
+                const cur = draggingSurface ?? {
+                  metallic: selectedMaterialInfo?.metallic() ?? 0,
+                  roughness: selectedMaterialInfo?.roughness() ?? 1,
+                }
+                setDraggingSurface({ ...cur, [which]: v })
+              }}
+              onPointerUp={commitSurface}
+              onKeyUp={commitSurface}
+              onBlur={commitSurface}
+              aria-label={
+                selectedMaterialInfo !== undefined
+                  ? which === 'metallic'
+                    ? t`Metallic for ${selectedName}`
+                    : t`Roughness for ${selectedName}`
+                  : which === 'metallic'
+                    ? t`Metallic (select a material swatch first)`
+                    : t`Roughness (select a material swatch first)`
+              }
+              style={{
+                flex: 1,
+                opacity: selectedMaterialInfo === undefined ? 0.4 : 1,
+                cursor: selectedMaterialInfo === undefined ? 'not-allowed' : 'pointer',
+              }}
+            />
+            <span style={{ width: '32px', textAlign: 'right', color: 'var(--text-tertiary, #aaa)' }}>
+              {Math.round(value * 100)}%
+            </span>
+          </div>
+        )
+      })}
 
       {/* Save to Library — real (non-sentinel) material only, and only
           with a working library backend (desktop, or a browser with

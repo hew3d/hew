@@ -934,8 +934,6 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "openskp"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d6da61e6de92133750297de27a9d9e3f31b21e6b11e0075bcc81dd22cda8214"
 dependencies = [
  "miniz_oxide 0.9.1",
 ]

@@ -21,6 +21,7 @@ fn scene(roots: Vec<ImportNode>, defs: Vec<DefRecipe>) -> ImportScene {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     }
 }
 

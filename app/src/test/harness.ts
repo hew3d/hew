@@ -369,7 +369,7 @@ export interface HewTestHarness {
    * Additive, exactly like File▸Import's kernel call. Test-only. */
   importStl(bytes: number[], unitScale: number): StlImportReportJs
   /** `Scene.skp_container(bytes)`: which `.skp` container the bytes are
-   * (`'skp2026'`, `'skp2017'`, or `''`). Reads nothing from the document. Test-only. */
+   * (`'skp2026'`, a stream release such as `'skp2017'` or `'skp8'`, or `''`). Reads nothing from the document. Test-only. */
   skpContainer(bytes: number[]): string
   // recording ( high + low, one artifact)
   startRecording(): void

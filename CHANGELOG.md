@@ -12,8 +12,24 @@ is not guaranteed: releases that change the `.hew` format say so under
 
 ### Added
 
+- **SketchUp files:** Hew opens and saves every SketchUp release from 3 to 8 and from 2013 to 2020 (the stream container, each saved in its own release's layout) as well as the 2021-and-later container. Save writes back in the format a file was opened in; Save As and Export offer the 2021-and-later format and an "Older SketchUp versions" group. A file is read by its content, not its header's version label. What an older release cannot hold is reported in a short list after the save.
+- **SketchUp files:** A 2021-and-later save is written by content at revision 17 or 18. The "Avoid features older SketchUp versions cannot open" option (`compat` on `hew.doc.save` and `hew.doc.export`) writes revision 17, leaving out layer folders, hatch patterns, PBR materials, environments, snaps, procedures, page extras and the coordinate system. Revision, not the header's version, decides what SketchUp opens: revision 18 and below open in SketchUp 2027, and SketchUp 2027 desktop refuses a hand-edited file of revision 19 or above (the web app accepted it; no real file above 18 exists). A `compat` save to a target other than the 2021-and-later container is refused with `format_mismatch`. SketchUp 2021 to 2025 are supported: they use the same container, and the files to hand them are the revision 17 ones.
+- **SketchUp files:** Layer folders map to tags and back. A scene's timing, a guide's dash and the section plane's look are kept.
+
 - **Drawing:** Tap Ctrl (⌘ on a Mac) on any draw tool to detach the shape from the face or drawing under it. Push/Pull turns a detached shape into a new object instead of changing the face. The cursor shows a small + while Detach is on, and the outline being drawn is orange when the shape will join the face and blue when it stays detached.
 - **Drawing:** Drawing now has two colors. Blue drawing belongs to no solid and pushes into a new object; orange drawing is part of a solid's face and pushes the solid itself. The outline you draw on the ground or in empty space is blue, and one you draw on a face is orange until you detach it. Push/Pull ghosts follow the same rule: orange where the solid grows, red where it loses material, and blue where a new object appears, including when you push a free shape inward. Offset shows its preview in the color of the shape it starts from.
+
+- **SketchUp files:** Guide lines keep their dash pattern (dashed, dotted, long dashes, dash-dot or any other), draw with it, and save back with it. A camera set to a photo (Match Photo) keeps its image width and ratio through a save back until you move the view. A file's section-cut outline color and width are drawn, and its section fill, active section color, guide color and guide visibility settings are kept. Hew's own format is now manifest format 24.
+
+- **SketchUp files:** A model's geo-location (its coordinate reference system: name, datum, projection, unit, and the origin's easting, northing and height) now opens with the file, shows at the top of Model Info, and is written back to a SketchUp 2021-and-later file with every field the file held. It is also stored in Hew's own format (manifest format 25) and can be read and set through `hew.geo.get` and `hew.geo.set`, one undo step each. Older SketchUp formats have no such record and leave it out.
+
+- **SketchUp files:** Physically based materials open with the file: a material's metallic and roughness settings are drawn in the viewport (approximated with a Phong shading model), along with its metallic, roughness, normal and occlusion maps, and a save back writes them with everything else the file held about the material (workflow, enabled maps, normal-map style). The material palette has Metallic and Roughness sliders, and `hew.material.set_pbr` sets them, one undo step each. They are also stored in Hew's own format (manifest format 26).
+
+- **SketchUp files:** Opening a file that holds things Hew keeps through a save back but cannot show or edit (hatch patterns, environments, snaps, procedures, layer line styles, the current style record, layer page behaviours) now says so in one line of the open report, with a count for each kind.
+
+### Changed
+
+- **Format:** The `.hew` format moves from manifest version 23 to 26 (guide dash and section look, geo-location, physically based materials). Hew opens every older file, but a file saved with these features needs this release or later.
 
 ### Fixed
 

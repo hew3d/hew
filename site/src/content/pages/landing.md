@@ -38,7 +38,7 @@ features:
     body: "Native apps for macOS (Apple Silicon and Intel), Windows, and Linux, with automatic updates. The web app at app.hew3d.com runs the same kernel (not a preview). Shop Mode brings the model to your phone. Self-host it in your homelab for ultimate privacy."
   - title: "Bring your SketchUp models"
     icon: file
-    body: "Hew opens and saves .skp files straight from current SketchUp (the 2026 format, web app included) as well as the 2017 format older models are in, plus COLLADA .dae files from SketchUp's exporter. It exports glTF, STL, 3MF, and USDZ. Its own .hew format is a documented zip of JSON and geometry buffers, so nothing you make is locked in."
+    body: "Hew opens and saves .skp files straight from current SketchUp (the 2026 format, web app included) as well as every older release (3 to 8 and 2013 to 2020) that older models are in, plus COLLADA .dae files from SketchUp's exporter. It exports glTF, STL, 3MF, and USDZ. Its own .hew format is a documented zip of JSON and geometry buffers, so nothing you make is locked in."
   - title: "Groups, components, tags, scenes"
     icon: split
     body: "The organizing vocabulary carries over: nested groups, components with a shared definition, tags that toggle visibility, scenes that save a view, an outliner. Plus materials and textures, dimensions and leader text, 3D text, printing to scale on paper or PDF, and more."
@@ -53,7 +53,7 @@ comparison:
     fix: "Hew is free on every desktop. Native macOS, Windows, and Linux apps plus a browser app that is the same modeler, not a preview of a paid one."
   - title: "Your models are tied to a subscription"
     pain: ".skp is a proprietary format. Stop paying — or lose the ability to run Make 2017 — and years of models become read-only at best."
-    fix: "Hew opens and saves .skp — the current 2026 format and the 2017 one — through a clean-room reader, and reads COLLADA from SketchUp's own exporter. Its own format is open and documented, and it exports glTF, STL, 3MF, and USDZ."
+    fix: "Hew opens and saves .skp — the current 2026 format and every older release from 3 to 8 and 2013 to 2020 — through a clean-room reader, and reads COLLADA from SketchUp's own exporter. Its own format is open and documented, and it exports glTF, STL, 3MF, and USDZ."
   - title: "Loose geometry welds to whatever it touches"
     pain: "Two pieces left ungrouped in SketchUp fuse the moment they meet, and a solid becomes a hollow shell the moment one face goes missing or the wrong line is deleted. Every expert learned 'Select All and Make Group' by reflex to avoid it."
     fix: "In Hew every push/pull is its own watertight object from the start. Objects never merge by accident, each one shows whether it is still solid, and combining them is a command you run on purpose."

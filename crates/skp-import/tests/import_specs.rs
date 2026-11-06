@@ -1,10 +1,10 @@
 //! Acceptance specs for `skp_import::import` (DEVELOPMENT.md rule 3).
 //!
-//! Fixtures under `tests/fixtures/` are frozen copies of OpenSKP's
+//! Fixtures under `tests/fixtures/` are frozen copies of Skpwright's
 //! self-authored corpus (`corpus/2017`, its 2026 twins under `2026/`, and
 //! one pre-2017 sample) — committed here so tests run anywhere the
 //! workspace builds. Ground truth and corpus stewardship stay upstream in
-//! OpenSKP; refresh fixtures when the rev pin advances. Expected numbers
+//! Skpwright; refresh fixtures when the rev pin advances. Expected numbers
 //! below were validated against the paired SketchUp `.dae` exports (see
 //! `differential.rs`); `containers.rs` holds every 2026 twin to its 2017
 //! original.
@@ -59,16 +59,121 @@ fn box_skp_probes_to_cube_topology() {
 
 // ── Version gate ─────────────────────────────────────────────────────────────
 
+/// `box.skp` (a {17.x} stream file) with its version's two digits replaced.
+fn stream_stamped(major: &str) -> Vec<u8> {
+    let mut b = fixture("box.skp");
+    assert_eq!(
+        b[36..44],
+        [0x7b, 0, 0x31, 0, 0x37, 0, 0x2e, 0],
+        "{{17. header"
+    );
+    b[38] = major.as_bytes()[0];
+    b[40] = major.as_bytes()[1];
+    b
+}
+
 #[test]
-fn pre_2017_files_are_refused_with_their_version() {
-    match skp_import::import(&fixture("box-v2013.skp")) {
-        Err(skp_import::SkpError::UnsupportedVersion { version }) => {
-            assert!(version.contains("13"), "got {version}");
+fn stream_files_of_a_release_the_reader_holds_are_imported_at_each_end() {
+    // Release 2013 (a real file) and the stamped boundaries of the held
+    // set: 2020 is the newest stream release, 2014 sits between.
+    let (report, _doc) = ingest("box-v2013.skp");
+    assert_eq!(report.objects_created, 1);
+    for major in ["14", "18", "20"] {
+        assert!(
+            skp_import::import(&stream_stamped(major)).is_ok(),
+            "stream stamped {{{major}.: imports"
+        );
+    }
+}
+
+#[test]
+fn stream_files_of_an_unlisted_release_are_read_with_a_warning() {
+    // 9 to 12 were never observed and 21 and later are not stream
+    // releases Skpwright lists: the body is a stream container, so Skpwright
+    // is asked and reads what it can; the warning says the release is
+    // unlisted. A listed release raises none.
+    for major in ["21", "25", "12", "10"] {
+        let s = skp_import::import(&stream_stamped(major))
+            .unwrap_or_else(|e| panic!("{major}: Skpwright reads the box: {e}"));
+        assert_eq!(s.scene.roots.len(), 1, "{major}");
+        assert!(
+            s.warnings
+                .first()
+                .is_some_and(|w| w.contains(&format!("{{{major}.")) && w.contains("does not list")),
+            "{major}: {:?}",
+            s.warnings
+        );
+    }
+    let listed = skp_import::import(&stream_stamped("19")).unwrap();
+    assert!(listed.warnings.is_empty(), "{:?}", listed.warnings);
+}
+
+#[test]
+fn stream_files_of_an_unlisted_release_are_refused_only_when_skpwright_refuses() {
+    // Cut short, the same stamped file gives Skpwright nothing to read
+    // (an error, or an empty model): refused with the file's version.
+    for major in ["21", "12"] {
+        for cut in [80usize, 1024] {
+            let mut b = stream_stamped(major);
+            b.truncate(cut);
+            match skp_import::import(&b) {
+                Err(skp_import::SkpError::UnsupportedVersion { version }) => {
+                    assert!(version.starts_with(&format!("{{{major}.")), "{version}");
+                }
+                other => panic!(
+                    "{major}@{cut}: expected UnsupportedVersion, ok={}",
+                    other.is_ok()
+                ),
+            }
         }
-        other => panic!(
-            "expected UnsupportedVersion, got {other:?}",
-            other = other.is_ok()
-        ),
+    }
+    // The same cut of a listed release is damage, not a version problem.
+    let mut b = fixture("box.skp");
+    b.truncate(1024);
+    assert!(matches!(
+        skp_import::import(&b),
+        Err(skp_import::SkpError::Damaged)
+    ));
+    let msg = skp_import::SkpError::UnsupportedVersion {
+        version: "{21.0.1}".into(),
+    }
+    .to_string();
+    assert!(
+        msg.contains("{21.0.1}") && !msg.contains("Version 2017"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn an_intact_header_of_an_undecoded_version_is_unsupported_not_damaged() {
+    // The 2026 box with everything after its header zeroed, stamped with
+    // each version: a decoded major is damage, any other is unsupported.
+    let zeroed = |major: &str| {
+        let mut cut = fixture("2026/box.skp");
+        cut.truncate(0x41 + 256);
+        cut[0x41..].fill(0);
+        assert_eq!(cut[0x24..0x2a], [0x7b, 0, 0x32, 0, 0x36, 0], "{{26 header");
+        cut[0x26] = major.as_bytes()[0];
+        cut[0x28] = major.as_bytes()[1];
+        cut
+    };
+    for major in ["21", "25"] {
+        assert!(
+            matches!(
+                skp_import::import(&zeroed(major)),
+                Err(skp_import::SkpError::UnsupportedVersion { .. })
+            ),
+            "{major}: unsupported"
+        );
+    }
+    for major in ["26", "27", "17"] {
+        assert!(
+            matches!(
+                skp_import::import(&zeroed(major)),
+                Err(skp_import::SkpError::Damaged)
+            ),
+            "{major}: damaged"
+        );
     }
 }
 
@@ -80,41 +185,6 @@ fn the_2026_container_is_imported_whatever_its_version_says() {
     assert_eq!(report.objects_created, 1);
     assert_eq!(report.watertight, 1);
     assert_eq!(doc.instance_ids().len(), 0);
-}
-
-#[test]
-fn unobserved_carchive_releases_are_refused_with_their_version() {
-    // No 2018–2025 file is in the corpus, so one is made from box.skp: the
-    // header's UTF-16 version string "{17.3.116}" becomes "{21.3.116}" and
-    // the CArchive stream behind it is untouched. The reader has decoded
-    // that layout for 2017 only; a stream claiming another release is
-    // refused with its version, and the copy points at both re-saves.
-    let mut bytes = fixture("box.skp");
-    let needle: Vec<u8> = "{17.".encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let patch: Vec<u8> = "{21.".encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let at = bytes
-        .windows(needle.len())
-        .position(|w| w == needle.as_slice())
-        .expect("the header carries the version string");
-    bytes[at..at + patch.len()].copy_from_slice(&patch);
-    match skp_import::import(&bytes) {
-        Err(skp_import::SkpError::UnsupportedVersion { version }) => {
-            assert_eq!(version, "{21.3.116}");
-            let msg = skp_import::SkpError::UnsupportedVersion { version }.to_string();
-            assert!(
-                msg.contains("Save As"),
-                "copy should suggest Save As: {msg}"
-            );
-            assert!(
-                msg.contains("current"),
-                "copy should suggest a re-save: {msg}"
-            );
-        }
-        other => panic!(
-            "expected UnsupportedVersion, got {other:?}",
-            other = other.is_ok()
-        ),
-    }
 }
 
 #[test]
@@ -484,7 +554,7 @@ fn house_ingests_with_shared_defs_and_loud_skips() {
     assert_eq!(report.skipped.len(), 0);
     // Nothing missing: the one material without inline image bytes
     // ("[Wood Floor Light]1") is a shared-texture record whose back-ref
-    // OpenSKP (0.2.0) resolves to the owning material's bytes.
+    // Skpwright (0.2.0) resolves to the owning material's bytes.
     assert_eq!(report.textures_missing, Vec::<String>::new());
 }
 
@@ -525,7 +595,7 @@ fn shared_texture_and_textured_opacity_survive_import() {
     };
 
     // "[Wood Floor Light]1" is a shared-texture record: a back-reference to
-    // "[Wood Floor Light]"'s image with no inline bytes of its own. OpenSKP
+    // "[Wood Floor Light]"'s image with no inline bytes of its own. Skpwright
     // 0.2.0 resolves the back-ref, so the sharing material imports textured
     // with the owning material's exact bytes instead of falling back to its
     // average color (and nothing lands in textures_missing).
@@ -684,7 +754,7 @@ fn scenes_arrive_with_cameras_hidden_tags_and_the_saved_view() {
     let cam = doc
         .camera_state()
         .expect("saved view adopted into the empty document");
-    let inch = openskp::INCH;
+    let inch = skpwright::INCH;
     assert!((cam.eye.x - 326.1769714 / inch).abs() < 1e-6);
     assert!((cam.eye.y - -250.1695099 / inch).abs() < 1e-6);
     assert!((cam.eye.z - 154.6123047 / inch).abs() < 1e-6);
@@ -733,13 +803,43 @@ fn scenes_arrive_with_cameras_hidden_tags_and_the_saved_view() {
 }
 
 #[test]
+fn a_scene_that_did_not_save_its_hidden_sets_does_not_claim_them() {
+    // A page without the hidden-geometry / visible-layers properties leaves
+    // visibility alone when recalled: its sets arrive absent, not empty.
+    use skp_import::skpwright::SceneProperties;
+    let mut m = skp_import::skpwright::Model::parse(&fixture("two-scenes.skp")).unwrap();
+    for s in &mut m.scenes {
+        s.saved = SceneProperties(
+            s.saved.0
+                & !(SceneProperties::HIDDEN_GEOMETRY
+                    | SceneProperties::HIDDEN_GEOMETRY_2
+                    | SceneProperties::HIDDEN_OBJECTS
+                    | SceneProperties::VISIBLE_LAYERS),
+        );
+        s.hidden_entities.clear();
+        s.hidden_layers.clear();
+    }
+    let bytes = skp_import::skpwright::StreamDocument::from_model(&m, skpwright::Release::R2017)
+        .unwrap()
+        .write();
+    let out = skp_import::import(&bytes).unwrap();
+    let mut doc = Document::new();
+    doc.ingest(out.scene, out.textures_missing).unwrap();
+    assert_eq!(doc.scenes().len(), 2);
+    for s in doc.scenes() {
+        assert_eq!(s.hidden_nodes, None, "{}", s.name);
+        assert_eq!(s.hidden_tags, None, "{}", s.name);
+    }
+}
+
+#[test]
 fn geometry_hew_built_reads_as_written_and_a_files_own_is_repaired() {
     // Two triangles sharing an edge, wound against each other. A file's own
     // mesh like that is repaired on open (one face turned over to agree);
     // marked as built by Hew (`loose_built`), it reads as written — both
     // faces turned as they are, split where they disagree.
-    use skp_import::openskp::{Attributes, Dictionary, Mesh, MeshEdge, MeshFace, Owner, Value};
-    let mut m = skp_import::openskp::Model::parse(&fixture("box.skp")).unwrap();
+    use skp_import::skpwright::{Attributes, Dictionary, Mesh, MeshEdge, MeshFace, Owner, Value};
+    let mut m = skp_import::skpwright::Model::parse(&fixture("box.skp")).unwrap();
     let run = m
         .geometry
         .iter()
@@ -767,8 +867,8 @@ fn geometry_hew_built_reads_as_written_and_a_files_own_is_repaired() {
         ..Default::default()
     };
     m.geometry[run].curves.clear();
-    let normals = |m: &skp_import::openskp::Model| -> Vec<i64> {
-        let bytes = skp_import::openskp::Document17::from_model(m)
+    let normals = |m: &skp_import::skpwright::Model| -> Vec<i64> {
+        let bytes = skp_import::skpwright::StreamDocument::from_model(m, skpwright::Release::R2017)
             .unwrap()
             .write();
         let out = skp_import::import(&bytes).unwrap();
@@ -832,7 +932,7 @@ fn the_house_fixtures_open_objects_read_as_surfaces_and_cappable_boxes() {
 #[test]
 fn sketchup_dimensions_open_on_edge_midpoints_arc_centers_and_in_plane() {
     use kernel::Annotation;
-    use openskp::{Anchor, Dimension, Model};
+    use skpwright::{Anchor, Dimension, Model};
     // cylinder.skp: arcs among the model's own entities. Four dimensions
     // SketchUp can draw on it, written beside it: arc center to a vertex
     // along x (frame 1), an edge's midpoint to a point along n × x (frame
@@ -902,7 +1002,9 @@ fn sketchup_dimensions_open_on_edge_midpoints_arc_centers_and_in_plane() {
         dim(crossing, free([corner[0] + 1.0, corner[1], corner[2]]), 1),
     ];
     m.texts.clear();
-    let bytes = openskp::Document17::from_model(&m).unwrap().write();
+    let bytes = skpwright::StreamDocument::from_model(&m, skpwright::Release::R2017)
+        .unwrap()
+        .write();
 
     let out = skp_import::import(&bytes).unwrap();
     let dims: Vec<_> = out
@@ -948,7 +1050,7 @@ fn sketchup_dimensions_open_on_edge_midpoints_arc_centers_and_in_plane() {
 
 #[test]
 fn a_dimension_on_one_placement_of_a_component_opens_on_that_placement() {
-    // dim-second-instance.skp (OpenSKP's anchors pair): two placements of
+    // dim-second-instance.skp (Skpwright's anchors pair): two placements of
     // one box component, and a dimension SketchUp's Dimension tool drew
     // between two top front corners of the second, 38.75 in apart.
     let out = skp_import::import(&fixture("dim-second-instance.skp")).unwrap();

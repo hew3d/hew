@@ -915,8 +915,8 @@ below.
 - COLLADA (`.dae`) import from SketchUp's own export path, with a healing
   pass that repairs common non-manifold export artifacts
 - Direct SketchUp (`.skp`) import — the 2026 container every current
-  SketchUp saves, and the 2017 format of older files — built on
-  [OpenSKP](https://github.com/hew3d/openskp), a clean-room reader with no
+  SketchUp saves, and every older release, 3 to 8 and 2013 to 2020 — built on
+  [Skpwright](https://github.com/hew3d/skpwright), a clean-room reader with no
   Trimble SDK code anywhere in its lineage — names, materials, components,
   tags, guides, scenes, and the saved view all come across natively, and
   identically from either container (every corpus file's 2026 save is
@@ -955,9 +955,9 @@ below.
   Each was checked against SketchUp itself on a production house model
   with 32 scenes
 - SketchUp (`.skp`) as a working format (`crates/skp-export`, on
-  OpenSKP's writers): File ▸ Open makes a `.skp` the document's own file,
+  Skpwright's writers): File ▸ Open makes a `.skp` the document's own file,
   Save writes it back in its own container, and Save As and Export write
-  `.hew`, the 2026 container, or the 2017 format SketchUp Make 2017 opens.
+  `.hew`, the 2021-and-later container (optionally at revision 17 for older apps), or any release from 3 to 8 and 2013 to 2020.
   Every Object becomes a SketchUp group of its own (solids stay
   discrete), merge groups and components keep their structure, sketches
   become loose geometry, curved walls are soft and smooth, circles are
@@ -1033,7 +1033,7 @@ below.
 | `.hew` (native) | yes | yes |
 | glTF / GLB | yes | yes |
 | COLLADA (`.dae`) | yes | — |
-| SketchUp (`.skp`, 2026 and 2017 formats) | yes | yes |
+| SketchUp (`.skp`, 2026 format and releases 3 to 8 and 2013 to 2020) | yes | yes |
 | STL | yes | yes |
 | 3MF | — | yes |
 | USDZ | — | yes |
@@ -1351,7 +1351,7 @@ below.
   SketchUp-native loose geometry opens as a healed mesh Object rather
   than as sketches; the `.skp` file association is macOS-only (the
   Windows installer would take the default from SketchUp); files from
-  SketchUp 2016 and earlier do not open (OpenSKP reads their headers, not
+  SketchUp 2016 and earlier do not open (Skpwright reads their headers, not
   their geometry, so Hew asks for a re-save from a current SketchUp)
 - **Signed Windows installers** — macOS builds are signed and notarized,
   auto-update and the hosted web build are shipped; Windows executables

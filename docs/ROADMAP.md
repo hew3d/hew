@@ -71,7 +71,7 @@ File ▸ Revert to Saved goes back to the last saved state.
 | Format | Import | Export |
 |---|---|---|
 | `.hew` (native) | yes | yes |
-| SketchUp (`.skp`, 2026 and 2017 formats) | yes | yes |
+| SketchUp (`.skp`, 2026 format and releases 3 to 8 and 2013 to 2020) | yes | yes |
 | glTF / GLB | yes | yes |
 | COLLADA (`.dae`) | yes | — |
 | STL | yes | yes |

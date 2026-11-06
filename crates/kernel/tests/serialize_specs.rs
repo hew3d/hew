@@ -401,6 +401,8 @@ fn a_camera_state() -> CameraState {
         eye: Point3::new(1.0, 2.0, 3.0),
         target: Point3::new(-1.0, 0.5, 0.0),
         up: Vec3::new(0.0, 0.0, 1.0),
+        image_width: None,
+        aspect_ratio: None,
     }
 }
 
@@ -818,6 +820,7 @@ fn tags_round_trip_through_save_load() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (_, _) = doc.ingest(scene, vec![]).unwrap();
 
@@ -899,6 +902,7 @@ fn tag_metadata_round_trips_through_save_load() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, vec![]).unwrap();
     assert!(doc.tag_hidden(&mock));
@@ -946,6 +950,7 @@ fn import_tag_registration_is_undone_and_never_clobbers() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, vec![]).unwrap();
     assert!(
@@ -1012,6 +1017,7 @@ fn import_hidden_nodes_arrive_user_hidden() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (report, _) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.objects_created, 1, "hidden content still imports");
@@ -2043,8 +2049,8 @@ fn state_hash_does_not_follow_the_release_version() {
     // Pinned from before the manifest named its release: the hashes frozen
     // into replay fixtures and bug-report recordings must stay valid across
     // release version bumps. The hash does cover the manifest's
-    // `format_version`, so a format bump moves it (v23: re-pinned).
-    assert_eq!(Document::new().state_hash(), 2_613_692_231_549_919_398);
+    // `format_version`, so a format bump moves it (v26: re-pinned).
+    assert_eq!(Document::new().state_hash(), 15_623_416_507_651_097_505);
 }
 
 #[test]
@@ -2688,6 +2694,7 @@ fn annotation_tags_are_gated_at_v18() {
         scenes: Vec::new(),
         section: None,
         view_style: None,
+        geo: None,
         extra: ImportSceneExtra {
             annotations: vec![text.clone()],
             annotation_tags: tags,
@@ -2713,7 +2720,7 @@ fn annotation_tags_are_gated_at_v18() {
         .ingest(scene(vec![vec![vec!["Notes".into()]]]), Vec::new())
         .unwrap();
     let bytes = tagged.save();
-    assert_eq!(version(&bytes), 23);
+    assert_eq!(version(&bytes), 26);
     assert!(Document::load(&bytes).is_ok());
     let smuggled = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(17));
     assert!(Document::load(&smuggled).is_err());
@@ -2743,6 +2750,7 @@ fn sketch_tags_are_gated_at_v20() {
         scenes: Vec::new(),
         section: None,
         view_style: None,
+        geo: None,
         extra: ImportSceneExtra {
             sketches: vec![ImportSketch {
                 plane: ground,
@@ -2774,7 +2782,7 @@ fn sketch_tags_are_gated_at_v20() {
         .ingest(scene(vec![vec!["Site".into()]]), Vec::new())
         .unwrap();
     let bytes = tagged.save();
-    assert_eq!(version(&bytes), 23);
+    assert_eq!(version(&bytes), 26);
     let loaded = Document::load(&bytes).unwrap();
     let s = loaded.sketch_ids()[0];
     assert_eq!(loaded.sketch_tags(s), [vec!["Site".to_string()]]);
@@ -2933,6 +2941,7 @@ fn faceless_loops_and_guide_tags_round_trip_and_are_gated_at_v21() {
 /// A scene of one guide segment, one ray and one whole line.
 fn guide_span_scene() -> ImportScene {
     let line = |span: kernel::GuideSpan| kernel::ImportGuide::Line {
+        dash: kernel::GuideDash::default(),
         origin: Point3::new(1.0, 2.0, 0.0),
         direction: kernel::Vec3::new(0.0, 2.0, 0.0),
         span,
@@ -2959,6 +2968,7 @@ fn guide_span_scene() -> ImportScene {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     }
 }
 
@@ -2983,7 +2993,7 @@ fn guide_stretches_round_trip_and_are_gated_at_v22() {
     assert_eq!(before.len(), 3);
     let bytes = doc.save();
     let m = manifest_json(&bytes);
-    assert_eq!(m["format_version"], 23);
+    assert_eq!(m["format_version"], 26);
     let written: Vec<(serde_json::Value, serde_json::Value)> = m["guides"]
         .as_array()
         .unwrap()
@@ -3041,12 +3051,263 @@ fn guide_stretches_round_trip_and_are_gated_at_v22() {
     );
 }
 
+// ------------------------------------------- camera image width and ratio (v24)
+
+/// A Match Photo camera's image width and ratio survive save and load,
+/// write no key when unset, and are version-gated and checked at load.
+#[test]
+fn camera_image_width_and_ratio_round_trip_and_are_gated_at_v24() {
+    let mut doc = Document::new();
+    let photo = CameraState {
+        image_width: Some(25.4),
+        aspect_ratio: Some(1.5),
+        ..a_camera_state()
+    };
+    doc.set_camera_state(photo);
+    let bytes = doc.save();
+    let m = manifest_json(&bytes);
+    assert_eq!(m["camera"]["image_width"], 25.4);
+    assert_eq!(m["camera"]["aspect_ratio"], 1.5);
+    assert_eq!(
+        Document::load(&bytes).unwrap().camera_state(),
+        Some(photo),
+        "both come back exactly"
+    );
+
+    let mut plain = Document::new();
+    plain.set_camera_state(a_camera_state());
+    let m = manifest_json(&plain.save());
+    assert!(m["camera"].get("image_width").is_none());
+    assert!(m["camera"].get("aspect_ratio").is_none());
+
+    let refused = |patch: &dyn Fn(&mut serde_json::Value)| {
+        matches!(
+            Document::load(&patch_manifest(&bytes, |m| patch(m))),
+            Err(kernel::LoadError::MalformedManifest { .. })
+        )
+    };
+    assert!(refused(&|m| m["format_version"] = serde_json::json!(23)));
+    assert!(refused(
+        &|m| m["camera"]["image_width"] = serde_json::json!(0.0)
+    ));
+    assert!(refused(
+        &|m| m["camera"]["aspect_ratio"] = serde_json::json!(-1.0)
+    ));
+}
+
+/// A camera recorded at a save that looks the way the held one does keeps
+/// the held image width and ratio; one that moved drops them.
+#[test]
+fn a_camera_that_has_not_moved_keeps_its_image_width_and_ratio() {
+    let mut doc = Document::new();
+    let photo = CameraState {
+        image_width: Some(25.4),
+        aspect_ratio: Some(1.5),
+        ..a_camera_state()
+    };
+    doc.set_camera_state(photo);
+    // The app records its view, which holds neither.
+    doc.set_camera_state(a_camera_state());
+    assert_eq!(doc.camera_state(), Some(photo), "an untouched view");
+    // Moved: replaced.
+    let moved = CameraState {
+        eye: Point3::new(1.0, 2.0, 3.5),
+        ..a_camera_state()
+    };
+    doc.set_camera_state(moved);
+    assert_eq!(doc.camera_state(), Some(moved));
+    assert_eq!(moved.image_width, None);
+    // And a camera that names its own width keeps it.
+    doc.set_camera_state(photo);
+    assert_eq!(doc.camera_state(), Some(photo));
+}
+
+// ------------------------------------- section and guide display settings (v24)
+
+/// A style's section cut and guide settings survive save and load, in the
+/// document's style and a Scene's, write no key when unset, and are gated
+/// at v24.
+#[test]
+fn view_style_section_and_guide_settings_round_trip_and_are_gated_at_v24() {
+    let styled = kernel::ViewStyle {
+        background: [1, 2, 3],
+        sky: None,
+        ground: None,
+        axes: true,
+        section: kernel::SectionLook {
+            cut_color: Some([200, 0, 10]),
+            cut_width: Some(5),
+            fill: Some(true),
+            fill_color: Some([4, 5, 6]),
+            active_color: Some([0, 200, 0]),
+        },
+        guides_color: Some([0, 0, 255]),
+        guides_hidden: Some(true),
+    };
+    let mut doc = Document::new();
+    doc.set_view_style(Some(styled));
+    let bytes = doc.save();
+    let m = manifest_json(&bytes);
+    assert_eq!(
+        m["view_style"]["section_cut_color"],
+        serde_json::json!([200, 0, 10])
+    );
+    assert_eq!(m["view_style"]["section_cut_width"], 5);
+    assert_eq!(m["view_style"]["guides_hidden"], true);
+    assert_eq!(Document::load(&bytes).unwrap().view_style(), Some(styled));
+
+    // A Scene that captures the look keeps it too.
+    let sid = doc
+        .add_scene(
+            None,
+            kernel::SceneProps::ALL,
+            Some(a_camera_state()),
+            Some(kernel::DisplayState {
+                grid: true,
+                axes: true,
+                guides: true,
+            }),
+            None,
+        )
+        .unwrap();
+    assert_eq!(doc.scene(sid).unwrap().view_style, Some(styled));
+    let loaded = Document::load(&doc.save()).unwrap();
+    assert_eq!(loaded.scenes()[0].view_style, Some(styled));
+
+    // Unset writes no key.
+    let plain = kernel::ViewStyle {
+        section: Default::default(),
+        guides_color: None,
+        guides_hidden: None,
+        ..styled
+    };
+    let mut doc2 = Document::new();
+    doc2.set_view_style(Some(plain));
+    let m = manifest_json(&doc2.save());
+    for key in [
+        "section_cut_color",
+        "section_cut_width",
+        "section_fill",
+        "section_fill_color",
+        "active_section_color",
+        "guides_color",
+        "guides_hidden",
+    ] {
+        assert!(
+            m["view_style"].get(key).is_none(),
+            "{key} is omitted when unset"
+        );
+    }
+
+    let refused = |patch: &dyn Fn(&mut serde_json::Value)| {
+        matches!(
+            Document::load(&patch_manifest(&bytes, |m| patch(m))),
+            Err(kernel::LoadError::MalformedManifest { .. })
+        )
+    };
+    assert!(refused(&|m| m["format_version"] = serde_json::json!(23)));
+}
+
+// ------------------------------------------------------ guide dashes (v24)
+
+/// A scene of guide lines with each of the named stipple masks.
+fn guide_dash_scene(masks: &[u16]) -> ImportScene {
+    let mut scene = guide_span_scene();
+    scene.guides = masks
+        .iter()
+        .enumerate()
+        .map(|(i, &m)| kernel::ImportGuide::Line {
+            dash: kernel::GuideDash(m),
+            origin: Point3::new(i as f64, 0.0, 0.0),
+            direction: kernel::Vec3::new(0.0, 1.0, 0.0),
+            span: kernel::GuideSpan::INFINITE,
+            tags: Vec::new(),
+        })
+        .collect();
+    scene
+}
+
+/// A guide line's dash, any 16-bit mask, survives save and load; the
+/// default dash writes no key; a v23 file carrying one, or a point with
+/// one, is malformed.
+#[test]
+fn guide_dashes_round_trip_and_are_gated_at_v24() {
+    let masks = [0xFFFF, 0x3333, 0x8888, 0xF0F0, 0x1C47, 0x0001];
+    let mut doc = Document::new();
+    doc.ingest(guide_dash_scene(&masks), Vec::new()).unwrap();
+    let dashes = |d: &Document| -> Vec<u16> {
+        d.guide_ids()
+            .iter()
+            .map(|&g| d.guide_dash(g).mask())
+            .collect()
+    };
+    assert_eq!(dashes(&doc), masks);
+    let bytes = doc.save();
+    let m = manifest_json(&bytes);
+    let written: Vec<serde_json::Value> = m["guides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["dash"].clone())
+        .collect();
+    assert_eq!(
+        written[1],
+        serde_json::Value::Null,
+        "the default is omitted"
+    );
+    assert_eq!(written[4], serde_json::json!(0x1C47));
+    let loaded = Document::load(&bytes).expect("load");
+    assert_eq!(dashes(&loaded), masks);
+    assert_eq!(loaded.state_hash(), doc.state_hash());
+
+    let refused = |patch: &dyn Fn(&mut serde_json::Value)| {
+        matches!(
+            Document::load(&patch_manifest(&bytes, |m| patch(m))),
+            Err(kernel::LoadError::MalformedManifest { .. })
+        )
+    };
+    assert!(refused(&|m| m["format_version"] = serde_json::json!(23)));
+    let mut with_point = Document::new();
+    with_point.add_guide_point(Point3::ORIGIN).unwrap();
+    let smuggled = patch_manifest(&with_point.save(), |m| {
+        m["guides"][0]["dash"] = serde_json::json!(0x8888)
+    });
+    assert!(matches!(
+        Document::load(&smuggled),
+        Err(kernel::LoadError::MalformedManifest { .. })
+    ));
+    // A file from before v24 loads with the default dash.
+    let mut plain = Document::new();
+    plain
+        .add_guide_line(Point3::ORIGIN, Vec3::new(1.0, 0.0, 0.0))
+        .unwrap();
+    let old = patch_manifest(&plain.save(), |m| {
+        m["format_version"] = serde_json::json!(23)
+    });
+    let old = Document::load(&old).expect("v23 loads");
+    assert_eq!(dashes(&old), vec![0x3333]);
+}
+
+/// A copy of a guide keeps its dash.
+#[test]
+fn a_duplicated_guide_keeps_its_dash() {
+    let mut doc = Document::new();
+    doc.ingest(guide_dash_scene(&[0x1C47]), Vec::new()).unwrap();
+    let g = doc.guide_ids()[0];
+    let step = kernel::Transform::translation(kernel::Vec3::new(1.0, 0.0, 0.0));
+    let (copies, _) = doc
+        .duplicate_guide_array(g, &step, std::num::NonZeroU32::new(2).unwrap())
+        .unwrap();
+    assert!(copies.iter().all(|&c| doc.guide_dash(c).mask() == 0x1C47));
+}
+
 /// An import's guide of no length is skipped and reported, and a
 /// rescale stretches a guide's span with it.
 #[test]
 fn a_guide_of_no_length_is_skipped_and_a_rescale_stretches_the_span() {
     let mut scene = guide_span_scene();
     scene.guides.push(kernel::ImportGuide::Line {
+        dash: kernel::GuideDash::default(),
         origin: Point3::ORIGIN,
         direction: kernel::Vec3::new(1.0, 0.0, 0.0),
         span: kernel::GuideSpan {
@@ -3178,7 +3439,7 @@ fn detached_sketches_round_trip_at_v23() {
     let s = s.unwrap();
     let bytes = doc.save();
     let m = manifest_json(&bytes);
-    assert_eq!(m["format_version"], 23);
+    assert_eq!(m["format_version"], 26);
     let flagged: Vec<&serde_json::Value> = m["sketches"]
         .as_array()
         .unwrap()
@@ -3235,7 +3496,7 @@ fn a_document_without_detached_sketches_is_v22_content() {
     let bytes = doc.save();
     let text = manifest_text(&bytes);
     assert!(!text.contains("\"detached\""), "no detached key is written");
-    const V23: &str = "\"format_version\": 23,";
+    const V23: &str = "\"format_version\": 26,";
     assert_eq!(text.matches(V23).count(), 1);
     let v22 = edit_manifest_text(&bytes, |t| t.replacen(V23, "\"format_version\": 22,", 1));
     let loaded = Document::load(&v22).expect("the same content declared v22 loads");
@@ -3283,4 +3544,86 @@ fn detached_with_owner_object_is_rejected() {
         }
         other => panic!("detached + owner_object must be malformed: {other:?}"),
     }
+}
+
+// ------------------------------------------------ physically based materials (v26)
+
+fn pbr_doc() -> (Document, Vec<u8>) {
+    let map = |b: &[u8]| kernel::PbrMap {
+        image: b.to_vec(),
+        format: kernel::ImageFormat::Png,
+    };
+    let mut doc = Document::new();
+    let mut steel = kernel::Material::solid("Steel", kernel::Rgba8::rgb(180, 180, 190));
+    steel.pbr = Some(kernel::Pbr {
+        metallic: 0.9,
+        roughness: 0.25,
+        normal_scale: 0.6,
+        occlusion_strength: 0.4,
+        metallic_map: Some(map(b"metal-bytes")),
+        roughness_map: None,
+        normal_map: Some(map(b"normal-bytes")),
+        occlusion_map: Some(map(b"ao-bytes")),
+    });
+    doc.add_material(steel);
+    doc.add_material(kernel::Material::solid(
+        "Plain",
+        kernel::Rgba8::rgb(1, 2, 3),
+    ));
+    let bytes = doc.save();
+    (doc, bytes)
+}
+
+#[test]
+fn pbr_round_trips_with_its_maps_and_a_plain_material_writes_none() {
+    let (doc, bytes) = pbr_doc();
+    let m = manifest_json(&bytes);
+    assert_eq!(m["format_version"], 26);
+    assert!(m["materials"][0]["pbr"].is_object());
+    assert!(m["materials"][1].get("pbr").is_none(), "plain: omitted");
+    let loaded = Document::load(&bytes).unwrap();
+    for name in ["Steel", "Plain"] {
+        let find = |d: &Document| {
+            d.material_ids()
+                .into_iter()
+                .map(|id| d.material(id).unwrap().clone())
+                .find(|m| m.name == name)
+                .unwrap()
+        };
+        assert_eq!(find(&loaded), find(&doc), "{name}");
+    }
+}
+
+#[test]
+fn pbr_is_gated_at_v26_and_range_checked() {
+    let (_, bytes) = pbr_doc();
+    let old = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(25));
+    assert!(Document::load(&old).is_err(), "a v25 file cannot hold pbr");
+    let bad = patch_manifest(&bytes, |m| {
+        m["materials"][0]["pbr"]["roughness"] = serde_json::json!(2.0)
+    });
+    assert!(Document::load(&bad).is_err(), "out of range is rejected");
+    let unknown = patch_manifest(&bytes, |m| {
+        m["materials"][0]["pbr"]["sheen"] = serde_json::json!(1.0)
+    });
+    assert!(Document::load(&unknown).is_err(), "unknown key is rejected");
+}
+
+#[test]
+fn set_material_pbr_is_one_undo_step_and_plain_values_clear_it() {
+    let mut doc = Document::new();
+    let id = doc.add_material(kernel::Material::solid("M", kernel::Rgba8::rgb(9, 9, 9)));
+    let before = doc.save();
+    doc.set_material_pbr(id, 0.5, 0.5).unwrap();
+    assert_eq!(
+        doc.material(id).unwrap().pbr.as_ref().unwrap().metallic,
+        0.5
+    );
+    assert!(doc.set_material_pbr(id, 1.5, 0.5).is_err());
+    doc.undo().unwrap();
+    assert!(doc.material(id).unwrap().pbr.is_none());
+    assert_eq!(doc.save(), before);
+    doc.redo().unwrap();
+    doc.set_material_pbr(id, 0.0, 1.0).unwrap();
+    assert!(doc.material(id).unwrap().pbr.is_none(), "plain clears it");
 }

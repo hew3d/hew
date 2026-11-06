@@ -94,7 +94,7 @@ crates/mesh-heal/     healing passes for imported foreign meshes
 crates/dae-import/    COLLADA .dae -> Objects/Instances
 crates/gltf-import/   glTF -> Objects/Instances
 crates/skp-import/    SketchUp .skp -> Objects/Instances, built on the
-                      clean-room OpenSKP reader (see rule 7)
+                      clean-room Skpwright reader (see rule 7)
 crates/stl-import/    STL (binary + ASCII) -> Objects; hand-written parser,
                       no external STL dependency
 crates/image-import/  PNG/JPEG -> a placed picture (one painted face in a
@@ -133,7 +133,7 @@ Hew's Objects/Instances, then hand off to the kernel:
   can export to, via a vendored `dae-parser`.
 - `gltf-import` reads glTF 2.0 (`.gltf`/`.glb`).
 - `skp-import` reads SketchUp's native `.skp` format directly, using
-  [OpenSKP](https://github.com/hew3d/openskp) (crates.io: `openskp`), a
+  [Skpwright](https://github.com/hew3d/skpwright) (crates.io: `skpwright`), a
   clean-room implementation with no SketchUp SDK in its history (rule 7).
 - `stl-import` reads STL (binary and ASCII, auto-detected), the format the
   maker community lives in. Hand-written on `std` — no external STL crate —
@@ -188,8 +188,8 @@ this list.
 7. **Licensing wall.** Nothing derived from the SketchUp SDK — headers,
    constants, or format knowledge obtained under Trimble's license — enters
    this repository or any part of its dependency chain. That admissibility
-   test is the rule, full stop. [OpenSKP](https://github.com/hew3d/openskp)
-   (crates.io: `openskp`), the reader behind `crates/skp-import`, is
+   test is the rule, full stop. [Skpwright](https://github.com/hew3d/skpwright)
+   (crates.io: `skpwright`), the reader behind `crates/skp-import`, is
    derived solely from self-authored test corpora, their own COLLADA
    exports, and public documentation of the MFC `CArchive` serialization
    convention — no SketchUp SDK anywhere in its history. It passes this

@@ -64,8 +64,10 @@ planned.
 - Materials with texturing, per-face painting, and translucency
 - Tags, an object tree, and per-Object solid/watertight reporting
 - SketchUp 2017 keyboard shortcuts
-- Open and save SketchUp `.skp` files as documents (the current 2026
-  format and the 2017 one), with names, hierarchy, materials, tags,
+- Open and save SketchUp `.skp` files as documents: releases 3 to 8 and
+  2013 to 2020 open and save back in their own release, and the 2026
+  container (what SketchUp 2021 and later save) opens and saves back as
+  that container, with names, hierarchy, materials, tags,
   guides, and scenes carried both ways; Model Health and Make Solid
   show and close what an imported model has that isn't solid
 - Import: COLLADA `.dae`, glTF, STL, and `.skp` into an open document
@@ -152,7 +154,7 @@ holds the exhaustive references AI agents work from.
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Note
 the project's licensing wall: nothing derived from the SketchUp SDK may
 enter this repository or its dependency chain. SketchUp import is powered
-by [OpenSKP](https://github.com/hew3d/openskp), a clean-room reader.
+by [Skpwright](https://github.com/hew3d/skpwright), a clean-room reader.
 
 ## License
 

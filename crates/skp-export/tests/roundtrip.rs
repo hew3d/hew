@@ -53,15 +53,15 @@ fn round_trip(label: &str, source: &Document, target: Target) -> Result<(), Stri
     let written =
         export(source, target, WriteEnv::system()).map_err(|e| format!("{label}: {e}"))?;
     let model =
-        openskp::Model::parse(&written.bytes).map_err(|e| format!("{label}: reread: {e:?}"))?;
+        skpwright::Model::parse(&written.bytes).map_err(|e| format!("{label}: reread: {e:?}"))?;
     let desync: Vec<_> = model.diagnostics.iter().filter(|d| d.is_desync()).collect();
     if !desync.is_empty() {
         return Err(format!(
             "{label}: written file reads with desyncs: {desync:?}"
         ));
     }
-    if target == Target::Skp2017 {
-        openskp::verify(&written.bytes).map_err(|e| format!("{label}: 2017 grammar: {e:?}"))?;
+    if target != Target::Skp2026 {
+        skpwright::verify(&written.bytes).map_err(|e| format!("{label}: 2017 grammar: {e:?}"))?;
     }
     let back = import(&written.bytes);
     let a = digest(source);
@@ -112,7 +112,7 @@ fn every_fixture_survives_hew_to_skp_to_hew() {
         source
             .ingest(out.scene, out.textures_missing)
             .expect("ingests");
-        for target in [Target::Skp2026, Target::Skp2017] {
+        for target in common::all_targets() {
             n += 1;
             if let Err(e) = round_trip(&label, &source, target) {
                 failures.push(e);
@@ -124,7 +124,7 @@ fn every_fixture_survives_hew_to_skp_to_hew() {
             .unwrap(),
     )
     .unwrap();
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         n += 1;
         if let Err(e) = round_trip("native.hew", &native, target) {
             failures.push(e);
@@ -154,7 +154,7 @@ fn every_fixture_survives_hew_to_skp_to_hew() {
 #[test]
 fn an_empty_document_writes_to_both_containers() {
     let doc = Document::new();
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         round_trip("empty", &doc, target).unwrap();
     }
 }
@@ -168,11 +168,11 @@ fn a_face_is_written_with_its_back_paint() {
     // and a closed solid's face, whose inside is never seen, on its front
     // only.
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../skp-import/tests/fixtures");
-    let names = |m: &openskp::Model| -> Vec<(Option<String>, Option<String>)> {
+    let names = |m: &skpwright::Model| -> Vec<(Option<String>, Option<String>)> {
         let name = |s: Option<u16>| {
             s.and_then(|s| m.material_of(s)).map(|x| match x {
-                openskp::Material::Solid { name, .. }
-                | openskp::Material::Textured { name, .. } => name.clone(),
+                skpwright::Material::Solid { name, .. }
+                | skpwright::Material::Textured { name, .. } => name.clone(),
             })
         };
         let mut v: Vec<_> = m
@@ -186,22 +186,22 @@ fn a_face_is_written_with_its_back_paint() {
         v
     };
     let bytes = std::fs::read(root.join("back-material.skp")).unwrap();
-    let source = openskp::Model::parse(&bytes).unwrap();
+    let source = skpwright::Model::parse(&bytes).unwrap();
     let painted: Vec<_> = names(&source)
         .into_iter()
         .filter(|(f, b)| b.is_some() && b != f)
         .collect();
     assert_eq!(painted.len(), 1, "{:?}", names(&source));
     let doc = import(&bytes);
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         let written = export(&doc, target, WriteEnv::system()).unwrap();
-        let back = names(&openskp::Model::parse(&written.bytes).unwrap());
+        let back = names(&skpwright::Model::parse(&written.bytes).unwrap());
         assert!(back.contains(&painted[0]), "{target:?}: {back:?}");
     }
     let doc = import(&std::fs::read(root.join("box-two-materials.skp")).unwrap());
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         let written = export(&doc, target, WriteEnv::system()).unwrap();
-        let m = openskp::Model::parse(&written.bytes).unwrap();
+        let m = skpwright::Model::parse(&written.bytes).unwrap();
         let faces: Vec<_> = m
             .geometry
             .iter()
@@ -241,7 +241,7 @@ fn a_stretched_components_circles_survive() {
         0.0, 0.0, 0.7, 0.0,
     ]);
     doc.transform_instance(instance, &stretch).unwrap();
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         round_trip("stretched component", &doc, target).unwrap();
     }
 }
@@ -251,15 +251,15 @@ fn a_production_models_whole_export_reads_back_as_written() {
     // theater: SketchUp meshes that are not manifold open split into
     // pieces, some closed. Written whole and read back, each piece is the
     // faces Hew wrote, turned as Hew had them. (The file sits beside the
-    // OpenSKP dev clone; skipped elsewhere.)
+    // Skpwright dev clone; skipped elsewhere.)
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../openskp/corpus/third-party/theater-2017.skp");
+        .join("../../../skpwright/corpus/third-party/theater-2017.skp");
     let Ok(bytes) = std::fs::read(&p) else {
-        eprintln!("skipped: no ../openskp checkout");
+        eprintln!("skipped: no ../skpwright checkout");
         return;
     };
     let doc = import(&bytes);
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         round_trip("theater", &doc, target).unwrap();
     }
 }
@@ -348,7 +348,7 @@ fn has_touching_hole(doc: &Document) -> bool {
 fn a_hole_touching_its_faces_outer_loop_survives_hew_to_skp_to_hew() {
     let source = tangent_circle_box();
     assert!(has_touching_hole(&source));
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         round_trip("tangent circle", &source, target).unwrap_or_else(|e| panic!("{e}"));
         let written = export(&source, target, WriteEnv::system()).expect("writes");
         let back = import(&written.bytes);

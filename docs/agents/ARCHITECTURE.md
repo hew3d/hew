@@ -615,8 +615,8 @@ the session had already been closed, without interrupting the edit.
 | `crates/mesh-export` | STL, 3MF, glTF/GLB, and USDZ writers for `hew.doc.export`, shared by every host that implements it | `kernel`, `tessellate` |
 | `crates/dae-import` | COLLADA (`.dae`) → Objects/Instances | `kernel`, `mesh-heal` |
 | `crates/gltf-import` | glTF/GLB → Objects/Instances | `kernel`, `mesh-heal` |
-| `crates/skp-import` | Clean-room SketchUp (`.skp`) → Objects/Instances, built on the `openskp` reader | `kernel`, `mesh-heal`, `openskp` |
-| `crates/skp-export` | Document → SketchUp `.skp` (2026 container or 2017 format) on OpenSKP's writers, and the save back over an opened `.skp` that keeps what did not change | `kernel`, `tessellate`, `skp-import`, `openskp` |
+| `crates/skp-import` | Clean-room SketchUp (`.skp`) → Objects/Instances, built on the `skpwright` reader | `kernel`, `mesh-heal`, `skpwright` |
+| `crates/skp-export` | Document → SketchUp `.skp` (2026 container, or any stream release 3 to 8 and 2013 to 2020) on Skpwright's writers, and the save back over an opened `.skp` that keeps what did not change | `kernel`, `tessellate`, `skp-import`, `skpwright` |
 | `crates/stl-import` | STL (binary + ASCII, hand-written parser) → Objects | `kernel`, `mesh-heal` |
 | `crates/image-import` | PNG/JPEG → a placed picture: one face painted with it in a component, placed once (the `.skp` image shape); reads only the pixel size from the header | `kernel` |
 | `crates/softrender` | Headless render device: a pure software rasterizer over `tessellate`'s buffers, for `hew.view.snapshot` off-screen | `kernel`, `tessellate` |
@@ -697,11 +697,11 @@ teaching the kernel about any external format:
   correctly-oriented, watertight-or-honestly-leaky Objects rather than raw
   triangle soup.
 - **`skp-import`** reads SketchUp's native `.skp` format directly, built on
-  [OpenSKP](https://github.com/hew3d/openskp), a clean-room reader
+  [Skpwright](https://github.com/hew3d/skpwright), a clean-room reader
   maintained as its own project and consumed as an ordinary versioned
   dependency. It shares the same `mesh-heal` pipeline as every other
   importer, and reports where each imported node came from in the file.
-- **`skp-export`** writes `.skp` on OpenSKP's writers, in the mapping
+- **`skp-export`** writes `.skp` on Skpwright's writers, in the mapping
   `skp-import` reads back as the same document. Saving back over an
   opened `.skp` starts from the file's own model and reuses its records
   for everything the document did not change, so a file can go Hew →
@@ -783,7 +783,7 @@ This is binding, for three reinforcing reasons. It makes the boundary the
 *solely through the documented Plugin API* — true by construction rather than
 by policy. It keeps proprietary plugins clear of the copyleft of any GPL
 dependency embedded in the kernel: a sandboxed plugin is mere aggregation,
-not a combined work, so OpenSKP's GPLv3 (or any future GPL dependency's) does
+not a combined work, so Skpwright's GPLv3 (or any future GPL dependency's) does
 not reach it. And it contains an untrusted third party — a plugin can crash
 neither the kernel nor the open document, and sees only what the API hands
 it. On a WASM stack this isolation is nearly free, where a native host would
@@ -896,7 +896,7 @@ from a proprietary SDK — its headers, its constants, or format knowledge
 obtained under its license — may enter the kernel's dependency chain,
 including transitively through an interop crate. What that permits is not
 "never support `.skp`," but "support it only through a reader whose entire
-provenance is clean" — which is what makes a clean-room reader like OpenSKP,
+provenance is clean" — which is what makes a clean-room reader like Skpwright,
 maintained independently and consumed as an ordinary dependency, an
 acceptable way to read a proprietary format without ever touching its SDK.
 

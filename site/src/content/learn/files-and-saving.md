@@ -21,13 +21,15 @@ Before anything would discard unsaved work — closing the window or tab, openin
 
 ## SketchUp files
 
-A SketchUp `.skp` file opens as a document, not only as an import. File ▸ Open takes a `.skp` (the 2026 format that current SketchUp saves, or the 2017 format) the same way it takes a `.hew`: the title shows `Model.skp`, the document starts clean, and Save writes the file back in the format it was opened in. Open Recent, drag-and-drop, and the desktop app's Open With menu all work the same way. File ▸ Import… is separate and unchanged: it adds a SketchUp file's contents to the current document and does not bind the document to that file.
+A SketchUp `.skp` file opens as a document, not only as an import. File ▸ Open takes a `.skp` (the 2026 format that SketchUp 2021 and later save, or a stream release: 3 to 8 and 2013 to 2020) the same way it takes a `.hew`: the title shows `Model.skp`, the document starts clean, and Save writes the file back in the format it was opened in. Open Recent, drag-and-drop, and the desktop app's Open With menu all work the same way. File ▸ Import… is separate and unchanged: it adds a SketchUp file's contents to the current document and does not bind the document to that file.
 
-**Save As…** offers three formats:
+**Save As…** offers sixteen formats:
 
 - **Hew document (.hew)**, the native format.
 - **SketchUp (.skp)**, the 2026 format.
-- **SketchUp 2017 (.skp)**, which opens in SketchUp Make 2017 and later.
+- **SketchUp 2020 (.skp)** down to **SketchUp 2013 (.skp)**, and **SketchUp 8 (.skp)** down to **SketchUp 3 (.skp)**, each the format of that release, which opens in it and every later release.
+
+A file opened from a stream release saves back in its own release. A file from SketchUp 2021 to 2025 is the 2026 container: it opens, and saves back in the 2026 container under Skpwright's own header label, since those releases share that container.
 
 The list starts on the document's current format (Hew for a new document). Changing it changes the name's extension to match, so `Model.skp` becomes `Model.hew`, never `Model.skp.hew`.
 

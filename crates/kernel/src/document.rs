@@ -45,14 +45,15 @@ use tracing::info;
 use crate::annotation::{Anchor, Annotation, CapturedCurve, RadialKind};
 use crate::axes::{AxesFrame, AxesFrameError};
 use crate::camera::{CameraProjection, CameraState};
-use crate::guide::Guide;
+use crate::geo::GeoReference;
+use crate::guide::{Guide, GuideDash};
 use crate::history::{FaceAnchor, History, HistoryError, KernelOp, KernelOpError, KernelOpReport};
 use crate::ids::{
     AnnotationId, ComponentId, EdgeId, FaceId, GroupId, GuideId, InstanceId, MaterialId, ObjectId,
     SketchId,
 };
 use crate::import::{ImportReport, ImportScene, SkippedMesh};
-use crate::material::{FaceMaterial, Material, UvFrame};
+use crate::material::{FaceMaterial, Material, Pbr, UvFrame};
 use crate::math::{MathError, Plane, Point3, Vec3};
 use crate::ops::{
     BooleanError, BooleanOp, ExtrudeError, FollowMeError, Operand, SliceError, StickyError,
@@ -382,6 +383,8 @@ struct InstanceRecord {
 #[derive(Debug, Clone, PartialEq)]
 struct GuideRecord {
     guide: Guide,
+    /// How a line guide is drawn; unused for a point.
+    dash: GuideDash,
     hidden: bool,
     /// Tag paths, root-first, as a node's: a guide with a hidden tag (or a
     /// tag below a hidden one) is not drawn or snapped to
@@ -836,6 +839,7 @@ pub fn render_history_label(kind: &HistoryKind) -> String {
         "group-sketch" => "Group sketch".to_string(),
         "rescale" => format!("Resize model ×{}", text("factor")),
         "move-axes" => "Move drawing axes".to_string(),
+        "set-geo" => "Set geo-location".to_string(),
         "move-sketch-point" => "Move sketch point".to_string(),
         "draw" => "Draw".to_string(),
         "group" => "Group".to_string(),
@@ -875,6 +879,7 @@ pub fn render_history_label(kind: &HistoryKind) -> String {
             )
         }
         "material-opacity" => "Change material opacity".to_string(),
+        "material-surface" => "Change material surface".to_string(),
         "rename-material" => "Rename material".to_string(),
         "delete-material" => "Delete material".to_string(),
         "delete-component" => "Delete component".to_string(),
@@ -1312,6 +1317,13 @@ enum DocAction {
     /// number of undo/redo cycles. No handles are created, hidden, or
     /// removed.
     SetAxes { before: AxesFrame, after: AxesFrame },
+    /// `set_geo_reference` swapped the document's geo-reference. Like
+    /// [`DocAction::SetAxes`] the record IS the value: undo and redo swap
+    /// the recorded `before`/`after` back in verbatim and touch no entity.
+    SetGeoReference {
+        before: Option<Box<GeoReference>>,
+        after: Option<Box<GeoReference>>,
+    },
     /// A single sketch vertex dragged to a new position (Phase D per-vertex
     /// edit). Topology-preserving, so the inverse is just the old position:
     /// undo restores `old_pos`, redo re-applies `new_pos`. The `SketchId` is
@@ -1857,6 +1869,14 @@ enum DocAction {
         prev: u8,
         next: u8,
     },
+    /// [`Document::set_material_pbr`] changed a palette material's physically
+    /// based properties; undo restores `prev`, redo re-applies `next`
+    /// (`None` = the plain surface).
+    SetMaterialPbr {
+        material: MaterialId,
+        prev: Option<Pbr>,
+        next: Option<Pbr>,
+    },
     /// [`Document::set_material_name`] renamed a palette material. Undo/
     /// redo swap the recorded names back in verbatim.
     MaterialRenamed {
@@ -2263,6 +2283,7 @@ impl DocAction {
             }
             DocAction::Rescale { objects, .. } => objects.iter().map(|&(id, _)| id).collect(),
             DocAction::SetAxes { .. }
+            | DocAction::SetGeoReference { .. }
             | DocAction::MovedSketchVertex { .. }
             | DocAction::RearrangedSketchVertex { .. } => Vec::new(),
             DocAction::SketchGesture { .. } => Vec::new(),
@@ -2320,7 +2341,9 @@ impl DocAction {
                 v.extend(defaults.iter().copied());
                 v
             }
-            DocAction::SetMaterialAlpha { .. } | DocAction::MaterialRenamed { .. } => Vec::new(),
+            DocAction::SetMaterialAlpha { .. }
+            | DocAction::SetMaterialPbr { .. }
+            | DocAction::MaterialRenamed { .. } => Vec::new(),
             DocAction::MaterialDeleted {
                 faces,
                 back_faces,
@@ -2402,7 +2425,7 @@ impl DocAction {
                 sketches.iter().map(|&(id, _)| id).collect()
             }
             DocAction::Rescale { sketches, .. } => sketches.iter().map(|&(id, _)| id).collect(),
-            DocAction::SetAxes { .. } => Vec::new(),
+            DocAction::SetAxes { .. } | DocAction::SetGeoReference { .. } => Vec::new(),
             DocAction::MovedSketchVertex { sketch, .. }
             | DocAction::RearrangedSketchVertex { sketch, .. } => vec![*sketch],
             DocAction::SketchGesture { sketch, .. } => vec![*sketch],
@@ -2433,6 +2456,7 @@ impl DocAction {
             | DocAction::SetFaceUvFrame { .. }
             | DocAction::ReplaceMaterial { .. }
             | DocAction::SetMaterialAlpha { .. }
+            | DocAction::SetMaterialPbr { .. }
             | DocAction::MaterialRenamed { .. }
             | DocAction::MaterialDeleted { .. }
             | DocAction::DefinitionDeleted { .. }
@@ -2831,6 +2855,8 @@ pub enum DocumentError {
     UnknownFace,
     /// The material handle is stale or from another Document's palette.
     UnknownMaterial,
+    /// A metallic or roughness factor is not a number from 0 to 1.
+    InvalidMaterialPbr,
     /// The group handle is stale, hidden, or from another Document.
     UnknownGroup,
     /// The component-definition handle is stale, hidden, or from another
@@ -3039,6 +3065,9 @@ pub enum DocumentError {
     /// Nothing is silently renormalized or reoriented (DEVELOPMENT.md rule
     /// 4); the document is untouched.
     InvalidAxesFrame(AxesFrameError),
+    /// `set_geo_reference` was given a record with a non-finite number or a
+    /// non-positive unit factor. The document is untouched.
+    InvalidGeoReference(crate::geo::GeoReferenceError),
     /// A [`DocAction::ReplaceMaterial`] or [`DocAction::MaterialDeleted`]
     /// undo/redo replay found a recorded face or object-default target that
     /// does not resolve: no live face carries the geometry the face had when
@@ -3133,6 +3162,12 @@ impl std::fmt::Display for DocumentError {
             }
             DocumentError::UnknownFace => write!(f, "no such face in the target object"),
             DocumentError::UnknownMaterial => write!(f, "no such material in this document"),
+            DocumentError::InvalidMaterialPbr => {
+                write!(
+                    f,
+                    "metallic and roughness must each be a number from 0 to 1"
+                )
+            }
             DocumentError::UnknownGroup => write!(f, "no such group in this document"),
             DocumentError::UnknownComponent => {
                 write!(f, "no such component definition in this document")
@@ -3295,6 +3330,7 @@ impl std::fmt::Display for DocumentError {
                 write!(f, "no such attribute namespace or key on this target")
             }
             DocumentError::InvalidAxesFrame(e) => write!(f, "{e}"),
+            DocumentError::InvalidGeoReference(e) => write!(f, "{e}"),
             DocumentError::ReplaceMaterialReplayStale => write!(
                 f,
                 "a replace-material undo/redo target no longer resolves live \
@@ -3614,6 +3650,9 @@ pub struct Document {
     /// deliberately do NOT read this (design's v1 scope) — they stay
     /// world-aligned.
     axes: AxesFrame,
+    /// The coordinate reference system the model is placed in (manifest
+    /// v25+; `geo.rs`), or `None`. Data only: no geometry reads it.
+    geo: Option<GeoReference>,
     /// Saved views (docs/design/scenes.md §3.1; manifest v16+), in tab
     /// order. View state outside undo history like `camera`/`tag_meta`/
     /// `user_hidden_*`; the editing methods live in `scenes.rs`.
@@ -4058,6 +4097,52 @@ impl Document {
         })
     }
 
+    // ------------------------------------------------------- geo-reference
+
+    /// The document's coordinate reference system (`geo.rs`), or `None`
+    /// when the model has no place on a map.
+    pub fn geo_reference(&self) -> Option<&GeoReference> {
+        self.geo.as_ref()
+    }
+
+    /// Sets (or, with `None`, clears) the document's geo-reference. One
+    /// undo step; undo and redo restore the recorded record verbatim and
+    /// touch no entity. Setting the record the document already holds is a
+    /// no-op that records nothing.
+    ///
+    /// # Errors
+    /// [`DocumentError::InvalidGeoReference`] — a non-finite number or a
+    /// non-positive unit factor; the document is untouched.
+    pub fn set_geo_reference(
+        &mut self,
+        geo: Option<GeoReference>,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "set_geo_reference");
+        if let Some(g) = &geo {
+            g.validate().map_err(DocumentError::InvalidGeoReference)?;
+        }
+        let none = DocChange {
+            objects_touched: Vec::new(),
+            sketches_touched: Vec::new(),
+            groups_touched: Vec::new(),
+            instances_touched: Vec::new(),
+            components_touched: Vec::new(),
+            guides_touched: Vec::new(),
+        };
+        if geo == self.geo {
+            return Ok(none);
+        }
+        let before = self.geo.take().map(Box::new);
+        self.geo = geo.clone();
+        self.undo.push(DocAction::SetGeoReference {
+            before,
+            after: geo.map(Box::new),
+        });
+        self.commit_new_action();
+        self.debug_validate();
+        Ok(none)
+    }
+
     // ---------------------------------------------------------- persistence
 
     /// Serializes the whole document to a `.hew` container (HEW_FILE_FORMAT.md):
@@ -4231,6 +4316,13 @@ impl Document {
             .filter(|(_, rec)| !rec.hidden)
             .map(|(id, rec)| (id, rec.guide))
             .collect();
+        // Each guide's dash, parallel (manifest v24+).
+        let guide_dashes: Vec<GuideDash> = self
+            .guides
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
+            .map(|(_, rec)| rec.dash)
+            .collect();
         // Each guide's tags, parallel (manifest v21+).
         let guide_tags: Vec<Vec<Vec<String>>> = self
             .guides
@@ -4278,6 +4370,7 @@ impl Document {
             sketch_tags,
             guides,
             guide_tags,
+            guide_dashes,
             annotations,
             annotation_tags,
             roots,
@@ -4290,6 +4383,7 @@ impl Document {
             camera: self.camera,
             view_style: self.view_style,
             axes: self.axes,
+            geo: self.geo.clone(),
             sids: self.sids.clone(),
             attrs: self.attrs.clone(),
             scenes: self.scenes.clone(),
@@ -4404,9 +4498,11 @@ impl Document {
         // `raw.guides` is already in dense (save-time) order.
         let mut guide_ids: Vec<GuideId> = Vec::with_capacity(raw.guides.len());
         let mut raw_guide_tags = raw.guide_tags.into_iter();
+        let mut raw_guide_dashes = raw.guide_dashes.into_iter();
         for guide in raw.guides {
             guide_ids.push(doc.guides.insert(GuideRecord {
                 guide,
+                dash: raw_guide_dashes.next().unwrap_or_default(),
                 hidden: false,
                 tags: raw_guide_tags.next().unwrap_or_default(),
             }));
@@ -5036,6 +5132,7 @@ impl Document {
 
         // ── Movable drawing axes (manifest v13+; identity for older files) ─
         doc.axes = raw.axes;
+        doc.geo = raw.geo;
 
         // ── Section plane + Scenes (manifest v16+; docs/design/scenes.md) ─
         // Decode validated shapes; Scene references are checked against the
@@ -5114,7 +5211,7 @@ impl Document {
         recipe: crate::import::ImportSceneRecipe,
         keys: &BTreeMap<u64, Vec<NodeId>>,
         placements: &[(ObjectId, Transform)],
-    ) {
+    ) -> Option<u64> {
         use crate::scenes::SceneProps;
         let base = if recipe.name.trim().is_empty() {
             "Scene".to_string()
@@ -5140,7 +5237,7 @@ impl Document {
             .camera
             .map(|c| self.camera_retargeted_to_model(c, placements));
         let Ok(sid) = self.add_scene(Some(name), props, camera, recipe.display, None) else {
-            return;
+            return None;
         };
         // The scene's own look is the recipe's, not the document's at this
         // moment (`add_scene` captured the latter).
@@ -5162,6 +5259,8 @@ impl Document {
         });
         if let Some(scene) = self.scenes.iter_mut().find(|s| s.sid == sid) {
             scene.description = recipe.description;
+            scene.transition_s = recipe.transition_s.filter(|s| s.is_finite() && *s >= 0.0);
+            scene.delay_s = recipe.delay_s.filter(|s| s.is_finite() && *s >= 0.0);
             if hidden_nodes.is_some() {
                 scene.hidden_nodes = hidden_nodes;
             }
@@ -5172,6 +5271,7 @@ impl Document {
                 scene.section = Some(section);
             }
         }
+        Some(sid)
     }
 
     // -------------------------------------------------------------- ingest
@@ -5282,6 +5382,7 @@ impl Document {
             camera: scene.camera,
             view_style: scene.view_style,
             section: scene.section,
+            geo: scene.geo,
             scenes: scene.scenes,
             extra,
             textures_missing,
@@ -5388,6 +5489,7 @@ impl Document {
             camera,
             view_style,
             section,
+            geo,
             scenes,
             extra,
             textures_missing,
@@ -5411,6 +5513,7 @@ impl Document {
                     origin,
                     direction,
                     span,
+                    dash,
                     tags,
                 } => {
                     let dir = direction.normalized().ok();
@@ -5424,6 +5527,7 @@ impl Document {
                                     direction: d,
                                     span,
                                 },
+                                dash,
                                 hidden: false,
                                 tags,
                             }));
@@ -5440,6 +5544,7 @@ impl Document {
                     if point_is_finite(position) {
                         all_guides.push(self.insert_guide_record(GuideRecord {
                             guide: Guide::Point { position },
+                            dash: GuideDash::default(),
                             hidden: false,
                             tags,
                         }));
@@ -5483,6 +5588,9 @@ impl Document {
             }
             if let Some(section) = section {
                 self.section_plane = Some(section);
+            }
+            if let Some(geo) = geo.filter(|g| g.validate().is_ok()) {
+                self.geo = Some(geo);
             }
         }
         // ── 4c. Drawn sketches ────────────────────────────────────────────
@@ -5657,9 +5765,10 @@ impl Document {
             }
         }
 
-        for recipe in scenes {
-            self.ingest_scene(recipe, &keys, &placements);
-        }
+        let scene_sids: Vec<Option<u64>> = scenes
+            .into_iter()
+            .map(|recipe| self.ingest_scene(recipe, &keys, &placements))
+            .collect();
 
         // ── 5. Push action + clear redo ───────────────────────────────────
         self.undo.push(DocAction::Imported {
@@ -5702,6 +5811,7 @@ impl Document {
             defs: def_cid,
             sketches: sketch_ids,
             annotations: report_annotations,
+            scenes: scene_sids,
         };
 
         (report, change)
@@ -6344,13 +6454,13 @@ impl Document {
         }
 
         // ── 3. Construction guides, carried through the pose ──────────────
-        let live_guides: Vec<(Guide, Vec<Vec<String>>)> = item
+        let live_guides: Vec<(Guide, GuideDash, Vec<Vec<String>>)> = item
             .guides
             .iter()
             .filter(|(_, r)| !r.hidden)
-            .map(|(_, r)| (r.guide, r.tags.clone()))
+            .map(|(_, r)| (r.guide, r.dash, r.tags.clone()))
             .collect();
-        for (g, tags) in live_guides {
+        for (g, dash, tags) in live_guides {
             let guide = match g {
                 Guide::Line {
                     origin,
@@ -6386,6 +6496,7 @@ impl Document {
             };
             ctx.all_guides.push(self.insert_guide_record(GuideRecord {
                 guide,
+                dash,
                 hidden: false,
                 tags,
             }));
@@ -7809,6 +7920,47 @@ impl Document {
         Ok(DocChange::default())
     }
 
+    /// Set a palette material's metallic and roughness factors (each
+    /// 0..=1), keeping its maps and the normal and occlusion strengths.
+    /// Setting the plain values on a material with no maps clears its
+    /// physically based properties. Undoable, recording
+    /// [`DocAction::SetMaterialPbr`]; like opacity it returns an empty
+    /// [`DocChange`] because the renderer resolves it live from the palette.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownMaterial`] — `id` is not in the palette.
+    /// - [`DocumentError::InvalidMaterialPbr`] — a factor is not in 0..=1.
+    pub fn set_material_pbr(
+        &mut self,
+        id: MaterialId,
+        metallic: f32,
+        roughness: f32,
+    ) -> Result<DocChange, DocumentError> {
+        if !self.material_is_live(id) {
+            return Err(DocumentError::UnknownMaterial);
+        }
+        let prev = self.materials[id].pbr.clone();
+        let mut next = prev.clone().unwrap_or(Pbr::PLAIN);
+        next.metallic = metallic;
+        next.roughness = roughness;
+        if !next.is_valid() {
+            return Err(DocumentError::InvalidMaterialPbr);
+        }
+        let next = (!next.is_plain()).then_some(next);
+        if prev == next {
+            return Ok(DocChange::default());
+        }
+        self.materials[id].pbr = next.clone();
+        self.undo.push(DocAction::SetMaterialPbr {
+            material: id,
+            prev,
+            next,
+        });
+        self.commit_new_action();
+        self.debug_validate();
+        Ok(DocChange::default())
+    }
+
     /// A palette material by handle, or `None` if stale.
     pub fn material(&self, id: MaterialId) -> Option<&Material> {
         if self.deleted_materials.contains(&id) {
@@ -8454,6 +8606,7 @@ impl Document {
         };
         let id = self.insert_guide_record(GuideRecord {
             guide,
+            dash: GuideDash::default(),
             hidden: false,
             tags: Vec::new(),
         });
@@ -8478,6 +8631,7 @@ impl Document {
         let guide = Guide::Point { position };
         let id = self.insert_guide_record(GuideRecord {
             guide,
+            dash: GuideDash::default(),
             hidden: false,
             tags: Vec::new(),
         });
@@ -8612,8 +8766,8 @@ impl Document {
             op = "duplicate_guide_array",
             count = count.get(),
         );
-        let (source, tags) = match self.guides.get(guide) {
-            Some(rec) if !rec.hidden => (rec.guide, rec.tags.clone()),
+        let (source, dash, tags) = match self.guides.get(guide) {
+            Some(rec) if !rec.hidden => (rec.guide, rec.dash, rec.tags.clone()),
             _ => return Err(DocumentError::UnknownGuide),
         };
         step.inverse().map_err(DocumentError::Transform)?;
@@ -8632,6 +8786,7 @@ impl Document {
             .map(|g| {
                 self.insert_guide_record(GuideRecord {
                     guide: g,
+                    dash,
                     hidden: false,
                     tags: tags.clone(),
                 })
@@ -8666,6 +8821,15 @@ impl Document {
             .get(id)
             .filter(|rec| !rec.hidden)
             .map(|rec| &rec.guide)
+    }
+
+    /// How a live guide line is drawn (the default for a stale id or a
+    /// point).
+    pub fn guide_dash(&self, id: GuideId) -> GuideDash {
+        self.guides
+            .get(id)
+            .filter(|rec| !rec.hidden)
+            .map_or_else(GuideDash::default, |rec| rec.dash)
     }
 
     /// A live guide's tag paths, root-first (empty for none, or a stale id).
@@ -9384,8 +9548,22 @@ impl Document {
     /// [`Document::set_tag_hidden`]'s own non-undoable, still-serialized
     /// posture. Serialized with the document (manifest v13); saved on
     /// document save, applied on load.
+    ///
+    /// A camera that looks the way the held one does keeps its image width
+    /// and aspect ratio when the new one gives none (the app records its
+    /// view at every save, and an untouched `.skp` Match Photo camera must
+    /// survive that); a camera that moved replaces them with `None`.
     pub fn set_camera_state(&mut self, state: CameraState) {
-        self.camera = Some(state.usable());
+        let mut state = state.usable();
+        if let Some(held) = self.camera
+            && state.image_width.is_none()
+            && state.aspect_ratio.is_none()
+            && state.same_view(&held)
+        {
+            state.image_width = held.image_width;
+            state.aspect_ratio = held.aspect_ratio;
+        }
+        self.camera = Some(state);
     }
 
     /// How the document asks to be shown (`style.rs`; manifest v19+), or
@@ -19371,6 +19549,7 @@ impl Document {
                 k("rescale").text("factor", factor)
             }
             DocAction::SetAxes { .. } => k("move-axes"),
+            DocAction::SetGeoReference { .. } => k("set-geo"),
             DocAction::MovedSketchVertex { .. } | DocAction::RearrangedSketchVertex { .. } => {
                 k("move-sketch-point")
             }
@@ -19425,6 +19604,7 @@ impl Document {
                 faces, defaults, ..
             } => k("replace-material").count("count", faces.len() + defaults.len()),
             DocAction::SetMaterialAlpha { .. } => k("material-opacity"),
+            DocAction::SetMaterialPbr { .. } => k("material-surface"),
             DocAction::MaterialRenamed { .. } => k("rename-material"),
             DocAction::MaterialDeleted { .. } => k("delete-material"),
             DocAction::DefinitionDeleted { .. } => k("delete-component"),
@@ -20616,6 +20796,19 @@ impl Document {
                     guides_touched: Vec::new(),
                 }
             }
+            DocAction::SetGeoReference { before, .. } => {
+                // Undo a geo-reference swap: the recorded prior record,
+                // verbatim.
+                self.geo = before.as_deref().cloned();
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: Vec::new(),
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
             DocAction::Boolean {
                 result,
                 a,
@@ -21750,6 +21943,12 @@ impl Document {
                 }
                 DocChange::default()
             }
+            DocAction::SetMaterialPbr { material, prev, .. } => {
+                if let Some(mat) = self.materials.get_mut(*material) {
+                    mat.pbr = prev.clone();
+                }
+                DocChange::default()
+            }
             DocAction::MaterialRenamed { material, prev, .. } => {
                 if let Some(mat) = self.materials.get_mut(*material) {
                     mat.name = prev.clone();
@@ -22233,6 +22432,18 @@ impl Document {
                 // Redo a frame swap: re-apply the RECORDED after-frame
                 // verbatim (same non-transform posture as undo above).
                 self.axes = after;
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: Vec::new(),
+                    groups_touched: Vec::new(),
+                    instances_touched: Vec::new(),
+                    components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
+            DocAction::SetGeoReference { after, .. } => {
+                // Redo a geo-reference swap: the recorded record, verbatim.
+                self.geo = after.as_deref().cloned();
                 DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: Vec::new(),
@@ -23175,6 +23386,12 @@ impl Document {
                 }
                 DocChange::default()
             }
+            DocAction::SetMaterialPbr { material, next, .. } => {
+                if let Some(mat) = self.materials.get_mut(*material) {
+                    mat.pbr = next.clone();
+                }
+                DocChange::default()
+            }
             DocAction::MaterialRenamed { material, next, .. } => {
                 if let Some(mat) = self.materials.get_mut(*material) {
                     mat.name = next.clone();
@@ -23788,6 +24005,7 @@ pub struct IngestJob {
     camera: Option<CameraState>,
     view_style: Option<crate::style::ViewStyle>,
     section: Option<crate::SectionPlaneState>,
+    geo: Option<GeoReference>,
     scenes: Vec<crate::import::ImportSceneRecipe>,
     extra: crate::import::ImportSceneExtra,
     textures_missing: Vec<String>,

@@ -4765,6 +4765,7 @@ fn boolean_union_keeps_seams_between_differently_painted_faces() {
         name: "red".to_string(),
         color: Rgba8::rgb(200, 30, 30),
         texture: None,
+        pbr: None,
     });
     let a_top = {
         let obj = doc.object(a).expect("a live");
@@ -5336,6 +5337,7 @@ fn doc_with_tagged_segment_guide() -> (Document, kernel::GuideId) {
         defs: Vec::new(),
         roots: Vec::new(),
         guides: vec![ImportGuide::Line {
+            dash: kernel::GuideDash::default(),
             origin: Point3::new(0.0, 1.0, 0.0),
             direction: Vec3::new(1.0, 0.0, 0.0),
             span: GuideSpan {
@@ -5353,6 +5355,7 @@ fn doc_with_tagged_segment_guide() -> (Document, kernel::GuideId) {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, Vec::new()).unwrap();
     let id = doc.guide_ids()[0];
@@ -7302,6 +7305,7 @@ fn boolean_nodes_refuses_leaky_leaves_naming_the_side() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (report, change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.leaky, 1);

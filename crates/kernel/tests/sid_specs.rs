@@ -74,6 +74,7 @@ fn representative_doc() -> Document {
             a: 255,
         },
         texture: None,
+        pbr: None,
     });
     doc.set_tag_hidden(vec!["Structure".to_string()], false);
     doc
