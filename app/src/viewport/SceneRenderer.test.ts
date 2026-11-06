@@ -3049,3 +3049,62 @@ describe('SceneRenderer — draw color language (free blue / attached orange)', 
     expect(lines).toContainEqual({ kind: 'free', color: FREE })
   })
 })
+
+describe('SceneRenderer — hover highlight (setHoverHighlight)', () => {
+  const NONE = {
+    objects: [] as bigint[],
+    instances: [] as bigint[],
+    member: null,
+    sketches: [] as bigint[],
+    sketchInstance: null,
+    draftSegments: new Float32Array(0),
+    guide: null,
+  }
+
+  function hoverGroup(threeScene: THREE.Scene): THREE.Group {
+    const g = threeScene.getObjectByName('Hover')
+    if (g === undefined) throw new Error('no Hover group')
+    return g as THREE.Group
+  }
+
+  it('redraws a hovered object\'s edges in the selection color, leaving its selection state alone', () => {
+    const threeScene = new THREE.Scene()
+    const renderer = new SceneRenderer(threeScene, makeScene({ objects: { '1': true } }))
+    renderer.refresh()
+    renderer.setHoverHighlight({ ...NONE, objects: [1n] })
+
+    const [edges] = hoverGroup(threeScene).children as THREE.LineSegments[]
+    expect((edges.material as THREE.LineBasicMaterial).color.getHex()).toBe(EDGE_COLOR_SELECTED)
+    expect(Array.from(edges.geometry.getAttribute('position').array)).toEqual([0, 0, 0, 1, 0, 0])
+    expect(renderer.getSelectedIds().objects).toEqual([])
+
+    renderer.setHoverHighlight(null)
+    expect(hoverGroup(threeScene).children).toHaveLength(0)
+  })
+
+  it('a batched instance is outlined at its pose without materializing it', () => {
+    const threeScene = new THREE.Scene()
+    const renderer = new SceneRenderer(threeScene, makeScene({
+      instances: {
+        '10': { def: 100n, pose: [1, 0, 0, 2, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+      },
+    }))
+    renderer.refresh()
+    renderer.setHoverHighlight({ ...NONE, instances: [10n] })
+
+    const [edges] = hoverGroup(threeScene).children as THREE.LineSegments[]
+    expect(edges.matrix.elements[12]).toBe(2) // the instance's translation
+    expect(materializedGroups(renderer.instancesGroup)).toHaveLength(0)
+  })
+
+  it('drawn shapes get the on-top fat-line overlay; ids that no longer render are skipped', () => {
+    const threeScene = new THREE.Scene()
+    const renderer = new SceneRenderer(threeScene, makeScene({}))
+    renderer.refresh()
+    renderer.setHoverHighlight({ ...NONE, objects: [42n], draftSegments: new Float32Array([0, 0, 0, 1, 1, 0]) })
+
+    const children = hoverGroup(threeScene).children
+    expect(children).toHaveLength(1)
+    expect(children[0]).toBeInstanceOf(LineSegments2)
+  })
+})
