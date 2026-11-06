@@ -544,7 +544,11 @@ export function ShopApp() {
     nativeMenu: false,
     run: (id) => {
       const name = SHOP_TOOL_BY_COMMAND[id]
-      if (name !== undefined) activateTool(name)
+      if (name === undefined) return
+      activateTool(name)
+      // The key restarts the tool even when it is already active (the
+      // editor's keymap `run` in App.tsx does the same).
+      setToolActivationSeq((s) => s + 1)
     },
     allow: (id) => SHOP_TOOL_BY_COMMAND[id] !== undefined,
     toolCapturesKey: (key) => viewportApi.current?.isCapturingInput?.(key) ?? false,

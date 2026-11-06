@@ -168,7 +168,7 @@ import type { SceneSource } from './print/printJob'
 import * as diagnosticLog from './log/diagnosticLog'
 import * as inputRecorder from './recording/inputRecorder'
 import { ReportBugDialog } from './panels/ReportBugDialog'
-import { TOOLS, toolLabel, type ToolName } from './tools/toolRegistry'
+import { TOOLS, isToolAction, toolLabel, type ToolName } from './tools/toolRegistry'
 
 /** Autosave tick interval (ms). Exported as a test seam (App.autosave.test.tsx
  *  drives fake timers by this exact value rather than hardcoding it). */
@@ -515,9 +515,10 @@ export default function App() {
   /** The one entry point every camera-tool selection (Camera menu, native
    * menu, keyboard shortcut, the ViewportHUD orbit button) should go
    * through — see `toolActivationSeq`'s doc comment. Scoped to the camera
-   * group: forcing every tool to re-apply on a same-name reselect would
-   * also reset in-progress non-camera gestures (e.g. a multi-click Line
-   * chain), which nothing here calls for. */
+   * group: forcing every tool to re-apply on a same-name reselect from a
+   * menu or the rail would also reset in-progress non-camera gestures (e.g.
+   * a multi-click Line chain). Only a tool's keyboard shortcut does that,
+   * on purpose (the keymap dispatcher's `run` below). */
   const activateTool = useCallback((name: ToolName) => {
     setActiveTool(name)
     if (CAMERA_HANDOFF_TOOL_NAMES.has(name)) setToolActivationSeq((s) => s + 1)
@@ -6111,7 +6112,14 @@ export default function App() {
   useKeymapDispatch({
     isMac,
     nativeMenu: isTauri && isMac,
-    run: (id) => menuActionRef.current(id),
+    run: (id) => {
+      // A tool's key restarts the tool even when it is already active
+      // (SketchUp's habit): it drops a sticky idle plane lock or a half-made
+      // gesture. A tool mid-measurement keeps its letters through
+      // `toolCapturesKey`, so this never cuts a typed entry short.
+      if (isToolAction(id)) setToolActivationSeq((s) => s + 1)
+      menuActionRef.current(id)
+    },
     welcomeOpen: () => welcomeOpenRef.current,
     toolCapturesKey: (key) => viewportApi.current?.isCapturingInput?.(key) ?? false,
   })

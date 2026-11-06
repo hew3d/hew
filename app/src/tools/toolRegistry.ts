@@ -100,6 +100,13 @@ export function toolSpec(name: ToolName): ToolSpec {
   return spec
 }
 
+const ACTION_IDS: ReadonlySet<string> = new Set(TOOL_REGISTRY.map((t) => t.actionId))
+
+/** Whether command `id` selects a tool. */
+export function isToolAction(id: string): boolean {
+  return ACTION_IDS.has(id)
+}
+
 /** The shortcut to display for `name`: the first key of its command in the
  * keymap (the person's own binding, or the default), '' when it has none. */
 export function shortcutFor(name: ToolName): string {

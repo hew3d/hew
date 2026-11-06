@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { TOOL_REGISTRY, TOOLS, RAIL_GROUPS, toolSpec, shortcutFor, toolsInGroup } from './toolRegistry'
+import { TOOL_REGISTRY, TOOLS, RAIL_GROUPS, toolSpec, shortcutFor, toolsInGroup, isToolAction } from './toolRegistry'
 
 describe('toolRegistry', () => {
   it('TOOLS matches TOOL_REGISTRY order and length', () => {
@@ -37,6 +37,13 @@ describe('toolRegistry', () => {
     const ids = TOOL_REGISTRY.map((t) => t.actionId)
     expect(new Set(ids).size).toBe(ids.length)
     for (const id of ids) expect(id).toMatch(/^tool-/)
+  })
+
+  it('isToolAction tells tool commands from every other command', () => {
+    for (const t of TOOL_REGISTRY) expect(isToolAction(t.actionId)).toBe(true)
+    expect(isToolAction('edit-undo')).toBe(false)
+    expect(isToolAction('toggle-parallel-projection')).toBe(false)
+    expect(isToolAction('tool-')).toBe(false)
   })
 
   describe('shortcutFor', () => {
