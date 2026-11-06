@@ -164,6 +164,9 @@ function esc(t: string): string {
  * land the right way up. Paths group by kind; strokes are given in metres
  * (mm ÷ scale) so they print at the intended weight.
  */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS font stack
+const ANNOTATION_FONT_FAMILY = "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, 'IBM Plex Sans Arabic', Cairo, 'Noto Sans Arabic', sans-serif"
+
 export function lineArtSvgForTile(
   drawing: LineDrawingData,
   tile: TileSpec,
@@ -228,7 +231,7 @@ export function lineArtSvgForTile(
       // Labels are drawn upright in paper space: undo the y flip locally.
       const at = labelAnchor(l, mm(1))
       parts.push(
-        `<text class="annotation-label" transform="translate(${num(at.x)} ${num(at.y)}) scale(1,-1)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif" font-size="${num(mm(LABEL_MM))}" text-anchor="middle" dominant-baseline="middle" fill="${l.detached ? '#b3261e' : '#000'}" stroke="#fff" stroke-width="${num(mm(0.6))}" paint-order="stroke" stroke-linejoin="round">${esc(l.text)}</text>`,
+        `<text class="annotation-label" transform="translate(${num(at.x)} ${num(at.y)}) scale(1,-1)" font-family="${ANNOTATION_FONT_FAMILY}" font-size="${num(mm(LABEL_MM))}" text-anchor="middle" dominant-baseline="middle" fill="${l.detached ? '#b3261e' : '#000'}" stroke="#fff" stroke-width="${num(mm(0.6))}" paint-order="stroke" stroke-linejoin="round">${esc(l.text)}</text>`,
       )
     }
   }
@@ -355,7 +358,7 @@ export function lineArtSvgDocument(drawing: LineDrawingData, ratio: number, opts
     }
     for (const l of a.labels) {
       const at = labelAnchor(l, 1 / k)
-      parts.push(`<text class="annotation-label" x="${num(at.x * k)}" y="${num(-at.y * k)}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif" font-size="${num(LABEL_MM)}" text-anchor="middle" dominant-baseline="middle" fill="${l.detached ? '#b3261e' : '#000'}" stroke="#fff" stroke-width="0.6" paint-order="stroke">${esc(l.text)}</text>`)
+      parts.push(`<text class="annotation-label" x="${num(at.x * k)}" y="${num(-at.y * k)}" font-family="${ANNOTATION_FONT_FAMILY}" font-size="${num(LABEL_MM)}" text-anchor="middle" dominant-baseline="middle" fill="${l.detached ? '#b3261e' : '#000'}" stroke="#fff" stroke-width="0.6" paint-order="stroke">${esc(l.text)}</text>`)
     }
   }
   parts.push('</g></svg>')

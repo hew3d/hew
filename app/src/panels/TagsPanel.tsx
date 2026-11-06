@@ -223,7 +223,7 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDe
           aria-hidden="true"
           style={{
             position: 'absolute',
-            left: '6px',
+            insetInlineStart: '6px',
             color: 'var(--text-faint, #888)',
             fontSize: '11px',
             pointerEvents: 'none',
@@ -260,7 +260,7 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDe
             aria-label={t`Clear filter`}
             style={{
               position: 'absolute',
-              right: '4px',
+              insetInlineEnd: '4px',
               background: 'none',
               border: 'none',
               color: 'var(--text-faint, #888)',
@@ -506,7 +506,8 @@ function TagRow({
               fontSize: '10px',
               color: 'var(--text-faint, #666)',
               minWidth: '16px',
-              textAlign: 'right',
+              // The count badge sits at the row's trailing edge.
+              textAlign: 'end',
               flexShrink: 0,
             }}
           >

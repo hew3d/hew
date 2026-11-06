@@ -18,11 +18,27 @@ import { SOURCE_LOCALE } from './locales'
 
 const cache = new Map<string, Intl.NumberFormat>()
 
+/**
+ * Locale tags whose `Intl` defaults are wrong for a CAD application.
+ *
+ * Arabic (`ar`) defaults to Arabic-Indic digits (٠١٢…). Hew's numbers are
+ * dimension values: the Measurements box parses ASCII digits, lengths are
+ * typed and read back as `1200mm` or `3' 6"`, and SketchUp's own Arabic
+ * edition uses Western digits too. So the tag carries the `-u-nu-latn`
+ * numbering-system extension; the words around the number still come from
+ * the `ar` catalog and `Intl.RelativeTimeFormat`.
+ */
+const INTL_TAG_OVERRIDES: Record<string, string> = {
+  ar: 'ar-u-nu-latn',
+}
+
 /** The BCP 47 tag `Intl` should format for. The pseudo-locale is not a real
  * tag, so it formats as the source locale. */
 export function intlLocale(): string {
   const l = i18n.locale
-  return l === '' || l.startsWith('pseudo') ? SOURCE_LOCALE : l
+  if (l === '' || l.startsWith('pseudo')) return SOURCE_LOCALE
+  const primary = l.split(/[-_]/)[0]?.toLowerCase() ?? ''
+  return INTL_TAG_OVERRIDES[primary] ?? l
 }
 
 export interface FormatNumberOptions {

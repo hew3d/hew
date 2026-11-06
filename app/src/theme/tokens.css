@@ -105,6 +105,25 @@
   --radius-hud: var(--radius-dock); /* README "Design Tokens": "= --radius-dock" */
 }
 
+/* ---- Arabic (right-to-left) ---------------------------------------------
+ * The interface font stack for an Arabic UI. It prioritizes the crisp,
+ * screen-tuned Arabic UI faces — IBM Plex Sans Arabic, Cairo, Noto Sans
+ * Arabic — then falls back to the platform's own Arabic-capable UI font
+ * (system-ui, then Segoe UI on Windows). Hew downloads and bundles no
+ * webfont: the desktop app has to render with no network, and an embedded
+ * Arabic family would be a large binary in every build, so a stack of
+ * installed faces is the honest choice.
+ *
+ * Keyed on `lang="ar"`, not on `[dir='rtl']`: direction alone is not the
+ * trigger — an English interface inside a mirrored shell keeps its Latin
+ * metrics, and only Arabic text needs the Arabic metrics. `i18n/direction.ts`
+ * keeps the two attributes in step. */
+html[lang='ar'],
+[dir='rtl'] {
+  --font-family-ui: 'IBM Plex Sans Arabic', Cairo, 'Noto Sans Arabic', 'Noto Naskh Arabic',
+    system-ui, 'Segoe UI', sans-serif;
+}
+
 /* ============================================================ Dark (default) */
 :root,
 [data-theme='dark'] {

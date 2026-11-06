@@ -36,6 +36,7 @@ import {
   type NodeKind,
 } from './treeModel'
 import { draftRef, outlinerDrawing, resolveDraft, type OutlinerDrawing } from '../tools/planeUnits'
+import { useIsRtl } from '../i18n/direction'
 import { isSketchScopedKind } from './treeModel'
 import type { HealthClass } from '../health/healthReport'
 import { OUTLINER_TOOLTIP } from '../health/healthCopy'
@@ -733,7 +734,7 @@ export function DocumentTree({
       <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '2px', fontSize: '12px', fontFamily: 'var(--font-family-ui)' }}>
         {crumbs.map((c, i) => (
           <span key={i} style={{ display: 'flex', alignItems: 'center', gap: '2px' }}>
-            {i > 0 && <span style={{ color: 'var(--text-faint, #777)' }}>›</span>}
+            {i > 0 && <span aria-hidden="true" className="hew-flip-icon" style={{ color: 'var(--text-faint, #777)' }}>›</span>}
             {i === crumbs.length - 1 ? (
               <span style={{ color: 'var(--text-primary, #fff)', fontWeight: 'bold' }}>{c.label}</span>
             ) : (
@@ -778,7 +779,7 @@ export function DocumentTree({
           aria-hidden="true"
           style={{
             position: 'absolute',
-            left: '6px',
+            insetInlineStart: '6px',
             color: 'var(--text-faint, #888)',
             fontSize: '11px',
             pointerEvents: 'none',
@@ -818,7 +819,7 @@ export function DocumentTree({
             aria-label={t`Clear filter`}
             style={{
               position: 'absolute',
-              right: '4px',
+              insetInlineEnd: '4px',
               background: 'none',
               border: 'none',
               color: 'var(--text-faint, #888)',
@@ -1019,8 +1020,10 @@ function ModelRow({
       data-drop-target="root"
       style={{
         ...ROW_BASE,
-        paddingLeft: '8px',
-        paddingRight: '4px',
+        // Tree indentation is an inline-start inset: it grows from the row's
+        // leading edge, which is the right edge in a mirrored layout.
+        paddingInlineStart: '8px',
+        paddingInlineEnd: '4px',
         cursor: 'default',
         fontWeight: 'bold',
         outline: isDropTarget === true ? '2px solid var(--accent-base)' : 'none',
@@ -1563,6 +1566,7 @@ function Row({
   onRowPointerDown?: (e: React.PointerEvent<HTMLDivElement>) => void
 }) {
   const { t } = useLingui()
+  const rtl = useIsRtl()
   // Selection highlight uses the theme accent tint (06_docked_panels.md: "the
   // selected node is highlighted with accent/tint background + accent text"),
   // not the old hardcoded blue bars that broke on the light theme. Three tiers:
@@ -1594,10 +1598,15 @@ function Row({
       onMouseLeave={() => setRowHovered(false)}
       style={{
         ...ROW_BASE,
-        paddingLeft: `${8 + indent * 16}px`,
-        paddingRight: '4px',
+        // One indentation step per level, measured from the row's leading
+        // (inline-start) edge — the tree grows rightward in English and
+        // leftward in Arabic without a second layout rule.
+        paddingInlineStart: `${8 + indent * 16}px`,
+        paddingInlineEnd: '4px',
         background: isDropTarget === true ? 'var(--accent-tint-15)' : background,
-        boxShadow: active ? 'inset 2px 0 0 var(--accent-base)' : 'none',
+        // The open-session marker sits on the leading edge; a box-shadow
+        // cannot be logical, so its sign follows the current direction.
+        boxShadow: active ? `inset ${rtl ? -2 : 2}px 0 0 var(--accent-base)` : 'none',
         outline: isDropTarget === true ? '2px solid var(--accent-base)' : 'none',
         outlineOffset: '-2px',
         color: anySelected ? 'var(--accent-text-on-tint)' : undefined,
@@ -1622,7 +1631,10 @@ function Row({
             lineHeight: 1,
           }}
         >
-          {expanded === true ? '▾' : '▸'}
+          {/* The collapse caret points along the reading direction, so a
+              collapsed group's arrow faces the side its children will open
+              on (index.css `.hew-flip-icon`). */}
+          <span className="hew-flip-icon">{expanded === true ? '▾' : '▸'}</span>
         </button>
       )}
       {icon}

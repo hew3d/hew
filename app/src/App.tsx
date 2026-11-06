@@ -3,6 +3,7 @@ import { i18n } from '@lingui/core'
 import { ph, plural, t } from '@lingui/core/macro'
 import { Trans, useLingui } from '@lingui/react/macro'
 import { historyLabel } from './i18n/historyLabels'
+import { horizontalSign } from './i18n/direction'
 import { isComposingKey, shortcutLetter } from './input/keyboard'
 import { flushSync } from 'react-dom'
 import { loadKernel, type Scene } from './wasm/loader'
@@ -7689,7 +7690,10 @@ export default function App() {
                         quotes); a guidance toast's code is a styling tag, not
                         something a person should read. */}
                     {toast.code !== undefined && toast.emphasis !== true && (
-                      <strong style={{ marginRight: '6px', opacity: 0.8 }}>[{toast.code}]</strong>
+                      // The code is a kernel identifier (Latin), quoted by bug
+                      // reports: keep its brackets and letters in reading
+                      // order inside an Arabic message.
+                      <strong className="hew-ltr" style={{ marginInlineEnd: '6px', opacity: 0.8 }}>[{toast.code}]</strong>
                     )}
                     {toast.message}
                   </span>
@@ -7729,7 +7733,13 @@ export default function App() {
             }
             const drag = { width: startWidth }
             const onMove = (mv: PointerEvent) => {
-              drag.width = clampTrayWidth(startWidth + (startX - mv.clientX))
+              // The handle rides the tray's inline-start edge. In English
+              // that edge is the left side, so dragging left (a smaller
+              // clientX) widens the tray; in Arabic the tray is on the left
+              // and the handle on its right, so the same gesture is the
+              // opposite pointer delta. `horizontalSign()` is the direction
+              // multiplier that keeps "drag away from the viewport" = wider.
+              drag.width = clampTrayWidth(startWidth + (startX - mv.clientX) * horizontalSign())
               setTrayWidth(drag.width)
             }
             // One teardown for every way the drag can end. pointerup alone
@@ -7760,7 +7770,10 @@ export default function App() {
           }}
           style={{
             width: '5px',
-            marginRight: '-5px',
+            // The grab strip overhangs the tray's inline-start hairline, so
+            // it uses the inline-end margin (right in English, left in
+            // Arabic) rather than a physical one.
+            marginInlineEnd: '-5px',
             flexShrink: 0,
             cursor: 'col-resize',
             zIndex: 5,
@@ -7780,7 +7793,10 @@ export default function App() {
             minHeight: 0,
             overflowY: 'auto',
             background: 'var(--surface-panel)',
-            borderLeft: '1px solid var(--border-hairline)',
+            // The tray is the last flex child, so it always sits at the
+            // inline end (right in English, left in Arabic) and its divider
+            // faces the viewport, which is the inline start.
+            borderInlineStart: '1px solid var(--border-hairline)',
           }}
         >
           <TrayHideRow onClick={hideTray} focusOnMount={trayToggleTakesFocus} />
@@ -7980,7 +7996,7 @@ export default function App() {
         {objectCount > 0 && (notSolidCount === 0 ? (
           <span
             style={{
-              marginLeft: 'auto',
+              marginInlineStart: 'auto',
               padding: '2px 8px',
               fontSize: 'var(--font-size-dock-chip, 11px)',
               borderRadius: 4,
@@ -7997,7 +8013,7 @@ export default function App() {
             onClick={() => openModelHealth()}
             title={i18n._(BADGE_TOOLTIP_LIST)}
             style={{
-              marginLeft: 'auto',
+              marginInlineStart: 'auto',
               padding: '2px 8px',
               fontSize: 'var(--font-size-dock-chip, 11px)',
               fontFamily: 'inherit',
@@ -8484,7 +8500,7 @@ export default function App() {
               style={{
                 position: 'absolute',
                 top: '8px',
-                right: '10px',
+                insetInlineEnd: '10px',
                 background: 'none',
                 border: 'none',
                 color: 'var(--text-faint, #888)',
