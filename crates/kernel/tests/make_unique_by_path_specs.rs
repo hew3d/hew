@@ -266,6 +266,9 @@ fn forked_definition_keeps_the_linked_attribute_and_drops_the_library_stamp() {
     )
     .unwrap();
     let before = entity_dict(&doc, EntityRef::Component(def));
+    // A second placement keeps the source set live after the fork (a linked
+    // set goes with its last placement).
+    doc.place_instance(def, shift(5.0)).unwrap();
 
     let (new_def, _, _, _) = doc.make_unique_by_path(&[a1], true, false).unwrap();
     let dict = entity_dict(&doc, EntityRef::Component(new_def)).expect("attributes copied");
@@ -487,7 +490,8 @@ fn a_nested_deep_fork_keeps_its_instance_name() {
     assert_eq!(doc.instance_name(b_copy), Some("Front leg"));
     assert_eq!(
         doc.component_name(remap.components[&def_b]),
-        Some(format!("{def_b_name} Copy").as_str())
+        Some(def_b_name.as_str()),
+        "the nested fork keeps the definition's name"
     );
     doc.undo().unwrap();
     doc.redo().unwrap();
@@ -629,13 +633,11 @@ fn instance_name_is_promoted_to_the_definition_name_at_each_step() {
     let (first, _, _, _) = doc.make_unique_by_path(&[a2], true, false).unwrap();
     assert_eq!(
         doc.component_name(first),
-        Some(format!("{base} Copy").as_str())
+        Some(base.as_str()),
+        "an unnamed placement's fork keeps the definition's name"
     );
     let (second, _, _, _) = doc.make_unique_by_path(&[a3], true, false).unwrap();
-    assert_eq!(
-        doc.component_name(second),
-        Some(format!("{base} Copy 2").as_str())
-    );
+    assert_eq!(doc.component_name(second), Some(base.as_str()));
 
     // Undo of the cascade restores both promoted names.
     doc.undo().unwrap();

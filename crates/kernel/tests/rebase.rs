@@ -376,7 +376,11 @@ fn placements_order_is_placement_major() {
     let t2 = Transform::translation(Vec3::new(0.0, 0.0, 7.0));
     let depth = doc.undo_depth();
     let (roots, _) = doc
-        .duplicate_nodes_placements(&[NodeId::Object(a), NodeId::Object(b)], &[t1, t2])
+        .duplicate_nodes_placements(
+            &[NodeId::Object(a), NodeId::Object(b)],
+            &[t1, t2],
+            kernel::LinkPolicy::Independent,
+        )
         .unwrap();
     assert_eq!(doc.undo_depth(), depth + 1, "one undo entry");
     assert_eq!(roots.len(), 4);
@@ -396,7 +400,7 @@ fn placements_order_is_placement_major() {
         "one undo removes them all"
     );
     assert_eq!(
-        doc.duplicate_nodes_placements(&[NodeId::Object(a)], &[]),
+        doc.duplicate_nodes_placements(&[NodeId::Object(a)], &[], kernel::LinkPolicy::Independent),
         Err(DocumentError::EmptySelection)
     );
 }
@@ -424,7 +428,12 @@ fn array_wrapper_matches_old_behavior() {
         );
     }
     let (roots, _) = doc
-        .duplicate_nodes_array(&[NodeId::Object(a)], &step, NonZeroU32::new(3).unwrap())
+        .duplicate_nodes_array(
+            &[NodeId::Object(a)],
+            &step,
+            NonZeroU32::new(3).unwrap(),
+            kernel::LinkPolicy::Independent,
+        )
         .unwrap();
     assert_eq!(roots.len(), 3);
     for (r, want) in roots.iter().zip(expected) {
@@ -533,7 +542,11 @@ fn a_failed_placement_rolls_back_owned_sketch_copies_too() {
         Transform::scale(Vec3::new(1e-7, 1e-7, 1e3)),
     ];
     assert!(matches!(
-        doc.duplicate_nodes_placements(&[NodeId::Object(a)], &placements),
+        doc.duplicate_nodes_placements(
+            &[NodeId::Object(a)],
+            &placements,
+            kernel::LinkPolicy::Independent
+        ),
         Err(DocumentError::Transform(_))
     ));
     assert_eq!(doc.save(), bytes);
@@ -569,7 +582,11 @@ fn placements_of_grouped_nodes_append_to_their_group() {
     let t1 = Transform::translation(Vec3::new(5.0, 0.0, 0.0));
     let t2 = Transform::translation(Vec3::new(10.0, 0.0, 0.0));
     let (roots, change) = doc
-        .duplicate_nodes_placements(&[NodeId::Object(a), NodeId::Object(b)], &[t1, t2])
+        .duplicate_nodes_placements(
+            &[NodeId::Object(a), NodeId::Object(b)],
+            &[t1, t2],
+            kernel::LinkPolicy::Independent,
+        )
         .unwrap();
     assert_eq!(roots.len(), 4);
     let mut want = before.clone();

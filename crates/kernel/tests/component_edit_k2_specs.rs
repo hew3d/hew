@@ -132,7 +132,11 @@ fn component_subface_push_through_cuts_every_instance_and_replays() {
     let mut doc = Document::new();
     let (component, instance, member) = boxed_component(&mut doc);
     let sibling = doc
-        .duplicate_node(NodeId::Instance(instance), &Transform::IDENTITY)
+        .duplicate_node(
+            NodeId::Instance(instance),
+            &Transform::IDENTITY,
+            kernel::LinkPolicy::Independent,
+        )
         .expect("duplicate instance")
         .0;
     let sibling = match sibling {
@@ -221,7 +225,11 @@ fn definition_sketch_transform_stays_owned_and_updates_every_instance() {
     let mut doc = Document::new();
     let (component, instance, _) = boxed_component(&mut doc);
     let sibling = match doc
-        .duplicate_node(NodeId::Instance(instance), &Transform::IDENTITY)
+        .duplicate_node(
+            NodeId::Instance(instance),
+            &Transform::IDENTITY,
+            kernel::LinkPolicy::Independent,
+        )
         .expect("duplicate instance")
         .0
     {

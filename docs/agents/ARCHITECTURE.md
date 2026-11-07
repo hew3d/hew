@@ -366,7 +366,29 @@ one place a persistent pose earns its complexity.
 A placement can be forked by occurrence path (`make_unique_by_path`): with
 the cascade on, every definition on the path is forked so only that
 placement diverges; the call returns the ids it created (the remap). A
-forked definition keeps its attributes and sheds its Library provenance.
+forked definition keeps its attributes and its name, and sheds its Library
+provenance.
+
+A **linked set** is an ordinary definition carrying the attribute `hew` /
+`linked`; it is how a copy of an Object or a Group links to its source.
+`Document::wrap_linked` folds the node into a new definition without
+flattening it: the node keeps its id, name, tags, attributes, history, and
+subtree, no geometry moves, and one identity placement takes its spot in
+its parent (a group, or an outer definition for a node reached by path).
+The duplicating ops take a `LinkPolicy`: with `Linked`, each Object or
+Group root is wrapped as its own set and every copy is a further placement
+of it, so a reflecting step makes a mirrored placement instead of baked
+geometry; the wraps and the copies are one undo entry, and undoing it
+returns the loose node exactly. A set reduced to one placement stays a
+set (only undoing the wrap itself restores the loose node), and a linked
+set goes with its last live placement — deleting, exploding, or unlinking
+it hides the definition and its members, and undo brings them back. The
+rule is transitive: a set placed only by instances among those hidden
+members goes too, as does one placed only inside a deleted definition —
+while
+a named component stays available with no placements. Removing the
+attribute (`promote_linked`) turns a set into a named component; the
+reverse does not exist.
 
 Editing a definition's members is covered separately in 2.11: because a
 definition's members are already ordinary Objects (just owned by a
@@ -587,8 +609,10 @@ new Objects, new sketches — folds in too, becoming part of the definition
 (SketchUp's "what you draw while editing goes into the component"). A
 member group ungrouped during the session releases its contents to the
 definition's top level, and they are listed as direct members of the
-definition at close. Every placement of the definition then shows the
-result.
+definition at close. A linked copy made in the session wraps a session
+member into a set of its own; the close leaves that member in the set and
+folds the set's placements in, so they come back as a nested pair. Every
+placement of the definition then shows the result.
 
 This works only when the instance's pose is a **similarity** — a rotation,
 uniform scale, and optionally a mirror (`Transform::similarity_scale`).

@@ -747,6 +747,10 @@ msgid "A circle needs at least 24 segments — below that it stops being a circl
 msgstr "A circle needs at least 24 segments — below that it stops being a circle and becomes a polygon. Use the Polygon tool for a coarser shape."
 
 #: src/kernelErrors.ts
+msgid "A component can't be turned back into linked copies. Copy one of its parts to start a new set."
+msgstr "A component can't be turned back into linked copies. Copy one of its parts to start a new set."
+
+#: src/kernelErrors.ts
 msgid "A connected tool changed which group or component was open for editing without putting it back, so its whole batch was discarded and the model was left unchanged."
 msgstr "A connected tool changed which group or component was open for editing without putting it back, so its whole batch was discarded and the model was left unchanged."
 
@@ -5344,6 +5348,10 @@ msgid "Only a whole, untouched circle can have its segment count changed — not
 msgstr "Only a whole, untouched circle can have its segment count changed — not a part-erased one, and not one other lines run into. Redraw the circle at the count you want."
 
 #: src/kernelErrors.ts
+msgid "Only an object or a group can start a set of linked copies. This is already a component, so copy it as it is."
+msgstr "Only an object or a group can start a set of linked copies. This is already a component, so copy it as it is."
+
+#: src/kernelErrors.ts
 msgid "Only flat panels can get a thickness this way. Close the openings of this shape instead."
 msgstr "Only flat panels can get a thickness this way. Close the openings of this shape instead."
 
@@ -8505,6 +8513,10 @@ msgstr "This instance sits inside a group, so it opens in the in-context editing
 #: src/kernelErrors.ts
 msgid "This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid."
 msgstr "This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid."
+
+#: src/kernelErrors.ts
+msgid "This is already a component, not a set of linked copies, so there's nothing to change."
+msgstr "This is already a component, not a set of linked copies, so there's nothing to change."
 
 #: src/kernelErrors.ts
 msgid "This is already solid, so there's nothing to close. Use Push/Pull to change its shape."

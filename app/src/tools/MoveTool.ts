@@ -1052,6 +1052,9 @@ export class MoveTool implements Tool {
       new BigUint64Array(nodes.map((n) => n.id)),
       affineF64,
       count,
+      // Independent copies until the linked-copy app stage flips the
+      // default.
+      false,
     )
     return created.map(nodeRefFromJs)
   }

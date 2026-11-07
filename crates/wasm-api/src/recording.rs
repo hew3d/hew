@@ -266,7 +266,19 @@ pub enum RecordedCall {
         ids: Vec<u64>,
         affine: [f64; 12],
         count: u32,
+        /// Linked copies ([`kernel::LinkPolicy::Linked`]). Missing in a
+        /// recording made before linked copies, which replays as
+        /// independent; written only when true, so an independent copy
+        /// records exactly as it always did.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        linked: bool,
     },
+    /// `wrap_linked(kind, id)` — one Object or Group wrapped as a linked
+    /// set. Additive variant (same posture as the others).
+    WrapLinked { kind: u8, id: u64 },
+    /// `set_linked(component, linked)` — "Make component" removing a linked
+    /// set's `hew` / `linked` (`linked = false`). Additive variant.
+    SetLinked { component: u64, linked: bool },
     /// `push_pull(object, face, distance)` — the user-level push/pull of a
     /// solid face. Replay re-issues it and the kernel re-derives the routing
     /// (translate, coplanar-aware, whole-wall radial offset, boss/recess, or

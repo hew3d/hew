@@ -234,6 +234,7 @@ impl Document {
             instances_touched,
             components_touched: vec![component],
             guides_touched: Vec::new(),
+            linked: Vec::new(),
         })
     }
 
@@ -342,6 +343,7 @@ impl Document {
             objects: created.objects.clone(),
             groups: created.groups.clone(),
             instances: created.instances.clone(),
+            copied: created.pairs.clone(),
         });
         self.commit_new_action();
         self.debug_validate();

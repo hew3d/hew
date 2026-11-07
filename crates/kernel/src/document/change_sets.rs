@@ -176,6 +176,37 @@ impl Builder<'_> {
     fn union(&mut self, other: &ChangeSet) {
         self.set.union_with(other);
     }
+    /// `(new, source)` pairs for `copied_from`, resolved to stable ids.
+    fn copied(&mut self, pairs: impl IntoIterator<Item = (EntityRef, EntityRef)>) {
+        for (new, src) in pairs {
+            let (Some(n), Some(s)) = (self.doc.sid_of(&new), self.doc.sid_of(&src)) else {
+                self.set.full = true;
+                return;
+            };
+            let pair = (
+                ChangeRef {
+                    entity: new,
+                    sid: n,
+                },
+                ChangeRef {
+                    entity: src,
+                    sid: s,
+                },
+            );
+            if !self.set.copied_from.contains(&pair) {
+                self.set.copied_from.push(pair);
+            }
+        }
+    }
+    fn node_pairs(&mut self, pairs: &[(NodeId, NodeId)]) {
+        self.copied(pairs.iter().map(|&(n, s)| (node_entity(n), node_entity(s))));
+    }
+    /// A linked-set definition hidden with its last placement, and the
+    /// member nodes hidden with it.
+    fn hidden_def(&mut self, def: ComponentId, nodes: &[NodeId]) {
+        self.component(List::Removed, def);
+        self.nodes(List::Removed, nodes.iter().copied());
+    }
 }
 
 impl Document {
@@ -383,12 +414,16 @@ impl Document {
                 parent,
                 hidden_subtree,
                 reanchored,
+                hidden_defs,
                 ..
             } => {
                 b.node(Removed, *node);
                 b.nodes(Removed, hidden_subtree.iter().copied());
                 b.parent(*parent);
                 b.reanchored(reanchored);
+                for (d, nodes) in hidden_defs {
+                    b.hidden_def(*d, nodes);
+                }
             }
             DocAction::MadeComponent {
                 component,
@@ -416,6 +451,43 @@ impl Document {
                 b.parent(*parent);
                 b.reanchored(reanchored);
             }
+            DocAction::WrappedLinked {
+                def,
+                instance,
+                node,
+                parent,
+                owner_def,
+                member_prior_parents,
+                folded_groups,
+                folded_instances,
+                reanchored,
+                ..
+            } => {
+                b.component(Added, *def);
+                b.instance(Added, *instance);
+                // The node is re-owned, not hidden: same entities, now
+                // members of the new definition.
+                b.node(Modified, *node);
+                b.objects(Modified, member_prior_parents.iter().map(|(o, _)| *o));
+                b.groups(Modified, folded_groups.iter().copied());
+                b.instances(Modified, folded_instances.iter().copied());
+                b.parent(*parent);
+                if let Some(outer) = owner_def {
+                    b.component(Modified, *outer);
+                }
+                b.reanchored(reanchored);
+                b.set.linked.push(crate::document::LinkedWrap {
+                    source: *node,
+                    instance: *instance,
+                    definition: *def,
+                });
+            }
+            DocAction::LinkedCopies { wraps, array } => {
+                for child in wraps.iter().chain(std::iter::once(array.as_ref())) {
+                    let child = self.action_changes(child);
+                    b.union(&child);
+                }
+            }
             DocAction::PlacedInstance { instance } => b.instance(Added, *instance),
             DocAction::Duplicated {
                 root,
@@ -423,18 +495,21 @@ impl Document {
                 objects,
                 groups,
                 instances,
+                copied,
             } => {
                 b.node(Added, *root);
                 b.objects(Added, objects.iter().copied());
                 b.groups(Added, groups.iter().copied());
                 b.instances(Added, instances.iter().copied());
                 b.parent(*parent);
+                b.node_pairs(copied);
             }
             DocAction::DuplicatedArray {
                 roots,
                 objects,
                 groups,
                 instances,
+                copied,
             } => {
                 b.nodes(Added, roots.iter().map(|(n, _)| *n));
                 b.objects(Added, objects.iter().copied());
@@ -444,6 +519,7 @@ impl Document {
                     b.parent(*parent);
                 }
                 b.owner_defs(objects, groups, instances);
+                b.node_pairs(copied);
             }
             DocAction::CreatedGuide { guide } => b.guide(Added, *guide),
             DocAction::DeletedGuide { guide } => b.guide(Removed, *guide),
@@ -487,7 +563,11 @@ impl Document {
                 // A baked base material is part of creating the copies.
                 baked_materials: _,
                 baked_instance_materials: _,
+                hidden_defs,
             } => {
+                for (d, nodes) in hidden_defs {
+                    b.hidden_def(*d, nodes);
+                }
                 b.instance(Removed, *instance);
                 // The created roots took the instance's place in its
                 // group's member list. A hidden instance keeps its parent
@@ -507,11 +587,20 @@ impl Document {
                 new_def,
                 copied,
                 shared,
+                hidden_defs,
                 ..
             } => {
                 b.component(Added, *new_def);
                 b.instance(Modified, *instance);
-                b.component(Modified, *prev_def);
+                // The step took a linked set's last placement (`prev_def`
+                // first, when it did), and any set placed only inside it.
+                if !hidden_defs.iter().any(|(d, _)| d == prev_def) {
+                    b.component(Modified, *prev_def);
+                }
+                for (d, nodes) in hidden_defs {
+                    b.hidden_def(*d, nodes);
+                }
+                b.copied(copied.iter().cloned());
                 // The private copy's members and cloned sketches are new
                 // entities a consumer would otherwise never hear of.
                 for (new, _) in copied {
@@ -602,9 +691,13 @@ impl Document {
             DocAction::DefinitionDeleted {
                 component,
                 hidden_nodes,
+                hidden_defs,
             } => {
                 b.component(Removed, *component);
                 b.nodes(Removed, hidden_nodes.iter().copied());
+                for (d, nodes) in hidden_defs {
+                    b.hidden_def(*d, nodes);
+                }
             }
             DocAction::NodeMetaChanged { node, .. } => b.node(Modified, *node),
             DocAction::ComponentRenamed { component, .. } => b.component(Modified, *component),

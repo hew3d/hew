@@ -598,7 +598,8 @@ fn expansion_width_is_bounded_at_the_op() {
     assert!(matches!(
         doc.duplicate_node(
             NodeId::Instance(inst),
-            &Transform::translation(Vec3::new(2.0, 0.0, 0.0))
+            &Transform::translation(Vec3::new(2.0, 0.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         ),
         Err(kernel::DocumentError::ComponentExpansionExceeded)
     ));

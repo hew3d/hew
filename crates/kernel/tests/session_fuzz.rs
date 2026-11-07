@@ -2,7 +2,8 @@
 //! sequences of the tree-shaping ops — make component, group, ungroup,
 //! reparent, explode, place, make unique (one instance, and by occurrence
 //! path), duplicate, delete, delete definition, transform and copy
-//! definition members in place — interleaved with component and group EDITING SESSIONS
+//! definition members in place, linked copies (wrap, copy linked, delete a
+//! linked placement, unlink one) — interleaved with component and group EDITING SESSIONS
 //! (opened, stacked, closed innermost-first) and undo/redo, over a document
 //! of plain boxes.
 //!
@@ -21,7 +22,12 @@
 //! - with no session open, `load(save())` succeeds too;
 //! - a make-unique-by-path fork keeps the occurrence walk's instance row
 //!   count, and undo then redo of it reproduces the state hash both ways
-//!   (a refused one leaves the document unchanged).
+//!   (a refused one leaves the document unchanged);
+//! - a wrap renders exactly what it rendered before, a linked copy adds one
+//!   world placement per copy (and one for the wrap, whose new set takes in
+//!   any world placements inside the wrapped group), and undo then redo of
+//!   either reproduces the state hash both ways;
+//! - deleting a linked set's last live placement takes the set with it.
 //!
 //! Failures shrink to a short op list. Run deeper than the default 256
 //! cases with `PROPTEST_CASES=20000 cargo test -p kernel --test
@@ -100,6 +106,22 @@ enum Op {
     /// Delete every object inside the open component session, so the close
     /// empties the definition (the grouped-sibling emptied-close defect).
     DeleteSessionMembers,
+    /// Wrap a node as a linked set (`wrap_linked`).
+    WrapLinked {
+        sel: usize,
+    },
+    /// Copy a node with `LinkPolicy::Linked`.
+    DuplicateLinked {
+        sel: usize,
+    },
+    /// Delete a world placement of a linked set.
+    DeleteLinkedPlacement {
+        sel: usize,
+    },
+    /// Unlink a placement of a linked set (make unique by path, cascade).
+    UnlinkPlacement {
+        sel: usize,
+    },
     CloseSession,
     Undo,
     Redo,
@@ -127,6 +149,10 @@ fn arb_op() -> impl Strategy<Value = Op> {
         3 => sel().prop_map(|sel| Op::OpenComponentSession { sel }),
         3 => sel().prop_map(|sel| Op::OpenGroupSession { sel }),
         2 => Just(Op::DeleteSessionMembers),
+        2 => sel().prop_map(|sel| Op::WrapLinked { sel }),
+        2 => sel().prop_map(|sel| Op::DuplicateLinked { sel }),
+        1 => sel().prop_map(|sel| Op::DeleteLinkedPlacement { sel }),
+        1 => sel().prop_map(|sel| Op::UnlinkPlacement { sel }),
         3 => Just(Op::CloseSession),
         2 => Just(Op::Undo),
         2 => Just(Op::Redo),
@@ -233,6 +259,29 @@ fn make_unique_by_path(
     Ok(())
 }
 
+/// What renders right now: visible world objects plus every expanded
+/// placement.
+fn rendered(doc: &Document) -> usize {
+    doc.visible_object_ids().len() + doc.expanded_placements().len()
+}
+
+/// Undo then redo of the op just committed must land on `before` and then
+/// `after` exactly.
+fn undo_redo_exact(doc: &mut Document, before: u64, what: &str) -> Result<(), String> {
+    let after = doc.state_hash();
+    doc.undo()
+        .map_err(|e| format!("undo of the {what} refused: {e}"))?;
+    if doc.state_hash() != before {
+        return Err(format!("undo of the {what} did not restore the document"));
+    }
+    doc.redo()
+        .map_err(|e| format!("redo of the {what} refused: {e}"))?;
+    if doc.state_hash() != after {
+        return Err(format!("redo of the {what} did not reproduce it"));
+    }
+    Ok(())
+}
+
 /// Applies one op. A typed refusal is a legal answer and is ignored; what
 /// must never happen is a panic or a document that no longer reopens, both
 /// checked by the caller.
@@ -290,7 +339,11 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
         }
         Op::Duplicate { sel } => {
             if let Some(n) = pick(&nodes, sel) {
-                let _ = doc.duplicate_node(n, &Transform::translation(Vec3::new(0.5, 0.5, 0.0)));
+                let _ = doc.duplicate_node(
+                    n,
+                    &Transform::translation(Vec3::new(0.5, 0.5, 0.0)),
+                    kernel::LinkPolicy::Independent,
+                );
             }
         }
         Op::Delete { sel } => {
@@ -341,6 +394,102 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
             for o in doc.explode_session_objects().unwrap_or_default() {
                 let _ = doc.delete_node(NodeId::Object(o));
             }
+        }
+        Op::WrapLinked { sel } => {
+            if let Some(n) = pick(&nodes, sel) {
+                let shown = rendered(doc);
+                let before = doc.state_hash();
+                match doc.wrap_linked(n) {
+                    Ok(_) => {
+                        if rendered(doc) != shown {
+                            return Err(format!(
+                                "a wrap changed what renders from {shown} to {}",
+                                rendered(doc)
+                            ));
+                        }
+                        return undo_redo_exact(doc, before, "wrap");
+                    }
+                    Err(_) if doc.state_hash() != before => {
+                        return Err("a refused wrap changed the document".to_string());
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        Op::DuplicateLinked { sel } => {
+            if let Some(n) = pick(&nodes, sel) {
+                let placements = doc.instance_ids().len();
+                // A wrapped group's own instances become members of the new
+                // set, so they stop being world placements.
+                let folded = match n {
+                    NodeId::Instance(_) => 0,
+                    _ => doc.leaf_instances_under(n).len(),
+                };
+                let before = doc.state_hash();
+                let t = Transform::translation(Vec3::new(0.5, 0.5, 0.0));
+                match doc.duplicate_node(n, &t, kernel::LinkPolicy::Linked) {
+                    Ok((_, change)) => {
+                        let want = placements + 1 + change.linked.len() - folded;
+                        if doc.instance_ids().len() != want {
+                            return Err(format!(
+                                "a linked copy left {} world placements, not {want}",
+                                doc.instance_ids().len()
+                            ));
+                        }
+                        return undo_redo_exact(doc, before, "linked copy");
+                    }
+                    Err(_) if doc.state_hash() != before => {
+                        return Err("a refused linked copy changed the document".to_string());
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        Op::DeleteLinkedPlacement { sel } => {
+            let linked: Vec<InstanceId> = instances
+                .iter()
+                .copied()
+                .filter(|&i| doc.instance_def(i).is_some_and(|d| doc.is_linked_set(d)))
+                .collect();
+            if let Some(i) = pick(&linked, sel) {
+                let def = doc.instance_def(i).expect("live");
+                let last = doc.definition_usage(def) == 1;
+                if doc.delete_node(NodeId::Instance(i)).is_ok()
+                    && last
+                    && doc.session_stack().is_empty()
+                    && doc.is_linked_set(def)
+                {
+                    return Err("a linked set outlived its last placement".to_string());
+                }
+            }
+        }
+        Op::UnlinkPlacement { sel } => {
+            let paths: Vec<Vec<InstanceId>> = instance_paths(doc)
+                .into_iter()
+                .filter(|p| {
+                    doc.instance_def(*p.last().expect("a path"))
+                        .is_some_and(|d| doc.is_linked_set(d))
+                })
+                .collect();
+            if paths.is_empty() {
+                return Ok(());
+            }
+            let path = paths[sel % paths.len()].clone();
+            let rows = instance_rows(doc);
+            let before = doc.state_hash();
+            if doc.make_unique_by_path(&path, true, false).is_err() {
+                if doc.state_hash() != before {
+                    return Err("a refused unlink changed the document".to_string());
+                }
+                return Ok(());
+            }
+            if instance_rows(doc) != rows {
+                return Err(format!(
+                    "the unlink changed the placement count from {rows} to {}",
+                    instance_rows(doc)
+                ));
+            }
+            return undo_redo_exact(doc, before, "unlink");
         }
         Op::CloseSession => {
             let _ = doc.close_innermost_session();
@@ -457,6 +606,19 @@ fn check_sibling_render(doc: &Document, step: usize, op: &Op) -> Result<(), Test
             if !placements.contains(&i) {
                 return Err(fail(format!(
                     "live sibling {i:?} missing from session_placements"
+                )));
+            }
+        }
+    }
+    // A linked set goes with its last live placement, transitively: no
+    // live linked set is left placed by nothing. Checked with nothing
+    // open only, since a definition on loan has its entered instance
+    // hidden by the bake.
+    if doc.session_stack().is_empty() {
+        for c in doc.component_ids() {
+            if doc.is_linked_set(c) && doc.definition_usage(c) == 0 {
+                return Err(fail(format!(
+                    "linked set {c:?} is live with no live placement"
                 )));
             }
         }

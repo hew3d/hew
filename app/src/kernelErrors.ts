@@ -241,6 +241,10 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.`,
   AmbiguousHost:
     msg`This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again.`,
+  NotWrappable:
+    msg`Only an object or a group can start a set of linked copies. This is already a component, so copy it as it is.`,
+  NotLinkable: msg`A component can't be turned back into linked copies. Copy one of its parts to start a new set.`,
+  NotLinked: msg`This is already a component, not a set of linked copies, so there's nothing to change.`,
   BooleanOperandNotSolid:
     msg`Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…`,
   BooleanOperandEmpty:

@@ -382,10 +382,16 @@ fn every_common_action_gets_the_label_the_ui_shows() {
 
     // Copies.
     let shift = Transform::translation(Vec3::new(0.0, 5.0, 0.0));
-    doc.duplicate_node(NodeId::Object(a), &shift).expect("copy");
+    doc.duplicate_node(NodeId::Object(a), &shift, kernel::LinkPolicy::Independent)
+        .expect("copy");
     assert_eq!(last(&doc), "Copy");
-    doc.duplicate_nodes_array(&[NodeId::Object(a)], &shift, NonZeroU32::new(3).unwrap())
-        .expect("array copy");
+    doc.duplicate_nodes_array(
+        &[NodeId::Object(a)],
+        &shift,
+        NonZeroU32::new(3).unwrap(),
+        kernel::LinkPolicy::Independent,
+    )
+    .expect("array copy");
     assert_eq!(last(&doc), "Copy ×3");
 
     // Materials.

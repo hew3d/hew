@@ -244,7 +244,7 @@ longer replay.
 | `transform_selection` | `kinds[]`/`ids[]` (parallel node lists), `sketches[]`, `affine[12]` | transform a whole multi-selection as one undo step |
 | `delete_node` | `kind` (0=object, 1=group, 2=instance), `id` | delete a node |
 | `duplicate_node` | `kind`, `id`, `affine[12]` | Move+copy of one node: a deep clone placed at the offset |
-| `duplicate_selection_array` | `kinds[]`/`ids[]` (parallel node lists), `affine[12]`, `count` (1–1000; an out-of-range count fails the replay typed rather than hanging) | array copy: every listed node cloned `count` times along the step, one undo step |
+| `duplicate_selection_array` | `kinds[]`/`ids[]` (parallel node lists), `affine[12]`, `count` (1–1000; an out-of-range count fails the replay typed rather than hanging), `linked` (optional, written only when `true`) | array copy: every listed node cloned `count` times along the step, one undo step. With `linked`, each Object or Group is first wrapped as its own linked set and the copies are placements of it; a recording without the field replays as independent copies |
 | `scene_undo` / `scene_redo` | — | document-level undo/redo (recorded only when it succeeded) |
 | `transform_sketch` | `sketch`, `affine[12]` | bake an affine into a free-standing sketch |
 | `transform_sketch_island` | `sketch`, `island`, `affine[12]` | rigidly move one sketch island |
@@ -261,6 +261,8 @@ longer replay.
 | `explode_instance` | `instance` | bake an instance into independent world objects |
 | `make_unique` | `instance` | detach an instance onto a private definition copy |
 | `make_unique_by_path` | `path[]`, `cascade`, `deep` | fork the placement at the end of an instance path (outermost first) onto a private definition copy; `cascade` forks every definition on the path so only that placement diverges, `deep` also forks the definitions nested inside the leaf's. One undo entry |
+| `wrap_linked` | `kind` (0=object, 1=group), `id` | wrap one Object or Group as a linked set: a definition carrying `hew` / `linked` with the node as its only member, placed once in the node's spot. One undo entry |
+| `set_linked` | `component`, `linked` (only `false` replays; `true` is refused) | remove `hew` / `linked` from a linked set, so it reads as a named component. One undo entry |
 | `push_pull_in_component` | `component`, `object`, `face`, `distance` | push/pull a face inside a component definition |
 | `set_node_name` | `kind`, `id`, `name` (string or null) | rename a node / clear its name |
 | `add_node_tag` / `remove_node_tag` | `kind`, `id`, `path[]` (segments) | assign / unassign a tag path on a node |

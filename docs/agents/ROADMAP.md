@@ -298,8 +298,8 @@ below.
   while editing another folds it in when you step out. The definition
   graph stays acyclic and bounded — a component cannot contain itself,
   and nesting past 64 levels or a million rendered parts is refused
-- Make Unique (detach an instance into its own copy, named "<definition>
-  Copy" — or after the instance's own name if it has one; the copied
+- Make Unique (detach an instance into its own copy, keeping the
+  definition's name — or taking the instance's own name if it has one; the copied
   members keep their names, tags, and attributes) and Explode
   (bake an instance back into ordinary geometry; a nested member
   surfaces as an ordinary instance, its geometry still shared)
@@ -1391,7 +1391,17 @@ below.
   (`Document::make_unique_by_path`: with the cascade, only that placement
   diverges; `deep` forks the nested definitions too; one undo entry),
   exported to the app as `make_unique_by_path_json`; its bus command
-  (`hew.component.make_unique` by path) is still to come. A boolean's
+  (`hew.component.make_unique` by path) is still to come. The kernel's
+  copies link when the caller asks for it (`LinkPolicy::Linked` on
+  `duplicate_node`, `duplicate_nodes_array`, and
+  `duplicate_nodes_placements`): each Object or Group copied is wrapped
+  as a linked set (`Document::wrap_linked`, a definition carrying `hew` /
+  `linked`) and every copy is a placement of it, in one undo entry; a set
+  goes with its last placement, `promote_linked` turns one into a named
+  component, change sets carry `linked` and `copied_from`, and the wasm
+  surface exports `wrap_linked`, `is_linked`, `set_linked`,
+  `owner_definition`, and `duplicate_selection_array_linked`. The app and
+  the bus still copy independently. A boolean's
   result keeps its first operand's name, tags, and attributes. The snap
   service can lock to any direction through an
   anchor, for plugin tools to use. A component placement carries its own

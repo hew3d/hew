@@ -3331,3 +3331,38 @@ fn detached_with_owner_object_is_rejected() {
         other => panic!("detached + owner_object must be malformed: {other:?}"),
     }
 }
+
+/// A linked set is an ordinary definition with one attribute (`hew` /
+/// `linked`): it needs no record field, so a document holding one encodes
+/// the same manifest version as one holding a named component with an
+/// ordinary attribute — and the key round-trips.
+#[test]
+fn a_document_with_a_linked_set_encodes_the_same_manifest_version() {
+    let mut linked = Document::new();
+    let o = extrude_box(&mut linked, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (def, _, _) = linked.wrap_linked(NodeId::Object(o)).unwrap();
+
+    let mut named = Document::new();
+    let p = extrude_box(&mut named, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let (c, _, _) = named.make_component(&[NodeId::Object(p)]).unwrap();
+    named
+        .attr_set(
+            kernel::AttrTarget::Entity(kernel::EntityRef::Component(c)),
+            "com.example",
+            "role",
+            kernel::AttrValue::Bool(true),
+        )
+        .unwrap();
+
+    let linked_bytes = linked.save();
+    let version = manifest_json(&linked_bytes)["format_version"].clone();
+    assert_eq!(version, manifest_json(&named.save())["format_version"]);
+    assert_eq!(
+        version,
+        serde_json::json!(kernel::serialize::MANIFEST_FORMAT_VERSION)
+    );
+    let re = Document::load(&linked_bytes).unwrap();
+    let back = re.component_ids()[0];
+    assert!(re.is_linked_set(back));
+    assert!(linked.is_linked_set(def));
+}

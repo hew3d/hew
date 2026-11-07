@@ -2753,8 +2753,8 @@ fn explode_bakes_the_displayed_name_after_a_definition_rename() {
 
 /// Make Unique names the new definition: a set instance name is promoted to
 /// the definition name (and cleared off the instance); an unnamed instance
-/// derives `"<def> Copy"`, disambiguated `"<def> Copy 2"`, … against live
-/// definitions. Undo restores the promoted instance name exactly.
+/// keeps the old definition's name (a copy is the same part until the user
+/// renames it). Undo restores the promoted instance name exactly.
 #[test]
 fn make_unique_names_the_new_definition() {
     let mut doc = Document::new();
@@ -2769,13 +2769,13 @@ fn make_unique_names_the_new_definition() {
         .place_instance(comp, Transform::translation(Vec3::new(6.0, 0.0, 0.0)))
         .unwrap();
 
-    // Unnamed instance → "<def> Copy".
+    // Unnamed instance → the definition's own name.
     let (u2, _) = doc.make_unique(i2).unwrap();
-    assert_eq!(doc.component_name(u2), Some("The Box Copy"));
+    assert_eq!(doc.component_name(u2), Some("The Box"));
 
-    // The next unnamed unique of the same def disambiguates.
+    // And again for the next unnamed unique of the same def.
     let (u3, _) = doc.make_unique(i3).unwrap();
-    assert_eq!(doc.component_name(u3), Some("The Box Copy 2"));
+    assert_eq!(doc.component_name(u3), Some("The Box"));
 
     // A named instance promotes its name to the new definition and clears
     // its own — the row now reads as the new component, not "Name (Name)".
@@ -5886,7 +5886,11 @@ fn duplicate_object_clones_geometry_at_offset_and_round_trips() {
     let offset = Vec3::new(3.0, 0.0, 0.0);
 
     let (root, change) = doc
-        .duplicate_node(NodeId::Object(a), &Transform::translation(offset))
+        .duplicate_node(
+            NodeId::Object(a),
+            &Transform::translation(offset),
+            kernel::LinkPolicy::Independent,
+        )
         .expect("duplicate object");
     let b = match root {
         NodeId::Object(id) => id,
@@ -5951,6 +5955,7 @@ fn duplicate_group_clones_the_whole_subtree() {
         .duplicate_node(
             NodeId::Group(g),
             &Transform::translation(Vec3::new(0.0, 5.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .unwrap();
     let g2 = match root {
@@ -5987,7 +5992,11 @@ fn duplicate_instance_shares_the_definition_at_offset_pose() {
     let offset = Vec3::new(4.0, 0.0, 0.0);
 
     let (root, _) = doc
-        .duplicate_node(NodeId::Instance(inst), &Transform::translation(offset))
+        .duplicate_node(
+            NodeId::Instance(inst),
+            &Transform::translation(offset),
+            kernel::LinkPolicy::Independent,
+        )
         .unwrap();
     let inst2 = match root {
         NodeId::Instance(id) => id,
@@ -6027,8 +6036,12 @@ fn duplicate_refuses_bad_placement_and_stale_node() {
     let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
 
     assert_eq!(
-        doc.duplicate_node(NodeId::Object(a), &Transform::uniform_scale(0.0))
-            .map(|_| ()),
+        doc.duplicate_node(
+            NodeId::Object(a),
+            &Transform::uniform_scale(0.0),
+            kernel::LinkPolicy::Independent
+        )
+        .map(|_| ()),
         Err(DocumentError::Transform(TransformError::Singular))
     );
     assert_eq!(
@@ -6038,7 +6051,11 @@ fn duplicate_refuses_bad_placement_and_stale_node() {
     );
     // A mirrored duplicate is a legal placement: it bakes a mirrored copy.
     let (copy, _) = doc
-        .duplicate_node(NodeId::Object(a), &Transform::uniform_scale(-1.0))
+        .duplicate_node(
+            NodeId::Object(a),
+            &Transform::uniform_scale(-1.0),
+            kernel::LinkPolicy::Independent,
+        )
         .expect("a reflecting duplicate bakes");
     let copy_id = match copy {
         NodeId::Object(o) => o,
@@ -6051,8 +6068,12 @@ fn duplicate_refuses_bad_placement_and_stale_node() {
     doc.undo().expect("undo the mirrored duplicate");
     let bogus = ObjectId::default();
     assert_eq!(
-        doc.duplicate_node(NodeId::Object(bogus), &Transform::IDENTITY)
-            .map(|_| ()),
+        doc.duplicate_node(
+            NodeId::Object(bogus),
+            &Transform::IDENTITY,
+            kernel::LinkPolicy::Independent
+        )
+        .map(|_| ()),
         Err(DocumentError::UnknownObject)
     );
 
@@ -6084,6 +6105,7 @@ fn array_copy_places_evenly_spaced_copies_as_one_undo_step() {
             &[NodeId::Object(a)],
             &Transform::translation(step),
             NonZeroU32::new(3).unwrap(),
+            kernel::LinkPolicy::Independent,
         )
         .expect("array duplicate");
     assert_eq!(roots.len(), 3, "three copies for count = 3");
@@ -6145,6 +6167,7 @@ fn array_copy_count_one_matches_single_duplicate() {
             &[NodeId::Object(a)],
             &Transform::translation(step),
             NonZeroU32::new(1).unwrap(),
+            kernel::LinkPolicy::Independent,
         )
         .expect("array duplicate of one");
     assert_eq!(roots.len(), 1);
@@ -6174,6 +6197,7 @@ fn array_copy_of_instances_shares_the_definition() {
             &[NodeId::Instance(inst), NodeId::Object(free)],
             &Transform::translation(step),
             NonZeroU32::new(2).unwrap(),
+            kernel::LinkPolicy::Independent,
         )
         .expect("mixed array duplicate");
     assert_eq!(roots.len(), 4, "two copies of each of two sources");
@@ -6233,23 +6257,39 @@ fn array_copy_rejects_bad_input_without_touching_the_document() {
     let t = Transform::translation(Vec3::new(1.0, 0.0, 0.0));
 
     assert_eq!(
-        doc.duplicate_nodes_array(&[], &t, one).map(|_| ()),
+        doc.duplicate_nodes_array(&[], &t, one, kernel::LinkPolicy::Independent)
+            .map(|_| ()),
         Err(DocumentError::EmptySelection)
     );
     assert_eq!(
-        doc.duplicate_nodes_array(&[NodeId::Object(a), NodeId::Object(a)], &t, one)
-            .map(|_| ()),
+        doc.duplicate_nodes_array(
+            &[NodeId::Object(a), NodeId::Object(a)],
+            &t,
+            one,
+            kernel::LinkPolicy::Independent
+        )
+        .map(|_| ()),
         Err(DocumentError::DuplicateMember)
     );
     let bogus = ObjectId::default();
     assert_eq!(
-        doc.duplicate_nodes_array(&[NodeId::Object(bogus)], &t, one)
-            .map(|_| ()),
+        doc.duplicate_nodes_array(
+            &[NodeId::Object(bogus)],
+            &t,
+            one,
+            kernel::LinkPolicy::Independent
+        )
+        .map(|_| ()),
         Err(DocumentError::UnknownObject)
     );
     assert_eq!(
-        doc.duplicate_nodes_array(&[NodeId::Object(a)], &Transform::uniform_scale(0.0), one)
-            .map(|_| ()),
+        doc.duplicate_nodes_array(
+            &[NodeId::Object(a)],
+            &Transform::uniform_scale(0.0),
+            one,
+            kernel::LinkPolicy::Independent
+        )
+        .map(|_| ()),
         Err(DocumentError::Transform(TransformError::Singular))
     );
     assert_eq!(
@@ -6259,7 +6299,12 @@ fn array_copy_rejects_bad_input_without_touching_the_document() {
     );
     // A reflecting array step bakes mirrored copies.
     let made = doc
-        .duplicate_nodes_array(&[NodeId::Object(a)], &Transform::uniform_scale(-1.0), one)
+        .duplicate_nodes_array(
+            &[NodeId::Object(a)],
+            &Transform::uniform_scale(-1.0),
+            one,
+            kernel::LinkPolicy::Independent,
+        )
         .expect("a reflecting array bakes");
     assert!(!made.0.is_empty());
     doc.undo().expect("undo the mirrored array");
@@ -6292,7 +6337,7 @@ proptest! {
             .duplicate_nodes_array(
                 &[NodeId::Object(a)],
                 &Transform::translation(step),
-                NonZeroU32::new(count).unwrap(),
+                NonZeroU32::new(count).unwrap(), kernel::LinkPolicy::Independent,
             )
             .expect("array duplicate");
         prop_assert_eq!(roots.len(), count as usize);
@@ -6366,6 +6411,7 @@ fn net_zero_tag_pair_restores_the_hash_but_not_the_generation() {
         &[NodeId::Object(a)],
         &Transform::translation(Vec3::new(2.0, 0.0, 0.0)),
         NonZeroU32::new(1).unwrap(),
+        kernel::LinkPolicy::Independent,
     )
     .expect("copy commit");
     let hash = doc.state_hash();
@@ -6425,6 +6471,7 @@ fn torture_mode_toggles_and_passes_a_real_op_sequence() {
         .duplicate_node(
             NodeId::Object(u),
             &Transform::translation(Vec3::new(6.0, 0.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .expect("duplicate under torture")
         .0;
@@ -6723,7 +6770,11 @@ fn duplicate_nested_group_clones_structure_instances_and_attributes() {
     let offset = Vec3::new(0.0, 10.0, 0.0);
     let hash_before = doc.state_hash();
     let (root, _) = doc
-        .duplicate_node(NodeId::Group(outer), &Transform::translation(offset))
+        .duplicate_node(
+            NodeId::Group(outer),
+            &Transform::translation(offset),
+            kernel::LinkPolicy::Independent,
+        )
         .expect("duplicate nested group");
     let hash_after = doc.state_hash();
     let outer2 = match root {
@@ -6818,7 +6869,7 @@ proptest! {
         let hash_before = doc.state_hash();
         doc.duplicate_node(
             NodeId::Group(outer),
-            &Transform::translation(Vec3::new(dx, dy, dz)),
+            &Transform::translation(Vec3::new(dx, dy, dz)), kernel::LinkPolicy::Independent,
         )
         .expect("duplicate nested group");
         let hash_after = doc.state_hash();

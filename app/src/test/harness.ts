@@ -830,8 +830,8 @@ export interface HewTestHarness {
   /**
    * Detach an instance onto its own private definition copy (Make Unique).
    * Returns the new definition handle. A set instance name is promoted to
-   * the new definition's name; otherwise the copy is named "<def> Copy"
-   * (disambiguated "<def> Copy 2", …).
+   * the new definition's name; otherwise the copy keeps the definition's
+   * name.
    */
   makeUnique(instance: string): string
 
