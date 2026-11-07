@@ -105,6 +105,28 @@ export function ctxOfSketch(scene: WasmScene, sketch: bigint, instance: bigint |
   return ctxOfPlane(point, normal, instance)
 }
 
+/** The context of ONE detached sketch (separate-shapes design D5): that
+ *  sketch's own drafting context, in which only its drawing takes part. The
+ *  kernel hands this string back as a pick's `ctx`; building it here keeps
+ *  every ref of the sketch on one canonical string. */
+export function ctxOfSketchOnly(sketch: bigint | number, instance: bigint | number | null = null): string {
+  return instance !== null
+    ? JSON.stringify({ sketch: Number(sketch), instance: Number(instance) })
+    : JSON.stringify({ sketch: Number(sketch) })
+}
+
+/** The sketch (and instance) a sketch-only context names, or `null` for any
+ *  other context (`ctxOfSketchOnly`'s inverse). */
+export function sketchOfCtx(ctx: string): { sketch: bigint; instance: bigint | null } | null {
+  try {
+    const v = JSON.parse(ctx) as { sketch?: unknown; instance?: unknown }
+    if (typeof v.sketch !== 'number') return null
+    return { sketch: BigInt(v.sketch), instance: typeof v.instance === 'number' ? BigInt(v.instance) : null }
+  } catch {
+    return null
+  }
+}
+
 /** The plane of a context string, or `null` if it is not a plane context. */
 export function planeOfCtx(ctx: string): { point: V3; normal: V3; instance: bigint | null } | null {
   try {
@@ -118,6 +140,21 @@ export function planeOfCtx(ctx: string): { point: V3; normal: V3; instance: bigi
   } catch {
     return null
   }
+}
+
+/** `planeOfCtx`, also answering a detached sketch's own context from the
+ *  sketch's plane (a world sketch; one inside an instance is not posed here,
+ *  so it answers `null`). */
+export function planeOfCtxIn(
+  scene: { sketch_plane?(sketch: bigint): Float64Array | undefined },
+  ctx: string,
+): { point: V3; normal: V3; instance: bigint | null } | null {
+  const pl = planeOfCtx(ctx)
+  if (pl !== null) return pl
+  const of = sketchOfCtx(ctx)
+  if (of === null || of.instance !== null || scene.sketch_plane === undefined) return null
+  const sp = scene.sketch_plane(of.sketch)
+  return sp === undefined ? null : { point: [sp[0], sp[1], sp[2]], normal: [sp[3], sp[4], sp[5]], instance: null }
 }
 
 /** The context of `ctx`'s plane moved through `affine` (3x4 row-major, world):
@@ -164,7 +201,9 @@ export function keysToArray(keys: readonly string[]): BigUint64Array {
 export type DraftStore =
   | { kind: 'topology'; object: bigint }
   | { kind: 'owned'; object: bigint; sketch: bigint }
-  | { kind: 'free'; sketch: bigint }
+  /** `detached`: the sketch is a detached shape — in no plane's arrangement,
+   *  its own drafting context (separate-shapes design D5). */
+  | { kind: 'free'; sketch: bigint; detached?: true }
 
 export interface PlaneEdge {
   key: string
@@ -216,6 +255,8 @@ export interface PlaneUnits {
 /** The slice of the wasm `Scene` the listing needs. */
 export interface PlaneUnitsScene {
   plane_units_json(ctx: string): string
+  /** A sketch's plane (a detached sketch's own context has no plane string). */
+  sketch_plane?(sketch: bigint): Float64Array | undefined
   pick_plane_unit?(ctx: string, ray: Float64Array, tolerance: number): string
   history_generation?(): bigint
 }
@@ -228,7 +269,8 @@ function v3(x: unknown): V3 {
 function parseStore(s: Record<string, unknown>): DraftStore {
   if (s.kind === 'topology') return { kind: 'topology', object: BigInt(s.object as number) }
   if (s.kind === 'owned') return { kind: 'owned', object: BigInt(s.object as number), sketch: BigInt(s.sketch as number) }
-  return { kind: 'free', sketch: BigInt(s.sketch as number) }
+  const sketch = BigInt(s.sketch as number)
+  return s.detached === true ? { kind: 'free', sketch, detached: true } : { kind: 'free', sketch }
 }
 
 /** Parse `plane_units_json`. Malformed entries are skipped, never thrown on —
@@ -327,6 +369,7 @@ let cache: CacheEntry | null = null
  *  show: a hide/unhide, a scene refresh). */
 export function invalidatePlaneUnits(): void {
   cache = null
+  allCache = null
 }
 
 /** Push the hidden set to the kernel's inference state and drop the cached
@@ -406,8 +449,8 @@ export function edgesOfCurveRef(pu: PlaneUnits, key: string): PlaneEdge[] {
 // ── Picking ─────────────────────────────────────────────────────────────────
 
 export type PlanePick =
-  | { edge: string; unit: string; curve: string | null; run: string | null }
-  | { region: string }
+  | { edge: string; unit: string; curve: string | null; run: string | null; ctx?: string }
+  | { region: string; ctx?: string }
 
 /** The kernel's pick in `ctx`'s plane (see `pick_plane_unit`). */
 export function pickPlaneUnit(
@@ -423,17 +466,29 @@ export function pickPlaneUnit(
   } catch {
     return null
   }
-  let v: { edge?: string; unit?: string; curve?: string | null; run?: string | null; region?: string } | null
+  let v: {
+    edge?: string
+    unit?: string
+    curve?: string | null
+    run?: string | null
+    region?: string
+    ctx?: { sketch?: unknown; instance?: unknown }
+  } | null
   try {
     v = JSON.parse(json)
   } catch {
     return null
   }
   if (v === null || typeof v !== 'object') return null
+  // A pick that hit a detached sketch names that sketch's own context (the
+  // kernel's `ctx`); absent means the request's own context.
+  const own = v.ctx !== undefined && v.ctx !== null && typeof v.ctx.sketch === 'number'
+    ? { ctx: ctxOfSketchOnly(v.ctx.sketch, typeof v.ctx.instance === 'number' ? v.ctx.instance : null) }
+    : {}
   if (typeof v.edge === 'string' && typeof v.unit === 'string') {
-    return { edge: v.edge, unit: v.unit, curve: typeof v.curve === 'string' ? v.curve : null, run: typeof v.run === 'string' ? v.run : null }
+    return { edge: v.edge, unit: v.unit, curve: typeof v.curve === 'string' ? v.curve : null, run: typeof v.run === 'string' ? v.run : null, ...own }
   }
-  if (typeof v.region === 'string') return { region: v.region }
+  if (typeof v.region === 'string') return { region: v.region, ...own }
   return null
 }
 
@@ -536,7 +591,10 @@ export function unitOfRegion(pu: PlaneUnits, region: PlaneRegion): PlaneUnit | n
 /** The selection ref a kernel pick resolves to — a curve for a circle's
  *  edge, an edge for a plain line, the region's SHAPE (its island) for a fill
  *  click; `null` for a click on a plain face region (background). */
-export function refOfPick(scene: PlaneUnitsScene, ctx: string, pick: PlanePick): NodeRef | null {
+export function refOfPick(scene: PlaneUnitsScene, requestCtx: string, pick: PlanePick): NodeRef | null {
+  // A detached unit's refs carry ITS context, so every later edit of them
+  // (move, erase, offset, vertex drag) runs in the sketch-only scope.
+  const ctx = pick.ctx ?? requestCtx
   if ('edge' in pick) {
     // A click on a piece of a circle, arc, or polygon selects that RUN; a run
     // of a single facet is just a line (as a one-edge sketch chain always was).
@@ -874,6 +932,52 @@ export function drawingCtxsOfObject(
   return out
 }
 
+/** One entry of `plane_units_all_json`: a plane's listing, or a detached
+ *  sketch's own (`sketch` set — such a shape is in no plane's arrangement). */
+interface AllListingEntry {
+  plane: number[]
+  sketch?: number
+  detached?: boolean
+  units: unknown
+}
+
+let allCache: { scene: unknown; gen: string | null; entries: AllListingEntry[] } | null = null
+
+/** The whole document's free drawing in one kernel read, parsed once per
+ *  document revision (the Outliner, Select All, a marquee, and the tools'
+ *  detached-sketch checks all share it). */
+function readAllListings(scene: { plane_units_all_json?(): string; history_generation?(): bigint }): AllListingEntry[] {
+  if (scene.plane_units_all_json === undefined) return []
+  const gen = genOf(scene as PlaneUnitsScene)
+  if (allCache !== null && gen !== null && allCache.scene === scene && allCache.gen === gen) return allCache.entries
+  let entries: AllListingEntry[] = []
+  try {
+    entries = JSON.parse(scene.plane_units_all_json()) as AllListingEntry[]
+  } catch {
+    entries = []
+  }
+  allCache = { scene, gen, entries }
+  return entries
+}
+
+/** Every detached sketch of the world frame (separate-shapes design D16).
+ *  Empty for a host without the batch listing. */
+export function detachedSketchIds(scene: { plane_units_all_json?(): string; history_generation?(): bigint }): ReadonlySet<bigint> {
+  const out = new Set<bigint>()
+  for (const e of readAllListings(scene)) {
+    if (e.detached === true && typeof e.sketch === 'number') out.add(BigInt(e.sketch))
+  }
+  return out
+}
+
+/** The drafting context a sketch's drawing is listed and edited in: its own
+ *  sketch context when it is a detached shape (no plane arrangement holds
+ *  it), else its plane's (`ctxOfSketch`). */
+export function ctxOfSketchUnits(scene: WasmScene, sketch: bigint, instance: bigint | null = null): string | null {
+  if (instance === null && detachedSketchIds(scene).has(sketch)) return ctxOfSketchOnly(sketch)
+  return ctxOfSketch(scene, sketch, instance)
+}
+
 /** Where every drawing unit of the document lists in the Outliner: under its
  *  object when any edge is a topology or owned edge, else under its free
  *  sketch row. Planes are found from the sketches (free and owned) and from
@@ -893,14 +997,11 @@ export function outlinerDrawing(scene: OutlinerScene, objects: readonly bigint[]
   // of tens of thousands of small sketches (a furnished room's stray
   // edges) took minutes plane by plane.
   if (scene.plane_units_all_json !== undefined) {
-    let entries: { plane: number[]; units: unknown }[] = []
-    try {
-      entries = JSON.parse(scene.plane_units_all_json()) as { plane: number[]; units: unknown }[]
-    } catch (e) {
-      entries = []
-    }
-    for (const entry of entries) {
-      const ctx = ctxOfPlane([entry.plane[0], entry.plane[1], entry.plane[2]], [entry.plane[3], entry.plane[4], entry.plane[5]])
+    for (const entry of readAllListings(scene)) {
+      // A detached shape lists as its own context, after the planes.
+      const ctx = entry.detached === true && typeof entry.sketch === 'number'
+        ? ctxOfSketchOnly(entry.sketch)
+        : ctxOfPlane([entry.plane[0], entry.plane[1], entry.plane[2]], [entry.plane[3], entry.plane[4], entry.plane[5]])
       if (ctx === null) continue
       seedPlaneUnits(scene, ctx, parsePlaneUnits(ctx, JSON.stringify(entry.units)))
       add(ctx)

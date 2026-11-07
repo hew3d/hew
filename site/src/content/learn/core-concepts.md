@@ -46,9 +46,10 @@ As you draw, Hew's inference engine constantly looks for meaningful relationship
 | Center (the exact center of a drawn circle or arc) | Teal |
 | Quadrant (a cardinal point on a drawn circle's rim) | Teal |
 | Midpoint | Cyan |
-| Intersection (guide crossing) | Amber |
+| Intersection (a guide crossing, two objects' edges crossing, or an edge passing through another object's face) | Amber |
 | Tangent (where your line brushes a drawn circle) | Violet |
 | On Edge | Red |
+| On Intersection Line (where a face of one object meets a face of another — not a real edge, since objects never merge, but a line you can slide along) | Orange-red |
 | On Face | Blue |
 | On Guide | Purple |
 | On Axis | The axis color (X red, Y green, Z blue) |

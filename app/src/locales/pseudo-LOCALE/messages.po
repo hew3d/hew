@@ -7,14 +7,6 @@ msgstr ""
 "X-Generator: @lingui/cli\n"
 "Language: pseudo-LOCALE\n"
 
-#: src/tools/TapeMeasureTool.ts
-#~ msgid " — measuring only, no guide will be created."
-#~ msgstr ""
-
-#: src/tools/FollowMeTool.ts
-#~ msgid "— will land at the top level, not inside the group you’re editing"
-#~ msgstr ""
-
 #: src/panels/WelcomeScreen.tsx
 msgid ".hew, or import SketchUp, COLLADA, glTF, or STL."
 msgstr ""
@@ -47,10 +39,6 @@ msgstr ""
 msgid "{cap, plural, one {Array copy is limited to {limit} copy} other {Array copy is limited to {limit} copies}}"
 msgstr ""
 
-#: src/panels/LibraryDialog.tsx
-#~ msgid "{categoryName} items"
-#~ msgstr ""
-
 #: src/App.tsx
 msgid "{copiedCount, plural, one {Copied # object} other {Copied # objects}}"
 msgstr ""
@@ -81,6 +69,18 @@ msgstr ""
 
 #: src/print/usePrintController.ts
 msgid "{count} + {extraPages} cut list"
+msgstr ""
+
+#: src/panels/FollowNoticeBar.tsx
+msgid "{count} of your bug reports have news."
+msgstr ""
+
+#: src/panels/FollowNoticeBar.tsx
+msgid "{count} of your bug reports have replies."
+msgstr ""
+
+#: src/panels/FollowNoticeBar.tsx
+msgid "{count} of your bug reports have updates."
 msgstr ""
 
 #: src/log/RenderStatsReadout.tsx
@@ -269,6 +269,10 @@ msgstr ""
 
 #: src/i18n/historyLabels.ts
 msgid "{n, plural, one {Close an opening} other {Close # openings}}"
+msgstr ""
+
+#: src/i18n/historyLabels.ts
+msgid "{n, plural, one {Copy guide} other {Copy guide ×#}}"
 msgstr ""
 
 #: src/i18n/historyLabels.ts
@@ -787,10 +791,6 @@ msgid "A partial sweep can't cut open this shape — its profile touches the tur
 msgstr ""
 
 #: src/kernelErrors.ts
-msgid "A placement of this component sits inside a group, so it opens in the in-context editing mode instead."
-msgstr ""
-
-#: src/kernelErrors.ts
 msgid "A plugin command's answer could not be delivered. If this keeps happening, use Report Bug."
 msgstr ""
 
@@ -1109,6 +1109,19 @@ msgstr ""
 msgid "At the cursor"
 msgstr ""
 
+#. placeholder {0}: failedOpen.name
+#: src/panels/SentReportsDialog.tsx
+#~ msgid "Attach {0} (the file that didn’t open)"
+#~ msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Attach {failedName} (the file that didn’t open)"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Attach a file…"
+msgstr ""
+
 #: src/i18n/historyLabels.ts
 msgid "Attach sketch"
 msgstr ""
@@ -1217,6 +1230,10 @@ msgstr ""
 msgid "Browser storage"
 msgstr ""
 
+#: src/palette/registry.ts
+msgid "bug"
+msgstr ""
+
 #: src/panels/ImportingOverlay.tsx
 msgid "Building objects: {done} of {total}"
 msgstr ""
@@ -1258,6 +1275,7 @@ msgstr ""
 #: src/panels/RescaleConfirmDialog.tsx
 #: src/panels/SaveFormatDialog.tsx
 #: src/panels/ScenesPanel.tsx
+#: src/panels/SentReportsDialog.tsx
 #: src/panels/StlUnitsDialog.tsx
 #: src/panels/TextDialog.tsx
 #: src/panels/UnsavedChangesDialog.tsx
@@ -1325,7 +1343,12 @@ msgstr ""
 
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
+#: src/panels/SentReportsDialog.tsx
 msgid "Check for Updates…"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Check now"
 msgstr ""
 
 #: src/viewport/gpuCapability.ts
@@ -1340,12 +1363,20 @@ msgstr ""
 msgid "Checking the objects"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Checking…"
+msgstr ""
+
 #: src/settings/FluentSettingsPage.tsx
 msgid "Checks that the address serves a Hew relay and, if it needs one, that your upload key is accepted. Over plain http:// the phone's in-app scanner can't open the camera; scan with the camera app instead. A certificate from your own authority must be trusted on this computer and on the phone."
 msgstr ""
 
 #: src/settings/FluentSettingsPage.tsx
 msgid "Checks that the Hew cloud relay is reachable from this computer."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Choose a file to attach"
 msgstr ""
 
 #: src/panels/MaterialPalette.tsx
@@ -1460,7 +1491,7 @@ msgid "Click a point for the new origin."
 msgstr ""
 
 #: src/tools/DimensionTool.ts
-msgid "Click a point to dimension from, or click a drawn circle/arc for a radius dimension."
+msgid "Click a point to dimension from, a line to dimension it, or a drawn circle/arc for a radius dimension."
 msgstr ""
 
 #: src/tools/TapeMeasureTool.ts
@@ -1603,6 +1634,10 @@ msgstr ""
 msgid "Click to measure from the crossing."
 msgstr ""
 
+#: src/tools/TapeMeasureTool.ts
+msgid "Click to measure from where the edge meets the face."
+msgstr ""
+
 #: src/tools/TextPlaceTool.ts
 msgid "Click to place — 3D Text places at the top level while editing a component."
 msgstr ""
@@ -1656,7 +1691,7 @@ msgid "Click to sweep it, or drag along the path for a partial sweep."
 msgstr ""
 
 #: src/palette/registry.ts
-msgid "Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment."
+msgid "Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment. Ctrl detaches the shape from the face."
 msgstr ""
 
 #: src/tools/MoveTool.ts
@@ -1678,6 +1713,7 @@ msgstr ""
 #: src/panels/MenuBar.tsx
 #: src/panels/PhoneShareDialog.tsx
 #: src/panels/ReportBugDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 #: src/TitleBar.tsx
 msgid "Close"
 msgstr ""
@@ -1720,6 +1756,10 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Close this opening"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Closed"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -1856,10 +1896,6 @@ msgid "Continue"
 msgstr ""
 
 #: src/settings/UnitsPane.tsx
-#~ msgid "Controls how lengths are displayed (e.g. the Move tool's live measurement). Model geometry is always stored in meters internally."
-#~ msgstr ""
-
-#: src/settings/UnitsPane.tsx
 msgid "Controls how lengths are displayed (e.g. the Move tool's live measurement). Precision sets how far readouts are rounded: a number of decimals, or a fraction of an inch. A rounded readout is marked with ~, and Exact shows every digit a length needs. Each format remembers its own choice. Model geometry is always stored in meters internally."
 msgstr ""
 
@@ -1964,6 +2000,10 @@ msgid "Couldn't close: {reason}"
 msgstr ""
 
 #: src/log/reportBundle.ts
+msgid "Couldn’t compress this file."
+msgstr ""
+
+#: src/log/reportBundle.ts
 msgid "Couldn’t compress this report. Save it to a file instead."
 msgstr ""
 
@@ -2048,8 +2088,16 @@ msgstr ""
 msgid "Couldn't print: {errorText}"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Couldn’t reach the report service. Check your internet connection and try again."
+msgstr ""
+
 #: src/App.tsx
 msgid "Couldn't read library item: {reason}"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Couldn’t read that file."
 msgstr ""
 
 #: src/App.tsx
@@ -2090,6 +2138,14 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "cross-section"
+msgstr ""
+
+#: src/viewport/Viewport.tsx
+msgid "Crossing"
+msgstr ""
+
+#: src/viewport/Viewport.tsx
+msgid "Crossing selection: picks everything the box touches. Drag left to right for a window selection."
 msgstr ""
 
 #: src/tools/FollowMeTool.ts
@@ -2405,6 +2461,19 @@ msgstr ""
 msgid "Deselect everything."
 msgstr ""
 
+#: src/tools/detachedMode.ts
+msgid "Detach is on — the shape stays apart from the face until you push it."
+msgstr ""
+
+#. Measurements box readout while Detach is on, followed by the measured value
+#: src/tools/detachedMode.ts
+msgid "Detached · {text}"
+msgstr ""
+
+#: src/tools/detachedMode.ts
+msgid "Detached applies to the next line."
+msgstr ""
+
 #: src/health/healthCopy.ts
 msgid "Details ({details})"
 msgstr ""
@@ -2686,19 +2755,19 @@ msgid "draw {drawCalls}"
 msgstr ""
 
 #: src/palette/registry.ts
-msgid "Draw a faceted circular face."
+msgid "Draw a faceted circular face. Ctrl detaches the shape from the face."
 msgstr ""
 
 #: src/palette/registry.ts
-msgid "Draw a rectangular face on the ground or a face."
+msgid "Draw a rectangular face on the ground or a face. Ctrl detaches the shape from the face."
 msgstr ""
 
 #: src/palette/registry.ts
-msgid "Draw a regular N-sided polygon from a center point."
+msgid "Draw a regular N-sided polygon from a center point. Ctrl detaches the shape from the face."
 msgstr ""
 
 #: src/palette/registry.ts
-msgid "Draw a straight edge between two points."
+msgid "Draw a straight edge between two points. Ctrl detaches the shape from the face."
 msgstr ""
 
 #: src/i18n/historyLabels.ts
@@ -3002,6 +3071,10 @@ msgstr ""
 msgid "Faster"
 msgstr ""
 
+#: src/palette/registry.ts
+msgid "feedback"
+msgstr ""
+
 #: src/viewport/MeasurementBox.tsx
 msgid "Field of View"
 msgstr ""
@@ -3009,6 +3082,10 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 msgid "File"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "File attached"
 msgstr ""
 
 #: src/panels/SaveFormatDialog.tsx
@@ -3104,6 +3181,14 @@ msgstr ""
 msgid "fix"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Fixed"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Fixed in Hew {v}"
+msgstr ""
+
 #: src/health/healthCopy.ts
 msgid "Flat panel"
 msgstr ""
@@ -3192,6 +3277,22 @@ msgstr ""
 
 #: src/panels/TextDialog.tsx
 msgid "Font family"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Forget"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Forget this report?"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Forget this report? Hew stops checking for replies and the thread is removed from the service. The report itself stays with Hew’s developer."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Forget this report…"
 msgstr ""
 
 #: src/panels/ExportDialog.tsx
@@ -3527,6 +3628,10 @@ msgstr ""
 msgid "Hew is already checking for updates."
 msgstr ""
 
+#: src/panels/ReportBugDialog.tsx
+msgid "Hew keeps a private key for this report on this computer and checks for a reply when it starts. No account, no email. You can stop any time under Help ▸ Sent Reports."
+msgstr ""
+
 #: src/kernelErrors.ts
 msgid "Hew lost track of a plugin's work in progress. Nothing was changed; if this keeps happening, use Report Bug."
 msgstr ""
@@ -3559,6 +3664,14 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "Hew tries to stand the profile up automatically, but couldn't square it to the path here. Move the profile closer to where the sweep should start — on a drawn circle, near the rim, in line with the circle's center."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Hew’s developer"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Hew’s developer asked for something. See below."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -3799,10 +3912,6 @@ msgstr ""
 #: src/panels/MenuBar.tsx
 msgid "Import…"
 msgstr ""
-
-#: src/io/documentSession.ts
-#~ msgid "Imported '{name}'"
-#~ msgstr ""
 
 #: src/io/documentSession.ts
 msgid "Imported {quoted}"
@@ -4072,6 +4181,7 @@ msgid "Last steps:"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
+#: src/panels/FollowNoticeBar.tsx
 msgid "Later"
 msgstr ""
 
@@ -4145,6 +4255,10 @@ msgstr ""
 
 #: src/settings/FluentSettingsPage.tsx
 msgid "Length format"
+msgstr ""
+
+#: src/panels/ReportBugDialog.tsx
+msgid "Let me know what happens with this report"
 msgstr ""
 
 #: src/print/paper.ts
@@ -4619,6 +4733,10 @@ msgid "Move drawing axes"
 msgstr ""
 
 #: src/i18n/historyLabels.ts
+msgid "Move guide"
+msgstr ""
+
+#: src/i18n/historyLabels.ts
 msgid "Move imprint"
 msgstr ""
 
@@ -4758,6 +4876,10 @@ msgstr ""
 msgid "Needs at least {DESCRIPTION_MIN} characters ({trimmedLength} so far)"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Needs your help"
+msgstr ""
+
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
 #: src/panels/MenuBar.tsx
@@ -4860,6 +4982,10 @@ msgstr ""
 msgid "No log entries"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "No longer available"
+msgstr ""
+
 #: src/palette/CommandPalette.tsx
 msgid "No matches for “{query}”."
 msgstr ""
@@ -4870,6 +4996,10 @@ msgstr ""
 
 #: src/panels/MaterialPalette.tsx
 msgid "No materials match"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "No messages yet."
 msgstr ""
 
 #: src/panels/LibraryDialog.tsx
@@ -4902,6 +5032,10 @@ msgstr ""
 
 #: src/log/reportBundle.ts
 msgid "no recording available"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "No reports from this computer are being followed. When you send one with “Let me know what happens” ticked, it appears here along with any reply."
 msgstr ""
 
 #: src/scenes/scenesModel.ts
@@ -5016,6 +5150,10 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Nothing was closed."
+msgstr ""
+
+#: src/kernelErrors.ts
+msgid "Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid."
 msgstr ""
 
 #: src/health/healthCopy.ts
@@ -5153,6 +5291,10 @@ msgstr ""
 msgid "On Guide"
 msgstr ""
 
+#: src/viewport/InferenceTooltip.tsx
+msgid "On Intersection Line"
+msgstr ""
+
 #: src/panels/PrintDialog.tsx
 #: src/shop/PrintSheet.tsx
 msgid "On paper"
@@ -5244,6 +5386,7 @@ msgid "Opacity for {selectedName}"
 msgstr ""
 
 #: src/panels/LibraryDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 #: src/panels/WelcomeScreen.tsx
 #: src/shop/ReceiveConfirmSheet.tsx
 msgid "Open"
@@ -6174,6 +6317,10 @@ msgstr ""
 msgid "Reload"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Reload Hew"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "remove"
 msgstr ""
@@ -6280,6 +6427,14 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "repair"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "reply"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "report"
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
@@ -6811,6 +6966,10 @@ msgid "Section Plane"
 msgstr ""
 
 #: src/palette/registry.ts
+msgid "See replies and the status of bug reports you sent from this computer."
+msgstr ""
+
+#: src/palette/registry.ts
 msgid "see through"
 msgstr ""
 
@@ -6908,16 +7067,37 @@ msgstr ""
 msgid "Self-hosted"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Send reply"
+msgstr ""
+
 #: src/panels/ReportBugDialog.tsx
 msgid "Send report"
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 msgid "Sending…"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sending… {attachPercent}%"
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
 msgid "Sending… {sendPercent}%"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent {attachedName}."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent {date} from Hew {version}."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent {date} from Hew {version}. No reply yet."
 msgstr ""
 
 #: src/log/reportBundle.ts
@@ -6926,6 +7106,28 @@ msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
 msgid "Sent privately to the Hew developer. Not posted publicly."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent reports"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent Reports"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+msgid "Sent Reports ({n} new)…"
+msgstr ""
+
+#: src/panels/MenuBar.tsx
+msgid "Sent Reports ({sentReportsNew} new)…"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+msgid "Sent Reports…"
 msgstr ""
 
 #: src/settings/AdvancedPane.tsx
@@ -7490,6 +7692,10 @@ msgstr ""
 msgid "Tangent"
 msgstr ""
 
+#: src/tools/detachedMode.ts
+msgid "Tap {key} to detach the shape from the face."
+msgstr ""
+
 #: src/shop/SettingsMenu.tsx
 msgid "Tap a part — its size · Double-tap — zoom · Hold — isolate<0/>One finger orbits · Two fingers pan · Pinch zooms"
 msgstr ""
@@ -7631,6 +7837,10 @@ msgstr ""
 msgid "That face belongs to a different component instance — press Esc to step out first."
 msgstr ""
 
+#: src/tools/faceDraw.ts
+msgid "That face belongs to another copy — press Esc to finish editing the open component first, then double-click this one"
+msgstr ""
+
 #: src/kernelErrors.ts
 msgid "That face has no usable area. Pick a different face."
 msgstr ""
@@ -7667,8 +7877,16 @@ msgstr ""
 msgid "That face isn’t part of the component you’re editing — press Esc to step out first."
 msgstr ""
 
+#: src/tools/faceDraw.ts
+msgid "That face isn't part of what you are editing — press Esc to finish first"
+msgstr ""
+
 #: src/tools/FollowMeTool.ts
 msgid "That face isn’t part of what you’re editing — press Esc to step out first."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "That file is too large to send."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -7755,10 +7973,6 @@ msgstr ""
 msgid "That point is no longer there — the model changed since it was picked. Click it again."
 msgstr ""
 
-#: src/tools/LineTool.ts
-#~ msgid "That point is the same as the last one — move the cursor before clicking"
-#~ msgstr ""
-
 #: src/kernelErrors.ts
 msgid "That point isn't on the drawing surface. Draw on the highlighted face or the ground plane."
 msgstr ""
@@ -7782,10 +7996,6 @@ msgstr ""
 #: src/kernelErrors.ts
 msgid "That selection has no solids to combine. Pick a solid object or a group of solids."
 msgstr ""
-
-#: src/kernelErrors.ts
-#~ msgid "That shape can't be pushed or pulled: it touches another shape, itself, or the face's edge at a single point, so the face would pinch there. Make it touch along a whole edge, or not at all."
-#~ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "That shape can't be pushed or pulled: part of it is drawn on the solid's face and part is loose, so the face can't hold it. Move the drawing clear of the edge, or push/pull the neighboring pieces instead."
@@ -7996,8 +8206,16 @@ msgstr ""
 msgid "The relay is full — try again in a minute, or ask its admin to raise the memory cap."
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "The report service didn’t accept that."
+msgstr ""
+
 #: src/panels/ReportBugDialog.tsx
 msgid "The report service is temporarily full — try again later."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "The report service is temporarily full. Try again later."
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
@@ -8005,6 +8223,7 @@ msgid "The report service is unavailable right now."
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 msgid "The report service’s certificate isn’t trusted by this computer."
 msgstr ""
 
@@ -8179,6 +8398,10 @@ msgstr ""
 msgid "This build can’t send reports directly. Save the file below and attach it to a GitHub issue instead."
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "This build can’t send reports, so there is nothing to follow."
+msgstr ""
+
 #: src/panels/PhoneShareDialog.tsx
 msgid "This code expired — reopen to try again."
 msgstr ""
@@ -8205,6 +8428,14 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "This edge has a face on only one side — there's nothing to merge it with."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "This file can’t be sent."
+msgstr ""
+
+#: src/log/reportBundle.ts
+msgid "This file is {size} compressed, over the {limit} limit."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -8256,6 +8487,10 @@ msgid "This instance only — leave empty to show the definition name"
 msgstr ""
 
 #: src/kernelErrors.ts
+msgid "This instance sits inside a group, so it opens in the in-context editing mode instead."
+msgstr ""
+
+#: src/kernelErrors.ts
 #~ msgid "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
 #~ msgstr ""
 
@@ -8269,6 +8504,10 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "This is the component's only member — deleting it would leave every instance empty. Delete the instances instead, or add another member first."
+msgstr ""
+
+#: src/tools/LineTool.ts
+msgid "This line stays detached; the next one will not."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -8367,6 +8606,10 @@ msgstr ""
 msgid "This report is {size} compressed, over the {limit} limit. Save it to a file instead."
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "This report is no longer available from the service. Hew has stopped checking it."
+msgstr ""
+
 #: src/panels/ReportBugDialog.tsx
 msgid "This report is too large to send."
 msgstr ""
@@ -8381,6 +8624,10 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "This step couldn't be undone or redone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
+msgstr ""
+
+#: src/log/reportBundle.ts
+msgid "This system can’t compress reports, so it can’t send them."
 msgstr ""
 
 #: src/log/reportBundle.ts
@@ -8497,6 +8744,14 @@ msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
 msgid "Too many reports sent recently — try again in a few minutes."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Too many requests right now. Try again in {secs} seconds."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Too many requests right now. Try again in a few minutes."
 msgstr ""
 
 #: src/palette/registry.ts
@@ -8715,6 +8970,7 @@ msgid "Unexpected response from the report service ({status})."
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 msgid "Unexpected response from the report service."
 msgstr ""
 
@@ -8766,6 +9022,10 @@ msgstr ""
 msgid "unknown OS"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Unread"
+msgstr ""
+
 #: src/panels/UnsavedChangesDialog.tsx
 msgid "Unsaved changes"
 msgstr ""
@@ -8790,6 +9050,10 @@ msgstr ""
 
 #: src/i18n/nativeMenu.ts
 msgid "Update available"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Update Hew through your package manager."
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
@@ -8885,6 +9149,7 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/io/savePanel.ts
 #: src/panels/ExportDialog.tsx
+#: src/panels/FollowNoticeBar.tsx
 #: src/panels/LibraryDialog.tsx
 #: src/panels/MenuBar.tsx
 #: src/panels/PrintDialog.tsx
@@ -9024,7 +9289,12 @@ msgstr ""
 
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
+#: src/viewport/Viewport.tsx
 msgid "Window"
+msgstr ""
+
+#: src/viewport/Viewport.tsx
+msgid "Window selection: picks objects the box fully encloses or mostly covers. Drag right to left for a crossing selection."
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
@@ -9039,6 +9309,10 @@ msgstr ""
 
 #: src/panels/MaterialPalette.tsx
 msgid "World size must be positive numbers."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Write a reply"
 msgstr ""
 
 #: src/settings/DebugPane.tsx
@@ -9063,8 +9337,37 @@ msgstr ""
 msgid "Y-up, meters, for AR Quick Look and USD pipelines"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "You"
+msgstr ""
+
+#: src/panels/ReportBugDialog.tsx
+msgid "You’ll find replies and the report’s status under <0>Help ▸ Sent Reports…</0>"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "You’re on {running}."
+msgstr ""
+
+#. placeholder {0}: only.id
+#: src/panels/FollowNoticeBar.tsx
+#~ msgid "Your bug report {0} has a reply from Hew’s developer."
+#~ msgstr ""
+
+#: src/panels/FollowNoticeBar.tsx
+msgid "Your bug report {onlyId} has a reply from Hew’s developer."
+msgstr ""
+
+#: src/panels/FollowNoticeBar.tsx
+msgid "Your bug report {onlyId} has an update from Hew’s developer."
+msgstr ""
+
 #: src/panels/LibraryDialog.tsx
 msgid "Your library folder needs permission again."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Your reply"
 msgstr ""
 
 #: src/io/savePanel.ts

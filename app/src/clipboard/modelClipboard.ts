@@ -11,6 +11,16 @@
  * pastes of the SAME copy reuse whatever definitions the first paste
  * created rather than minting duplicates.
  *
+ * Component instances stay LINKED within a document: Copy passes the
+ * window's nonce as `extract_item`'s `origin`, which stamps each carried
+ * definition with the definition it was copied from; Paste passes the same
+ * nonce to `insert_item`, and the kernel places the ORIGINAL definition
+ * when the stamp matches (SketchUp's copy/paste — editing the paste edits
+ * the original, Make Unique breaks the link). The scene folds its document
+ * epoch into the origin, so bytes copied before File ▸ Open/New in this
+ * window, or in another window, paste as an ordinary copy: a new
+ * definition the first time, reused by provenance on repeat pastes.
+ *
  * Held at module scope (survives tool switches/re-renders within one tab).
  * Under Tauri, also mirrored into the Rust app-state clipboard
  * (`clipboard_set`/`clipboard_get`, shared across every open document

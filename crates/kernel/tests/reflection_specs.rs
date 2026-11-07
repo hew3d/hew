@@ -339,6 +339,7 @@ fn library_insert_at_a_mirrored_pose_bakes_a_mirrored_copy() {
         &kernel::InsertOptions {
             pose: mirror_x(),
             provenance: None,
+            origin: None,
         },
     )
     .expect("mirrored insert");

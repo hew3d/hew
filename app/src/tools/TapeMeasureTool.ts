@@ -10,13 +10,18 @@
  *        mode. Remembers the edge's two endpoints (via
  *        `wasmScene.edge_endpoints` / `sketch_edge_endpoints`) and the
  *        picked point on it.
+ *      - On the line where two Objects' faces meet ('on-intersection-line'
+ *        snaps, which carry the line's two ends in `Snap.meetingLine`) →
+ *        the same PARALLEL-GUIDE mode: no edge is stored, but the ends give
+ *        the direction. Its midpoint and ends are point snaps and measure.
  *      - On a world axis or an existing guide line ('on-axis'/'on-guide'
  *        snaps, which carry the analytic line's direction) → the same
  *        PARALLEL-GUIDE mode, sourced from the infinite analytic line.
  *      - On an edge crossing ('intersection' snap — the point where two
- *        edges pass through each other) → MEASURE mode from the crossing,
- *        though the snap carries the first edge's provenance: the crossing
- *        is a point, and which edge it would offset is a coin toss.
+ *        edges pass through each other, or where an edge passes through a
+ *        face: `piercesFace`) → MEASURE mode from the crossing, though the
+ *        snap carries the first edge's provenance: the crossing is a
+ *        point, and which edge it would offset is a coin toss.
  *      - Anywhere else → MEASURE mode. Remembers the picked point as P0.
  *   2. Pointer move previews:
  *      - Parallel mode, no resolved offset plane (`_resolveOffsetPlane`
@@ -202,11 +207,12 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, arrowToAxis, axisLockColorName, axisLockColorNameCapitalized } from './moveInput'
 import { displayedLength, isFreePick } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
-import { planeFromSketch, axisDrawPlane, isPointOnDrawPlane, SketchPickCache, instanceOf, GROUND_PLANE_EPS, type DrawPlane } from './drawPlane'
+import { planeFromSketch, axisDrawPlane, isPointOnDrawPlane, SketchPickCache, GROUND_PLANE_EPS, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
 import type { V3 } from '../viewport/geoHelpers'
 import { crossV3, normalizeV3, dotV3, subV3 } from '../viewport/geoHelpers'
 import { worldFaceNormal } from './faceDraw'
+import { snapEdgeEndpoints } from './snapEdge'
 import {
   AXIS_ALONG_EDGE_SIN,
   AXIS_ALONG_EDGE_COS,
@@ -219,6 +225,7 @@ import {
 } from './tapeOffset'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
+import { pickPolicyGeneration } from './pickPolicy'
 import { GUIDE_COLOR } from '../viewport/guideColors'
 
 /** Whether a snap landed on real picked geometry, as opposed to a broad
@@ -267,6 +274,10 @@ type GeometryAttribution =
 function attributionOf(snap: Snap): GeometryAttribution {
   if (!snapOnGeometry(snap)) return null
   if (isCrossingSnap(snap)) return null
+  // The line where two owners' faces meet, and its midpoint, lie on both
+  // faces and carry only the first's provenance: unattributable, exactly
+  // as a crossing.
+  if (snap.meetingLine !== undefined) return null
   if (snap.sketch !== undefined) return { kind: 'sketch', sketch: snap.sketch }
   if (snap.instance !== undefined) return { kind: 'instance', instance: snap.instance }
   if (snap.object !== undefined) return { kind: 'object', object: snap.object }
@@ -341,8 +352,13 @@ function noOffsetSideMessage(): string {
   return t`Move the cursor to the side the guide should go, then type the distance.`
 }
 
-/** Idle hint while the cursor is on an edge crossing (`isCrossingSnap`). */
-const crossingHint = (): string => t`Click to measure from the crossing.`
+/** Idle hint while the cursor is on an edge crossing (`isCrossingSnap`):
+ *  two edges crossing, or an edge passing through a face (`piercesFace`),
+ *  named as the person sees it. */
+const crossingHint = (piercesFace: boolean): string =>
+  piercesFace
+    ? t`Click to measure from where the edge meets the face.`
+    : t`Click to measure from the crossing.`
 
 /** Whether `snap` is an edge-crossing snap (`SnapKind::Intersection` —
  *  "intersection" across the wasm boundary): a first click there measures
@@ -640,14 +656,16 @@ export class TapeMeasureTool implements Tool {
         if (this._recall !== null) {
           return t`Type a distance and press Enter to resize the model to it — or click a point to measure from.`
         }
-        if (this._hoverCrossing) return crossingHint()
+        if (this._hoverCrossing !== null) return crossingHint(this._hoverCrossing.piercesFace)
         return t`Click a point to measure from — or click an edge to drop a parallel guide.`
     }
   }
 
-  /** Whether the last idle hover sat on an edge crossing (`isCrossingSnap`),
-   *  for the idle hint. Set by every `onPointerMove`; false mid-gesture. */
-  private _hoverCrossing = false
+  /** The edge crossing the last idle hover sat on (`isCrossingSnap`), for
+   *  the idle hint — which of its two shapes (edge × edge, or an edge
+   *  through a face) decides the wording. Set by every `onPointerMove`;
+   *  null off a crossing and mid-gesture. */
+  private _hoverCrossing: { piercesFace: boolean } | null = null
 
   private stage: Stage = { kind: 'idle' }
   private preview: THREE.Group
@@ -1091,6 +1109,8 @@ export class TapeMeasureTool implements Tool {
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
     this._hoverCrossing = this.stage.kind === 'idle' && isCrossingSnap(snap)
+      ? { piercesFace: snap?.piercesFace === true }
+      : null
     if (snap === null) return
 
     if (this.stage.kind === 'parallel') {
@@ -1621,11 +1641,13 @@ export class TapeMeasureTool implements Tool {
    *  `SketchPickCache.pickFor` in drawPlane.ts for the same pattern), so
    *  reference identity is a valid per-event cache key. Keeps the same ray
    *  from being picked twice in a frame where both `onPointerMove` (via
-   *  `_resolveFaceAnchor`'s callers) and `snapConstraint` consult case 3. */
-  private _facePickCache: { ray: Ray; pick: RawFacePick | null } | null = null
+   *  `_resolveFaceAnchor`'s callers) and `snapConstraint` consult case 3.
+   *  Also keyed on `pickPolicyGeneration()`: an editing-scope push or a
+   *  render-mode change re-picks for the same Ray. */
+  private _facePickCache: { ray: Ray; gen: number; pick: RawFacePick | null } | null = null
 
   private _pickFaceFor(ray: Ray): RawFacePick | null {
-    if (this._facePickCache !== null && this._facePickCache.ray === ray) {
+    if (this._facePickCache !== null && this._facePickCache.ray === ray && this._facePickCache.gen === pickPolicyGeneration()) {
       return this._facePickCache.pick
     }
     const pick = this.wasmScene.pick_face(
@@ -1645,7 +1667,7 @@ export class TapeMeasureTool implements Tool {
         pick.free()
       }
     }
-    this._facePickCache = { ray, pick: raw }
+    this._facePickCache = { ray, gen: pickPolicyGeneration(), pick: raw }
     return raw
   }
 
@@ -1874,14 +1896,8 @@ export class TapeMeasureTool implements Tool {
    * distinguishing "vertex that happens to sit on an edge" needs more
    * inference-engine plumbing than this slice adds).
    *
-   * Component-instance members: a plain `edge_endpoints`/`sketch_edge_
-   * endpoints` call refuses a definition-owned object/sketch (it isn't
-   * world geometry with a single world-space pose of its own). When the
-   * snap names a placing `instance` — or, for a sketch edge, the tool is
-   * currently inside an `'instance'` edit context — the `*_in_instance`
-   * variant is tried first, composing that instance's pose into the
-   * endpoints. A group member needs none of this: it's still `is_world()`
-   * in the kernel, so it already resolves via the plain calls below.
+   * Edge endpoints, component-instance members included, come from
+   * `snapEdgeEndpoints` (snapEdge.ts), with this tool's edit context.
    */
   private _tryResolveEdge(
     snap: Snap,
@@ -1896,37 +1912,27 @@ export class TapeMeasureTool implements Tool {
       }
     }
 
-    let endpoints: Float64Array | number[] | undefined
-    if (snap.elementKind === 'edge' && snap.object !== undefined && snap.element !== undefined) {
-      endpoints = snap.instance !== undefined
-        ? this.wasmScene.edge_endpoints_in_instance(snap.instance, snap.object, snap.element)
-        : this.wasmScene.edge_endpoints(snap.object, snap.element)
-    } else if (
-      snap.elementKind === 'sketch-edge' &&
-      snap.sketch !== undefined &&
-      snap.element !== undefined
-    ) {
-      // A committed sketch line works as a guide reference too — the most
-      // common case: a parallel guide off a just-drawn rectangle's edge.
-      // `snap.instance` (if the hover carried one) wins over the edit
-      // context's instance; either way, a definition-owned sketch edge
-      // needs a placing instance composed in to resolve world-space
-      // endpoints at all.
-      const instance = snap.instance ?? instanceOf(this._editContext) ?? undefined
-      endpoints = instance !== undefined
-        ? this.wasmScene.sketch_edge_endpoints_in_instance(instance, snap.sketch, snap.element)
-        : undefined
-      if (endpoints === undefined) {
-        // No instance resolved at all, OR the in-instance call refused
-        // (e.g. hovering a plain world sketch while inside an unrelated
-        // instance edit context — a legitimate case, not an error): fall
-        // back to the ordinary world-space lookup.
-        endpoints = this.wasmScene.sketch_edge_endpoints(snap.sketch, snap.element)
+    // The line where two owners' faces meet is a virtual edge: no stored
+    // edge names it, but its two ends (carried by the snap) give the
+    // direction, and a guide is only a line in space. Only the line itself
+    // qualifies; its midpoint and ends are point snaps and measure.
+    if (snap.kind === 'on-intersection-line' && snap.meetingLine !== undefined) {
+      const [[ax, ay, az], [bx, by, bz]] = snap.meetingLine
+      const dx = bx - ax, dy = by - ay, dz = bz - az
+      const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
+      if (len < 1e-9) return null // degenerate line — fall back
+      return {
+        edgePoint: [snap.x, snap.y, snap.z],
+        edgeDir: [dx / len, dy / len, dz / len],
       }
     }
-    if (endpoints === undefined) return null // stale/consumed — fall back
 
-    const [ax, ay, az, bx, by, bz] = endpoints
+    // A committed sketch line works as a guide reference too — the most
+    // common case: a parallel guide off a just-drawn rectangle's edge.
+    const endpoints = snapEdgeEndpoints(this.wasmScene, snap, this._editContext)
+    if (endpoints === null) return null // stale/consumed — fall back
+
+    const [[ax, ay, az], [bx, by, bz]] = endpoints
     const dx = bx - ax, dy = by - ay, dz = bz - az
     const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
     if (len < 1e-9) return null // degenerate edge

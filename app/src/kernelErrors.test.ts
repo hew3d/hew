@@ -416,7 +416,7 @@ describe('isErrorLevelCode', () => {
     // The three group-boolean refusals must not render one level softer than
     // OperandNotSolid (adversarial review, minor).
     for (const code of [
-      'OperandNotSolid', 'DegenerateContact', 'EmptyResult',
+      'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'NothingRemoved',
       'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
     ]) {
       expect(isErrorLevelCode(code), code).toBe(true)
@@ -433,6 +433,7 @@ describe('isErrorLevelCode', () => {
     for (const code of [
       'WouldVanish', 'NonManifoldResult', 'ObjectNotSolid', 'DegenerateGeometry',
       'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'SingularTransform',
+      'NothingRemoved',
       'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
     ]) {
       expect(described.has(code), `${code} has copy`).toBe(true)

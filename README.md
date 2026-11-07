@@ -163,5 +163,8 @@ interact with Hew solely through the documented Plugin API. The core stays
 copyleft, including over network use; the plugin ecosystem is open to
 commercial authors.
 
+The brand assets in [`brand/`](brand/) (logo, mark, and icons) are
+licensed separately under [CC BY 4.0](brand/LICENSE).
+
 SketchUp is a trademark of Trimble Inc. This project is independent of
 and not affiliated with Trimble in any possible way.

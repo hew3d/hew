@@ -451,7 +451,7 @@ fn instance_material_golden_path() -> PathBuf {
 
 /// A component placed twice, both placements painted; the first then
 /// folds into an outer component whose own placement is painted too
-/// (manifest v23's `instances[].material`, world and definition-owned).
+/// (manifest v24's `instances[].material`, world and definition-owned).
 fn build_instance_material_doc() -> Document {
     let mut doc = Document::new();
     let plane = Plane::from_polygon(&[
@@ -640,7 +640,7 @@ fn document_id_golden_path() -> PathBuf {
 }
 
 /// The face-and-edge-attributes box with a document id minted from fixed
-/// randomness (manifest v25's `document_id`).
+/// randomness (manifest v26's `document_id`).
 fn build_document_id_doc() -> Document {
     let mut doc = build_face_edge_attrs_doc();
     doc.ensure_document_id([

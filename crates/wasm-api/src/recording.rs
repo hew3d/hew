@@ -379,6 +379,27 @@ pub enum RecordedCall {
     OpenExplodeSession { instance: u64 },
     /// `close_explode_session()`.
     CloseExplodeSession,
+    /// `set_pick_scope(objects, instances, frame_sketches)` — the editing
+    /// scope the picks favor. Session-only view state, neither undoable
+    /// nor saved, and recorded anyway (unlike the inference hide sets) so
+    /// a replayed session ends up with the same scope as the original (a
+    /// probe after replay then sees the same scoped picks). A recording
+    /// stores no pick results and replay issues no picks. Changes nothing
+    /// the state hash covers. Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture).
+    SetPickScope {
+        objects: Vec<u64>,
+        instances: Vec<u64>,
+        /// Whether the open session frame's own drawing is in scope.
+        /// Additive field, always written by a current recorder: a
+        /// recording made before it has none and replays with that call's
+        /// original meaning (both lists empty cleared the scope; otherwise
+        /// the frame's drawing was in it). The format version is unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame_sketches: Option<bool>,
+    },
+    /// `clear_pick_scope()` — same posture as [`RecordedCall::SetPickScope`].
+    ClearPickScope,
     /// `open_group_session(group)` (docs/design/group-session.md).
     OpenGroupSession { group: u64 },
     /// `close_group_session()`.
@@ -596,6 +617,20 @@ pub enum RecordedCall {
     DeleteGuide { guide: u64 },
     /// `delete_all_guides()`.
     DeleteAllGuides,
+    /// `transform_guide(guide, affine)` — Move on a guide. Additive
+    /// variant (the [`RecordedCall::SketchBeginCurveWith`] posture): a
+    /// recording that never moves a guide replays on older builds
+    /// unchanged; one that does fails to parse there — loudly, never
+    /// silently divergent.
+    TransformGuide { guide: u64, affine: [f64; 12] },
+    /// `duplicate_guide_array(guide, affine, count)` — Move's copy and
+    /// ×N / /N array on a guide. Additive variant, as
+    /// [`RecordedCall::TransformGuide`].
+    DuplicateGuideArray {
+        guide: u64,
+        affine: [f64; 12],
+        count: u32,
+    },
     /// `add_linear_dimension(a_node_kind, a_node_id, a_point, b_node_kind,
     /// b_node_id, b_point, offset, plane, text_override)`. Additive variant
     /// (the [`RecordedCall::SketchBeginCurveWith`] posture): a recording
@@ -682,11 +717,11 @@ pub enum RecordedCall {
     /// `delete_annotation(id)`. Additive variant, same posture as
     /// [`RecordedCall::AddLinearDimension`].
     DeleteAnnotation { id: u64 },
-    /// `insert_item(bytes, affine, source_id, content_hash)` — a library
-    /// insert: embeds the item file, the placement pose, and the provenance
-    /// that drives idempotent definition reuse, so a session with an insert
-    /// replays self-contained AND reproduces the same reuse-vs-copy
-    /// decision. Additive variant (the
+    /// `insert_item(bytes, affine, source_id, content_hash, origin)` — a
+    /// library insert or a paste: embeds the item file, the placement pose,
+    /// and the provenance that drives idempotent definition reuse, so a
+    /// session with an insert replays self-contained AND reproduces the
+    /// same reuse-vs-copy decision. Additive variant (the
     /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
     /// replay unchanged; one that inserts a library item fails to parse on
     /// older builds — loudly, never silently divergent.
@@ -695,6 +730,15 @@ pub enum RecordedCall {
         affine: [f64; 12],
         source_id: Option<String>,
         content_hash: Option<String>,
+        /// The composed clipboard origin of a same-document paste
+        /// (`Scene::clipboard_origin`), absent for a library placement.
+        /// Recorded as composed, so replay compares it with the stamps
+        /// inside `bytes` exactly as the live session did, whatever the
+        /// replaying scene's own epoch is. Same additive posture as
+        /// `stop_len` above: absent in older recordings, which replay
+        /// unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
     },
     /// `insert_item_palette(bytes)` — a material item's Add-to-palette:
     /// embeds the item file. Additive variant, same posture as
@@ -1046,6 +1090,15 @@ pub enum RecordedCall {
     },
     /// `draft_begin_ctx(ctx_json, label)`.
     DraftBeginCtx {
+        draft: u64,
+        ctx: String,
+        label: String,
+    },
+    /// `draft_begin_detached(ctx_json, label)`: a draft that draws one new
+    /// detached shape (detached shapes §3.7). Additive (the posture above):
+    /// a recording that never draws a detached shape replays on older builds
+    /// unchanged; one that does fails to parse there, loudly.
+    DraftBeginDetached {
         draft: u64,
         ctx: String,
         label: String,

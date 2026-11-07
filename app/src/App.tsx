@@ -77,6 +77,7 @@ import { uiIsolationJson, uiSelectionJson } from './api/viewMirror'
 import { pumpEvents } from './api/eventPump'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
+import { EDIT_CONTEXT_HINT_CODE } from './tools/faceDraw'
 import { outlinerDrawing, resolveDraft, setKernelHidden, type OutlinerDrawing, type PlaneUnitsScene } from './tools/planeUnits'
 import { makeFileHost, isTauri, FileReadError, type DocFormat, type ExportFileType, type FileHost, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
 import {
@@ -168,6 +169,10 @@ import type { SceneSource } from './print/printJob'
 import * as diagnosticLog from './log/diagnosticLog'
 import * as inputRecorder from './recording/inputRecorder'
 import { ReportBugDialog } from './panels/ReportBugDialog'
+import { SentReportsDialog } from './panels/SentReportsDialog'
+import { FollowNoticeBar, useFollowedReports } from './panels/FollowNoticeBar'
+import { getFollowHost, totalUnread } from './io/followHost'
+import { startWebLaunchCheck } from './io/webFollowHost'
 import { TOOLS, toolLabel, type ToolName } from './tools/toolRegistry'
 
 /** Autosave tick interval (ms). Exported as a test seam (App.autosave.test.tsx
@@ -218,6 +223,10 @@ interface Toast {
    * `updateToast` schedules its own short auto-dismiss once a patch turns
    * this back to false. */
   sticky?: boolean
+  /** Guidance rather than a warning (`EDIT_CONTEXT_HINT_CODE`: "double-click
+   * it to edit the component"): drawn in the accent tint, larger, and kept
+   * up longer, so the way in is not missed at the bottom of the window. */
+  emphasis?: boolean
 }
 
 let toastCounter = 0
@@ -2206,10 +2215,11 @@ export default function App() {
     }
 
     const id = ++toastCounter
-    setToasts((prev) => [...prev, { id, message, code, isError }])
+    const emphasis = code === EDIT_CONTEXT_HINT_CODE
+    setToasts((prev) => [...prev, { id, message, code, isError, emphasis }])
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id))
-    }, 4000)
+    }, emphasis ? 7000 : 4000)
   }, [])
   const handleToastRef = useRef(handleToast)
   handleToastRef.current = handleToast
@@ -2278,6 +2288,21 @@ export default function App() {
   const [reportBugOpen, setReportBugOpen] = useState(false)
   const handleReportBug = useCallback(() => {
     setReportBugOpen(true)
+  }, [])
+
+  // Help ▸ Sent Reports… (docs/design/follow-a-report.md §2.2). `id` selects a
+  // report first (the notice bar's View with exactly one report).
+  const [sentReports, setSentReports] = useState<{ id: string | null } | null>(null)
+  const handleSentReports = useCallback((id: string | null = null) => {
+    setSentReports({ id })
+  }, [])
+  const followedReports = useFollowedReports()
+  const sentReportsNew = totalUnread(followedReports)
+  // The web build checks followed reports once per launch (the desktop shell
+  // does its own); a no-op when this build has nothing to follow.
+  useEffect(() => {
+    if (isTauri) return
+    return startWebLaunchCheck(getFollowHost())
   }, [])
 
   // Whether this desktop build carries the auto-updater (package-manager
@@ -5429,7 +5454,14 @@ export default function App() {
     if (sel === null) return null // unreachable — every entry is already structural
     let bytes: Uint8Array
     try {
-      bytes = scene.extract_item(sel.kinds, sel.ids, false, undefined, undefined)
+      // The window nonce makes this a CLIPBOARD copy: the kernel stamps
+      // every definition the copy carries with where it came from, so a
+      // paste back into this same document (handlePaste passes the same
+      // nonce) places the ORIGINAL definition — a linked instance, as
+      // Move+copy makes — instead of minting an unlinked duplicate. The
+      // scene composes its document epoch in, so a copy taken before
+      // File ▸ Open/New in this window never links into the new document.
+      bytes = scene.extract_item(sel.kinds, sel.ids, false, undefined, undefined, clipboardSourceIdRef.current)
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
@@ -5500,7 +5532,13 @@ export default function App() {
         )
         let raw: unknown
         try {
-          raw = scene.insert_item(content.bytes, affine, content.sourceId, content.contentHash)
+          raw = scene.insert_item(
+            content.bytes,
+            affine,
+            content.sourceId,
+            content.contentHash,
+            clipboardSourceIdRef.current,
+          )
         } catch (err) {
           const code = parseKernelErrorCode(err)
           const rawMsg = err instanceof Error ? err.message : String(err)
@@ -5524,9 +5562,22 @@ export default function App() {
 
       // Cursor placement: arm the same one-shot LibraryPlaceTool the Library
       // browser uses, with a ghost built straight from the clipboard bytes.
+      //
+      // A linked paste places the LIVE definition, which may have been
+      // edited since Copy, so the ghost (and the bounds the snap and the
+      // origin cue use) come from the kernel's preview of what the paste
+      // will place. No preview (nothing links, or it cannot be built)
+      // means the copy-time bytes already are the paste.
+      let previewBytes = content.bytes
+      try {
+        const live = scene.clipboard_paste_preview(content.bytes, clipboardSourceIdRef.current)
+        if (live !== undefined) previewBytes = live
+      } catch {
+        // Fall back to the copy-time bytes; the placement itself decides.
+      }
       let ghost: Awaited<ReturnType<typeof buildItemGhost>>
       try {
-        ghost = await buildItemGhost(content.bytes)
+        ghost = await buildItemGhost(previewBytes)
       } catch (err) {
         handleToast(t`Couldn't preview the paste: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
         return
@@ -5535,6 +5586,10 @@ export default function App() {
         bytes: content.bytes,
         sourceId: content.sourceId,
         contentHash: content.contentHash,
+        // The paste half of the clipboard link (see doCopy): the same
+        // window nonce, so an instance copied from THIS document places
+        // its original definition rather than an unlinked copy.
+        origin: clipboardSourceIdRef.current,
         displayName: t`Pasted objects`,
         ghost: ghost.group,
         bboxMin: ghost.bboxMin,
@@ -5799,6 +5854,7 @@ export default function App() {
       case 'view-iso':            viewportApi.current?.setStandardView('iso'); break
       case 'open-settings':       openSettingsRef.current(); break
       case 'report-bug': handleReportBug(); break
+      case 'sent-reports': handleSentReports(); break
       case 'open-guide': handleOpenGuide(); break
       case 'open-library':   openLibraryEntry(); break
       case 'toggle-library': openLibraryEntry(); break
@@ -7464,6 +7520,8 @@ export default function App() {
         onOpenPalette={() => openPalette()}
         onHelpSearch={(q) => openPalette(q)}
         onReportBug={handleReportBug}
+        onSentReports={() => handleSentReports()}
+        sentReportsNew={sentReportsNew}
         onCheckForUpdates={updaterAvailable ? handleCheckForUpdates : undefined}
         onOpenOnPhone={isTauri ? () => setPhoneShareOpen(true) : undefined}
         openOnPhoneDisabled={phoneShareDisabled}
@@ -7471,6 +7529,9 @@ export default function App() {
         windowList={isTauri ? windowList : undefined}
         onFocusWindow={focusWindow}
       />
+
+      {/* Reply notice for followed bug reports (follow-a-report §2.3). */}
+      <FollowNoticeBar onView={handleSentReports} />
 
       {/* Kernel panic sticky banner */}
       {kernelPanicked && (
@@ -7829,6 +7890,8 @@ export default function App() {
               return (
                 <div
                   key={toast.id}
+                  data-testid="toast"
+                  data-emphasis={toast.emphasis === true ? 'true' : undefined}
                   onClick={() => dismissToast(toast.id)}
                   style={{
                     display: 'flex',
@@ -7841,12 +7904,16 @@ export default function App() {
                     // overlay/text-primary pair instead of a hardcoded dark
                     // chip, so it's no longer illegible against the light
                     // theme's own light canvas.
+                    // A guidance toast (emphasis) keeps the opaque overlay
+                    // surface — it can land over the floating dock — and
+                    // reads as guidance through the accent border and text.
                     background: toast.isError ? 'var(--status-leaky-bg)' : 'var(--surface-overlay)',
-                    color: toast.isError ? '#fff' : 'var(--text-primary)',
-                    border: toast.isError ? 'none' : '1px solid var(--border-strong)',
+                    color: toast.isError ? '#fff' : toast.emphasis === true ? 'var(--accent-text-strong)' : 'var(--text-primary)',
+                    border: toast.isError ? 'none' : toast.emphasis === true ? '2px solid var(--accent-base)' : '1px solid var(--border-strong)',
                     borderRadius: '4px',
-                    fontFamily: 'monospace',
-                    fontSize: '13px',
+                    fontFamily: toast.emphasis === true ? 'var(--font-family-ui)' : 'monospace',
+                    fontSize: toast.emphasis === true ? '15px' : '13px',
+                    fontWeight: toast.emphasis === true ? 600 : undefined,
                     cursor: 'pointer',
                     pointerEvents: 'auto',
                     boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
@@ -7875,7 +7942,10 @@ export default function App() {
                       message wraps under the code instead of in a narrow
                       column beside it. */}
                   <span>
-                    {toast.code !== undefined && (
+                    {/* A kernel code is worth showing (it is what a bug report
+                        quotes); a guidance toast's code is a styling tag, not
+                        something a person should read. */}
+                    {toast.code !== undefined && toast.emphasis !== true && (
                       <strong style={{ marginRight: '6px', opacity: 0.8 }}>[{toast.code}]</strong>
                     )}
                     {toast.message}
@@ -7965,6 +8035,7 @@ export default function App() {
             display: 'flex',
             flexDirection: 'column',
             minHeight: 0,
+            overflowY: 'auto',
             background: 'var(--surface-panel)',
             borderLeft: '1px solid var(--border-hairline)',
           }}
@@ -8497,6 +8568,14 @@ export default function App() {
           documentName={documentName(docSession)}
           crash={kernelPanicked ? getPanicCapture() : null}
           onClose={() => setReportBugOpen(false)}
+        />
+      )}
+
+      {sentReports !== null && (
+        <SentReportsDialog
+          initialId={sentReports.id}
+          onCheckForUpdates={updaterAvailable ? handleCheckForUpdates : undefined}
+          onClose={() => setSentReports(null)}
         />
       )}
 

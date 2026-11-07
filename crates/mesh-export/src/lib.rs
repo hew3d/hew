@@ -65,11 +65,13 @@
 //!
 //! **Session normalization.** `Document::open_explode_session`/`open_group_
 //! session` bake an entered definition's members into world-owned objects
-//! for the session's duration and HIDE every sibling placement of that
-//! component (so editing one of eight identical chairs doesn't show the
-//! other seven mid-bake twice). `visible_object_ids`/`instance_ids` (this
-//! traversal's own inputs) honor that hiding, so exporting mid-session
-//! used to silently drop every hidden sibling — a live `hew.doc.export`
+//! for the session's duration and HIDE the entered placement (every other
+//! placement stays live and renders the session's world content through
+//! its own pose — ARCHITECTURE.md 2.11). `visible_object_ids`/
+//! `instance_ids` (this traversal's own inputs) honor that hiding, and
+//! the sibling expansion is a render-time view of baked world coordinates,
+//! so exporting mid-session used to silently drop the hidden placement (and
+//! every sibling, when sessions still hid them all) — a live `hew.doc.export`
 //! disagreed with `hew.doc.save` about what the document even was, though
 //! `save` was always correct: `Document::save_for_persistence` already
 //! normalized against exactly this by writing a session-closed clone
@@ -601,7 +603,11 @@ fn stl_from_roots(
 /// 80-byte header, a `u32` triangle count, then 50 bytes per triangle (3×f32
 /// normal, 3×3×f32 vertices, a zero `u16` attribute count). Degenerate
 /// (near-zero-area) triangles are skipped, never emitted with a fabricated
-/// normal. `soup` is meters, 9 `f64`s per triangle, CCW from outside.
+/// normal, and so is a triangle whose winding does not survive the
+/// rounding of its millimeter corners to `f32` ([`writes_forward`]): its
+/// stored normal, computed in `f64`, would otherwise contradict the
+/// vertices a slicer reads back. `soup` is meters, 9 `f64`s per triangle,
+/// CCW from outside.
 fn write_binary_stl(soup: &[f64]) -> Vec<u8> {
     const HEADER_BYTES: usize = 80;
     const METERS_TO_MM: f64 = 1000.0;
@@ -622,6 +628,9 @@ fn write_binary_stl(soup: &[f64]) -> Vec<u8> {
         let nz = ux * vy - uy * vx;
         let len_sq = nx * nx + ny * ny + nz * nz;
         if len_sq <= DEGENERATE_CROSS_LENGTH_SQ_MM4 {
+            continue;
+        }
+        if !writes_forward(&mm) {
             continue;
         }
         let inv_len = 1.0 / len_sq.sqrt();
@@ -657,6 +666,40 @@ fn write_binary_stl(soup: &[f64]) -> Vec<u8> {
         out.extend_from_slice(&0u16.to_le_bytes());
     }
     out
+}
+
+/// Whether a triangle (9 `f64`s, in the coordinates the writer is about to
+/// round to `f32`) still winds the way its own `f64` normal says once each
+/// corner is rounded — [`tessellate::winds_forward_in_f32`], the gate the
+/// render buffers apply, at the writer's own scale.
+///
+/// The export soup is `f64`, and every triangle in it has a strictly
+/// positive area; but `tessellate::export_triangles` fans a face from one
+/// vertex across a hole's chain of chords, and the fan's last triangle
+/// before the tangent can be thinner than the `f32` quantum of its
+/// coordinates (about 2e-7 m two meters from the origin, the same at any
+/// scale: 2e-4 mm at 2000 mm). STL, GLB, and USDZ all store `f32`; such a
+/// sliver, written, winds backwards or collapses — an STL facet whose
+/// normal contradicts its vertices, a glTF triangle facing into the solid.
+/// It is left out instead: its footprint is below what the file can hold,
+/// so after rounding its two neighbours already cover it between them.
+/// (Its three edges are then unmatched in the file by exact endpoint, as
+/// at a T-junction; the gap they bound is below the file's resolution,
+/// where the written sliver would have been a fold of the same size.)
+/// Only the sign of the rounded winding decides — a triangle with any
+/// representable altitude passes — so a normal export is byte-for-byte
+/// what it was. 3MF needs no such gate: it writes `f64` decimal text
+/// (`format_coord`), which round-trips exactly.
+///
+/// The scale matters: STL rounds millimeters, GLB and USDZ meters, and
+/// 1000 is not a power of two, so a sliver that inverts at one scale can
+/// survive at the other. Each writer asks in its own coordinates.
+fn writes_forward(tri: &[f64]) -> bool {
+    let a = Point3::new(tri[0], tri[1], tri[2]);
+    let b = Point3::new(tri[3], tri[4], tri[5]);
+    let c = Point3::new(tri[6], tri[7], tri[8]);
+    let normal = (b - a).cross(c - a);
+    tessellate::winds_forward_in_f32(a, b, c, normal)
 }
 
 // -------------------------------------------------------------------- 3MF
@@ -1163,6 +1206,13 @@ fn build_glb_meshes(
             };
 
             for &t in &bucket_tris[bi] {
+                // A sliver that would wind backwards once its meter
+                // corners are `f32` is left out before its vertices are
+                // welded in (`writes_forward`); the Z-up to Y-up swap
+                // below is a rotation, so it keeps the winding's sign.
+                if !writes_forward(&solid.triangles[t * 9..t * 9 + 9]) {
+                    continue;
+                }
                 let i0 = vertex_at(t, 0);
                 let i1 = vertex_at(t, 1);
                 let i2 = vertex_at(t, 2);
@@ -1593,6 +1643,12 @@ fn build_usdz_parts(solids: &[ExportSolid]) -> (Vec<UsdPart>, ColorPalette) {
 
         for t in 0..tri_count {
             let o = t * 9;
+            // A sliver that would wind backwards once its meter corners
+            // are `f32` is left out before its points are welded in
+            // (`writes_forward`), as in GLB; the Y-up swap is a rotation.
+            if !writes_forward(&solid.triangles[o..o + 9]) {
+                continue;
+            }
             let v1 = vertex_at(o);
             let v2 = vertex_at(o + 3);
             let v3 = vertex_at(o + 6);

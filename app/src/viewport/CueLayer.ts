@@ -6,6 +6,8 @@
  *       endpoint   → green   #00cc44
  *       midpoint   → cyan    #00cccc
  *       on-edge    → red     #cc2200
+ *       on-intersection-line → orange-red #e05a00 (the line where two
+ *                    objects' faces meet — a virtual edge, no stored geometry)
  *       on-face    → blue    #0055cc
  *       on-guide   → purple  #9933cc  (construction guide)
  *       on-axis    → axis color (X=red, Y=green, Z=blue; unknown=magenta)
@@ -16,6 +18,10 @@
  *       plane      → gray    #888888  (constraint-plane fallback, same role)
  *       other      → white   #ffffff
  *   - Dashed guide line through the snap point along direction() when present.
+ *   - The virtual edge itself, drawn solid between its two ends, when the
+ *     snap lies on the line where two objects' faces meet (`meetingLine`):
+ *     nothing in the model draws that line, so the cue is the only thing
+ *     that shows what the cursor is sliding along.
  *
  * The group is added to the scene once; call update() on every pointer move
  * to rebuild its children; call updateMarkerScale(camera) every render frame
@@ -35,6 +41,7 @@ const SNAP_COLORS: Record<string, number> = {
   midpoint: 0x00cccc,
   intersection: 0xffaa00,
   'on-edge': 0xcc2200,
+  'on-intersection-line': 0xe05a00,
   'on-face': 0x0055cc,
   'on-guide': 0x9933cc,
   ground: 0x888888,
@@ -121,6 +128,26 @@ function buildTieLine(from: THREE.Vector3, to: THREE.Vector3, color: number): TH
  *  clamp) — short enough to read as dotted at drawing scale. */
 const TIE_DASH_LENGTH_M = 0.02
 
+/** Below this length (metres) a meeting line has nothing to draw: the
+ *  kernel's own point-merge distance, the shortest stretch it offers. */
+const MEETING_LINE_MIN_LENGTH_M = 1e-9
+
+/** The virtual edge where two objects' faces meet, drawn solid between its
+ *  two ends in the snap's own color. Nothing in the model draws this line
+ *  — objects never merge, so it is no stored edge — and without it the
+ *  cursor would appear to slide along nothing. Drawn over geometry like
+ *  the tie, a little fainter than a real edge's highlight. `null` for a
+ *  degenerate line, which draws nothing. */
+function buildMeetingLine(a: THREE.Vector3, b: THREE.Vector3, color: number): THREE.LineSegments | null {
+  if (a.distanceTo(b) < MEETING_LINE_MIN_LENGTH_M) return null
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([a.x, a.y, a.z, b.x, b.y, b.z]), 3))
+  const mat = new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.85 })
+  const ls = new THREE.LineSegments(geo, mat)
+  ls.renderOrder = 998
+  return ls
+}
+
 export class CueLayer {
   readonly group: THREE.Group
 
@@ -188,6 +215,15 @@ export class CueLayer {
     if (snap.projectedFrom !== undefined) {
       const from = new THREE.Vector3(...snap.projectedFrom)
       this.group.add(buildTieLine(from, pos, snapColor(snap.kind)))
+    }
+    // The line where two objects' faces meet: show the whole stretch the
+    // cursor is on, in the kind's color (orange-red for the line, cyan for
+    // its midpoint) — a real edge is already drawn by the model, this one
+    // is not.
+    if (snap.meetingLine !== undefined) {
+      const [a, b] = snap.meetingLine
+      const line = buildMeetingLine(new THREE.Vector3(...a), new THREE.Vector3(...b), snapColor(snap.kind))
+      if (line !== null) this.group.add(line)
     }
   }
 

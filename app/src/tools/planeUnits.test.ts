@@ -8,6 +8,7 @@
  * imports its type), serving a hand-written `plane_units_json` listing.
  */
 import { describe, expect, it, vi } from 'vitest'
+import { regionUnderRay } from './regionPick'
 import {
   allFree,
   canonicalPlane,
@@ -15,7 +16,12 @@ import {
   ctxOfFace,
   ctxOfPlane,
   ctxOfSketch,
+  ctxOfSketchOnly,
+  ctxOfSketchUnits,
   ctxThroughAffine,
+  planeOfCtxIn,
+  detachedSketchIds,
+  sketchOfCtx,
   edgesOfCurveRef,
   runsOfCurve,
   unitName,
@@ -560,5 +566,115 @@ describe('unitName', () => {
     // A rectangle whose corner is rounded by a circle run: an arc shape.
     const mixed = [...RECT.slice(0, 3), edge(9, [0, 1, 0.5], [0, 0, 0.5], FREE, { center: [0, 0, 0.5], radius: 1 })]
     expect(unitName(unit(mixed, [{ key: 5, curveKey: 6, edges: [9, 2] }]))).toBe('Arc shape')
+  })
+})
+
+// Detached shapes (docs/design/separate-shapes.md §6.6): a detached sketch is
+// its own drafting context, `{"sketch":id}`, handed back by the kernel pick.
+describe('detached shapes', () => {
+  const SEP = { kind: 'free', sketch: 5, detached: true }
+  const SCTX = ctxOfSketchOnly(5)
+  const sepListing = listing([
+    { key: 70, edges: [edge(70, [0, 0, 0], [1, 0, 0], SEP), edge(71, [1, 0, 0], [0, 1, 0], SEP), edge(72, [0, 1, 0], [0, 0, 0], SEP)] },
+  ], [{ key: K(8), outer: [[0, 0, 0], [1, 0, 0], [0, 1, 0]], holes: [], over: null, extrude: { sketch: 5, region: 6 } }])
+
+  it('names a detached sketch by one canonical context string', () => {
+    expect(SCTX).toBe('{"sketch":5}')
+    expect(ctxOfSketchOnly(5n, 9n)).toBe('{"sketch":5,"instance":9}')
+    expect(sketchOfCtx(SCTX)).toEqual({ sketch: 5n, instance: null })
+    expect(sketchOfCtx(ctxGround())).toBeNull()
+  })
+
+  it('reads the detached flag off a free store', () => {
+    const pu = parsePlaneUnits(SCTX, sepListing)
+    const store = pu.units[0].edges[0].store
+    expect(store).toEqual({ kind: 'free', sketch: 5n, detached: true })
+    // An ordinary free store carries no flag.
+    expect(parsePlaneUnits(CTX, listing([{ key: 1, edges: [edge(1, [0, 0, 0], [1, 0, 0], FREE)] }])).units[0].edges[0].store)
+      .toEqual({ kind: 'free', sketch: 3n })
+  })
+
+  it('a pick that names a detached sketch makes refs in THAT context; a plain pick keeps the request context', () => {
+    const lists: Record<string, string> = { [SCTX]: sepListing }
+    const { scene } = makeScene({
+      plane_units_json: (ctx: string) => lists[ctx] ?? listing([]),
+    })
+    const ray = { origin: [0.2, 0.2, 4], direction: [0, 0, -1] }
+    const raw = scene as unknown as { pick_plane_unit: unknown }
+    raw.pick_plane_unit = () => JSON.stringify({ edge: K(70), unit: K(70), curve: null, run: null, ctx: { sketch: 5 } })
+    expect(pickDraftRef(scene, ctxGround(), ray, 0.01)).toEqual(draftRef('draft-edge', SCTX, K(70)))
+    raw.pick_plane_unit = () => JSON.stringify({ region: K(8), ctx: { sketch: 5 } })
+    expect(pickDraftRef(scene, ctxGround(), ray, 0.01)).toEqual(draftRef('draft-island', SCTX, K(70)))
+    raw.pick_plane_unit = () => JSON.stringify({ edge: K(70), unit: K(70), curve: null, run: null, ctx: { sketch: 5, instance: 2 } })
+    expect(pickDraftRef(scene, ctxGround(), ray, 0.01)).toEqual(draftRef('draft-edge', ctxOfSketchOnly(5, 2), K(70)))
+    raw.pick_plane_unit = () => JSON.stringify({ edge: K(70), unit: K(70), curve: null, run: null })
+    expect(pickDraftRef(scene, ctxGround(), ray, 0.01)).toEqual(draftRef('draft-edge', ctxGround(), K(70)))
+  })
+
+  it('is free drawing: allFree holds and its context names the sketch plane', () => {
+    const { scene } = makeScene({
+      sketch_plane: () => new Float64Array([0, 0, 2, 0, 0, 1]),
+      plane_units_json: () => sepListing,
+    })
+    const ref = draftRef('draft-island', SCTX, K(70))
+    expect(allFree(scene, ref)).toBe(true)
+    expect(planeOfCtx(SCTX)).toBeNull()
+    expect(planeOfCtxIn(scene as never, SCTX)).toEqual({ point: [0, 0, 2], normal: [0, 0, 1], instance: null })
+  })
+
+  describe('listing', () => {
+    const groundList = listing([{ key: 60, edges: [edge(60, [0, 0, 0], [1, 0, 0], { kind: 'free', sketch: 9 })] }])
+    const batch = () => JSON.stringify([
+      { plane: [0, 0, 0, 0, 0, 1], units: JSON.parse(groundList) },
+      { plane: [0, 0, 0, 0, 0, 1], sketch: 5, detached: true, units: JSON.parse(sepListing) },
+    ])
+
+    it('Outliner lists a detached entry as its own context, a plain free row like any other', () => {
+      const perPlane: string[] = []
+      const { scene } = makeScene({
+        sketch_ids: () => [9n, 5n],
+        sketch_plane: () => new Float64Array([0, 0, 0, 0, 0, 1]),
+        plane_units_all_json: batch,
+        plane_units_json: (ctx: string) => { perPlane.push(ctx); return listing([]) },
+      })
+      const d = outlinerDrawing(scene as never, [])
+      expect(d.free.map((u) => u.unit.key)).toEqual([K(60), K(70)])
+      const sep = d.free[1]
+      expect(sep.ref).toEqual(draftRef('draft-island', SCTX, K(70)))
+      // Both free rows keep the "Sketch N" fallback: no label, no "detached"
+      // suffix (a standalone row already says it is not attached).
+      for (const u of d.free) expect(d.labels.has(`${u.ref.kind}:${u.ref.ctx}:${u.ref.key}`)).toBe(false)
+      expect(perPlane).toEqual([])
+    })
+
+    it('finds the detached sketches (marquee, Select All, tools) from the same one read', () => {
+      const all = vi.fn(batch)
+      const { scene } = makeScene({
+        sketch_plane: () => new Float64Array([0, 0, 0, 0, 0, 1]),
+        plane_units_all_json: all,
+      })
+      expect([...detachedSketchIds(scene as never)]).toEqual([5n])
+      expect(ctxOfSketchUnits(scene as WasmScene, 5n)).toBe(SCTX)
+      // A sketch in a plane's arrangement answers its plane's context.
+      expect(ctxOfSketchUnits(scene as WasmScene, 9n)).toBe(ctxOfSketch(scene as WasmScene, 9n))
+      expect(all).toHaveBeenCalledTimes(1)
+    })
+  })
+})
+
+describe('regionUnderRay on a detached shape', () => {
+  it('resolves the region in the pick\'s own sketch context, not the request context', () => {
+    const own = ctxOfSketchOnly(9n)
+    const region = { key: K(50), outer: [[0, 0, 0.5], [1, 0, 0.5], [1, 1, 0.5], [0, 1, 0.5]], holes: [], over: { object: 7, face: 31 }, extrude: null }
+    const { scene } = makeScene({
+      // The request's (face) context lists no region at all; the detached sketch's own does.
+      plane_units_json: (ctx: string) => (ctx === own ? listing([], [region]) : listing([])),
+      pick_plane_unit: () => JSON.stringify({ region: K(50), ctx: { sketch: 9 } }),
+      sketch_plane: () => new Float64Array([0, 0, 0.5, 0, 0, 1]),
+    })
+    const hit = regionUnderRay(scene as never, CTX, { origin: [0.5, 0.5, 4], direction: [0, 0, -1] }, 0)
+    expect(hit).not.toBeNull()
+    expect(hit?.ctx).toBe(own)
+    expect(hit?.region.key).toBe(K(50))
   })
 })

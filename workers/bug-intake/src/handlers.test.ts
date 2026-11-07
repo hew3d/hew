@@ -30,6 +30,7 @@ import assert from 'node:assert/strict'
 import { handleRequest, handleIdentity, handleStart, handleCommit } from './handlers.ts'
 import { ReportStore } from './reportStore.ts'
 import { IndexStore } from './indexStore.ts'
+import { ThreadStore } from './threadStore.ts'
 import {
   MAX_UPLOAD_BYTES,
   PIECE_BYTES,
@@ -42,7 +43,7 @@ import {
   UPLOAD_LIFETIME_MS,
 } from './constants.ts'
 import { FakeDurableObjectNamespace, type FakeDurableObjectStorage } from './testSupport/fakeDurableObject.ts'
-import type { BugIntakeEnv, ReportDropStub, ReportIndexStub } from './types.ts'
+import type { BugIntakeEnv, ReportDropStub, ReportIndexStub, ReportThreadStub } from './types.ts'
 import type { RawMailSender } from './email.ts'
 import type { VerifyOptions } from './adminAuth.ts'
 
@@ -79,10 +80,22 @@ function fillRandom(bytes: Uint8Array): void {
 // Fake env
 // ---------------------------------------------------------------------------
 
+/** Binds `REPORT_THREAD` the way `reportThread.ts` does: a real
+ *  `ThreadStore` whose destroy hook tells the env's index. */
+function withThreads(env: BugIntakeEnv): void {
+  env.REPORT_THREAD = new FakeDurableObjectNamespace<ReportThreadStub>(
+    (state) =>
+      new ThreadStore(state.storage, (reportId) =>
+        env.REPORT_INDEX.get(env.REPORT_INDEX.idFromName(INDEX_DO_NAME)).threadEnded(reportId),
+      ),
+  )
+}
+
 function makeEnv(overrides: Partial<BugIntakeEnv> = {}): BugIntakeEnv {
   const env = {} as BugIntakeEnv
   env.REPORT_DROP = new FakeDurableObjectNamespace<ReportDropStub>((state) => new ReportStore(state.storage))
   env.REPORT_INDEX = new FakeDurableObjectNamespace<ReportIndexStub>((state) => new IndexStore(state.storage))
+  withThreads(env)
   env.IP_HASH_SECRET = 'test-secret'
   Object.assign(env, overrides)
   return env
@@ -110,9 +123,16 @@ function makeEnvWithThrowingIndex(
       deleteReport: throwOn.has('deleteReport') ? boom : real.deleteReport.bind(real),
       setTriaged: throwOn.has('setTriaged') ? boom : real.setTriaged.bind(real),
       reserveEmail: throwOn.has('reserveEmail') ? boom : real.reserveEmail.bind(real),
+      bundleExpired: throwOn.has('bundleExpired') ? boom : real.bundleExpired.bind(real),
+      threadEnded: throwOn.has('threadEnded') ? boom : real.threadEnded.bind(real),
+      setThreadCache: throwOn.has('setThreadCache') ? boom : real.setThreadCache.bind(real),
+      markAdminViewed: throwOn.has('markAdminViewed') ? boom : real.markAdminViewed.bind(real),
+      listChildren: throwOn.has('listChildren') ? boom : real.listChildren.bind(real),
+      countThreadRequest: throwOn.has('countThreadRequest') ? boom : real.countThreadRequest.bind(real),
     }
     return stub
   })
+  withThreads(env)
   env.IP_HASH_SECRET = 'test-secret'
   Object.assign(env, overrides)
   return env
@@ -139,6 +159,7 @@ function makeEnvWithThrowingDrop(throwOn: ReadonlySet<keyof ReportDropStub>): Bu
     return stub
   })
   env.REPORT_INDEX = new FakeDurableObjectNamespace<ReportIndexStub>((state) => new IndexStore(state.storage))
+  withThreads(env)
   env.IP_HASH_SECRET = 'test-secret'
   return env
 }
@@ -882,7 +903,8 @@ describe('COMMIT', () => {
       }
       return stub
     })
-    env.IP_HASH_SECRET = 'test-secret'
+    withThreads(env)
+  env.IP_HASH_SECRET = 'test-secret'
     env.NOTIFY_TO = 'maintainer@hew3d.com'
     env.NOTIFY_FROM = 'notify@hew3d.com'
 
@@ -1484,6 +1506,7 @@ function makeEnvCapturingDrops(): { env: BugIntakeEnv; dropStorages: FakeDurable
     return new ReportStore(state.storage)
   })
   env.REPORT_INDEX = new FakeDurableObjectNamespace<ReportIndexStub>((state) => new IndexStore(state.storage))
+  withThreads(env)
   env.IP_HASH_SECRET = 'test-secret'
   env.ACCESS_TEAM_DOMAIN = TEAM_DOMAIN
   env.ACCESS_AUD = AUD

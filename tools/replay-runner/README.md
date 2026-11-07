@@ -50,6 +50,28 @@ Drives a fresh `Scene` through each named scenario in `generate.mjs`
   whose operand is itself a boolean result (handle reuse across a replacing op).
 - `hex-prism` — a 6-gon ground profile (the Circle tool's N-gon shape) extruded,
   exercising extrude over a non-quad loop.
+- `cutter-moved-into-bin` — a cutter built clear of its target: a disk drawn
+  in the plane of a bin's side face but in empty space above it, extruded
+  across the bin, moved down into it, and subtracted. The generator also
+  asserts that subtracting the cutter *before* the move is refused as
+  `nothing_removed` (a refused call never enters a recording, so the fixture
+  itself holds only the successful cut).
+- `detached-cutter-on-bin` — the same cutter drawn as a detached shape: a
+  2 cm disk centered on the bin's right-face corner through
+  `draft_begin_detached`, so the face's edge does not split it, pushed
+  across the bin and subtracted. Locks a recording holding
+  `draft_begin_detached`.
+- `xray-edit-scope` — the editing-scope pick (Shaded and X-ray): a box with a second
+  box half buried in it, `set_pick_scope` naming the buried one. The golden
+  `state_hash` covers neither the pick scope nor the render mode, so on its
+  own it pins only the document and the recorded call sequence replaying
+  cleanly. The pick behavior is asserted twice: the generator asserts it at
+  generation (view state such as `set_render_mode` is not recorded), and
+  `run.mjs` re-asks the same scoped picks after every replay
+  (`POST_REPLAY_PROBES`), so a broken scoped pick fails the gate: Shaded
+  and X-ray both land on the buried box, nothing in scope behind falls back
+  to the nearest face, and a cleared scope returns the nearest face. The inference, wasm-api and e2e
+  specs cover it as well.
 
 To regenerate a single scenario: `node generate.mjs <name>` (or
 `node generate.mjs` with no arg to run every scenario, same as

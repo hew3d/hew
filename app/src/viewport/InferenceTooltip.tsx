@@ -25,6 +25,9 @@ const KIND_LABEL: Record<string, MessageDescriptor> = {
   midpoint: msg`Midpoint`,
   intersection: msg`Intersection`,
   'on-edge': msg`On Edge`,
+  /** The line where a face of one object meets a face of another — no
+   *  stored edge, since objects never merge, but a line a person sees. */
+  'on-intersection-line': msg`On Intersection Line`,
   'on-face': msg`On Face`,
   'on-guide': msg`On Guide`,
   'on-axis': msg`On Axis`,
@@ -121,6 +124,16 @@ export function InferenceTooltip({ info, detail = null }: { info: InferenceInfo 
       {showDetail && (
         <div data-testid="inference-tip-detail" style={{ color: 'var(--text-secondary)' }}>
           {detail}
+        </div>
+      )}
+      {/* The tool's own guidance for a face it cannot act on
+          (`InferenceInfo.hint`): shown at once, never behind the dwell —
+          the whole point is to say "double-click it to edit the component"
+          BEFORE the click is refused. Accent-colored so it reads as
+          guidance, not as another snap label. */}
+      {info.hint !== undefined && (
+        <div data-testid="inference-tip-hint" style={{ color: 'var(--accent-text-on-tint)', fontWeight: 600 }}>
+          {info.hint}
         </div>
       )}
     </div>

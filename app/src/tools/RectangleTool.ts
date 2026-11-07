@@ -54,10 +54,11 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
 import { rectangleCorners, faceRectangleCorners, facePlaneBasis, rectangleDimensionAxes, defaultGrowthSigns } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
-import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
+import { makeFatSegments, disposeFatSegments } from '../viewport/fatLine'
 import { formatLength, parseDimensionsToMeters, typedReadout } from '../settings/units'
 import { editDimsBuffer, nextIdlePlaneLock, axisLockColorName } from './moveInput'
 import type { SketchTarget } from './sketchGesture'
+import { DetachedMode, type OnDetachedChange } from './detachedMode'
 import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
 import { drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
@@ -143,6 +144,9 @@ type FaceStage = { kind: 'idle' } | AnchoredFaceStage
 type RetypeSpec = {
   anchor: V3
   far: V3
+  /** Detached mode the rectangle was drawn with — a retyped size re-commits
+   *  with the same mode (separate-shapes design §6.1). */
+  detached: boolean
 } & (
   | { mode: 'plane'; plane: DrawPlane; target: SketchTarget }
   | { mode: 'face'; object: bigint; face: bigint; normal: V3 }
@@ -174,6 +178,11 @@ export class RectangleTool implements Tool {
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
+    const idle = this.planeStage.kind === 'idle' && this.faceStage.kind === 'idle' && !this.retype.isOpen
+    return this.sep.hint(this._stageHint(), idle)
+  }
+
+  private _stageHint(): string {
     if (this.planeStage.kind !== 'idle' || this.faceStage.kind !== 'idle') {
       return t`Click the opposite corner — or type exact dimensions.`
     }
@@ -198,6 +207,8 @@ export class RectangleTool implements Tool {
   private onFaceImprint: OnFaceImprint
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
+  /** Detached mode (Ctrl/Cmd tap): the next rectangle joins nothing. */
+  private readonly sep: DetachedMode
 
   /** The current editing context (component-edit-parity.md phase A1) — see
    *  LineTool's identical fields for the full rationale. */
@@ -259,13 +270,15 @@ export class RectangleTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
+    onDetachedChange: OnDetachedChange = () => { /* no-op */ },
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.onCommit = onCommit
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
-    this.onMeasurementCb = onMeasurement
+    this.sep = new DetachedMode(onMeasurement, onDetachedChange)
+    this.onMeasurementCb = this.sep.report
     this.retype = new RetypeWindow(wasmScene)
   }
 
@@ -630,7 +643,7 @@ export class RectangleTool implements Tool {
       const corners = faceRectangleCorners(anchor, cursorOnPlane, normal)
       const extents = this._planeExtents(anchor, cursorOnPlane, normal)
       if (corners !== null && extents !== null) {
-        this._drawRubberBandCorners(corners)
+        this._drawRubberBandCorners(corners, true)
         this._reportMeasurement(extents[0], extents[1])
       } else {
         this._clearPreview()
@@ -655,13 +668,13 @@ export class RectangleTool implements Tool {
       if (plane.ground) {
         // EXACT legacy ground fast path — no basis math.
         const corners = rectangleCorners([anchor[0], anchor[1]], [cursor[0], cursor[1]])
-        this._drawRubberBandCorners(corners)
+        this._drawRubberBandCorners(corners, false)
         this._reportMeasurement(Math.abs(cursor[0] - anchor[0]), Math.abs(cursor[1] - anchor[1]))
       } else {
         const corners = faceRectangleCorners(anchor, cursor, plane.normal)
         const extents = this._planeExtents(anchor, cursor, plane.normal)
         if (corners !== null && extents !== null) {
-          this._drawRubberBandCorners(corners)
+          this._drawRubberBandCorners(corners, false)
           this._reportMeasurement(extents[0], extents[1])
         } else {
           this._clearPreview()
@@ -902,6 +915,18 @@ export class RectangleTool implements Tool {
    */
   onDocumentReset(): void {
     this.cancel()
+    this.sep.reset()
+  }
+
+  /** Ctrl/Cmd clean tap (Viewport-driven; a bare Ctrl never reaches onKey):
+   *  flip Detached for the next rectangle (separate-shapes design §6.1). */
+  toggleDetached(): void {
+    this.sep.toggle()
+  }
+
+  /** Whether Detach is on. */
+  get detachedOn(): boolean {
+    return this.sep.on
   }
 
   /**
@@ -1013,8 +1038,8 @@ export class RectangleTool implements Tool {
       this._lastPlaneCursor = null
       this._clearPreview()
       this.onMeasurementCb('')
-      if (this._commitPlaneRectangle(target, corners)) {
-        this._armRetype({ mode: 'plane', plane, target, anchor, far: corners[2] })
+      if (this._commitPlaneRectangle(target, corners, plane)) {
+        this._armRetype({ mode: 'plane', plane, target, anchor, far: corners[2], detached: this.sep.on })
       }
     } else if (this.faceStage.kind === 'anchored') {
       const { object, face, normal, anchor } = this.faceStage
@@ -1030,7 +1055,7 @@ export class RectangleTool implements Tool {
       this._clearPreview()
       this.onMeasurementCb('')
       if (this._commitFaceCorners(object, face, corners)) {
-        this._armRetype({ mode: 'face', object, face, normal, anchor, far: corners[2] })
+        this._armRetype({ mode: 'face', object, face, normal, anchor, far: corners[2], detached: this.sep.on })
       }
     }
   }
@@ -1092,8 +1117,8 @@ export class RectangleTool implements Tool {
   /** Lay `corners` down through the hot record's own commit path. */
   private _commitHot(hot: RetypeSpec, corners: [V3, V3, V3, V3]): boolean {
     return hot.mode === 'plane'
-      ? this._commitPlaneRectangle(hot.target, corners)
-      : this._commitFaceCorners(hot.object, hot.face, corners)
+      ? this._commitPlaneRectangle(hot.target, corners, hot.plane, hot.detached)
+      : this._commitFaceCorners(hot.object, hot.face, corners, hot.detached)
   }
 
   /** The committed rectangle's own `w × d` (from anchor → far), for
@@ -1166,8 +1191,8 @@ export class RectangleTool implements Tool {
         this._clearPreview()
         this.onMeasurementCb('')
         const corners = rectangleCorners([anchor[0], anchor[1]], [cursor[0], cursor[1]])
-        if (this._commitPlaneRectangle(target, corners)) {
-          this._armRetype({ mode: 'plane', plane, target, anchor, far: corners[2] })
+        if (this._commitPlaneRectangle(target, corners, plane)) {
+          this._armRetype({ mode: 'plane', plane, target, anchor, far: corners[2], detached: this.sep.on })
         }
       } else {
         const corners = faceRectangleCorners(anchor, cursor, plane.normal)
@@ -1178,8 +1203,8 @@ export class RectangleTool implements Tool {
         this._lastPlaneCursor = null
         this._clearPreview()
         this.onMeasurementCb('')
-        if (this._commitPlaneRectangle(target, corners)) {
-          this._armRetype({ mode: 'plane', plane, target, anchor, far: corners[2] })
+        if (this._commitPlaneRectangle(target, corners, plane)) {
+          this._armRetype({ mode: 'plane', plane, target, anchor, far: corners[2], detached: this.sep.on })
         }
       }
     }
@@ -1190,11 +1215,11 @@ export class RectangleTool implements Tool {
    *  lowers into whatever lies under it (face topology, an owned sketch, or
    *  a free sketch). Used by ground, non-ground plane and sketch mode (the
    *  face-mode click path commits through `_commitFaceCorners`). */
-  private _commitPlaneRectangle(target: SketchTarget, corners: [V3, V3, V3, V3]): boolean {
+  private _commitPlaneRectangle(target: SketchTarget, corners: [V3, V3, V3, V3], plane: DrawPlane, detached = this.sep.on): boolean {
     try {
       const { result: regionsCreated, report } = runDraft(
         this.wasmScene,
-        draftTargetFromSketchTarget(target),
+        draftTargetFromSketchTarget(target, detached, plane),
         t`Rectangle`,
         (d) => this._addLoop(d, corners),
       )
@@ -1265,7 +1290,7 @@ export class RectangleTool implements Tool {
       this.onMeasurementCb('')
 
       if (this._commitFaceCorners(object, face, corners)) {
-        this._armRetype({ mode: 'face', object, face, normal, anchor, far: corners[2] })
+        this._armRetype({ mode: 'face', object, face, normal, anchor, far: corners[2], detached: this.sep.on })
       }
     }
   }
@@ -1294,11 +1319,11 @@ export class RectangleTool implements Tool {
   /** Draw a rectangle loop of 4 explicit world-space corners on the given
    *  face (one draft; the engine decides which edges become face topology).
    *  True when the kernel accepted it (false = refused, toasted). */
-  private _commitFaceCorners(object: bigint, face: bigint, corners: [V3, V3, V3, V3]): boolean {
+  private _commitFaceCorners(object: bigint, face: bigint, corners: [V3, V3, V3, V3], detached = this.sep.on): boolean {
     try {
       const { result: regionsCreated, report } = runDraft(
         this.wasmScene,
-        { kind: 'face', object, face, instance: this._activeInstance },
+        { kind: 'face', object, face, instance: this._activeInstance, ...(detached ? { detached: true as const } : {}) },
         t`Rectangle`,
         (d) => this._addLoop(d, corners),
       )
@@ -1323,7 +1348,7 @@ export class RectangleTool implements Tool {
    *
    * @param corners  Four world-space xyz corners in order.
    */
-  private _drawRubberBandCorners(corners: readonly [V3, V3, V3, V3]): void {
+  private _drawRubberBandCorners(corners: readonly [V3, V3, V3, V3], joinsFace: boolean): void {
     this._clearPreview()
     const [c0, c1, c2, c3] = corners
     const pts = new Float32Array([
@@ -1332,7 +1357,7 @@ export class RectangleTool implements Tool {
       ...c2, ...c3,
       ...c3, ...c0,
     ])
-    this.preview.add(makeFatSegments(pts, PREVIEW_LINE_STYLE))
+    this.preview.add(makeFatSegments(pts, this.sep.previewStyle(joinsFace)))
   }
 
   private _clearPreview(): void {

@@ -419,8 +419,12 @@ fn an_explode_session_lists_displayed_rows_and_hidden_placements_at_their_poses(
     let shown = doc.occurrences(None, false).unwrap();
     assert_eq!(
         shown.iter().map(key).collect::<Vec<_>>(),
-        vec![(vec![], NodeId::Object(m))],
-        "as displayed: the baked member only"
+        vec![
+            (vec![], NodeId::Object(m)),
+            (vec![], NodeId::Instance(k2)),
+            (vec![k2], NodeId::Object(m)),
+        ],
+        "as displayed: the baked member and the live sibling placement"
     );
     let all = doc.occurrences(None, true).unwrap();
     assert_eq!(
@@ -433,8 +437,11 @@ fn an_explode_session_lists_displayed_rows_and_hidden_placements_at_their_poses(
             (vec![k2], NodeId::Object(m)),
         ]
     );
+    // The entered placement is hidden; the sibling stays live (ARCHITECTURE.md
+    // 2.11), so its rows are not hidden.
     for r in &all[1..] {
-        assert!(r.hidden, "{:?}", key(r));
+        let sibling = r.path.first() == Some(&k2) || r.node == NodeId::Instance(k2);
+        assert_eq!(r.hidden, !sibling, "{:?}", key(r));
     }
     // A baked member reached under the hidden sibling maps each vertex to
     // where that placement would draw it.

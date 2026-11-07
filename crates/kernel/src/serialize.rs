@@ -271,24 +271,35 @@ pub(crate) const ELEMENT_ATTRS_GEOMETRY_VERSION: u32 = 9;
 /// document whose guides are all whole lines writes the same manifest as
 /// v21 apart from the version. Gated by [`GUIDE_SPAN_MIN_VERSION`].
 /// Geometry buffer unchanged.
-/// **v23**: `instances[].material` — a placement's own material (dense
+/// **v23**: `sketches[].detached` — the sketch is a detached shape
+/// (`Sketch::detached`): drawing that takes part in no plane arrangement,
+/// never object-owned. Optional and omitted when false, so a document with
+/// no detached sketch writes the same manifest as v22 apart from the
+/// version. Gated by [`DETACHED_SKETCH_MIN_VERSION`]; a reader also rejects
+/// `detached` together with `owner_object`. Geometry buffer unchanged.
+/// **v24**: `instances[].material` — a placement's own material (dense
 /// `materials[]` id), which a member face shows when neither the face nor
 /// its Object's base is painted, the nearest painted placement winning
 /// (HEW_FILE_FORMAT.md §4.4). Optional and omitted when absent, so a
-/// document with no painted placement writes the same manifest as v22
+/// document with no painted placement writes the same manifest as v23
 /// apart from the version. Gated by [`INSTANCE_MATERIAL_MIN_VERSION`].
 /// Geometry buffer unchanged.
-/// **v24**: geometry buffer v9 (per-face and per-edge attribute
+/// **v25**: geometry buffer v9 (per-face and per-edge attribute
 /// dictionaries, HEW_FILE_FORMAT.md §3). The manifest shape is unchanged
 /// apart from `format_version` and `geometry_version`.
-/// **v25**: `document_id` — a UUID (lowercase, hyphenated) that identifies
+/// **v26**: `document_id` — a UUID (lowercase, hyphenated) that identifies
 /// the document across saves, minted from host randomness on the first
 /// save and never changed after (HEW_FILE_FORMAT.md §2). Optional and
 /// omitted when absent, so a document that was never given one writes the
-/// same manifest as v24 apart from the version. Gated by
+/// same manifest as v25 apart from the version. Gated by
 /// [`DOCUMENT_ID_MIN_VERSION`]; `Document::state_hash` never writes it.
 /// Geometry buffer unchanged.
-pub const MANIFEST_FORMAT_VERSION: u32 = 25;
+pub const MANIFEST_FORMAT_VERSION: u32 = 26;
+
+/// The manifest version at which `sketches[].detached` was introduced. A
+/// file declaring an older version that sets it is malformed for its own
+/// declared version and rejected (reject-not-repair).
+pub(crate) const DETACHED_SKETCH_MIN_VERSION: u32 = 23;
 
 /// The `format_version` `Document::state_hash` encodes with, whatever the
 /// writer's own version: the hash is a digest of the document's state,
@@ -305,7 +316,7 @@ pub(crate) const HASHED_FORMAT_VERSION: u32 = 22;
 /// The manifest version at which the top-level `document_id` was
 /// introduced. A file declaring an older version that carries one is
 /// malformed for its own declared version and rejected (reject-not-repair).
-pub(crate) const DOCUMENT_ID_MIN_VERSION: u32 = 25;
+pub(crate) const DOCUMENT_ID_MIN_VERSION: u32 = 26;
 
 /// Deserializes a member that is present in the JSON, `null` included, as
 /// `Some(..)`; with `#[serde(default)]` an absent member stays `None`.
@@ -358,7 +369,7 @@ pub(crate) fn parse_document_id(text: &str) -> Option<[u8; 16]> {
 /// The manifest version at which `instances[].material` was introduced. A
 /// file declaring an older version that carries one is malformed for its
 /// own declared version and rejected (reject-not-repair).
-pub(crate) const INSTANCE_MATERIAL_MIN_VERSION: u32 = 23;
+pub(crate) const INSTANCE_MATERIAL_MIN_VERSION: u32 = 24;
 
 /// The manifest version at which `sketches[].tags` was introduced. A file
 /// declaring an older version that carries one is malformed for its own
@@ -2094,8 +2105,8 @@ pub(crate) struct Manifest {
     pub app: String,
     pub app_version: String,
     /// A UUID (lowercase, hyphenated) that identifies this document across
-    /// saves (manifest v25+). Absent (outer `None`) → the document has no id
-    /// yet (every pre-v25 file). A member that is present but `null`
+    /// saves (manifest v26+). Absent (outer `None`) → the document has no id
+    /// yet (every pre-v26 file). A member that is present but `null`
     /// (`Some(None)`) is kept distinct from an absent one so decode rejects
     /// it: only a valid id may appear.
     #[serde(
@@ -2588,8 +2599,8 @@ pub(crate) struct InstanceDto {
     /// smuggled field and rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<u32>,
-    /// The placement's own material (manifest v23+): a dense material id.
-    /// Absent → none. Presence in a pre-v23 file is a smuggled field and
+    /// The placement's own material (manifest v24+): a dense material id.
+    /// Absent → none. Presence in a pre-v24 file is a smuggled field and
     /// rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<u32>,
@@ -2636,6 +2647,11 @@ pub(crate) struct SketchDto {
     /// object-owned — every sketch before v17.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_object: Option<u32>,
+    /// A detached shape (manifest v23+, `Sketch::detached`): drawing that
+    /// takes part in no plane arrangement. Omitted when false; `true` in an
+    /// older file, or together with `owner_object`, is rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
     /// The GROUP the sketch is drawn in (manifest v19+): the dense
     /// `groups[]` id of the group that holds it — a `.skp` group of edges,
     /// or lines drawn while editing a group. The sketch keeps its frame
@@ -2812,7 +2828,7 @@ pub(crate) type GroupSaveRow = (
 
 /// Serialization row for an instance:
 /// (id, def, pose, name, tags, owner definition — v15 nested components,
-/// own material — v23).
+/// own material — v24).
 pub(crate) type InstanceSaveRow = (
     InstanceId,
     ComponentId,
@@ -2838,7 +2854,7 @@ pub(crate) struct DocSaveData {
     /// Object with dictionaries still encodes at the version that carries
     /// them, [`Object::encode_version`]).
     pub geometry_version: u32,
-    /// The manifest's `document_id` (manifest v25+): the document's id for
+    /// The manifest's `document_id` (manifest v26+): the document's id for
     /// a real save, always `None` for `Document::state_hash`.
     pub document_id: Option<[u8; 16]>,
     pub materials: Vec<(MaterialId, Material)>,
@@ -3396,8 +3412,9 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
         curves: curve_dtos,
         owner: None,
         owner_object: None, // patched by the caller (`encode_document`), like `id`
-        owner_group: None,  // likewise
-        tags: Vec::new(),   // likewise
+        detached: sk.detached(),
+        owner_group: None, // patched by the caller, like `owner_object`
+        tags: Vec::new(),  // likewise
     }
 }
 
@@ -3539,7 +3556,7 @@ pub(crate) struct DocLoadRaw {
     /// The manifest's declared `format_version` — gates version-specific
     /// load behavior (the pre-v11 retroactive consumption).
     pub format_version: u32,
-    /// The document's id (manifest v25+; `None` for older files or a
+    /// The document's id (manifest v26+; `None` for older files or a
     /// document never given one). Shape-validated by decode.
     pub document_id: Option<[u8; 16]>,
     pub materials: Vec<Material>,
@@ -3593,7 +3610,7 @@ pub(crate) struct DocLoadRaw {
     pub group_names: Vec<Option<String>>,
     pub component_names: Vec<Option<String>>,
     pub instance_names: Vec<Option<String>>,
-    /// Each instance's own material (manifest v23+), a dense material id,
+    /// Each instance's own material (manifest v24+), a dense material id,
     /// in dense order; `None` for none (and for every older file).
     pub instance_materials: Vec<Option<u32>>,
     /// Tag lists per object/group/instance, in dense order (manifest v3+; empty
@@ -3683,7 +3700,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         });
     }
 
-    // The document id (manifest v25+): a smuggled one below its version is
+    // The document id (manifest v26+): a smuggled one below its version is
     // rejected like every other gated field, and a present one must be
     // UUID text exactly as the writer emits it.
     let document_id = match &manifest.document_id {
@@ -3951,7 +3968,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     let group_names = manifest.groups.iter().map(|g| g.name.clone()).collect();
     let component_names = manifest.components.iter().map(|c| c.name.clone()).collect();
     let instance_names = manifest.instances.iter().map(|i| i.name.clone()).collect();
-    // Instance materials (v23+): gated like every sibling field.
+    // Instance materials (v24+): gated like every sibling field.
     if manifest.format_version < INSTANCE_MATERIAL_MIN_VERSION
         && let Some(i) = manifest.instances.iter().find(|i| i.material.is_some())
     {
@@ -4345,6 +4362,21 @@ fn validate_manifest_references(
                 what: format!("sketch {} owner object id {} out of range", sk.id, owner),
             });
         }
+        if sk.detached && manifest.format_version < DETACHED_SKETCH_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} is detached in a v{} manifest (introduced at v{})",
+                    sk.id, manifest.format_version, DETACHED_SKETCH_MIN_VERSION
+                ),
+            });
+        }
+        // A detached sketch is never object-owned (invariant I9): a file
+        // claiming both is malformed, never resolved by dropping either.
+        if sk.detached && sk.owner_object.is_some() {
+            return Err(LoadError::MalformedManifest {
+                what: format!("sketch {} is both detached and owned by an object", sk.id),
+            });
+        }
         if sk.owner_group.is_some() && manifest.format_version < VIEW_MIN_VERSION {
             return Err(LoadError::MalformedManifest {
                 what: format!(
@@ -4601,7 +4633,7 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
         }
     })?;
 
-    let mut sk = Sketch::reconstruct(plane);
+    let mut sk = Sketch::reconstruct(plane, dto.detached);
 
     // Insert vertices in dense id order.
     let mut vert_ids: Vec<SketchVertexId> = Vec::with_capacity(dto.vertices.len());

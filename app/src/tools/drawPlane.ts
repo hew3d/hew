@@ -19,6 +19,7 @@ import type { DrawingAxes } from './drawingAxes'
 import { getDrawingAxes, isWorldIdentity, WORLD_DRAWING_AXES } from './drawingAxes'
 import { nextIdlePlaneLock } from './moveInput'
 import { pickPolicyGeneration } from './pickPolicy'
+import { detachedSketchIds } from './planeUnits'
 import type { SketchTarget } from './sketchGesture'
 import type { EditContext, Snap } from './types'
 
@@ -448,6 +449,15 @@ function isDefMemberSketch(wasmScene: WasmScene, component: bigint, sketch: bigi
   return false
 }
 
+/** Whether `sketch` is a detached shape. Asks the kernel per handle (it also
+ *  knows component-definition members, which the world-frame batch listing
+ *  omits); a host without the accessor falls back to that listing. */
+function isDetachedSketch(wasmScene: WasmScene, sketch: bigint): boolean {
+  const direct = (wasmScene as { sketch_is_detached?: (s: bigint) => boolean }).sketch_is_detached
+  if (typeof direct === 'function') return direct.call(wasmScene, sketch)
+  return detachedSketchIds(wasmScene).has(sketch)
+}
+
 /**
  * Resolve the plane/target an IDLE gesture would anchor onto at `ray`
  * (design §1/§4) — the one implementation the five plane-mode draw tools
@@ -493,7 +503,11 @@ export function resolveIdleDrawTarget(
   const instance = instanceOf(editContext)
   return sketchPickCache.targetFor(ray, () => {
     const sketchHandle = sketchPickCache.pickFor(wasmScene, ray)
-    if (sketchHandle !== null) {
+    // A detached shape touches nothing: hovering it never adopts it as the
+    // sketch to draw into (separate-shapes design D3), so a plain shape
+    // drawn over it lands on the face or plane beneath, as if it were not
+    // there. Only a detached drawing tool call continues one, deliberately.
+    if (sketchHandle !== null && !isDetachedSketch(wasmScene, sketchHandle)) {
       const isEligible =
         instance === null ||
         (editContext.kind === 'instance' &&

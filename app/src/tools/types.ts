@@ -55,6 +55,20 @@ export interface Snap {
    *  projected onto the locked line (`x/y/z` are the projection). The cue
    *  layer draws the dotted tie between the two. */
   projectedFrom?: [number, number, number]
+  /** For an `'intersection'` snap: true when an edge passes THROUGH a face
+   *  of another owner (the kernel's `pierced_face` is set), false when two
+   *  edges — or an edge and a guide or axis — cross. The edge is the snap's
+   *  provenance either way; a tool only words the point differently. */
+  piercesFace?: boolean
+  /** For an `'on-intersection-line'` snap, or the `'midpoint'` of such a
+   *  line: the two ends of the stretch where a face of one owner meets a
+   *  face of another (the kernel's `meeting_line`), so the cue layer can
+   *  draw the virtual edge under the cursor. Its `elementKind` is
+   *  `'meeting-line'`, never `'face'`: it lies on two faces at once and is
+   *  a pick of neither, so no tool adopts a face's plane, normal or part
+   *  from it. `object`/`element` (or `sketch`/`sketchRegion`) still name
+   *  the first of the two faces, the line's owner of record. */
+  meetingLine?: [[number, number, number], [number, number, number]]
   object?: bigint
   /** Placing component instance handle, when the snap came from instanced
    *  geometry (pairs with `object`). */
@@ -199,6 +213,24 @@ export interface Tool {
    * projected and nothing needs qualifying.
    */
   snapProjected?(): boolean
+
+  /**
+   * (optional) A cursor-side explanation for what is under the pointer when
+   * the tool cannot act on it — Push/Pull hovering a face that belongs to a
+   * component not being edited ("double-click it to edit the component").
+   * The Viewport passes it through to the inference chip, which shows it as
+   * its own line beside the cursor, so the guidance sits where the person
+   * is looking instead of only in a bottom toast after the click is
+   * refused. `null` (or absent) means nothing to explain right now.
+   */
+  hoverHint?(): string | null
+
+  /**
+   * (optional) The pointer left the canvas. A tool that memoizes anything
+   * about what is hovered (`hoverHint`'s refusal line) drops it here, so the
+   * status bar does not keep describing a face the cursor is no longer over.
+   */
+  onPointerLeave?(): void
 
   /**
    * (optional) Return snap constraints the tool wants injected into the next

@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `25`**, and **geometry buffer format version `9`**. Both are covered
+version `26`**, and **geometry buffer format version `9`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,11 +59,11 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 25,
+  "format_version": 26,
   "geometry_version": 9,
   "app": "hew",
   "app_version": "1.2.1",
-  "document_id": "3f2c9107-5ed4-40a8-806b-1ec297405d83", // v25+, optional;
+  "document_id": "3f2c9107-5ed4-40a8-806b-1ec297405d83", // v26+, optional;
                                     // omitted = the document has no id yet
 
   "materials": [
@@ -98,7 +98,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "pose": [1,0,0,0, 0,1,0,0, 0,0,1,0],
       "name": "Chair_1",
       "tags": [["Furniture"]],
-      "material": 0 }  // v23+, optional; dense `materials[]` id. Omitted =
+      "material": 0 }  // v24+, optional; dense `materials[]` id. Omitted =
                        // the placement has no material of its own
   ],
   "sketches": [
@@ -118,6 +118,14 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "owner_group": 0, // v19+, optional; dense `groups[]` id. Omitted =
                        // in no group (the only possibility before v19)
       "tags": [["Site"]] // v20+, optional; omitted = untagged
+    },
+    { "id": 1, "sid": 12,
+      "plane": [0.0, 0.0, 1.0, 0.0],
+      "vertices": [ {"id":0, "p":[5.0, 0.0, 0.0]} ],
+      "edges":    [ {"id":0, "from":0, "to":1} ],
+      "regions":  [ {"id":0, "outer":[0,1,2], "holes":[]} ],
+      "detached": true // v23+, optional; omitted = the sketch joins its
+                       // plane's arrangement. Never with "owner_object"
     }
   ],
   "guides": [
@@ -176,7 +184,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `25`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `26`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `9`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -185,15 +193,15 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   identification, no semantic meaning. A reader MUST NOT branch on these.
   Hew writes the release that saved the file (e.g. `"1.2.1"`). Releases up
   to and including 1.2.0 wrote `"0.1.0"` whatever their own version.
-- **`document_id`** (`string`, v25+, optional) — a UUID that identifies the
+- **`document_id`** (`string`, v26+, optional) — a UUID that identifies the
   document across saves, so data kept outside the file (a plugin's
   per-document storage, provenance) can key on it. Format: exactly 36
   characters, lowercase hexadecimal in the hyphenated `8-4-4-4-12` form
   (`3f2c9107-5ed4-40a8-806b-1ec297405d83`); Hew mints a version 4 UUID
   (RFC 9562), but a reader checks only the textual form. Any other value,
   including uppercase hex, braces, or `null`, is a fatal, typed error. Absent means
-  the document has no id yet: every pre-v25 file, and any document never
-  saved by a v25 writer. A writer mints the id once, from real randomness,
+  the document has no id yet: every pre-v26 file, and any document never
+  saved by a v26 writer. A writer mints the id once, from real randomness,
   the first time it saves the document as `.hew` (a `.skp` save mints it
   too, on the document in memory, though a SketchUp file has no slot for
   it), and never changes it after: a save, a Save As to a new name, and a
@@ -319,16 +327,17 @@ of the manifest:
 | `sketches[].regions[].faceless` | 21 | `false` (every closed loop has a face, the only possibility before v21) |
 | `guides[].tags` | 21 | empty list (the guide carries no tag) |
 | `guides[].from`, `guides[].to` | 22 | absent: the line runs on forever both ways, the only possibility before v22 |
-| `instances[].material` | 23 | absent: the placement has no material of its own, the only possibility before v23 |
-| `document_id` (top-level string) | 25 | absent: the document has no id yet; the next save mints one |
+| `sketches[].detached` | 23 | `false` (every sketch joins its plane's arrangement, the only possibility before v23) |
+| `instances[].material` | 24 | absent: the placement has no material of its own, the only possibility before v24 |
+| `document_id` (top-level string) | 26 | absent: the document has no id yet; the next save mints one |
 
-Manifest v24 adds no manifest field: it marks geometry buffer v9 (face
-and edge attribute dictionaries, §3), so a v24 manifest names
+Manifest v25 adds no manifest field: it marks geometry buffer v9 (face
+and edge attribute dictionaries, §3), so a v25 manifest names
 `geometry_version` 9.
 
-`document_id` (v25) is version-gated the usual single direction: a file
-declaring a version older than 25 that carries it is malformed for its own
-declared version and MUST be rejected. At v25+ it is optional, but a
+`document_id` (v26) is version-gated the usual single direction: a file
+declaring a version older than 26 that carries it is malformed for its own
+declared version and MUST be rejected. At v26+ it is optional, but a
 present one must have the exact textual form the field reference gives.
 
 Four fields land in the same v13 bump (four efforts in flight at once) and
@@ -800,7 +809,7 @@ from winding alone (). A mirrored placement may also exist as a component
   over, since poses are not baked into the definition's geometry. Each instance carries its own optional name
   (falling back to the definition's name if absent) and optional tags.
 
-  An instance may carry its own `material` (v23+, optional): a dense
+  An instance may carry its own `material` (v24+, optional): a dense
   `materials[]` id that MUST name an entry of this file (an out-of-range
   id is a fatal, typed error). Definition-owned instances carry one too.
   It colors only what nobody painted. A face of a definition member
@@ -810,7 +819,7 @@ from winding alone (). A mirrored placement may also exist as a component
   `material`; else the renderer's default. A painted face or a painted
   object base therefore keeps its color in every placement, and a nested
   instance's material wins over its outer instance's. A file declaring
-  `format_version < 23` that carries an instance `material` is malformed
+  `format_version < 24` that carries an instance `material` is malformed
   for its declared version and MUST be rejected, never honored.
 
 ### 4.5 Materials and textures
@@ -936,6 +945,17 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   pre-v17 writer could not have produced it). A sketch whose owner object
   is not saved (deleted, or consumed by a boolean) is not saved either; a
   writer never emits an `owner_object` that names an unsaved object.
+- `detached` (v23+, optional, omitted when false) — the sketch is a
+  **detached shape**: drawing that takes part in no plane arrangement.
+  Drawing made later on the same plane does not split or merge with it,
+  moving it onto other drawing or onto a solid's face does not join it,
+  and extruding one of its regions always makes a new Object. It is a
+  free sketch in every other respect (`owner`, `owner_group`, `tags`
+  apply as usual). A detached sketch is never object-owned: a reader
+  MUST reject `detached` together with `owner_object` as a malformed
+  manifest, and MUST reject a manifest declaring `format_version < 23`
+  that sets `detached` (reject-not-repair: a pre-v23 writer could not
+  have produced it).
 
 - `owner_group` (v19+, optional) — the dense `groups[]` id of the group the
   sketch is drawn in: a `.skp` group of edges, or lines drawn while

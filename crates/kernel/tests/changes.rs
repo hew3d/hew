@@ -430,6 +430,53 @@ fn group_session_names_the_annotations_it_reanchors() {
     );
 }
 
+/// A session close that finds the definition emptied deletes the
+/// definition, the entered instance, and the live sibling placements, and
+/// detaches an annotation anchored to a sibling: the close's change set
+/// names all of them (a subscriber hears about a delete the save writes).
+#[test]
+fn an_emptied_explode_close_names_what_it_deletes() {
+    let mut doc = Document::new();
+    let m = boxed(&mut doc, 0.0);
+    let (component, instance, _) = doc.make_component(&[NodeId::Object(m)]).unwrap();
+    let (sibling, _) = doc
+        .place_instance(component, Transform::translation(Vec3::new(10.0, 0.0, 0.0)))
+        .unwrap();
+    let note = doc
+        .add_leader_text(
+            kernel::Anchor {
+                node: Some(NodeId::Instance(sibling)),
+                point: Point3::new(10.0, 0.0, 1.0),
+            },
+            Vec3::new(0.2, 0.2, 0.0),
+            "sibling note".into(),
+        )
+        .unwrap();
+    doc.open_explode_session(instance).unwrap();
+    doc.delete_node(NodeId::Object(m)).unwrap();
+    doc.close_explode_session().unwrap();
+    let r = last(&doc);
+    let removed = names(&r.changes.removed);
+    assert!(
+        removed.contains(&EntityRef::Component(component)),
+        "{removed:?}"
+    );
+    assert!(
+        removed.contains(&EntityRef::Instance(instance)),
+        "{removed:?}"
+    );
+    assert!(
+        removed.contains(&EntityRef::Instance(sibling)),
+        "{removed:?}"
+    );
+    assert_eq!(
+        names(&r.changes.modified),
+        vec![EntityRef::Annotation(note)],
+        "{:?}",
+        r.changes
+    );
+}
+
 /// Exploding an instance inside a group rewrites the group's member list,
 /// so the group is modified.
 #[test]

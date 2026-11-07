@@ -433,6 +433,12 @@ impl Document {
                     b.guide(Removed, *g);
                 }
             }
+            DocAction::TransformedGuide { guide, .. } => b.guide(Modified, *guide),
+            DocAction::DuplicatedGuides { guides } => {
+                for g in guides {
+                    b.guide(Added, *g);
+                }
+            }
             DocAction::CreatedAnnotation { annotation } => b.annotation(Added, *annotation),
             DocAction::DeletedAnnotation { annotation } => b.annotation(Removed, *annotation),
             DocAction::UpdatedAnnotation { annotation, .. } => {
@@ -493,7 +499,27 @@ impl Document {
             // an edit of its own. A host reports the session itself with
             // `context_changed`; the edits made inside it are their own
             // entries.
-            DocAction::SessionOpened { .. } | DocAction::SessionClosed { .. } => {}
+            DocAction::SessionOpened { .. } => {}
+            // The close is bookkeeping too, except when it finds the
+            // definition emptied: then the definition, the entered
+            // instance, and the live sibling placements are deleted
+            // outright and anchored annotations detach, which a save
+            // writes and a subscriber must hear about.
+            DocAction::SessionClosed {
+                instance,
+                component,
+                emptied,
+                emptied_instances,
+                reanchored,
+                ..
+            } => {
+                if *emptied {
+                    b.component(Removed, *component);
+                    b.instance(Removed, *instance);
+                    b.instances(Removed, emptied_instances.iter().copied());
+                    b.reanchored(reanchored);
+                }
+            }
             // A group session's open hides the group node and its close
             // brings it back; annotations anchored to the group are
             // detached or re-attached, which a save writes.

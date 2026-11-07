@@ -143,7 +143,9 @@ moment a drawn region is pushed or pulled it is solid geometry again.
 Three kernel ops carry the topology half of every lowered edit and stay
 the vocabulary of history replay: `split_face` (a boundary-to-boundary cut,
 or a cut with both ends on the same hole loop), `merge_faces` (its exact
-inverse, across one run or, through the re-trace, several), and
+inverse, across one run or, through the re-trace, several — a run passing
+through a vertex other edges also use counts as the pieces it splits
+into there, so its undo re-inserts each boundary to boundary), and
 `retrace_face`, which inserts several paths at once and rebuilds the
 face's loops by rotational order at each vertex, the half-edge form of the
 ground's region tracer. Every loop is simple (no vertex twice in one
@@ -279,6 +281,13 @@ freeing a sketch left with no coplanar face, and deleting an emptied one,
 all inside the same undo step (`Document::complete_change` adds owned
 sketches to a change). The file records an owned sketch's owner as
 `owner_object` (HEW_FILE_FORMAT.md 4.6, v17).
+
+A free sketch may be **detached**: it takes part in no plane arrangement
+(`Sketch::detached`, format v23), is its own drafting context, and
+extrudes only to a new Object. It is the one way to draw on a face
+without joining it; nothing joins it later. The viewport draws a
+detached sketch, like any free sketch, in blue, and the edges and regions
+of a solid's face (imprints, object-owned sketches) in orange.
 
 Imports are the one source of open Objects, and many of them are
 **surfaces**: a single sheet SketchUp let someone draw on purpose (a pane
@@ -459,7 +468,13 @@ temporarily ARE, and lets the unmodified tool set do the rest. Entering a
 container opens a **session frame** on a kernel-held stack; frames nest
 one per container level and close strictly LIFO (Escape, double-click
 outside). Both frame kinds lean on the same structural insight: the
-contents are already real Objects, merely attached to a container.
+contents are already real Objects, merely attached to a container. While
+a frame is open, picks favor its own geometry in Shaded and X-ray alike
+(the editing view draws everything outside it translucent): the kernel
+skips faces and drawing outside the frame (`PickScope`, plus the frame's
+own sketches from `Document::session_frame_sketches`) so a tool reaches a
+buried face of the component or group being edited through whatever
+encloses it.
 
 Entering a **Group** is a transient *ungroup*: the group's direct members
 have their parents cleared to the top level and the group record hides
@@ -484,13 +499,81 @@ kernel bakes the instance's pose into the definition's member Objects and
 sketches — the SAME `ObjectId`/`SketchId`s, a move of ownership rather than
 a copy — and retargets them from the definition to the world tree. From
 that point every tool sees ordinary world geometry and behaves exactly as
-it does anywhere else, because that is what it now is. Every other live
-instance of the definition is hidden for the session's duration: there is
-exactly one copy of the geometry, and it is on loan to the world tree, so
-there is nothing left to keep in sync — a deliberate trade of live
-per-instance propagation during the edit for a tool set that needs no
-component-awareness at all. Closing the session (Escape, double-click
-outside) folds the members back: an Object or sketch the session touched
+it does anywhere else, because that is what it now is. Only the entered
+instance hides (its geometry is the world geometry now; drawing it through
+the instance path too would double it). Every other placement of the
+definition stays live and shows the edit as it happens — **live sibling
+placements**, SketchUp's behavior. There is still exactly one copy of the
+geometry, on loan to the world tree, so nothing is kept in sync: a sibling
+simply renders the session's world objects through the session's inverse
+pose and then its own. That is `Document::expand_def_core`'s on-loan rule:
+`expanded_def_placements` of an on-loan definition answers with the frame's
+live world objects — the original members plus everything created since
+the open and not claimed by a deeper frame — at the inverse session pose,
+and with the frame's surfaced and mid-session-placed instances expanded
+the same way one level down. A placement inside another definition, and
+a sibling nested in a group, render through the same rule, and nested
+frames compose, so a sibling of the outer frame shows an edit made two
+frames deep. Because a sibling is a real live instance, inference snaps to
+it, picks report it, and the Outliner lists it, with no sibling-specific
+code anywhere; the renderer's instanced-batch path draws it from the same
+cached member mesh it would use for a closed definition, so a session edit
+costs one mesh re-pull per changed object, not one per placement. Every
+mid-session `DocChange` lists the live placements in `instances_touched`
+(`Document::complete_change`; `Scene::session_placements` reads the same
+list), exactly as a definition edit lands every instance there. The
+gesture BEFORE the commit shows on the siblings too, as it does in
+SketchUp: a tool previews in the session's world coordinates (Push/Pull's
+swept prism, a Move/Rotate/Scale ghost of the selection, Offset's loops —
+each marked as session geometry by the preview builder that makes it,
+`markSessionGhost`), and the viewport's sibling preview mirror
+(`app/src/viewport/siblingPreview.ts`) draws every marked ghost again
+through each sibling's frame — `Scene::session_sibling_frames`, one
+world-to-world affine per shown placement image: the inverse session pose,
+the nesting poses for a placement reached through another definition,
+then the placement's own pose, with the entered instance and any hidden,
+tag-hidden, or isolated-away placement left out. The mirrors are clones
+sharing the ghost's geometry and materials, built when the ghost appears
+and dropped when the preview empties (commit, cancel, Escape, tool
+switch). A snapshot of the ghost tree (node identity, geometry, material,
+transform, visibility) decides what a frame costs: nothing when nothing
+changed, a retarget of the existing clones when the same shape carries
+new geometry or transforms (Push/Pull's fresh prism per move, a driven
+Move/Rotate/Scale ghost, a child swapped in place), a rebuild only when
+the tree's shape changes — so a drag never re-tessellates per move. The
+frames are read when a gesture's first ghost appears and again only when
+the session fingerprint (entered instance, placement list) changes or the
+viewport invalidates them on a document, visibility, or isolation change,
+so a mid-gesture undo or hide never leaves a mirror at a stale pose. Two
+budgets bound a big model: the frame cap (the first N placements in
+kernel order get a mirror) and a total node budget (a big multi-select
+ghost gets fewer full mirrors; one too big for even one mirror is drawn
+on every frame as a wireframe box of its bounds). The out-of-band
+capture render syncs the mirrors too, so a thumbnail never draws clones
+of geometry a tool has already disposed. Cursor cues that are not
+geometry — a protractor, a leader, a station marker — are not marked and
+are not mirrored. What a
+sibling cannot be is an operand of a definition-level op while the loan is
+out: `make_unique`, `transform_instance`, `apply_def_op`,
+`delete_def_member`, and the in-instance surfaces refuse
+`ExplodeSessionOpen` on it, since the definition's members are world
+objects right now and treating them as def-local content would corrupt
+them; the session's own world-path tools are the way to edit what it
+shows. The frame's drawing travels the same way: `def_rendered_sketches`
+answers, for an on-loan definition, with the session's live world sketches
+(the definition's own, baked at open; free sketches drawn mid-session; the
+members' owned sketches) and the inverse session pose as their frame, so a
+sibling's def-sketch linework follows the drawing as it happens (those
+lines snap only through the entered copy, as a closed definition's sketches
+snap only through the active instance). Undo inside the session reverts
+the siblings with the edit, and undoing the open restores the plain
+definition render. A close that empties the definition tombstones the
+siblings with it (`emptied_instances`), splices a grouped sibling out of
+its group's member list and detaches annotations anchored to one exactly
+as `delete_node` would (`emptied_parent_members`, `reanchored`), and undo
+revives and re-lists exactly those. Closing the session
+(Escape, double-click outside) folds the members back: an Object or sketch
+the session touched
 unbakes through the inverse pose, one it never touched is restored from a
 pristine snapshot taken at open (bit-exact, sidestepping round-trip
 floating-point noise entirely for the common case of a session that only
@@ -508,17 +591,16 @@ Similarities are exactly the transforms that keep a circle a circle, which
 is what lets analytic curve and surface metadata (2.6) survive the
 bake/unbake round trip intact. A mirrored pose bakes like any other: the
 geometry is mirrored and every face is turned over, so the solid stays
-right side out. Group nesting gates a session the
-same way: the bake produces top-level world objects and must hide every
-placement of the definition, neither of which a group-nested placement can
-survive coherently (splicing baked members into a containing group is not
-modeled, and a group may not list a hidden member). Session nesting
-dissolves the common case of that gate: an instance inside a Group is
-genuinely top-level while its group's frame is open, so drilling in
-through the group opens its explode session normally — only a
-same-definition placement grouped *elsewhere* still trips it. An instance
-that fails either gate — a non-uniform scale, or a sibling
-placement nested inside some other group — falls back to the previous
+right side out. Group nesting gates a session the same way for the
+ENTERED instance: the bake produces top-level world objects, which a
+group-nested placement cannot survive coherently (splicing baked members
+into a containing group is not modeled). A sibling nested in some other
+group does not trip it: nothing hides a sibling, so its group keeps
+listing a live member. Session nesting dissolves the common case of the
+gate: an instance inside a Group is genuinely top-level while its group's
+frame is open, so drilling in through the group opens its explode session
+normally. An instance that fails either gate — a non-uniform scale, or a
+placement entered directly inside a group — falls back to the previous
 in-context editing model instead: the tool set operates on the
 definition's members directly, through the pose, without baking or
 retargeting anything. That model remains fully supported for exactly
@@ -813,11 +895,15 @@ common in practice, not edge cases, so the boolean engine classifies
 coplanar sub-faces by an exact, tolerance-free coverage test instead of
 falling back to a numerically fragile epsilon comparison. A genuinely
 ambiguous case (an edge lying exactly on a face with no area overlap) is
-refused outright rather than resolved arbitrarily. Results are also cleaned
-up: coplanar seams a boolean (or a through-cut push/pull) introduces are
-dissolved, so two joined tops read as one face — while coplanar edges the
-operands already carried (drawing on faces, not yet extruded) are
-preserved, and differing face materials are a hard stop.
+refused outright rather than resolved arbitrarily. A Subtract whose cutter
+is disjoint from, or only touches, the target is refused as `NothingRemoved`
+(the arrangement dropped no face of the target and kept no face of the
+cutter, so the target's skin is unchanged), since handing back the target
+unchanged would read as a cut that silently did nothing.
+Results are also cleaned up: coplanar seams a boolean (or a through-cut
+push/pull) introduces are dissolved, so two joined tops read as one face —
+while coplanar edges the operands already carried (drawing on faces, not
+yet extruded) are preserved, and differing face materials are a hard stop.
 
 **A baked transform for plain geometry; a real pose only for Component
 instances.** Move, rotate, and scale write directly into an Object's or

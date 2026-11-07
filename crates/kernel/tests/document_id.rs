@@ -1,5 +1,5 @@
 //! Specs for the persistent document id (docs/dev/HEW_FILE_FORMAT.md §2,
-//! manifest v25+): a UUID minted from host-supplied randomness on the
+//! manifest v26+): a UUID minted from host-supplied randomness on the
 //! first save, carried in the manifest, kept across save, load, and copy,
 //! and invisible to `state_hash`.
 
@@ -157,26 +157,26 @@ fn id_is_not_undoable() {
 }
 
 #[test]
-fn pre_v25_file_with_document_id_is_rejected() {
+fn pre_v26_file_with_document_id_is_rejected() {
     let mut doc = Document::new();
     a_box(&mut doc);
     doc.ensure_document_id(RANDOM);
     let bytes = doc.save();
-    let smuggled = patch_manifest(&bytes, |m| m["format_version"] = 24.into());
+    let smuggled = patch_manifest(&bytes, |m| m["format_version"] = 25.into());
     assert!(
         matches!(
             Document::load(&smuggled),
             Err(LoadError::MalformedManifest { .. })
         ),
-        "a document_id below v25 is a smuggled field"
+        "a document_id below v26 is a smuggled field"
     );
 
-    // The same file without the member still loads at v24, with no id.
+    // The same file without the member still loads at v25, with no id.
     let clean = patch_manifest(&bytes, |m| {
-        m["format_version"] = 24.into();
+        m["format_version"] = 25.into();
         m.as_object_mut().unwrap().remove("document_id");
     });
-    let old = Document::load(&clean).expect("a v24 file loads");
+    let old = Document::load(&clean).expect("a v25 file loads");
     assert_eq!(old.document_id(), None);
 }
 
@@ -221,7 +221,7 @@ fn encode_omits_the_member_when_absent() {
         manifest.as_object().unwrap().get("document_id").is_none(),
         "no key without an id"
     );
-    assert_eq!(manifest["format_version"], 25);
+    assert_eq!(manifest["format_version"], 26);
 }
 
 #[test]
@@ -297,7 +297,7 @@ fn a_null_document_id_is_rejected_at_every_version() {
     let mut doc = Document::new();
     a_box(&mut doc);
     let bytes = doc.save();
-    for version in [24, 25] {
+    for version in [25, 26] {
         let patched = patch_manifest(&bytes, |m| {
             m["format_version"] = version.into();
             m["document_id"] = serde_json::Value::Null;

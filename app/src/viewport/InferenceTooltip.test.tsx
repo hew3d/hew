@@ -36,6 +36,22 @@ describe('InferenceTooltip', () => {
     expect(screen.getByText('mystery-kind')).toBeInTheDocument()
   })
 
+  it('shows a tool\'s hover hint at once, as its own line, with no dwell', () => {
+    render(
+      <InferenceTooltip
+        info={{ kind: 'on-face', screenX: 10, screenY: 20, hint: 'That face is part of a component — double-click it to edit the component' }}
+      />,
+    )
+    expect(screen.getByText('On Face')).toBeInTheDocument()
+    const hint = screen.getByTestId('inference-tip-hint')
+    expect(hint).toHaveTextContent('double-click it to edit the component')
+  })
+
+  it('draws no hint line when the tool has nothing to explain', () => {
+    render(<InferenceTooltip info={{ kind: 'on-face', screenX: 10, screenY: 20 }} />)
+    expect(screen.queryByTestId('inference-tip-hint')).toBeNull()
+  })
+
   it('shows an axis label when direction is axis-aligned and kind is not already on-axis', () => {
     render(<InferenceTooltip info={{ kind: 'endpoint', screenX: 10, screenY: 20, direction: [1, 0, 0] }} />)
     expect(screen.getByText('on red axis')).toBeInTheDocument()

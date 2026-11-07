@@ -519,6 +519,11 @@ pub enum BooleanError {
     /// edge-on-face tangency). Refused rather than repaired; nudge or use a
     /// merge-group container instead.
     DegenerateContact,
+    /// Subtract removed no volume: the operands are disjoint or only touch
+    /// (along a face, an edge, or a corner), so the result would be `a`
+    /// unchanged. Refused rather than returned as a no-op that reads like a
+    /// cut; move the cutter so it passes through `a`.
+    NothingRemoved,
 }
 
 /// Typed failures of [`Object::slice`].
@@ -826,6 +831,12 @@ impl std::fmt::Display for BooleanError {
             }
             BooleanError::DegenerateContact => {
                 write!(f, "operands touch degenerately; no manifold result exists")
+            }
+            BooleanError::NothingRemoved => {
+                write!(
+                    f,
+                    "subtract removed no volume; the operands are disjoint or only touch"
+                )
             }
         }
     }
@@ -5398,6 +5409,14 @@ impl Object {
     /// split followed by a merge leaves no scar — this is what makes the
     /// identity property hold.
     ///
+    /// A run passing through a vertex that other edges also use (the faces
+    /// touch another boundary there, as a disc's arc does at the point where
+    /// its hole touches the outer loop) dissolves as the pieces that vertex
+    /// splits it into, through the re-trace that merges several runs: the
+    /// vertex survives as an end of each piece, and is healed away when it
+    /// is left a straight two-edge scar, exactly as erasing those edges
+    /// heals it. Its undo re-inserts the pieces.
+    ///
     /// # Errors
     /// See [`StickyError`]; all leave the object untouched.
     pub fn merge_faces(&mut self, edge: EdgeId) -> Result<FaceMergeReport, StickyError> {
@@ -5480,8 +5499,23 @@ impl Object {
         // Several separate runs between the two loops: every run dissolves
         // at once through the re-trace (two faces side by side gain a hole
         // where they enclosed another face; a face in a hole splits that
-        // hole). The face holding the hole, else `face_a`, survives.
-        let runs = self.shared_runs(loop_a, loop_b);
+        // hole). The face holding the hole, else `face_a`, survives. So does
+        // one run passing through a vertex other edges also use (a hole
+        // touching the outer loop there): that vertex outlives the dissolve,
+        // so the run goes as the pieces it splits into there, the scar it
+        // leaves heals as erasing those edges heals it, and the undo
+        // re-inserts the pieces, each boundary to boundary — one cut whose
+        // interior ran through a boundary vertex could not be replayed. The
+        // boolean seam cleanup (`!multi_run`) keeps its unsplit runs.
+        let runs: Vec<Vec<Point3>> = {
+            let runs = self.shared_run_half_edges(loop_a, loop_b);
+            let runs = if multi_run {
+                self.split_runs_at_touches(runs)
+            } else {
+                runs
+            };
+            runs.iter().map(|run| self.run_positions(run)).collect()
+        };
         if runs.len() > 1 {
             if !multi_run {
                 return Err(StickyError::SharedChainDisconnected);
@@ -5516,10 +5550,15 @@ impl Object {
     }
 
     /// The separate runs of edges along which `loop_a` meets `loop_b`
-    /// (half-edges of one twinned into the other), each as its vertex
-    /// positions in `loop_a`'s order. Empty when they share none, and one
-    /// run when every half-edge of `loop_a` is shared.
-    pub(crate) fn shared_runs(&self, loop_a: LoopId, loop_b: LoopId) -> Vec<Vec<Point3>> {
+    /// (half-edges of one twinned into the other), each as `loop_a`'s
+    /// half-edges in loop order ([`Object::run_positions`] gives its
+    /// points). Empty when they share none, and when every half-edge of
+    /// `loop_a` is shared (one closed run has no start).
+    pub(crate) fn shared_run_half_edges(
+        &self,
+        loop_a: LoopId,
+        loop_b: LoopId,
+    ) -> Vec<Vec<HalfEdgeId>> {
         let hes: Vec<HalfEdgeId> = self.loop_half_edges(loop_a).collect();
         let shared = |h: HalfEdgeId| {
             self.half_edges[h]
@@ -5532,17 +5571,67 @@ impl Object {
             if !shared(hes[i]) || shared(hes[(i + n - 1) % n]) {
                 continue;
             }
-            let mut pts = Vec::new();
+            let mut run = Vec::new();
             let mut k = i;
             while shared(hes[k % n]) {
-                pts.push(self.vertices[self.half_edges[hes[k % n]].origin].position);
+                run.push(hes[k % n]);
                 k += 1;
             }
-            let last = hes[(k + n - 1) % n];
-            pts.push(self.vertices[self.half_edges[self.half_edges[last].next].origin].position);
-            runs.push(pts);
+            runs.push(run);
         }
         runs
+    }
+
+    /// The vertex positions of a run of consecutive loop half-edges: every
+    /// origin, then the last half-edge's destination.
+    pub(crate) fn run_positions(&self, run: &[HalfEdgeId]) -> Vec<Point3> {
+        let mut pts: Vec<Point3> = run
+            .iter()
+            .map(|&h| self.vertices[self.half_edges[h].origin].position)
+            .collect();
+        if let Some(&last) = run.last() {
+            pts.push(self.vertices[self.half_edges[self.half_edges[last].next].origin].position);
+        }
+        pts
+    }
+
+    /// Splits each run of shared half-edges at every interior vertex that
+    /// other edges also use: a point where the run touches another boundary
+    /// of the two faces (a hole touching the outer loop at one vertex, say).
+    /// Such a vertex outlives the dissolve, so it is an end of the edges
+    /// removed, not a point inside them: the merge removes the pieces, and
+    /// its undo inserts them, each running boundary to boundary. A vertex
+    /// only the run passes through departs exactly two half-edges (the run's
+    /// own, one in each loop); any more is a touch.
+    pub(crate) fn split_runs_at_touches(&self, runs: Vec<Vec<HalfEdgeId>>) -> Vec<Vec<HalfEdgeId>> {
+        let interior: std::collections::BTreeSet<VertexId> = runs
+            .iter()
+            .flat_map(|run| run.iter().skip(1))
+            .map(|&h| self.half_edges[h].origin)
+            .collect();
+        if interior.is_empty() {
+            return runs;
+        }
+        let mut departing: std::collections::BTreeMap<VertexId, usize> =
+            std::collections::BTreeMap::new();
+        for he in self.half_edges.values() {
+            if interior.contains(&he.origin) {
+                *departing.entry(he.origin).or_default() += 1;
+            }
+        }
+        let touch = |h: HalfEdgeId| departing[&self.half_edges[h].origin] > 2;
+        let mut pieces = Vec::new();
+        for run in runs {
+            let mut piece = Vec::new();
+            for (k, &h) in run.iter().enumerate() {
+                if k > 0 && touch(h) {
+                    pieces.push(std::mem::take(&mut piece));
+                }
+                piece.push(h);
+            }
+            pieces.push(piece);
+        }
+        pieces
     }
 
     /// The interior edges whose two adjacent faces are coplanar, facing the
@@ -5742,7 +5831,9 @@ impl Object {
     /// # Errors
     /// See [`BooleanError`]. Degenerate contact (coincident faces, tangent
     /// edges) is refused, not repaired — resolution strategies (nudging,
-    /// merge-group containers) belong to M2 UX.
+    /// merge-group containers) belong to M2 UX. A subtract whose operands
+    /// are disjoint or only touch, so that nothing is removed, refuses as
+    /// [`BooleanError::NothingRemoved`] rather than returning `a` unchanged.
     pub fn boolean(
         op: BooleanOp,
         a: &Object,
@@ -6498,6 +6589,10 @@ impl Object {
                 Ok(result)
             }
             Err(BooleanError::EmptyResult) => Err(PushPullError::WouldVanish),
+            // The tool is swept from a face of this solid, so it can remove
+            // nothing only when the sweep had no depth: a vanishing distance,
+            // not damaged geometry.
+            Err(BooleanError::NothingRemoved) => Err(PushPullError::DistanceTooSmall),
             Err(_) => Err(PushPullError::NonManifoldResult),
         }
     }

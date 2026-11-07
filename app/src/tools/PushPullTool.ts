@@ -33,8 +33,9 @@ import {
   PREVIEW_PUSHPULL_FALLBACK,
   PREVIEW_PUSHPULL_TOKEN,
 } from './previewTint'
-import { defaultFaceEligible, ineligibleFaceHint, worldFaceNormal, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
-import { ctxOfFace, type PlaneUnitsScene } from './planeUnits'
+import { defaultFaceEligible, ineligibleFaceHint, sessionIsOpen, worldFaceNormal, EDIT_CONTEXT_HINT_CODE, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
+import { ctxOfFace, ctxOfSketch, readPlaneUnits, type PlaneUnitsScene } from './planeUnits'
+import { pickPolicyGeneration, pickRenderMode } from './pickPolicy'
 import { regionUnderRay } from './regionPick'
 
 /** Snap kinds whose point is a deliberate depth reference for push/pull — the
@@ -55,6 +56,7 @@ const HARD_SNAP_KINDS = new Set([
   'midpoint',
   'intersection',
   'on-edge',
+  'on-intersection-line',
   'on-guide',
 ])
 
@@ -88,7 +90,14 @@ const MIN_INWARD_DRAG_M = 1e-9
 
 /** A `pick_sketch_region` hit: the region handles plus its ray depth in
  *  metres along the normalized ray (the scale `pick_face` reports in). */
-type RegionPick = { sketch: bigint; region: bigint; depth: number }
+type RegionPick = {
+  sketch: bigint
+  region: bigint
+  depth: number
+  /** The region's sketch is a detached shape (separate-shapes design D8):
+   *  drawn to stay apart from the face it lies on. */
+  detached: boolean
+}
 
 /**
  * Whether a picked sketch region sits IN FRONT of the object face picked on
@@ -102,13 +111,29 @@ type RegionPick = { sketch: bigint; region: bigint; depth: number }
  * extruding on the rest). No face on the ray at all also counts as "in
  * front"; no region never does.
  */
-function regionInFrontOfFace(region: RegionPick | null, face: RawFacePick | null, faceEligible = true): boolean {
+export function regionInFrontOfFace(
+  region: RegionPick | null,
+  face: RawFacePick | null,
+  faceEligible = true,
+  regionInScope: boolean | null = null,
+): boolean {
   if (region === null) return false
   if (face === null) return true
-  // Free drawing lying ON a face that cannot be pushed from here (a group's
-  // or component's face, drawn on from outside) is what the cursor is on:
-  // a tie goes to the drawing, which pulls into a new object of its own.
-  if (!faceEligible) return region.depth <= face.depth + REGION_COPLANAR_EPS_M
+  // Shaded or X-ray with an editing scope: the kernel's picks landed on the nearest
+  // thing INSIDE the scope, falling back to the nearest of any owner when
+  // nothing in scope lay under the ray. When exactly one of the two is the
+  // in-scope one it wins, whatever the depth — depth only orders two
+  // candidates of the same standing.
+  if (regionInScope !== null) {
+    if (faceEligible && !regionInScope) return false
+    if (!faceEligible && regionInScope) return true
+  }
+  // A detached shape lying on a face is what the cursor is on: it was drawn
+  // to stay apart from the face, so a tie goes to it (D8). So does free
+  // drawing lying ON a face that cannot be pushed from here (a group's or
+  // component's face, drawn on from outside). Either pulls into a new object
+  // of its own.
+  if (region.detached || !faceEligible) return region.depth <= face.depth + REGION_COPLANAR_EPS_M
   return region.depth < face.depth - REGION_IN_FRONT_EPS_M
 }
 
@@ -188,6 +213,10 @@ export class PushPullTool implements Tool {
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.stage.kind === 'idle') {
+      // A face the tool cannot push explains itself while hovered — the
+      // same line the refused click toasts, shown BEFORE the click, in the
+      // status bar and (`hoverHint`) beside the cursor.
+      if (this._hoverRefusal !== null) return this._hoverRefusal
       if (this.retype.isOpen) {
         return t`Type an exact distance to redo the push/pull you just made — or click another face; double-click repeats the last distance.`
       }
@@ -374,7 +403,7 @@ export class PushPullTool implements Tool {
     // never inside an OBJECT editing context.
     const activeInstance = this._activeInstance
     const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
-    if (!regionInFrontOfFace(region, raw, eligible !== null)) {
+    if (!regionInFrontOfFace(region, raw, eligible !== null, this._regionInScope(region, activeInstance))) {
       if (eligible !== null) {
         const a = this.wasmScene.face_plane(eligible.object, eligible.face)
         return {
@@ -455,14 +484,46 @@ export class PushPullTool implements Tool {
   private _regionPickCache: {
     ray: Ray
     instance: bigint | null
+    /** `pickPolicyGeneration()` at pick time: a render-mode or editing-scope
+     *  change invalidates the memo even when the ray is the same object. */
+    gen: number
     region: RegionPick | null
   } | null = null
+
+  /**
+   * Whether the picked region is inside the editing scope, or null when the
+   * question does not apply (Wireframe, or nothing is open for editing) or
+   * cannot be answered (the region is not in its plane's listing — then the
+   * plain depth rule stands). Only a non-Wireframe mode with a scope makes the kernel's
+   * picks prefer in-scope candidates, so only there can a region and a face
+   * differ in standing. A region picked through the entered instance
+   * (`_in_instance`) is in scope by construction; a world region is in scope
+   * when it is drawn on an eligible object's face, or is a free sketch of
+   * the open session.
+   */
+  private _regionInScope(region: RegionPick | null, activeInstance: bigint | null): boolean | null {
+    if (region === null || pickRenderMode() === 'wireframe') return null
+    if (activeInstance !== null) return true
+    try {
+      if (!sessionIsOpen(this.wasmScene)) return null
+      const ctx = ctxOfSketch(this.wasmScene, region.sketch)
+      if (ctx === null) return null
+      const pu = readPlaneUnits(this.wasmScene as unknown as PlaneUnitsScene, ctx)
+      const hit = pu?.regions.find((r) => r.extrude?.sketch === region.sketch && r.extrude.region === region.region)
+      if (hit === undefined) return null
+      if (hit.over !== null) return this._isEligible(hit.over.object, undefined)
+      return Array.from(this.wasmScene.explode_session_sketches() ?? []).includes(region.sketch)
+    } catch {
+      return null
+    }
+  }
 
   private _pickRegionFor(ray: Ray, activeInstance: bigint | null): RegionPick | null {
     if (
       this._regionPickCache !== null &&
       this._regionPickCache.ray === ray &&
-      this._regionPickCache.instance === activeInstance
+      this._regionPickCache.instance === activeInstance &&
+      this._regionPickCache.gen === pickPolicyGeneration()
     ) {
       return this._regionPickCache.region
     }
@@ -488,12 +549,12 @@ export class PushPullTool implements Tool {
         // direction's length itself) — scaling it again would double-count
         // any non-unit direction.
         const dirLen = activeInstance !== null ? 1 : Math.hypot(ray.direction[0], ray.direction[1], ray.direction[2])
-        region = { sketch: regionPick.sketch(), region: regionPick.region(), depth: regionPick.depth() * dirLen }
+        region = { sketch: regionPick.sketch(), region: regionPick.region(), depth: regionPick.depth() * dirLen, detached: regionPick.detached() }
       } finally {
         regionPick.free()
       }
     }
-    this._regionPickCache = { ray, instance: activeInstance, region }
+    this._regionPickCache = { ray, instance: activeInstance, gen: pickPolicyGeneration(), region }
     return region
   }
 
@@ -506,15 +567,59 @@ export class PushPullTool implements Tool {
       this.stage = { ...this.stage, distance }
       this._drawGhostPreview(anchor, target.normal, distance)
       this._reportMeasurement(distance)
+    } else {
+      this._updateHoverRefusal(ray)
     }
     // Hover highlight is handled via CueLayer for on-face snaps (M1 shortcut
     // per docs/dev/DEVELOPMENT.md: show snap marker at face location; per-face highlight
     // requires face→triangle table in MeshJs which is a WASM_API addendum).
   }
 
+  /** The hovered face's refusal while idle (see `_updateHoverRefusal`), or
+   *  null when the cursor is over something the tool can act on, nothing,
+   *  or a gesture is in progress. */
+  private _hoverRefusal: string | null = null
+
+  /** Cursor-side guidance (Tool.hoverHint): the same line the refused
+   *  click would toast, shown while the face is merely hovered. */
+  hoverHint(): string | null {
+    return this.stage.kind === 'idle' ? this._hoverRefusal : null
+  }
+
+  /**
+   * Resolves whether the face under `ray` would refuse a click, exactly as
+   * `onPointerDown`'s Path A decides it — the same memoized pick
+   * (`_pickCache`, keyed on this ray object) and the same region-in-front
+   * rule, so the hover never says one thing and the click another. A
+   * component face hovered outside its edit session (the common
+   * SketchUp-habit case: push on a copied component without entering it)
+   * is what this exists for; a grouped face and an out-of-scope face get
+   * their own lines from the same helper.
+   */
+  private _updateHoverRefusal(ray: Ray): void {
+    let next: string | null = null
+    try {
+      const eligible = this._pickCache.pickFor(this.wasmScene, ray, (object, instance) =>
+        this._isEligible(object, instance))
+      const raw = this._pickCache.rawPickFor(ray)
+      if (raw !== null && eligible === null) {
+        const activeInstance = this._activeInstance
+        const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
+        if (!regionInFrontOfFace(region, raw, false, this._regionInScope(region, activeInstance))) next = this._ineligibleFaceHint(raw.instance)
+      }
+    } catch {
+      next = null
+    }
+    this._hoverRefusal = next
+  }
+
   onPointerDown(snap: Snap | null, ray: Ray): void {
     // Any pointer action ends the retype window — the next push/pull begins.
     this.disarmRetype()
+    // The click decides for itself (and re-toasts a refusal); a hover memo
+    // left standing here would survive a double-click that opens the very
+    // component it describes.
+    this._hoverRefusal = null
     if (this.stage.kind === 'idle') {
       let target: PushPullTarget | null = null
       let anchor: [number, number, number] = [0, 0, 0]
@@ -540,7 +645,7 @@ export class PushPullTool implements Tool {
       // as `snapConstraint` skips it at hover time. The two must agree.
       const activeInstance = this._activeInstance
       const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
-      const regionWins = regionInFrontOfFace(region, raw, eligible !== null)
+      const regionWins = regionInFrontOfFace(region, raw, eligible !== null, this._regionInScope(region, activeInstance))
       if (raw !== null && !regionWins) {
         // Same face-eligibility policy as the draw tools (faceDraw.ts): at
         // the top level only PLAIN objects are directly push/pullable —
@@ -585,7 +690,7 @@ export class PushPullTool implements Tool {
           // did not aim at. Refuse explicably instead. `snapConstraint`
           // fails closed the same way at hover time (see its own doc) —
           // the two must never disagree.
-          this.onToast(this._ineligibleFaceHint(raw.instance))
+          this.onToast(this._ineligibleFaceHint(raw.instance), EDIT_CONTEXT_HINT_CODE)
           return
         }
       }
@@ -759,6 +864,15 @@ export class PushPullTool implements Tool {
     clearPreview(this.preview)
     this.onMeasurementCb('')
     this.lastSnap = null
+    // A context change or tool switch arrives without a pointer move; the
+    // hovered face's refusal would otherwise outlive the state it described
+    // (the chip still saying "double-click it" over a face just entered).
+    this._hoverRefusal = null
+  }
+
+  /** The pointer left the canvas: nothing is hovered (Tool.onPointerLeave). */
+  onPointerLeave(): void {
+    this._hoverRefusal = null
   }
 
   /**
@@ -883,6 +997,7 @@ export class PushPullTool implements Tool {
       t`Push/pull`,
       this._contextScoped || this._activeContext !== null || this._activeComponent !== null,
       instance,
+      sessionIsOpen(this.wasmScene),
     )
   }
 
@@ -1152,6 +1267,15 @@ export class PushPullTool implements Tool {
     this.onMeasurementCb(formatLength(distance))
   }
 
+  /** The ghost is blue ("a new object appears, nothing existing changes")
+   *  in extrude-as-new mode and for every region target — a free sketch
+   *  region always extrudes into a new object, whichever way it is pushed.
+   *  Inside a component edit the Ctrl toggle's commit falls back to an
+   *  ordinary push (see `_commit`), so the ghost stays on the push colors. */
+  private _ghostMakesNewObject(): boolean {
+    return (this.extrudeAsNewMode && this._activeComponent === null) || (this.stage.kind === 'dragging' && this.stage.target.kind === 'region')
+  }
+
   private _drawGhostPreview(
     anchor: [number, number, number],
     normal: [number, number, number],
@@ -1182,13 +1306,15 @@ export class PushPullTool implements Tool {
         // mid-drag) degrades to the arrow rather than drawing a misplaced
         // ghost — `worldBoundary` is null exactly then.
         if (worldBoundary !== null) {
-          // Extrude-as-new mode tints the ghost blue (both signs); plain
-          // push/pull keeps its orange add / red cut look.
+          // A new object (extrude-as-new mode, or any free-sketch region,
+          // which always extrudes into a new object) tints the ghost blue
+          // on both signs; a face push/pull keeps its orange add / red cut
+          // look.
           const prism = buildSweptPrismPreview(
             worldBoundary,
             normal,
             distance,
-            this.extrudeAsNewMode
+            this._ghostMakesNewObject()
               ? readPreviewTint(PREVIEW_EXTRUDE_NEW_TOKEN, PREVIEW_EXTRUDE_NEW_FALLBACK)
               : distance > 0
                 ? readPreviewTint(PREVIEW_PUSHPULL_TOKEN, PREVIEW_PUSHPULL_FALLBACK)
@@ -1254,7 +1380,7 @@ export class PushPullTool implements Tool {
     const pts = new Float32Array([ax, ay, az, ...tip])
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(pts, 3))
-    const arrowColor = this.extrudeAsNewMode
+    const arrowColor = this._ghostMakesNewObject()
       ? readPreviewTint(PREVIEW_EXTRUDE_NEW_TOKEN, PREVIEW_EXTRUDE_NEW_FALLBACK)
       : readPreviewTint(PREVIEW_PUSHPULL_TOKEN, PREVIEW_PUSHPULL_FALLBACK)
     const mat = new THREE.LineBasicMaterial({

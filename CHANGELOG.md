@@ -8,6 +8,17 @@ A newer Hew always opens documents saved by an older one. The reverse
 is not guaranteed: releases that change the `.hew` format say so under
 **Changed**.
 
+## [Unreleased]
+
+### Added
+
+- **Drawing:** Tap Ctrl (⌘ on a Mac) on any draw tool to detach the shape from the face or drawing under it. Push/Pull turns a detached shape into a new object instead of changing the face. The cursor shows a small + while Detach is on, and the outline being drawn is orange when the shape will join the face and blue when it stays detached.
+- **Drawing:** Drawing now has two colors. Blue drawing belongs to no solid and pushes into a new object; orange drawing is part of a solid's face and pushes the solid itself. The outline you draw on the ground or in empty space is blue, and one you draw on a face is orange until you detach it. Push/Pull ghosts follow the same rule: orange where the solid grows, red where it loses material, and blue where a new object appears, including when you push a free shape inward. Offset shows its preview in the color of the shape it starts from.
+
+### Fixed
+
+- **Push/Pull:** The hint for the Ctrl/⌘ new-object toggle now refreshes the moment you tap the key.
+
 ## [1.3.1] (2026-10-26) - The "Safe to Reopen" Release
 
 A fix for several ways Hew could save a file it then could not open, or stop

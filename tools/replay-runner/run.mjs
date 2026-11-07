@@ -17,6 +17,50 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { loadWasm, FIXTURES_DIR } from './lib.mjs';
 
+/**
+ * Post-replay probes, by fixture name. The golden state_hash covers neither
+ * the pick scope nor the render mode, so a fixture whose point is a scoped
+ * pick asserts it here: after the replay the scene must still hold the
+ * recorded scope and answer the same picks. Returns a failure message or null.
+ */
+const POST_REPLAY_PROBES = {
+  'xray-edit-scope': (scene) => {
+    const pick = (x, y) => {
+      const hit = scene.pick_face(x, y, 8, 0, 0, -1);
+      if (hit === undefined) return null;
+      const object = hit.object();
+      hit.free();
+      return object;
+    };
+    // The recorded scope is still set after the replay. Ask the scoped
+    // picks first, then clear it to learn the nearest face (A's top).
+    scene.set_render_mode('shaded');
+    const scopedShaded = pick(1.5, 1);
+    const behindShaded = pick(0.4, 1);
+    scene.set_render_mode('xray');
+    const scopedXray = pick(1.5, 1);
+    const behindXray = pick(0.4, 1);
+    scene.clear_pick_scope();
+    const nearest = pick(1.5, 1);
+    if (nearest === null) return 'X-ray pick through A found nothing';
+    if (scopedXray === null || scopedXray === nearest) {
+      return `X-ray pick through A with the replayed scope returned ${scopedXray}, expected the scoped box (not ${nearest})`;
+    }
+    if (scopedShaded !== scopedXray) {
+      return `Shaded pick through A with the replayed scope returned ${scopedShaded}, expected the scoped box ${scopedXray}`;
+    }
+    if (behindXray !== nearest) return `X-ray pick with nothing in scope behind returned ${behindXray}, expected ${nearest}`;
+    if (behindShaded !== nearest) return `Shaded pick with nothing in scope behind returned ${behindShaded}, expected ${nearest}`;
+    scene.set_render_mode('shaded');
+    if (pick(1.5, 1) !== nearest) return 'Shaded pick after clear_pick_scope must return the nearest face';
+    scene.set_render_mode('wireframe');
+    scene.set_pick_scope(new BigUint64Array([scopedXray]), new BigUint64Array([]), false);
+    if (pick(1.5, 1) !== null) return 'Wireframe picks no face, scope or not';
+    scene.clear_pick_scope();
+    return null;
+  },
+};
+
 async function main() {
   if (process.argv.includes('--generate')) {
     const { generateAll } = await import('./generate.mjs');
@@ -81,7 +125,12 @@ async function main() {
     const scene = new wasm.Scene();
     try {
       const got = scene.replay(json);
-      if (got === golden) {
+      const probe = POST_REPLAY_PROBES[path.basename(name, '.json')];
+      const probeFailure = got === golden && probe ? probe(scene) : null;
+      if (probeFailure !== null) {
+        console.log(`FAIL  ${name}  (post-replay probe: ${probeFailure})`);
+        allPassed = false;
+      } else if (got === golden) {
         console.log(`PASS  ${name}  state_hash=${got}`);
       } else {
         console.log(`FAIL  ${name}  expected golden_hash=${golden} got state_hash=${got}`);

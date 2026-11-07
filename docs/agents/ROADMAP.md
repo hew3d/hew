@@ -165,7 +165,7 @@ below.
   still welds watertight
 - Editable shapes on faces (imprints): a shape drawn on a solid's face and
   not yet pushed or pulled is selectable (click inside it; the object is
-  one click away anywhere else), fills blue like a ground sketch, lists in
+  one click away anywhere else), fills and outlines in the attached orange (part of the solid's face; a free sketch is blue), lists in
   the Outliner under its object as a named child row (Circle, Rectangle,
   Shape, Arc shape, Line, Arc, Edge shape), and moves, rotates, scales, and deletes ON its
   face — Move constrains the drop to the face's plane. (Superseded by
@@ -193,7 +193,7 @@ below.
   this (`face_features`, `transform_sub_face`, `transform_chord` /
   `dissolve_imprint`) is gone: the drafting engine (ARCHITECTURE.md 2.4)
   lists and edits the same drawing as plane units, and the
-  `hew.solid.imprints` / `*_imprint` API commands run over it. Instanced geometry gets the selection highlight but no blue
+  `hew.solid.imprints` / `*_imprint` API commands run over it. Instanced geometry gets the selection highlight but no orange
   fill overlay
 - Drawing-like sketch editing: lines are selectable and deletable
   (merging the regions they separated), a drawn arc or circle selects
@@ -242,6 +242,10 @@ below.
   the per-edge polygon mark (`docs/dev/HEW_FILE_FORMAT.md`); the wasm and
   Hew API surfaces address drawing by plane context and unit key
   (`plane_units`, `draft_*`)
+- Detached shapes: Ctrl/Cmd on a draw tool keeps the shape apart from the
+  plane's drawing (`Sketch::detached`, sketch-only draft scope,
+  `draft_begin_detached`, API `detached`); Push/Pull on it makes a new
+  Object; the Getting Started cutter is drawn this way
 - Push/pull to extrude a closed profile into a solid, with a live preview
   that borrows its depth only from references OFF the face's own plane (a
   face's own edges and the drawing axes are never a depth), and picks a
@@ -266,7 +270,9 @@ below.
   untouched, sharing a footprint with the new solid exactly like
   re-extruding occupied ground
 - Explicit boolean union, subtract, and intersect, with coplanar seams
-  dissolved on the result (a union of two flush boxes reads as one box)
+  dissolved on the result (a union of two flush boxes reads as one box).
+  A subtract whose cutter sits apart from, or only touches, the target
+  refuses with a typed `NothingRemoved` and leaves both solids in place
 - Non-destructive, nestable grouping (Group/Ungroup)
 - Group-level booleans: Union/Subtract/Intersect accept a whole group on
   either side (or mixed with a plain solid). The group's solids are fused
@@ -296,6 +302,19 @@ below.
   Copy" — or after the instance's own name if it has one) and Explode
   (bake an instance back into ordinary geometry; a nested member
   surfaces as an ordinary instance, its geometry still shared)
+- Copy/Cut/Paste and Paste In Place of component instances stay linked
+  within a document: the clipboard bytes carry a `hew.clipboard` origin
+  stamp per definition (the copying window's document token plus the
+  source definition's stable id) and the paste links each stamped
+  definition back to the live original (`Document::extract_clipboard_item`
+  / `InsertOptions::origin`), so the pasted instance places the same
+  definition as Move+copy and Place Copy do — several copied instances of
+  one definition share it, nested definitions link per definition, a
+  mixed selection pastes its plain objects as independent copies, undo
+  removes only the pasted instances. A paste under another origin
+  (another window, or after File ▸ Open/New in this one) copies the
+  definition as before, with repeat pastes of the same copy reusing it by
+  clipboard provenance; Make Unique breaks a link on purpose
 - Slice: cut a solid along a plane into two independent watertight solids
 - Push/pull on any planar face of a solid, not just faces with
   perpendicular neighbors: it follows classic SketchUp translate-and-build —
@@ -434,16 +453,17 @@ below.
   transient ungroup (nothing bakes; grouping, component/instance creation,
   import, and 3D text stay available inside one, their products folding
   into the group); a component session is a transient explode of the
-  instance's pose, always the innermost frame, with sibling instances
-  hidden for the session's duration instead of updating live. Frames nest
+  instance's pose, always the innermost frame, with every other placement
+  of the definition staying visible and showing the edit live through its
+  own pose (the live-sibling rule, ARCHITECTURE.md 2.11). Frames nest
   per container level and close LIFO (Escape, double-click outside),
   folding edits and mid-session creations back into the container; both
   entry paths — viewport drill-down and Outliner double-click — produce
   the same breadcrumb, with every level on it marked as editing. A
   component session requires the instance's pose to be a similarity
   (uniform scale; a mirror is allowed); a group-nested placement now opens through
-  its group's session, and a non-uniformly-scaled or
-  elsewhere-grouped-sibling placement falls back to the previous
+  its group's session, and a non-uniformly-scaled placement, or one entered
+  directly inside a group, falls back to the previous
   in-context editing model (the component-edit-parity machinery, still
   fully supported for those cases). Session open/close are ordinary undo
   steps, and saving — autosave included — works transparently mid-session
@@ -495,7 +515,14 @@ below.
 - Push/pull's preview is tinted per mode through two theme tokens, orange
   for a plain pull, blue for extrude-as-new, red for a cut, in light and
   dark; toggling Ctrl mid-gesture changes the hue, and the bare arrow drawn
-  with no swept prism follows the mode
+  with no swept prism follows the mode. A free-sketch region always extrudes
+  into a new object, so its ghost is the new-object blue in both directions
+- Draw color language (`--draw-free`/`--draw-attached` and their fill tokens):
+  drawing that belongs to no solid is blue and pushes into a new object;
+  drawing that is part of a solid's face (an imprint, an object-owned sketch
+  edge) is orange and pushes the solid itself. The viewport colors each edge
+  by its store (`Scene::sketch_owner_object`); the rubber band is orange only
+  when the shape would join a face, and Offset's ghost takes its source's color
 
 ### Inference & precision
 
@@ -510,10 +537,45 @@ below.
   nothing else puts a point there. Only the edges through the pick cone
   are paired, at most 2,000 pairs a query (past that the query offers no
   crossing and counts the skip), and screen-space crossings of edges that
-  only overlap on screen are not offered. Candidates within a pixel of each other on screen rank by
-  depth, nearest first, so a stack of corners seen from a nearly-vertical
-  Top view — top plate, sole plate, slab — resolves to the one in front
-  rather than to whichever the camera's slight tilt happens to lean toward.
+  only overlap on screen are not offered. Where an edge of one owner passes
+  through a face of another (a panel's edge entering the wall it is set
+  into, with nothing imprinted on the wall), the piercing snaps as the same
+  intersection, carrying the edge and the pierced face: the edge must cross
+  the face's plane strictly (an edge ending on the face is its own
+  endpoint; an edge lying in the plane has no single point) inside the
+  face's outer loop and outside its holes, curved surfaces counting as
+  their facets. Edges through the pick cone are paired with the faces the
+  cone reaches, nearest pairs first, at most 2,000 pairs a query; the
+  pairs a capped query leaves untested are counted and traced, like the
+  edge pairs. Where a face of one owner meets a face of another (a slab
+  passing through a wall draws four such lines on the wall's face), the
+  stretch of the two planes' intersection line inside both faces — outer
+  loops, outside their holes — is a virtual edge: the cursor slides along
+  it as On Intersection Line (the same pick reach and rank as a real edge),
+  its middle is a Midpoint, and its ends are the piercings and crossings
+  the intersection snaps already name. The line runs through both faces'
+  interiors: a face that only touches the other's plane along its own edge
+  (a box flush against a wall) makes no line, only that real edge, decided
+  with a named tolerance so a rotated pair behaves like an axis-aligned
+  one. On a chord facet of a curved surface (a slab through a cylinder)
+  each facet's piece is the line but offers no middle. Parallel and
+  coplanar faces make no line, one owner's own faces never pair, and a
+  selection pick is never offered one (two faces at once are nothing to
+  select). Both faces travel with the snap — reported as a meeting line,
+  never as a pick of either face, so no tool adopts one face's plane or
+  part from it — and the cue draws the stretch itself, since nothing in
+  the model does. The faces the cone reaches are paired across owners
+  front to back along the ray, so faces hidden behind the one in view
+  cannot crowd out the line in view; at most 2,000 pairs a query, each
+  rejected cheaply when its line clipped to both faces' boxes misses the
+  pick cone, counted and traced past the cap like the other two walks;
+  the piercing and meeting walks share one cone-face pool, built only
+  when faces of two owners have boxes in the cone (drawn regions carry
+  boxes of their own). Candidates
+  within a pixel of each other on screen rank by depth, nearest first, so
+  a stack of corners seen from a nearly-vertical Top view — top plate,
+  sole plate, slab — resolves to the one in front rather than to
+  whichever the camera's slight tilt happens to lean toward.
   Named points (endpoints, midpoints, centers, quadrants) capture from
   1.75 times as far as lines, so a corner on an edge or axis wins near it,
   and the soft axis is capped on screen to an edge's pick radius rather
@@ -523,10 +585,16 @@ below.
   tangent-from-anchor points of drawn circles and arcs, honoring each
   arc's actual angular range
 - Construction guides — guide lines and points that participate in
-  snapping and are saved with the model
+  snapping and are saved with the model. Move and Rotate transform a
+  guide like any selection (axis locks, typed and retyped values), and
+  their copy toggle copies it, ×N / /N arrays (rows, fans) included,
+  each transform or copy one undo step. With nothing else selected, a
+  click on a guide starts transforming that guide; a guide taken that
+  way is selected only for the gesture
 - Tape Measure (point-to-point distance, or drop a parallel guide at an
   offset — sourced from an edge (a plain object's, a group member's, or a
-  component instance's), a sketch line, a world axis, or another guide
+  component instance's), a sketch line, the line where two Objects' faces
+  meet (On Intersection Line), a world axis, or another guide
   line) and Protractor (measure an angle, or drop an angular guide). A
   guide or measurement isn't confined to the ground plane: it follows a
   hovered sketch's plane, an idle arrow-key plane lock, or — for a
@@ -612,7 +680,8 @@ below.
 - A crossing outranks a midpoint and reaches as far as other named points;
   Tape Measure treats a crossing as a point (the first click measures from
   it, and the hover hint says so) while edges, sketch edges, axes, and
-  guides still start parallel guides, and a crossing never anchors a resize
+  guides, and the line where two Objects' faces meet (not its middle or
+  ends, which are points) still start parallel guides, and a crossing never anchors a resize
   scoped to an open group or component, since the snap names only one of its
   two edges
 - X-ray and Wireframe render modes (View menu on the web and native menus,
@@ -622,9 +691,27 @@ below.
   faces occlude, only visible geometry snaps or picks. X-ray (faces at 0.4
   opacity, depth writes off): every edge, endpoint, midpoint, crossing,
   center, and quadrant is snappable and selectable, faces stay targets with
-  the nearest along the ray winning off an edge or point. Wireframe (no
-  faces, every edge): no On Face snaps, face hover, selection, push/pull, or
-  paint; drawing lands on the ground, a locked plane, or an edge or point.
+  the nearest along the ray winning off an edge or point. With an editing
+  scope open (a component or group session, an object context, or a legacy
+  in-context instance), Shaded and X-ray picks land on the nearest face,
+  sketch region, sketch edge, sketch vertex or sketch inside the scope and
+  skip what lies outside it (the editing view draws the outside
+  translucent, so what is in scope can be seen and so picked); the scope is
+  the renderer's lit set plus, for a session's own scope, the frame's own
+  drawing (`Document::session_frame_sketches`: a component frame's
+  definition drawing and lines drawn since the open, a group frame's held
+  drawing and lines drawn since the open), pushed to the kernel by
+  `Scene::set_pick_scope(objects, instances, frame_sketches)` /
+  `clear_pick_scope` (`PickScope` in the inference crate); empty lists are
+  still a scope (a component with only drawing left), only
+  `clear_pick_scope` clears; an object context on top of a session passes
+  `frame_sketches = false`. With nothing in scope under the cursor the pick
+  is the nearest of any owner, so the tools' refusal hints still run;
+  Wireframe, the top level, snapping and the geometry-only camera picks
+  ignore the scope.
+  Wireframe (no faces, every edge): no On Face snaps, face hover, selection,
+  push/pull, or paint; drawing lands on the ground, a locked plane, or an edge
+  or point.
   The orbit pivot and in-session sketch selection use geometry-only picks
   (`pick_face_geometry`, `pick_sketch_region_geometry`). The five draw tools
   that drop an off-plane snap onto their plane opt in to hidden points
@@ -1300,7 +1387,7 @@ below.
   grid of up to three axes in one undo step (`hew.entity.move`'s
   `copy.grid`); the snap service can lock to any direction through an
   anchor, for plugin tools to use. A component placement carries its own
-  material (manifest v23), shown on member faces nobody painted, the
+  material (manifest v24), shown on member faces nobody painted, the
   nearest painted placement winning; `hew.material.paint` sets it or a
   whole definition's, occurrence rows and path-located faces report
   `material_effective`, and the Paint tool paints the placement under
@@ -1310,7 +1397,7 @@ below.
   `hew.query.faces` and `hew.query.topology`, and carried through edits
   by per-site rules; edge dictionaries do not yet survive booleans,
   slices, thickening, or splitting a solid into pieces (HEW_API.md §8).
-  A saved document carries a persistent id (manifest v25 `document_id`),
+  A saved document carries a persistent id (manifest v26 `document_id`),
   minted on its first save and kept through Save As and copies, which
   `hew.meta.documents` and the open and save events report for
   per-document plugin state to key on (docs/agents/PLUGINS.md). The SketchUp

@@ -26,3 +26,17 @@ generated copies — regenerate from here.
 | `png/hew-appicon-{180,512,1024}.png` | Rasterised app icon (full-bleed) |
 | `png/hew-appicon-macos-1024.png`  | Rasterised macOS app icon (feeds `icon.icns`) |
 | `png/hew-favicon-{32,64}.png`     | Rasterised favicon-size app icon |
+
+## License
+
+Everything in this directory, including the `png/` renders and the brand
+sheet, is licensed under [Creative Commons Attribution 4.0
+International](LICENSE) (CC BY 4.0), © Kurt Granroth. You may share and adapt
+these files for any purpose, including commercially, as long as you give
+credit and indicate changes.
+
+This applies to the brand assets only; the rest of the repository stays under
+the [AGPL-3.0-only](../LICENSE) with the
+[Plugin API Exception](../LICENSE-EXCEPTION). The CC license does not grant
+trademark rights: the name "Hew" and its mark may not be used to suggest that
+your work is the official Hew or endorsed by it.

@@ -426,6 +426,7 @@ fn library_copies_remap_the_instance_material() {
         &InsertOptions {
             pose: Transform::IDENTITY,
             provenance: None,
+            origin: None,
         },
     )
     .unwrap();
@@ -467,24 +468,26 @@ fn a_document_without_instance_materials_writes_no_material_key() {
     for inst in manifest["instances"].as_array().unwrap() {
         assert!(inst.get("material").is_none());
     }
-    assert_eq!(manifest["format_version"], 25);
+    assert_eq!(manifest["format_version"], 26);
 }
 
 #[test]
-fn an_instance_material_smuggled_into_a_pre_v23_file_is_rejected() {
+fn an_instance_material_smuggled_into_a_pre_v24_file_is_rejected() {
     let mut doc = Document::new();
     let (_, inst, _) = one_component(&mut doc);
     let red = solid(&mut doc, "Red", 200);
     doc.set_instance_material(inst, Some(red)).unwrap();
     let bytes = doc.save();
-    let smuggled = patch_manifest(&bytes, |m| m["format_version"] = 22.into());
-    assert!(
-        matches!(
-            Document::load(&smuggled),
-            Err(LoadError::MalformedManifest { .. })
-        ),
-        "an instance material below v23 is a smuggled field"
-    );
+    for declared in [22, 23] {
+        let smuggled = patch_manifest(&bytes, |m| m["format_version"] = declared.into());
+        assert!(
+            matches!(
+                Document::load(&smuggled),
+                Err(LoadError::MalformedManifest { .. })
+            ),
+            "an instance material below v24 is a smuggled field (declared v{declared})"
+        );
+    }
 
     // The same file without the field still loads at v22.
     let clean = patch_manifest(&bytes, |m| {

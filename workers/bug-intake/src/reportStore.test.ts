@@ -229,7 +229,7 @@ describe('ReportStore: commit', () => {
     await store.startUpload('HEW-BBBB-0001', 20, tokenHash, randomBytes(10), FIELDS)
     await store.putPiece(1, tokenHash, randomBytes(10))
     const result = await store.commit(tokenHash)
-    assert.deepEqual(result, { ok: true, ...FIELDS, sizeBytes: 20 })
+    assert.deepEqual(result, { ok: true, ...FIELDS, sizeBytes: 20, followHash: null, parentId: null })
   })
 
   test('incomplete when fewer bytes arrived than declared', async () => {
@@ -489,5 +489,63 @@ describe('ReportStore: upload lifetime and piece shape', () => {
 
     assert.deepEqual(await store.putPiece(1, await hashToken('wrong'), randomBytes(PIECE_BYTES)), { ok: false, reason: 'forbidden' })
     assert.deepEqual(await store.putPiece(1, tokenHash, randomBytes(PIECE_BYTES)), { ok: false, reason: 'expired' })
+  })
+})
+
+describe('ReportStore: follow fields', () => {
+  test('START keeps followHash/parentId and COMMIT hands them back', async () => {
+    const store = makeStore(10)
+    const tokenHash = await hashToken('t')
+    await store.startUpload('HEW-BBBB-0009', 10, tokenHash, randomBytes(10), { ...FIELDS, followHash: 'abc', parentId: 'HEW-PARE-NT00' })
+    const result = await store.commit(tokenHash)
+    assert.equal(result.ok && result.followHash, 'abc')
+    assert.equal(result.ok && result.parentId, 'HEW-PARE-NT00')
+  })
+
+  test('a meta row from the previous deploy (no follow columns) still commits and reads', async () => {
+    const storage = new FakeDurableObjectStorage()
+    storage.sql.exec(
+      `CREATE TABLE meta (id INTEGER PRIMARY KEY CHECK (id = 0), reportId TEXT NOT NULL, receivedAt INTEGER NOT NULL,
+         declaredTotal INTEGER NOT NULL, tokenHash TEXT NOT NULL, nextIndex INTEGER NOT NULL, receivedBytes INTEGER NOT NULL,
+         lastActivity INTEGER NOT NULL, committed INTEGER NOT NULL DEFAULT 0, description TEXT NOT NULL,
+         appVersion TEXT NOT NULL, platform TEXT NOT NULL)`,
+    )
+    storage.sql.exec('CREATE TABLE piece (idx INTEGER PRIMARY KEY, data BLOB NOT NULL, length INTEGER NOT NULL)')
+    const tokenHash = await hashToken('t')
+    storage.sql.exec(
+      "INSERT INTO meta VALUES (0, 'HEW-OLD0-0001', ?, 4, ?, 1, 4, ?, 0, 'old description', '1.2.0', 'web')",
+      Date.now(),
+      tokenHash,
+      Date.now(),
+    )
+    storage.sql.exec('INSERT INTO piece VALUES (0, ?, 4)', new Uint8Array([1, 2, 3, 4]).buffer)
+    const store = new ReportStore(storage, 4)
+    const result = await store.commit(tokenHash)
+    assert.deepEqual(result, {
+      ok: true,
+      description: 'old description',
+      appVersion: '1.2.0',
+      platform: 'web',
+      sizeBytes: 4,
+      followHash: null,
+      parentId: null,
+    })
+  })
+
+  test('expire tells the callback first, then wipes; a destroyed drop skips the callback', async () => {
+    const store = makeStore(10)
+    const tokenHash = await hashToken('t')
+    await store.startUpload('HEW-BBBB-0010', 10, tokenHash, randomBytes(10), FIELDS)
+    const seen: string[] = []
+    await store.expire(async (id) => {
+      seen.push(id)
+      assert.notEqual(await store.head(), null, 'still there when the index is told')
+    })
+    assert.deepEqual(seen, ['HEW-BBBB-0010'])
+    assert.equal(await store.head(), null)
+    await store.expire(async (id) => {
+      seen.push(id)
+    })
+    assert.deepEqual(seen, ['HEW-BBBB-0010'])
   })
 })

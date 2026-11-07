@@ -231,6 +231,7 @@ longer replay.
 | `duplicate_node` | `kind`, `id`, `affine[12]` (row-major 3×4) | deep-copy a node (Move+Alt) at the affine offset |
 | `slice_object` | `object`, `plane[6]` (`[px,py,pz,nx,ny,nz]`) | slice an Object by a plane |
 | `draft_begin_plane` / `draft_begin_face` / `draft_begin_sketch` / `draft_begin_ctx` | `draft` (the handle replay re-mints), the plane (`px..nz`), `object`/`face`, `sketch`, or `ctx` (JSON), `label` | open a drafting gesture on a plane (draw on the ground or on a face); `_in_instance` forms also carry `instance` and take world coordinates |
+| `draft_begin_detached` | `draft`, `ctx` (JSON: a `plane` or `face` context), `label` | open a drafting gesture that draws one new detached shape (it joins nothing on the plane) |
 | `draft_add_segment` | `draft`, `a[3]`, `b[3]` | add a segment to the open draft's drawing |
 | `draft_begin_curve` / `draft_begin_curve_with` / `draft_begin_polygon_with` / `draft_end_curve` | `draft`, plus `center[3]`, `radius` for the `_with` forms | bracket segments into one curve chain (a plain run such as a flat arc), circle, or regular polygon |
 | `draft_remove_edges` / `draft_transform_edges` / `draft_copy_edges` | `draft`, `keys[]` (edge keys), `affine[12]` | erase, move, or copy drawing by edge key |
@@ -280,6 +281,7 @@ longer replay.
 | `import_skp` | `bytes[]` | additive `.skp` import (embeds the file) |
 | `import_stl` | `bytes[]`, `unit_scale`, `name` (string or null) | additive STL import (embeds the file); `unit_scale` is meters-per-STL-unit since STL carries no units of its own, and `name` is the file stem the Objects are named from (STL carries no names) — both embedded so replay reproduces the same geometry size and Object names |
 | `load` | `bytes[]` | replace the whole document — a mid-session File ▸ Open/New (embeds the `.hew` bytes) |
+| `set_pick_scope` / `clear_pick_scope` | `objects[]`, `instances[]`, `frame_sketches` (set only; empty lists are a scope, only `clear_pick_scope` clears; a recording without `frame_sketches` replays as before it existed: both lists empty clear, otherwise the session frame's drawing is in scope) | set or clear the editing scope the Shaded and X-ray picks favor (session-only view state, recorded so a replayed session ends with the same scope as the original; changes nothing the state hash covers, and the recording stores no pick results) |
 
 **Coverage rule** (ratified with the recording audit): every `Scene` method
 that pushes the document undo stack or mutates state included in
@@ -288,7 +290,14 @@ that pushes the document undo stack or mutates state included in
 stack and silently reproduce a different session. Session-only state that
 is neither undoable nor saved (inference hide sets, transient snap
 segments, guide/axis snappability, torture mode) is deliberately not
-recorded. Calls that carry file or image payloads (`import_*`, `load`,
+recorded. The one exception is the editing scope (`set_pick_scope` /
+`clear_pick_scope`), recorded so a replayed session ends up with the
+same scope as the original, and a probe after replay sees the same scoped
+picks. The recording proves no pick result (it stores none, and replay
+issues no picks); the render mode is not recorded either, so a probe sets
+the mode it means to test itself (the scope applies in Shaded and X-ray,
+not in Wireframe).
+Calls that carry file or image payloads (`import_*`, `load`,
 `add_texture_material`) embed the raw bytes so a recording stays
 self-contained and replayable from a fresh document; recordings that span
 imports, mid-session opens, or texture additions are correspondingly
@@ -560,3 +569,35 @@ after sending (prefilled with the description, version, platform, and report
 ID, never an attachment), or file one directly at
 https://github.com/hew3d/hew/issues with the same three files attached by
 hand.
+
+### Attachments, follow-up uploads, and followed reports
+
+A bundle is format 1. It may carry one optional top-level `attachment` key,
+`{"name", "label", "size", "bytes"}`, with `bytes` in base64 as `failedFile`
+uses it. Follow-up bundles use this key. A file sent as a reply to a report
+(**Attach a file…** in Help ▸ Sent Reports, or the one-click attach for a
+file that failed to open) is uploaded as a new report whose
+`report.description` starts with `File for report HEW-XXXX-XXXX: <file name>`,
+optionally followed by a blank line and the reporter's own note. The head
+scanner reads only `format`, `report`, and `system`, so these bundles pass
+through it unchanged.
+
+A follow-up upload is the normal chunked upload, except that START carries
+two extra headers: `Hew-Follow-Up: <parent ID>` and
+`Hew-Follow-Secret: <key>`. START with `Hew-Follow: 1` returns an extra
+`follow` field in its 201 body.
+
+Thread routes take the same `Hew-Follow-Secret: <key>` header. Every failure
+returns 403 with `{"error":"forbidden"}`.
+
+- `GET /report/<id>/thread?after=<seq>` reads messages after a sequence number.
+- `POST /report/<id>/thread` with `{"text"}` adds a reply.
+- `POST /report/<id>/thread/seen` with `{"upTo"}` marks messages as seen by the reporter.
+- `DELETE /report/<id>/thread` deletes the conversation.
+
+The desktop app keeps followed reports in `followed-reports.json` in the app's
+config folder, readable only by the user. Each entry holds the report ID, the
+follow key, the date sent, the Hew version, the first line of the description,
+and the time of the last check. The web build keeps the same records in the
+app's local storage. In debug builds, `HEW_REPORT_URL` sets the base URL for
+the thread routes as well as the upload routes.

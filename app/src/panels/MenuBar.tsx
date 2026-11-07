@@ -278,6 +278,10 @@ export interface MenuBarProps {
   onOpenSettings?: () => void
   /** Assemble and write a "Report Bug" bundle (Help → Report Bug…). */
   onReportBug?: () => void
+  /** Open Help → Sent Reports… (docs/design/follow-a-report.md §2.2). */
+  onSentReports?: () => void
+  /** Unread replies across followed reports, for the "(n new)" suffix. */
+  sentReportsNew?: number
   /** Trigger a manual update check (Help → Check for Updates…). Omitted — and
    *  the item hidden — on the web build and in package-manager desktop builds
    *  that compile the updater out. */
@@ -786,6 +790,8 @@ export function MenuBar({
   onToggleFly,
   onOpenSettings,
   onReportBug,
+  onSentReports,
+  sentReportsNew = 0,
   onCheckForUpdates,
   onOpenOnPhone,
   openOnPhoneDisabled = false,
@@ -1558,6 +1564,10 @@ export function MenuBar({
             <MenuItem
               label={t`Report Bug…`}
               onClick={withClose(() => onReportBug?.())}
+            />
+            <MenuItem
+              label={sentReportsNew > 0 ? t`Sent Reports (${sentReportsNew} new)…` : t`Sent Reports…`}
+              onClick={withClose(() => onSentReports?.())}
             />
             <CheckMenuItem
               label={t`Debug Log`}

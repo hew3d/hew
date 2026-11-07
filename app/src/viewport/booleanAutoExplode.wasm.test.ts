@@ -372,4 +372,36 @@ describe('runBooleanCore — the mutated-failed accounting itself (delta-review 
     expect(Array.from(scene.instance_ids())).toContain(scaledB)
     expect(scene.instance_def(scaledB)).toBe(defB)
   })
+
+  it('an instance cutter that never reaches the target (3D text beside a plate, subtracted): the auto-explode commits, the retried boolean refuses NothingRemoved, and the explode is rolled back — a plain refusal with the instance still in place and no undo step left behind', () => {
+    const SUBTRACT = 1
+    const scene = new Scene()
+
+    const plate = makeBox(scene, -1, 1, -1, 1, 1)
+    const glyphBox = makeBox(scene, 3, 5, -1, 1, 1) // two units clear of the plate
+    const glyph = scene.make_component(new Uint8Array([0]), new BigUint64Array([glyphBox]))
+    const def = scene.instance_def(glyph)
+    const undoDepth = scene.undo_depth()
+    const objectsBefore = Array.from(scene.object_ids())
+
+    const outcome = runBooleanCore(
+      scene,
+      SUBTRACT,
+      { kind: 'object', id: plate },
+      { kind: 'instance', id: glyph },
+    )
+
+    expect(outcome.kind).toBe('refused')
+    if (outcome.kind !== 'refused') throw new Error('unreachable')
+    expect(outcome.code).toBe('NothingRemoved')
+
+    // The document reads as untouched: the instance is back on its shared
+    // definition, the exploded piece is gone, and the make_unique /
+    // explode_instance steps committed for the boolean's sake were undone
+    // rather than left for the person to find.
+    expect(Array.from(scene.instance_ids())).toContain(glyph)
+    expect(scene.instance_def(glyph)).toBe(def)
+    expect(Array.from(scene.object_ids())).toEqual(objectsBefore)
+    expect(scene.undo_depth()).toBe(undoDepth)
+  })
 })

@@ -378,3 +378,92 @@ fn a_group_of_lines_alone_survives_being_opened_and_closed() {
     assert_eq!(doc.sketch_owner_group(s), Some(g));
     assert!(doc.sketch_shown(s));
 }
+
+/// A free line on the ground drawn the app's way (a fresh sketch, its
+/// segment in a recorded gesture), so it is history, not a fresh sketch.
+fn drawn_line(doc: &mut Document, x: f64) -> kernel::SketchId {
+    let s = doc.add_sketch(ground());
+    doc.begin_sketch_gesture(s).unwrap();
+    doc.sketch_mut(s)
+        .unwrap()
+        .add_segment(Point3::new(x, 20.0, 0.0), Point3::new(x, 21.0, 0.0))
+        .unwrap();
+    doc.end_sketch_gesture(s).unwrap();
+    s
+}
+
+/// **A group frame's own drawing** (`session_frame_sketches`): while a
+/// group session is innermost it is the drawing the group holds, the
+/// drawing of a group nested in it, a member's owned sketch, a line drawn
+/// since the open (recorded or still fresh), and a nested group's drawing
+/// a mid-session ungroup released — exactly what the close keeps in or
+/// folds into the group. Never a free line drawn before the open, nor
+/// another group's drawing. Empty once closed.
+#[test]
+fn a_group_frames_own_drawing_is_what_the_group_holds_and_folds_in() {
+    let mut doc = Document::new();
+    let a = box_at(&mut doc, 0.0);
+    let b = box_at(&mut doc, 3.0);
+    let c = box_at(&mut doc, 6.0);
+    let (inner, _) = doc.group_nodes(&[NodeId::Object(b)]).unwrap();
+    let in_inner = drawn_line(&mut doc, 1.0);
+    doc.set_sketch_group(in_inner, Some(inner)).unwrap();
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Group(inner)])
+        .unwrap();
+    let held = drawn_line(&mut doc, 2.0);
+    doc.set_sketch_group(held, Some(g)).unwrap();
+    let (other, _) = doc.group_nodes(&[NodeId::Object(c)]).unwrap();
+    let in_other = drawn_line(&mut doc, 3.0);
+    doc.set_sketch_group(in_other, Some(other)).unwrap();
+    let outside = drawn_line(&mut doc, 4.0);
+    // A sketch member A owns, on its top face (z = 1).
+    let top = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 1.0),
+        Point3::new(1.0, 0.0, 1.0),
+        Point3::new(0.0, 1.0, 1.0),
+    ])
+    .unwrap();
+    let owned = doc.add_sketch(top);
+    doc.set_sketch_object_owner(owned, Some(a)).unwrap();
+    assert!(doc.session_frame_sketches().is_empty(), "no frame open");
+
+    doc.open_group_session(g).unwrap();
+    let drawn = drawn_line(&mut doc, 5.0);
+    let fresh = doc.add_sketch(ground());
+    let frame = doc.session_frame_sketches();
+    for s in [held, in_inner, owned, drawn, fresh] {
+        assert!(
+            frame.contains(&s),
+            "{s:?} is the frame's drawing: {frame:?}"
+        );
+    }
+    for s in [outside, in_other] {
+        assert!(!frame.contains(&s), "{s:?} is context: {frame:?}");
+    }
+
+    // A mid-session ungroup releases the nested group's drawing to the
+    // top; it folds into the open group at the close, so it stays in.
+    doc.ungroup(inner).unwrap();
+    assert_eq!(doc.sketch_owner_group(in_inner), None, "released");
+    assert!(doc.session_frame_sketches().contains(&in_inner));
+
+    doc.close_group_session().unwrap();
+    assert!(doc.session_frame_sketches().is_empty(), "closed");
+    assert_eq!(doc.sketch_owner_group(drawn), Some(g), "folded in");
+    assert_eq!(doc.sketch_owner_group(in_inner), Some(g), "folded in");
+}
+
+/// A group holding drawing and no solid (a `.skp` group of edges): its
+/// frame's drawing is that drawing.
+#[test]
+fn a_group_of_lines_alone_has_its_lines_as_its_frames_drawing() {
+    let mut doc = Document::new();
+    let a = box_at(&mut doc, 0.0);
+    let (g, _) = doc.group_nodes(&[NodeId::Object(a)]).unwrap();
+    let s = drawn_line(&mut doc, 0.0);
+    doc.set_sketch_group(s, Some(g)).unwrap();
+    doc.delete_node(NodeId::Object(a)).unwrap();
+    doc.open_group_session(g).unwrap();
+    assert_eq!(doc.session_frame_sketches(), vec![s]);
+}

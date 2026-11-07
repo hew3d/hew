@@ -643,6 +643,16 @@ describe('resolveIdleDrawTarget', () => {
     expect(resolved.plane.ground).toBe(false)
   })
 
+  it('never adopts a DETACHED shape: a plain shape drawn over it lands on the plane beneath (separate-shapes D3)', () => {
+    const sc = scene(WALL_PLANE_ARR) as unknown as Record<string, unknown>
+    sc.history_generation = vi.fn(() => 1n)
+    sc.plane_units_all_json = vi.fn(() => JSON.stringify([
+      { plane: [0, 0, 0, 0, 1, 0], sketch: Number(WALL_SKETCH), detached: true, units: { units: [], regions: [] } },
+    ]))
+    const resolved = resolveIdleDrawTarget(sc as unknown as WasmScene, new SketchPickCache(), rayThrough([0, 0, 0.4]), TOP)
+    expect(resolved.target.kind).toBe('plane')
+  })
+
   it('falls back to the GROUND plane on a grazing pick the ray does not land on', () => {
     const resolved = resolveIdleDrawTarget(scene(WALL_PLANE_ARR), new SketchPickCache(), rayThrough([0, 0, 0]), TOP)
     expect(resolved.plane).toEqual(groundDrawPlane())
@@ -692,6 +702,15 @@ describe('resolveIdleDrawTarget', () => {
         INSTANCE_CTX,
       )
       expect(resolved.target).toEqual({ kind: 'existing', handle: WALL_SKETCH, instance: INSTANCE })
+    })
+
+    it('never adopts a DETACHED definition-member sketch (the kernel answers per handle; the world listing omits members)', () => {
+      const sc = instanceScene(WALL_PLANE_ARR, WALL_SKETCH, [WALL_SKETCH]) as unknown as Record<string, unknown>
+      sc.sketch_is_detached = vi.fn((h: bigint) => h === WALL_SKETCH)
+      const resolved = resolveIdleDrawTarget(
+        sc as unknown as WasmScene, new SketchPickCache(), rayThrough([0, 0, 0.4]), INSTANCE_CTX,
+      )
+      expect(resolved.target.kind).toBe('plane')
     })
 
     it('refuses to adopt a hovered sketch that belongs to a DIFFERENT (or no) definition, falling to a def-owned plane target instead', () => {

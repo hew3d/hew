@@ -102,9 +102,15 @@ function makeScene(opts: {
      * parallel to the placements; omitted, none. */
     inherited?: bigint[]
   }>
+  /** Instances rendering a definition on loan to an open session — the
+   *  kernel's `session_placements` (live sibling placements). Mutable by
+   *  reference, like `objects`/`instances`, so a test can open a session
+   *  between refreshes. Empty by default (no session). */
+  sessionPlacements?: bigint[]
 }): WasmScene {
   const objects = opts.objects ?? {}
   const instances = opts.instances ?? {}
+  const sessionPlacements = opts.sessionPlacements ?? []
   const placementsOf = (inst: { memberIds: bigint[]; placements?: MockPlacement[] }): MockPlacement[] =>
     inst.placements ?? inst.memberIds.map((memberId) => ({ memberId, localPose: IDENTITY_LOCAL_POSE }))
   return {
@@ -160,6 +166,9 @@ function makeScene(opts: {
     // `defSketches` (see `makeSceneWithDefSketches` in the def-sketch
     // rendering describe block below).
     component_member_sketches: () => new BigUint64Array(),
+    component_rendered_sketches: () => new BigUint64Array(),
+    component_sketch_frame: () => Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]),
+    session_placements: () => BigUint64Array.from(sessionPlacements),
     sketch_ids: () => new BigUint64Array(),
     guide_ids: () => new BigUint64Array(),
   } as unknown as WasmScene
@@ -354,6 +363,42 @@ describe('SceneRenderer — targeted refresh (refreshTouched)', () => {
     expect(renderer.objectsGroup.getObjectByName('Object_3')).toBeDefined()
     // The untouched survivor was not rebuilt.
     expect(renderer.objectsGroup.getObjectByName('Object_1')).toBe(survivorBefore)
+  })
+
+  it('re-pulls a live sibling placement so a solid created mid-session draws on it (ARCHITECTURE 2.11)', () => {
+    // A component session is open: object 1 is the session's world member
+    // (drawn by the object path) AND the member the sibling instance 10
+    // draws through the inverse session pose; the kernel reports 10 as a
+    // session placement. A world object 2 is then created inside the
+    // session — the tool's commit names only `objectIds: [2]`, yet the
+    // sibling's expanded placements now include 2 as well.
+    const objects: Record<string, boolean> = { '1': true }
+    const memberWatertight: Record<string, boolean> = { '1': true }
+    const instances = {
+      '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight },
+    }
+    const scene = makeScene({ objects, instances, sessionPlacements: [10n] })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    expect(instancedBatches(renderer.instancesGroup)).toHaveLength(1)
+
+    objects['2'] = true
+    instances['10'].memberIds.push(2n)
+    instances['10'].memberWatertight['2'] = true
+    renderer.refreshTouched({ objectIds: [2n] })
+
+    // The new solid draws twice: once as a world object, once instanced
+    // on the sibling — a second batch, with the sibling's slot in it.
+    expect(renderer.objectsGroup.getObjectByName('Object_2')).toBeDefined()
+    const batches = instancedBatches(renderer.instancesGroup)
+    expect(batches).toHaveLength(2)
+    for (const b of batches) expect(b.count).toBe(1)
+
+    // And a session edit on the shared member re-pulls its mesh for the
+    // sibling batch too (the dirty-member path), not just the object group.
+    meshSpy(scene).mockClear()
+    renderer.refreshTouched({ objectIds: [1n] })
+    expect(meshSpy(scene).mock.calls.filter((c) => c[0] === 1n).length).toBeGreaterThanOrEqual(2)
   })
 
   it('a touched instance updates its batch slot in place, without re-pulling shared member geometry', () => {
@@ -1482,7 +1527,7 @@ describe('SceneRenderer — definition-owned sketch rendering (component-edit-pa
       '11': { def: 100n, pose: [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
     }
     const scene = makeScene({ instances }) as unknown as Record<string, unknown>
-    scene.component_member_sketches = (componentId: bigint) =>
+    scene.component_rendered_sketches = (componentId: bigint) =>
       live && componentId === 100n ? BigUint64Array.from([500n]) : new BigUint64Array()
     // A closed unit square in DEFINITION-LOCAL coordinates (z=0 plane).
     scene.sketch_lines = (id: bigint) =>
@@ -1530,6 +1575,31 @@ describe('SceneRenderer — definition-owned sketch rendering (component-edit-pa
     expect(g11.matrix.elements[12]).toBe(5)
   })
 
+  it('a sibling of an open session draws the session\'s world drawing through the inverse session pose (ARCHITECTURE 2.11)', () => {
+    // The definition is on loan: the entered placement 11 (at +5 x) is
+    // hidden, so only sibling 10 is live. The kernel reports the session's
+    // WORLD sketch (drawn where 11 sits, x in [5, 6]) and the inverse
+    // session pose (-5 x) as the frame; the sibling's group matrix must be
+    // pose(10) × frame, which brings the drawing back onto 10.
+    const instances = {
+      '10': { def: 100n, pose: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+    }
+    const scene = makeScene({ instances, sessionPlacements: [10n] }) as unknown as Record<string, unknown>
+    scene.component_rendered_sketches = (componentId: bigint) =>
+      componentId === 100n ? BigUint64Array.from([500n]) : new BigUint64Array()
+    scene.component_sketch_frame = (componentId: bigint) =>
+      Float64Array.from(componentId === 100n ? [1, 0, 0, -5, 0, 1, 0, 0, 0, 0, 1, 0] : [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])
+    scene.sketch_lines = (id: bigint) =>
+      id === 500n ? new Float32Array([5, 0, 0, 6, 0, 0, 6, 0, 0, 6, 1, 0]) : new Float32Array()
+    scene.sketch_regions = () => new BigUint64Array()
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refresh()
+
+    const g10 = renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group
+    expect(g10).toBeDefined()
+    expect(g10.matrix.elements[12]).toBe(-5)
+  })
+
   it('an undone/deleted def sketch (component_member_sketches no longer reports it) renders NO group', () => {
     const scene = makeDefSketchScene(false)
     const renderer = new SceneRenderer(new THREE.Scene(), scene)
@@ -1546,7 +1616,7 @@ describe('SceneRenderer — definition-owned sketch rendering (component-edit-pa
 
     // Simulate the sketch's creation being undone: the wasm accessor now
     // reports no live sketches for the component.
-    scene.component_member_sketches = () => new BigUint64Array()
+    scene.component_rendered_sketches = () => new BigUint64Array()
     renderer.refreshAllSketches()
 
     expect(defSketchGroups(renderer.sketchGroup)).toHaveLength(0)
@@ -1674,7 +1744,7 @@ describe('SceneRenderer — edit-context dimming (component-edit-parity.md Findi
     // renders through both instances' poses (the sole scenario Finding 1
     // exists for).
     const square = new Float32Array([0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0])
-    scene.component_member_sketches = (c: bigint) => (c === 100n ? BigUint64Array.from([500n]) : new BigUint64Array())
+    scene.component_rendered_sketches = (c: bigint) => (c === 100n ? BigUint64Array.from([500n]) : new BigUint64Array())
     scene.sketch_lines = (id: bigint) => (id === 500n ? square : new Float32Array())
     scene.sketch_regions = () => new BigUint64Array()
     scene.region_boundary = () => new Float32Array()
@@ -3042,3 +3112,49 @@ describe('SceneRenderer — instance materials (inherited by members)', () => {
   })
 })
 
+describe('SceneRenderer — draw color language (free blue / attached orange)', () => {
+  // The Draw color language: a sketch whose edges an Object owns is part of a
+  // solid's face (orange); every other sketch (world, detached, group-held,
+  // member) is free (blue). Reads the colour the renderer actually paints.
+  const FREE = 0x2266cc
+  const ATTACHED = 0xe0761c
+  const SQUARE = new Float32Array([0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0])
+
+  function drawingLines(renderer: SceneRenderer): { kind: string; color: number }[] {
+    const out: { kind: string; color: number }[] = []
+    renderer.sketchGroup.traverse((o) => {
+      if (!('isLineSegments2' in o)) return
+      const mat = (o as unknown as { material: LineMaterial }).material
+      out.push({ kind: mat.userData.drawKind as string, color: mat.color.getHex() })
+    })
+    return out
+  }
+
+  function sketchRenderer(owners: Record<string, bigint | undefined>): SceneRenderer {
+    const scene = makeScene({}) as unknown as Record<string, unknown>
+    scene.sketch_ids = () => BigUint64Array.from(Object.keys(owners).map(BigInt))
+    scene.sketch_owner_object = (s: bigint) => owners[s.toString()]
+    scene.sketch_lines = () => SQUARE
+    scene.sketch_regions = () => new BigUint64Array()
+    scene.region_boundary = () => new Float32Array()
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refresh()
+    renderer.refreshAllSketches()
+    return renderer
+  }
+
+  it('a sketch owned by an Object draws in the attached orange ink', () => {
+    expect(drawingLines(sketchRenderer({ '5': 7n }))).toEqual([{ kind: 'attached', color: ATTACHED }])
+  })
+
+  it('a sketch with no owning Object draws in the free blue ink', () => {
+    expect(drawingLines(sketchRenderer({ '5': undefined }))).toEqual([{ kind: 'free', color: FREE }])
+  })
+
+  it('mixed sketches split into one orange and one blue batch', () => {
+    const lines = drawingLines(sketchRenderer({ '5': 7n, '6': undefined }))
+    expect(lines).toHaveLength(2)
+    expect(lines).toContainEqual({ kind: 'attached', color: ATTACHED })
+    expect(lines).toContainEqual({ kind: 'free', color: FREE })
+  })
+})

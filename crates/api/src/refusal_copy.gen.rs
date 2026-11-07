@@ -250,6 +250,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "DegenerateContact" => {
             "The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect."
         }
+        "NothingRemoved" => {
+            "Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid."
+        }
         "NotSolid" => {
             "Only a solid can be sliced. To make it solid, select it and choose Object ▸ Make Solid…"
         }
@@ -365,7 +368,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again."
         }
         "ExplodeSessionGroupedInstance" => {
-            "A placement of this component sits inside a group, so it opens in the in-context editing mode instead."
+            "This instance sits inside a group, so it opens in the in-context editing mode instead."
         }
         "ExplodeSessionNestedGroup" => {
             "This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one."

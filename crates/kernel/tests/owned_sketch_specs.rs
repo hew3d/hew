@@ -303,7 +303,7 @@ fn owner_object_round_trips_through_save_and_load() {
     let bytes = doc.save();
 
     let manifest = manifest_of(&bytes);
-    assert_eq!(manifest["format_version"], serde_json::json!(25));
+    assert_eq!(manifest["format_version"], serde_json::json!(26));
     let sk = &manifest["sketches"][0];
     assert!(sk["owner_object"].is_number(), "owner_object is written");
     assert!(sk.get("owner").is_none());
@@ -1066,6 +1066,7 @@ fn library_extract_and_insert_carry_the_owned_sketch_with_its_object() {
             &InsertOptions {
                 pose: place,
                 provenance: None,
+                origin: None,
             },
         )
         .expect("insert");
@@ -1109,6 +1110,7 @@ fn a_free_world_sketch_is_still_skipped_by_insert_but_an_owned_one_is_not() {
             &InsertOptions {
                 pose: Transform::IDENTITY,
                 provenance: None,
+                origin: None,
             },
         )
         .expect("insert");
@@ -1152,6 +1154,7 @@ fn assert_component_item_lands_owned(item: &Document, original: &[Point3], _shif
             &InsertOptions {
                 pose: Transform::IDENTITY,
                 provenance: None,
+                origin: None,
             },
         )
         .expect("insert component item");

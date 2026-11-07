@@ -22,6 +22,10 @@
 //! - `save()` is deterministic, `load(save())` reproduces the same
 //!   `state_hash`, after every op and at the post-sequence and maximal
 //!   states;
+//! - every detached sketch (`Sketch::detached`) an op does not itself edit
+//!   is `==` before and after it (detached shapes §3.8): no plane draft,
+//!   imprint, move, or extrusion ever arranges with one (see
+//!   `check_detached_untouched`);
 //! - fully unwinding the document log and replaying it twice reproduces the
 //!   same states up to tolerance-aware equivalence (canonical fingerprints).
 //!   The canonical geometry writer makes save bytes independent of slot
@@ -163,7 +167,10 @@ enum DocOp {
         edge_sel: usize,
         from_features: bool,
     },
-    /// Boolean between two distinct visible objects.
+    /// Boolean between two distinct visible objects. A typed refusal is an
+    /// accepted no-op: `DegenerateContact` for a measure-zero contact,
+    /// `EmptyResult` for an empty intersect or a total subtract, and
+    /// `NothingRemoved` for a subtract whose operands do not overlap.
     Boolean {
         kind: u8,
         a_sel: usize,
@@ -303,12 +310,30 @@ enum DocOp {
         origin: (f64, f64, f64),
         direction: (f64, f64, f64),
     },
+    /// Moves the `guide_sel`-th live guide through a rigid pose
+    /// (`Document::transform_guide`): the undo/redo of its exact geometry
+    /// and the save/load round trip of a rotated direction.
+    MoveGuide {
+        guide_sel: usize,
+        axis: (f64, f64, f64),
+        angle: f64,
+        offset: (f64, f64, f64),
+    },
+    /// Copies the `guide_sel`-th live guide `count` times along a
+    /// translation (`Document::duplicate_guide_array`, Move's copy and
+    /// array on a guide).
+    CopyGuide {
+        guide_sel: usize,
+        offset: (f64, f64, f64),
+        count: u32,
+    },
     /// Boolean between the `a_sel`-th and `b_sel`-th LIVE members of the
     /// `comp_sel`-th component (`boolean_in_component`, component-edit-
     /// parity.md phase K2) — the shared-geometry combine, replacing both
     /// operands with a new member. `a_sel == b_sel` (same live member) is an
     /// accepted typed no-op (`DegenerateContact`), like the world `Boolean`
-    /// op's own `a_sel == b_sel` case.
+    /// op's own `a_sel == b_sel` case; so is a subtract between members
+    /// that do not overlap (`NothingRemoved`).
     BooleanInComponent {
         comp_sel: usize,
         kind: u8,
@@ -604,6 +629,38 @@ enum DocOp {
         sel: usize,
         segments: usize,
     },
+    /// Draw a NEW detached shape (detached shapes §3.8) through
+    /// `Document::draft_detached_new` on the plane [`DocOp::Draft`] would
+    /// pick — the `face_sel`-th face of the `obj_sel`-th visible object, or
+    /// the ground — on the same lattice: a rectangle `a` + `b`, or a circle
+    /// about `a` of radius `b.0` steps. A refusal fails the case.
+    DrawDetached {
+        obj_sel: usize,
+        face_sel: usize,
+        ground: bool,
+        circle: bool,
+        a: (i32, i32),
+        b: (i32, i32),
+        segments: usize,
+    },
+    /// Edit the `sk_sel`-th detached sketch in its own context
+    /// (`Document::draft_detached`): `mode` 0 moves its `sel`-th unit by
+    /// `d` lattice steps in its plane, 1 erases its `sel`-th edge, 2
+    /// continues drawing — a segment from its `sel`-th vertex by `d`.
+    /// A refusal fails the case.
+    EditDetached {
+        sk_sel: usize,
+        mode: u8,
+        sel: usize,
+        d: (i32, i32),
+    },
+    /// Extrude the `reg_sel`-th region of the `sk_sel`-th detached sketch
+    /// (as listed by `Document::detached_sketch_units`) by `distance`.
+    ExtrudeDetached {
+        sk_sel: usize,
+        reg_sel: usize,
+        distance: f64,
+    },
     Undo,
     Redo,
     /// Open a compound (a held bracket around a forwarded plugin command).
@@ -762,6 +819,28 @@ fn arb_sketch_edit() -> impl Strategy<Value = DocOp> {
             .prop_map(|(obj_sel, face_sel, ground, shape, a, b, sel, segments)| {
                 DocOp::Draft { obj_sel, face_sel, ground, shape, a, b, sel, segments }
             }),
+        2 => (
+            any::<usize>(),
+            any::<usize>(),
+            proptest::bool::weighted(0.25),
+            any::<bool>(),
+            (-2..14i32, -2..14i32),
+            (1..9i32, 1..9i32),
+            24..40usize,
+        )
+            .prop_map(|(obj_sel, face_sel, ground, circle, a, b, segments)| {
+                DocOp::DrawDetached { obj_sel, face_sel, ground, circle, a, b, segments }
+            }),
+        2 => (any::<usize>(), 0..3u8, any::<usize>(), (-6..=6i32, -6..=6i32))
+            .prop_map(|(sk_sel, mode, sel, d)| DocOp::EditDetached { sk_sel, mode, sel, d }),
+        1 => (
+            any::<usize>(),
+            any::<usize>(),
+            (-3.0..3.0f64).prop_filter("degenerate distance", |d| d.abs() >= 0.05),
+        )
+            .prop_map(|(sk_sel, reg_sel, distance)| DocOp::ExtrudeDetached {
+                sk_sel, reg_sel, distance,
+            }),
     ]
 }
 
@@ -897,6 +976,14 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         1 => any::<usize>().prop_map(|inst_sel| DocOp::MakeUnique { inst_sel }),
         1 => (arb_offset(), arb_axis()).prop_map(|(origin, direction)| {
             DocOp::AddGuideLine { origin, direction }
+        }),
+        1 => (any::<usize>(), arb_axis(), -3.0..3.0f64, arb_offset()).prop_map(
+            |(guide_sel, axis, angle, offset)| DocOp::MoveGuide {
+                guide_sel, axis, angle, offset,
+            }
+        ),
+        1 => (any::<usize>(), arb_offset(), 1u32..4).prop_map(|(guide_sel, offset, count)| {
+            DocOp::CopyGuide { guide_sel, offset, count }
         }),
         1 => (0u8..3, any::<usize>(), any::<usize>(), any::<usize>()).prop_map(
             |(kind, comp_sel, a_sel, b_sel)| DocOp::BooleanInComponent {
@@ -1699,15 +1786,106 @@ fn free_sketch_ids(doc: &Document) -> Vec<kernel::SketchId> {
 /// sketch lying on the z = 0 plane facing +z, or a fresh one.
 fn ground_sketch(doc: &mut Document) -> kernel::SketchId {
     let found = free_sketch_ids(doc).into_iter().find(|&sid| {
-        let plane = doc.sketch(sid).expect("live id").plane();
+        let sk = doc.sketch(sid).expect("live id");
+        let plane = sk.plane();
         let n = plane.normal();
-        n.x == 0.0 && n.y == 0.0 && n.z == 1.0 && plane.point().z == 0.0
+        // A detached shape is no ground drawing: it joins nothing.
+        !sk.detached() && n.x == 0.0 && n.y == 0.0 && n.z == 1.0 && plane.point().z == 0.0
     });
     found.unwrap_or_else(|| {
         let plane = Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
             .expect("unit normal");
         doc.add_sketch(plane)
     })
+}
+
+/// The live world detached sketches ([`DocOp::EditDetached`] and
+/// [`DocOp::ExtrudeDetached`] pick from these), in id order.
+fn detached_sketch_ids(doc: &Document) -> Vec<kernel::SketchId> {
+    let mut ids: Vec<kernel::SketchId> = doc
+        .sketch_ids()
+        .into_iter()
+        .filter(|&s| doc.sketch(s).expect("live id").detached())
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// Every live world detached sketch as it stands.
+fn detached_snapshot(doc: &Document) -> Vec<(kernel::SketchId, kernel::Sketch)> {
+    detached_sketch_ids(doc)
+        .into_iter()
+        .map(|s| (s, doc.sketch(s).expect("live id").clone()))
+        .collect()
+}
+
+/// The sketch `op` itself edits, resolved against `doc` BEFORE it applies:
+/// the free-sketch ops' and the detached ops' picks. Any other detached
+/// sketch must come through the op unchanged.
+fn op_target_sketch(doc: &Document, op: &DocOp) -> Option<kernel::SketchId> {
+    match *op {
+        DocOp::MoveIsland { sk_sel, .. }
+        | DocOp::MoveIslands { sk_sel, .. }
+        | DocOp::RemoveSketchEdge { sk_sel, .. }
+        | DocOp::MoveSketchVertex { sk_sel, .. }
+        | DocOp::OffsetRegion { sk_sel, .. }
+        | DocOp::RefacetCurve { sk_sel, .. } => nth(&free_sketch_ids(doc), sk_sel),
+        DocOp::EditDetached { sk_sel, .. } | DocOp::ExtrudeDetached { sk_sel, .. } => {
+            nth(&detached_sketch_ids(doc), sk_sel)
+        }
+        _ => None,
+    }
+}
+
+/// Detached shapes §3.8: every detached sketch of `before` that `op` does
+/// not itself edit (`target`) and that is still live is `==` (plane, flag,
+/// drawing, handles) — no plane arrangement ever reached it — and no live
+/// detached sketch is object-owned (I9). Undo, redo, and a whole-document
+/// rescale legitimately change every sketch and are not checked.
+fn check_detached_untouched(
+    doc: &Document,
+    step: usize,
+    op: &DocOp,
+    before: &[(kernel::SketchId, kernel::Sketch)],
+    target: Option<kernel::SketchId>,
+) -> Result<(), TestCaseError> {
+    for s in detached_sketch_ids(doc) {
+        prop_assert!(
+            doc.sketch_owner_object(s).is_none(),
+            "step {}: detached sketch {:?} is object-owned (I9)",
+            step,
+            s
+        );
+    }
+    if matches!(op, DocOp::Undo | DocOp::Redo | DocOp::Rescale { .. }) {
+        return Ok(());
+    }
+    for (s, sk) in before {
+        if Some(*s) == target {
+            continue;
+        }
+        if let Some(now) = doc.sketch(*s) {
+            prop_assert!(
+                now == sk,
+                "step {} ({:?}): detached sketch {:?} changed",
+                step,
+                op,
+                s
+            );
+        }
+    }
+    Ok(())
+}
+
+/// An in-plane basis of `n`.
+fn plane_basis_of(n: Vec3) -> (Vec3, Vec3) {
+    let helper = if n.x.abs() < 0.9 {
+        Vec3::new(1.0, 0.0, 0.0)
+    } else {
+        Vec3::new(0.0, 1.0, 0.0)
+    };
+    let u = n.cross(helper).normalized().expect("non-parallel helper");
+    (u, n.cross(u))
 }
 
 fn lattice_translation(dx: i32, dy: i32) -> Transform {
@@ -1946,6 +2124,191 @@ fn fixed_segments(doc: &Document, objs: &[ObjectId], plane: &Plane) -> Vec<(Poin
     out
 }
 
+/// The plane a [`DocOp::Draft`] (or [`DocOp::DrawDetached`]) draws on and
+/// its lattice frame (origin, first axis): the `face_sel`-th face of the
+/// `obj_sel`-th visible object, anchored at its first outer vertex along
+/// its first edge; or the ground, when `ground` or nothing is visible.
+/// `None` when the face's first edge has no direction.
+fn draft_lattice(
+    doc: &Document,
+    obj_sel: usize,
+    face_sel: usize,
+    ground: bool,
+) -> Option<(Plane, Point3, Vec3)> {
+    let visible = doc.visible_object_ids();
+    match nth(&visible, obj_sel).filter(|_| !ground) {
+        None => Some((
+            Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+                .expect("unit normal"),
+            Point3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+        )),
+        Some(oid) => {
+            let obj = doc.object(oid).expect("visible");
+            let f = obj.faces().keys().nth(face_sel % obj.faces().len())?;
+            let ring: Vec<Point3> = obj.loop_positions(obj.faces()[f].outer_loop).collect();
+            let plane = obj.faces()[f].plane;
+            let u = (ring[1] - ring[0]).normalized().ok()?;
+            Some((plane, ring[0], u))
+        }
+    }
+}
+
+/// One [`DocOp::DrawDetached`]: a new detached shape, one undo step.
+#[allow(clippy::too_many_arguments)]
+fn apply_draw_detached(
+    doc: &mut Document,
+    step: usize,
+    obj_sel: usize,
+    face_sel: usize,
+    ground: bool,
+    circle: bool,
+    a: (i32, i32),
+    b: (i32, i32),
+    segments: usize,
+) -> Result<(), TestCaseError> {
+    let Some((plane, origin, u)) = draft_lattice(doc, obj_sel, face_sel, ground) else {
+        return Ok(());
+    };
+    let v = plane.normal().cross(u);
+    let at = |x: i32, y: i32| origin + u * (f64::from(x) * 0.5) + v * (f64::from(y) * 0.5);
+    let depth0 = doc.undo_depth();
+    let result = doc.draft_detached_new(plane, None, "Fuzz detached", |sk| {
+        if circle {
+            let center = at(a.0, a.1);
+            let radius = f64::from(b.0) * 0.5;
+            let ring: Vec<Point3> = (0..segments)
+                .map(|i| {
+                    let t = std::f64::consts::TAU * i as f64 / segments as f64;
+                    center + u * (radius * t.cos()) + v * (radius * t.sin())
+                })
+                .collect();
+            sk.begin_curve_with(kernel::CurveGeom { center, radius })?;
+            for i in 0..segments {
+                sk.add_segment(ring[i], ring[(i + 1) % segments])?;
+            }
+            sk.end_curve();
+        } else {
+            let (x1, y1) = (a.0 + b.0, a.1 + b.1);
+            let c = [at(a.0, a.1), at(x1, a.1), at(x1, y1), at(a.0, y1)];
+            for k in 0..4 {
+                sk.add_segment(c[k], c[(k + 1) % 4])?;
+            }
+        }
+        Ok(())
+    });
+    match result {
+        Ok((report, _)) => {
+            prop_assert_eq!(doc.undo_depth(), depth0 + 1, "step {}: one undo step", step);
+            prop_assert!(
+                report.objects.is_empty(),
+                "step {}: an object changed",
+                step
+            );
+            prop_assert_eq!(report.sketches.len(), 1, "step {}: one new sketch", step);
+            let s = report.sketches[0];
+            prop_assert!(
+                doc.sketch(s).is_some_and(|sk| sk.detached()),
+                "step {}: the new sketch is not detached",
+                step
+            );
+            Ok(())
+        }
+        Err(e) => Err(TestCaseError::fail(format!(
+            "step {step}: a detached shape was refused: {e:?} (plane {plane:?})"
+        ))),
+    }
+}
+
+/// One [`DocOp::EditDetached`]: an edit in the sketch's own context.
+fn apply_edit_detached(
+    doc: &mut Document,
+    step: usize,
+    sk_sel: usize,
+    mode: u8,
+    sel: usize,
+    d: (i32, i32),
+) -> Result<(), TestCaseError> {
+    let Some(s) = nth(&detached_sketch_ids(doc), sk_sel) else {
+        return Ok(());
+    };
+    let sk = doc.sketch(s).expect("live").clone();
+    let (u, v) = plane_basis_of(sk.plane().normal());
+    let by = u * (f64::from(d.0) * 0.5) + v * (f64::from(d.1) * 0.5);
+    let units = match doc.detached_sketch_units(s) {
+        Ok(units) => units,
+        Err(e) => {
+            return Err(TestCaseError::fail(format!(
+                "step {step}: a detached sketch has no listing: {e:?}"
+            )));
+        }
+    };
+    let depth0 = doc.undo_depth();
+    let result = doc.draft_detached(s, "Fuzz detached edit", |w| {
+        match mode {
+            0 => {
+                if units.units.is_empty() || by.length() == 0.0 {
+                    return Ok(());
+                }
+                let unit = &units.units[sel % units.units.len()];
+                let es: Vec<_> = unit
+                    .edges
+                    .iter()
+                    .map(|e| {
+                        w.edge_at_positions(e.a, e.b)
+                            .expect("a listed edge is in the lift")
+                    })
+                    .collect();
+                w.apply_transform_edges(&es, &Transform::translation(by))?;
+            }
+            1 => {
+                let es: Vec<_> = w.edges().keys().collect();
+                if let Some(e) = nth(&es, sel) {
+                    w.remove_edge(e)?;
+                }
+            }
+            _ => {
+                let vs: Vec<Point3> = w.vertices().values().map(|x| x.position).collect();
+                if let Some(p) = nth(&vs, sel)
+                    && by.length() > 0.0
+                {
+                    w.add_segment(p, p + by)?;
+                }
+            }
+        }
+        Ok(())
+    });
+    match result {
+        Ok((report, _)) => {
+            let committed = doc.undo_depth();
+            prop_assert!(
+                committed == depth0 || committed == depth0 + 1,
+                "step {}: a detached edit recorded {} steps",
+                step,
+                committed.saturating_sub(depth0)
+            );
+            prop_assert!(
+                report.objects.is_empty(),
+                "step {}: an object changed",
+                step
+            );
+            prop_assert!(
+                report.sketches.iter().all(|&x| x == s),
+                "step {}: a detached edit wrote another sketch: {:?}",
+                step,
+                report.sketches
+            );
+            if let Some(now) = doc.sketch(s) {
+                prop_assert!(now.detached(), "step {}: the sketch lost its flag", step);
+            }
+            Ok(())
+        }
+        Err(e) => Err(TestCaseError::fail(format!(
+            "step {step}: a detached edit (mode {mode}) was refused: {e:?}"
+        ))),
+    }
+}
+
 /// One [`DocOp::Draft`].
 #[allow(clippy::too_many_arguments)]
 fn apply_draft(
@@ -1961,26 +2324,8 @@ fn apply_draft(
     segments: usize,
 ) -> Result<(), TestCaseError> {
     let visible = doc.visible_object_ids();
-    // The plane and a lattice frame on it.
-    let (plane, origin, u) = match nth(&visible, obj_sel).filter(|_| !ground) {
-        None => (
-            Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
-                .expect("unit normal"),
-            Point3::new(0.0, 0.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-        ),
-        Some(oid) => {
-            let obj = doc.object(oid).expect("visible");
-            let Some(f) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
-                return Ok(());
-            };
-            let ring: Vec<Point3> = obj.loop_positions(obj.faces()[f].outer_loop).collect();
-            let plane = obj.faces()[f].plane;
-            let Ok(u) = (ring[1] - ring[0]).normalized() else {
-                return Ok(());
-            };
-            (plane, ring[0], u)
-        }
+    let Some((plane, origin, u)) = draft_lattice(doc, obj_sel, face_sel, ground) else {
+        return Ok(());
     };
     let n = plane.normal();
     let v = n.cross(u);
@@ -3220,6 +3565,35 @@ fn apply_doc_op(
             let direction = Vec3::new(direction.0, direction.1, direction.2);
             let _ = doc.add_guide_line(origin, direction);
         }
+        DocOp::MoveGuide {
+            guide_sel,
+            axis,
+            angle,
+            offset,
+        } => {
+            let Some(gid) = nth(&doc.guide_ids(), *guide_sel) else {
+                return Ok(true);
+            };
+            let Ok(rot) = Transform::rotation(Vec3::new(axis.0, axis.1, axis.2), *angle) else {
+                return Ok(true);
+            };
+            let pose = rot.then(&Transform::translation(Vec3::new(
+                offset.0, offset.1, offset.2,
+            )));
+            let _ = doc.transform_guide(gid, &pose);
+        }
+        DocOp::CopyGuide {
+            guide_sel,
+            offset,
+            count,
+        } => {
+            let Some(gid) = nth(&doc.guide_ids(), *guide_sel) else {
+                return Ok(true);
+            };
+            let step = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
+            let count = std::num::NonZeroU32::new(*count).expect("strategy draws 1..4");
+            let _ = doc.duplicate_guide_array(gid, &step, count);
+        }
         DocOp::BooleanInComponent {
             comp_sel,
             kind,
@@ -3816,6 +4190,63 @@ fn apply_doc_op(
             )
             .map(|()| true);
         }
+        DocOp::DrawDetached {
+            obj_sel,
+            face_sel,
+            ground,
+            circle,
+            a,
+            b,
+            segments,
+        } => {
+            apply_draw_detached(
+                doc, step, *obj_sel, *face_sel, *ground, *circle, *a, *b, *segments,
+            )?;
+        }
+        DocOp::EditDetached {
+            sk_sel,
+            mode,
+            sel,
+            d,
+        } => {
+            apply_edit_detached(doc, step, *sk_sel, *mode, *sel, *d)?;
+        }
+        DocOp::ExtrudeDetached {
+            sk_sel,
+            reg_sel,
+            distance,
+        } => {
+            let Some(s) = nth(&detached_sketch_ids(doc), *sk_sel) else {
+                return Ok(true);
+            };
+            let Ok(units) = doc.detached_sketch_units(s) else {
+                return Err(TestCaseError::fail(format!(
+                    "step {step}: a detached sketch has no listing"
+                )));
+            };
+            let regions: Vec<_> = units.regions.iter().filter_map(|r| r.extrude).collect();
+            let Some((sk, rid)) = nth(&regions, *reg_sel) else {
+                return Ok(true);
+            };
+            prop_assert_eq!(
+                sk,
+                s,
+                "step {}: a detached region extrudes as its own",
+                step
+            );
+            let objects0 = doc.visible_object_ids().len();
+            if doc.extrude_region(sk, rid, *distance).is_ok() {
+                prop_assert_eq!(
+                    doc.visible_object_ids().len(),
+                    objects0 + 1,
+                    "step {}: extruding a detached region makes one new object",
+                    step
+                );
+                if let Some(now) = doc.sketch(s) {
+                    prop_assert!(now.detached(), "step {}: the sketch lost its flag", step);
+                }
+            }
+        }
         DocOp::MoveIsland {
             sk_sel,
             isl_sel,
@@ -4044,12 +4475,15 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
 
     let mut open = Vec::new();
     for (step, op) in ops.iter().enumerate() {
+        let detached_before = detached_snapshot(&doc);
+        let target = op_target_sketch(&doc, op);
         if !apply_compound_op(&mut doc, step, op, &mut open)?
             && !apply_doc_op(&mut doc, step, op, &materials)?
         {
             return Ok(());
         }
         check_doc(&doc, step, "apply")?;
+        check_detached_untouched(&doc, step, op, &detached_before, target)?;
         check_save_and_sketch_owners(&doc, &format!("step {step}"))?;
         // Every committed state reopens: an op that left a face the
         // loader rejects would lose the user's file on the next save.
@@ -4315,6 +4749,60 @@ fn kb34_redo_split_after_tangent_circle() {
         },
     ];
     run_doc_case(seeds, ops).expect("KB-34 replay holds every invariant");
+}
+
+/// A tangent circle drawn over two imprints and a loop bridging them,
+/// clipped by them, then merged into the face around it across its arc:
+/// the arc runs through the rim vertex where the hole touches the face's
+/// outline. Undoing the merge replayed one cut through that boundary vertex
+/// and refused ("path point is not on the face"). The minimized spec lives
+/// in `tangent_loop_specs.rs`; this replays the exact case under every
+/// harness invariant.
+#[test]
+fn merge_of_a_clipped_tangent_disc_unwinds() {
+    let seeds: Vec<BoxSeed> = vec![
+        ((0.0, 0.0), (2.2346752169091917, 1.0), 3.276568943736587),
+        ((0.0, 0.0), (1.0, 1.0), 0.5),
+        ((0.0, -3.507174267747308), (1.0, 1.0), 0.5),
+    ];
+    let ops = vec![
+        DocOp::SliceDefMember {
+            inst_sel: 66360466712461141,
+            member_sel: 6596232982742202595,
+            origin: (0.25223245092388275, -6.952412369336496, -0.7718551660407071),
+            direction: (
+                -0.07185658133522942,
+                -0.6647107021629067,
+                -0.45456653437751626,
+            ),
+        },
+        DocOp::BridgeLoop {
+            obj_sel: 1354774533126141447,
+            face_sel: 4288230138990121280,
+            ts: (0.15190935456390073, 0.8690961128556175),
+            frac: 0.963971482904148,
+            circle: false,
+        },
+        DocOp::Duplicate {
+            obj_sel: 4165769603963804333,
+            offset: (4.536789387423562, 6.760316351437082, -1.1763973855480325),
+        },
+        DocOp::Undo,
+        DocOp::TangentCircle {
+            obj_sel: 14941672070845138833,
+            face_sel: 3591855991437777439,
+            side: 9786374422185185391,
+            t: 0.5028176080342001,
+            frac: 0.3829567238869083,
+            twin: false,
+        },
+        DocOp::MergeCoplanar {
+            obj_sel: 3269655902696552490,
+            edge_sel: 5049629487782488163,
+            from_features: false,
+        },
+    ];
+    run_doc_case(seeds, ops).expect("the clipped-disc merge unwinds and replays");
 }
 
 proptest! {

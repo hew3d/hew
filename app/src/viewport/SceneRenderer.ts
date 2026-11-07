@@ -40,6 +40,7 @@ import {
   ringAllDrawn,
 } from '../tools/planeUnits'
 import { invalidatePlaneUnits } from '../tools/planeUnits'
+import { readPreviewTint } from '../tools/previewTint'
 import { DEPTH_BIAS } from './depthPolicy'
 import type { HealthOverlay } from '../health/healthReport'
 import type { IsolationFade } from './isolation'
@@ -52,7 +53,7 @@ import { getResolvedTheme } from '../settings/theme'
 import { prefersReducedMotion } from '../platform'
 import { inlineTextQuaternion, TextBillboard } from './TextBillboard'
 import { GUIDE_COLOR } from './guideColors'
-import { windowFor, guideReach, guideSpanOf, stretchToUse, type GuideWindow } from './guideWindow'
+import { windowFor, guideReach, guideSpanOf, stretchToUse, guideOverlayPositions, GUIDE_POINT_MARKER_HALF_SIZE, type GuideWindow } from './guideWindow'
 
 /** What `updateGuideExtents` needs to know about the live camera. */
 export interface GuideView {
@@ -95,7 +96,22 @@ export const EDGE_COLOR_SEE_THROUGH_DARK = 0xc4c9d0
 export const EDGE_COLOR_SELECTED = 0xffaa00
 /** Edge color of the placement the Paint tool would paint (hover). */
 export const EDGE_COLOR_HOVER = 0xffd08a
-const SKETCH_LINE_COLOR = 0x2266cc
+
+/** The draw color language (fallbacks; the live values are the
+ *  `--draw-*` theme tokens, read by `_readDrawColors`): drawing that belongs
+ *  to no solid is blue ("free"), drawing that is part of a solid's face is
+ *  orange ("attached"). */
+const DRAW_FREE_FALLBACK = 0x2266cc
+const DRAW_FREE_FILL_FALLBACK = 0x88aadd
+const DRAW_ATTACHED_FALLBACK = 0xe0761c
+const DRAW_ATTACHED_FILL_FALLBACK = 0xe8a66a
+type DrawKind = 'free' | 'attached'
+interface DrawColors {
+  free: number
+  freeFill: number
+  attached: number
+  attachedFill: number
+}
 /** Sketch line width in px (matches the `makeFatSegments` call in `refreshAllSketches`). */
 const SKETCH_LINE_WIDTH_PX = 2.2
 /** Section-cut outlines (where the active section passes through a solid):
@@ -108,7 +124,6 @@ const SECTION_CUT_WIDTH_PX = 2.5
  * sketch-line width above so the orange overlay reads as clearly on top of
  * it rather than disappearing into (or under) it, worst case in light mode. */
 const SKETCH_HIGHLIGHT_WIDTH_PX = 3.8
-const SKETCH_REGION_COLOR = 0x88aadd
 /** Normal translucency of a sketch region fill. */
 const SKETCH_REGION_OPACITY = 0.4
 /**
@@ -205,12 +220,6 @@ const GUIDE_VIEW_SPAN = 2
  *  render from their own cameras, so a window sized to the live view would
  *  crop them. */
 const GUIDE_PRINT_HALF_LENGTH = 50
-/** Half-length of the selected guide's highlight overlay (meters). It draws
- *  with the depth test off, so unlike the guide itself its length cannot
- *  disturb depth ordering and a long segment reads as infinite. */
-const GUIDE_HIGHLIGHT_HALF_LENGTH = 50
-/** Half-size of a point guide's cross marker (meters). */
-const GUIDE_POINT_MARKER_HALF_SIZE = 0.05
 
 /**
  * One in-flight opacity tween owned by `setHiddenFaded`/`tickFades` (Shop
@@ -443,6 +452,8 @@ interface InstanceMeshGroup {
 interface DefSketchGroup {
   group: THREE.Group
   lines: LineSegments2 | null
+  /** Lines of object-owned (attached, orange) sketches, when any. */
+  linesAttached: LineSegments2 | null
   /** Fill meshes, keyed `${sketchHandle}:${regionHandle}` (region handles
    *  are per-sketch, so they can collide across sketches). */
   regionMeshes: Map<string, THREE.Mesh>
@@ -602,6 +613,17 @@ const _slotMatrix = new THREE.Matrix4()
  * `_slotMatrix` so the pull path (record construction) and the write path
  * (slot matrix writes) never alias the same scratch object. */
 const _composeScratch = new THREE.Matrix4()
+
+/** A THREE matrix from a row-major 3×4 affine (12 floats, the kernel's
+ *  `instance_pose` / `component_sketch_frame` layout). */
+function rowMajorToMatrix4(a: ArrayLike<number>): THREE.Matrix4 {
+  return new THREE.Matrix4().set(
+    a[0], a[1], a[2], a[3],
+    a[4], a[5], a[6], a[7],
+    a[8], a[9], a[10], a[11],
+    0, 0, 0, 1,
+  )
+}
 /** Scratch bounds for the live-slots-only batch bounds computation. */
 const _boundsBox = new THREE.Box3()
 const _boundsSphere = new THREE.Sphere()
@@ -730,7 +752,12 @@ export class SceneRenderer {
    * and shared across instances so we never duplicate GPU texture objects.
    */
   private textureCache: Map<string, THREE.Texture> = new Map()
+  /** Free (blue) sketch edges: world sketches, detached shapes, group-held. */
   private sketchLines: LineSegments2 | null = null
+  /** Edges of object-owned sketches (part of a solid's face): orange. */
+  private sketchLinesAttached: LineSegments2 | null = null
+  /** The current draw-color tokens (see `_readDrawColors`). */
+  private drawColors: DrawColors = this._readDrawColors()
   /** One fill mesh per sketch region, keyed by `${sketchHandle}:${regionHandle}`
    *  (region handles are per-sketch, so they can collide across sketches). */
   private sketchRegionMeshes: Map<string, THREE.Mesh> = new Map()
@@ -1073,6 +1100,16 @@ export class SceneRenderer {
         ![...this.instanceRecords.values()].some((r) => r.memberIds.includes(id)),
     )
     const recheckInstances = new Set<bigint>(touchedInstances)
+    // Live sibling placements (ARCHITECTURE.md 2.11): with a component
+    // session open, every other placement of the on-loan definition draws
+    // the session's world objects through its own pose, so a session commit
+    // that creates or deletes a world object changes those placements'
+    // member lists even though the caller's touched set names only the
+    // object. Re-pull them on every targeted refresh — a handful of
+    // instances, pose + member-id pulls, no geometry; a touched session
+    // object that is already a cached member took the `dirtyMembers` path
+    // above and rebuilds its batches like any definition edit.
+    for (const iid of this.wasmScene.session_placements()) recheckInstances.add(iid)
     if (touchedComponentSet.size > 0 || unresolvedMemberIds.length > 0) {
       for (const [iid, rec] of this.instanceRecords) {
         if (unresolvedMemberIds.length > 0 || touchedComponentSet.has(rec.componentId)) {
@@ -1090,41 +1127,42 @@ export class SceneRenderer {
         this._removeInstance(iid)
         continue
       }
-      // Compare the FULL placement sequence (member id per index, repeats
-      // included), not just the deduplicated member set: a nested
-      // definition can gain/lose a placement of a member it already had
-      // (e.g. an array count edit) with the deduplicated set unchanged —
-      // that still resizes the batch and must take the slow path. Local
-      // pose is deliberately NOT part of this comparison: a nested def edit
-      // that only moves a placement (member set/count unchanged) is exactly
-      // what the fast path below is for, since it always re-composes
-      // `rec.matrix × placement.localMatrix` from the FRESH placement.
-      const samePlacements =
-        next.componentId === prev.componentId &&
-        next.placements.length === prev.placements.length &&
-        next.placements.every((p, i) => p.memberId === prev.placements[i].memberId)
-      if (!samePlacements) {
-        // Batch membership changed (a placement gained/lost/swapped) — the
-        // slow (rebuild) path.
+      // Diff the placements per member by BATCH KEY multiset (member ×
+      // bucket, counts included): a member whose key counts differ gained,
+      // lost, or re-bucketed a placement — its batches resize or move and
+      // take the slow (rebuild) path. Every OTHER member of this instance
+      // keeps its slots and takes the fast in-place write below. Counting
+      // rather than comparing the full sequence matters for live sibling
+      // placements (ARCHITECTURE.md 2.11): a solid created inside a
+      // session adds ONE placement to every sibling, and rebuilding every
+      // member of every sibling for that was a per-commit hitch on a large
+      // component with many copies. Local pose is deliberately NOT part of
+      // the comparison: a nested def edit that only moves a placement is
+      // exactly what the fast path is for, since it re-composes
+      // `rec.matrix × placement.localMatrix` from the FRESH placement. A
+      // bucket flip (reflected/orthogonal, derived from the COMPOSED pose)
+      // shows up as a key count change on both the old and the new key.
+      if (next.componentId !== prev.componentId) {
         for (const m of prev.memberIds) membersToRebuild.add(m)
         for (const m of next.memberIds) membersToRebuild.add(m)
         continue
       }
-      // A pose-only change can still flip an individual PLACEMENT's own
-      // bucket: `reflected`/`orthogonal` are derived from the COMPOSED pose
-      // (outer × local — module doc on `Placement`), so a nested
-      // definition's local pose can independently mirror a member even when
-      // the outer instance pose only translates. Detect any placement whose
-      // bucket tag changed and route just that member through the slow
-      // (rebuild) path below; OTHER placements/members of this same
-      // instance, whose bucket did not change, still take the fast in-place
-      // write below.
-      for (let i = 0; i < next.placements.length; i++) {
-        const nextPlacement = next.placements[i]
-        const prevPlacement = prev.placements[i]
-        const prevKey = this._batchKeyFor(nextPlacement.memberId, prevPlacement)
-        const nextKey = this._batchKeyFor(nextPlacement.memberId, nextPlacement)
-        if (prevKey !== nextKey) membersToRebuild.add(nextPlacement.memberId)
+      const keyCounts = (placements: Placement[]): Map<string, number> => {
+        const counts = new Map<string, number>()
+        for (const p of placements) {
+          const key = this._batchKeyFor(p.memberId, p) ?? `${p.memberId}|?`
+          counts.set(key, (counts.get(key) ?? 0) + 1)
+        }
+        return counts
+      }
+      const prevCounts = keyCounts(prev.placements)
+      const nextCounts = keyCounts(next.placements)
+      const memberOfKey = (key: string): bigint => BigInt(key.slice(0, key.indexOf('|')))
+      for (const [key, n] of prevCounts) {
+        if (nextCounts.get(key) !== n) membersToRebuild.add(memberOfKey(key))
+      }
+      for (const [key, n] of nextCounts) {
+        if (prevCounts.get(key) !== n) membersToRebuild.add(memberOfKey(key))
       }
       // Fast path: write the slot matrix of every placement whose member is
       // NOT being rebuilt this pass. `occurrence` tracks each (member,
@@ -1133,8 +1171,8 @@ export class SceneRenderer {
       // per-instance slot list (built in the same encounter order by
       // `_rebuildMemberBatches`/`_buildBatch`) even when its placements now
       // land in DIFFERENT buckets and so belong to independent slot
-      // sequences (`samePlacements` above guarantees the member SEQUENCE
-      // still matches; it says nothing about each placement's bucket).
+      // sequences (a member not in `membersToRebuild` has exactly the same
+      // key counts as before, so its slot list is still the right length).
       const occurrence = new Map<string, number>()
       for (const placement of next.placements) {
         const m = placement.memberId
@@ -2280,9 +2318,9 @@ export class SceneRenderer {
 
   /**
    * The drawing overlay for a world object (see `ObjectMeshGroup.imprints`):
-   * one fat `SKETCH_LINE_COLOR` line batch over every Topology-store edge of
+   * one fat attached-orange line batch over every Topology-store edge of
    * the object on each of its drawing planes (owned sketch edges draw through
-   * the sketch overlay) and one translucent `SKETCH_REGION_COLOR` fill per
+   * the sketch overlay) and one translucent attached-orange fill per
    * region over a face whose outer ring is wholly drawing edges (every hole
    * cut out, so a shape inside a shape reads as two fills, and a boss it was
    * drawn around is not tinted). Both use the sketch depth biases so they sit
@@ -2292,6 +2330,7 @@ export class SceneRenderer {
    * poses correctly.
    */
   private _buildImprintOverlay(objectId: bigint): THREE.Group | null {
+    // (lines and fills are the attached/orange pair)
     const planes = objectDrawingPlanes(this.wasmScene, objectId)
     if (planes.length === 0) return null
     const group = new THREE.Group()
@@ -2313,18 +2352,13 @@ export class SceneRenderer {
       }
       for (const r of pu.regions) {
         if (r.over === null || r.extrude !== null || !ringAllDrawn(pu, r.outer)) continue
-        const mesh = this._buildPlanarFillMesh(r.outer, r.holes)
+        const mesh = this._buildPlanarFillMesh(r.outer, r.holes, 'attached')
         if (mesh !== null) group.add(mesh)
       }
     }
     if (lines.length > 0) {
       group.add(
-        makeFatSegments(new Float32Array(lines), {
-          color: SKETCH_LINE_COLOR,
-          widthPx: SKETCH_LINE_WIDTH_PX,
-          transparent: true,
-          depthBias: DEPTH_BIAS.SKETCH_LINE,
-        }),
+        this._drawLine(lines, 'attached'),
       )
     }
     return group.children.length > 0 ? group : null
@@ -2345,7 +2379,7 @@ export class SceneRenderer {
   /** A translucent sketch-region fill over the planar polygon `outer` with
    *  `holes` cut out — `_buildRegionFillMesh`'s triangulation (Newell
    *  normal, project, ear-clip) lifted out so imprints share it. */
-  private _buildPlanarFillMesh(outer: readonly V3[], holes: readonly V3[][]): THREE.Mesh | null {
+  private _buildPlanarFillMesh(outer: readonly V3[], holes: readonly V3[][], kind: DrawKind): THREE.Mesh | null {
     const n = outer.length
     if (n < 3) return null
     const verts3 = outer.map((p) => new THREE.Vector3(p[0], p[1], p[2]))
@@ -2386,7 +2420,7 @@ export class SceneRenderer {
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
     const mat = new THREE.MeshBasicMaterial({
-      color: SKETCH_REGION_COLOR,
+      color: this._drawColor(kind, true),
       transparent: true,
       opacity: SKETCH_REGION_OPACITY,
       side: THREE.DoubleSide,
@@ -2396,6 +2430,7 @@ export class SceneRenderer {
       polygonOffsetUnits: DEPTH_BIAS.REGION_FILL,
       colorWrite: this._filmsDrawn(),
     })
+    mat.userData.drawKind = kind
     return new THREE.Mesh(geo, mat)
   }
 
@@ -2526,16 +2561,20 @@ export class SceneRenderer {
     // Every mutation (and every hide/unhide) lands here: what the plane-unit
     // listings answer may have changed, so drop their cache.
     invalidatePlaneUnits()
+    this.drawColors = this._readDrawColors()
     this._clearSketchLines()
     this._clearSketchRegions()
 
     const allLinePositions: number[] = []
+    const attachedLinePositions: number[] = []
     for (const sketchHandle of this.wasmScene.sketch_ids()) {
+      const attached = this._sketchIsAttached(sketchHandle)
+      const out = attached ? attachedLinePositions : allLinePositions
       const linePositions = this.wasmScene.sketch_lines(sketchHandle)
       for (let i = 0; i < linePositions.length; i++) {
-        allLinePositions.push(linePositions[i])
+        out.push(linePositions[i])
       }
-      this._buildRegionFills(sketchHandle)
+      this._buildRegionFills(sketchHandle, attached ? 'attached' : 'free')
     }
 
     if (allLinePositions.length > 0) {
@@ -2545,17 +2584,16 @@ export class SceneRenderer {
       // sketch-isolation fade can animate opacity. Resolution is kept current
       // by the fat-line registry (makeFatSegments registers the material;
       // Viewport calls updateFatLineResolutions on mount/resize).
-      this.sketchLines = makeFatSegments(new Float32Array(allLinePositions), {
-        color: SKETCH_LINE_COLOR,
-        widthPx: SKETCH_LINE_WIDTH_PX,
-        transparent: true,
-        // Sketch lines are coincident with the object edges they were
-        // consumed into (and with each other across sketches); bias them one
-        // rung in front of native edges so the tie is deterministic
-        // (depthPolicy.ts).
-        depthBias: DEPTH_BIAS.SKETCH_LINE,
-      })
+      // Sketch lines are coincident with the object edges they were
+      // consumed into (and with each other across sketches); `_drawLine`
+      // biases them one rung in front of native edges so the tie is
+      // deterministic (depthPolicy.ts).
+      this.sketchLines = this._drawLine(allLinePositions, 'free')
       this.sketchGroup.add(this.sketchLines)
+    }
+    if (attachedLinePositions.length > 0) {
+      this.sketchLinesAttached = this._drawLine(attachedLinePositions, 'attached')
+      this.sketchGroup.add(this.sketchLinesAttached)
     }
 
     // Sketches DRAWN INSIDE A COMPONENT (component-edit-parity.md Finding 1)
@@ -2603,11 +2641,20 @@ export class SceneRenderer {
     for (const instanceId of this.wasmScene.instance_ids()) {
       const componentId = this.wasmScene.instance_def(instanceId)
       if (componentId === undefined) continue
-      const sketchIds = this.wasmScene.component_member_sketches(componentId)
+      // `component_rendered_sketches`, not `component_member_sketches`:
+      // while the definition is on loan to an open session this is the
+      // session's live world drawing, and `component_sketch_frame` is the
+      // inverse session pose that brings it back into the definition's
+      // frame — so a live sibling placement shows lines drawn inside the
+      // session as they are drawn (ARCHITECTURE.md 2.11). For a closed
+      // definition the list is its own def-local sketches at identity.
+      const sketchIds = this.wasmScene.component_rendered_sketches(componentId)
       if (sketchIds.length === 0) continue
       const pose = this.wasmScene.instance_pose(instanceId)
       if (pose === undefined) continue
-      this._buildDefSketchGroup(instanceId, pose, sketchIds)
+      const frame = this.wasmScene.component_sketch_frame(componentId)
+      const composed = this._composeRowMajorPose(rowMajorToMatrix4(pose), rowMajorToMatrix4(frame))
+      this._buildDefSketchGroup(instanceId, composed, sketchIds)
     }
   }
 
@@ -2615,6 +2662,7 @@ export class SceneRenderer {
   private _clearDefSketchGroups(): void {
     for (const g of this.defSketchGroups.values()) {
       if (g.lines !== null) disposeFatSegments(g.lines)
+      if (g.linesAttached !== null) disposeFatSegments(g.linesAttached)
       for (const mesh of g.regionMeshes.values()) {
         mesh.geometry.dispose()
         ;(mesh.material as THREE.Material).dispose()
@@ -2648,16 +2696,19 @@ export class SceneRenderer {
     group.matrixWorldNeedsUpdate = true
 
     const allLinePositions: number[] = []
+    const attachedLinePositions: number[] = []
     const regionMeshes = new Map<string, THREE.Mesh>()
     for (const sketchHandle of sketchIds) {
+      const attached = this._sketchIsAttached(sketchHandle)
+      const out = attached ? attachedLinePositions : allLinePositions
       const linePositions = this.wasmScene.sketch_lines(sketchHandle)
       for (let i = 0; i < linePositions.length; i++) {
-        allLinePositions.push(linePositions[i])
+        out.push(linePositions[i])
       }
       const regionHandles = this.wasmScene.sketch_regions(sketchHandle)
       for (let i = 0; i < regionHandles.length; i++) {
         const regionHandle = regionHandles[i]
-        const mesh = this._buildRegionFillMesh(sketchHandle, regionHandle)
+        const mesh = this._buildRegionFillMesh(sketchHandle, regionHandle, attached ? 'attached' : 'free')
         if (mesh === null) continue
         group.add(mesh)
         regionMeshes.set(`${sketchHandle}:${regionHandle}`, mesh)
@@ -2666,19 +2717,19 @@ export class SceneRenderer {
 
     let lines: LineSegments2 | null = null
     if (allLinePositions.length > 0) {
-      lines = makeFatSegments(new Float32Array(allLinePositions), {
-        color: SKETCH_LINE_COLOR,
-        widthPx: SKETCH_LINE_WIDTH_PX,
-        transparent: true,
-        depthBias: DEPTH_BIAS.SKETCH_LINE,
-      })
+      lines = this._drawLine(allLinePositions, 'free')
       group.add(lines)
     }
+    let linesAttached: LineSegments2 | null = null
+    if (attachedLinePositions.length > 0) {
+      linesAttached = this._drawLine(attachedLinePositions, 'attached')
+      group.add(linesAttached)
+    }
 
-    if (lines === null && regionMeshes.size === 0) return // nothing to show
+    if (lines === null && linesAttached === null && regionMeshes.size === 0) return // nothing to show
 
     this.sketchGroup.add(group)
-    this.defSketchGroups.set(instanceId, { group, lines, regionMeshes })
+    this.defSketchGroups.set(instanceId, { group, lines, linesAttached, regionMeshes })
   }
 
   /**
@@ -2687,11 +2738,11 @@ export class SceneRenderer {
    * vertex 0 is correct. Every closed region fills and picks — all of them
    * extrude (interpenetration is allowed everywhere in Hew).
    */
-  private _buildRegionFills(sketchHandle: bigint): void {
+  private _buildRegionFills(sketchHandle: bigint, kind: DrawKind): void {
     const regionHandles = this.wasmScene.sketch_regions(sketchHandle)
     for (let i = 0; i < regionHandles.length; i++) {
       const regionHandle = regionHandles[i]
-      const mesh = this._buildRegionFillMesh(sketchHandle, regionHandle)
+      const mesh = this._buildRegionFillMesh(sketchHandle, regionHandle, kind)
       if (mesh === null) continue
       this.sketchGroup.add(mesh)
       this.sketchRegionMeshes.set(`${sketchHandle}:${regionHandle}`, mesh)
@@ -2705,7 +2756,7 @@ export class SceneRenderer {
    * degenerate region (fewer than 3 boundary vertices, or a near-zero
    * polygon normal).
    */
-  private _buildRegionFillMesh(sketchHandle: bigint, regionHandle: bigint): THREE.Mesh | null {
+  private _buildRegionFillMesh(sketchHandle: bigint, regionHandle: bigint, kind: DrawKind): THREE.Mesh | null {
     const boundary = this.wasmScene.region_boundary(sketchHandle, regionHandle)
     // boundary is flat [x0,y0,z0, x1,y1,z1, ...]; n vertices
     const n = Math.floor(boundary.length / 3)
@@ -2756,7 +2807,7 @@ export class SceneRenderer {
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
     const mat = new THREE.MeshBasicMaterial({
-      color: SKETCH_REGION_COLOR,
+      color: this._drawColor(kind, true),
       transparent: true,
       opacity: SKETCH_REGION_OPACITY,
       side: THREE.DoubleSide,
@@ -2769,6 +2820,7 @@ export class SceneRenderer {
       polygonOffsetUnits: DEPTH_BIAS.REGION_FILL,
       colorWrite: this._filmsDrawn(),
     })
+    mat.userData.drawKind = kind
     return new THREE.Mesh(geo, mat)
   }
 
@@ -2904,26 +2956,8 @@ export class SceneRenderer {
     const geometry = this.wasmScene.guide_geometry(this.selectedGuideId)
     if (kind === undefined || geometry === undefined) return
 
-    const pts: number[] = []
-    if (kind === 'line') {
-      const [ox, oy, oz, dx, dy, dz] = geometry
-      const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
-      if (len < 1e-9) return
-      const ux = dx / len
-      const uy = dy / len
-      const uz = dz / len
-      const { lo, hi } = guideSpanOf(geometry)
-      const span = stretchToUse(-GUIDE_HIGHLIGHT_HALF_LENGTH, GUIDE_HIGHLIGHT_HALF_LENGTH, lo, hi)
-      if (span === null) return
-      const [s0, s1] = span
-      pts.push(ox + ux * s0, oy + uy * s0, oz + uz * s0, ox + ux * s1, oy + uy * s1, oz + uz * s1)
-    } else if (kind === 'point') {
-      const [x, y, z] = geometry
-      const k = GUIDE_POINT_MARKER_HALF_SIZE
-      pts.push(x - k, y, z, x + k, y, z, x, y - k, z, x, y + k, z, x, y, z - k, x, y, z + k)
-    } else {
-      return
-    }
+    const pts = guideOverlayPositions(kind, geometry)
+    if (pts === null) return
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3))
     const mat = new THREE.LineBasicMaterial({ color: EDGE_COLOR_SELECTED, depthTest: false })
@@ -4063,7 +4097,11 @@ export class SceneRenderer {
         })
       }
       setWidth(this.sketchLines)
-      for (const d of this.defSketchGroups.values()) setWidth(d.lines)
+      setWidth(this.sketchLinesAttached)
+      for (const d of this.defSketchGroups.values()) {
+        setWidth(d.lines)
+        setWidth(d.linesAttached)
+      }
     }
 
     if (opts.style === 'lineart') {
@@ -4113,7 +4151,11 @@ export class SceneRenderer {
         })
       }
       inkLine(this.sketchLines)
-      for (const d of this.defSketchGroups.values()) inkLine(d.lines)
+      inkLine(this.sketchLinesAttached)
+      for (const d of this.defSketchGroups.values()) {
+        inkLine(d.lines)
+        inkLine(d.linesAttached)
+      }
       undo.push(() => {
         for (const m of cache.values()) m.dispose()
       })
@@ -4593,9 +4635,11 @@ export class SceneRenderer {
       for (const m of Array.isArray(mat) ? mat : [mat]) fn(m)
     }
     if (this.sketchLines !== null) touch(this.sketchLines.material)
+    if (this.sketchLinesAttached !== null) touch(this.sketchLinesAttached.material)
     for (const mesh of this.sketchRegionMeshes.values()) touch(mesh.material)
     for (const g of this.defSketchGroups.values()) {
       if (g.lines !== null) touch(g.lines.material)
+      if (g.linesAttached !== null) touch(g.linesAttached.material)
       for (const mesh of g.regionMeshes.values()) touch(mesh.material)
     }
     for (const g of this.objectGroups.values()) {
@@ -5205,6 +5249,70 @@ export class SceneRenderer {
     const before = this._edgeColor()
     this.edgeTheme = theme
     if (this._edgeColor() !== before) this._recolorPlainEdges()
+    this._recolorDrawing()
+  }
+
+  /** Read the `--draw-*` theme tokens (fallbacks outside a DOM). */
+  private _readDrawColors(): DrawColors {
+    return {
+      free: readPreviewTint('--draw-free', DRAW_FREE_FALLBACK),
+      freeFill: readPreviewTint('--draw-free-fill', DRAW_FREE_FILL_FALLBACK),
+      attached: readPreviewTint('--draw-attached', DRAW_ATTACHED_FALLBACK),
+      attachedFill: readPreviewTint('--draw-attached-fill', DRAW_ATTACHED_FILL_FALLBACK),
+    }
+  }
+
+  private _drawColor(kind: DrawKind, fill: boolean): number {
+    const c = this.drawColors
+    return kind === 'free' ? (fill ? c.freeFill : c.free) : fill ? c.attachedFill : c.attached
+  }
+
+  /** One fat sketch-line batch in the free (blue) or attached (orange) ink. */
+  private _drawLine(positions: number[], kind: DrawKind): LineSegments2 {
+    // Fat lines (LineSegments2) — a plain THREE.LineSegments ignores
+    // `linewidth` on WebGL and renders 1px. `transparent: true` so the
+    // sketch-isolation fade can animate opacity. Resolution is kept current
+    // by the fat-line registry (makeFatSegments registers the material).
+    const line = makeFatSegments(new Float32Array(positions), {
+      color: this._drawColor(kind, false),
+      widthPx: SKETCH_LINE_WIDTH_PX,
+      transparent: true,
+      depthBias: DEPTH_BIAS.SKETCH_LINE,
+    })
+    ;(line.material as THREE.Material).userData.drawKind = kind
+    return line
+  }
+
+  /** Whether `sketch`'s edges are owned by an Object (part of a solid's
+   *  face: orange) rather than free (world, detached, group-held, member). */
+  private _sketchIsAttached(sketch: bigint): boolean {
+    const fn = (this.wasmScene as { sketch_owner_object?: (s: bigint) => bigint | undefined }).sketch_owner_object
+    return fn !== undefined && fn.call(this.wasmScene, sketch) !== undefined
+  }
+
+  /** Re-read the draw tokens and recolor every drawing material in place
+   *  (a theme switch changes them; geometry is untouched). */
+  private _recolorDrawing(): void {
+    const next = this._readDrawColors()
+    const c = this.drawColors
+    if (next.free === c.free && next.freeFill === c.freeFill && next.attached === c.attached && next.attachedFill === c.attachedFill) return
+    this.drawColors = next
+    const paint = (obj: THREE.Object3D | null): void => {
+      if (obj === null) return
+      const mat = (obj as THREE.Mesh).material as THREE.Material | undefined
+      const kind = mat?.userData.drawKind as DrawKind | undefined
+      if (mat === undefined || kind === undefined) return
+      ;(mat as THREE.MeshBasicMaterial).color.setHex(this._drawColor(kind, !(obj instanceof LineSegments2)))
+    }
+    paint(this.sketchLines)
+    paint(this.sketchLinesAttached)
+    for (const mesh of this.sketchRegionMeshes.values()) paint(mesh)
+    for (const g of this.defSketchGroups.values()) {
+      paint(g.lines)
+      paint(g.linesAttached)
+      for (const mesh of g.regionMeshes.values()) paint(mesh)
+    }
+    for (const g of this.objectGroups.values()) if (g.imprints !== null) for (const child of g.imprints.children) paint(child)
   }
 
   /** The plain (unselected) edge color right now. */
@@ -5334,8 +5442,9 @@ export class SceneRenderer {
   private _applySketchIsolation(): void {
     const anyContextActive = this.activeLitSet !== null || this.activeLitInstanceSet !== null
     const dim = this._dimOpacity()
-    if (this.sketchLines !== null) {
-      const mat = this.sketchLines.material as LineMaterial
+    for (const lines of [this.sketchLines, this.sketchLinesAttached]) {
+      if (lines === null) continue
+      const mat = lines.material as LineMaterial
       mat.opacity = anyContextActive ? dim : 1
       mat.transparent = anyContextActive
     }
@@ -5346,8 +5455,9 @@ export class SceneRenderer {
     for (const [instanceId, g] of this.defSketchGroups) {
       const isLit = this.activeLitInstanceSet !== null && this.activeLitInstanceSet.has(instanceId)
       const dimmed = anyContextActive && !isLit
-      if (g.lines !== null) {
-        const mat = g.lines.material as LineMaterial
+      for (const lines of [g.lines, g.linesAttached]) {
+        if (lines === null) continue
+        const mat = lines.material as LineMaterial
         mat.opacity = dimmed ? dim : 1
         mat.transparent = dimmed
       }
@@ -5450,6 +5560,32 @@ export class SceneRenderer {
     return this.instanceGroups.get(instanceId)?.group ?? null
   }
 
+  /**
+   * Face geometry of one placement's shown members for screen-space hit
+   * testing, read straight from the shared member cache. Unlike
+   * `getInstanceGroup` this never materializes the placement out of its batch
+   * (a marquee over a brick wall would otherwise pull thousands of placements
+   * out of their batches and rebuild materials for each). `matrixWorld`
+   * composes the outer pose with the member's local pose. Null when the
+   * instance is not rendered.
+   */
+  instanceFaceParts(instanceId: bigint): { positions: Float32Array; indices: Uint32Array; matrixWorld: THREE.Matrix4 }[] | null {
+    const rec = this.instanceRecords.get(instanceId)
+    if (rec === undefined) return null
+    const outer = new THREE.Matrix4().multiplyMatrices(this.instancesGroup.matrixWorld, rec.matrix)
+    const parts: { positions: Float32Array; indices: Uint32Array; matrixWorld: THREE.Matrix4 }[] = []
+    for (const placement of rec.placements) {
+      if (!placement.shown) continue
+      const cached = this._getMemberGeometry(placement.memberId, placement.inherited)
+      parts.push({
+        positions: cached.positions,
+        indices: cached.indices,
+        matrixWorld: new THREE.Matrix4().multiplyMatrices(outer, placement.localMatrix),
+      })
+    }
+    return parts
+  }
+
   /** The rendered group for one object id — map-backed, unlike a name walk
    * over `objectsGroup` (marquee hit-testing calls this per candidate). */
   getObjectGroup(objectId: bigint): THREE.Group | null {
@@ -5527,6 +5663,11 @@ export class SceneRenderer {
       disposeFatSegments(this.sketchLines)
       this.sketchGroup.remove(this.sketchLines)
       this.sketchLines = null
+    }
+    if (this.sketchLinesAttached !== null) {
+      disposeFatSegments(this.sketchLinesAttached)
+      this.sketchGroup.remove(this.sketchLinesAttached)
+      this.sketchLinesAttached = null
     }
   }
 

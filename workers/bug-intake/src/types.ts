@@ -8,6 +8,15 @@
  * their own bundled definitions regardless of what's declared here.
  */
 
+import type {
+  ThreadView,
+  ThreadAdminView,
+  ThreadStatus,
+  PostReporterResult,
+  AppendResult,
+  AppendAttachmentResult,
+} from './threadStore.ts'
+
 /** A cursor over a `SqlStorage.exec` result set — only `toArray()` is used
  *  here, same subset share-relay declares. */
 export interface SqlStorageCursor<T> {
@@ -51,6 +60,10 @@ export interface StartFields {
   description: string
   appVersion: string
   platform: string
+  /** SHA-256 hex of a follow secret minted at START, if any. */
+  followHash?: string | null
+  /** The parent report of a follow-up attachment, if any. */
+  parentId?: string | null
 }
 
 export type PutPieceResult =
@@ -64,7 +77,15 @@ export type PutPieceResult =
   | { ok: false; reason: 'out-of-order'; expected: number }
 
 export type CommitResult =
-  | { ok: true; description: string; appVersion: string; platform: string; sizeBytes: number }
+  | {
+      ok: true
+      description: string
+      appVersion: string
+      platform: string
+      sizeBytes: number
+      followHash: string | null
+      parentId: string | null
+    }
   | { ok: false; reason: 'not-found' }
   | { ok: false; reason: 'forbidden' }
   | { ok: false; reason: 'incomplete' }
@@ -131,13 +152,31 @@ export interface ReportIndexStub {
     now: number,
     entry: ReportReservation,
   ): Promise<{ ok: true } | { ok: false; reason: 'rate-limited'; retryAfterMs: number } | { ok: false; reason: 'full' }>
-  commitReport(id: string): Promise<CommitReportOutcome>
+  /** `following`: COMMIT just created this report's thread. */
+  commitReport(id: string, following?: boolean): Promise<CommitReportOutcome>
   touchActivity(id: string, now: number): Promise<void>
   listReports(): Promise<ReportEntry[]>
   getReport(id: string): Promise<ReportEntry | null>
   deleteReport(id: string): Promise<void>
   setTriaged(id: string, triaged: boolean): Promise<void>
-  reserveEmail(now: number): Promise<boolean>
+  /** `'thread'` stops short of the cap (`EMAIL_THREAD_RESERVE`). */
+  reserveEmail(now: number, purpose?: 'report' | 'thread'): Promise<boolean>
+  /** A `ReportDrop` alarm (retention or abandonment) fired for `id`.
+   *  Resolves `true` when the row is gone afterwards. */
+  bundleExpired(id: string): Promise<boolean>
+  /** `id`'s `ReportThread` was destroyed (alarm or Forget). */
+  threadEnded(id: string): Promise<void>
+  setThreadCache(id: string, patch: ThreadCachePatch): Promise<void>
+  markAdminViewed(id: string, now: number): Promise<void>
+  listChildren(parentId: string): Promise<ReportEntry[]>
+  countThreadRequest(clientHash: string, now: number): Promise<{ ok: true } | { ok: false; retryAfterMs: number }>
+}
+
+/** See `indexStore.ts`. */
+export interface ThreadCachePatch {
+  status?: string
+  statusVersion?: string | null
+  reporterActivityAt?: number
 }
 
 /** One row of the admin list / detail metadata. `sizeBytes` is the raw
@@ -157,11 +196,40 @@ export interface ReportEntry {
   sizeBytes: number
   triaged: boolean
   committed: boolean
+  /** Display caches for the admin list (`indexStore.ts`'s `ReportRow`). */
+  following: boolean
+  status: string
+  statusVersion: string | null
+  reporterActivityAt: number | null
+  adminViewedAt: number | null
+  parentId: string | null
+  bundleDeleted: boolean
 }
 
 /** What `reserveReport` needs at reservation time — before a byte of the
  *  bundle has gone anywhere, so before `triaged`/`committed` mean anything. */
-export type ReportReservation = Omit<ReportEntry, 'triaged' | 'committed'>
+export type ReportReservation = Pick<
+  ReportEntry,
+  'id' | 'receivedAt' | 'appVersion' | 'platform' | 'descriptionPreview' | 'sizeBytes'
+> & { parentId?: string | null }
+
+/** The RPC surface `ReportThread` (`src/reportThread.ts`) exposes — one
+ *  followed report's thread (docs/design/follow-a-report.md §5.1). Every
+ *  reporter-facing method takes the presented follow secret's SHA-256 hex,
+ *  never the raw secret. Shapes are defined in `threadStore.ts`. */
+export interface ReportThreadStub {
+  create(reportId: string, secretHash: string, now: number): Promise<void>
+  verifySecret(secretHash: string): Promise<boolean>
+  read(secretHash: string, afterSeq: number, now: number): Promise<ThreadView | 'forbidden'>
+  postReporter(secretHash: string, text: string, now: number): Promise<PostReporterResult>
+  markSeen(secretHash: string, upTo: number, now: number): Promise<'ok' | 'forbidden'>
+  revoke(secretHash: string): Promise<'ok' | 'forbidden'>
+  postMaintainer(text: string, now: number): Promise<AppendResult>
+  setStatus(status: ThreadStatus, version: string | null, note: string | null, now: number): Promise<AppendResult>
+  appendAttachment(childId: string, text: string, now: number): Promise<AppendAttachmentResult>
+  adminView(now: number): Promise<ThreadAdminView | null>
+  destroy(): Promise<void>
+}
 
 /** The subset of `DurableObjectNamespace<T>` this Worker calls. */
 export interface DurableObjectNamespace<T> {
@@ -182,6 +250,7 @@ export interface SendEmailBinding {
 export interface BugIntakeEnv {
   REPORT_DROP: DurableObjectNamespace<ReportDropStub>
   REPORT_INDEX: DurableObjectNamespace<ReportIndexStub>
+  REPORT_THREAD: DurableObjectNamespace<ReportThreadStub>
   NOTIFY: SendEmailBinding
   /** The maintainer's verified Email Routing destination address. Unset:
    *  submissions still store, email is skipped, and the skip is logged once

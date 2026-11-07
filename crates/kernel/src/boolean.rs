@@ -43,6 +43,21 @@
 //! so the face stays whole and the result touches itself along that line,
 //! every edge still between exactly two faces.
 //!
+//! **A Subtract that removes nothing is refused as `NothingRemoved`.** When
+//! the operands are disjoint, or touch only along a face, an edge, or a
+//! corner, the arrangement keeps every sub-face of `a` and no face of `b`,
+//! so the assembled result would be `a` itself. Union and intersect have an
+//! honest answer there (two shells; `EmptyResult`), but a subtract that hands
+//! back an unchanged `a` reads as a cut that silently did nothing, so
+//! [`execute`] refuses when the arrangement dropped no sub-face of `a` and
+//! kept no sub-face of `b`. That is the classification's own verdict —
+//! `b` never enters `a` — so the test adds no tolerance of its own and is
+//! the same whether the operands sit at the origin or a hundred kilometers
+//! from it. It does inherit the arrangement's: a cutter whose skin lies
+//! within `tol::PLANE_DIST` of a face of `a` is coplanar with it to the
+//! arrangement, so a cut thinner than that (a nanometer) is refused exactly
+//! as a touch is, while any cut the arrangement can resolve stays a cut.
+//!
 //! Why the result is watertight: a seam is the real intersection of two faces,
 //! computed once and imprinted identically on both. Where the seam meets a face
 //! boundary, the intersection curve continues onto the neighbouring face through
@@ -154,11 +169,28 @@ pub(crate) fn execute(
     let b_polys = face_polys(&b_in_a);
 
     let mut faces = Vec::new();
-    collect_faces(op, Side::A, &a_polys, &b_polys, &mut faces)?;
+    let a_dropped = collect_faces(op, Side::A, &a_polys, &b_polys, &mut faces)?;
+    let a_kept = faces.len();
     collect_faces(op, Side::B, &a_polys, &b_polys, &mut faces)?;
 
     if faces.is_empty() {
         return Err(BooleanError::EmptyResult);
+    }
+    // A Subtract removes volume exactly when the arrangement changes `a`'s
+    // skin: it drops a sub-face of `a` (that patch of `a`'s boundary lies
+    // inside `b`, so the material behind it goes — a whole swallowed shell
+    // of a multi-shell `a` drops every face it has) or keeps a sub-face of
+    // `b` (that patch of `b`'s skin lies inside `a` and becomes the cut's
+    // new wall). Neither happening means `b` never enters `a` — the operands
+    // are apart, or touch along a face, an edge, or a corner — and the
+    // result would be a copy of `a`, which would read as a successful cut
+    // that changed nothing. (A coincident patch both operands produce is
+    // attributed to `a`, collected first, so a touching `b` contributes
+    // nothing here.) This reads the arrangement's own classification, so it
+    // adds no tolerance beyond the arrangement's (`tol::PLANE_DIST`,
+    // `tol::POINT_MERGE`) and does not depend on where the operands sit.
+    if op == BooleanOp::Subtract && a_dropped == 0 && faces.len() == a_kept {
+        return Err(BooleanError::NothingRemoved);
     }
     let mut result = assemble(faces, a.planarity_tol.max(b.planarity_tol))?;
     // The result inherits operand A's base material ( follow-up), so a
@@ -205,7 +237,8 @@ fn face_polys(obj: &Object) -> Vec<FacePoly> {
 
 /// Arranges each face of one operand against the other, classifies every
 /// sub-face by the coverage-based neighborhood test, and pushes the kept
-/// (correctly oriented) ones into `out`.
+/// (correctly oriented) ones into `out`. Returns how many sub-faces of this
+/// operand the classification dropped.
 ///
 /// A face is subdivided by transversal seams (where non-coplanar partner faces
 /// cross its plane) *and* by the boundaries of any coplanar partner faces, so
@@ -217,7 +250,7 @@ fn collect_faces(
     a_polys: &[FacePoly],
     b_polys: &[FacePoly],
     out: &mut Vec<OrientedFace>,
-) -> Result<(), BooleanError> {
+) -> Result<usize, BooleanError> {
     let (these, others) = match this_side {
         Side::A => (a_polys, b_polys),
         Side::B => (b_polys, a_polys),
@@ -242,6 +275,10 @@ fn collect_faces(
             found
         })
         .collect();
+    // Sub-faces of this operand the classification dropped (both sides of
+    // them equally in or out of the result): for a subtract, the patches of
+    // `a`'s skin that lie inside `b`.
+    let mut dropped = 0usize;
     for fp in these {
         let na = fp.plane.normal();
 
@@ -356,7 +393,11 @@ fn collect_faces(
             if !region_contains(fp, c) {
                 continue;
             }
-            if let Some(flip) = classify(op, this_side, na, c, a_polys, b_polys, &coplanar) {
+            let Some(flip) = classify(op, this_side, na, c, a_polys, b_polys, &coplanar) else {
+                dropped += 1;
+                continue;
+            };
+            {
                 let face = OrientedFace::new(
                     region,
                     fp.plane,
@@ -375,7 +416,7 @@ fn collect_faces(
             }
         }
     }
-    Ok(())
+    Ok(dropped)
 }
 
 /// Whether a sub-face (interior point `c`, owning-face normal `na`, from operand
@@ -1314,15 +1355,276 @@ mod tests {
         );
     }
 
-    /// Subtracting a box that only touches `a`'s top face removes nothing.
+    /// Subtracting a box that only touches `a`'s top face removes nothing,
+    /// and a subtract that removes nothing is refused rather than returned
+    /// as an unchanged `a` (this test asserted the unchanged `a` before the
+    /// refusal existed).
     #[test]
     fn stacked_subtract_leaves_a_unchanged() {
         let a = unit_cube();
         let b = unit_cube();
         let stacked = Transform::translation(Vec3::new(0.0, 0.0, 1.0));
-        let r = Object::boolean(BooleanOp::Subtract, &a, &b, &stacked).unwrap();
+        assert_eq!(
+            Object::boolean(BooleanOp::Subtract, &a, &b, &stacked).unwrap_err(),
+            BooleanError::NothingRemoved
+        );
+    }
+
+    /// Two boxes sitting apart: the subtract has nothing to remove.
+    #[test]
+    fn disjoint_subtract_is_refused() {
+        let (a, b, t) = overlapping(Vec3::new(5.0, 0.0, 0.0));
+        assert_eq!(
+            Object::boolean(BooleanOp::Subtract, &a, &b, &t).unwrap_err(),
+            BooleanError::NothingRemoved
+        );
+        // Union of the same pair still answers honestly: two shells, both
+        // volumes kept (see `disjoint_union_keeps_both_volumes`).
+        let u = Object::boolean(BooleanOp::Union, &a, &b, &t).unwrap();
+        assert!((volume(&u) - 2.0).abs() < VOL_TOL);
+    }
+
+    /// A prism with an L-shaped cross-section in the xz plane, extruded along
+    /// y from `y0` to `y1`. `xz` is the cross-section wound counter-clockwise
+    /// with x to the right and z up.
+    fn prism_along_y(xz: &[(f64, f64)], y0: f64, y1: f64) -> Object {
+        let n = xz.len();
+        let mut pts = Vec::with_capacity(2 * n);
+        for &(x, z) in xz {
+            pts.push(Point3::new(x, y0, z));
+        }
+        for &(x, z) in xz {
+            pts.push(Point3::new(x, y1, z));
+        }
+        // x × z = −y, so the cross-section's CCW winding faces −y: that is
+        // the outward normal of the y0 cap; the y1 cap is wound the other way.
+        let mut faces = vec![
+            (0..n).collect::<Vec<_>>(),
+            (0..n).rev().map(|i| i + n).collect(),
+        ];
+        for i in 0..n {
+            let j = (i + 1) % n;
+            // Each side quad traverses the y0 cap's edge in reverse, like the
+            // cube helper's side faces do against its bottom face.
+            faces.push(vec![j, i, i + n, j + n]);
+        }
+        let p = Object::from_polygons(&pts, &faces).unwrap();
+        p.validate().unwrap();
+        assert_eq!(p.watertight(), WatertightState::Watertight);
+        assert!(volume(&p) > 0.0, "prism is wound inside out");
+        p
+    }
+
+    /// A 3/4 prism hugging the cube's (x=1, z=1) edge: its missing quadrant
+    /// is exactly the cube's corner, so it touches the cube along two face
+    /// strips (x=1 for z in [0.5,1], z=1 for x in [0.5,1]) and shares no
+    /// volume. Partial coplanar face contact is RESOLVED by the arrangement
+    /// (not refused as DegenerateContact), so before the volume check this
+    /// subtract returned the cube unchanged.
+    #[test]
+    fn subtract_touching_along_a_face_strip_is_refused() {
+        let a = unit_cube();
+        let hug = prism_along_y(
+            &[
+                (1.0, 0.5),
+                (1.5, 0.5),
+                (1.5, 1.5),
+                (0.5, 1.5),
+                (0.5, 1.0),
+                (1.0, 1.0),
+            ],
+            0.0,
+            1.0,
+        );
+        assert!((volume(&hug) - 0.75).abs() < VOL_TOL);
+        assert_eq!(
+            Object::boolean(BooleanOp::Subtract, &a, &hug, &Transform::IDENTITY).unwrap_err(),
+            BooleanError::NothingRemoved
+        );
+        // The union of the same pair fuses along the shared strips: one
+        // solid, no double-counted volume.
+        let u = Object::boolean(BooleanOp::Union, &a, &hug, &Transform::IDENTITY).unwrap();
+        u.validate().unwrap();
+        assert_eq!(u.watertight(), WatertightState::Watertight);
+        assert!(
+            (volume(&u) - 1.75).abs() < VOL_TOL,
+            "union vol {}",
+            volume(&u)
+        );
+    }
+
+    /// A cutter wholly inside `a` removes volume without touching `a`'s
+    /// skin: the result is `a` with a cavity (an inner, inside-out shell).
+    /// The refusal is about volume, not about whether faces intersect, so
+    /// this must stay Ok.
+    /// The refusal is about whether `b`'s skin enters `a`, not about how
+    /// much volume goes: a 0.1 mm × 0.1 mm × 10 µm notch (1e-13 m³, a
+    /// 1e-13 fraction of the cube) is a real cut and stays Ok.
+    #[test]
+    fn subtract_of_a_tiny_notch_is_not_refused() {
+        let a = unit_cube();
+        let notch = cube(
+            Point3::new(0.4, 0.4, 1.0 - 1e-5),
+            Point3::new(0.4 + 1e-4, 0.4 + 1e-4, 1.0 + 1e-4),
+        );
+        let r = Object::boolean(BooleanOp::Subtract, &a, &notch, &Transform::IDENTITY).unwrap();
         r.validate().unwrap();
-        assert!((volume(&r) - 1.0).abs() < VOL_TOL, "vol {}", volume(&r));
+        assert_eq!(r.watertight(), WatertightState::Watertight);
+        assert!(r.faces().len() > a.faces().len(), "the notch has walls");
+        assert!(
+            (volume(&r) - (1.0 - 1e-13)).abs() < 1e-14,
+            "vol {}",
+            volume(&r)
+        );
+    }
+
+    /// A 20 µm cavity (8e-15 m³) wholly inside a meter cube is a real cut too.
+    #[test]
+    fn subtract_of_a_tiny_enclosed_cavity_is_not_refused() {
+        let a = unit_cube();
+        let pore = cube(
+            Point3::new(0.5, 0.5, 0.5),
+            Point3::new(0.5 + 2e-5, 0.5 + 2e-5, 0.5 + 2e-5),
+        );
+        let r = Object::boolean(BooleanOp::Subtract, &a, &pore, &Transform::IDENTITY).unwrap();
+        r.validate().unwrap();
+        assert_eq!(r.shells().len(), 2, "outer skin plus the cavity wall");
+    }
+
+    /// The test does not depend on where the operands sit: two 1 cm cubes a
+    /// meter apart refuse the same way at the origin and 10 km or 100 km
+    /// from it, where a volume comparison about the origin would drown in
+    /// rounding.
+    #[test]
+    fn disjoint_subtract_far_from_the_origin_is_refused() {
+        for offset in [0.0, 1e3, 1e4, 3e4, 1e5] {
+            let o = Point3::new(offset, offset, offset);
+            let a = cube(o, Point3::new(o.x + 0.01, o.y + 0.01, o.z + 0.01));
+            let b = cube(
+                Point3::new(o.x + 1.0, o.y, o.z),
+                Point3::new(o.x + 1.01, o.y + 0.01, o.z + 0.01),
+            );
+            assert_eq!(
+                Object::boolean(BooleanOp::Subtract, &a, &b, &Transform::IDENTITY).unwrap_err(),
+                BooleanError::NothingRemoved,
+                "offset {offset}"
+            );
+            // And the face-strip contact, which welds, is refused there too.
+            let hug = cube(
+                Point3::new(o.x + 0.01, o.y, o.z + 0.005),
+                Point3::new(o.x + 0.02, o.y + 0.01, o.z + 0.015),
+            );
+            assert_eq!(
+                Object::boolean(BooleanOp::Subtract, &a, &hug, &Transform::IDENTITY).unwrap_err(),
+                BooleanError::NothingRemoved,
+                "hugging at offset {offset}"
+            );
+        }
+    }
+
+    /// An inside-out target (every loop reversed; still a closed shell, so
+    /// it passes the watertight gate) is refused like a right-side-out one:
+    /// the test reads the arrangement, not a signed volume whose sign an
+    /// inverted shell would flip.
+    #[test]
+    fn disjoint_subtract_from_an_inside_out_target_is_refused() {
+        let (a, b) = (Point3::ORIGIN, Point3::new(1.0, 1.0, 1.0));
+        let inside_out = Object::from_polygons(
+            &[
+                Point3::new(a.x, a.y, a.z),
+                Point3::new(b.x, a.y, a.z),
+                Point3::new(b.x, b.y, a.z),
+                Point3::new(a.x, b.y, a.z),
+                Point3::new(a.x, a.y, b.z),
+                Point3::new(b.x, a.y, b.z),
+                Point3::new(b.x, b.y, b.z),
+                Point3::new(a.x, b.y, b.z),
+            ],
+            &[
+                vec![1, 2, 3, 0],
+                vec![7, 6, 5, 4],
+                vec![4, 5, 1, 0],
+                vec![5, 6, 2, 1],
+                vec![6, 7, 3, 2],
+                vec![7, 4, 0, 3],
+            ],
+        )
+        .unwrap();
+        assert_eq!(inside_out.watertight(), WatertightState::Watertight);
+        assert!(volume(&inside_out) < 0.0, "wound inside out");
+        let cutter = unit_cube();
+        let apart = Transform::translation(Vec3::new(5.0, 0.0, 0.0));
+        assert_eq!(
+            Object::boolean(BooleanOp::Subtract, &inside_out, &cutter, &apart).unwrap_err(),
+            BooleanError::NothingRemoved
+        );
+    }
+
+    /// A two-shell target (a union of two cubes sitting apart) losing one
+    /// whole shell to a cutter that encloses it: `b`'s skin never enters a
+    /// face of `a`, but every face of the swallowed shell is dropped, and a
+    /// dropped face of `a` is a removal. The survivor is the other cube —
+    /// also with the cutter flush against the swallowed cube's top.
+    #[test]
+    fn subtract_swallowing_one_shell_of_two_is_a_real_cut() {
+        let near = unit_cube();
+        let far = cube(Point3::new(5.0, 0.0, 0.0), Point3::new(6.0, 1.0, 1.0));
+        let a = Object::boolean(BooleanOp::Union, &near, &far, &Transform::IDENTITY).unwrap();
+        assert_eq!(a.shells().len(), 2);
+        for top in [2.0, 1.0] {
+            let swallow = cube(Point3::new(-1.0, -1.0, -1.0), Point3::new(2.0, 2.0, top));
+            let r = Object::boolean(BooleanOp::Subtract, &a, &swallow, &Transform::IDENTITY)
+                .unwrap_or_else(|e| panic!("cutter to z={top}: {e:?}"));
+            r.validate().unwrap();
+            assert_eq!(r.watertight(), WatertightState::Watertight);
+            assert_eq!(r.shells().len(), 1, "one cube left (cutter to z={top})");
+            assert!((volume(&r) - 1.0).abs() < VOL_TOL, "vol {}", volume(&r));
+        }
+    }
+
+    /// The refusal inherits the arrangement's tolerances and nothing more: a
+    /// slab taken off the top of a cube is a cut once it is thicker than
+    /// `tol::PLANE_DIST` (the cutter's bottom then leaves the top face's
+    /// plane), and a touch once it is thinner (the two faces are coplanar to
+    /// the arrangement, so no face of `a` is dropped and no face of `b` is
+    /// kept).
+    #[test]
+    fn subtract_thinner_than_plane_dist_is_a_touch_and_thicker_is_a_cut() {
+        let a = unit_cube();
+        let slab = |d: f64| cube(Point3::new(0.0, 0.0, 1.0 - d), Point3::new(1.0, 1.0, 2.0));
+        for d in [tol::PLANE_DIST / 10.0, tol::PLANE_DIST / 2.0] {
+            assert_eq!(
+                Object::boolean(BooleanOp::Subtract, &a, &slab(d), &Transform::IDENTITY)
+                    .unwrap_err(),
+                BooleanError::NothingRemoved,
+                "d = {d}"
+            );
+        }
+        for d in [tol::PLANE_DIST * 10.0, 1e-6, 1e-3] {
+            let r = Object::boolean(BooleanOp::Subtract, &a, &slab(d), &Transform::IDENTITY)
+                .unwrap_or_else(|e| panic!("d = {d}: {e:?}"));
+            r.validate().unwrap();
+            assert!(
+                (volume(&r) - (1.0 - d)).abs() < VOL_TOL,
+                "d = {d}: vol {}",
+                volume(&r)
+            );
+        }
+    }
+
+    #[test]
+    fn subtract_of_cutter_inside_a_is_a_cavity_not_refused() {
+        let a = unit_cube();
+        let inner = cube(Point3::new(0.25, 0.25, 0.25), Point3::new(0.75, 0.75, 0.75));
+        let r = Object::boolean(BooleanOp::Subtract, &a, &inner, &Transform::IDENTITY).unwrap();
+        r.validate().unwrap();
+        assert_eq!(r.watertight(), WatertightState::Watertight);
+        assert_eq!(r.shells().len(), 2, "outer skin plus the cavity wall");
+        assert!(
+            (volume(&r) - (1.0 - 0.125)).abs() < VOL_TOL,
+            "vol {}",
+            volume(&r)
+        );
     }
 
     /// The user's case: two boxes sitting on the ground (shared z=0 *and* z=1

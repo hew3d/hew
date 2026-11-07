@@ -524,6 +524,15 @@ impl std::error::Error for SketchError {}
 #[derive(Debug, Clone)]
 pub struct Sketch {
     plane: Plane,
+    /// A **detached shape** (persisted, part of equality): drawing that
+    /// takes part in no plane arrangement. A drafting lift of its plane
+    /// leaves it out, so later drawing there neither splits nor merges with
+    /// it and it never becomes face topology; it is edited only through its
+    /// own sketch-only draft ([`crate::Document::draft_detached`]), and
+    /// extruding one of its regions always makes a new Object. Never set on
+    /// an object-owned sketch (invariant I9). Every rebuild of an existing
+    /// sketch starts from [`Sketch::blank_like`], which carries it.
+    detached: bool,
     vertices: SlotMap<SketchVertexId, SketchVertex>,
     edges: SlotMap<SketchEdgeId, SketchEdge>,
     regions: SlotMap<SketchRegionId, SketchRegion>,
@@ -584,10 +593,42 @@ pub(crate) struct RemovedScaffolding {
 }
 
 impl Sketch {
-    /// An empty sketch on `plane`.
+    /// An empty sketch on `plane` (not detached).
     pub fn on_plane(plane: Plane) -> Sketch {
+        Self::blank(plane, false)
+    }
+
+    /// An empty **detached** sketch on `plane` (see the field `detached`).
+    pub fn detached_on_plane(plane: Plane) -> Sketch {
+        Self::blank(plane, true)
+    }
+
+    /// Whether this sketch is a detached shape: drawing that takes part in
+    /// no plane arrangement (see the field `detached`).
+    pub fn detached(&self) -> bool {
+        self.detached
+    }
+
+    /// An empty sketch on this sketch's plane with its `detached` flag:
+    /// what every rebuild of an existing sketch starts from, so the flag is
+    /// carried structurally. Transient drafting state (curve bracket, bulk
+    /// insertion cells, snapping, seams) is NOT copied.
+    pub fn blank_like(&self) -> Sketch {
+        Self::blank(self.plane, self.detached)
+    }
+
+    /// [`Sketch::blank_like`] on another plane: an empty sketch on `plane`
+    /// carrying this sketch's `detached` flag — the start of a rebuild that
+    /// lands this sketch's drawing on a transformed plane.
+    pub(crate) fn blank_like_on(&self, plane: Plane) -> Sketch {
+        Self::blank(plane, self.detached)
+    }
+
+    /// The one empty-sketch constructor every other one goes through.
+    fn blank(plane: Plane, detached: bool) -> Sketch {
         Sketch {
             plane,
+            detached,
             vertices: SlotMap::with_key(),
             edges: SlotMap::with_key(),
             regions: SlotMap::with_key(),
@@ -1341,7 +1382,9 @@ impl Sketch {
         t: &crate::Transform,
         plane: Plane,
     ) -> Result<Sketch, SketchError> {
-        let mut fresh = Sketch::on_plane(plane);
+        // The new sketch is this one's kind: a detached shape's islands
+        // detach or copy into a detached sketch.
+        let mut fresh = self.blank_like_on(plane);
         self.replay_islands_into(islands, t, &mut fresh)?;
         Ok(fresh)
     }
@@ -1385,7 +1428,7 @@ impl Sketch {
         t: &crate::Transform,
         plane: Plane,
     ) -> Result<Sketch, SketchError> {
-        let mut fresh = Sketch::on_plane(plane);
+        let mut fresh = self.blank_like_on(plane);
         self.replay_edges_into(edges, t, &mut fresh)?;
         Ok(fresh)
     }
@@ -3020,11 +3063,12 @@ impl Sketch {
     }
 }
 
-/// Content equality: same plane and identical vertex/edge/region storage,
-/// **including handle identity** (same `SlotMap` keys). Gesture undo snapshots
-/// (see `Document::end_sketch_gesture`) rely on the handle-identity part —
-/// restoring a snapshot must keep every previously-issued id valid — so plain
-/// positional equality would be too weak here.
+/// Content equality: same plane, same `detached` flag, and identical
+/// vertex/edge/region storage, **including handle identity** (same `SlotMap`
+/// keys). Gesture undo snapshots (see `Document::end_sketch_gesture`) rely
+/// on the handle-identity part — restoring a snapshot must keep every
+/// previously-issued id valid — so plain positional equality would be too
+/// weak here.
 impl PartialEq for Sketch {
     fn eq(&self, other: &Sketch) -> bool {
         fn slotmaps_eq<K: slotmap::Key, V: PartialEq>(
@@ -3034,6 +3078,7 @@ impl PartialEq for Sketch {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
         }
         self.plane == other.plane
+            && self.detached == other.detached
             && slotmaps_eq(&self.vertices, &other.vertices)
             && slotmaps_eq(&self.edges, &other.edges)
             && slotmaps_eq(&self.regions, &other.regions)
@@ -3962,22 +4007,12 @@ fn split_ring_at_repeats(walk: Vec<SketchVertexId>) -> Vec<Vec<SketchVertexId>> 
 // ═════════════════════════════════════════════ structural reconstruction
 
 impl Sketch {
-    /// Create an empty sketch for structural reconstruction. Unlike `on_plane`,
-    /// this is `pub(crate)` so the serializer can build a Sketch by directly
-    /// inserting pre-validated elements (bypassing the sticky-geometry pipeline).
-    pub(crate) fn reconstruct(plane: Plane) -> Sketch {
-        Sketch {
-            plane,
-            vertices: SlotMap::with_key(),
-            edges: SlotMap::with_key(),
-            regions: SlotMap::with_key(),
-            curves: SlotMap::with_key(),
-            active_curve: None,
-            islands: SlotMap::with_key(),
-            bulk_vertex_cells: None,
-            snap_to_existing: false,
-            seams: Vec::new(),
-        }
+    /// Create an empty sketch for structural reconstruction, `detached` as
+    /// the file says. Unlike `on_plane`, this is `pub(crate)` so the
+    /// serializer can build a Sketch by directly inserting pre-validated
+    /// elements (bypassing the sticky-geometry pipeline).
+    pub(crate) fn reconstruct(plane: Plane, detached: bool) -> Sketch {
+        Self::blank(plane, detached)
     }
 
     /// Insert a vertex directly into the slotmap (no planarity check, no merging).

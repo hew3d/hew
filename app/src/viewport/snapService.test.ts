@@ -119,6 +119,8 @@ describe('SnapService — precision mode', () => {
       kind: () => 'endpoint',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => 7n,
@@ -165,6 +167,8 @@ describe('SnapService — precision mode', () => {
       kind: () => 'center',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -209,6 +213,8 @@ describe('SnapService — precision mode', () => {
       kind: () => 'on-axis',
       direction: () => new Float64Array([1, 0, 0]),
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -244,6 +250,8 @@ describe('SnapService — precision mode', () => {
       kind: () => 'midpoint',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -275,6 +283,8 @@ describe('SnapService — precision mode', () => {
       kind: () => 'midpoint',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -315,6 +325,8 @@ describe('SnapService — ApertureBasis (projection-aware aperture, camera.md §
     kind: () => 'endpoint',
     direction: () => undefined,
     projected_from: () => undefined,
+    pierces_face: () => false,
+    meeting_line: () => undefined,
     object: () => undefined,
     instance: () => undefined,
     element: () => 7n,
@@ -377,6 +389,8 @@ describe('SnapService — clearHold (finding 5a: discrete-tap hysteresis)', () =
       kind: () => 'endpoint',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => 7n,
@@ -427,6 +441,8 @@ describe('SnapService — apertureScaleOverride (finding 5b: tap-inspect vs. coa
     kind: () => 'endpoint',
     direction: () => undefined,
     projected_from: () => undefined,
+    pierces_face: () => false,
+    meeting_line: () => undefined,
     object: () => undefined,
     instance: () => undefined,
     element: () => 7n,
@@ -477,6 +493,8 @@ describe('SnapService — facesOnly (design v1.1 Lane E "Push/Pull face-first")'
       kind: () => kind,
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -572,6 +590,8 @@ describe('SnapService — direction lock', () => {
       kind: () => 'endpoint',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => 7n,
@@ -592,5 +612,98 @@ describe('SnapService — direction lock', () => {
     for (const c of snapFn.mock.calls) {
       expect(Array.from(c[16] as Float64Array)).toEqual([0, 1, 0])
     }
+  })
+})
+
+describe('snapJsToSnap — pierces_face', () => {
+  const snapJs = (pierces: boolean) => ({
+    x: () => 1, y: () => 0.9, z: () => 0.6,
+    kind: () => 'intersection',
+    direction: () => undefined,
+    projected_from: () => undefined,
+    pierces_face: () => pierces,
+    meeting_line: () => undefined,
+    object: () => 7n,
+    instance: () => undefined,
+    element: () => 3n,
+    element_kind: () => 'edge',
+    sketch: () => undefined,
+    sketch_region: () => undefined,
+    sketch_curve: () => undefined,
+    free: () => {},
+  })
+
+  it('carries the kernel’s pierced-face flag onto the snap, true and false alike', () => {
+    const pierced = new SnapService({ snap: vi.fn(() => snapJs(true)) } as unknown as Scene)
+    const snap = pierced.resolve(DOWN, 800, PERSPECTIVE_45).snap
+    expect(snap?.kind).toBe('intersection')
+    expect(snap?.piercesFace).toBe(true)
+
+    const crossing = new SnapService({ snap: vi.fn(() => snapJs(false)) } as unknown as Scene)
+    expect(crossing.resolve(DOWN, 800, PERSPECTIVE_45).snap?.piercesFace).toBe(false)
+  })
+})
+
+describe('snapJsToSnap — meeting_line', () => {
+  const snapJs = (line: number[] | undefined) => ({
+    x: () => 1, y: () => 0.8, z: () => 0.5,
+    kind: () => (line !== undefined ? 'on-intersection-line' : 'on-face'),
+    direction: () => undefined,
+    projected_from: () => undefined,
+    pierces_face: () => false,
+    meeting_line: () => line,
+    object: () => 7n,
+    instance: () => undefined,
+    element: () => 3n,
+    // The kernel never reports a snap on a meeting line as a face pick.
+    element_kind: () => (line !== undefined ? 'meeting-line' : 'face'),
+    sketch: () => undefined,
+    sketch_region: () => undefined,
+    sketch_curve: () => undefined,
+    free: () => {},
+  })
+
+  it('splits the kernel’s six numbers into the line’s two ends, and leaves a plain face without one', () => {
+    const onLine = new SnapService({ snap: vi.fn(() => snapJs([1, 0.6, 0.5, 1, 1.4, 0.5])) } as unknown as Scene)
+    const snap = onLine.resolve(DOWN, 800, PERSPECTIVE_45).snap
+    expect(snap?.kind).toBe('on-intersection-line')
+    expect(snap?.meetingLine).toEqual([[1, 0.6, 0.5], [1, 1.4, 0.5]])
+    // Edge-class, not a face pick; the first face stays the owner of record.
+    expect(snap?.elementKind).toBe('meeting-line')
+    expect(snap?.object).toBe(7n)
+    expect(snap?.element).toBe(3n)
+
+    const onFace = new SnapService({ snap: vi.fn(() => snapJs(undefined)) } as unknown as Scene)
+    const face = onFace.resolve(DOWN, 800, PERSPECTIVE_45).snap
+    expect(face?.meetingLine).toBeUndefined()
+    expect(face?.elementKind).toBe('face')
+  })
+
+  it('holds a meeting line only while the release query still finds that same line, not another on the same face', () => {
+    // A slab through a wall: its top and bottom lines both name the wall's
+    // face as the first face, and only their ends tell them apart.
+    const top = [1, 0.6, 0.5, 1, 1.4, 0.5]
+    const bottom = [1, 0.6, 0.4, 1, 1.4, 0.4]
+    let acquire: number[] | undefined = top
+    let release: number[] | undefined = top
+    const snapFn = vi.fn((...args: unknown[]) => {
+      // The release query is the one that passes a soft-axis scale.
+      const line = args[12] === null || args[12] === undefined ? acquire : release
+      return snapJs(line)
+    })
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+    expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.meetingLine).toEqual([[1, 0.6, 0.5], [1, 1.4, 0.5]])
+
+    // The cursor drifts off the top line onto the wall: the acquire query
+    // finds only the face, the release query still the top line. Held.
+    acquire = undefined
+    expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.kind).toBe('on-intersection-line')
+
+    // The release query now finds the bottom line instead: a different
+    // target, so the hold lets go to the face.
+    release = bottom
+    const snap = svc.resolve(DOWN, 800, PERSPECTIVE_45).snap
+    expect(snap?.kind).toBe('on-face')
+    expect(snap?.meetingLine).toBeUndefined()
   })
 })

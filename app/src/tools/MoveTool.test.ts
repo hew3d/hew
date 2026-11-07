@@ -27,6 +27,8 @@ import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
 import { ctxGround, ctxOfPlane, draftRef } from './planeUnits'
 import { applyAffineToPoint } from './transformMath'
+import { SiblingPreviewMirror } from '../viewport/siblingPreview'
+import { isSessionGhost } from './transformPreview'
 
 const CTX = ctxGround()
 /** Kernel keys are 16-hex strings. */
@@ -1500,5 +1502,38 @@ describe('MoveTool — click-drag-release gate', () => {
     expect(gate.release(t.tool, 1, 160, 100, () => t.tool.onPointerDown(makeSnap(3, 0, 0), rayThrough(3, 0)))).toBe(true)
     expect(t.scene.duplicate_selection_array.mock.calls.length + t.onCommit.mock.calls.length).toBeGreaterThan(commits)
     expect(t.tool.gestureInFlight()).toBe(false)
+  })
+})
+
+describe('MoveTool — the drag ghost is session geometry, mirrored onto sibling placements', () => {
+  it('arming a move puts a marked ghost in the preview; the mirror follows it and clears with Esc', () => {
+    const objectsGroup = new THREE.Group()
+    const sub = new THREE.Group()
+    sub.name = 'Object_1'
+    sub.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial()))
+    objectsGroup.add(sub)
+    const preview = new THREE.Group()
+    const { scene } = makeWasmScene()
+    const tool = new MoveTool(scene as never, preview, objectsGroup, [{ kind: 'object', id: 1n }], vi.fn(), vi.fn(), vi.fn(), null, vi.fn(), vi.fn())
+    const root = new THREE.Group()
+    const mirror = new SiblingPreviewMirror({ source: preview, root, frames: () => [1, 0, 0, 4, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 7, 0, 0, 1, 0] })
+
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    const ghosts = preview.children.filter(isSessionGhost)
+    expect(ghosts).toHaveLength(1)
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(2)
+
+    // The ghost rides the cursor; so do its mirrors, in place.
+    tool.onPointerMove(makeSnap(1, 0, 0), rayThrough(1, 0))
+    mirror.sync()
+    expect(mirror.lastWork).toBe('retarget')
+    const clone = (root.children[0] as THREE.Group).children[0]
+    expect(clone.position.x).toBeCloseTo(1)
+
+    tool.onKey(makeKeyEvent('Escape'))
+    mirror.sync()
+    expect(preview.children.filter(isSessionGhost)).toHaveLength(0)
+    expect(mirror.mirrorCount).toBe(0)
   })
 })

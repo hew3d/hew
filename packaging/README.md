@@ -84,6 +84,25 @@ actions someone with the right access has to do once)
   with Contents: Read and write, and add it as the `HEW_PACKAGES_TOKEN`
   secret on `hew3d/hew`.
 
+## Flatpak runtime and install scope
+
+Hew's remote contains the app; Flathub supplies its GNOME runtime. The
+published install commands add both remotes with `--user` and install Hew
+in that same scope, including on systems where Flathub is only configured
+per user. Bundles name Flathub's `.flatpakrepo` as their runtime source and
+Hew's raw repository URL as their update origin, with the public signing
+key embedded so updates can be verified.
+
+The command regression tests run without Flatpak or signing secrets:
+
+```sh
+python3 -B -m unittest discover -s packaging/tests -v
+```
+
+They execute the build script and published install commands against
+controlled tool doubles; the real Linux build remains in the packaging
+workflow.
+
 ## Why the cask keeps the in-app updater
 
 A cask installs a prebuilt app by definition, so the cask uses the same

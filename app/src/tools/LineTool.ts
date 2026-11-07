@@ -99,6 +99,7 @@ import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retyp
 import { displayedLength, isFreePick } from './displayedValue'
 import { segmentLength, directionBetween, rehomePlaneNormal, fromPointCandidate, dotV3 } from './lineInput'
 import type { SketchTarget } from './sketchGesture'
+import { DetachedMode, type OnDetachedChange } from './detachedMode'
 import { runDraft, addDraftSegment, refreshAfterDraft, draftTargetFromSketchTarget, type DraftTarget } from './draftCommit'
 import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, isPointOnDrawPlane, planeKey, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
@@ -257,7 +258,7 @@ type FaceStage =
  * anchor / the face chain's points) to what it was before that segment so
  * the re-commit is indistinguishable from the original click.
  */
-type RetypeSpec =
+type RetypeSpec = ChainLatch & (
   | {
       mode: 'plane'
       plane: DrawPlane
@@ -277,6 +278,21 @@ type RetypeSpec =
       endpoint: V3
       index: number
     }
+)
+
+/**
+ * A Line chain's Detached latch (separate-shapes design §6.1, D12), as it
+ * stood BEFORE the retypeable segment: a retype retracts that segment and
+ * re-lays it, so the chain's latch and the detached sketch it continues
+ * must be put back first — the first segment of a detached chain CREATES the
+ * sketch, and its undo deletes it. `segDetached` is the mode the segment
+ * itself was drawn with.
+ */
+type ChainLatch = {
+  chainDetachedBefore: boolean | null
+  chainSketchBefore: bigint | null
+  segDetached: boolean
+}
 
 /** How far, in canvas pixels, the pointer may drift after the commit and
  *  still count as "not moved" for the retype window — comfortably above a
@@ -297,6 +313,20 @@ export class LineTool implements Tool {
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
+    const anchored = this.planeStage.kind !== 'idle' || this.faceStage.kind !== 'idle'
+    const base = this._stageHint()
+    if (!anchored) return this.sep.hint(base, true)
+    // D12: the mode is latched when a chain's first segment commits; a tap
+    // after that applies to the next chain.
+    if (this.chainDetached !== null && this.chainDetached !== this.sep.on) {
+      return this.sep.on
+        ? this.sep.hint(base, false, true)
+        : `${base} ${t`This line stays detached; the next one will not.`}`
+    }
+    return this.sep.hint(base, false)
+  }
+
+  private _stageHint(): string {
     if (this._dragDone && this.retype.isOpen) {
       return t`Type a length to resize the line you just drew, or click to start a new one.`
     }
@@ -324,6 +354,17 @@ export class LineTool implements Tool {
   private onFaceImprint: OnFaceImprint
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
+  /** Detached mode (Ctrl/Cmd tap): the next chain joins nothing. */
+  private readonly sep: DetachedMode
+  /** The mode the CURRENT chain latched at its first committed segment
+   *  (D12), or null before one commits. Every segment of the chain uses it,
+   *  whatever a later tap does to `sep`. */
+  private chainDetached: boolean | null = null
+  /** The detached sketch the chain's first segment created (the draft
+   *  report's `sketches[0]`); later segments continue into it. Null before
+   *  the first segment, off a detached chain, and after a re-home onto a new
+   *  plane (which starts a new detached sketch there). */
+  private chainSketch: bigint | null = null
 
   /** The current editing context (component-edit-parity.md phase A1) — a
    *  single value replacing the old `_activeContext`/`_activeComponent`
@@ -601,13 +642,15 @@ export class LineTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
+    onDetachedChange: OnDetachedChange = () => { /* no-op */ },
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.onCommit = onCommit
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
-    this.onMeasurementCb = onMeasurement
+    this.sep = new DetachedMode(onMeasurement, onDetachedChange)
+    this.onMeasurementCb = this.sep.report
     this.retype = new RetypeWindow(wasmScene)
   }
 
@@ -1109,7 +1152,7 @@ export class LineTool implements Tool {
     this.lastSnap = effectiveSnap
     this._lastPlaneCursor = cursor
     this._clearPreview()
-    this._drawRubberBandSegment(anchor, cursor, this._previewStyle(effectiveSnap))
+    this._drawRubberBandSegment(anchor, cursor, this._previewStyle(effectiveSnap, false))
     this._reportMeasurement(anchor, cursor)
     this._publishTransient()
   }
@@ -1135,7 +1178,7 @@ export class LineTool implements Tool {
     const { points } = this.faceStage
     const last = points[points.length - 1]
     this._clearPreview()
-    this._drawRubberBandSegment(last, cursor, this._previewStyle(snap))
+    this._drawRubberBandSegment(last, cursor, this._previewStyle(snap, true))
     this._reportMeasurement(last, cursor)
     this._publishTransient()
   }
@@ -1570,11 +1613,57 @@ export class LineTool implements Tool {
     this._lastFaceCursor = null
     this._prevSegmentDir = null
     this._chainVertices = []
+    this._resetChainLatch()
     this.lockAxis = null
     this.shiftAxisLock = false
     this._clearPreview()
     this.onMeasurementCb('')
     this.wasmScene.clear_transient_segments()
+  }
+
+  /** The chain is over: the next chain latches Detached afresh. */
+  private _resetChainLatch(): void {
+    this.chainDetached = null
+    this.chainSketch = null
+  }
+
+  /**
+   * Whether the chain being drawn is detached, latching the mode at the
+   * chain's first commit (D12). The caller undoes the latch with
+   * `_unlatchIfFirst` when that first commit is refused.
+   */
+  private _latchChain(): boolean {
+    if (this.chainDetached === null) this.chainDetached = this.sep.on
+    return this.chainDetached
+  }
+
+  /** The live detached sketch the chain continues into, or null (none yet,
+   *  or it vanished — an undo removed it — in which case the next segment
+   *  starts a fresh detached sketch). */
+  private _liveChainSketch(): bigint | null {
+    if (this.chainSketch === null) return null
+    if (this.wasmScene.sketch_plane(this.chainSketch) === undefined) this.chainSketch = null
+    return this.chainSketch
+  }
+
+  /** Continue into the chain's detached sketch: its own drafting context. */
+  private _chainSketchTarget(sketch: bigint, instance: bigint | null): DraftTarget {
+    return {
+      kind: 'ctx',
+      ctx: JSON.stringify({ sketch: Number(sketch), ...(instance !== null ? { instance: Number(instance) } : {}) }),
+    }
+  }
+
+  /** Remember the sketch a detached chain's first segment created. */
+  private _noteChainSketch(report: { sketches: bigint[] }): void {
+    if (this.chainDetached === true && this.chainSketch === null && report.sketches.length > 0) {
+      this.chainSketch = report.sketches[0]
+    }
+  }
+
+  /** The chain latch as it stands now, for a retypeable segment's spec. */
+  private _latchSnapshot(): Pick<ChainLatch, 'chainDetachedBefore' | 'chainSketchBefore'> {
+    return { chainDetachedBefore: this.chainDetached, chainSketchBefore: this.chainSketch }
   }
 
   /**
@@ -1626,6 +1715,7 @@ export class LineTool implements Tool {
     this._prevSegmentDir = null
     this.lastSnap = null
     this._chainVertices = []
+    this._resetChainLatch()
     this.lockAxis = null
     this.shiftAxisLock = false
     this.idlePlaneLock = null
@@ -1644,6 +1734,19 @@ export class LineTool implements Tool {
    */
   onDocumentReset(): void {
     this.cancel()
+    this.sep.reset()
+  }
+
+  /** Ctrl/Cmd clean tap (Viewport-driven; a bare Ctrl never reaches onKey):
+   *  flip Detached. A chain already under way keeps the mode it latched at
+   *  its first segment (D12); the tap applies to the next one. */
+  toggleDetached(): void {
+    this.sep.toggle()
+  }
+
+  /** Whether Detach is on. */
+  get detachedOn(): boolean {
+    return this.sep.on
   }
 
   /**
@@ -1849,17 +1952,33 @@ export class LineTool implements Tool {
     // restores so the re-commit sees exactly the state this click saw.
     const chainLenBefore = this._chainVertices.length
     const prevDirBefore = this._prevSegmentDir
+    const latchBefore = this._latchSnapshot()
     let armRetype = false
 
     let effectivePlane = plane
     let effectiveTarget = target
+    // Restored if the re-homed segment is refused: the chain then stays on
+    // its old plane and must keep continuing into its old detached sketch.
+    let rehomedFromSketch: bigint | null | undefined
     if (!isPointOnDrawPlane(cursor, plane)) {
       const rehomed = this._rehomeChain(anchor, cursor)
       effectivePlane = rehomed.plane
       effectiveTarget = rehomed.target
+      // A detached chain that re-homes onto a new plane starts a new
+      // detached sketch there (a sketch lives on one plane).
+      rehomedFromSketch = this.chainSketch
+      this.chainSketch = null
     }
 
     try {
+      // Detached (D12): latched at the chain's first segment. The first
+      // segment opens a new detached sketch on the plane; the rest continue
+      // into it as its own drafting context.
+      const detached = this._latchChain()
+      const liveSketch = detached ? this._liveChainSketch() : null
+      const draftTarget = liveSketch !== null
+        ? this._chainSketchTarget(liveSketch, effectiveTarget.instance)
+        : draftTargetFromSketchTarget(effectiveTarget, detached, effectivePlane)
       // Each committed segment is its own draft — one Cmd+Z undoes exactly
       // that segment, matching LineTool's chain-forward-per-click semantics.
       // The draft's plane is the drafting context: the segment lowers into
@@ -1868,10 +1987,11 @@ export class LineTool implements Tool {
       // drawing is what says the chain closed a loop.
       const { result: closed, report } = runDraft(
         this.wasmScene,
-        draftTargetFromSketchTarget(effectiveTarget),
+        draftTarget,
         t({ context: 'tool', message: 'Line' }),
         (d) => addDraftSegment(this.wasmScene, d, anchor, cursor).length > 0,
       )
+      this._noteChainSketch(report)
       const planeTag = effectiveTarget.kind === 'existing'
         ? `sketch:${effectiveTarget.handle}`
         : `plane:${effectiveTarget.instance ?? 'world'}:${planeKey(effectiveTarget.plane)}`
@@ -1914,6 +2034,7 @@ export class LineTool implements Tool {
         this._lastPlaneCursor = null
         this._prevSegmentDir = null
         this._chainVertices = []
+        this._resetChainLatch()
         this.lockAxis = null
         this.shiftAxisLock = false
         this._clearPreview()
@@ -1938,12 +2059,16 @@ export class LineTool implements Tool {
         this.retype.arm({
           mode: 'plane', plane, target, anchor, endpoint: cursor,
           chainLen: chainLenBefore, prevSegmentDir: prevDirBefore,
+          ...latchBefore, segDetached: this.chainDetached === true,
         })
         this._retypeRayDir = this._lastRayDir
         this._retypeScreen = this._lastScreen
       }
       return true
     } catch (err) {
+      // A refused FIRST segment starts no chain: the next click latches anew.
+      if (latchBefore.chainDetachedBefore === null) this.chainDetached = null
+      if (rehomedFromSketch !== undefined) this.chainSketch = rehomedFromSketch
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
@@ -2018,6 +2143,7 @@ export class LineTool implements Tool {
     // a ground chain: the segment lowers into face topology, the object's
     // owned sketch, or — over no face — a free sketch. Nothing is waiting to
     // "reach an edge"; a refusal leaves the chain as it was.
+    const latchBefore = this._latchSnapshot()
     if (!this._commitFaceSegment(object, face, last, point)) return false
 
     points.push(point)
@@ -2039,6 +2165,7 @@ export class LineTool implements Tool {
     if (!this._retyping) {
       this.retype.arm({
         mode: 'face', object, face, anchor: last, endpoint: point, index: points.length - 1,
+        ...latchBefore, segDetached: this.chainDetached === true,
       })
       this._retypeRayDir = this._lastRayDir
       this._retypeScreen = this._lastScreen
@@ -2053,10 +2180,20 @@ export class LineTool implements Tool {
   private _commitFaceSegment(object: bigint, face: bigint, a: V3, b: V3): boolean {
     const run = (target: DraftTarget) =>
       runDraft(this.wasmScene, target, t({ context: 'tool', message: 'Line' }), (d) => addDraftSegment(this.wasmScene, d, a, b))
+    const wasUnlatched = this.chainDetached === null
     try {
+      // Detached (D12): the first segment opens a new detached sketch on the
+      // face's plane; the rest continue into it. A detached commit changes no
+      // object, so `onFaceImprint` is never called for it.
+      const detached = this._latchChain()
+      const liveSketch = detached ? this._liveChainSketch() : null
       let outcome: ReturnType<typeof run>
       try {
-        outcome = run({ kind: 'face', object, face, instance: this._activeInstance })
+        outcome = run(
+          liveSketch !== null
+            ? this._chainSketchTarget(liveSketch, this._activeInstance)
+            : { kind: 'face', object, face, instance: this._activeInstance, ...(detached ? { detached: true as const } : {}) },
+        )
       } catch (err) {
         const code = parseKernelErrorCode(err)
         if (code !== 'UnknownFace' || this.faceStage.kind !== 'anchored') throw err
@@ -2070,14 +2207,17 @@ export class LineTool implements Tool {
             ground: isGroundPlane(planePoint, normal),
           },
           instance: this._activeInstance,
+          ...(detached ? { detached: true as const } : {}),
         })
       }
+      this._noteChainSketch(outcome.report)
       refreshAfterDraft(outcome.report, {
         onObject: (o) => this.onFaceImprint(o),
         onSketch: (sketch) => this.onCommit(sketch),
       })
       return true
     } catch (err) {
+      if (wasUnlatched) this.chainDetached = null
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
@@ -2122,6 +2262,10 @@ export class LineTool implements Tool {
   private _relaySegment(hot: RetypeSpec, end: V3): boolean {
     this._retyping = true
     try {
+      // Put the chain's Detached latch back to what the segment saw: the
+      // retracted first segment of a detached chain took its sketch with it.
+      this.chainDetached = hot.chainDetachedBefore ?? hot.segDetached
+      this.chainSketch = hot.chainSketchBefore
       if (hot.mode === 'face') {
         if (this.faceStage.kind !== 'anchored') return false
         this.faceStage.points.length = hot.index
@@ -2157,7 +2301,7 @@ export class LineTool implements Tool {
    * depthPolicy.ts) settles coincidence with the ground/committed lines, so
    * no z-lift.
    */
-  private _drawRubberBandSegment(a: V3, b: V3, style: FatSegmentsOpts = PREVIEW_LINE_STYLE): void {
+  private _drawRubberBandSegment(a: V3, b: V3, style: FatSegmentsOpts): void {
     const pts = new Float32Array([...a, ...b])
     this.preview.add(makeFatSegments(pts, style))
   }
@@ -2179,17 +2323,20 @@ export class LineTool implements Tool {
    * Falls back to the plain `PREVIEW_LINE_STYLE` (blue) whenever there's no
    * direction to paint, or it doesn't read as one of the three frame axes.
    */
-  private _previewStyle(snap: Snap | null): FatSegmentsOpts {
-    if (snap === null || snap.direction === undefined) return PREVIEW_LINE_STYLE
+  private _previewStyle(snap: Snap | null, joinsFace: boolean): FatSegmentsOpts {
+    // A chain in progress is drawn with the mode latched at its first
+    // segment (a mid-chain tap only applies to the next chain).
+    const base = this.sep.previewStyle(joinsFace, this.chainDetached ?? this.sep.on)
+    if (snap === null || snap.direction === undefined) return base
     const match = axisColorForDirection(
       snap.direction,
       LINE_AXIS_PREVIEW_TOL_DOT,
       axisColorsForTheme(getResolvedTheme()),
       getDrawingAxes(this.wasmScene),
     )
-    if (match === null) return PREVIEW_LINE_STYLE
+    if (match === null) return base
     return {
-      ...PREVIEW_LINE_STYLE,
+      ...base,
       color: match.color,
       widthPx: this.lockAxis !== null ? HARD_LOCK_PREVIEW_WIDTH_PX : PREVIEW_LINE_STYLE.widthPx,
     }

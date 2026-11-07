@@ -43,7 +43,7 @@ The Tape Measure does two jobs, chosen by where your *first* click lands:
 
 Both jobs also take a drag: press on the first point or the edge, drag, and let go where the second click would go.
 
-**Drop a parallel guide.** Click on an **edge** — of a solid, a sketch you've drawn, a group member, or a component instance — then move sideways. A guide line parallel to that edge follows at the offset shown in the readout. Click to place it, or type an exact offset and press `Enter`. This is the classic SketchUp workflow for laying out a design before drawing it. A **world axis** works as the source edge too: click anywhere along the red, green, or blue axis (the On Axis cue confirms the pick) and pull sideways. So does an existing guide line — one guide can father a whole ladder of parallels.
+**Drop a parallel guide.** Click on an **edge** — of a solid, a sketch you've drawn, a group member, or a component instance — then move sideways. A guide line parallel to that edge follows at the offset shown in the readout. Click to place it, or type an exact offset and press `Enter`. This is the classic SketchUp workflow for laying out a design before drawing it. The **line where a face of one object meets a face of another** (the On Intersection Line cue) works the same way, even though no edge is stored there; its middle and ends are points, so a click on them measures instead. A **world axis** works as the source edge too: click anywhere along the red, green, or blue axis (the On Axis cue confirms the pick) and pull sideways. So does an existing guide line — one guide can father a whole ladder of parallels.
 
 ### Working off the ground plane
 
@@ -96,6 +96,8 @@ Guides are construction geometry — dashed lines and point markers that are nev
 - The purple "On Guide" snap cue appears whenever the cursor is on a guide.
 - Where a guide **crosses** an edge, a sketch line, or another guide, the amber Intersection cue appears — click there to land exactly on the crossing, which is usually the whole reason the guide exists.
 - **View ▸ Guides** hides or shows all guides at once; hidden guides don't snap.
+- To move a guide, use [Move](/learn/moving-and-transforming/): with no objects selected, click the guide and click (or drag) to where it goes — axis locks and typed distances work as for objects, and the guide is selected only while it moves. Tap the copy modifier to drop a copy instead, then type `5x` or `5/` for a row of evenly spaced guides.
+- To turn a guide, use [Rotate](/learn/moving-and-transforming/): with nothing selected, set the pivot on the guide and sweep. To turn a guide about a point on another guide, or where two guides cross, select it with Select first: with a guide selected, Rotate's first click only places the pivot. A rotated copy with `6x` or `6/` fans copies around the pivot.
 - To delete one guide, select it with the Select tool and press `Delete`. **Edit ▸ Delete Guide Lines** clears every guide in one undoable step.
 - Guides are saved in the `.hew` file, and guides in imported SketchUp files come across. A SketchUp guide that starts at a point or runs between two keeps that length, so it draws and snaps only there, as it does in SketchUp. A guide from a SketchUp file carries the tag its layer became, so hiding that tag in the Tags panel hides the guide, and a Scene that hides the tag hides it too; select a guide to see its tags in Object Info.
 

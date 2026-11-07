@@ -71,6 +71,7 @@ const SIMPLE: Record<string, MessageDescriptor> = {
   copy: msg`Copy`,
   guide: msg`Guide`,
   'delete-guide': msg`Delete guide`,
+  'move-guide': msg`Move guide`,
   'delete-sketch': msg`Delete sketch`,
   explode: msg`Explode`,
   'make-unique': msg`Make unique`,
@@ -223,6 +224,10 @@ export function historyKindLabel(k: HistoryKind): string | null {
     case 'delete-guides': {
       const n = count(k, 'count')
       return plural(n, { one: 'Delete # guide', other: 'Delete # guides' })
+    }
+    case 'copy-guides': {
+      const n = count(k, 'count')
+      return plural(n, { one: 'Copy guide', other: 'Copy guide ×#' })
     }
     case 'add-annotation':
       return annotationWord(text(k, 'what'))

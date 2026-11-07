@@ -45,7 +45,7 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { formatLength } from '../settings/units'
 import { displayedLength, isFreePick } from './displayedValue'
 import { runDraft } from './draftCommit'
-import { ctxOfFace, ctxOfSketch, planeOfCtx, readPlaneUnits, type PlaneUnitsScene } from './planeUnits'
+import { ctxOfFace, ctxOfSketchUnits, planeOfCtxIn, readPlaneUnits, type PlaneUnitsScene } from './planeUnits'
 
 /** Fraction of the pick depth within which the ray counts as ON a vertex
  *  (about eight pixels at the default view). */
@@ -142,7 +142,7 @@ export class EditVertexTool implements Tool {
       const { ctx, base } = hit
       // A picked vertex's plane is live by construction, but resolve it
       // defensively: a stale context is a miss, not a silent ground fallback.
-      const pl = planeOfCtx(ctx)
+      const pl = planeOfCtxIn(this.wasmScene, ctx)
       if (pl === null) return
       const plane = { point: pl.point, normal: pl.normal }
       const incidentOthers = this._findIncidentOthers(ctx, base)
@@ -228,7 +228,7 @@ export class EditVertexTool implements Tool {
       } finally {
         pick.free()
       }
-      const ctx = ctxOfSketch(this.wasmScene, sketch, null)
+      const ctx = ctxOfSketchUnits(this.wasmScene, sketch, null)
       return ctx === null ? null : { ctx, base }
     }
 

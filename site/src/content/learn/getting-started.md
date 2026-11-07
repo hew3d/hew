@@ -123,11 +123,11 @@ It is worth saying that you don't always *have* to use the arrow keys to lock to
 
 Our goal is to make a "cutter" out of a cylinder that we construct to lie *across* the bin. It'll be easier to do this if you **Orbit** the model to show the right face of the bin more clearly. Alternatively, you can choose **Camera ▸ Standard Views ▸ Right**. Play around with this - being able to master the camera is a critical skill working in 3D.
 
-Drawing on the "right" face means locking to the **red / X-plane** (which is perpendicular to the X-axis, because that's how that works).
+A plain click with a draw tool on the right face would split the new circle where it meets the face's edge, because the circle would join the face's drawing. We want the disk to stay whole, so we turn on **Detached** first. Detached mode is how you draw on a face and keep the shape apart from it.
 
-1. Choose the **Circle** (`C`) tool and hover over the bin's right face. Then press the **Right arrow** key. The Status Bar confirms that we're locked to the red plane and there are some visual clues as well.
-2. Click the upper left corner of the right face as the circle center and enter a radius of `2cm`. We now have a disk Sketch on the right face of the bin, rather than on the ground
-3. Choose **Push/Pull** (`P`) to create a cylinder the entire length of the bin (`7cm` or just choose a point on the far edge)
+1. Choose the **Circle** (`C`) tool and hover over the bin's right face. Tap `Ctrl` (`⌘` on a Mac). The cursor gains a small `+`, the hint at the bottom says Detach is on, and the readout gains a "Detached ·" prefix: the next shape stays apart from the face it is drawn on.
+2. Click the upper left corner of the right face as the circle center, type `2cm`, and press `Enter`. The disk is a Sketch in the Outliner, on the face's plane but not part of the face. The face itself is untouched. The disk is blue, the color of drawing that belongs to no solid.
+3. Choose **Push/Pull** (`P`), click the disk, type `-7cm`, and press `Enter`. The minus sign pushes the disk across the bin to its far side. We now have a cylinder along the bin's top edge, sunk into the wall.
 
 ![The bin with a right face disk being extruded into a cylinder](/docs/bin-with-cutter.webp)
 

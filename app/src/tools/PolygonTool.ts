@@ -89,13 +89,14 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
 import { circlePolygonGround, circlePolygonFace, facePlaneBasis } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
-import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
+import { makeFatSegments, disposeFatSegments } from '../viewport/fatLine'
 import { displayedLength, isFreePick } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { editPolygonBuffer, isPolygonInputKey, parsePolygonSideCount, nextIdlePlaneLock, axisLockColorName, radiusReadout } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { segmentLength } from './lineInput'
 import type { SketchTarget } from './sketchGesture'
+import { DetachedMode, type OnDetachedChange } from './detachedMode'
 import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
 import { drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
@@ -176,6 +177,9 @@ type RetypeSpec = {
   center: V3
   rim: V3
   sides: number
+  /** Detached mode the polygon was drawn with — a retype re-commits with
+   *  the same mode (separate-shapes design §6.1). */
+  detached: boolean
 } & (
   | { mode: 'plane'; plane: DrawPlane; target: SketchTarget }
   | { mode: 'face'; object: bigint; face: bigint; normal: V3 }
@@ -188,6 +192,11 @@ export class PolygonTool implements Tool {
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
+    const idle = this.planeStage.kind === 'idle' && this.faceStage.kind === 'idle' && !this.retype.isOpen
+    return this.sep.hint(this._stageHint(), idle)
+  }
+
+  private _stageHint(): string {
     if (!this.capturingInput() && this.idlePlaneLock === null && this.retype.isOpen) {
       return t`Type an exact radius, or Ns for N sides, to redraw the polygon you just drew — or click the centre of the next one.`
     }
@@ -212,6 +221,8 @@ export class PolygonTool implements Tool {
   private onFaceImprint: OnFaceImprint
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
+  /** Detached mode (Ctrl/Cmd tap): the next polygon joins nothing. */
+  private readonly sep: DetachedMode
   private onSideCountChangeCb: OnSideCountChange
 
   /** The current side count. Persists across gestures within this tool
@@ -279,13 +290,15 @@ export class PolygonTool implements Tool {
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
     onSideCountChange: OnSideCountChange = () => { /* no-op */ },
+    onDetachedChange: OnDetachedChange = () => { /* no-op */ },
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
     this.onCommit = onCommit
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
-    this.onMeasurementCb = onMeasurement
+    this.sep = new DetachedMode(onMeasurement, onDetachedChange)
+    this.onMeasurementCb = this.sep.report
     this.onSideCountChangeCb = onSideCountChange
     this.retype = new RetypeWindow(wasmScene)
   }
@@ -901,6 +914,18 @@ export class PolygonTool implements Tool {
    */
   onDocumentReset(): void {
     this.cancel()
+    this.sep.reset()
+  }
+
+  /** Ctrl/Cmd clean tap (Viewport-driven; a bare Ctrl never reaches onKey):
+   *  flip Detached for the next polygon (separate-shapes design §6.1). */
+  toggleDetached(): void {
+    this.sep.toggle()
+  }
+
+  /** Whether Detach is on. */
+  get detachedOn(): boolean {
+    return this.sep.on
   }
 
   /** The typed-buffer readout. A buffer ending in a completed `<n>s` token
@@ -992,7 +1017,7 @@ export class PolygonTool implements Tool {
       this._clearPreview()
       this.onMeasurementCb('')
       if (this._commitPlanePolygon(plane, target, center, rim)) {
-        this.retype.arm({ mode: 'plane', plane, target, center, rim, sides: this.sides })
+        this.retype.arm({ mode: 'plane', plane, target, center, rim, sides: this.sides, detached: this.sep.on })
       }
     } else if (this.faceStage.kind === 'anchored') {
       const { object, face, normal, center } = this.faceStage
@@ -1023,7 +1048,7 @@ export class PolygonTool implements Tool {
       this._clearPreview()
       this.onMeasurementCb('')
       if (this._commitFacePolygon(object, face, rim, center, normal)) {
-        this.retype.arm({ mode: 'face', object, face, normal, center, rim, sides: this.sides })
+        this.retype.arm({ mode: 'face', object, face, normal, center, rim, sides: this.sides, detached: this.sep.on })
       }
     }
   }
@@ -1077,8 +1102,8 @@ export class PolygonTool implements Tool {
   private _commitHot(hot: RetypeSpec, rim: V3, sides: number): boolean {
     this.sides = sides
     return hot.mode === 'plane'
-      ? this._commitPlanePolygon(hot.plane, hot.target, hot.center, rim)
-      : this._commitFacePolygon(hot.object, hot.face, rim, hot.center, hot.normal)
+      ? this._commitPlanePolygon(hot.plane, hot.target, hot.center, rim, hot.detached)
+      : this._commitFacePolygon(hot.object, hot.face, rim, hot.center, hot.normal, hot.detached)
   }
 
   // ------------------------------------------------------------------ plane mode
@@ -1127,7 +1152,7 @@ export class PolygonTool implements Tool {
       this._lastPlaneCursor = null
       this._clearPreview()
       this.onMeasurementCb('')
-      if (committed) this.retype.arm({ mode: 'plane', plane, target, center, rim: cursor, sides: this.sides })
+      if (committed) this.retype.arm({ mode: 'plane', plane, target, center, rim: cursor, sides: this.sides, detached: this.sep.on })
     }
   }
 
@@ -1141,7 +1166,7 @@ export class PolygonTool implements Tool {
    *  geometry, not an approximation to suppress) — the kernel's
    *  `SketchCurveKind::Polygon` is what keeps the circumcircle from being
    *  mistaken for a curve. */
-  private _commitPlanePolygon(plane: DrawPlane, target: SketchTarget, center: V3, rim: V3): boolean {
+  private _commitPlanePolygon(plane: DrawPlane, target: SketchTarget, center: V3, rim: V3, detached = this.sep.on): boolean {
     const verts = plane.ground
       ? circlePolygonGround([center[0], center[1]], [rim[0], rim[1]], this.sides)
       : circlePolygonFace(center, rim, plane.normal, this.sides)
@@ -1151,7 +1176,7 @@ export class PolygonTool implements Tool {
     const radius = plane.ground
       ? Math.hypot(rim[0] - center[0], rim[1] - center[1])
       : segmentLength(center, rim)
-    return this._runPolygonDraft(draftTargetFromSketchTarget(target), verts, center, radius)
+    return this._runPolygonDraft(draftTargetFromSketchTarget(target, detached, plane), verts, center, radius)
   }
 
   /** The whole polygon is ONE chain inside a POLYGON bracket
@@ -1240,7 +1265,7 @@ export class PolygonTool implements Tool {
       this.onMeasurementCb('')
 
       if (this._commitFacePolygon(object, face, cursorOnPlane, center, normal)) {
-        this.retype.arm({ mode: 'face', object, face, normal, center, rim: cursorOnPlane, sides: this.sides })
+        this.retype.arm({ mode: 'face', object, face, normal, center, rim: cursorOnPlane, sides: this.sides, detached: this.sep.on })
       }
     }
   }
@@ -1267,12 +1292,12 @@ export class PolygonTool implements Tool {
   }
 
   /** Split the given face with an N-gon loop defined by center/rim/normal. */
-  private _commitFacePolygon(object: bigint, face: bigint, rim: V3, center: V3, normal: V3): boolean {
+  private _commitFacePolygon(object: bigint, face: bigint, rim: V3, center: V3, normal: V3, detached = this.sep.on): boolean {
     const verts = circlePolygonFace(center, rim, normal, this.sides)
     if (verts === null) return false // degenerate — ignore
 
     return this._runPolygonDraft(
-      { kind: 'face', object, face, instance: this._activeInstance },
+      { kind: 'face', object, face, instance: this._activeInstance, ...(detached ? { detached: true as const } : {}) },
       verts,
       center,
       segmentLength(center, rim),
@@ -1293,7 +1318,7 @@ export class PolygonTool implements Tool {
       ? circlePolygonGround([center[0], center[1]], [cursor[0], cursor[1]], this.sides)
       : circlePolygonFace(center, cursor, plane.normal, this.sides)
     if (verts !== null && verts.length > 0) {
-      this._drawRubberBandVerts(verts)
+      this._drawRubberBandVerts(verts, false)
       this._reportMeasurement(center, cursor)
     } else {
       this._clearPreview()
@@ -1308,7 +1333,7 @@ export class PolygonTool implements Tool {
     const cursor = this._lastFaceCursor
     const verts = circlePolygonFace(center, cursor, normal, this.sides)
     if (verts !== null) {
-      this._drawRubberBandVerts(verts)
+      this._drawRubberBandVerts(verts, true)
       this._reportMeasurement(center, cursor)
     } else {
       this._clearPreview()
@@ -1324,7 +1349,7 @@ export class PolygonTool implements Tool {
    *
    * @param verts  N world-space xyz vertices in order.
    */
-  private _drawRubberBandVerts(verts: V3[]): void {
+  private _drawRubberBandVerts(verts: V3[], joinsFace: boolean): void {
     this._clearPreview()
     const n = verts.length
     const pts = new Float32Array(n * 2 * 3)
@@ -1335,7 +1360,7 @@ export class PolygonTool implements Tool {
       pts[base + 0] = a[0]; pts[base + 1] = a[1]; pts[base + 2] = a[2]
       pts[base + 3] = b[0]; pts[base + 4] = b[1]; pts[base + 5] = b[2]
     }
-    this.preview.add(makeFatSegments(pts, PREVIEW_LINE_STYLE))
+    this.preview.add(makeFatSegments(pts, this.sep.previewStyle(joinsFace)))
   }
 
   private _clearPreview(): void {

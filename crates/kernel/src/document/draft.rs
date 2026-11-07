@@ -87,6 +87,10 @@ pub(crate) struct Lifted {
     stored: Vec<StoredEdge>,
     /// The working sketch as lifted, before any edit.
     before: Sketch,
+    /// A detached shape's own drafting context ([`Document::lift_detached`],
+    /// [`Document::lift_detached_new`]): no objects, no other sketches, and
+    /// everything lowers into the one detached sketch (or a new one).
+    detached: bool,
 }
 
 /// An open drafting gesture ([`Document::begin_draft`]).
@@ -270,7 +274,7 @@ fn snap_onto_fixed(
             .find(|&&(from, _)| from == p)
             .map_or(p, |&(_, to)| to)
     };
-    let mut fresh = Sketch::on_plane(work.plane());
+    let mut fresh = work.blank_like();
     let edges: Vec<SketchEdgeId> = work.edges().keys().collect();
     replay_edges_mapped(work, &edges, &mut fresh, &map).ok()?;
     fresh.carry_faceless_from(work, &map, &[]);
@@ -649,6 +653,9 @@ impl Document {
                     !self.sketch_tombstoned(&s)
                         && !self.object_sketches.contains_key(&s)
                         && self.def_sketches.get(&s).copied() == frame
+                        // A detached shape takes part in no plane's
+                        // arrangement: it is its own drafting context.
+                        && !sk.detached()
                         && planes_coincide(&plane, &sk.plane())
                 })
                 .map(|(s, _)| s)
@@ -691,7 +698,53 @@ impl Document {
             fixed,
             stored,
             before: work,
+            detached: false,
         })
+    }
+
+    /// The sketch-only lift of detached sketch `sketch` (its own drafting
+    /// context): no objects and no other sketch take part, so an edit
+    /// arranges only with the sketch's own drawing and lowers back into it.
+    ///
+    /// # Errors
+    /// [`DocumentError::UnknownSketch`] for a stale, deleted, object-owned,
+    /// or non-detached sketch; [`DocumentError::Sketch`] if its drawing
+    /// cannot be replayed (never for a valid document).
+    pub(crate) fn lift_detached(&self, sketch: SketchId) -> Result<Lifted, DocumentError> {
+        let sk = self
+            .sketches
+            .get(sketch)
+            .filter(|sk| {
+                sk.detached()
+                    && !self.sketch_tombstoned(&sketch)
+                    && !self.object_sketches.contains_key(&sketch)
+            })
+            .ok_or(DocumentError::UnknownSketch)?;
+        let frame = self.def_sketches.get(&sketch).copied();
+        let mut lifted = self.lift_plane_with(sk.plane(), frame, &[], Some(vec![sketch]))?;
+        lifted.detached = true;
+        Ok(lifted)
+    }
+
+    /// The lift that CREATES a detached sketch on `plane` in `frame`:
+    /// nothing is lifted, and everything the edit draws lowers into ONE new
+    /// detached sketch.
+    ///
+    /// # Errors
+    /// [`DocumentError::UnknownComponent`] for a stale or hidden `frame`.
+    pub(crate) fn lift_detached_new(
+        &self,
+        plane: Plane,
+        frame: Option<ComponentId>,
+    ) -> Result<Lifted, DocumentError> {
+        if let Some(c) = frame
+            && self.components.get(c).is_none_or(|r| r.hidden)
+        {
+            return Err(DocumentError::UnknownComponent);
+        }
+        let mut lifted = self.lift_plane_with(plane, frame, &[], Some(Vec::new()))?;
+        lifted.detached = true;
+        Ok(lifted)
     }
 
     /// Opens a drafting gesture on `plane` in `frame` over `objects`
@@ -715,6 +768,59 @@ impl Document {
             return Err(DocumentError::DraftAlreadyOpen);
         }
         let lifted = self.lift_plane(plane, frame, objects)?;
+        self.open_draft(lifted, label);
+        Ok(())
+    }
+
+    /// Opens a drafting gesture on detached sketch `sketch` in its own
+    /// context (detached shapes D5): only that sketch is lifted — no
+    /// object, no other drawing on its plane — so the edit (continuing a
+    /// line, erasing, moving, offsetting, re-faceting) arranges with the
+    /// sketch's own drawing alone, and [`Document::end_draft`] lowers it
+    /// all back into the sketch (an emptied sketch is deleted) as one undo
+    /// step labeled `label`.
+    ///
+    /// # Errors
+    /// [`DocumentError::DraftAlreadyOpen`]; [`DocumentError::UnknownSketch`]
+    /// for a stale, deleted, object-owned, or non-detached sketch.
+    pub fn begin_draft_detached(
+        &mut self,
+        sketch: SketchId,
+        label: &str,
+    ) -> Result<(), DocumentError> {
+        if self.current_draft().is_some() {
+            return Err(DocumentError::DraftAlreadyOpen);
+        }
+        let lifted = self.lift_detached(sketch)?;
+        self.open_draft(lifted, label);
+        Ok(())
+    }
+
+    /// Opens a drafting gesture that draws a NEW detached shape on `plane`
+    /// in `frame` (detached shapes D3): the working sketch starts empty, and
+    /// everything the edit draws lowers into ONE new detached sketch, which
+    /// [`DraftReport::sketches`] names (an edit that draws nothing records
+    /// nothing). Nothing else on the plane takes part.
+    ///
+    /// # Errors
+    /// [`DocumentError::DraftAlreadyOpen`]; [`DocumentError::UnknownComponent`]
+    /// for a stale or hidden `frame`.
+    pub fn begin_draft_detached_new(
+        &mut self,
+        plane: Plane,
+        frame: Option<ComponentId>,
+        label: &str,
+    ) -> Result<(), DocumentError> {
+        if self.current_draft().is_some() {
+            return Err(DocumentError::DraftAlreadyOpen);
+        }
+        let lifted = self.lift_detached_new(plane, frame)?;
+        self.open_draft(lifted, label);
+        Ok(())
+    }
+
+    /// Makes `lifted` the open draft, its working sketch a copy of the lift.
+    fn open_draft(&mut self, lifted: Lifted, label: &str) {
         let work = lifted.before.clone();
         let generation = self.history_generation();
         self.pending_draft = Some(Box::new(PendingDraft {
@@ -723,7 +829,6 @@ impl Document {
             label: label.to_string(),
             generation,
         }));
-        Ok(())
     }
 
     /// The open draft, unless the document changed under it (a recorded
@@ -798,6 +903,51 @@ impl Document {
         F: FnOnce(&mut Sketch) -> Result<(), SketchError>,
     {
         self.begin_draft(plane, frame, objects, label)?;
+        self.run_open_draft(edit)
+    }
+
+    /// Runs one drafting gesture on detached sketch `sketch` in its own
+    /// context: [`Document::begin_draft_detached`], `edit` on the working
+    /// sketch, [`Document::end_draft`]. A refusal from `edit` or the
+    /// lowering cancels the draft and leaves the document untouched.
+    pub fn draft_detached<F>(
+        &mut self,
+        sketch: SketchId,
+        label: &str,
+        edit: F,
+    ) -> Result<(DraftReport, DocChange), DocumentError>
+    where
+        F: FnOnce(&mut Sketch) -> Result<(), SketchError>,
+    {
+        self.begin_draft_detached(sketch, label)?;
+        self.run_open_draft(edit)
+    }
+
+    /// Runs one drafting gesture that draws a new detached shape on `plane`
+    /// in `frame`: [`Document::begin_draft_detached_new`], `edit`,
+    /// [`Document::end_draft`]. The report's `sketches` names the created
+    /// sketch. A refusal cancels the draft and leaves the document
+    /// untouched.
+    pub fn draft_detached_new<F>(
+        &mut self,
+        plane: Plane,
+        frame: Option<ComponentId>,
+        label: &str,
+        edit: F,
+    ) -> Result<(DraftReport, DocChange), DocumentError>
+    where
+        F: FnOnce(&mut Sketch) -> Result<(), SketchError>,
+    {
+        self.begin_draft_detached_new(plane, frame, label)?;
+        self.run_open_draft(edit)
+    }
+
+    /// `edit` on the draft just opened, then [`Document::end_draft`]; any
+    /// refusal cancels the draft.
+    fn run_open_draft<F>(&mut self, edit: F) -> Result<(DraftReport, DocChange), DocumentError>
+    where
+        F: FnOnce(&mut Sketch) -> Result<(), SketchError>,
+    {
         let edited = edit(self.draft_sketch_mut().expect("just opened"));
         if let Err(e) = edited {
             self.cancel_draft();
@@ -823,7 +973,15 @@ impl Document {
             fixed,
             stored,
             before,
+            detached,
         } = &pending.lifted;
+        // I11: a detached shape's own context lifts no object and no solid
+        // edge, so the topology plan and materialization below are no-ops
+        // and every edge lowers as free drawing into its one sketch.
+        debug_assert!(
+            !*detached || (objects.is_empty() && fixed.is_empty() && owned.is_empty()),
+            "a detached lower lifted objects or solid edges (I11) — kernel bug"
+        );
         // A new point within the merge tolerance of an edge that was there
         // before (a solid's own edge, or drawing already on the plane) is ON
         // that edge: it moves onto the edge's line, so the edge splits
@@ -1302,12 +1460,23 @@ impl Document {
         for s in every_sketch {
             let edges = desired.remove(&Store::Sketch(s)).unwrap_or_default();
             let cur = &self.sketches[s];
+            // I10: a plane lower never writes a detached sketch (the lift
+            // filter keeps them out), and a detached lower writes only its
+            // own.
+            debug_assert_eq!(
+                cur.detached(),
+                *detached,
+                "lower of a {} draft would write sketch {s:?} (detached: {}) (I10) — kernel bug",
+                if *detached { "detached" } else { "plane" },
+                cur.detached()
+            );
             let cur_keys: BTreeSet<SegKey> = cur.edges().keys().map(|e| key_of(cur, e)).collect();
             let new_keys: BTreeSet<SegKey> = edges.iter().map(|&e| key_of(after, e)).collect();
             // (A loop given its face by drawing over an edge changes no edge,
             // but the sketch all the same.)
             if cur_keys != new_keys || face_state_changed(cur, after) {
-                let mut fresh = Sketch::on_plane(cur.plane());
+                // The rebuild keeps the store's kind (its `detached` flag).
+                let mut fresh = cur.blank_like();
                 replay_edges(after, &edges, &mut fresh).map_err(DocumentError::Sketch)?;
                 // A loop with no face stays one through the rebuild (sketch rule 6).
                 fresh.carry_faceless_from(after, &|p| p, &[]);
@@ -1323,7 +1492,13 @@ impl Document {
             creations.push((Some(o), fresh));
         }
         if !new_free.is_empty() {
-            let mut fresh = Sketch::on_plane(*plane);
+            // One new free sketch per draft; in a detached shape's context
+            // it is a new detached sketch.
+            let mut fresh = if *detached {
+                Sketch::detached_on_plane(*plane)
+            } else {
+                Sketch::on_plane(*plane)
+            };
             replay_edges(after, &new_free, &mut fresh).map_err(DocumentError::Sketch)?;
             // A loop with no face stays one through the rebuild (sketch rule 6).
             fresh.carry_faceless_from(after, &|p| p, &[]);
@@ -1364,7 +1539,11 @@ impl Document {
             report.sketches.push(s);
         }
         for (owner, fresh) in creations {
-            let s = self.insert_sketch_record(Sketch::on_plane(fresh.plane()));
+            debug_assert!(
+                !(fresh.detached() && owner.is_some()),
+                "a detached sketch would be created object-owned (I9) — kernel bug"
+            );
+            let s = self.insert_sketch_record(fresh.blank_like());
             if let Some(c) = frame {
                 self.def_sketches.insert(s, *c);
             }
@@ -1893,6 +2072,25 @@ pub struct PlaneUnits {
     pub regions: Vec<DraftRegion>,
 }
 
+/// What one entry of [`Document::free_plane_units`] lists.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlaneListing {
+    /// A plane's arrangement: its free drawing with the objects taking part.
+    Plane(Plane),
+    /// One detached sketch, in its own context
+    /// ([`Document::detached_sketch_units`]).
+    Detached { sketch: SketchId, plane: Plane },
+}
+
+impl PlaneListing {
+    /// The plane the entry's drawing lies on.
+    pub fn plane(&self) -> Plane {
+        match *self {
+            PlaneListing::Plane(plane) | PlaneListing::Detached { plane, .. } => plane,
+        }
+    }
+}
+
 impl Document {
     /// The drawing on `plane` in `frame` over `objects`, as the units a user
     /// selects (islands of drawing edges, each edge with its store and key)
@@ -1914,18 +2112,22 @@ impl Document {
 
     /// The drawing of a frame, plane by plane, in one pass: every plane a
     /// free sketch of the frame lies on (planes within tolerance as one),
-    /// each listed as [`Document::plane_units`] lists it, with the objects
-    /// of the frame that have a face on the plane taking part, except the
-    /// `excluded` ones (hidden on screen). Each plane is lifted with its
-    /// own sketches, found by one grouping of all of them; asking plane by
-    /// plane walks every sketch and every face of the frame for each plane,
-    /// which on a document of tens of thousands of small sketches took
-    /// minutes. The order is by plane, so the listing is deterministic.
+    /// each listed as [`Document::plane_units`] lists it
+    /// ([`PlaneListing::Plane`]), with the objects of the frame that have a
+    /// face on the plane taking part, except the `excluded` ones (hidden on
+    /// screen). Each plane is lifted with its own sketches, found by one
+    /// grouping of all of them; asking plane by plane walks every sketch and
+    /// every face of the frame for each plane, which on a document of tens
+    /// of thousands of small sketches took minutes. The order is by plane,
+    /// so the listing is deterministic. After the planes, every detached
+    /// sketch of the frame is listed on its own
+    /// ([`PlaneListing::Detached`], [`Document::detached_sketch_units`]), in
+    /// [`SketchId`] order: it belongs to no plane's arrangement.
     pub fn free_plane_units(
         &self,
         frame: Option<ComponentId>,
         excluded: &BTreeSet<ObjectId>,
-    ) -> Vec<(Plane, PlaneUnits)> {
+    ) -> Vec<(PlaneListing, PlaneUnits)> {
         // A plane's bucket: its normal and offset at a grain of a
         // millionth, a thousand times coarser than the tolerances two
         // coincident planes are allowed to differ by. Such planes land in
@@ -1952,14 +2154,19 @@ impl Document {
             }
             out
         };
-        // Free sketches by plane, in sketch order.
+        // Free sketches by plane, in sketch order; detached ones apart.
         let mut groups: Vec<(Plane, Vec<SketchId>)> = Vec::new();
         let mut group_of: BTreeMap<[i64; 4], Vec<usize>> = BTreeMap::new();
+        let mut detached: Vec<SketchId> = Vec::new();
         for (s, sk) in self.sketches.iter() {
             if self.sketch_tombstoned(&s)
                 || self.object_sketches.contains_key(&s)
                 || self.def_sketches.get(&s).copied() != frame
             {
+                continue;
+            }
+            if sk.detached() {
+                detached.push(s);
                 continue;
             }
             let plane = sk.plane();
@@ -2020,8 +2227,54 @@ impl Document {
             let Ok(units) = self.plane_units_of(&lifted) else {
                 continue;
             };
-            out.push((plane, units));
+            out.push((PlaneListing::Plane(plane), units));
         }
+        detached.sort_unstable();
+        for s in detached {
+            let Ok(units) = self.detached_sketch_units(s) else {
+                continue;
+            };
+            out.push((
+                PlaneListing::Detached {
+                    sketch: s,
+                    plane: self.sketches[s].plane(),
+                },
+                units,
+            ));
+        }
+        out
+    }
+
+    /// The drawing of detached sketch `sketch` in its own context, as
+    /// [`Document::plane_units`] lists a plane's: its units, and its regions
+    /// — every one over no face, extruding as the sketch's own region
+    /// ([`DraftRegion::extrude`]), since no object takes part.
+    ///
+    /// # Errors
+    /// As [`Document::begin_draft_detached`]: [`DocumentError::UnknownSketch`]
+    /// for a stale, deleted, object-owned, or non-detached sketch.
+    pub fn detached_sketch_units(&self, sketch: SketchId) -> Result<PlaneUnits, DocumentError> {
+        self.plane_units_of(&self.lift_detached(sketch)?)
+    }
+
+    /// The live detached sketches on `plane` (within tolerance, same
+    /// facing) in `frame`, in [`SketchId`] order — what a pick on a plane
+    /// probes besides the plane's own arrangement, since a detached sketch
+    /// is in none.
+    pub fn detached_sketches_on(&self, plane: Plane, frame: Option<ComponentId>) -> Vec<SketchId> {
+        let mut out: Vec<SketchId> = self
+            .sketches
+            .iter()
+            .filter(|&(s, sk)| {
+                sk.detached()
+                    && !self.sketch_tombstoned(&s)
+                    && !self.object_sketches.contains_key(&s)
+                    && self.def_sketches.get(&s).copied() == frame
+                    && planes_coincide(&plane, &sk.plane())
+            })
+            .map(|(s, _)| s)
+            .collect();
+        out.sort_unstable();
         out
     }
 
@@ -2309,7 +2562,31 @@ impl Document {
         objects: &[ObjectId],
         key: u64,
     ) -> Result<crate::sketch::Profile, DocumentError> {
-        let lifted = self.lift_plane(plane, frame, objects)?;
+        Self::region_profile_of(&self.lift_plane(plane, frame, objects)?, key)
+    }
+
+    /// [`Document::plane_region_profile`] for detached sketch `sketch`, in
+    /// its own context ([`Document::detached_sketch_units`] lists its
+    /// regions): what an offset of that region would start from.
+    ///
+    /// # Errors
+    /// As [`Document::begin_draft_detached`] for the sketch;
+    /// [`DocumentError::Sketch`] with
+    /// [`crate::sketch::SketchError::UnknownRegion`] when no region has that
+    /// key.
+    pub fn detached_region_profile(
+        &self,
+        sketch: SketchId,
+        key: u64,
+    ) -> Result<crate::sketch::Profile, DocumentError> {
+        Self::region_profile_of(&self.lift_detached(sketch)?, key)
+    }
+
+    /// The profile of the region with key `key` in a lift's drawing.
+    fn region_profile_of(
+        lifted: &Lifted,
+        key: u64,
+    ) -> Result<crate::sketch::Profile, DocumentError> {
         let rid = region_by_key(&lifted.before, key).ok_or(DocumentError::Sketch(
             crate::sketch::SketchError::UnknownRegion,
         ))?;

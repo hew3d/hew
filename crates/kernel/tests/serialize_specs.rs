@@ -2042,7 +2042,8 @@ fn save_names_the_writing_release() {
 fn state_hash_does_not_follow_the_release_version() {
     // Pinned from before the manifest named its release: the hashes frozen
     // into replay fixtures and bug-report recordings must stay valid across
-    // version bumps.
+    // version bumps (the hashed bytes carry `HASHED_FORMAT_VERSION`, not the
+    // writer's own version).
     assert_eq!(Document::new().state_hash(), 219_183_841_381_781_821);
 }
 
@@ -2712,7 +2713,7 @@ fn annotation_tags_are_gated_at_v18() {
         .ingest(scene(vec![vec![vec!["Notes".into()]]]), Vec::new())
         .unwrap();
     let bytes = tagged.save();
-    assert_eq!(version(&bytes), 25);
+    assert_eq!(version(&bytes), 26);
     assert!(Document::load(&bytes).is_ok());
     let smuggled = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(17));
     assert!(Document::load(&smuggled).is_err());
@@ -2773,7 +2774,7 @@ fn sketch_tags_are_gated_at_v20() {
         .ingest(scene(vec![vec!["Site".into()]]), Vec::new())
         .unwrap();
     let bytes = tagged.save();
-    assert_eq!(version(&bytes), 25);
+    assert_eq!(version(&bytes), 26);
     let loaded = Document::load(&bytes).unwrap();
     let s = loaded.sketch_ids()[0];
     assert_eq!(loaded.sketch_tags(s), [vec!["Site".to_string()]]);
@@ -2982,7 +2983,7 @@ fn guide_stretches_round_trip_and_are_gated_at_v22() {
     assert_eq!(before.len(), 3);
     let bytes = doc.save();
     let m = manifest_json(&bytes);
-    assert_eq!(m["format_version"], 25);
+    assert_eq!(m["format_version"], 26);
     let written: Vec<(serde_json::Value, serde_json::Value)> = m["guides"]
         .as_array()
         .unwrap()
@@ -3077,4 +3078,256 @@ fn a_guide_of_no_length_is_skipped_and_a_rescale_stretches_the_span() {
         .unwrap();
     assert!((segment.to.unwrap() - 0.0254).abs() < 1e-12, "{segment:?}");
     assert_eq!(segment.from, Some(0.0));
+}
+
+// ------------------------------------------------- detached sketches (v23)
+
+/// A box with plain drawing (a free sketch past its top edge and an owned
+/// loose line on the top) and, when `detached`, a detached circle on its
+/// top: the shapes the v23 field sits beside.
+fn detached_doc(detached: bool) -> (Document, kernel::ObjectId, Option<kernel::SketchId>) {
+    let mut doc = Document::new();
+    let b = extrude_box(&mut doc, 0.0, 0.0, 4.0, 3.0, 0.0, 2.0);
+    let top = Plane::from_point_normal(Point3::new(0.0, 0.0, 2.0), Vec3::new(0.0, 0.0, 1.0))
+        .expect("top plane");
+    doc.draft(top, None, &[b], "Rectangle", |w| {
+        for (a, c) in [
+            (Point3::new(5.0, 0.0, 2.0), Point3::new(6.0, 0.0, 2.0)),
+            (Point3::new(6.0, 0.0, 2.0), Point3::new(6.0, 1.0, 2.0)),
+            (Point3::new(6.0, 1.0, 2.0), Point3::new(5.0, 1.0, 2.0)),
+            (Point3::new(5.0, 1.0, 2.0), Point3::new(5.0, 0.0, 2.0)),
+        ] {
+            w.add_segment(a, c)?;
+        }
+        Ok(())
+    })
+    .expect("free drawing");
+    doc.draft(top, None, &[b], "Line", |w| {
+        w.add_segment(Point3::new(1.0, 1.0, 2.0), Point3::new(2.0, 1.0, 2.0))
+            .map(|_| ())
+    })
+    .expect("owned drawing");
+    let s = detached.then(|| {
+        let g = CurveGeom {
+            center: Point3::new(4.0, 3.0, 2.0),
+            radius: 0.5,
+        };
+        let (report, _) = doc
+            .draft_detached_new(top, None, "Circle", |w| {
+                w.begin_curve_with(g)?;
+                let n = 24;
+                let at = |i: usize| {
+                    let a = std::f64::consts::TAU * i as f64 / n as f64;
+                    Point3::new(g.center.x + 0.5 * a.cos(), g.center.y + 0.5 * a.sin(), 2.0)
+                };
+                for i in 0..n {
+                    w.add_segment(at(i), at(i + 1))?;
+                }
+                w.end_curve();
+                Ok(())
+            })
+            .expect("detached circle");
+        report.sketches[0]
+    });
+    (doc, b, s)
+}
+
+/// The container's manifest text exactly as written.
+fn manifest_text(bytes: &[u8]) -> String {
+    use std::io::Read as _;
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut s = String::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_string(&mut s)
+        .unwrap();
+    s
+}
+
+/// `bytes` with its manifest TEXT replaced by `edit` of it (no JSON
+/// re-serialization, so every other byte of the manifest stays as written).
+fn edit_manifest_text(bytes: &[u8], edit: impl FnOnce(String) -> String) -> Vec<u8> {
+    use std::io::{Cursor, Read as _, Write as _};
+    let text = edit(manifest_text(bytes));
+    let mut out = zip::ZipWriter::new(Cursor::new(Vec::<u8>::new()));
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .last_modified_time(zip::DateTime::default());
+    let mut src = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    for i in 0..src.len() {
+        let mut entry = src.by_index(i).unwrap();
+        let name = entry.name().unwrap().to_string();
+        let mut buf = Vec::new();
+        entry.read_to_end(&mut buf).unwrap();
+        if name == "manifest.json" {
+            buf = text.clone().into_bytes();
+        }
+        out.start_file(name, opts).unwrap();
+        out.write_all(&buf).unwrap();
+    }
+    out.finish().unwrap().into_inner()
+}
+
+/// A detached sketch round-trips through save and load (manifest v23):
+/// written as `"detached": true` on that sketch alone, loaded back
+/// detached with its drawing, still out of its plane's arrangement, and
+/// the save is a fixed point.
+#[test]
+fn detached_sketches_round_trip_at_v26() {
+    let (doc, b, s) = detached_doc(true);
+    let s = s.unwrap();
+    let bytes = doc.save();
+    let m = manifest_json(&bytes);
+    assert_eq!(m["format_version"], 26);
+    let flagged: Vec<&serde_json::Value> = m["sketches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|sk| sk.get("detached").is_some())
+        .collect();
+    assert_eq!(flagged.len(), 1, "only the detached sketch writes the key");
+    assert_eq!(flagged[0]["detached"], true);
+    assert!(flagged[0].get("owner_object").is_none());
+
+    let loaded = Document::load(&bytes).expect("v26 loads");
+    assert_eq!(
+        loaded.save(),
+        bytes,
+        "save -> load -> save is byte-identical"
+    );
+    assert_eq!(loaded.state_hash(), doc.state_hash());
+    let seps: Vec<kernel::SketchId> = loaded
+        .sketch_ids()
+        .into_iter()
+        .filter(|&x| loaded.sketch(x).unwrap().detached())
+        .collect();
+    assert_eq!(seps.len(), 1);
+    let (orig, back) = (doc.sketch(s).unwrap(), loaded.sketch(seps[0]).unwrap());
+    assert_eq!(back.plane(), orig.plane());
+    assert_eq!(back.edges().len(), orig.edges().len());
+    assert_eq!(back.regions().len(), 1);
+    assert!(loaded.sketch_owner_object(seps[0]).is_none());
+    // Loaded, it is still its own context: the top's listing ignores it.
+    let top = orig.plane();
+    let units = loaded
+        .plane_units(top, None, &loaded.drawable_objects_on_plane(top, None))
+        .unwrap();
+    assert!(
+        units
+            .units
+            .iter()
+            .flat_map(|u| &u.edges)
+            .all(|e| { !matches!(e.store, kernel::DraftStore::Free(x) if x == seps[0]) })
+    );
+    assert_eq!(
+        loaded.detached_sketch_units(seps[0]).unwrap().regions.len(),
+        1
+    );
+    let _ = b;
+}
+
+/// Both optional fields that the two sides added at different versions
+/// coexist: a detached sketch (v23) and an instance material (v24) in one
+/// document write the current manifest (v26) and load back; each field is
+/// rejected below its own minimum version (reject-not-repair).
+#[test]
+fn a_document_with_a_detached_sketch_and_an_instance_material_round_trips_at_v26() {
+    let (mut doc, b, s) = detached_doc(true);
+    assert!(s.is_some());
+    let (_, inst, _) = doc.make_component(&[NodeId::Object(b)]).unwrap();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 50, 40)));
+    doc.set_instance_material(inst, Some(red)).unwrap();
+    let bytes = doc.save();
+    let m = manifest_json(&bytes);
+    assert_eq!(m["format_version"], 26);
+    let loaded = Document::load(&bytes).expect("v26 loads");
+    assert_eq!(
+        loaded.save(),
+        bytes,
+        "save -> load -> save is a fixed point"
+    );
+    assert_eq!(loaded.instance_material(inst), Some(Some(red)));
+    assert!(
+        loaded
+            .sketch_ids()
+            .into_iter()
+            .any(|x| loaded.sketch(x).unwrap().detached())
+    );
+
+    // Declared v23: the detached sketch is accepted, the instance material
+    // (introduced at v24) is malformed.
+    let v23 = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(23));
+    assert!(matches!(
+        Document::load(&v23),
+        Err(kernel::LoadError::MalformedManifest { .. })
+    ));
+    let (plain, _, _) = detached_doc(true);
+    let bytes = plain.save();
+    let v23 = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(23));
+    assert!(Document::load(&v23).is_ok(), "detached is legal at v23");
+    // Declared v22 with a detached sketch: malformed.
+    let v22 = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(22));
+    assert!(matches!(
+        Document::load(&v22),
+        Err(kernel::LoadError::MalformedManifest { .. })
+    ));
+}
+
+/// A document with no detached sketch writes exactly what a v22 writer
+/// wrote, apart from the version number: no `detached` key anywhere, and a
+/// copy declaring v22 loads and saves back to the same bytes.
+#[test]
+fn a_document_without_detached_sketches_is_v22_content() {
+    let (doc, _, _) = detached_doc(false);
+    let bytes = doc.save();
+    let text = manifest_text(&bytes);
+    assert!(!text.contains("\"detached\""), "no detached key is written");
+    const V26: &str = "\"format_version\": 26,";
+    assert_eq!(text.matches(V26).count(), 1);
+    let v22 = edit_manifest_text(&bytes, |t| t.replacen(V26, "\"format_version\": 22,", 1));
+    let loaded = Document::load(&v22).expect("the same content declared v22 loads");
+    assert_eq!(
+        loaded.save(),
+        bytes,
+        "a v22 file of it saves back identically apart from the version"
+    );
+}
+
+/// `detached` in a manifest declaring v22 is malformed (introduced at v23),
+/// never honored or dropped.
+#[test]
+fn detached_is_rejected_below_v23() {
+    let (doc, _, _) = detached_doc(true);
+    let bytes = doc.save();
+    let old = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(22));
+    match Document::load(&old) {
+        Err(kernel::LoadError::MalformedManifest { what }) => {
+            assert!(what.contains("detached"), "{what}");
+        }
+        other => panic!("a v22 file carrying detached must be malformed: {other:?}"),
+    }
+}
+
+/// A sketch both detached and object-owned is malformed (I9): the reader
+/// rejects it rather than picking one.
+#[test]
+fn detached_with_owner_object_is_rejected() {
+    let (doc, _, _) = detached_doc(true);
+    let bytes = doc.save();
+    let m = manifest_json(&bytes);
+    let i = m["sketches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|sk| sk.get("detached").is_some())
+        .expect("the detached sketch");
+    let both = patch_manifest(&bytes, |m| {
+        m["sketches"][i]["owner_object"] = serde_json::json!(0);
+    });
+    match Document::load(&both) {
+        Err(kernel::LoadError::MalformedManifest { what }) => {
+            assert!(what.contains("both detached and owned"), "{what}");
+        }
+        other => panic!("detached + owner_object must be malformed: {other:?}"),
+    }
 }

@@ -26,6 +26,9 @@ if [ "$HAVE_WASM_PACK" != "$WANT_WASM_PACK" ]; then
 fi
 echo "wasm-pack $HAVE_WASM_PACK"
 
+echo "=== Flatpak packaging command tests ==="
+python3 -B -m unittest discover -s packaging/tests -v
+
 echo "=== cargo fmt --check ==="
 cargo fmt --check
 

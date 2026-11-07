@@ -74,26 +74,31 @@ pub struct ReportError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,
+    /// Seconds from a 429's `Retry-After`, when the service sent one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<u64>,
 }
 
 impl ReportError {
-    fn new(kind: ReportErrorKind, message: impl Into<String>) -> Self {
+    pub(crate) fn new(kind: ReportErrorKind, message: impl Into<String>) -> Self {
         Self {
             kind,
             message: message.into(),
             status: None,
+            retry_after: None,
         }
     }
 
-    fn status(status: reqwest::StatusCode, message: impl Into<String>) -> Self {
+    pub(crate) fn status(status: reqwest::StatusCode, message: impl Into<String>) -> Self {
         Self {
             kind: ReportErrorKind::Status,
             message: message.into(),
             status: Some(status.as_u16()),
+            retry_after: None,
         }
     }
 
-    fn malformed() -> Self {
+    pub(crate) fn malformed() -> Self {
         Self::new(
             ReportErrorKind::Status,
             "malformed response from the report service",
@@ -104,7 +109,7 @@ impl ReportError {
     /// HTTP status onto a typed kind. Falls back to `Status` for anything
     /// that doesn't match the contract — a proxy's own error page, an
     /// unversioned server — rather than guessing.
-    fn from_status(status: reqwest::StatusCode, body: &str) -> Self {
+    pub(crate) fn from_status(status: reqwest::StatusCode, body: &str) -> Self {
         #[derive(serde::Deserialize)]
         struct ErrorBody {
             error: String,
@@ -128,6 +133,9 @@ impl ReportError {
                 ReportErrorKind::Full,
                 "the report service is temporarily full",
             ),
+            (reqwest::StatusCode::FORBIDDEN, "forbidden") => {
+                Self::status(status, crate::follow::FORBIDDEN_MESSAGE)
+            }
             _ if status.is_server_error() => Self::new(
                 ReportErrorKind::Unreachable,
                 "the report service is unavailable",
@@ -140,7 +148,7 @@ impl ReportError {
     /// which this mirrors exactly (same reqwest/rustls stack, same reasoning
     /// for walking the source chain instead of matching reqwest's own
     /// Display, which embeds the request URL).
-    fn transport(err: &reqwest::Error) -> Self {
+    pub(crate) fn transport(err: &reqwest::Error) -> Self {
         let mut text = String::new();
         let mut source = std::error::Error::source(err);
         while let Some(s) = source {
@@ -169,8 +177,12 @@ impl ReportError {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReportSubmitResult {
     pub id: String,
+    /// Whether a follow record was stored (the reporter asked to follow and
+    /// the service minted a secret).
+    pub following: bool,
 }
 
 /// How much of the compressed report has been uploaded, emitted as
@@ -187,7 +199,7 @@ struct ReportProgress {
 /// §8's "Clients" subsection) — for testing against `wrangler dev` without
 /// ever giving a release binary an environment-controlled endpoint. Always
 /// ends in `/`, so piece and commit paths join onto it.
-fn report_url() -> String {
+pub(crate) fn report_url() -> String {
     #[cfg(debug_assertions)]
     if let Ok(url) = std::env::var("HEW_REPORT_URL") {
         if !url.is_empty() {
@@ -215,7 +227,7 @@ fn piece_ranges(total: usize) -> Vec<(usize, usize)> {
 
 /// `HEW-` plus two groups of four Crockford base32 characters. The ID is
 /// joined into request paths, so anything else is refused.
-fn is_report_id(id: &str) -> bool {
+pub(crate) fn is_report_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     bytes.len() == 13
         && id.starts_with("HEW-")
@@ -229,14 +241,14 @@ fn is_report_id(id: &str) -> bool {
 
 /// 32 random bytes, base64url without padding: 43 characters. The token
 /// rides a header, so anything else is refused.
-fn is_upload_token(token: &str) -> bool {
+pub(crate) fn is_upload_token(token: &str) -> bool {
     token.len() == 43
         && token
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-fn build_client() -> reqwest::Client {
+pub(crate) fn build_client() -> reqwest::Client {
     // Same idempotent provider install as relay_client.rs — see its doc
     // comment for why this can't just rely on rustls's own default.
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -261,7 +273,7 @@ async fn send_with_retry(
     }
 }
 
-async fn error_from(response: reqwest::Response) -> ReportError {
+pub(crate) async fn error_from(response: reqwest::Response) -> ReportError {
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     ReportError::from_status(status, &text)
@@ -278,24 +290,22 @@ fn emit_progress(app: &tauri::AppHandle, sent: usize, total: usize) {
     );
 }
 
-/// Uploads the gzip-compressed report: start with the first piece, each
-/// following piece in order, then commit. The webview passes the bytes as
-/// the invoke's raw body (`invoke('report_submit', bytes)`), not a JSON
-/// array, for the same reason `relay_put` does — see the module doc comment.
-#[tauri::command]
-pub async fn report_submit(
-    app: tauri::AppHandle,
-    request: tauri::ipc::Request<'_>,
-) -> Result<ReportSubmitResult, ReportError> {
-    let bytes: Vec<u8> = match request.body() {
-        InvokeBody::Raw(bytes) => bytes.clone(),
-        InvokeBody::Json(_) => {
-            return Err(ReportError::new(
-                ReportErrorKind::Invalid,
-                "report_submit expects a raw byte body",
-            ));
-        }
-    };
+/// What START answered, plus the finished upload's report ID.
+pub(crate) struct Uploaded {
+    pub id: String,
+    /// The follow secret START minted, when `Hew-Follow: 1` was sent and
+    /// the Worker understood it. Never leaves Rust.
+    pub follow: Option<String>,
+}
+
+/// The chunked upload shared by `report_submit` and `follow_attach`: start
+/// with the first piece (plus `start_headers`), each following piece in
+/// order, then commit. Emits `report-progress` after every piece.
+pub(crate) async fn upload_pieces(
+    app: &tauri::AppHandle,
+    bytes: &[u8],
+    start_headers: &[(&'static str, String)],
+) -> Result<Uploaded, ReportError> {
     if bytes.is_empty() {
         return Err(ReportError::new(
             ReportErrorKind::Invalid,
@@ -311,11 +321,14 @@ pub async fn report_submit(
     // Start: the first piece and the whole compressed length.
     let (first_start, first_end) = pieces[0];
     let response = send_with_retry(|| {
-        client
+        let mut request = client
             .post(&base)
             .header(reqwest::header::CONTENT_TYPE, "application/gzip")
-            .header("Hew-Upload-Length", total.to_string())
-            .body(bytes[first_start..first_end].to_vec())
+            .header("Hew-Upload-Length", total.to_string());
+        for (name, value) in start_headers {
+            request = request.header(*name, value);
+        }
+        request.body(bytes[first_start..first_end].to_vec())
     })
     .await?;
     if response.status() != reqwest::StatusCode::CREATED {
@@ -325,6 +338,8 @@ pub async fn report_submit(
     struct StartBody {
         id: String,
         token: String,
+        #[serde(default)]
+        follow: Option<String>,
     }
     let text = response
         .text()
@@ -334,7 +349,10 @@ pub async fn report_submit(
     if !is_report_id(&started.id) || !is_upload_token(&started.token) {
         return Err(ReportError::malformed());
     }
-    emit_progress(&app, first_end, total);
+    // A malformed secret is dropped rather than failing a report that is
+    // otherwise going through; the caller then simply does not follow.
+    let follow = started.follow.filter(|f| is_upload_token(f));
+    emit_progress(app, first_end, total);
 
     for (index, &(start, end)) in pieces.iter().enumerate().skip(1) {
         let url = format!("{base}{}/{index}", started.id);
@@ -349,7 +367,7 @@ pub async fn report_submit(
         if response.status() != reqwest::StatusCode::NO_CONTENT {
             return Err(error_from(response).await);
         }
-        emit_progress(&app, end, total);
+        emit_progress(app, end, total);
     }
 
     let url = format!("{base}{}/commit", started.id);
@@ -358,7 +376,46 @@ pub async fn report_submit(
     if response.status() != reqwest::StatusCode::CREATED {
         return Err(error_from(response).await);
     }
-    Ok(ReportSubmitResult { id: started.id })
+    Ok(Uploaded {
+        id: started.id,
+        follow,
+    })
+}
+
+/// The raw gzip body of a `tauri::ipc::Request`.
+pub(crate) fn raw_body(request: &tauri::ipc::Request<'_>) -> Result<Vec<u8>, ReportError> {
+    match request.body() {
+        InvokeBody::Raw(bytes) => Ok(bytes.clone()),
+        InvokeBody::Json(_) => Err(ReportError::new(
+            ReportErrorKind::Invalid,
+            "expected a raw byte body",
+        )),
+    }
+}
+
+/// Uploads the gzip-compressed report: start with the first piece, each
+/// following piece in order, then commit. The webview passes the bytes as
+/// the invoke's raw body (`invoke('report_submit', bytes)`), not a JSON
+/// array, for the same reason `relay_put` does — see the module doc comment.
+/// Options (follow-this-report, excerpt, file name) ride in the optional
+/// `hew-options` request header (see `follow::parse_options_header`).
+#[tauri::command]
+pub async fn report_submit(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<ReportSubmitResult, ReportError> {
+    let bytes = raw_body(&request)?;
+    let options = crate::follow::parse_options_header(request.headers());
+    let headers = crate::follow::start_headers(options.follow, None);
+    let uploaded = upload_pieces(&app, &bytes, &headers).await?;
+    let following = options.follow
+        && uploaded.follow.is_some_and(|secret| {
+            crate::follow::record_submitted(&app, &uploaded.id, secret, options)
+        });
+    Ok(ReportSubmitResult {
+        id: uploaded.id,
+        following,
+    })
 }
 
 #[cfg(test)]

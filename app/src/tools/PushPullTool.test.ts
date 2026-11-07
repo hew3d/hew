@@ -37,11 +37,12 @@ function makeFacePick(object: bigint, face: bigint, instance?: bigint, depth = 1
 
 /** A fake `SketchRegionPickJs` returning the seeded handles, `depth` in ray
  *  parameter units (RAY's direction is unit, so metres too). */
-function makeRegionPick(sketch: bigint, region: bigint, depth = 1) {
+function makeRegionPick(sketch: bigint, region: bigint, depth = 1, detached = false) {
   return {
     sketch: () => sketch,
     region: () => region,
     depth: () => depth,
+    detached: () => detached,
     free: vi.fn(),
   }
 }
@@ -67,6 +68,8 @@ function makeWasmScene(opts: {
    *  the active component (component-edit-parity.md phase A2). */
   memberSketches?: bigint[]
   componentThroughResults?: bigint[]
+  /** A component/group editing session is open (`session_stack` non-empty). */
+  sessionOpen?: boolean
   /** Plane listings by context (the face / sketch plane's `plane_units_json`).
    *  Absent: the scene lists nothing and the struck face stands. */
   listings?: Record<string, MockListing>
@@ -78,6 +81,7 @@ function makeWasmScene(opts: {
     ...(opts.listings !== undefined ? planeUnitsMock(opts.listings) : {}),
     history_generation: vi.fn(() => 1n),
     pick_face: vi.fn(() => opts.facePick),
+    session_stack: vi.fn(() => (opts.sessionOpen === true ? [{ kind: 'instance', id: 77n }] : [])),
     // `pick_sketch_region` only ever walks WORLD-tree sketches — Path B calls
     // its `_in_instance` sibling instead while inside an instance context, so
     // the two are seeded independently (`regionPick` covers whichever one the
@@ -210,6 +214,80 @@ describe('PushPullTool — Path A (object face)', () => {
     expect(scene.extrude_region).not.toHaveBeenCalled()
     expect(tool.capturingInput()).toBe(false)
     expect(String((onToast as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('component')
+    // The refusal is GUIDANCE, tagged so the app emphasizes the toast
+    // rather than filing it as an ordinary warning (bug report: the plain
+    // bottom toast was easy to miss).
+    expect((onToast as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe('EditContextHint')
+  })
+
+  // Part A of the live-siblings bug report: a person coming from SketchUp
+  // pushes on a copied component, sees nothing happen, and reads the
+  // viewport as broken. The way in now shows BEFORE the click: hovering a
+  // component face outside its edit session puts the same hint beside the
+  // cursor (Tool.hoverHint) and in the status bar (statusHint).
+  it('hovering a component face outside its edit session explains itself before any click', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { tool, onToast } = makeTool(scene)
+
+    expect(tool.hoverHint()).toBeNull()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+
+    expect(tool.hoverHint()).toContain('double-click it to edit the component')
+    expect(tool.statusHint()).toContain('double-click it to edit the component')
+    expect(onToast).not.toHaveBeenCalled() // a hover never toasts
+  })
+
+  it('with a session open, the hint names Esc as the way out instead of a dead-end double-click', () => {
+    // Double-clicking another copy while a component is open for editing
+    // is ignored by the viewport (outside the session scope), so the hover
+    // and the refused click must not promise it.
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n), sessionOpen: true })
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).toContain('press Esc to finish editing the open component first')
+    expect(tool.hoverHint()).not.toContain('double-click it to edit')
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    expect(String((onToast as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('press Esc')
+  })
+
+  it('the hover hint is dropped on cancel, on a context change, and when the pointer leaves the canvas', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).not.toBeNull()
+    tool.onPointerLeave()
+    expect(tool.hoverHint()).toBeNull()
+    expect(tool.statusHint()).toContain('Click a face')
+
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).not.toBeNull()
+    tool.cancel()
+    expect(tool.hoverHint()).toBeNull()
+
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).not.toBeNull()
+    tool.setEditContext({ kind: 'instance', id: 12n, component: 100n })
+    expect(tool.hoverHint()).toBeNull()
+  })
+
+  it('the hover hint clears over a pushable face and over nothing', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool.hoverHint()).not.toBeNull()
+
+    // A fresh ray object: the per-ray pick cache must not serve the old
+    // instanced pick for a ray that now hits a plain face.
+    const plain = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool: tool2 } = makeTool(plain)
+    tool2.onPointerMove(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    expect(tool2.hoverHint()).toBeNull()
+    expect(tool2.statusHint()).toContain('Click a face')
+
+    const empty = makeWasmScene({})
+    const { tool: tool3 } = makeTool(empty)
+    tool3.onPointerMove(null, RAY)
+    expect(tool3.hoverHint()).toBeNull()
   })
 
   it('free drawing lying ON an ineligible face (drawn on a component from outside) takes the click and extrudes', () => {
@@ -1201,6 +1279,22 @@ describe('PushPullTool — hard snaps that are not a depth (inference-permissive
     const { tool, scene } = armDrag()
     expect(commitAt(tool, scene, makeSnap({ x: 2, y: 2, z: 0.75, kind: 'on-guide' }), freeDragRay(0.9))).toBeCloseTo(0.75)
   })
+
+  it('the line where two objects\' faces meet is a depth reference, like a real edge', () => {
+    const { tool, scene } = armDrag()
+    const meetingLine: Snap['meetingLine'] = [
+      [2, 1, 0.5],
+      [2, 3, 0.5],
+    ]
+    expect(
+      commitAt(tool, scene, makeSnap({ x: 2, y: 2, z: 0.5, kind: 'on-intersection-line', meetingLine }), freeDragRay(0.9)),
+    ).toBe(0.5)
+  })
+
+  it('a face under the cursor is not: the drag follows the cursor past it', () => {
+    const { tool, scene } = armDrag()
+    expect(commitAt(tool, scene, makeSnap({ x: 2, y: 2, z: 0.5, kind: 'on-face' }), freeDragRay(0.9))).toBeCloseTo(0.9)
+  })
 })
 
 describe('PushPullTool — a drawn region in front of an object face wins the pick (GitHub issue 13)', () => {
@@ -1247,6 +1341,33 @@ describe('PushPullTool — a drawn region in front of an object face wins the pi
       expect(scene.push_pull).toHaveBeenCalledTimes(1)
       expect(scene.extrude_region).not.toHaveBeenCalled()
     }
+  })
+
+  it('a DETACHED shape lying on an ELIGIBLE face wins the tie and extrudes into a new object (separate-shapes D8)', () => {
+    // Same depth: the disk was drawn on the face to stay apart from it.
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, undefined, 2.0),
+      facePlane: [1, 2, 3, 0, 0, 1],
+      regionPick: makeRegionPick(99n, 7n, 2.0, true),
+    })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 3, kind: 'on-face' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 4, kind: 'endpoint' }), RAY)
+    expect(scene.extrude_region).toHaveBeenCalledTimes(1)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+  })
+
+  it('an ORDINARY region lying on an eligible face still yields to the face (the tie-break is detached-only)', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, undefined, 2.0),
+      facePlane: [1, 2, 3, 0, 0, 1],
+      regionPick: makeRegionPick(99n, 7n, 2.0, false),
+    })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 3, kind: 'on-face' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 4, kind: 'endpoint' }), RAY)
+    expect(scene.push_pull).toHaveBeenCalledTimes(1)
+    expect(scene.extrude_region).not.toHaveBeenCalled()
   })
 
   it('a region in front of an INELIGIBLE (grouped) face wins too — the fail-closed rule only guards regions behind the face', () => {
@@ -1550,6 +1671,42 @@ describe('PushPullTool — preview tint per mode (#41)', () => {
     const asNew = ghostColor(true)
     expect(asNew).not.toBe(plain)
     expect(ghostColor(true, -1)).toBe(asNew) // pulling the other way is still "new"
+  })
+
+  it('a free-sketch region ghost is the new-object blue on both signs, never the red cut', () => {
+    const regionGhost = (z: number): number => {
+      const scene = makeWasmScene({ regionPick: makeRegionPick(50n, 51n) })
+      ;(scene.region_boundary as ReturnType<typeof vi.fn>).mockReturnValue(SQUARE)
+      const { tool, preview } = makeTool(scene)
+      tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+      tool.onPointerMove(makeSnap({ x: 0, y: 0, z, kind: 'endpoint' }), RAY)
+      const mesh = preview.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+      return (mesh.material as THREE.MeshBasicMaterial).color.getHex()
+    }
+    const asNew = ghostColor(true)
+    expect(regionGhost(1)).toBe(asNew)
+    expect(regionGhost(-1)).toBe(asNew)
+    // A face pushed in stays the default cut look (not the new-object blue).
+    expect(ghostColor(false, -1)).not.toBe(asNew)
+  })
+
+  it('inside a component edit the extrude-as-new toggle leaves the ghost on the push colors (the commit falls back to an ordinary push)', () => {
+    const INSTANCE = 42n
+    const inEdit = (extrudeAsNew: boolean): number => {
+      const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, INSTANCE) })
+      ;(scene.face_boundary as ReturnType<typeof vi.fn>).mockReturnValue(SQUARE)
+      const { tool, preview } = makeTool(scene)
+      tool.setEditContext({ kind: 'instance', id: INSTANCE, component: 5n })
+      tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
+      if (extrudeAsNew) tool.toggleExtrudeAsNew()
+      tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+      tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'endpoint' }), RAY)
+      const mesh = preview.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+      expect(mesh).toBeDefined()
+      return (mesh.material as THREE.MeshBasicMaterial).color.getHex()
+    }
+    expect(inEdit(true)).toBe(inEdit(false))
+    expect(inEdit(true)).not.toBe(ghostColor(true))
   })
 
   it('the arrow/cross fallback (no swept prism) follows the mode too', () => {

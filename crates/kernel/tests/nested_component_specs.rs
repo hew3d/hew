@@ -389,10 +389,12 @@ fn world_ops_refuse_definition_owned_instances() {
 
 /// A definition nested inside another AND placed in the world can be
 /// edited through its world placement: the def-owned placement stays live
-/// but the outer definitions' expansion SKIPS the on-loan content for the
-/// session's duration, and everything returns at close.
+/// and the outer definition's expansion renders the on-loan content from
+/// the session's world geometry through the inverse session pose
+/// (ARCHITECTURE.md 2.11, live sibling placements), so the nested
+/// placement shows the edit as it happens, and everything returns at close.
 #[test]
-fn sessions_on_defs_nested_elsewhere_skip_on_loan_content() {
+fn sessions_on_defs_nested_elsewhere_render_on_loan_content_live() {
     let mut doc = Document::new();
     let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 1.0);
     let b = extrude_box(&mut doc, 3.0, 0.0, 4.0, 1.0, 1.0);
@@ -401,18 +403,31 @@ fn sessions_on_defs_nested_elsewhere_skip_on_loan_content() {
     let (world_inst, _) = doc
         .place_instance(inner_cid, Transform::translation(Vec3::new(8.0, 0.0, 0.0)))
         .unwrap();
-    doc.make_component(&[NodeId::Object(b), NodeId::Instance(inner_inst)])
+    let (_, outer_inst, _) = doc
+        .make_component(&[NodeId::Object(b), NodeId::Instance(inner_inst)])
         .unwrap();
     assert_eq!(doc.expanded_placements().len(), 3);
 
     doc.open_explode_session(world_inst)
         .expect("session through the world placement");
-    // The outer definition's placement drops the on-loan inner content
-    // (1 = the outer's own body; the session geometry renders as world
-    // objects, not placements).
-    assert_eq!(doc.expanded_placements().len(), 1);
+    // The outer definition's placement keeps rendering the inner content:
+    // the outer's own body plus the inner member, now a world object baked
+    // to x in [8, 9], mapped back through the inverse session pose to where
+    // the nested placement sits (x in [0, 1]). The entered placement itself
+    // is hidden, so its content renders only as world objects.
+    let placements = doc.expanded_placements();
+    assert_eq!(placements.len(), 2);
+    let (_, t, i) = placements
+        .iter()
+        .find(|(o, _, _)| *o == a)
+        .expect("the inner member renders through the outer placement");
+    assert_eq!(*i, outer_inst);
+    let p = t.apply_point(kernel::Point3::new(8.0, 0.0, 0.0));
+    assert!(p.x.abs() < 1e-9 && p.y.abs() < 1e-9 && p.z.abs() < 1e-9);
+    assert_eq!(doc.session_placements(), vec![outer_inst]);
     doc.close_explode_session().expect("close");
     assert_eq!(doc.expanded_placements().len(), 3, "content returns");
+    assert!(doc.session_placements().is_empty());
 }
 
 /// Placing an instance MID-SESSION folds it into the open definition as a

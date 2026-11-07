@@ -35,3 +35,10 @@ export function pickRenderMode(): RenderMode {
 export function pickPolicyGeneration(): number {
   return generation
 }
+
+/** The editing scope changed (`pushPickScope`): memoized picks keyed to an
+ *  older generation are stale even though no pointer moved and the render
+ *  mode is unchanged. */
+export function bumpPickScopeGeneration(): void {
+  generation += 1
+}

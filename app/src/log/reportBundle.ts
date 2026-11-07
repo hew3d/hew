@@ -35,6 +35,9 @@
  *   size passes the cap.
  * `buildReportBundle`, `buildReportFile`, and `buildReportUpload` gather and
  * build in one call.
+ * `buildFollowUpUpload` is the small bundle for a file sent later for an
+ * existing report (follow-a-report §5.6): the description, `system`, and
+ * either the optional top-level `attachment` key or the `failedFile` row.
  *
  * A session that imported a large file records it byte by byte, so the
  * bundle can run to hundreds of megabytes. It is never assembled as one
@@ -651,6 +654,35 @@ function* base64Pieces(bytes: Uint8Array, size: number): Generator<string> {
   for (let i = 0; i < bytes.length; i += step) yield base64FromBytes(bytes.subarray(i, i + step))
 }
 
+/** The `failedFile` key and value: everything but the bytes first, so a
+ *  reader that stops early still learns what the file was and how it
+ *  failed. A file too large to send still goes by name, size, and error:
+ *  that much a reader can act on (a 137 MB .skp that ran the kernel out of
+ *  memory tells its own story). */
+/* oxlint-disable lingui/no-unlocalized-strings -- bundle JSON for the maintainer, English by design */
+function* failedFileStrings(failed: FailedOpen, includeBytes: boolean, size: number): Generator<string> {
+  const { name, label, bytes, error } = failed
+  yield `,"failedFile":{"name":${JSON.stringify(name)},"label":${JSON.stringify(label)},"size":${bytes.byteLength},"error":${JSON.stringify(error)}`
+  if (includeBytes) {
+    yield ',"bytes":"'
+    yield* base64Pieces(bytes, size)
+    yield '"}'
+  } else {
+    yield ',"omitted":"too large to send"}'
+  }
+}
+
+/** The optional top-level `attachment` key (design §5.6): a file the
+ *  reporter sends later for an existing report. Same shape as `failedFile`
+ *  minus the error: `{name, label, size, bytes}` with base64 bytes. */
+/* oxlint-disable lingui/no-unlocalized-strings -- bundle JSON for the maintainer, English by design */
+function* attachmentStrings(file: { name: string; label: string; bytes: Uint8Array }, size: number): Generator<string> {
+  yield `,"attachment":{"name":${JSON.stringify(file.name)},"label":${JSON.stringify(file.label)},"size":${file.bytes.byteLength},"bytes":"`
+  yield* base64Pieces(file.bytes, size)
+  yield '"}'
+}
+/* oxlint-enable lingui/no-unlocalized-strings */
+
 /**
  * The bundle's JSON text in pieces, identical when joined to
  * `JSON.stringify` of the bundle object. Insertion order is the wire order:
@@ -689,21 +721,7 @@ function* bundleStrings(
     yield* jsonStringPieces((includeImports ? c.recording : c.strippedRecording) as string, size)
     if (c.importedFiles.length > 0 && !includeImports) yield ',"importsStripped":true'
   }
-  if (inc.failedFile && c.failedOpen !== null) {
-    const { name, label, bytes, error } = c.failedOpen
-    // Everything but the bytes first, so a reader that stops early still
-    // learns what the file was and how it failed. A file too large to send
-    // still goes by name, size, and error: that much a reader can act on
-    // (a 137 MB .skp that ran the kernel out of memory tells its own story).
-    yield `,"failedFile":{"name":${JSON.stringify(name)},"label":${JSON.stringify(label)},"size":${bytes.byteLength},"error":${JSON.stringify(error)}`
-    if (includeFailedFile) {
-      yield ',"bytes":"'
-      yield* base64Pieces(bytes, size)
-      yield '"}'
-    } else {
-      yield ',"omitted":"too large to send"}'
-    }
-  }
+  if (inc.failedFile && c.failedOpen !== null) yield* failedFileStrings(c.failedOpen, includeFailedFile, size)
   if (includeModel && c.model !== null) {
     yield ',"hew":"'
     yield* base64Pieces(c.model, size)
@@ -973,6 +991,84 @@ export async function buildReportFile(opts: BuildReportBundleOptions): Promise<U
 /** Gather, then `compressReportUpload`, in one call. */
 export async function buildReportUpload(opts: BuildReportBundleOptions): Promise<ReportUpload> {
   return compressReportUpload(await gatherReport(opts), opts)
+}
+
+/** The file a follow-up bundle carries: a chosen file under `attachment`, or
+ *  the file that failed to open as the `failedFile` row so its error
+ *  travels with it. */
+export type FollowUpFile =
+  | { kind: 'attachment'; name: string; label: string; bytes: Uint8Array }
+  | { kind: 'failedFile'; failed: FailedOpen }
+
+export interface FollowUpBundleOptions {
+  /** The report the file is for, e.g. `HEW-7K3F-Q9XB`. */
+  reportId: string
+  /** An optional note from the reporter; blank is left out. */
+  note: string
+  file: FollowUpFile
+  appVersion: string
+  platform: string
+  maxSendBytes?: number
+  segmentChars?: number
+  signal?: AbortSignal
+}
+
+/** The description line a follow-up bundle opens with. */
+/* oxlint-disable lingui/no-unlocalized-strings -- the bundle is for the maintainer, English by design */
+export function followUpDescription(reportId: string, fileName: string, note: string): string {
+  const head = `File for report ${reportId}: ${fileName}`
+  return note.trim() === '' ? head : `${head}\n\n${note.trim()}`
+}
+
+function* followUpStrings(opts: FollowUpBundleOptions): Generator<string> {
+  const size = Math.max(1, opts.segmentChars ?? SEGMENT_CHARS)
+  const name = opts.file.kind === 'attachment' ? opts.file.name : opts.file.failed.name
+  const report = { description: followUpDescription(opts.reportId, name, opts.note) }
+  yield `{"format":1,"report":${JSON.stringify(report)}`
+  yield `,"system":${JSON.stringify(gatherSystemInfo(opts.appVersion, opts.platform))}`
+  if (opts.file.kind === 'attachment') yield* attachmentStrings(opts.file, size)
+  else yield* failedFileStrings(opts.file.failed, true, size)
+  yield '}'
+}
+/* oxlint-enable lingui/no-unlocalized-strings */
+
+/** The JSON bytes of a follow-up bundle, uncompressed (tests, Save to file). */
+export function encodeFollowUpBundle(opts: FollowUpBundleOptions): Uint8Array {
+  const parts: Uint8Array[] = []
+  const encoder = new TextEncoder()
+  for (const s of followUpStrings(opts)) parts.push(encoder.encode(s))
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0))
+  let offset = 0
+  for (const p of parts) {
+    out.set(p, offset)
+    offset += p.byteLength
+  }
+  return out
+}
+
+/** Gzip of a follow-up bundle for `FollowHost.attach`, or the reason it
+ *  can't be sent (over the cap, or no compression here). */
+export async function buildFollowUpUpload(opts: FollowUpBundleOptions): Promise<ReportUpload> {
+  if (!canCompress()) {
+    return {
+      gzip: null,
+      compressedBytes: null,
+      unavailableReason: t`This system can’t compress reports, so it can’t send them.`,
+    }
+  }
+  const max = opts.maxSendBytes ?? MAX_SEND_BYTES
+  try {
+    const result = await gzipChunks(utf8Pieces(followUpStrings(opts), opts.signal), max)
+    if (result.length > max) {
+      const size = displayBytes(result.length)
+      const limit = displayBytes(max)
+      return { gzip: null, compressedBytes: result.length, unavailableReason: t`This file is ${size} compressed, over the ${limit} limit.` }
+    }
+    return { gzip: result.bytes, compressedBytes: result.length, unavailableReason: null }
+  } catch (err) {
+    if (err instanceof ReportBuildCancelled || opts.signal?.aborted) throw new ReportBuildCancelled()
+    return { gzip: null, compressedBytes: null, unavailableReason: t`Couldn’t compress this file.` }
+  }
 }
 
 // Optional build-time version string — absent under a bare tsc/vitest run

@@ -205,6 +205,209 @@ function buildHexPrism(scene) {
   return scene.take_recording();
 }
 
+/**
+ * Draws a closed regular `n`-gon on a fresh sketch in the plane x = `x`
+ * (normal +X), centered at (y = cy, z = cz) with circumradius `r`, and returns
+ * `[sketchHandle, regionHandle]` — a disk drawn in the plane of a solid's
+ * side face but out in empty space, a cutter built clear of its target.
+ */
+function sidePlaneRegularPolygon(scene, n, x, cy, cz, r) {
+  const sketch = scene.begin_sketch_on_plane(x, cy, cz, 1, 0, 0);
+  const pt = (i) => {
+    const t = (2 * Math.PI * i) / n;
+    return [cy + r * Math.cos(t), cz + r * Math.sin(t)];
+  };
+  let region = null;
+  for (let i = 0; i < n; i++) {
+    const [ay, az] = pt(i);
+    const [by, bz] = pt((i + 1) % n);
+    const report = scene.sketch_add_segment(sketch, x, ay, az, x, by, bz);
+    const created = report.regions_created();
+    if (created.length > 0) {
+      region = created[0];
+    }
+  }
+  if (region === null) {
+    throw new Error(`closing the ${n}-gon did not create a region`);
+  }
+  return [sketch, region];
+}
+
+/**
+ * A cutter built clear of its target, in meters: a 7 × 5 × 6 cm bin, a 2 cm
+ * disk drawn in the plane of its right face (x = 0.07) 3 cm above the top
+ * corner at y = 0 (the upper-left corner as the Right view shows it, eye at
+ * +X looking toward -X with Z up, so screen-left is y = 0), pushed 7 cm
+ * across the bin into a cylinder that hangs just above it, then moved down
+ * 3 cm so its axis runs along the top edge, and subtracted. Before the move
+ * the cutter only hangs over the bin, so that
+ * Subtract is refused (`NothingRemoved`) and leaves nothing in the
+ * recording — the scenario asserts the refusal rather than recording it —
+ * and the fixture locks the cut that the moved cutter makes.
+ */
+function buildCutterMovedIntoBin(scene) {
+  scene.start_recording();
+
+  const bin = scene.begin_ground_sketch();
+  const footprint = [
+    [0, 0, 0.07, 0],
+    [0.07, 0, 0.07, 0.05],
+    [0.07, 0.05, 0, 0.05],
+    [0, 0.05, 0, 0],
+  ];
+  let binRegion = null;
+  for (const [ax, ay, bx, by] of footprint) {
+    const created = scene.sketch_add_segment(bin, ax, ay, 0, bx, by, 0).regions_created();
+    if (created.length > 0) binRegion = created[0];
+  }
+  if (binRegion === null) throw new Error('closing the bin footprint did not create a region');
+  const block = scene.extrude_region(bin, binRegion, 0.06);
+
+  const [disk, diskRegion] = sidePlaneRegularPolygon(scene, 24, 0.07, 0.0, 0.09, 0.02);
+  const cutter = scene.extrude_region(disk, diskRegion, -0.07);
+
+  // Hanging a centimeter above the bin: nothing to remove, refused, not
+  // recorded (refused calls never enter a recording).
+  let refused = null;
+  try {
+    scene.boolean_nodes(1 /* subtract */, 0, block, 0, cutter);
+  } catch (err) {
+    refused = String(err);
+  }
+  if (refused === null || !refused.startsWith('NothingRemoved:')) {
+    throw new Error(`expected the hanging cutter's subtract to refuse NothingRemoved, got ${refused}`);
+  }
+
+  scene.transform_object(cutter, translate(0, 0, -0.03));
+  scene.boolean_nodes(1 /* subtract */, 0, block, 0, cutter);
+
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
+/**
+ * The same cutter drawn the way the Getting Started guide now draws it: the
+ * bin as above, then a 2 cm disk centered on the right face's upper corner
+ * at y = 0 drawn as a DETACHED shape (`draft_begin_detached` on the face),
+ * so the face's edge does not split it and the face stays whole; the disk is
+ * pushed 7 cm across the bin into a cylinder whose axis runs along the top
+ * edge, and subtracted. The fixture locks a recording holding
+ * `draft_begin_detached` and the cut it makes.
+ */
+function buildDetachedCutterOnBin(scene) {
+  scene.start_recording();
+
+  const bin = scene.begin_ground_sketch();
+  const footprint = [
+    [0, 0, 0.07, 0],
+    [0.07, 0, 0.07, 0.05],
+    [0.07, 0.05, 0, 0.05],
+    [0, 0.05, 0, 0],
+  ];
+  let binRegion = null;
+  for (const [ax, ay, bx, by] of footprint) {
+    const created = scene.sketch_add_segment(bin, ax, ay, 0, bx, by, 0).regions_created();
+    if (created.length > 0) binRegion = created[0];
+  }
+  if (binRegion === null) throw new Error('closing the bin footprint did not create a region');
+  const block = scene.extrude_region(bin, binRegion, 0.06);
+
+  // The right face (x = 0.07, normal +X), found by a ray from +X.
+  const face = scene.pick_face_geometry(1, 0.025, 0.03, -1, 0, 0);
+  if (!face) throw new Error("the ray missed the bin's right face");
+  // Ids are u64 (BigInt here): written into the JSON by their digits.
+  const ctx = `{"face":{"object":${face.object()},"face":${face.face()}}}`;
+
+  const [cy, cz, r, n] = [0.0, 0.06, 0.02, 48];
+  const d = scene.draft_begin_detached(ctx, 'Circle');
+  scene.draft_begin_curve_with(d, [0.07, cy, cz], r);
+  const at = (i) => {
+    const t = (2 * Math.PI * i) / n;
+    return [cy + r * Math.cos(t), cz + r * Math.sin(t)];
+  };
+  for (let i = 0; i < n; i++) {
+    const [ay, az] = at(i);
+    const [by, bz] = at((i + 1) % n);
+    scene.draft_add_segment(d, 0.07, ay, az, 0.07, by, bz);
+  }
+  scene.draft_end_curve(d);
+  scene.draft_end(d);
+
+  // The whole disk is one detached region on the face's plane.
+  const pick = scene.pick_sketch_region(1, 0.005, 0.055, -1, 0, 0);
+  if (!pick || !pick.detached()) throw new Error('expected to pick the detached disk');
+  const cutter = scene.extrude_region(pick.sketch(), pick.region(), -0.07);
+  scene.boolean_nodes(1 /* subtract */, 0, block, 0, cutter);
+
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
+/**
+ * The editing-scope pick (Shaded and X-ray) (docs/design/xray-edit-scope-pick.md), the
+ * reporter's gesture: a box A with a second box B half buried in it, a
+ * downward ray through A's top that also meets B's buried top. `set_render_mode`
+ * is view state and is NOT recorded, so this builder asks every scoped pick
+ * itself and asserts the answer at generation. The recording carries the
+ * geometry and the `set_pick_scope` / `clear_pick_scope` calls; its replay
+ * re-applies the scope. The golden state_hash covers neither the scope nor
+ * the render mode, so the replay gate (run.mjs, POST_REPLAY_PROBES) re-asks
+ * the same scoped picks after replay; the golden alone pins the document.
+ */
+function buildXrayEditScope(scene) {
+  scene.start_recording();
+
+  const box = (x0, y0, x1, y1, height) => {
+    const sketch = scene.begin_ground_sketch();
+    const loop = [
+      [x0, y0, x1, y0],
+      [x1, y0, x1, y1],
+      [x1, y1, x0, y1],
+      [x0, y1, x0, y0],
+    ];
+    let region = null;
+    for (const [ax, ay, bx, by] of loop) {
+      const created = scene.sketch_add_segment(sketch, ax, ay, 0, bx, by, 0).regions_created();
+      if (created.length > 0) region = created[0];
+    }
+    if (region === null) throw new Error('closing the box footprint did not create a region');
+    return scene.extrude_region(sketch, region, height);
+  };
+  const a = box(0, 0, 2, 2, 2);
+  const b = box(1, 0.5, 3, 1.5, 1);
+
+  const pickObject = (x, y) => {
+    const hit = scene.pick_face(x, y, 8, 0, 0, -1);
+    if (hit === undefined) return null;
+    const object = hit.object();
+    hit.free();
+    return object;
+  };
+  const expectPick = (label, x, y, want) => {
+    const got = pickObject(x, y);
+    if (got !== want) throw new Error(`${label}: expected object ${want}, picked ${got}`);
+  };
+
+  // Through A's top at (1.5, 1): A is the nearest face, B lies behind it.
+  scene.set_render_mode('xray');
+  expectPick('X-ray, no scope', 1.5, 1, a);
+  scene.set_pick_scope(new BigUint64Array([b]), new BigUint64Array([]), true);
+  expectPick('X-ray, B in scope', 1.5, 1, b);
+  // Nothing in scope under the ray: today's answer, the nearest face.
+  expectPick('X-ray, B in scope, nothing of B behind', 0.4, 1, a);
+  // Shaded follows the scope too (faces are targets there).
+  scene.set_render_mode('shaded');
+  expectPick('Shaded, B in scope', 1.5, 1, b);
+  scene.set_render_mode('xray');
+  scene.clear_pick_scope();
+  expectPick('X-ray, scope cleared', 1.5, 1, a);
+  // Leave the scope set at the end of the recording so a replay re-applies it.
+  scene.set_pick_scope(new BigUint64Array([b]), new BigUint64Array([]), true);
+
+  scene.stop_recording();
+  return scene.take_recording();
+}
+
 /** Named scenarios, each producing a `take_recording()` JSON string. */
 const SCENARIOS = {
   'two-boxes-union-slice': buildTwoBoxesUnionSlice,
@@ -215,6 +418,9 @@ const SCENARIOS = {
   'multi-object-scene': buildMultiObjectScene,
   'chained-boolean': buildChainedBoolean,
   'hex-prism': buildHexPrism,
+  'cutter-moved-into-bin': buildCutterMovedIntoBin,
+  'detached-cutter-on-bin': buildDetachedCutterOnBin,
+  'xray-edit-scope': buildXrayEditScope,
 };
 
 /** Runs scenario `name`'s build and writes `fixtures/<name>.json`. */

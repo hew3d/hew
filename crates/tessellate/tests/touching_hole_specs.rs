@@ -184,6 +184,85 @@ fn two_holes_sharing_a_vertex_tessellate_with_no_gap_or_overlap() {
     assert_tessellates_exactly(obj);
 }
 
+/// The lattice case the property test draws from: a `wq × dq` box (in
+/// 0.1 m units) with a circle of radius `rq` (same units) and `4·n4`
+/// facets, its rim snapped onto edge `side` (0 bottom, 1 right, 2 top, 3
+/// left) at fraction `along`/10 of that edge's free run, and with `second`
+/// a half-radius circle touching the first at its far point when it fits
+/// clear of every edge. `None` when the circle does not fit the box.
+fn touching_case(
+    wq: u32,
+    dq: u32,
+    side: u8,
+    rq: u32,
+    along: u32,
+    n4: usize,
+    second: bool,
+) -> Option<(Document, ObjectId)> {
+    let q = 0.1;
+    let (w, d) = (f64::from(wq) * q, f64::from(dq) * q);
+    let r = f64::from(rq) * q;
+    let n = n4 * 4;
+    let t = f64::from(along) / 10.0;
+    // Center one radius in from the chosen edge, the rim on it.
+    let (cx, cy, phase) = match side {
+        0 => (r + t * (w - 2.0 * r), r, -PI / 2.0),
+        1 => (w - r, r + t * (d - 2.0 * r), 0.0),
+        2 => (r + t * (w - 2.0 * r), d - r, PI / 2.0),
+        _ => (r, r + t * (d - 2.0 * r), PI),
+    };
+    if !(w > 2.0 * r && d > 2.0 * r) {
+        return None;
+    }
+    let (mut doc, id, top) = boxed(w, d);
+    let mut a = ring(cx, cy, r, n, phase);
+    // The rim exactly on the edge.
+    a[0] = match side {
+        0 => Point3::new(a[0].x, 0.0, 1.0),
+        1 => Point3::new(w, a[0].y, 1.0),
+        2 => Point3::new(a[0].x, d, 1.0),
+        _ => Point3::new(0.0, a[0].y, 1.0),
+    };
+    draw(&mut doc, id, top, &a, cx, cy, r);
+    if second {
+        // A second, smaller circle outside the first, touching it at
+        // the first's far point (vertex n/2, opposite the rim): its
+        // vertex 0, at angle `phase` from its own center, is that point.
+        let far = a[n / 2];
+        let r2 = 0.5 * r;
+        let (dx, dy) = (far.x - cx, far.y - cy);
+        let len = dx.hypot(dy);
+        let (c2x, c2y) = (far.x + dx / len * r2, far.y + dy / len * r2);
+        // Clear of every edge by a margin, so the second circle touches only
+        // the first.
+        let m = r2 + 1e-3;
+        let inside = |x: f64, y: f64| x > m && y > m && x < w - m && y < d - m;
+        if inside(c2x, c2y) {
+            let mut b = ring(c2x, c2y, r2, n, phase);
+            b[0] = far;
+            draw(&mut doc, id, top, &b, c2x, c2y, r2);
+        }
+    }
+    Some((doc, id))
+}
+
+/// A 2.9 × 2.6 top with a 44-facet circle of radius 0.2 on its right edge
+/// and a radius-0.1 circle touching it on the left. Ear clipping fans the
+/// far top-left corner across the small circle's lower chords, and the
+/// fan's first triangle sits at that corner's tangent to the circle: its
+/// apex is 5.7e-8 m off a 2.44 m side, under the f32 quantum of the
+/// coordinates, so the rounded buffers would wind it backwards. The
+/// tessellation must leave such a triangle out rather than write it
+/// inverted (the property test's first found counterexample).
+#[test]
+fn a_fan_tangent_to_a_hole_writes_no_inverted_sliver() {
+    let (doc, id) = touching_case(29, 26, 1, 2, 9, 11, true).expect("the circles fit");
+    let obj = doc.object(id).expect("box");
+    obj.validate().expect("valid");
+    assert!(has_touching_loops(obj));
+    assert_tessellates_exactly(obj);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
@@ -196,48 +275,9 @@ proptest! {
         side in 0u8..4, rq in 1u32..=4, along in 1u32..=9, n4 in 6usize..=18,
         second in proptest::bool::ANY,
     ) {
-        let q = 0.1;
-        let (w, d) = (f64::from(wq) * q, f64::from(dq) * q);
-        let r = f64::from(rq) * q;
-        let n = n4 * 4;
-        let t = f64::from(along) / 10.0;
-        // Center one radius in from the chosen edge, the rim on it.
-        let (cx, cy, phase) = match side {
-            0 => (r + t * (w - 2.0 * r), r, -PI / 2.0),
-            1 => (w - r, r + t * (d - 2.0 * r), 0.0),
-            2 => (r + t * (w - 2.0 * r), d - r, PI / 2.0),
-            _ => (r, r + t * (d - 2.0 * r), PI),
-        };
-        prop_assume!(w > 2.0 * r && d > 2.0 * r);
-        let (mut doc, id, top) = boxed(w, d);
-        let mut a = ring(cx, cy, r, n, phase);
-        // The rim exactly on the edge.
-        a[0] = match side {
-            0 => Point3::new(a[0].x, 0.0, 1.0),
-            1 => Point3::new(w, a[0].y, 1.0),
-            2 => Point3::new(a[0].x, d, 1.0),
-            _ => Point3::new(0.0, a[0].y, 1.0),
-        };
-        draw(&mut doc, id, top, &a, cx, cy, r);
-        if second {
-            // A second, smaller circle outside the first, touching it at
-            // the first's far point (vertex n/2, opposite the rim): its
-            // vertex 0, at angle `phase` from its own center, is that point.
-            let far = a[n / 2];
-            let r2 = 0.5 * r;
-            let (dx, dy) = (far.x - cx, far.y - cy);
-            let len = dx.hypot(dy);
-            let (c2x, c2y) = (far.x + dx / len * r2, far.y + dy / len * r2);
-            // Clear of every edge by a margin, so the second circle touches only
-            // the first.
-            let m = r2 + 1e-3;
-            let inside = |x: f64, y: f64| x > m && y > m && x < w - m && y < d - m;
-            if inside(c2x, c2y) {
-                let mut b = ring(c2x, c2y, r2, n, phase);
-                b[0] = far;
-                draw(&mut doc, id, top, &b, c2x, c2y, r2);
-            }
-        }
+        let case = touching_case(wq, dq, side, rq, along, n4, second);
+        prop_assume!(case.is_some());
+        let (doc, id) = case.unwrap();
         let obj = doc.object(id).expect("box");
         obj.validate().expect("valid");
         prop_assert!(has_touching_loops(obj));

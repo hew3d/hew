@@ -4,10 +4,13 @@
 //! random queries (rays, apertures, locks, constraint planes), the indexed
 //! hot paths must return byte-for-byte the same results as the linear
 //! reference scan (`resolve_linear` / `pick_face_linear`) — the index may
-//! only prune, never decide.
+//! only prune, never decide. The scoped face pick (crate docs, *Occlusion*)
+//! is held to the same bar under every face policy, and to the depth-sorted
+//! hit list (`pick_face_hits_linear`) as its oracle.
 
 use inference::{
-    ApertureMode, Axis, InferenceScene, PickRay, SnapKind, SnapLock, SnapQuery, SnapWeights,
+    ApertureMode, Axis, FacePolicy, InferenceScene, PickRay, PickScope, SnapKind, SnapLock,
+    SnapQuery, SnapWeights,
 };
 use kernel::{Guide, InstanceId, Object, ObjectId, Plane, Point3, SketchId, Transform, Vec3};
 use proptest::prelude::*;
@@ -398,6 +401,143 @@ proptest! {
             scene.pick_face_linear(&query.ray)
         );
     }
+}
+
+/// The face policies the scoped-pick properties sweep.
+const SCOPE_POLICIES: [FacePolicy; 3] = [
+    FacePolicy::Opaque,
+    FacePolicy::SeeThrough,
+    FacePolicy::Absent,
+];
+
+/// What the scoped pick must return: nothing under `Absent`; under
+/// `Opaque` or `SeeThrough` with a scope, the first depth-sorted hit whose
+/// owner is in it, else the first hit; otherwise the first hit.
+fn scoped_oracle(
+    scene: &InferenceScene,
+    ray: &PickRay,
+    policy: FacePolicy,
+    scope: Option<&PickScope>,
+) -> Option<(inference::SnapSource, f64)> {
+    let hits = scene.pick_face_hits_linear(ray);
+    match (policy, scope) {
+        (FacePolicy::Absent, _) => None,
+        (FacePolicy::Opaque | FacePolicy::SeeThrough, Some(scope)) => hits
+            .iter()
+            .find(|(s, _)| s.in_scope(scope))
+            .or(hits.first())
+            .copied(),
+        _ => hits.first().copied(),
+    }
+}
+
+proptest! {
+    /// The scoped face pick: indexed ≡ linear, bit for bit, under every
+    /// policy with and without a scope; and both equal the oracle over the
+    /// depth-sorted hit list. Rays aim at a chosen solid (with a random
+    /// eye), so most cases cross several owners; the scope names a random
+    /// subset of owners, sometimes padded with stale ids.
+    #[test]
+    fn the_scoped_pick_is_the_first_in_scope_hit_else_the_first_hit(
+        scene_spec in arb_scene(),
+        eye in arb_point(60.0),
+        aim_at in any::<prop::sample::Index>(),
+        jitter in arb_point(0.5),
+        picks in prop::collection::vec(any::<bool>(), 5),
+        stale in any::<bool>(),
+        scoped in any::<bool>(),
+    ) {
+        let (mut scene, owners, aims) = build_owned_scene(&scene_spec);
+        let target = aims[aim_at.index(aims.len())] + jitter.to_vec();
+        prop_assume!((target - eye).length_squared() >= MIN_RAY_LEN_SQ);
+        let ray = PickRay { origin: eye, direction: target - eye };
+        let scope = scoped.then(|| {
+            let mut scope = PickScope::default();
+            for (&(object, instance), &pick) in owners.iter().zip(&picks) {
+                if !pick {
+                    continue;
+                }
+                match instance {
+                    Some(i) => { scope.instances.insert(i); }
+                    None => { scope.objects.insert(object); }
+                }
+            }
+            if stale {
+                // Keys past every minted one name nothing in the scene.
+                let mut o: slotmap::SlotMap<ObjectId, ()> = slotmap::SlotMap::with_key();
+                let mut i: slotmap::SlotMap<InstanceId, ()> = slotmap::SlotMap::with_key();
+                let mut last = (o.insert(()), i.insert(()));
+                for _ in 0..16 {
+                    last = (o.insert(()), i.insert(()));
+                }
+                scope.objects.insert(last.0);
+                scope.instances.insert(last.1);
+            }
+            scope
+        });
+        scene.set_pick_scope(scope.clone());
+        for policy in SCOPE_POLICIES {
+            scene.set_face_policy(policy);
+            let want = scoped_oracle(&scene, &ray, policy, scope.as_ref());
+            prop_assert_eq!(scene.pick_face(&ray), want, "{:?} indexed", policy);
+            prop_assert_eq!(scene.pick_face_linear(&ray), want, "{:?} linear", policy);
+            // Nothing in scope under the ray: the unscoped pick, exactly.
+            if want.is_none_or(|(s, _)| scope.as_ref().is_none_or(|sc| !s.in_scope(sc))) {
+                let mut bare = scene.clone();
+                bare.set_pick_scope(None);
+                prop_assert_eq!(bare.pick_face(&ray), want, "{:?} unscoped", policy);
+            }
+        }
+    }
+}
+
+/// A scene for the scoped-pick property: every solid its own owner (world
+/// objects and placements alike carry distinct ids, so a scope can name any
+/// subset), with `share`-flagged placements re-placing the previous member
+/// as sibling placements do. Returns the scene, each solid's owner as a
+/// scope entry, and each solid's world-space centroid to aim at.
+#[allow(clippy::type_complexity)]
+fn build_owned_scene(
+    spec: &SceneSpec,
+) -> (
+    InferenceScene,
+    Vec<(ObjectId, Option<InstanceId>)>,
+    Vec<Point3>,
+) {
+    let mut scene = InferenceScene::new();
+    let mut objects: slotmap::SlotMap<ObjectId, ()> = slotmap::SlotMap::with_key();
+    let mut instances: slotmap::SlotMap<InstanceId, ()> = slotmap::SlotMap::with_key();
+    let mut owners = Vec::new();
+    let mut aims = Vec::new();
+    // The previous member and its definition-space centroid.
+    let mut last_member: Option<(ObjectId, Point3)> = None;
+    for (i, ((positions, faces), placement, share)) in spec.solids.iter().enumerate() {
+        let object = Object::from_polygons(positions, faces).expect("generated solids are valid");
+        let sum = positions.iter().fold(Vec3::ZERO, |acc, p| acc + p.to_vec());
+        let centroid = Point3::ORIGIN + sum * (1.0 / positions.len() as f64);
+        // Even slots: world objects; odd slots: placements.
+        if i % 2 == 0 {
+            let id = objects.insert(());
+            scene.add_object(id, &object, placement);
+            owners.push((id, None));
+            aims.push(placement.apply_point(centroid));
+            continue;
+        }
+        let (member, local_centroid) = match last_member {
+            Some(prev) if *share => prev,
+            _ => {
+                let member = objects.insert(());
+                scene.set_def_member(member, &object);
+                (member, centroid)
+            }
+        };
+        let instance = instances.insert(());
+        scene.add_placement(instance, member, placement);
+        owners.push((member, Some(instance)));
+        aims.push(placement.apply_point(local_centroid));
+        last_member = Some((member, local_centroid));
+    }
+    (scene, owners, aims)
 }
 
 /// Deterministic indexed/linear parity at REAL guide crossings. The random

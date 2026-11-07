@@ -12,6 +12,8 @@ import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColor
 import { getResolvedTheme } from '../settings/theme'
 import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
 import type { DrawingAxes } from './drawingAxes'
+import { SiblingPreviewMirror } from '../viewport/siblingPreview'
+import { isSessionGhost } from './transformPreview'
 
 // `isMac` is a load-time constant read from `navigator.platform`, so this
 // whole file mocks `../platform` to `isMac: true` (macOS) rather than
@@ -368,6 +370,26 @@ describe('RotateTool — protractor widget (idle/hover)', () => {
     tool.onPointerMove(makeSnap({ kind: 'face', elementKind: 'face', object: 1n, element: 2n }), rayThrough(0, 0))
     expect(ringColorHex(preview)).toBe(axisColorHex([1, 0, 0]))
     expect(ringColorHex(preview)).not.toBe(axisColorHex([0, 0, 1]))
+  })
+
+  it('a snap on the line where two objects\' faces meet does not adopt the first face\'s axis', () => {
+    // The kernel names the first of the two faces as the line's owner of
+    // record (here a side face, +X); the line is on both and a pick of
+    // neither, so the axis comes from what is under the ray (nothing here
+    // → +Z), as for an edge.
+    const { tool, preview, wasmScene } = makeTool({ faceNormal: [1, 0, 0] })
+    const meetingLine: Snap['meetingLine'] = [
+      [0, -1, 0],
+      [0, 1, 0],
+    ]
+    for (const kind of ['on-intersection-line', 'midpoint']) {
+      tool.onPointerMove(
+        makeSnap({ kind, elementKind: 'meeting-line', object: 1n, element: 2n, meetingLine }),
+        rayThrough(0, 0),
+      )
+      expect(ringColorHex(preview)).toBe(axisColorHex([0, 0, 1]))
+    }
+    expect(wasmScene.face_normal).not.toHaveBeenCalledWith(1n, 2n)
   })
 })
 
@@ -1669,5 +1691,35 @@ describe('RotateTool — click-drag-release gate', () => {
     // The release set the reference: the tool now asks for the angle.
     expect(t.tool.gestureInFlight()).toBe(true)
     expect(t.tool.statusHint()).not.toContain('center of rotation')
+  })
+})
+
+describe('RotateTool — the drag ghost is session geometry, mirrored onto sibling placements', () => {
+  it('the reference click puts a marked ghost in the preview (the protractor disk is not one); the mirror shows it and clears with Esc', () => {
+    const objectsGroup = new THREE.Group()
+    const sub = new THREE.Group()
+    sub.name = 'Object_1'
+    sub.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial()))
+    objectsGroup.add(sub)
+    const preview = new THREE.Group()
+    const wasmScene = makeWasmScene()
+    const tool = new RotateTool(wasmScene as never, preview, objectsGroup, [{ kind: 'object', id: 1n }], vi.fn(), vi.fn(), null, vi.fn(), vi.fn(), vi.fn())
+    const root = new THREE.Group()
+    const mirror = new SiblingPreviewMirror({ source: preview, root, frames: () => [1, 0, 0, 4, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 7, 0, 0, 1, 0] })
+
+    tool.onPointerDown(makeSnap(), rayThrough(0, 0)) // pivot
+    expect(preview.children.filter(isSessionGhost)).toHaveLength(0) // disk only
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(0)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference arm: the ghost appears
+    const ghosts = preview.children.filter(isSessionGhost)
+    expect(ghosts).toHaveLength(1)
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(2)
+    expect((root.children[0] as THREE.Group).children).toHaveLength(1) // the ghost, not the disk
+
+    tool.onKey(makeKeyEvent('Escape'))
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(0)
   })
 })

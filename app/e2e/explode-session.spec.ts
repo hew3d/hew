@@ -23,9 +23,11 @@ import {
  * "is the rest of the model actually dimmed" has something to dim):
  *
  *   1. Double-click instance A open — sibling instance B (same definition)
- *      and the unrelated box both prove out: B is hidden kernel-side
- *      (`instances_of` excludes it), the unrelated box is merely dimmed
- *      (still a live, visible, un-hidden world object — just faded).
+ *      and the unrelated box both prove out: only A hides kernel-side
+ *      (`instances_of` keeps B — a LIVE sibling placement that renders the
+ *      session's world geometry, ARCHITECTURE.md 2.11; live-siblings.spec.ts
+ *      drives that rendering), the unrelated box is merely dimmed (still a
+ *      live, visible, un-hidden world object — just faded).
  *   2. Push/Pull a member face outward (a REAL drag — a plain world-object
  *      push, the same mechanics tools.spec.ts's own Push/Pull drags use).
  *   3. Draw a rectangle on another member face and Push/Pull the new
@@ -177,9 +179,14 @@ test('explode session: open, edit two member faces, close folds both instances, 
   await dblClickWorld(page, ctx, 1, 0.5, 1)
   await page.waitForTimeout(200)
 
-  // Sibling instance B is hidden kernel-side: `instances_of` (which the
-  // harness's getInstancesOf wraps) filters hidden instances out entirely.
-  expect(await page.evaluate((c) => window.__hew_test!.getInstancesOf(c), component)).toEqual([])
+  // Only the ENTERED instance A hides kernel-side: `instances_of` (which the
+  // harness's getInstancesOf wraps) filters hidden instances out, and the
+  // sibling B stays live — a live sibling placement drawing the session's
+  // world member (ARCHITECTURE.md 2.11).
+  expect(await page.evaluate((c) => window.__hew_test!.getInstancesOf(c), component)).toEqual([setup.instanceB])
+  expect(await page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBe(setup.instance)
+  expect(await page.evaluate(() => window.__hew_test!.getSessionPlacements())).toEqual([setup.instanceB])
+  expect(await page.evaluate((i) => window.__hew_test!.getInstanceExpandedMembers(i), setup.instanceB)).toEqual([memberId])
   // The member is now a WORLD-owned object (baked, same id) — object_ids()
   // (`getObjectCount`) counts only world-tree objects, so it now includes
   // both the unrelated box AND the newly-baked member.
@@ -264,7 +271,7 @@ test('explode session: open, edit two member faces, close folds both instances, 
   const memberBounds = () =>
     page.evaluate((id) => window.__hew_test!.getObjectBounds(id), memberId)
   const sessionOpen = async () =>
-    (await page.evaluate((c) => window.__hew_test!.getInstancesOf(c), component)).length === 0
+    (await page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())) !== null
 
   // ---- 5. Undo the granular walk in reverse: close -> extrude -> push/pull
   // -> open. Undoing past the close visually RE-ENTERS the session — the
@@ -277,7 +284,7 @@ test('explode session: open, edit two member faces, close folds both instances, 
     return b[1] < -0.1 && b[5] > 1.1
   }, 'session reopened with both edits')
   await page.waitForTimeout(150)
-  expect(await page.evaluate((c) => window.__hew_test!.getInstancesOf(c), component)).toEqual([])
+  expect(await page.evaluate((c) => window.__hew_test!.getInstancesOf(c), component)).toEqual([setup.instanceB])
   const afterUndoCloseShot = await page.locator('canvas').first().screenshot()
   // Re-entering the session re-dims the unrelated box again — visually
   // distinct from the (undimmed) post-close render just captured.

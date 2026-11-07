@@ -19,6 +19,7 @@ export const KIND_CSS_COLOR: Record<string, string> = {
   midpoint: '#00cccc',
   intersection: '#ffaa00',
   'on-edge': '#cc2200',
+  'on-intersection-line': '#e05a00',
   'on-face': '#0055cc',
   'on-guide': '#9933cc',
   ground: '#888888',

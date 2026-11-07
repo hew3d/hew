@@ -41,6 +41,7 @@ import { DEPTH_BIAS } from './depthPolicy'
 import type { Scene as WasmScene, DocChangeJs } from '../wasm/loader'
 import type { HealthOverlay } from '../health/healthReport'
 import { CueLayer } from './CueLayer'
+import { SiblingPreviewMirror } from './siblingPreview'
 import { DrawPlaneCueLayer } from './DrawPlaneCueLayer'
 import type { DrawPlane } from '../tools/drawPlane'
 import { SnapService } from './snapService'
@@ -107,7 +108,7 @@ import {
 } from './math'
 import { dynamicClipPlanes, groundHitIsUsable, targetAtDepth, zoomFloorFor } from './cameraDepth'
 import { CameraRig, type Projection, isBehindCamera, turnedEyePosition } from './cameraRig'
-import { guideSpanOf, stretchToUse } from './guideWindow'
+import { guideLinePickPx, segmentPickPx } from './screenPick'
 import { fovReadoutText, activeCameraToolForName } from './fovReadout'
 import { parseFovEntry } from './fovUnits'
 import {
@@ -127,7 +128,7 @@ import { readAnnotation, commitAnnotationText, initialEditorText, type Annotatio
 import { collectLeafIds, isDraftKind, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structuralSelection, treeIndexOf, type NodeRef, type SelectMode } from '../panels/treeModel'
 import { selectModeFor, isModifiedSelectPress } from './selectModifiers'
 import { baseBindingFor, desiredDragState, switchDragTo, orbitDragState, setPreciseOrbit, forceBaseAfterPress, type SwitchableDrag } from './orbitDragSwitch'
-import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
+import { MarqueeProjector, WINDOW_COVERAGE_MIN, boundsCoverage, emptyScreenBounds, normalizedRect, type MarqueeMode, type MarqueeRect, type ScreenBounds } from './marquee'
 import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
 import { DragCommitGate } from './dragCommit'
 import {
@@ -149,9 +150,8 @@ import {
 } from './zoomWindowDrag'
 import { CleanModifierTap } from './cleanModifierTap'
 import { MultiClickTracker } from './multiClick'
-import { resolveSelectableRef, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
+import { resolveSelectableRef, selectionScopeActive, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
 import {
-  allFree,
   draftRef,
   geometryOf,
   isDraftRef,
@@ -159,7 +159,7 @@ import {
   readPlaneUnits,
   resolveDraft,
   keysToArray,
-  ctxOfSketch,
+  ctxOfSketchUnits,
   widenCurveRef,
 } from '../tools/planeUnits'
 import { runDraft } from '../tools/draftCommit'
@@ -187,6 +187,7 @@ import { getResolvedTheme, subscribe as subscribeTheme, type ResolvedTheme } fro
 import { buildShopGradientTextureFromToken } from './shopGradientBackground'
 import { readAppliedTheme } from '../theme/applyTheme'
 import { setPickRenderMode } from '../tools/pickPolicy'
+import { pushActiveScope } from './pickScope'
 import { leftCanvasBounds, replaysWithoutSnap, shouldReplayHeldPointer } from './heldPointerReplay'
 import { getLengthSystem, getLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit } from '../settings/units'
 import { InfiniteGrid } from './InfiniteGrid'
@@ -316,6 +317,10 @@ export interface InferenceInfo {
    *  tip's second line (docs/design/selection-path.md "The hover line"). */
   object?: bigint
   instance?: bigint
+  /** The active tool's cursor-side explanation for why it cannot act on
+   *  what is hovered (`Tool.hoverHint`) — Push/Pull over a component face
+   *  outside its edit session. Shown as the chip's own line. */
+  hint?: string
 }
 
 interface Props {
@@ -2212,7 +2217,16 @@ export function flattenSessionScope(
  */
 export type BooleanCoreOutcome =
   | { kind: 'ok'; node: NodeRef; autoExploded: boolean }
-  | { kind: 'refused'; code?: string; message: string }
+  | {
+      kind: 'refused'
+      code?: string
+      message: string
+      /** True when an instance operand's auto-explode was committed and
+       *  then undone because the retried boolean refused: the document is
+       *  back where it started, but the scene passed through other states
+       *  on the way, so the caller refreshes what it renders. */
+      rolledBack?: boolean
+    }
   | {
       kind: 'mutated-failed'
       /** Every node now sitting in the document in place of a pre-explode
@@ -2331,15 +2345,35 @@ export function runBooleanCore(
       const node = attempt(opA, opB)
       return { kind: 'ok', node, autoExploded: true }
     } catch (err2) {
-      // Unlike every refusal above, the explode(s) already committed real
-      // mutations — the document now holds the exploded pieces, not the
-      // pre-explode instance(s).
+      // The explode(s) were committed only so this boolean could run. When
+      // the boolean itself refuses — a cutter that removes nothing, a
+      // degenerate contact — the person asked for a boolean and got none, so
+      // the document must read as untouched: roll the explode steps back
+      // (each was one undo step) and report a plain refusal. Only if an
+      // undo itself fails is the partial state disclosed as mutated-failed,
+      // with the exact step count that restores it.
       const code2 = parseKernelErrorCode(err2)
       const rawMsg2 = err2 instanceof Error ? err2.message : String(err2)
+      let rolledBack = 0
+      try {
+        // Each explode step was one undo entry; the returned change report
+        // is a wasm handle, freed since the caller re-pulls the whole scene.
+        for (; rolledBack < committedSteps; rolledBack++) wasmScene.scene_undo().free()
+      } catch {
+        // fall through to the honest partial-state report below
+      }
+      if (rolledBack === committedSteps) {
+        return {
+          kind: 'refused',
+          code: code2 ?? undefined,
+          message: kernelErrorMessage(code2 ?? 'Unknown', rawMsg2),
+          rolledBack: true,
+        }
+      }
       return {
         kind: 'mutated-failed',
         settledNodes,
-        committedSteps,
+        committedSteps: committedSteps - rolledBack,
         retryFailed: true,
         otherOperandExploded: false,
         code: code2 ?? undefined,
@@ -2550,6 +2584,8 @@ export default function Viewport({
   const lastPushedSessionRef = useRef<{ node: NodeRef; label: string }[]>([])
   // Latest selected ids, readable inside the stable event closures.
   const selectedIdsRef = useRef<NodeRef[]>(selectedIds)
+  // Latest selected construction guide — the Move tool's guide target.
+  const selectedGuideRef = useRef<bigint | null>(selectedGuide)
   // Latest current material id for the Paint tool.
   const currentMaterialIdRef = useRef<bigint>(currentMaterialId)
   // Polygon's last-used side count — session-lived across tool re-selection
@@ -2943,6 +2979,26 @@ export default function Viewport({
     const previewGroup = new THREE.Group()
     previewGroup.name = 'Preview'
     threeScene.add(previewGroup)
+    // Inside a component session, the geometry ghosts a tool draws into
+    // `previewGroup` are drawn again through every other placement of the
+    // definition (siblingPreview.ts, ARCHITECTURE.md 2.11), so a drag shows
+    // on every copy as the commit will. Its own scene-level group: a tool's
+    // `clearPreview` disposes what it finds under the preview group, and
+    // the mirrors share the ghosts' geometry. Synced before each render.
+    const siblingPreviewGroup = new THREE.Group()
+    siblingPreviewGroup.name = 'SiblingPreview'
+    threeScene.add(siblingPreviewGroup)
+    const siblingPreview = new SiblingPreviewMirror({
+      source: previewGroup,
+      root: siblingPreviewGroup,
+      frames: () => wasmScene.session_sibling_frames(),
+      // Read again when the entered instance or the placement list changes
+      // under a gesture (undo/redo across a session boundary, a placement
+      // created or deleted); `invalidate()` below covers what this cannot
+      // see — a visibility, tag, or isolation change, any document change.
+      fingerprint: () =>
+        `${wasmScene.explode_session_instance() ?? ''}|${Array.from(wasmScene.session_placements()).join(',')}`,
+    })
 
     /**
      * The session-scope nodeKey filter `resolvePickToSelectable` should
@@ -2990,6 +3046,9 @@ export default function Viewport({
         worldPerPixelAt: (p) =>
           rig.worldPerPixel(camera.position.distanceTo(new THREE.Vector3(p[0], p[1], p[2])), el.clientHeight),
         facesOcclude: sceneRenderer.getRenderMode() === 'shaded',
+        scopeActive: selectionScopeActive(
+          sceneRenderer.getRenderMode(), activeContextRef.current.length, sessionScopeKeysRef.current !== null,
+        ),
       }
     }
 
@@ -3057,6 +3116,8 @@ export default function Viewport({
     // every routed event (the wrapped listeners below) and on tool switches,
     // pushing CHANGES up — a string compare keeps the per-move cost trivial.
     let lastToolHint: string | null = null
+    /** Live window/crossing state of an active marquee drag, for the status bar. */
+    let marqueeHint: 'window' | 'crossing' | null = null
     function reportToolHint(): void {
       // Camera tools (Orbit/Pan/Zoom/Zoom Window) park the controller on
       // Select — for Orbit/Pan/Zoom because OrbitControls owns the left
@@ -3069,7 +3130,11 @@ export default function Viewport({
       // reads the new mode.
       const hint = activeCameraTool !== null
         ? null
-        : (toolController.activeTool.statusHint?.() ?? null)
+        : marqueeHint !== null && toolController.activeToolName === 'Select'
+          ? (marqueeHint === 'crossing'
+            ? t`Crossing selection: picks everything the box touches. Drag left to right for a window selection.`
+            : t`Window selection: picks objects the box fully encloses or mostly covers. Drag right to left for a crossing selection.`)
+          : (toolController.activeTool.statusHint?.() ?? null)
       if (hint !== lastToolHint) {
         lastToolHint = hint
         onToolHintRef.current?.(hint)
@@ -3145,7 +3210,7 @@ export default function Viewport({
       const seenCtx = new Set<string>()
       for (const sid of Array.from(wasmScene.sketch_ids())) {
         if (inScope !== null && !inScope.has(sid)) continue
-        const ctx = ctxOfSketch(wasmScene, sid)
+        const ctx = ctxOfSketchUnits(wasmScene, sid)
         if (ctx === null || seenCtx.has(ctx)) continue
         seenCtx.add(ctx)
         const pu = readPlaneUnits(wasmScene, ctx)
@@ -3248,20 +3313,46 @@ export default function Viewport({
       scheduleRender()
     }
 
-    /** The face meshes rendered for one node's visible leaves. */
-    function candidateMeshes(cand: { leafObjects: bigint[]; leafInstances: bigint[] }): THREE.Mesh[] {
-      const meshes: THREE.Mesh[] = []
+    /** One face mesh's worth of hit-test geometry. */
+    interface MarqueePart {
+      positions: ArrayLike<number>
+      index: ArrayLike<number> | null
+      matrixWorld: THREE.Matrix4
+      /** Local-space bounds of `positions` (cached per buffer). */
+      box: THREE.Box3
+    }
+    const partBoxes = new WeakMap<object, THREE.Box3>()
+    function boxOfPositions(positions: ArrayLike<number>): THREE.Box3 {
+      let box = partBoxes.get(positions)
+      if (box === undefined) {
+        box = new THREE.Box3().setFromArray(positions as ArrayLike<number> as number[])
+        partBoxes.set(positions, box)
+      }
+      return box
+    }
+
+    /** The face geometry rendered for one node's visible leaves. Instances
+     * are read from the renderer's member cache, never materialized. */
+    function candidateParts(cand: { leafObjects: bigint[]; leafInstances: bigint[] }): MarqueePart[] {
+      const parts: MarqueePart[] = []
       for (const id of cand.leafObjects) {
         sceneRenderer.getObjectGroup(id)?.traverse((child) => {
-          if (child instanceof THREE.Mesh) meshes.push(child)
+          if (!(child instanceof THREE.Mesh)) return
+          const positions = child.geometry.getAttribute('position').array
+          parts.push({
+            positions,
+            index: child.geometry.index?.array ?? null,
+            matrixWorld: child.matrixWorld,
+            box: boxOfPositions(positions),
+          })
         })
       }
       for (const id of cand.leafInstances) {
-        sceneRenderer.getInstanceGroup(id)?.traverse((child) => {
-          if (child instanceof THREE.Mesh) meshes.push(child)
-        })
+        for (const p of sceneRenderer.instanceFaceParts(id) ?? []) {
+          parts.push({ positions: p.positions, index: p.indices, matrixWorld: p.matrixWorld, box: boxOfPositions(p.positions) })
+        }
       }
-      return meshes
+      return parts
     }
 
     /**
@@ -3277,25 +3368,59 @@ export default function Viewport({
       const projector = new MarqueeProjector(camera, el.clientWidth, el.clientHeight)
       const out: NodeRef[] = []
 
+      const bb: ScreenBounds = { minX: 0, minY: 0, maxX: 0, maxY: 0 }
       for (const cand of visibleTopLevelCandidates()) {
-        const meshes = candidateMeshes(cand)
-        if (meshes.length === 0) continue
-        let hit: boolean
+        const parts = candidateParts(cand)
+        if (parts.length === 0) continue
+        // Cheap per-part screen bounds from the local bounding box (null when
+        // a corner is behind the camera). A large group is thousands of
+        // parts; most are nowhere near the rect and must not cost a vertex
+        // scan.
+        const bounds: (ScreenBounds | null)[] = parts.map((pt) =>
+          projector.boxScreenBounds(pt.box, pt.matrixWorld, bb) ? { ...bb } : null,
+        )
+        const touches = (i: number): boolean => {
+          const b = bounds[i]
+          if (b !== null && (b.maxX < rect.minX || b.minX > rect.maxX || b.maxY < rect.minY || b.minY > rect.maxY)) {
+            return false
+          }
+          return projector.meshTouchesRect(parts[i].positions, parts[i].index, parts[i].matrixWorld, rect)
+        }
+        let hit = false
         if (mode === 'window') {
-          hit = meshes.every((m) =>
-            projector.allVerticesInRect(
-              m.geometry.getAttribute('position').array, m.matrixWorld, rect,
-            ),
-          )
+          hit = parts.every((pt, i) => {
+            // Box inside the rect proves every vertex is; a box that pokes out
+            // (rotated geometry overshoots its corners) still needs the scan.
+            const b = bounds[i]
+            if (b !== null && b.minX >= rect.minX && b.maxX <= rect.maxX && b.minY >= rect.minY && b.maxY <= rect.maxY) return true
+            return projector.allVerticesInRect(pt.positions, pt.matrixWorld, rect)
+          })
+          if (!hit) {
+            // Not fully enclosed: still picked when the window swallows most
+            // of the object (WINDOW_COVERAGE_MIN of its on-screen extent). The
+            // exact extents are only worth scanning when the rect reaches the
+            // object's box at all; a part whose box corner is behind the
+            // camera has no box bounds and goes straight to the exact scan.
+            let reaches = true
+            if (bounds.every((b) => b !== null)) {
+              const u = emptyScreenBounds()
+              for (const b of bounds) {
+                u.minX = Math.min(u.minX, b!.minX); u.maxX = Math.max(u.maxX, b!.maxX)
+                u.minY = Math.min(u.minY, b!.minY); u.maxY = Math.max(u.maxY, b!.maxY)
+              }
+              reaches = boundsCoverage(u, rect) > 0
+            }
+            if (reaches) {
+              const acc = emptyScreenBounds()
+              const allFront = parts.every((pt) => projector.extendScreenBounds(pt.positions, pt.matrixWorld, acc))
+              // The window must also touch the object itself: a ring or frame
+              // can have most of its bounding box empty, and a window drawn
+              // inside the hole is not aimed at it.
+              hit = allFront && boundsCoverage(acc, rect) >= WINDOW_COVERAGE_MIN && parts.some((_, i) => touches(i))
+            }
+          }
         } else {
-          hit = meshes.some((m) =>
-            projector.meshTouchesRect(
-              m.geometry.getAttribute('position').array,
-              m.geometry.index?.array ?? null,
-              m.matrixWorld,
-              rect,
-            ),
-          )
+          hit = parts.some((_, i) => touches(i))
         }
         if (hit) out.push(cand.node)
       }
@@ -3362,14 +3487,13 @@ export default function Viewport({
       )
       const snap = excludeAxisSnapForSelect(rawSnap)
       const g = pickGuide(ndcX, ndcY)
-      // A line drawn on a face under the cursor wins over a guide lying
-      // along it: guides are often placed exactly on the edges a shape was
-      // drawn to, and the line is what the click is for. The guide stays
-      // selectable anywhere else along its length.
+      // A drawn line under the cursor, on a face or on the ground, wins over
+      // a guide lying along it: guides are often placed exactly on the edges
+      // a shape was drawn to, and the line is what the click is for. The
+      // guide stays selectable anywhere else along its length.
       const under = g !== null ? resolveSelectableRef(snap, ray, selectionDeps()) : null
-      const lineOnFace =
-        under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve') && !allFree(wasmScene, under)
-      if (g !== null && !lineOnFace) {
+      const lineUnder = under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve')
+      if (g !== null && !lineUnder) {
         onSelectGuideRef.current?.(g)
         scheduleRender()
         return
@@ -3594,6 +3718,39 @@ export default function Viewport({
     }
 
     /**
+     * Guide auto-select for Move and Rotate (guideTarget.ts): the guide
+     * under the first click is selected and transformed — the Select click's
+     * own rule (`dispatchSelectPick`), so a drawn line lying along the guide
+     * still wins and is left to `acquireTransformTargets`.
+     */
+    function acquireGuideTarget(ray: Ray): bigint | null {
+      // Any point along the ray projects to the clicked pixel, in either
+      // projection.
+      const ndc = new THREE.Vector3(...ray.origin)
+        .add(new THREE.Vector3(...ray.direction))
+        .project(camera)
+      const g = pickGuide(ndc.x, ndc.y)
+      if (g === null) return null
+      const { snap } = snapService.resolve(
+        ray, el.clientHeight, apertureBasis(),
+        undefined, undefined, undefined, undefined, undefined, undefined, true,
+      )
+      const under = resolveSelectableRef(snap, ray, selectionDeps())
+      if (under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve')) return null
+      onSelectGuideRef.current?.(g)
+      scheduleRender()
+      return g
+    }
+
+    /** A guide transform landed (or a gesture on a guide ended): redraw the
+     *  guides and select `guide` (null: none). */
+    function landGuideTransform(guide: bigint | null): void {
+      sceneRenderer.refreshGuides()
+      onSelectGuideRef.current?.(guide)
+      scheduleRender()
+    }
+
+    /**
      * "Plain objects are immediately editable": may a draw tool
      * (Line/Rectangle/Circle/Polygon/Arc) draw directly on this picked face?
      * Injected into the draw tools (which only know an entered-object id)
@@ -3640,6 +3797,10 @@ export default function Viewport({
       /** The press's modifier matrix, applied to the swept nodes on release. */
       mode: SelectMode
       active: boolean
+      /** Live direction of the drag: right-to-left is a crossing selection. */
+      crossing: boolean
+      /** The arming pointer: other pointers' moves never drive this gesture. */
+      pointerId: number
     }
     let marqueeDrag: MarqueeDrag | null = null
 
@@ -4137,12 +4298,29 @@ export default function Viewport({
       return [ev.clientX - r.left, ev.clientY - r.top]
     }
 
+    /** Window (L→R) and crossing (R→L) read as two different tools: solid blue
+     * with a "Window" tag versus dashed green with a "Crossing" tag. */
+    const marqueeChip = document.createElement('div')
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS, not user-facing text
+    Object.assign(marqueeChip.style, {
+      position: 'absolute', top: '0', left: '0', transform: 'translateY(-100%)',
+      padding: '1px 6px', font: '600 11px system-ui, sans-serif', color: '#fff',
+      whiteSpace: 'nowrap', borderRadius: '3px 3px 0 0',
+    })
+    marqueeOverlay.appendChild(marqueeChip)
+
     function updateMarqueeOverlay(x: number, y: number): void {
       if (marqueeDrag === null) return
       const rect = normalizedRect(marqueeDrag.startX, marqueeDrag.startY, x, y)
-      // Solid border = window (L→R), dashed = crossing (R→L) — SketchUp's cue.
-      marqueeOverlay.style.border =
-        x >= marqueeDrag.startX ? '1px solid #4a90e2' : '1px dashed #4a90e2'
+      const crossing = x < marqueeDrag.startX
+      marqueeDrag.crossing = crossing
+      marqueeHint = crossing ? 'crossing' : 'window'
+      const color = crossing ? '#1e9e4a' : '#2d6cdf'
+      marqueeOverlay.style.border = crossing ? `2px dashed ${color}` : `2px solid ${color}`
+      marqueeOverlay.style.background = crossing ? 'rgba(30, 158, 74, 0.16)' : 'rgba(45, 108, 223, 0.16)'
+      marqueeChip.style.background = color
+      marqueeChip.textContent = crossing ? t`Crossing` : t`Window`
+      marqueeChip.style.display = 'block'
       marqueeOverlay.style.left = `${rect.minX}px`
       marqueeOverlay.style.top = `${rect.minY}px`
       marqueeOverlay.style.width = `${rect.maxX - rect.minX}px`
@@ -4152,6 +4330,7 @@ export default function Viewport({
 
     function clearMarquee(): void {
       marqueeDrag = null
+      marqueeHint = null
       marqueeOverlay.style.display = 'none'
     }
 
@@ -4315,6 +4494,8 @@ export default function Viewport({
         // no crossing-selection analogue, so drag direction carries no
         // separate meaning the way it does for the Select marquee.
         marqueeOverlay.style.border = '1px solid #4a90e2'
+        marqueeOverlay.style.background = 'rgba(74, 144, 226, 0.12)'
+        marqueeChip.style.display = 'none'
         marqueeOverlay.style.left = `${rect.minX}px`
         marqueeOverlay.style.top = `${rect.minY}px`
         marqueeOverlay.style.width = `${rect.maxX - rect.minX}px`
@@ -4607,6 +4788,10 @@ export default function Viewport({
      * full rebuild runs as before.
      */
     function handleSceneRefresh(touched?: RefreshTouched): void {
+      // The document changed (a commit, undo/redo, a session opened or
+      // closed): a mirrored gesture still in flight re-reads its sibling
+      // frames on the next sync rather than drawing at stale poses.
+      siblingPreview.invalidate()
       const wtMap = touched !== undefined
         ? sceneRenderer.refreshTouched(touched)
         : sceneRenderer.refresh()
@@ -4730,6 +4915,15 @@ export default function Viewport({
       const outcome = runBooleanCore(wasmScene, op, a, b)
 
       if (outcome.kind === 'refused') {
+        if (outcome.rolledBack) {
+          // The document is back where it started, but the scene passed
+          // through the exploded state on the way; re-pull what is rendered
+          // so nothing stale from that detour survives.
+          handleSceneRefresh()
+          sceneRenderer.refreshAllSketches()
+          sceneRenderer.refreshGuides()
+          scheduleRender()
+        }
         handleToast(outcome.message, outcome.code)
         return null
       }
@@ -5170,7 +5364,7 @@ export default function Viewport({
       }
 
       if (activeContextRef.current.length === 0) {
-        sceneRenderer.setActiveContext(explodeSessionObjectIdsRef.current, sessionInstanceIdsRef.current)
+        pushActiveScope(sceneRenderer, wasmScene, explodeSessionObjectIdsRef.current, sessionInstanceIdsRef.current, true)
       }
 
       // Tape Measure scoped-rescale gating (finding 6): push the fresh
@@ -5224,10 +5418,12 @@ export default function Viewport({
     /**
      * The double-click gesture's own open attempt: a plain double-click on a
      * component instance opens an explode session; if the kernel gates it —
-     * `ExplodeSessionPoseUnsupported` (non-uniform scale) or
-     * `ExplodeSessionGroupedInstance` (a placement of the definition is
-     * nested in a group, which a session's hide-every-placement bake cannot
-     * honor) — fall back SILENTLY to the ordinary "enter this instance's
+     * `ExplodeSessionPoseUnsupported` (non-uniform scale or a mirror) or
+     * `ExplodeSessionGroupedInstance` (the entered instance itself is
+     * nested in a group, which a session's bake to top-level world objects
+     * cannot honor; a grouped SIBLING is fine — siblings stay live,
+     * ARCHITECTURE.md 2.11) — fall back SILENTLY to the ordinary "enter
+     * this instance's
      * edit context" gesture (K1/K2), which remains the editing model for
      * exactly those instances. Any other refusal surfaces as the usual
      * kernel-error toast and enters neither. Exposed on `ViewportApi` too
@@ -5842,7 +6038,7 @@ export default function Viewport({
           dirLight,
           lightRig: MODEL_LIGHT_RIG.light,
           gridAxes: [infiniteGrid.mesh, originAxes],
-          hideAlways: [cueLayer.group, drawPlaneCueLayer.group, previewGroup, sceneRenderer.sectionGroup],
+          hideAlways: [cueLayer.group, drawPlaneCueLayer.group, previewGroup, siblingPreviewGroup, sceneRenderer.sectionGroup],
           viewportCssSize: () => ({ width: el.clientWidth, height: el.clientHeight }),
           liveTheme: () => readAppliedTheme(),
           liveSection: () => getSectionState(),
@@ -5932,6 +6128,9 @@ export default function Viewport({
       updateOriginAxesFrame(originAxes, wasmScene)
       clampOriginAxes(originAxes, rig, el.clientHeight)
       syncGuides(rig.effectiveDistance(controls.getDistance()))
+      // The sibling mirrors too: a capture between a tool's `clearPreview`
+      // and the next loop frame must not draw clones of disposed geometry.
+      siblingPreview.sync()
       renderer.render(threeScene, camera)
       const gl = renderer.getContext()
       const width = gl.drawingBufferWidth
@@ -6308,6 +6507,9 @@ export default function Viewport({
     function applyHidden(opts?: { fadeMs?: number }): void {
       const isolation = isolationView()
       const eff = effectiveHidden(baseHidden, isolation)
+      // A placement hidden, shown, or isolated away mid-gesture gains or
+      // loses its mirror on the next sync.
+      siblingPreview.invalidate()
       hiddenObjectIdsRef.current = new Set(eff.objects)
       hiddenInstanceIdsRef.current = new Set(eff.instances)
       sceneRenderer.setIsolationFade(isolation === null ? null : isolation.fade, {
@@ -6778,6 +6980,13 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
+        // Detached mode → badge the cursor with a `+`, the same cursorFor
+        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
+        // the tool-switch path re-sets the plain cursor.
+        (on: boolean) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
+          renderer.domElement.style.cursor = cursorFor('Rectangle', on)
+        },
       )
       // Scope the tool to the current editing context (component-edit-
       // parity.md phase A1 — the single channel every tool consults).
@@ -6802,6 +7011,13 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
+        // Detached mode → badge the cursor with a `+`, the same cursorFor
+        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
+        // the tool-switch path re-sets the plain cursor.
+        (on: boolean) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
+          renderer.domElement.style.cursor = cursorFor('Circle', on)
+        },
       )
       // Scope the tool to the current editing context (component-edit-
       // parity.md phase A1 — the single channel every tool consults).
@@ -6829,6 +7045,13 @@ export default function Viewport({
         // Side count persists across tool re-selection for the session
         // (design §1), the same way Paint's current material does.
         (sides) => { polygonSidesRef.current = sides },
+        // Detached mode → badge the cursor with a `+`, the same cursorFor
+        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
+        // the tool-switch path re-sets the plain cursor.
+        (on: boolean) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
+          renderer.domElement.style.cursor = cursorFor('Polygon', on)
+        },
       )
       tool.setSideCount(polygonSidesRef.current)
       // Scope the tool to the current editing context (component-edit-
@@ -6854,6 +7077,13 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
+        // Detached mode → badge the cursor with a `+`, the same cursorFor
+        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
+        // the tool-switch path re-sets the plain cursor.
+        (on: boolean) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
+          renderer.domElement.style.cursor = cursorFor('Arc', on)
+        },
       )
       // Scope the tool to the current editing context (component-edit-
       // parity.md phase A1 — the single channel every tool consults).
@@ -6878,6 +7108,13 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
+        // Detached mode → badge the cursor with a `+`, the same cursorFor
+        // pipeline as Push/Pull's extrude-as-new. A new tool starts off, and
+        // the tool-switch path re-sets the plain cursor.
+        (on: boolean) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
+          renderer.domElement.style.cursor = cursorFor('Line', on)
+        },
       )
       // Scope the tool to the current editing context (component-edit-
       // parity.md phase A1 — the single channel every tool consults).
@@ -7088,6 +7325,10 @@ export default function Viewport({
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
+      // A guide is a Move target too. A drag-move hands over nodes, never
+      // a guide, so only a plain tool switch carries the selected one in.
+      if (selection === undefined) tool.setGuideTarget(selectedGuideRef.current)
+      tool.setGuideHooks(acquireGuideTarget, landGuideTransform)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }
@@ -7107,7 +7348,7 @@ export default function Viewport({
       // A tool switch that bypasses switchToolRef (this one) still needs the
       // same mid-hold-tap reset — see switchToolRef's comment above.
       ctrlTap.reset()
-      pushPullModifierTap.reset()
+      modeModifierTap.reset()
       multiClick.reset()
       const tool = makeMoveTool(dm.nodes)
       toolController.setTool(tool)
@@ -7154,6 +7395,8 @@ export default function Viewport({
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
+      tool.setGuideTarget(selectedGuideRef.current)
+      tool.setGuideHooks(acquireGuideTarget, landGuideTransform)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }
@@ -7626,7 +7869,7 @@ export default function Viewport({
       // instance check covers switches that don't (e.g. beginDragMove's
       // direct toolController.setTool).
       ctrlTap.reset()
-      pushPullModifierTap.reset()
+      modeModifierTap.reset()
       multiClick.reset()
       switch (toolName) {
         case 'Rectangle':
@@ -7991,7 +8234,7 @@ export default function Viewport({
       if (baseBindingFor(ev.button, controls.mouseButtons.LEFT) === null) return
       forceBaseAfterPress(controls, ev, controls.mouseButtons.LEFT)
       ctrlTap.reset()
-      pushPullModifierTap.reset()
+      modeModifierTap.reset()
     }
     function attachControlsListeners(c: OrbitControls): void {
       renderer.domElement.removeEventListener('pointerdown', onOrbitPressForceBase)
@@ -8336,7 +8579,7 @@ export default function Viewport({
       const live = orbitDragState(controls)
       if (live === 'rotate' || live === 'pan') {
         ctrlTap.reset()
-        pushPullModifierTap.reset()
+        modeModifierTap.reset()
       }
       scheduleRender()
     }
@@ -8450,33 +8693,51 @@ export default function Viewport({
     // reason as Scale's tap guard (Ctrl+Z / Ctrl+A / etc. must not toggle
     // it as a side effect). Also tool-scoped at keydown/keyup for the same
     // mid-hold-switch reason documented on `ctrlTap` above.
-    const pushPullModifierTap = new CleanModifierTap<Tool>((key) => key === 'Control' || key === 'Meta')
-    function onPushPullModifierKeyDown(ev: KeyboardEvent): void {
-      pushPullModifierTap.onKeyDown(ev, toolController.activeTool)
+    //
+    // The same tap drives the draw tools' Detached toggle (Line, Rectangle,
+    // Circle, Polygon, Arc — separate-shapes design §6.2): Ctrl is unused on
+    // them, and Push/Pull's tap is the precedent for accepting Control or
+    // Meta on every platform.
+    const modeModifierTap = new CleanModifierTap<Tool>((key) => key === 'Control' || key === 'Meta')
+    function onModeModifierKeyDown(ev: KeyboardEvent): void {
+      modeModifierTap.onKeyDown(ev, toolController.activeTool)
     }
-    function onPushPullModifierKeyUp(ev: KeyboardEvent): void {
-      const armedTool = pushPullModifierTap.onKeyUp(ev, toolController.activeTool)
+    function onModeModifierKeyUp(ev: KeyboardEvent): void {
+      const armedTool = modeModifierTap.onKeyUp(ev, toolController.activeTool)
       if (armedTool === null) return
       if ('toggleExtrudeAsNew' in armedTool) {
         (armedTool as { toggleExtrudeAsNew(): void }).toggleExtrudeAsNew()
+        reportToolHint()
+        scheduleRender()
+      } else if ('toggleDetached' in armedTool) {
+        // Alt held while Ctrl/Cmd releases is the precision-snap chord, not a tap.
+        if (ev.altKey) return
+        (armedTool as { toggleDetached(): void }).toggleDetached()
+        reportToolHint()
+        drawPlaneCueLayer.update(queryDrawPlaneCue(armedTool), getDrawingAxes(wasmScene))
         scheduleRender()
       }
     }
-    window.addEventListener('keydown', onPushPullModifierKeyDown)
-    window.addEventListener('keyup', onPushPullModifierKeyUp)
+    window.addEventListener('keydown', onModeModifierKeyDown)
+    window.addEventListener('keyup', onModeModifierKeyUp)
+    // Blur swallows the keyup (Cmd-Tab): drop any stale arm.
+    function onWindowBlurClearsModeModifierTap(): void {
+      modeModifierTap.reset()
+    }
+    window.addEventListener('blur', onWindowBlurClearsModeModifierTap)
 
     // Ctrl/Cmd HELD during a Tape Measure gesture = measure WITHOUT
     // creating a guide (SketchUp parity, tape-measure-rework WP-7 item 1) —
     // a LIVE held-state dispatch, same posture as `onShiftKeyDown`/
     // `onShiftKeyUp` above, NOT the CLEAN-TAP dispatch `onCtrlKeyDown`/
-    // `onPushPullModifierKeyDown` use just above for Scale's/Push-Pull's own
+    // `onModeModifierKeyDown` use just above for Scale's/Push-Pull's own
     // Ctrl/Cmd bindings — those duck-type a DIFFERENT method
     // (`toggleCenterAnchor`/`toggleExtrudeAsNew`) that TapeMeasureTool
     // implements neither of, so a live hold here never reaches them, and
     // conversely a clean tap while TapeMeasureTool is active never reaches
     // `setGuideCreationSuppressed` (nothing here is TAP-scoped). Control and
     // Meta are treated as one logical modifier, same as
-    // `onPushPullModifierKeyDown` just above — Ctrl (Windows/Linux) and Cmd
+    // `onModeModifierKeyDown` just above — Ctrl (Windows/Linux) and Cmd
     // (macOS) both work, per this codebase's `metaKey || ctrlKey` convention
     // (see platform.ts).
     function onGuideSuppressKeyDown(ev: KeyboardEvent): void {
@@ -8583,7 +8844,7 @@ export default function Viewport({
     // inversion; a bare Control/Meta keydown arms Scale's center-anchor tap,
     // Move's/Rotate's copy toggle on Windows/Linux (`onCtrlKeyDown` above),
     // or, while Push/Pull is active, its extrude-as-new toggle
-    // (`onPushPullModifierKeyDown` above); a bare Alt keydown is Move's and
+    // (`onModeModifierKeyDown` above); a bare Alt keydown is Move's and
     // Rotate's durable copy toggle on macOS (`MoveTool.onKey` /
     // `RotateTool.onKey`) and ArcTool's completion-mode cycle
     // (`ArcTool.onKey`), all reached through onKeyDown's unconditional
@@ -8849,6 +9110,11 @@ export default function Viewport({
         // mounted — with it closed this is a single boolean check per
         // rendered frame. Read renderer.info right after render(), before
         // three.js auto-resets the per-frame counters on the next frame.
+        // Mirror the session-geometry ghosts onto the sibling placements
+        // (or drop the mirrors once the preview is empty) — after the tool's
+        // own per-frame hooks above, so a ghost they moved is mirrored where
+        // it is now.
+        siblingPreview.sync()
         const statsActive = isRenderStatsActive()
         const renderStart = statsActive ? performance.now() : 0
         renderer.render(threeScene, camera)
@@ -9134,10 +9400,15 @@ export default function Viewport({
 
       // Armed marquee: past the drag threshold the rubber-band owns the
       // pointer — update the rectangle and skip hover/snap work entirely.
-      if (marqueeDrag !== null) {
+      if (marqueeDrag !== null && ev.pointerId === marqueeDrag.pointerId) {
         if ((ev.buttons & 1) === 0) {
-          // The release happened outside our listeners (focus loss) — drop it.
-          clearMarquee()
+          // The button is already up, yet the release never reached us:
+          // browsers can deliver a move carrying the updated button state
+          // (and drop the pointer capture) ahead of the pointerup. Treat it
+          // as the release it is — discarding the gesture here is what made
+          // some drags vanish with nothing selected. A real focus loss is
+          // handled by the window-blur listener instead.
+          finishMarquee(ev)
         } else {
           const [px, py] = canvasPoint(ev)
           if (
@@ -9353,6 +9624,12 @@ export default function Viewport({
           direction: snap.direction,
           frame: getDrawingAxes(wasmScene),
           projected: activeTool.snapProjected?.() ?? false,
+          // A tool's own hover guidance (Tool.hoverHint): the refusal a
+          // click would toast, shown beside the cursor before the click.
+          ...((): { hint?: string } => {
+            const hint = activeTool.hoverHint?.() ?? null
+            return hint === null ? {} : { hint }
+          })(),
           // Hover identification is a Select-only, idle-only second line.
           ...(toolController.activeToolName === 'Select' && !readOnlyRef.current &&
               !toolHasArmedGesture(activeTool) && snap.object !== undefined &&
@@ -9367,9 +9644,6 @@ export default function Viewport({
     // --- construction-guide picking ---------------------------------
     const GUIDE_PICK_PX = 8
     const ANNOTATION_PICK_PX = 8
-    // The drawn stretch follows the view (SceneRenderer.updateGuideExtents);
-    // a click can only land where the line is on screen, which it always spans.
-    const GUIDE_LINE_SAMPLE_HALF = 50
 
     function worldToPixels(p: THREE.Vector3): { x: number; y: number; behind: boolean } {
       const v = p.clone().project(camera)
@@ -9379,18 +9653,6 @@ export default function Viewport({
       // camera-space z — the old NDC `v.z > 1` check was a perspective-only
       // heuristic that inverts under orthographic projection (see its doc).
       return { x: (v.x * 0.5 + 0.5) * w, y: (-v.y * 0.5 + 0.5) * h, behind: isBehindCamera(p, camera) }
-    }
-
-    function pointSegPx(
-      px: number, py: number,
-      ax: number, ay: number, bx: number, by: number,
-    ): number {
-      const dx = bx - ax, dy = by - ay
-      const len2 = dx * dx + dy * dy
-      if (len2 < 1e-9) return Math.hypot(px - ax, py - ay)
-      let t = ((px - ax) * dx + (py - ay) * dy) / len2
-      t = Math.max(0, Math.min(1, t))
-      return Math.hypot(px - (ax + t * dx), py - (ay + t * dy))
     }
 
     /** Nearest construction guide within GUIDE_PICK_PX of the NDC click, or null.
@@ -9409,34 +9671,10 @@ export default function Viewport({
         if (kind === undefined || geom === undefined) continue
         let d: number
         if (kind === 'line') {
-          const [ox, oy, oz, dx, dy, dz] = geom
-          const len = Math.hypot(dx, dy, dz)
-          if (len < 1e-9) continue
-          const ux = dx / len, uy = dy / len, uz = dz / len
-          // Sample along the line and measure pixel distance segment-by-segment
-          // between consecutive IN-FRONT samples, over the part of the guide's
-          // own span within the sample range. (Projecting the bare ±50 m
-          // endpoints breaks when one is behind the camera — its projection is
-          // garbage — so a near guide could never be picked.)
-          const N = 64
-          const { lo, hi } = guideSpanOf(geom)
-          const sampled = stretchToUse(-GUIDE_LINE_SAMPLE_HALF, GUIDE_LINE_SAMPLE_HALF, lo, hi)
-          if (sampled === null) continue
-          d = Infinity
-          let prev: { x: number; y: number; behind: boolean } | null = null
-          for (let i = 0; i <= N; i++) {
-            const t = sampled[0] + (sampled[1] - sampled[0]) * (i / N)
-            const p = worldToPixels(new THREE.Vector3(ox + ux * t, oy + uy * t, oz + uz * t))
-            if (!p.behind) {
-              const dp = Math.hypot(p.x - clickX, p.y - clickY)
-              if (dp < d) d = dp
-              if (prev !== null && !prev.behind) {
-                const ds = pointSegPx(clickX, clickY, prev.x, prev.y, p.x, p.y)
-                if (ds < d) d = ds
-              }
-            }
-            prev = p
-          }
+          // Clipped at the near plane, not sampled: zoomed in on a guide
+          // running into depth, its whole stretch on screen lies next to
+          // the camera (screenPick.ts).
+          d = guideLinePickPx(camera, w, h, geom, clickX, clickY)
           if (!Number.isFinite(d)) continue
         } else if (kind === 'point') {
           const [x, y, z] = geom
@@ -9458,9 +9696,9 @@ export default function Viewport({
      * (docs/design/dimensions-text.md — "annotations are pickable via
      * screen-space distance"). Tests the segment a real user would actually
      * click: the dimension line for a linear dimension, the leader for a
-     * radial dimension or leader text — the same segment-sampling technique
-     * `pickGuide` uses above, just against the annotation's own two key
-     * points instead of a sampled infinite line. */
+     * radial dimension or leader text — measured like a guide line in
+     * `pickGuide` above (screenPick.ts), just against the annotation's own
+     * two key points instead of a stretch of an infinite line. */
     function pickAnnotation(ndcX: number, ndcY: number): bigint | null {
       const w = renderer.domElement.clientWidth
       const h = renderer.domElement.clientHeight
@@ -9493,12 +9731,7 @@ export default function Viewport({
           p0 = [anchor[0], anchor[1], anchor[2]]
           p1 = [anchor[0] + offset[0], anchor[1] + offset[1], anchor[2] + offset[2]]
         }
-        const a2 = worldToPixels(new THREE.Vector3(p0[0], p0[1], p0[2]))
-        const b2 = worldToPixels(new THREE.Vector3(p1[0], p1[1], p1[2]))
-        let d = Infinity
-        if (!a2.behind) d = Math.min(d, Math.hypot(a2.x - clickX, a2.y - clickY))
-        if (!b2.behind) d = Math.min(d, Math.hypot(b2.x - clickX, b2.y - clickY))
-        if (!a2.behind && !b2.behind) d = Math.min(d, pointSegPx(clickX, clickY, a2.x, a2.y, b2.x, b2.y))
+        const d = segmentPickPx(camera, w, h, p0, p1, clickX, clickY)
         if (d < bestDist) {
           bestDist = d
           best = id
@@ -9671,7 +9904,7 @@ export default function Viewport({
           if (readOnlyRef.current) {
             deferredTapDrag = { startX: px, startY: py, active: false, pointerId: ev.pointerId }
           } else {
-            marqueeDrag = { startX: px, startY: py, mode: selectModeFor(ev), active: false }
+            marqueeDrag = { startX: px, startY: py, mode: selectModeFor(ev), active: false, crossing: false, pointerId: ev.pointerId }
           }
           // Track the drag even when it leaves the canvas.
           renderer.domElement.setPointerCapture(ev.pointerId)
@@ -10222,6 +10455,36 @@ export default function Viewport({
     // sweep, E4 — see the interface doc for why click-move-click alone can't
     // express that gesture), dispatched first and independently of the
     // Select-only `dragMove`/`marqueeDrag` state below.
+    /** Completes the armed marquee press (a click-pick when it never became a
+     * drag) at the event's position. Shared by pointerup and the early-release
+     * move path in onPointerMove. */
+    function finishMarquee(ev: PointerEvent): void {
+      if (marqueeDrag === null) return
+      const drag = marqueeDrag
+      clearMarquee()
+
+      // The tool changed mid-drag (keyboard shortcut) — drop the gesture.
+      if (toolController.activeToolName !== 'Select') return
+
+      if (!drag.active) {
+        // A plain click: run the pick chain at the RELEASE position — if the
+        // camera moved between press and release (scroll zoom, inertia), the
+        // pick lands on what is visibly under the cursor now.
+        const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
+        dispatchSelectPick(ndcX, ndcY, makeWorldRay(ndcX, ndcY, camera))
+        return
+      }
+
+      const [px, py] = canvasPoint(ev)
+      const rect = normalizedRect(drag.startX, drag.startY, px, py)
+      // Drag direction picks the mode: L→R window, R→L crossing (SketchUp).
+      const mode: MarqueeMode = px >= drag.startX ? 'window' : 'crossing'
+      const refs = computeMarqueeSelection(rect, mode)
+      // An empty plain marquee clears the selection, like clicking air; a
+      // modified one leaves it alone (mergeSelection's per-mode rule).
+      onSelectManyRef.current?.(refs, drag.mode)
+      scheduleRender()
+    }
     function onPointerUp(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
       if (ev.button !== 0) return
@@ -10412,31 +10675,7 @@ export default function Viewport({
         return
       }
 
-      if (marqueeDrag === null) return
-      const drag = marqueeDrag
-      clearMarquee()
-
-      // The tool changed mid-drag (keyboard shortcut) — drop the gesture.
-      if (toolController.activeToolName !== 'Select') return
-
-      if (!drag.active) {
-        // A plain click: run the pick chain at the RELEASE position — if the
-        // camera moved between press and release (scroll zoom, inertia), the
-        // pick lands on what is visibly under the cursor now.
-        const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
-        dispatchSelectPick(ndcX, ndcY, makeWorldRay(ndcX, ndcY, camera))
-        return
-      }
-
-      const [px, py] = canvasPoint(ev)
-      const rect = normalizedRect(drag.startX, drag.startY, px, py)
-      // Drag direction picks the mode: L→R window, R→L crossing (SketchUp).
-      const mode: MarqueeMode = px >= drag.startX ? 'window' : 'crossing'
-      const refs = computeMarqueeSelection(rect, mode)
-      // An empty plain marquee clears the selection, like clicking air; a
-      // modified one leaves it alone (mergeSelection's per-mode rule).
-      onSelectManyRef.current?.(refs, drag.mode)
-      scheduleRender()
+      finishMarquee(ev)
     }
     function onPointerCancel(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
@@ -10448,6 +10687,7 @@ export default function Viewport({
       // still-armed drag.
       abortFovDrag(ev.pointerId)
       clearMarquee()
+      reportToolHint()
       if (dragCommitGate.pointerId === ev.pointerId) endDragCommit()
       // Both scoped to the arming pointer too (ADVERSARIAL-REVIEW finding
       // 4) — this listener fires for every pointer's own cancel, same as
@@ -10488,12 +10728,19 @@ export default function Viewport({
       pointerRestClient.x = ev.clientX
       pointerRestClient.y = ev.clientY
       if (leftCanvasBounds(ev.clientX, ev.clientY, renderer.domElement.getBoundingClientRect())) pointerInsideCanvas = false
+      // Nothing is hovered any more: the tool drops its hover memo
+      // (Tool.onPointerLeave), the status bar re-polls, and the chip goes.
+      toolController.activeTool.onPointerLeave?.()
+      reportToolHint()
+      onInferenceChangeRef.current?.(null)
     }
     renderer.domElement.addEventListener('pointerenter', onCanvasPointerEnter)
     renderer.domElement.addEventListener('pointerleave', onCanvasPointerLeave)
     renderer.domElement.addEventListener('pointerdown', onPointerDownTracked)
     renderer.domElement.addEventListener('pointerup', onPointerUpTracked)
     renderer.domElement.addEventListener('pointercancel', onPointerCancel)
+    const onWindowBlurMarquee = (): void => { if (marqueeDrag !== null) { clearMarquee(); reportToolHint() } }
+    window.addEventListener('blur', onWindowBlurMarquee)
     renderer.domElement.addEventListener('dblclick', onDoubleClickTracked)
     window.addEventListener('keydown', onKeyDownTracked)
 
@@ -11147,8 +11394,9 @@ export default function Viewport({
       window.removeEventListener('blur', onWindowBlurClearsShiftLock)
       window.removeEventListener('keydown', onCtrlKeyDown, true)
       window.removeEventListener('keyup', onCtrlKeyUp)
-      window.removeEventListener('keydown', onPushPullModifierKeyDown)
-      window.removeEventListener('keyup', onPushPullModifierKeyUp)
+      window.removeEventListener('keydown', onModeModifierKeyDown)
+      window.removeEventListener('keyup', onModeModifierKeyUp)
+      window.removeEventListener('blur', onWindowBlurClearsModeModifierTap)
       window.removeEventListener('keydown', onGuideSuppressKeyDown)
       window.removeEventListener('keyup', onGuideSuppressKeyUp)
       window.removeEventListener('blur', onWindowBlurClearsGuideSuppress)
@@ -11192,6 +11440,7 @@ export default function Viewport({
       renderer.domElement.removeEventListener('pointerdown', onPointerDownTracked)
       renderer.domElement.removeEventListener('pointerup', onPointerUpTracked)
       renderer.domElement.removeEventListener('pointercancel', onPointerCancel)
+      window.removeEventListener('blur', onWindowBlurMarquee)
       renderer.domElement.removeEventListener('dblclick', onDoubleClickTracked)
       marqueeOverlay.remove()
       loupeOverlay.remove()
@@ -11214,6 +11463,7 @@ export default function Viewport({
       controls.dispose()
       cueLayer.clear()
       drawPlaneCueLayer.clear()
+      siblingPreview.end()
       sceneRenderer.dispose()
       toolControllerRef.current = null
       switchToolRef.current = null
@@ -11316,7 +11566,9 @@ export default function Viewport({
     const inSession = activeContext.length === 0
     const objectLit = inSession ? explodeSessionObjectIdsRef.current ?? activeLitSet ?? null : activeLitSet ?? null
     const instanceLit = inSession ? sessionInstanceIdsRef.current ?? litInstances : litInstances
-    sceneRendererRef.current?.setActiveContext(objectLit, instanceLit)
+    // Frame free sketches are in scope only for the session itself; an
+    // object or legacy-instance context (even atop a session) excludes them.
+    pushActiveScope(sceneRendererRef.current, wasmSceneRef.current, objectLit, instanceLit, inSession)
     const tool = toolControllerRef.current?.activeTool
     if (tool !== undefined) {
       // The single editing-context channel (component-edit-parity.md phase
@@ -11407,8 +11659,14 @@ export default function Viewport({
     scheduleRenderRef.current()
   }, [selectedIds, activeContext])
 
-  // Reflect the selected construction guide into the renderer highlight.
+  // Reflect the selected construction guide into the renderer highlight,
+  // and into the active tool (Move's guide target, like Tool.setSelection).
   useEffect(() => {
+    selectedGuideRef.current = selectedGuide
+    const activeTool = toolControllerRef.current?.activeTool
+    if (activeTool !== undefined && 'setGuideTarget' in activeTool) {
+      (activeTool as { setGuideTarget(guide: bigint | null): void }).setGuideTarget(selectedGuide)
+    }
     sceneRendererRef.current?.setSelectedGuide(selectedGuide)
     scheduleRenderRef.current()
   }, [selectedGuide])

@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { windowFor, guideReach, guideSpanOf, clampToSpan, stretchToUse, type GuideWindow } from './guideWindow'
+import {
+  windowFor, guideReach, guideSpanOf, clampToSpan, stretchToUse, guideOverlayPositions,
+  GUIDE_OVERLAY_HALF_LENGTH, GUIDE_POINT_MARKER_HALF_SIZE, type GuideWindow,
+} from './guideWindow'
 
 describe('windowFor', () => {
   it('centres on the focus and snaps the half-length up to a power of two', () => {
@@ -106,5 +109,31 @@ describe('guideSpanOf / clampToSpan', () => {
     expect(stretchToUse(-50, 50, 0, Infinity)).toEqual([0, 50])
     expect(stretchToUse(-50, -10, 0, Infinity)).toBeNull()
     expect(stretchToUse(-50, 50, -Infinity, Infinity)).toEqual([-50, 50])
+  })
+})
+
+describe('guideOverlayPositions', () => {
+  it('draws an infinite line the overlay half-length either side of its origin, along its unit direction', () => {
+    const h = GUIDE_OVERLAY_HALF_LENGTH
+    expect(guideOverlayPositions('line', [1, 2, 3, 0, 2, 0])).toEqual([1, 2 - h, 3, 1, 2 + h, 3])
+  })
+
+  it('draws a segment guide whole, wherever it lies along its line', () => {
+    expect(guideOverlayPositions('line', [0, 0, 0, 1, 0, 0, 100, 102])).toEqual([100, 0, 0, 102, 0, 0])
+  })
+
+  it('draws a point guide as a three-axis cross', () => {
+    const k = GUIDE_POINT_MARKER_HALF_SIZE
+    expect(guideOverlayPositions('point', [1, 1, 1])).toEqual([
+      1 - k, 1, 1, 1 + k, 1, 1,
+      1, 1 - k, 1, 1, 1 + k, 1,
+      1, 1, 1 - k, 1, 1, 1 + k,
+    ])
+  })
+
+  it('draws nothing for a degenerate line, a missed span, or an unknown kind', () => {
+    expect(guideOverlayPositions('line', [0, 0, 0, 0, 0, 0])).toBeNull()
+    expect(guideOverlayPositions('line', [0, 0, 0, 1, 0, 0, 1000, NaN])).toBeNull()
+    expect(guideOverlayPositions('arc', [0, 0, 0])).toBeNull()
   })
 })
