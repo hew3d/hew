@@ -12,9 +12,9 @@
 //! kernel::Document`.
 
 use api::{
-    DocFormat, Host, IsolationEntry, LibraryListing, LibraryReadResult, LibraryWriteResult,
-    LibraryWriteTarget, Refusal, SaveOutcome, SelectMode, SelectionEntry, SelectionState,
-    SnapshotProjection, StandardView, ViewCameraSpec,
+    ContextEntry, ContextKind, DocFormat, Host, IsolationEntry, LibraryListing, LibraryReadResult,
+    LibraryWriteResult, LibraryWriteTarget, Refusal, SaveOutcome, SelectMode, SelectionEntry,
+    SelectionState, SnapshotProjection, StandardView, ViewCameraSpec,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -176,6 +176,76 @@ impl UiIsolationEntry {
     }
 }
 
+/// One of the app's in-context entries as it mirrors them
+/// ([`crate::Scene::set_ui_context`]): the kinds its fallback can hold, with
+/// the handle as a decimal string. A group always opens a session, so it is
+/// never one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UiContextEntry {
+    Object {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Instance {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+}
+
+impl UiContextEntry {
+    /// The entry with kernel ids, for the [`api::Host`] boundary.
+    pub fn to_entry(&self) -> ContextEntry {
+        let key = |id: u64| KeyData::from_ffi(id);
+        match *self {
+            UiContextEntry::Object { id } => ContextEntry {
+                kind: ContextKind::Object,
+                node: kernel::NodeId::Object(key(id).into()),
+            },
+            UiContextEntry::Instance { id } => ContextEntry {
+                kind: ContextKind::Instance,
+                node: kernel::NodeId::Instance(key(id).into()),
+            },
+        }
+    }
+}
+
+/// A tree node on the wire of a [`ViewDirective::EnterContext`]: an object,
+/// group, or instance, the handle a decimal string (the app's `NodeRef`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UiNode {
+    Object {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Group {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+    Instance {
+        #[serde(with = "decimal")]
+        id: u64,
+    },
+}
+
+impl UiNode {
+    /// The app's form of a kernel node.
+    pub fn from_node(node: kernel::NodeId) -> UiNode {
+        match node {
+            kernel::NodeId::Object(id) => UiNode::Object {
+                id: id.data().as_ffi(),
+            },
+            kernel::NodeId::Group(id) => UiNode::Group {
+                id: id.data().as_ffi(),
+            },
+            kernel::NodeId::Instance(id) => UiNode::Instance {
+                id: id.data().as_ffi(),
+            },
+        }
+    }
+}
+
 /// A viewport/app-settings effect requested by `hew.view.camera`,
 /// `hew.view.zoom_extents`, or `hew.view.units` that `LiveHost` cannot
 /// perform itself — this WASM module has no DOM access to move the
@@ -262,6 +332,17 @@ pub enum ViewDirective {
         max: [f64; 3],
         padding: f64,
     },
+    /// `hew.view.enter`'s effect: the bridge converges the user's window on
+    /// `leaf` the way an Outliner double click does, calling the app's
+    /// `enterNode` for each instance of `path` (outermost first) and then
+    /// for `leaf`. The outcome is `context_changed`, not a reply.
+    EnterContext { path: Vec<UiNode>, leaf: UiNode },
+    /// `hew.view.exit`'s effect: the app pops its innermost entry or
+    /// session frame (`setPathDepth(total - 1)`).
+    ExitContext,
+    /// `hew.view.exit_all`'s effect: the app closes everything
+    /// (`setPathDepth(0)`).
+    ExitAllContexts,
 }
 
 /// The wire shape `ViewDirective::Camera` hands the live bridge for an
@@ -380,6 +461,13 @@ pub struct LiveHost {
     /// `LengthFormat`), which a SketchUp export opens in unless the caller
     /// names one; `None` writes SketchUp's own defaults.
     pub display_units: Option<String>,
+    /// The app's in-context entries as mirrored into the `Scene`.
+    pub fallback: Vec<ContextEntry>,
+    /// Whether a tool gesture is armed in the user's window.
+    pub gesture_armed: bool,
+    /// Whether the user's window is at the top level (no session frame, no
+    /// fallback entry): `hew.view.exit` has nothing to pop then.
+    pub at_top_level: bool,
 }
 
 /// Builds the `host_capability_missing` refusal every method below
@@ -797,6 +885,45 @@ impl Host for LiveHost {
     fn clear_isolation(&mut self) -> Result<(), Refusal> {
         self.isolation = None;
         self.directives.push(ViewDirective::ClearIsolation);
+        Ok(())
+    }
+
+    fn fallback_context(&self) -> Vec<ContextEntry> {
+        self.fallback.clone()
+    }
+
+    fn gesture_armed(&self) -> bool {
+        self.gesture_armed
+    }
+
+    fn enter_user_context(
+        &mut self,
+        path: &[kernel::InstanceId],
+        leaf: kernel::NodeId,
+    ) -> Result<(), Refusal> {
+        self.directives.push(ViewDirective::EnterContext {
+            path: path
+                .iter()
+                .map(|i| UiNode::from_node(kernel::NodeId::Instance(*i)))
+                .collect(),
+            leaf: UiNode::from_node(leaf),
+        });
+        Ok(())
+    }
+
+    fn exit_user_context(&mut self) -> Result<(), Refusal> {
+        if self.at_top_level {
+            return Err(Refusal::api(
+                "nothing_to_exit",
+                "Nothing is open for editing; the model is already at the top level.",
+            ));
+        }
+        self.directives.push(ViewDirective::ExitContext);
+        Ok(())
+    }
+
+    fn exit_all_user_contexts(&mut self) -> Result<(), Refusal> {
+        self.directives.push(ViewDirective::ExitAllContexts);
         Ok(())
     }
 

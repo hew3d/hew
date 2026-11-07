@@ -61,6 +61,7 @@ import { InspectCard } from './InspectCard'
 import { PartsSheet } from './PartsSheet'
 import { PEEK_HEIGHT_PX, type SheetDetent } from './sheetDetents'
 import { isolateHiddenFor } from './isolate'
+import { uiContextJson } from '../api/viewMirror'
 import { writeShellModeOverride, parseRecvParams, type RecvParams } from './shellMode'
 import { installShopTestHarness } from './testHarness'
 import { HintEngine, largestVisiblePart, testHintsSuppressed, type ActiveHint } from './hints'
@@ -327,6 +328,15 @@ export function ShopApp() {
   }, [tapeAnchors])
 
   const [activeContext, setActiveContext] = useState<NodeRef[]>([])
+  // The bus reads Shop's in-context entries from the Scene
+  // (`hew.query.context`'s `fallback`, `context_changed`): mirror them
+  // whenever they change (Shop has no bus connection to notify yet, so
+  // nothing is pumped). Shop has no sessions, so the entries are all of
+  // its context (`userContext.ts` holds the chain rules a bus entry uses).
+  useEffect(() => {
+    if (scene === null) return
+    scene.set_ui_context(uiContextJson(activeContext))
+  }, [scene, activeContext])
   const [selectedIds, setSelectedIds] = useState<NodeRef[]>([])
 
   // Long-press isolate's current target — declared up here (rather than down

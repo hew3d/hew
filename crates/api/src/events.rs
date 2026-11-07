@@ -163,10 +163,16 @@ pub fn document_changed(doc: &kernel::Document, document: &str, record: &ChangeR
     })
 }
 
-/// `context_changed` params: `hew.query.context`'s `stack`.
-pub fn context_changed(doc: &kernel::Document, document: &str) -> Value {
+/// `context_changed` params: `hew.query.context`'s `stack` and `fallback`
+/// (the host's in-context entries; empty headless).
+pub fn context_changed(
+    doc: &kernel::Document,
+    document: &str,
+    fallback: &[crate::host::ContextEntry],
+) -> Value {
     let stack = crate::commands::query::context_stack_json(doc).unwrap_or_else(|_| json!([]));
-    json!({ "document": document, "stack": stack })
+    let fallback = crate::commands::query::context_fallback_json(doc, fallback);
+    json!({ "document": document, "stack": stack, "fallback": fallback })
 }
 
 /// `scenes_changed` params: `hew.scenes.list`'s entries and the Scene
@@ -352,8 +358,8 @@ mod tests {
     fn context_and_scenes_reuse_the_query_shapes() {
         let mut doc = Document::new();
         assert_eq!(
-            context_changed(&doc, "doc_1"),
-            json!({ "document": "doc_1", "stack": [] })
+            context_changed(&doc, "doc_1", &[]),
+            json!({ "document": "doc_1", "stack": [], "fallback": [] })
         );
         let sid = doc
             .add_scene(

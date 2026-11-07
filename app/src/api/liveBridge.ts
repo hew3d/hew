@@ -161,6 +161,23 @@ export interface LiveBridgeDeps {
    * without it the bridge calls `ViewportApi.isolate` directly.
    */
   isolate?: (targets: IsolationTarget[], opts: { frame: boolean }) => void
+  /**
+   * The Outliner's own entry convergence (`enterNode`): opens group and
+   * component sessions level by level toward a node, falls back to the
+   * in-context entry for an instance a session cannot take, and selects it.
+   * An `enter_context` directive calls it for each instance of the path and
+   * then for the leaf. Optional; without it the directive is a no-op.
+   */
+  enterNode?: (node: NodeRef, opts?: { keepFallback?: boolean }) => void
+  /**
+   * The breadcrumb's own truncation (`handleSetPathDepth`): everything past
+   * combined depth `depth` (session frames, then in-context entries) closes.
+   * `exit_context` and `exit_all_contexts` drive it.
+   */
+  setPathDepth?: (depth: number) => void
+  /** How many crumbs the window has open: session frames plus in-context
+   * entries. `exit_context` pops to one fewer. */
+  contextDepth?: () => number
 }
 
 /** Whether a successful reply added a Library material item to the
@@ -291,6 +308,10 @@ type DirectiveSelectionEntry = {
   id: string
 }
 
+/** A tree node as an `enter_context` directive carries it
+ * (`UiNode`). */
+type DirectiveNode = { kind: 'object' | 'group' | 'instance'; id: string }
+
 /** An isolation target as an `isolate` directive carries it
  * (`UiIsolationEntry`). */
 type DirectiveIsolationEntry =
@@ -331,6 +352,9 @@ type ViewDirective =
   | { kind: 'isolate'; entries: DirectiveIsolationEntry[]; frame: boolean }
   | { kind: 'clear_isolation' }
   | { kind: 'zoom_to'; min: [number, number, number]; max: [number, number, number]; padding: number }
+  | { kind: 'enter_context'; path: DirectiveNode[]; leaf: DirectiveNode }
+  | { kind: 'exit_context' }
+  | { kind: 'exit_all_contexts' }
 
 /** `hew.view.camera`'s own defaults for an explicit camera's optional
  * fields (docs/agents/HEW_API.md §7, `crates/api/src/host.rs`'s `SnapshotCamera`
@@ -354,6 +378,9 @@ export type DirectiveTargets = Pick<
   | 'selectAnnotation'
   | 'selectNone'
   | 'isolate'
+  | 'enterNode'
+  | 'setPathDepth'
+  | 'contextDepth'
 > & { viewportApi: ViewportApi | null }
 
 /** A `selection` directive's merged entries, applied wholesale through the
@@ -477,6 +504,27 @@ function applyViewDirective(directive: ViewDirective, targets: DirectiveTargets)
     case 'zoom_to':
       viewportApi?.zoomToWorldBounds(directive.min, directive.max)
       return
+    case 'enter_context':
+      // One `enterNode` per path instance, outermost first, then the leaf:
+      // each call opens the frames the Outliner would for that node, so a
+      // deep leaf opens one level per call exactly as a double click does.
+      // Steps after the first keep the fallback entries the earlier ones
+      // pushed, so a path through a mirrored instance ends inside the leaf
+      // with that instance still beneath it.
+      ;[...directive.path, directive.leaf].forEach((n, i) => {
+        const node = { kind: n.kind, id: BigInt(n.id) }
+        if (i === 0) targets.enterNode?.(node)
+        else targets.enterNode?.(node, { keepFallback: true })
+      })
+      return
+    case 'exit_context': {
+      const total = targets.contextDepth?.() ?? 0
+      if (total > 0) targets.setPathDepth?.(total - 1)
+      return
+    }
+    case 'exit_all_contexts':
+      targets.setPathDepth?.(0)
+      return
   }
 }
 
@@ -523,6 +571,9 @@ export function directiveTargets(deps: LiveBridgeDeps): DirectiveTargets {
     selectAnnotation: deps.selectAnnotation,
     selectNone: deps.selectNone,
     isolate: deps.isolate,
+    enterNode: deps.enterNode,
+    setPathDepth: deps.setPathDepth,
+    contextDepth: deps.contextDepth,
   }
 }
 
@@ -557,6 +608,18 @@ export function afterDispatch(deps: LiveBridgeDeps, scene: Scene, reply: string,
 }
 
 /**
+ * Tells the Scene whether a tool gesture is armed in the window, right
+ * before a dispatch: `hew.view.enter`/`exit`/`exit_all` refuse
+ * `gesture_in_progress` while it is. Read at dispatch time rather than
+ * pushed on every arm and disarm, since the tools expose the state only as
+ * a predicate, and a read at the moment of the call cannot be stale (a
+ * gesture ended by Escape included).
+ */
+function pushGestureArmed(deps: LiveBridgeDeps, scene: Scene): void {
+  scene.set_ui_gesture_armed(deps.getViewportApi()?.hasArmedGesture() ?? false)
+}
+
+/**
  * Dispatches one frame on `wasmId` and runs the whole answered-dispatch
  * path, returning the reply frame (`undefined` for a notification). A
  * plugin command is answered `unavailable` at once, no compound opened:
@@ -570,6 +633,7 @@ export function dispatchFrameNow(
   frame: string,
 ): string | undefined {
   scene.set_display_units(getLengthUnit())
+  pushGestureArmed(deps, scene)
   const result = parseDispatch(scene.api_dispatch(wasmId, frame))
   if (result.kind === 'none') return undefined
   const reply =
@@ -902,6 +966,7 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     // A `.skp` the API exports opens in the app's display units, as File
     // > Export writes it, so the dispatch sees the current preference.
     scene.set_display_units(getLengthUnit())
+    pushGestureArmed(deps, scene)
     if (hostDocumentId !== null) scene.set_host_document_id(hostDocumentId)
     const result = parseDispatch(scene.api_dispatch(wasmId, frame))
     if (result.kind === 'none') return // a notification: no reply, per §4.1

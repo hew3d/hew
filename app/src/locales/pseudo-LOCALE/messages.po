@@ -9255,6 +9255,10 @@ msgstr ""
 msgid "What is isolated could not be shared with a connected program. If this keeps happening, use Report Bug."
 msgstr ""
 
+#: src/kernelErrors.ts
+msgid "What is open for editing could not be shared with a connected program. If this keeps happening, use Report Bug."
+msgstr ""
+
 #: src/panels/ReportBugDialog.tsx
 msgid "What’s included"
 msgstr ""

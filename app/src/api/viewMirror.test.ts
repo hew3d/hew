@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { uiIsolationJson, uiSelectionJson } from './viewMirror'
+import { uiContextJson, uiIsolationJson, uiSelectionJson } from './viewMirror'
 
 describe('uiSelectionJson', () => {
   it('mirrors nodes and sketches in pick order, ids as decimal strings', () => {
@@ -55,5 +55,26 @@ describe('uiIsolationJson', () => {
       { kind: 'group', id: '3' },
       { kind: 'member', object: '8', instance: '9' },
     ])
+  })
+})
+
+describe('uiContextJson', () => {
+  it('mirrors object and instance entries outermost first, ids as decimal strings', () => {
+    expect(
+      JSON.parse(
+        uiContextJson([
+          { kind: 'instance', id: 9007199254740993n },
+          { kind: 'object', id: 4n },
+        ]),
+      ),
+    ).toEqual([
+      { kind: 'instance', id: '9007199254740993' },
+      { kind: 'object', id: '4' },
+    ])
+  })
+
+  it('leaves out kinds the fallback cannot hold, and is empty at the top level', () => {
+    expect(uiContextJson([{ kind: 'group', id: 2n }])).toBe('[]')
+    expect(uiContextJson([])).toBe('[]')
   })
 })

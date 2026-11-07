@@ -277,6 +277,19 @@ fn selection_transcript_matches_the_golden() {
     ));
 }
 
+/// The user's editing context from the bus (HEW_API.md §6.3) on a host
+/// with no window: the context read reports empty `fallback` and `armed:
+/// false`, the three view commands refuse `host_capability_missing`, a
+/// target that names nothing is `unknown_entity`, an empty locator and a
+/// transaction carrying them are `-32602`.
+#[test]
+fn user_context_transcript_matches_the_golden() {
+    replay(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/transcripts/user_context.json"
+    ));
+}
+
 /// The model reads for parts: every placement with its path and composed
 /// pose (a mirrored placement included), roots in order, a rotated board's
 /// true size, an occurrence locator, topology and mesh counts, and the

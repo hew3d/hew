@@ -612,6 +612,12 @@ retargeting anything. That model remains fully supported for exactly
 these cases; the session stack is the default path, not a replacement for
 it.
 
+The bus can drive the same entry convergence the Outliner uses
+(`hew.view.enter`, `exit`, and `exit_all`, HEW_API.md §6.3): the app opens
+the same session frames level by level, falls back to the in-context entry
+for the same instances, and reports the result as `context_changed` with
+`stack` and `fallback`.
+
 The API's path forms use the same through-the-pose model with no session
 at all: a move, turn, scale, copy, boolean, or slice addressed to a
 member by an occurrence path (`Document::transform_def_members`,

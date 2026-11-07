@@ -23,11 +23,18 @@
 //! kernel-served over the document's user-hidden flags (view state, never
 //! undoable); `hew.view.isolate`/`clear_isolation`/`zoom_to` are host
 //! effects on the live viewport.
+//!
+//! `hew.view.enter`/`exit`/`exit_all` are the exception to "view state":
+//! they act on the person's editing context (docs/agents/HEW_API.md §6.3).
+//! Solitary (a transaction refuses them `-32602`), `mutates_document = true`
+//! because a session open or close is a history step, and refused
+//! `gesture_in_progress` while a tool gesture is armed.
 
 use super::camera::{RawCamera, parse_camera_or_view};
 use super::entity::unknown_entity;
 use super::{CmdError, Ctx, Handler};
 use crate::host::{IsolationEntry, SelectionEntry, ViewCameraSpec};
+use crate::locate;
 use crate::refusal::Refusal;
 use kernel::{EntityRef, NodeId, Point3};
 use serde::Deserialize;
@@ -46,6 +53,9 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.view.isolate" => Some(isolate),
         "hew.view.clear_isolation" => Some(clear_isolation),
         "hew.view.zoom_to" => Some(zoom_to),
+        "hew.view.enter" => Some(enter),
+        "hew.view.exit" => Some(exit),
+        "hew.view.exit_all" => Some(exit_all),
         _ => None,
     }
 }
@@ -448,4 +458,92 @@ fn zoom_to(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         "min": [min.x, min.y, min.z],
         "max": [max.x, max.y, max.z],
     }))
+}
+
+// ------------------------------------------ hew.view.enter / exit / exit_all
+
+/// Refuses while a tool gesture is armed in the user's window: the app's own
+/// entry silently does nothing then, so the bus says so instead.
+fn refuse_if_gesture_armed(ctx: &Ctx) -> Result<(), CmdError> {
+    if ctx.host.gesture_armed() {
+        return Err(CmdError::Refusal(Refusal::api(
+            "gesture_in_progress",
+            "A tool gesture is in progress in the Hew window. Wait for it to finish, then try again.",
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnterParams {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    path: Option<Vec<String>>,
+}
+
+/// The `-32602` for a target that is not an object, group, or instance.
+fn not_enterable(id: &str) -> CmdError {
+    CmdError::Params(format!(
+        "{id} cannot be entered for editing; name an object, group, or component instance"
+    ))
+}
+
+/// Checks that `id` names a node (object, group, or instance); a sketch,
+/// guide, annotation, material, tag, or component definition is a params
+/// error, an id that resolves to nothing is `unknown_entity`.
+fn check_enterable(ctx: &Ctx, id: &str) -> Result<(), CmdError> {
+    match ctx.resolver().resolve(id) {
+        Some(EntityRef::Object(_) | EntityRef::Group(_) | EntityRef::Instance(_)) => Ok(()),
+        Some(_) => Err(not_enterable(id)),
+        None => Err(unknown_entity(id)),
+    }
+}
+
+fn enter(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let EnterParams { id, path } = parse(params)?;
+    let occurrence = match (id, path) {
+        (Some(id), None) => {
+            check_enterable(ctx, &id)?;
+            locate::resolve_world_node(ctx, &id)?
+        }
+        (None, Some(path)) => {
+            if path.is_empty() {
+                return Err(CmdError::Params(
+                    "path names at least one entity".to_string(),
+                ));
+            }
+            for id in &path {
+                check_enterable(ctx, id)?;
+            }
+            locate::resolve_occurrence_path(ctx, &path)?
+        }
+        _ => {
+            return Err(CmdError::Params(
+                "exactly one of id or path is required".to_string(),
+            ));
+        }
+    };
+    refuse_if_gesture_armed(ctx)?;
+    ctx.host
+        .enter_user_context(&occurrence.path, occurrence.node)
+        .map_err(CmdError::Refusal)?;
+    Ok(serde_json::json!({}))
+}
+
+fn exit(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let NoParams {} = parse(params)?;
+    refuse_if_gesture_armed(ctx)?;
+    ctx.host.exit_user_context().map_err(CmdError::Refusal)?;
+    Ok(serde_json::json!({}))
+}
+
+fn exit_all(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let NoParams {} = parse(params)?;
+    refuse_if_gesture_armed(ctx)?;
+    ctx.host
+        .exit_all_user_contexts()
+        .map_err(CmdError::Refusal)?;
+    Ok(serde_json::json!({}))
 }

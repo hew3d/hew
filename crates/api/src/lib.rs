@@ -43,12 +43,12 @@ pub use dispatch::{
 pub use envelope::{ErrorObject, Request, RequestId, Response, codes};
 pub use grant::{Ceiling, Grant, Permission, within_ceiling};
 pub use host::{
-    DepthPass, DocFormat, Host, ImportImage, ImportOptions, IsolationEntry, LENGTH_FORMATS,
-    LibraryItemEntry, LibraryListing, LibraryReadResult, LibraryWriteResult, LibraryWriteTarget,
-    LineDrawingFormat, LineDrawingParams, LineDrawingResult, NoHost, PrintPdfParams,
-    PrintPdfResult, SaveOutcome, SelectMode, SelectionEntry, SelectionState, SnapshotCamera,
-    SnapshotParams, SnapshotProjection, SnapshotResult, StandardView, ViewCameraSpec,
-    resolve_document,
+    ContextEntry, ContextKind, DepthPass, DocFormat, Host, ImportImage, ImportOptions,
+    IsolationEntry, LENGTH_FORMATS, LibraryItemEntry, LibraryListing, LibraryReadResult,
+    LibraryWriteResult, LibraryWriteTarget, LineDrawingFormat, LineDrawingParams,
+    LineDrawingResult, NoHost, PrintPdfParams, PrintPdfResult, SaveOutcome, SelectMode,
+    SelectionEntry, SelectionState, SnapshotCamera, SnapshotParams, SnapshotProjection,
+    SnapshotResult, StandardView, ViewCameraSpec, resolve_document,
 };
 pub use ids::IdResolver;
 pub use refusal::Refusal;

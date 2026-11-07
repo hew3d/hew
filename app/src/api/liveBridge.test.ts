@@ -86,6 +86,7 @@ describe('installLiveBridge', () => {
     compound_abort: ReturnType<typeof vi.fn>
     drain_events: ReturnType<typeof vi.fn>
     set_host_document_id: ReturnType<typeof vi.fn>
+    set_ui_gesture_armed: ReturnType<typeof vi.fn>
   }
   let uninstall: (() => void) | null = null
   let refreshScene: ReturnType<typeof vi.fn>
@@ -103,6 +104,7 @@ describe('installLiveBridge', () => {
     isolate: ReturnType<typeof vi.fn>
     clearIsolation: ReturnType<typeof vi.fn>
     zoomToWorldBounds: ReturnType<typeof vi.fn>
+    hasArmedGesture: ReturnType<typeof vi.fn>
   }
   let deps: LiveBridgeDeps
 
@@ -147,6 +149,7 @@ describe('installLiveBridge', () => {
       // arms it.
       drain_events: vi.fn(() => '[]'),
       set_host_document_id: vi.fn(),
+      set_ui_gesture_armed: vi.fn(),
     }
     // A bridge a previous test installed would keep its event sink.
     uninstall?.()
@@ -161,6 +164,7 @@ describe('installLiveBridge', () => {
       isolate: vi.fn(),
       clearIsolation: vi.fn(),
       zoomToWorldBounds: vi.fn(),
+      hasArmedGesture: vi.fn(() => false),
     }
     reconcile = vi.fn<() => void>()
     reconcileVisibility = vi.fn<() => void>()
@@ -1143,6 +1147,60 @@ describe('installLiveBridge', () => {
       expect(viewportApi.zoomToWorldBounds).toHaveBeenCalledWith([-1, -2, -3], [4, 5, 6])
     })
 
+    it('enter_context enters each path instance outermost first, then the leaf', async () => {
+      const enterNode = vi.fn()
+      deps.enterNode = enterNode
+      await dispatchWith(
+        [
+          {
+            kind: 'enter_context',
+            path: [
+              { kind: 'instance', id: '7' },
+              { kind: 'instance', id: '9' },
+            ],
+            leaf: { kind: 'object', id: '3' },
+          },
+        ],
+        'hew.view.enter',
+      )
+      expect(enterNode.mock.calls).toEqual([
+        [{ kind: 'instance', id: 7n }],
+        [{ kind: 'instance', id: 9n }, { keepFallback: true }],
+        [{ kind: 'object', id: 3n }, { keepFallback: true }],
+      ])
+    })
+
+    it('exit_context pops to one crumb fewer, and exit_all_contexts to the top', async () => {
+      const setPathDepth = vi.fn()
+      deps.setPathDepth = setPathDepth
+      deps.contextDepth = () => 3
+      await dispatchWith([{ kind: 'exit_context' }, { kind: 'exit_all_contexts' }], 'hew.view.exit')
+      expect(setPathDepth.mock.calls).toEqual([[2], [0]])
+    })
+
+    it('exit_context with nothing open pops nothing', async () => {
+      const setPathDepth = vi.fn()
+      deps.setPathDepth = setPathDepth
+      deps.contextDepth = () => 0
+      await dispatchWith([{ kind: 'exit_context' }], 'hew.view.exit')
+      expect(setPathDepth).not.toHaveBeenCalled()
+    })
+
+    it('tells the scene whether a gesture is armed right before the dispatch', async () => {
+      viewportApi.hasArmedGesture.mockReturnValue(true)
+      await dispatchWith([], 'hew.view.enter')
+      expect(scene.set_ui_gesture_armed).toHaveBeenLastCalledWith(true)
+      expect(scene.set_ui_gesture_armed.mock.invocationCallOrder[0]).toBeLessThan(
+        scene.api_dispatch.mock.invocationCallOrder[0],
+      )
+    })
+
+    it('tells the scene a gesture is not armed once it has ended', async () => {
+      viewportApi.hasArmedGesture.mockReturnValue(false)
+      await dispatchWith([], 'hew.view.enter')
+      expect(scene.set_ui_gesture_armed).toHaveBeenLastCalledWith(false)
+    })
+
     it('applies several directives in the order the dispatch left them', async () => {
       const order: string[] = []
       viewportApi.isolate.mockImplementation(() => order.push('isolate'))
@@ -1317,6 +1375,7 @@ describe('dispatchFrameNow', () => {
     const reseedViewState = vi.fn()
     const scene = {
       set_display_units: vi.fn(),
+      set_ui_gesture_armed: vi.fn(),
       api_dispatch: vi.fn(() => tagged('{"jsonrpc":"2.0","id":4,"result":{"hidden":[]}}')),
       api_method_mutates: vi.fn(() => false),
       take_pending_view_directives: vi.fn(() =>

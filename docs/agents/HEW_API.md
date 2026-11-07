@@ -400,7 +400,7 @@ effect without a reconnect.
 | Event | Needs | Params | Sent when |
 |---|---|---|---|
 | `document_changed` | `model.read` | below | after every history entry, undo, redo, aborted transaction or plugin command, and document replacement |
-| `context_changed` | `model.read` | `{document, stack}`, `stack` as `hew.query.context` answers it | the editing context stack changed |
+| `context_changed` | `model.read` | `{document, stack, fallback}`, both as `hew.query.context` answers them | the session stack, or the app's in-context entries, changed |
 | `scenes_changed` | `model.read` | `{document, scenes, active}`: `hew.scenes.list`'s entries, and the last activated Scene's id or `null` | a Scene was added, removed, renamed, reordered, updated, or activated |
 | `units_changed` | `model.read` | `{document, units}`, a display length format (`m`, `cm`, `mm`, `arch`, `frac_in`, `dec_in`) | the app's display units changed |
 | `document_will_save` | `model.read` | `{document, title, format}` | before a save |
@@ -808,6 +808,33 @@ Moving, turning, scaling, copying, or cutting a definition member does
 not need a session at all: the path forms of §7 edit the definition
 directly, in world terms, with every placement following.
 
+**The user's own context.** `hew.view.enter`, `hew.view.exit`, and
+`hew.view.exit_all` (§7.3) are the other side of this: they act on the
+person's window outside any transaction, the way their click would. They
+are not `hew.context.enter` and `exit`: those stay balanced and scope a
+plugin's own edits; these leave the window inside the node when they
+return, and the frame they open is the person's, visible in the
+breadcrumb and closed the way the person closes frames. `hew.view.enter`
+takes an `id` (an object, group, or instance in the world) or a `path` (an
+occurrence path of instances outermost first; the last element is the
+node to enter and may be a member object inside the last instance), opens group and
+component sessions level by level, falls back to the in-context entry for
+an instance a session cannot take (mirrored, unevenly scaled, or placed in
+a group elsewhere), and selects the target. `hew.view.exit` pops the
+innermost entry, a fallback entry or a session frame; `hew.view.exit_all`
+goes back to the top level. Each answers `{}`: the outcome is the
+`context_changed` event, which carries the new `stack` and the `fallback`
+entries (`{kind: "object" | "instance", id}`, outermost first, inside the
+innermost frame). A refusal the app shows the person as a toast leaves the
+context unchanged and sends no event; `hew.query.context` afterward
+reports the truth. While a tool gesture is armed in the window (a Move
+drag in flight) all three refuse `gesture_in_progress`. A call inside a
+multi-command transaction is `-32602`. Each is `mutates_document: true`,
+because opening or closing a session is a history step the window
+resyncs after, but none is a replayable kernel call. Only closing a
+session pushes an undo entry: an exit that pops just a fallback entry
+changes the window's context and nothing in the history.
+
 ### 6.4 What a transaction may contain
 
 The registry classes every command, and the class governs placement:
@@ -907,7 +934,7 @@ for, not shipped.
 |---|---|---|
 | `hew.meta` | `hello`, `capabilities`, `documents` (the open documents: id, title, path, dirty, document_id; in the desktop app also front, attached, label — §4.2) | Required |
 | `hew.doc` | `attach` (to a named document, §4.2), `transact`, `new`, `open` (the desktop app opens each into a new background window), `close`, `focus` (desktop app windows; `app` profile), `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats), `purge_unused` (delete every unused palette material and component definition, one undo entry), `health` (every open object with its verdict, open rims and seam family) | Required (`import`, `purge_unused`, `health`, `close`, `focus` Standard) |
-| `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack), `changes_since` (what changed since a history generation, §4.5), `occurrences`, `part_frame`, `mesh`, `topology` (§7.4) | Required (`changes_since`, `occurrences`, `part_frame`, `mesh`, `topology` Standard) |
+| `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack as `stack`, the app's in-context entries as `fallback`, whether a tool gesture is armed as `armed`; headless: `fallback: []`, `armed: false`), `changes_since` (what changed since a history generation, §4.5), `occurrences`, `part_frame`, `mesh`, `topology` (§7.4) | Required (`changes_since`, `occurrences`, `part_frame`, `mesh`, `topology` Standard) |
 | `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` (a sketch region, or a face/plane region by unit key), `units` (list a plane's drawing as units), `move`, `rotate`, `scale`, `copy`, `delete` (edit units on a plane) | Required (`units`, `move`, `rotate`, `scale`, `copy`, `delete` Standard) |
 | `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice` (`subtract`, `slice`, and `push_pull` also on a definition member through a path, below), `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form), `cap`, `delete_faces`, `mark_surface`, `thicken` (repair open objects, see below) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint`, and the repair commands Standard) |
 | `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy, array, and grid forms), `rotate`, `scale` (each also on members of one definition through a path, below), `set_frame` (a part's frame override, §7.4) | Required (`set_frame` Standard) |
@@ -921,7 +948,7 @@ for, not shipped.
 | `hew.library` | `list`, `describe`, `insert`, `save`, `remove`, `update_meta` — the Hew Library (§8.1) | Standard |
 | `hew.attr` | `get`, `set`, `delete` (§8) | Required |
 | `hew.history` | `undo`, `redo`, `status` (depth; top entry's label and origin; the saved depth; every undo/redo entry's label and origin) | Required |
-| `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format), `line_drawing` (hidden-line SVG or segments, headless or live, §7.2), `hide`, `show`, `show_all`, `hidden`, `isolate`, `clear_isolation`, `zoom_to` (view state, §7.3) | Standard (`core` grants `snapshot` and `line_drawing` specifically; the rest stay `app`-only — live-host-only effects) |
+| `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format), `line_drawing` (hidden-line SVG or segments, headless or live, §7.2), `hide`, `show`, `show_all`, `hidden`, `isolate`, `clear_isolation`, `zoom_to` (view state, §7.3), `enter`, `exit`, `exit_all` (the person's editing context, §6.3) | Standard (`core` grants `snapshot` and `line_drawing` specifically; the rest stay `app`-only — live-host-only effects) |
 | `hew.selection` | `get`, `set`, `clear`: the app's selection (§7.3) | Standard |
 | `hew.print` | `pdf` (a full print job — paper/scale/tiling/marks — as a PDF, headless or live, §7.2) | Standard |
 | `hew.annotate` | dimensions, leader text | Reserved |
@@ -1753,6 +1780,9 @@ The app's selection, what is hidden, the viewport's isolation, and its
 framing are view state: none of it is modeled data, none of it is undoable,
 and none of it moves the history. Ten commands reach it, all `ReadOnly`
 and all under the `view` permission; `mutates_document` is false for each.
+Three more, `hew.view.enter`, `exit`, and `exit_all`, act on the person's
+editing context instead (§6.3): they are solitary, so they cannot share a
+transaction with another command.
 
 | Command | Served | Params | Result | Refusals |
 |---|---|---|---|---|
@@ -1766,6 +1796,9 @@ and all under the `view` permission; `mutates_document` is false for each.
 | `hew.view.isolate` | host | `{ids}`: 1 to 10 000 node ids or `{object, instance}` pairs | `{isolated}` | `unknown_entity`, `host_capability_missing` |
 | `hew.view.clear_isolation` | host | `{}` | `{}` | `host_capability_missing` |
 | `hew.view.zoom_to` | host | `{ids, padding?}`: `padding` from 0 to 2, default 0.1 | `{min, max}`: the framed box before padding | `unknown_entity`, `nothing_to_frame`, `host_capability_missing` |
+| `hew.view.enter` | host, solitary | `{id}` or `{path}`, exactly one: a world object, group, or instance, or an occurrence path of instances whose last element, an instance or a member object, is the node to enter | `{}`; the outcome arrives as `context_changed` | `unknown_entity`, `unknown_occurrence`, `gesture_in_progress`, `host_capability_missing`; `-32602` for a sketch, guide, annotation, material, tag, or component target |
+| `hew.view.exit` | host, solitary | `{}` | `{}` | `gesture_in_progress`, `nothing_to_exit`, `host_capability_missing` |
+| `hew.view.exit_all` | host, solitary | `{}` | `{}` | `gesture_in_progress`, `host_capability_missing` |
 
 **The selection.** `ids` are public ids in pick order; `primary` is the
 first, or `null` for an empty selection. A selection holds objects,
@@ -2300,7 +2333,7 @@ registry (the `Permission` line of each entry in `API_REFERENCE.gen.md`):
 | `model.read` | the read surface: `hew.query.*`, `hew.attr.get`, `hew.meta.documents`, `hew.history.status`, scene and library listings, `hew.doc.health`, `hew.solid.imprints`, `hew.sketch.units`, `hew.view.snapshot`, `hew.view.line_drawing`, `hew.print.pdf` |
 | `model.write` | every modeling command, `hew.scenes.add`/`update`/`rename`/`remove`/`reorder`/`apply`, `hew.history.undo`/`redo`, `hew.doc.purge_unused` |
 | `attributes.write` | `hew.attr.set`, `hew.attr.delete` (under the namespace rule below) |
-| `view` | `hew.view.camera`, `hew.view.zoom_extents`, `hew.view.units`, `hew.selection.*`, `hew.view.hide`/`show`/`show_all`/`hidden`/`isolate`/`clear_isolation`/`zoom_to` (§7.3); the `selection_changed` and `tool_changed` events |
+| `view` | `hew.view.camera`, `hew.view.zoom_extents`, `hew.view.units`, `hew.selection.*`, `hew.view.hide`/`show`/`show_all`/`hidden`/`isolate`/`clear_isolation`/`zoom_to` (§7.3), `hew.view.enter`/`exit`/`exit_all` (§6.3); the `selection_changed` and `tool_changed` events |
 | `documents.save` | `hew.doc.save`, `hew.doc.export`, `hew.doc.import` |
 | `documents.discard` | `hew.doc.close`, `hew.doc.revert` |
 | `documents.other` | `hew.doc.new`, `hew.doc.open`, `hew.doc.focus`, the `document` parameter of `hew.doc.attach`, `close`, `revert`, and `focus`, and the envelope `document` member (§4.2) |
@@ -2647,6 +2680,7 @@ at parity or a stated, reasoned difference:
 | `hew.library.*` | the library folder | the library folder, on the client's side (§12.1); `save` records the document's file as `source_doc` as headless does |
 | `hew.view.camera`, `zoom_extents`, `units` | refused (`core` profile) | take effect in the window |
 | `hew.view.hide`, `show`, `show_all`, `hidden`, `isolate`, `clear_isolation`, `zoom_to` | refused (`core` profile) | take effect in the window (§7.3) |
+| `hew.view.enter`, `exit`, `exit_all` | refused (`core` profile) | open and close the person's editing context (§6.3) |
 | `hew.selection.*` | `host_capability_missing` | the window's selection (§7.3) |
 | `hew.doc.close`, `focus` | refused (`core` profile) | §4.2 |
 

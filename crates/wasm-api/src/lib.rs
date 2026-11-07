@@ -288,9 +288,27 @@ const USER_HIDDEN_WRITERS: &[&str] = &["hew.view.hide", "hew.view.show", "hew.vi
 /// as the sole command of a one-command `hew.doc.transact`, the shape MCP
 /// sends) records the file it merged under the import size cap
 /// (`LiveHost::import_document`); recording its frame too would replay the
-/// import twice and carry the whole file in base64 past that cap.
+/// import twice and carry the whole file in base64 past that cap. The
+/// user-context host effects (`USER_CONTEXT_EFFECTS`) "record themselves" as
+/// nothing: there is no kernel call for a replay to re-run.
 fn records_itself(method: &str, frame: &str) -> bool {
-    if method == "hew.doc.import" {
+    sole_command_is(method, frame, |name| {
+        name == "hew.doc.import" || USER_CONTEXT_EFFECTS.contains(&name)
+    })
+}
+
+/// Whether the dispatch is an import: `hew.doc.import`, bare or as the sole
+/// command of a one-command `hew.doc.transact`. Model Health's "Last import"
+/// bookkeeping keys on this, not on [`records_itself`], so a view command
+/// never touches it.
+fn is_import(method: &str, frame: &str) -> bool {
+    sole_command_is(method, frame, |name| name == "hew.doc.import")
+}
+
+/// Whether `method` satisfies `pred`, or is a `hew.doc.transact` whose only
+/// command does.
+fn sole_command_is(method: &str, frame: &str, pred: impl Fn(&str) -> bool) -> bool {
+    if pred(method) {
         return true;
     }
     if method != "hew.doc.transact" {
@@ -301,12 +319,19 @@ fn records_itself(method: &str, frame: &str) -> bool {
         .and_then(|v| {
             let commands = v.pointer("/params/commands")?.as_array()?.clone();
             match commands.as_slice() {
-                [only] => Some(only.get("method")?.as_str()? == "hew.doc.import"),
+                [only] => Some(pred(only.get("method")?.as_str()?)),
                 _ => Some(false),
             }
         })
         .unwrap_or(false)
 }
+
+/// The host effects on the user's window (`hew.view.enter`/`exit`/
+/// `exit_all`): `mutates_document` so a session open or close resyncs, but
+/// no kernel call a replay could re-run — the session itself records its own
+/// open and close through the app's ordinary paths — so the dispatcher does
+/// not record the frame.
+const USER_CONTEXT_EFFECTS: &[&str] = &["hew.view.enter", "hew.view.exit", "hew.view.exit_all"];
 
 /// What one live API frame came to: a reply frame, or a plugin command for
 /// the caller to route ([`Scene::api_dispatch`]).
@@ -385,6 +410,8 @@ pub const BUSY_EXEMPT: &[&str] = &[
     "take_pending_view_directives",
     "set_ui_selection",
     "set_ui_isolation",
+    "set_ui_context",
+    "set_ui_gesture_armed",
     // event bookkeeping on the `Scene`, never the document;
     "drain_events",
     "set_host_document_id",
@@ -2452,6 +2479,12 @@ pub struct Scene {
     /// ([`Scene::set_ui_isolation`]), or as a successful bus command left
     /// it; `None` when nothing is isolated.
     ui_isolation: Option<Vec<live::UiIsolationEntry>>,
+    /// The app's in-context (fallback) entries as it last mirrored them
+    /// ([`Scene::set_ui_context`]), outermost first.
+    ui_context: Vec<live::UiContextEntry>,
+    /// Whether a tool gesture is armed in the user's window, as the app last
+    /// reported it ([`Scene::set_ui_gesture_armed`]).
+    ui_gesture_armed: bool,
     /// The active tool's name as the app last reported it
     /// ([`Scene::note_tool_changed`]).
     ui_tool: String,
@@ -2506,6 +2539,8 @@ pub struct Scene {
     /// the Scenes (stable id and entry JSON), the Scene last activated,
     /// and the display units.
     last_context: Vec<NodeId>,
+    /// The fallback entries the last drain saw, beside `last_context`.
+    last_drained_fallback: Vec<live::UiContextEntry>,
     last_scenes: Vec<(u64, String)>,
     last_active_scene: Option<u64>,
     /// The active Scene as of the last drain.
@@ -3028,6 +3063,8 @@ impl Scene {
             pending_view_directives: Vec::new(),
             ui_selection: Vec::new(),
             ui_isolation: None,
+            ui_context: Vec::new(),
+            ui_gesture_armed: false,
             ui_tool: String::new(),
             last_drained_selection: Vec::new(),
             last_drained_tool: String::new(),
@@ -3045,6 +3082,7 @@ impl Scene {
             host_document_id: "doc_1".to_string(),
             last_drained_epoch: 0,
             last_context: Vec::new(),
+            last_drained_fallback: Vec::new(),
             last_scenes: Vec::new(),
             last_active_scene: None,
             drained_active_scene: None,
@@ -3474,7 +3512,7 @@ impl Scene {
         // like one from the File menu: the objects it leaves behind that
         // were not there before.
         let import_before: Option<std::collections::BTreeSet<ObjectId>> =
-            records_itself(&request.method, frame)
+            is_import(&request.method, frame)
                 .then(|| self.doc.live_object_ids().into_iter().collect());
         let Some(conn) = self.api_connections.get_mut(&conn_id) else {
             // Not a protocol case reachable by any well-behaved client —
@@ -3521,6 +3559,13 @@ impl Scene {
                 .ui_isolation
                 .as_ref()
                 .map(|v| v.iter().map(live::UiIsolationEntry::to_entry).collect()),
+            fallback: self
+                .ui_context
+                .iter()
+                .map(live::UiContextEntry::to_entry)
+                .collect(),
+            gesture_armed: self.ui_gesture_armed,
+            at_top_level: self.doc.session_stack().is_empty() && self.ui_context.is_empty(),
             ..live::LiveHost::default()
         };
         let outcome = match scope {
@@ -3606,10 +3651,12 @@ impl Scene {
                     .map(|e| live::UiIsolationEntry::from_entry(*e))
                     .collect()
             });
-            // The view commands are NOT `mutates` (they change no document
-            // history — registry.rs's `mutates_document = false`), so they
-            // never reach the branch above; this is their own hand-off,
-            // unconditional on `mutates` and gated only on success (a
+            // The view commands (hew.view.camera and the like) do not mutate
+            // the document, and `hew.view.enter`/`exit`/`exit_all` mutate it
+            // (a session open or close is a history step) without recording
+            // a replayable call, so both resync through the branch above
+            // where they mutate. This is the directive hand-off for all of
+            // them, unconditional on `mutates` and gated only on success (a
             // refused view command changes nothing, view included,
             // matching every other refusal's untouched-document guarantee).
             self.pending_view_directives = std::mem::take(&mut host.directives);
@@ -3673,6 +3720,29 @@ impl Scene {
             .map_err(|e| ApiError::new("ISOLATION", &format!("malformed isolation: {e}")))?;
         self.ui_isolation = entries;
         Ok(())
+    }
+
+    /// The app mirrors its in-context (fallback) entries here whenever they
+    /// change, outermost first: a JSON array of `{"kind": "object" |
+    /// "instance", "id": "<decimal handle>"}`. What `hew.query.context`
+    /// reports as `fallback`; [`Scene::drain_events`] emits
+    /// `context_changed` when either this or the session stack moved.
+    ///
+    /// # Errors
+    /// `CONTEXT` for JSON of any other shape; the mirror keeps its previous
+    /// value.
+    pub fn set_ui_context(&mut self, json: &str) -> Result<(), ApiError> {
+        let entries: Vec<live::UiContextEntry> = serde_json::from_str(json)
+            .map_err(|e| ApiError::new("CONTEXT", &format!("malformed context: {e}")))?;
+        self.ui_context = entries;
+        Ok(())
+    }
+
+    /// The app reports here whenever a tool gesture arms or disarms (a Move
+    /// drag in flight, ended by commit or Escape). While armed,
+    /// `hew.view.enter`/`exit`/`exit_all` refuse `gesture_in_progress`.
+    pub fn set_ui_gesture_armed(&mut self, armed: bool) {
+        self.ui_gesture_armed = armed;
     }
 
     // ------------------------------------------------------------- events
@@ -3754,12 +3824,18 @@ impl Scene {
         };
 
         let stack = self.doc.session_stack();
-        if stack != self.last_context {
+        if stack != self.last_context || self.ui_context != self.last_drained_fallback {
+            let fallback: Vec<api::ContextEntry> = self
+                .ui_context
+                .iter()
+                .map(live::UiContextEntry::to_entry)
+                .collect();
             events.push((
                 "context_changed".into(),
-                api::events::context_changed(&self.doc, &doc_id),
+                api::events::context_changed(&self.doc, &doc_id, &fallback),
             ));
             self.last_context = stack;
+            self.last_drained_fallback = self.ui_context.clone();
         }
 
         let scenes_params = api::events::scenes_changed(&self.doc, &doc_id, self.last_active_scene);
@@ -12909,6 +12985,7 @@ impl Scene {
         // not name the new document's entities through the old handles.
         self.ui_selection.clear();
         self.ui_isolation = None;
+        self.ui_context.clear();
         self.inference.set_pick_scope(None);
         self.pick_scope_frame_sketches = false;
         self.open_draft = None;
@@ -22037,6 +22114,203 @@ mod tests {
         assert!(directives(&mut scene).is_empty());
         assert!(scene.ui_isolation.is_some(), "the isolation stays");
         assert!(!scene.doc.node_user_hidden(NodeId::Object(a_id)));
+    }
+
+    /// A component of two boxes placed twice: the second placement mirrored.
+    fn mirrored_pair(scene: &mut Scene) -> (kernel::InstanceId, kernel::InstanceId) {
+        let (a, _) = scene_box_at(scene, 0.0);
+        let (b, _) = scene_box_at(scene, 2.0);
+        let (comp, i1, _) = scene
+            .doc
+            .make_component(&[NodeId::Object(a), NodeId::Object(b)])
+            .unwrap();
+        let mirror = kernel::Transform::scale(kernel::Vec3::new(-1.0, 1.0, 1.0)).then(
+            &kernel::Transform::translation(kernel::Vec3::new(20.0, 0.0, 0.0)),
+        );
+        let (i2, _) = scene.doc.place_instance(comp, mirror).unwrap();
+        (i1, i2)
+    }
+
+    #[test]
+    fn set_ui_context_drains_one_context_changed_with_the_fallback() {
+        let mut scene = Scene::new();
+        let (_i1, i2) = mirrored_pair(&mut scene);
+        let conn = scene.api_connection_open();
+        subscribed(&mut scene, conn, &["context_changed"]);
+        drained(&mut scene);
+
+        scene
+            .set_ui_context(&format!(
+                r#"[{{"kind":"instance","id":"{}"}}]"#,
+                i2.data().as_ffi()
+            ))
+            .unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1, "{got:?}");
+        assert_eq!(got[&conn][0]["method"], "hew.event.context_changed");
+        let public = api::ids::public_id(
+            &kernel::EntityRef::Instance(i2),
+            scene.doc.sid_of(&kernel::EntityRef::Instance(i2)).unwrap(),
+        );
+        assert_eq!(
+            got[&conn][0]["params"]["fallback"],
+            serde_json::json!([{ "kind": "instance", "id": public }])
+        );
+        assert_eq!(got[&conn][0]["params"]["stack"], serde_json::json!([]));
+        assert!(drained(&mut scene).is_empty(), "no change, no event");
+
+        // The read agrees, and the mirror clearing is a change too.
+        hello_and_attach(&mut scene, conn);
+        let reply = scene
+            .api_dispatch_reply(conn, &frame(5, "hew.query.context", serde_json::json!({})))
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(
+            reply["result"]["fallback"],
+            serde_json::json!([{ "kind": "instance", "id": public }])
+        );
+        assert_eq!(reply["result"]["armed"], false);
+        scene.set_ui_context("[]").unwrap();
+        assert_eq!(drained(&mut scene)[&conn].len(), 1);
+        assert!(scene.set_ui_context("not json").is_err());
+    }
+
+    #[test]
+    fn view_enter_leaves_the_resolved_directive_and_exits_follow_the_window() {
+        recording::reset();
+        recording::start();
+        let mut scene = Scene::new();
+        let (_, i2) = mirrored_pair(&mut scene);
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let ins = |scene: &Scene, i| {
+            api::ids::public_id(
+                &kernel::EntityRef::Instance(i),
+                scene.doc.sid_of(&kernel::EntityRef::Instance(i)).unwrap(),
+            )
+        };
+        let public = ins(&scene, i2);
+
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                &frame(5, "hew.view.enter", serde_json::json!({ "id": public })),
+            )
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["result"], serde_json::json!({}), "{reply}");
+        assert_eq!(
+            directives(&mut scene),
+            vec![serde_json::json!({
+                "kind": "enter_context",
+                "path": [],
+                "leaf": { "kind": "instance", "id": i2.data().as_ffi().to_string() },
+            })]
+        );
+
+        // An armed gesture refuses before any directive exists.
+        scene.set_ui_gesture_armed(true);
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                &frame(6, "hew.view.enter", serde_json::json!({ "id": public })),
+            )
+            .unwrap();
+        assert!(reply.contains("gesture_in_progress"), "{reply}");
+        assert!(directives(&mut scene).is_empty());
+        scene.set_ui_gesture_armed(false);
+
+        // At the top level there is nothing to pop; exit_all is still fine.
+        let reply = scene
+            .api_dispatch_reply(conn, &frame(7, "hew.view.exit", serde_json::json!({})))
+            .unwrap();
+        assert!(reply.contains("nothing_to_exit"), "{reply}");
+        assert!(directives(&mut scene).is_empty());
+        let reply = scene
+            .api_dispatch_reply(conn, &frame(8, "hew.view.exit_all", serde_json::json!({})))
+            .unwrap();
+        assert!(reply.contains("\"result\""), "{reply}");
+        assert_eq!(directives(&mut scene)[0]["kind"], "exit_all_contexts");
+
+        // With a fallback entry open, exit pops it.
+        scene
+            .set_ui_context(&format!(
+                r#"[{{"kind":"instance","id":"{}"}}]"#,
+                i2.data().as_ffi()
+            ))
+            .unwrap();
+        let reply = scene
+            .api_dispatch_reply(conn, &frame(9, "hew.view.exit", serde_json::json!({})))
+            .unwrap();
+        assert!(reply.contains("\"result\""), "{reply}");
+        assert_eq!(directives(&mut scene)[0]["kind"], "exit_context");
+
+        // Host effects on the window are not replayable kernel calls.
+        scene
+            .api_dispatch_reply(conn, &draw_rect_frame(20, 50.0))
+            .unwrap();
+        let rec = scene.take_recording();
+        recording::reset();
+        assert!(
+            rec.contains("draw_rect"),
+            "ordinary mutations record: {rec}"
+        );
+        assert!(!rec.contains("hew.view.enter"), "{rec}");
+        assert!(!rec.contains("hew.view.exit"), "{rec}");
+    }
+
+    #[test]
+    fn view_commands_leave_the_last_import_scope_alone() {
+        let mut scene = Scene::new();
+        let (a_id, _) = scene_box_at(&mut scene, 0.0);
+        let (_i1, i2) = mirrored_pair(&mut scene);
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        scene.last_import_objects = vec![a_id];
+        let public = api::ids::public_id(
+            &kernel::EntityRef::Instance(i2),
+            scene.doc.sid_of(&kernel::EntityRef::Instance(i2)).unwrap(),
+        );
+        for (id, method, params) in [
+            (5, "hew.view.enter", serde_json::json!({ "id": public })),
+            (6, "hew.view.exit_all", serde_json::json!({})),
+        ] {
+            let reply = scene
+                .api_dispatch_reply(conn, &frame(id, method, params))
+                .unwrap();
+            assert!(reply.contains("\"result\""), "{reply}");
+            assert_eq!(scene.last_import_objects, vec![a_id], "{method}");
+        }
+        // Nor as the sole command of a transaction (which refuses these, but
+        // the scope must not move on the refusal either).
+        let _ = scene.api_dispatch_reply(
+            conn,
+            &frame(
+                7,
+                "hew.doc.transact",
+                serde_json::json!({ "commands": [{ "method": "hew.view.exit_all", "params": {} }] }),
+            ),
+        );
+        assert_eq!(scene.last_import_objects, vec![a_id]);
+    }
+
+    #[test]
+    fn view_exit_with_only_a_session_open_leaves_an_exit_directive() {
+        let mut scene = Scene::new();
+        let (a, _) = scene_box_at(&mut scene, 0.0);
+        let (b, _) = scene_box_at(&mut scene, 3.0);
+        let _ = (a, b);
+        let objects = scene.doc.top_level_nodes();
+        let (g, _) = scene.doc.group_nodes(&objects).unwrap();
+        scene.doc.open_group_session(g).unwrap();
+        // No fallback entry mirrored: the session alone is something to exit.
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let reply = scene
+            .api_dispatch_reply(conn, &frame(5, "hew.view.exit", serde_json::json!({})))
+            .unwrap();
+        assert!(reply.contains("\"result\""), "{reply}");
+        assert_eq!(directives(&mut scene)[0]["kind"], "exit_context");
     }
 
     #[test]

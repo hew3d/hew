@@ -1053,15 +1053,19 @@ export interface QueryChangesSinceResult {
 }
 
 /**
- * `hew.query.context` (v1) — The open editing-context frame stack.
+ * `hew.query.context` (v1) — The open editing-context frame stack, with the app's fallback entries and whether a gesture is armed.
  * Tier: Required · Class: read-only · Served: kernel
  * Refusals: none.
  */
 export interface QueryContextParams {}
 
 export interface QueryContextResult {
+  /** a tool gesture is armed in the user's window; false headless */
+  armed: boolean
   direct_members?: UnspecifiedShape
   epoch: number
+  /** the app's in-context entries inside the innermost open frame, outermost first; empty headless */
+  fallback: ({ id: string; kind: "object" | "instance" })[]
   generation: number
   stack: unknown[]
 }
@@ -2011,6 +2015,38 @@ export interface ViewClearIsolationParams {}
 export interface ViewClearIsolationResult {}
 
 /**
+ * `hew.view.enter` (v1) — Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (mirrored, unevenly scaled, or placed in a group elsewhere), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The result is empty; the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward. Acts on the user's window, so it is refused inside a transaction; distinct from hew.context.enter, which scopes a plugin's own edits.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: unknown_entity, unknown_occurrence, gesture_in_progress, host_capability_missing
+ */
+export interface ViewEnterParams {
+  /** a world object, group, or instance */
+  id?: string
+  /** an occurrence path: instances outermost first, the last element the node to enter */
+  path?: string[]
+}
+
+export interface ViewEnterResult {}
+
+/**
+ * `hew.view.exit` (v1) — Pop the user's innermost editing context, a fallback entry or a session frame. The outcome arrives as context_changed.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: gesture_in_progress, nothing_to_exit, host_capability_missing
+ */
+export interface ViewExitParams {}
+
+export interface ViewExitResult {}
+
+/**
+ * `hew.view.exit_all` (v1) — Close every editing context in the user's window, back to the top level. The outcome arrives as context_changed.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: gesture_in_progress, host_capability_missing
+ */
+export interface ViewExitAllParams {}
+
+export interface ViewExitAllResult {}
+
+/**
  * `hew.view.hidden` (v1) — What is hidden: the hidden objects, groups, and instances, the hidden tags, and the live viewport's isolation (null when nothing is isolated or the host has no viewport).
  * Tier: Standard · Class: read-only · Served: kernel
  * Refusals: none.
@@ -2418,6 +2454,9 @@ export class HewApiClient {
   readonly view = {
     camera: (params: ViewCameraParams): Promise<ViewCameraResult> => this.call('hew.view.camera', params),
     clearIsolation: (params: ViewClearIsolationParams): Promise<ViewClearIsolationResult> => this.call('hew.view.clear_isolation', params),
+    enter: (params: ViewEnterParams): Promise<ViewEnterResult> => this.call('hew.view.enter', params),
+    exit: (params: ViewExitParams): Promise<ViewExitResult> => this.call('hew.view.exit', params),
+    exitAll: (params: ViewExitAllParams): Promise<ViewExitAllResult> => this.call('hew.view.exit_all', params),
     hidden: (params: ViewHiddenParams): Promise<ViewHiddenResult> => this.call('hew.view.hidden', params),
     hide: (params: ViewHideParams): Promise<ViewHideResult> => this.call('hew.view.hide', params),
     isolate: (params: ViewIsolateParams): Promise<ViewIsolateResult> => this.call('hew.view.isolate', params),

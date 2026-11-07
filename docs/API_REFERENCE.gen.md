@@ -4769,7 +4769,7 @@ What changed since a history generation: the union of the change sets since then
 - **Served:** kernel
 - **Permission:** model.read
 
-The open editing-context frame stack.
+The open editing-context frame stack, with the app's fallback entries and whether a gesture is armed.
 
 **Params schema:**
 
@@ -4786,10 +4786,38 @@ The open editing-context frame stack.
 ```json
 {
   "properties": {
+    "armed": {
+      "description": "a tool gesture is armed in the user's window; false headless",
+      "type": "boolean"
+    },
     "direct_members": {},
     "epoch": {
       "minimum": 0,
       "type": "integer"
+    },
+    "fallback": {
+      "description": "the app's in-context entries inside the innermost open frame, outermost first; empty headless",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "object",
+              "instance"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "type": "array"
     },
     "generation": {
       "minimum": 0,
@@ -4801,6 +4829,8 @@ The open editing-context frame stack.
   },
   "required": [
     "stack",
+    "fallback",
+    "armed",
     "generation",
     "epoch"
   ],
@@ -10731,6 +10761,127 @@ End the live viewport's isolation; a no-op when nothing is isolated.
 
 **Refusals:**
 
+- `host_capability_missing`
+
+### `hew.view.enter`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** view
+
+Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (mirrored, unevenly scaled, or placed in a group elsewhere), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The result is empty; the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward. Acts on the user's window, so it is refused inside a transaction; distinct from hew.context.enter, which scopes a plugin's own edits.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "a world object, group, or instance",
+      "type": "string"
+    },
+    "path": {
+      "description": "an occurrence path: instances outermost first, the last element the node to enter",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `gesture_in_progress`
+- `host_capability_missing`
+
+### `hew.view.exit`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** view
+
+Pop the user's innermost editing context, a fallback entry or a session frame. The outcome arrives as context_changed.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `gesture_in_progress`
+- `nothing_to_exit`
+- `host_capability_missing`
+
+### `hew.view.exit_all`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** view
+
+Close every editing context in the user's window, back to the top level. The outcome arrives as context_changed.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `gesture_in_progress`
 - `host_capability_missing`
 
 ### `hew.view.hidden`

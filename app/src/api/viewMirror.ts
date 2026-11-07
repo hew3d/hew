@@ -46,3 +46,15 @@ export function uiIsolationJson(targets: readonly IsolationTarget[] | null): str
   }
   return JSON.stringify(entries)
 }
+
+/** The in-context mirror (`Scene.set_ui_context`): the entries the app keeps
+ * past the kernel's session stack, outermost first. The fallback holds only
+ * objects and instances (a group always opens a session), so any other kind
+ * is left out. */
+export function uiContextJson(entries: readonly NodeRef[]): string {
+  const out: { kind: string; id: string }[] = []
+  for (const n of entries) {
+    if (n.kind === 'object' || n.kind === 'instance') out.push({ kind: n.kind, id: n.id.toString() })
+  }
+  return JSON.stringify(out)
+}

@@ -315,7 +315,7 @@ the events without a reconnect.
 | Event | Needs | What it carries |
 |---|---|---|
 | `document_changed` | `model.read` | the history clock (`generation`, `epoch`), who made the change (`origin`), its `label`, its `kind` (`commit`, `undo`, `redo`, `abort`, `reset`), and `changes` |
-| `context_changed` | `model.read` | the editing context stack, as `hew.query.context` |
+| `context_changed` | `model.read` | the editing context stack and the in-context `fallback` entries, as `hew.query.context` |
 | `scenes_changed` | `model.read` | every Scene, as `hew.scenes.list`, and the active one |
 | `units_changed` | `model.read` | the display length format |
 | `document_will_save`, `document_saved`, `document_opened`, `document_closed` | `model.read` | the document's id and title, the format of a save, and its path only with `documents.save` |
@@ -378,6 +378,38 @@ framing it moved stays. Subscribe to `selection_changed` to follow the selection
   effect in the desktop app; the browser and Shop Mode do not carry them
   out yet. `hide`, `show`, `show_all`, and `hidden` change and read the
   document itself.
+
+## Entering a node for editing
+
+A plugin holding `view` can put the person inside a node, the way a
+double click in Hew's own Outliner does: `hew.view.enter {id}` for a
+world object, group, or instance, or `hew.view.enter {path}` for a node
+reached through instances (HEW_API.md §6.3). The window opens group and
+component sessions level by level, falls back to the in-context entry for
+an instance a session cannot take (mirrored, unevenly scaled, or placed in
+a group elsewhere), and selects the target. `hew.view.exit` steps out one
+level and `hew.view.exit_all` all the way. This is not `hew.context.enter`,
+which stays balanced inside a transaction and scopes a plugin's own
+edits; the frame `hew.view.enter` opens is the person's.
+
+The recipe for an outliner panel:
+
+1. On a row's double click, call `hew.view.enter` with the row's id, or
+   with its occurrence path when the row is a part inside an instance. The
+   answer is `{}`; do not read the result for what opened.
+2. Listen for `context_changed`. Its `stack` lists the open group and
+   component frames, outermost first, and `fallback` lists the in-context
+   entries (`{kind: "object" | "instance", id}`) inside the innermost frame.
+   Draw the breadcrumb from `stack` followed by `fallback`.
+3. Call `hew.query.context` for the same two lists on startup, or after a
+   refusal. A refusal the app shows the person as a message leaves the
+   context unchanged and sends no event.
+4. Handle `gesture_in_progress`: a tool gesture (a Move drag) is under way,
+   and the call changes nothing. Try again when it ends. `hew.query.context`
+   reports `armed`.
+
+Calls are solitary: a multi-command transaction carrying one is refused
+`-32602`.
 
 ## Reading parts
 

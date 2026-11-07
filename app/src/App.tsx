@@ -73,7 +73,7 @@ import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { installTestHarness, type PrintRecorder } from './test/harness'
 import { installLiveBridge, type LiveBridgeDeps, type LiveOpOutcome, type LiveOpRunner } from './api/liveBridge'
-import { uiIsolationJson, uiSelectionJson } from './api/viewMirror'
+import { uiContextJson, uiIsolationJson, uiSelectionJson } from './api/viewMirror'
 import { pumpEvents } from './api/eventPump'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
@@ -578,7 +578,7 @@ export default function App() {
    *  Empty = nothing pushed past the session stack (or top level, if no
    *  session is open either). A group NodeRef is never pushed here anymore
    *  — a group entry always opens a session instead (`sessionStack` below). */
-  const [activeContext, setActiveContext] = useState<NodeRef[]>([])
+  const [activeContext, setActiveContextState] = useState<NodeRef[]>([])
   /** The open kernel session stack, outermost first — mirrors the
    *  viewport's own belief (`ViewportApi.sessionStack`), pushed up via
    *  `onSessionChange` on open, close, and every undo/redo resync. Each
@@ -924,6 +924,20 @@ export default function App() {
 
   // Stable ref to the Scene for undo/redo button state queries
   const sceneRef = useRef<Scene | null>(null)
+  /** The in-context entries, always current: `activeContext` above is the
+   *  render copy. Every change goes through `setActiveContext`, which keeps
+   *  this and the Scene's mirror (`Scene.set_ui_context`) in step in the
+   *  same synchronous call — so a bus-driven entry (`hew.view.enter`) whose
+   *  session opens and fallback push both land in one call stack reports
+   *  them in ONE `context_changed`, not a stack event now and a fallback
+   *  event a render later. */
+  const activeContextRef = useRef<NodeRef[]>([])
+  const setActiveContext = useCallback((next: NodeRef[] | ((prev: NodeRef[]) => NodeRef[])) => {
+    const value = typeof next === 'function' ? next(activeContextRef.current) : next
+    activeContextRef.current = value
+    setActiveContextState(value)
+    sceneRef.current?.set_ui_context(uiContextJson(value))
+  }, [])
   // Bytes of a fresh blank scene, captured once after kernel load, used for New.
   const blankBytesRef = useRef<Uint8Array | null>(null)
   // Stable file host instance.
@@ -1748,7 +1762,7 @@ export default function App() {
    * non-contiguous breadcrumbs like "Model → Object 1" for a nested object
    * with no Group shown.
    */
-  const enterNode = useCallback((target: NodeRef) => {
+  const enterNode = useCallback((target: NodeRef, opts?: { keepFallback?: boolean }) => {
     const scene = sceneRef.current
     const api = viewportApi.current
     if (scene === null || api === null) return
@@ -1811,7 +1825,12 @@ export default function App() {
       nodeEq(openStack[common], framesChain[common])
     ) common++
 
-    setActiveContext([])
+    // A later step of a bus path keeps the fallback entries the earlier
+    // steps pushed: the path's instances that could not take a session stay
+    // in the chain, so the window ends inside the leaf with them beneath it.
+    // Only when the frames above them stay open, though; closing a session
+    // drops the context tail that sat inside it.
+    if (opts?.keepFallback !== true || openStack.length > common) setActiveContext([])
     for (let i = openStack.length; i > common; i--) {
       api.runCloseInnermostSession()
     }
@@ -1851,7 +1870,9 @@ export default function App() {
     // mid-gesture could re-home geometry the gesture still holds stale
     // handles into. Silently ignore, no toast.
     if (api?.hasArmedGesture()) return
-    const stackLen = sessionStack.length
+    // The synchronous ref, not the render copy: bus frames can land before
+    // the render that follows a session change.
+    const stackLen = prevSessionStackRef.current.length
     if (depth < stackLen) {
       setActiveContext([])
       setSelectedIds([])
@@ -1860,7 +1881,14 @@ export default function App() {
       setActiveContext((prev) => prev.slice(0, depth - stackLen))
       setSelectedIds([])
     }
-  }, [sessionStack])
+  }, [])
+
+  // The live bridge (installed once) reaches the entry convergence and the
+  // breadcrumb truncation through refs, like the selection handlers.
+  const enterNodeRef = useRef(enterNode)
+  enterNodeRef.current = enterNode
+  const setPathDepthRef = useRef(handleSetPathDepth)
+  setPathDepthRef.current = handleSetPathDepth
 
   /** The root "Model" breadcrumb crumb: exit everything — every open
    *  session frame, innermost-first, plus the object-context tail. */
@@ -1871,8 +1899,8 @@ export default function App() {
     if (api?.hasArmedGesture()) return
     setActiveContext([])
     setSelectedIds([])
-    for (let i = sessionStack.length; i > 0; i--) api?.runCloseInnermostSession()
-  }, [sessionStack])
+    for (let i = prevSessionStackRef.current.length; i > 0; i--) api?.runCloseInnermostSession()
+  }, [])
 
   // ---------------------------------------------------------------- scenes
   // The Scenes controller (docs/design/scenes.md §5): entries, active Scene,
@@ -2133,6 +2161,11 @@ export default function App() {
     // A bus isolation is nobody's panel's: Model Health closing must not
     // end it (`handleIsolate` hands ownership back to the app).
     isolate: (targets, opts) => handleIsolateRef.current(targets, opts),
+    // A bus `hew.view.enter`/`exit`/`exit_all` drives the Outliner's own
+    // entry convergence and the breadcrumb's own truncation.
+    enterNode: (node, opts) => enterNodeRef.current(node, opts),
+    setPathDepth: (depth) => setPathDepthRef.current(depth),
+    contextDepth: () => prevSessionStackRef.current.length + activeContextRef.current.length,
   }
   useEffect(() => {
     if (!(import.meta.env.DEV || import.meta.env.VITE_HEW_TEST === '1')) return
@@ -2195,6 +2228,18 @@ export default function App() {
     scene.set_ui_selection(uiSelectionJson(selectedIds, selectedGuide, selectedAnnotation))
     pumpEvents(scene)
   }, [state?.scene, selectedIds, selectedGuide, selectedAnnotation])
+  // The in-context entries: `setActiveContext` already mirrors every change
+  // into the Scene; this re-seeds a replaced Scene and pumps, so
+  // `context_changed` reaches subscribers when the user's own clicks (not a
+  // bus entry, which the bridge pumps) moved the entries.
+  useEffect(() => {
+    const scene = state?.scene
+    if (scene === undefined) return
+    // From the ref: a bus entry that landed after this render committed
+    // must not be overwritten by the render copy.
+    scene.set_ui_context(uiContextJson(activeContextRef.current))
+    pumpEvents(scene)
+  }, [state?.scene, activeContext])
   useEffect(() => {
     const scene = state?.scene
     if (scene === undefined) return

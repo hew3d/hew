@@ -1376,7 +1376,41 @@ fn context(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         None => None,
     };
 
-    Ok(json!({ "stack": stack, "direct_members": direct_members }))
+    let fallback = context_fallback_json(ctx.doc, &ctx.host.fallback_context());
+
+    Ok(json!({
+        "stack": stack,
+        "direct_members": direct_members,
+        "fallback": fallback,
+        "armed": ctx.host.gesture_armed(),
+    }))
+}
+
+/// `hew.query.context`'s `fallback`: the app's in-context entries
+/// sitting inside the innermost open frame, outermost first, each
+/// `{kind, id}`. An entry whose node no longer carries a stable id (deleted
+/// since the app last reported) is left out. Shared with the
+/// `context_changed` event.
+pub(crate) fn context_fallback_json(
+    doc: &kernel::Document,
+    entries: &[crate::host::ContextEntry],
+) -> Value {
+    let mut out = Vec::new();
+    for e in entries {
+        let (kind, entity) = match (e.kind, e.node) {
+            (crate::host::ContextKind::Object, NodeId::Object(o)) => {
+                ("object", EntityRef::Object(o))
+            }
+            (crate::host::ContextKind::Instance, NodeId::Instance(i)) => {
+                ("instance", EntityRef::Instance(i))
+            }
+            _ => continue,
+        };
+        if let Some(sid) = doc.sid_of(&entity) {
+            out.push(json!({ "kind": kind, "id": ids::public_id(&entity, sid) }));
+        }
+    }
+    Value::Array(out)
 }
 
 /// `hew.query.context`'s `stack`: the open editing frames, outermost

@@ -141,6 +141,8 @@ const mockScene = {
   // open re-issues this, since `Scene.load` itself resets the kernel's
   // inference state, silently re-enabling axis snapping otherwise).
   set_axes_snappable: vi.fn(),
+  // The bus mirror of the in-context entries (`ShopApp`).
+  set_ui_context: vi.fn(),
   // Registry accessors the seed fix (documentLoad.ts's
   // seedHiddenKeysFromRegistry/seedHiddenTagPathsFromRegistry) reads on
   // every open — vi.fn() (not plain closures) so individual tests can

@@ -613,7 +613,7 @@ impl Registry {
             R,
             Kernel,
             Req,
-            "The open editing-context frame stack.",
+            "The open editing-context frame stack, with the app's fallback entries and whether a gesture is armed.",
         );
         add(
             "hew.query.occurrences",
@@ -1259,6 +1259,32 @@ impl Registry {
             Std,
             "Frame the named entities in the live viewport, with a margin.",
         );
+        // The user's editing context (docs/agents/HEW_API.md §6.3): host
+        // effects on the user's window, outside transactions. Solitary, so
+        // a multi-command transaction refuses them -32602; `mutates_document`
+        // is corrected below because opening or closing a session is a
+        // history step the live app resyncs after.
+        add(
+            "hew.view.enter",
+            S,
+            Host,
+            Std,
+            "Put the user's window inside a node for editing, the way a double click in the Outliner does.",
+        );
+        add(
+            "hew.view.exit",
+            S,
+            Host,
+            Std,
+            "Step the user's window out of its innermost editing context.",
+        );
+        add(
+            "hew.view.exit_all",
+            S,
+            Host,
+            Std,
+            "Step the user's window all the way out to the top level.",
+        );
         // Printing (docs/design/printing.md §9b): headless-renderable like
         // hew.view.snapshot (the same core-profile carve-out below).
         add(
@@ -1835,8 +1861,25 @@ impl Registry {
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "stack": { "type": "array" }, "direct_members": {} },
-                "required": ["stack"]
+                "properties": {
+                    "stack": { "type": "array" },
+                    "direct_members": {},
+                    "fallback": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "type": "string", "enum": ["object", "instance"] },
+                                "id": { "type": "string" }
+                            },
+                            "required": ["kind", "id"],
+                            "additionalProperties": false
+                        },
+                        "description": "the app's in-context entries inside the innermost open frame, outermost first; empty headless"
+                    },
+                    "armed": { "type": "boolean", "description": "a tool gesture is armed in the user's window; false headless" }
+                },
+                "required": ["stack", "fallback", "armed"]
             });
             cmd.refusals = Vec::new();
         }
@@ -3151,6 +3194,47 @@ impl Registry {
                         "nothing_to_frame",
                         "host_capability_missing",
                     ],
+                ),
+                (
+                    "hew.view.enter",
+                    "Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (mirrored, unevenly scaled, or placed in a group elsewhere), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The result is empty; the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward. Acts on the user's window, so it is refused inside a transaction; distinct from hew.context.enter, which scopes a plugin's own edits.",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "description": "a world object, group, or instance" },
+                            "path": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "an occurrence path: instances outermost first, the last element the node to enter" }
+                        },
+                        "additionalProperties": false
+                    }),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }),
+                    vec![
+                        "unknown_entity",
+                        "unknown_occurrence",
+                        "gesture_in_progress",
+                        "host_capability_missing",
+                    ],
+                ),
+                (
+                    "hew.view.exit",
+                    "Pop the user's innermost editing context, a fallback entry or a session frame. The outcome arrives as context_changed.",
+                    empty(),
+                    empty(),
+                    vec![
+                        "gesture_in_progress",
+                        "nothing_to_exit",
+                        "host_capability_missing",
+                    ],
+                ),
+                (
+                    "hew.view.exit_all",
+                    "Close every editing context in the user's window, back to the top level. The outcome arrives as context_changed.",
+                    empty(),
+                    empty(),
+                    vec!["gesture_in_progress", "host_capability_missing"],
                 ),
             ] {
                 let cmd = commands.get_mut(name).expect("declared above");
@@ -5417,6 +5501,11 @@ impl Registry {
             // registry and `hew.scenes.*` above — is bookkeeping the
             // kernel never records as an undo step.
             "hew.library.save",
+            // Host effects on the user's window; opening or closing a
+            // session is a history step, so a live host resyncs after.
+            "hew.view.enter",
+            "hew.view.exit",
+            "hew.view.exit_all",
         ] {
             commands
                 .get_mut(name)
@@ -5865,6 +5954,9 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.view.isolate",
                 "hew.view.clear_isolation",
                 "hew.view.zoom_to",
+                "hew.view.enter",
+                "hew.view.exit",
+                "hew.view.exit_all",
             ],
         ),
         (

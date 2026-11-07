@@ -18,6 +18,7 @@ const mockScene = {
   // Events (docs/agents/HEW_API.md §4.5): the units mirror and the
   // document lifecycle notes.
   set_display_units: vi.fn(),
+  set_ui_context: vi.fn(),
   // Selection and view state (docs/agents/HEW_API.md §7): the mirrors the
   // bus reads.
   set_ui_selection: vi.fn(),

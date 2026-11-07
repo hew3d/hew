@@ -1000,6 +1000,46 @@ pub trait Host {
         Err(unsupported("clear isolation"))
     }
 
+    /// The app's in-context entries sitting logically inside the innermost
+    /// open session frame, outermost first: the editing model the app falls
+    /// back on for an instance a session cannot take (mirrored, unevenly
+    /// scaled, or placed in a group elsewhere). Empty headless.
+    fn fallback_context(&self) -> Vec<ContextEntry> {
+        Vec::new()
+    }
+
+    /// Whether a tool gesture is armed in the user's window (a Move drag in
+    /// flight). `hew.view.enter`/`exit`/`exit_all` refuse
+    /// `gesture_in_progress` while it is, because the app's own entry
+    /// silently does nothing then.
+    fn gesture_armed(&self) -> bool {
+        false
+    }
+
+    /// `hew.view.enter`: converges the user's window onto `leaf` reached
+    /// through `path` (instances only, outermost first), the way a double
+    /// click on the node in the Outliner would. The host queues the effect;
+    /// the outcome is reported by `context_changed`.
+    fn enter_user_context(
+        &mut self,
+        path: &[kernel::InstanceId],
+        leaf: kernel::NodeId,
+    ) -> Result<(), Refusal> {
+        let _ = (path, leaf);
+        Err(unsupported("enter the user's context"))
+    }
+
+    /// `hew.view.exit`: pops the user's innermost entry, a fallback entry
+    /// or a session frame.
+    fn exit_user_context(&mut self) -> Result<(), Refusal> {
+        Err(unsupported("leave the user's context"))
+    }
+
+    /// `hew.view.exit_all`: back to the top level in the user's window.
+    fn exit_all_user_contexts(&mut self) -> Result<(), Refusal> {
+        Err(unsupported("leave the user's context"))
+    }
+
     /// Frames the world box `min`..`max` in the live viewport
     /// (`hew.view.zoom_to`). The box already carries `padding`, which is
     /// passed along for information only.
@@ -1012,6 +1052,22 @@ pub trait Host {
         let _ = (min, max, padding);
         Err(unsupported("frame the viewport"))
     }
+}
+
+/// What an in-context entry holds (`Host::fallback_context`): the kinds the
+/// app's fallback can hold. A group always opens a session, so it never
+/// appears here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextKind {
+    Object,
+    Instance,
+}
+
+/// One in-context entry the app keeps beside the kernel's session stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextEntry {
+    pub kind: ContextKind,
+    pub node: kernel::NodeId,
 }
 
 /// The capability-free host: pure in-process dispatch with no file

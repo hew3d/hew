@@ -537,6 +537,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "ISOLATION" => {
             "What is isolated could not be shared with a connected program. If this keeps happening, use Report Bug."
         }
+        "CONTEXT" => {
+            "What is open for editing could not be shared with a connected program. If this keeps happening, use Report Bug."
+        }
         "BadRenderMode" => {
             "The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug."
         }
