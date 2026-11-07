@@ -1,0 +1,465 @@
+{
+  "profile": "core",
+  "frames": [
+    {
+      "note": "the handshake",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": {
+        "id": 0,
+        "jsonrpc": "2.0",
+        "result": {
+          "app": {
+            "name": "hew",
+            "version": "1.3.1"
+          },
+          "documents": [],
+          "encoding": "json",
+          "profile": "core",
+          "protocol": 1
+        }
+      }
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "note": "the generation before any rehearsal",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "hew.query.context",
+        "params": {}
+      },
+      "compare": "/result/generation",
+      "response": 0
+    },
+    {
+      "note": "a rehearsed draw_rect + extrude answers the object id a commit would mint",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "p",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  1.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "as": "box",
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "p#/region_id"
+                }
+              }
+            }
+          ],
+          "dry_run": true
+        }
+      },
+      "outcome": "dry_run",
+      "compare": "/result/results/1/object_id",
+      "response": "obj_1"
+    },
+    {
+      "note": "the same rehearsal says it is one: dry_run is true",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "p",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  1.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "as": "box",
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "p#/region_id"
+                }
+              }
+            }
+          ],
+          "dry_run": true
+        }
+      },
+      "outcome": "dry_run",
+      "compare": "/result/dry_run",
+      "response": true
+    },
+    {
+      "note": "the generation did not move",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "hew.query.context",
+        "params": {}
+      },
+      "compare": "/result/generation",
+      "response": 0
+    },
+    {
+      "note": "no undo entry was made",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "hew.history.status",
+        "params": {}
+      },
+      "compare": "/result/undo_depth",
+      "response": 0
+    },
+    {
+      "note": "coalesce does not apply to a dry run: -32602",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "hew.doc.transact",
+        "params": {
+          "coalesce": "k",
+          "commands": [
+            {
+              "as": "p",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  1.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "as": "box",
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "p#/region_id"
+                }
+              }
+            }
+          ],
+          "dry_run": true
+        }
+      },
+      "outcome": "dry_run",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "coalesce does not apply to a dry run; nothing is committed"
+        },
+        "id": 7,
+        "jsonrpc": "2.0"
+      }
+    },
+    {
+      "note": "a Host-served command cannot be rehearsed: dry_run_host_command, five fields, failed_index 0",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "method": "hew.doc.export",
+              "params": {
+                "format": "stl",
+                "path": "/tmp/x.stl"
+              }
+            }
+          ],
+          "dry_run": true
+        }
+      },
+      "outcome": "dry_run",
+      "response": {
+        "error": {
+          "code": -32000,
+          "data": {
+            "detail": {
+              "method": "hew.doc.export"
+            },
+            "explanation": "A dry run can only rehearse edits to the model. hew.doc.export touches files, the library, or the screen, so run it for real.",
+            "failed_index": 0,
+            "failed_method": "hew.doc.export",
+            "refusal": "dry_run_host_command"
+          },
+          "message": "refused"
+        },
+        "id": 8,
+        "jsonrpc": "2.0"
+      }
+    },
+    {
+      "note": "a stale expect_generation refuses generation_moved before anything runs, as a commit would",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "p",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  1.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "as": "box",
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "p#/region_id"
+                }
+              }
+            }
+          ],
+          "dry_run": true,
+          "expect_generation": 99
+        }
+      },
+      "outcome": "dry_run",
+      "response": {
+        "error": {
+          "code": -32000,
+          "data": {
+            "detail": {
+              "actual": 0,
+              "expected": 99
+            },
+            "explanation": "The document changed since this envelope was computed. Read it again and resend.",
+            "failed_index": 0,
+            "failed_method": "hew.doc.transact",
+            "refusal": "generation_moved"
+          },
+          "message": "refused"
+        },
+        "id": 9,
+        "jsonrpc": "2.0"
+      }
+    },
+    {
+      "note": "two overlapping boxes committed for real",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "a",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  1.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "as": "ba",
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "a#/region_id"
+                }
+              }
+            },
+            {
+              "as": "b",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.5,
+                  0.25,
+                  0.5
+                ],
+                "corner_b": [
+                  1.5,
+                  0.75,
+                  0.5
+                ],
+                "plane": {
+                  "normal": [
+                    0.0,
+                    0.0,
+                    1.0
+                  ],
+                  "origin": [
+                    0.0,
+                    0.0,
+                    0.5
+                  ]
+                }
+              }
+            },
+            {
+              "as": "bb",
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "b#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "Two boxes"
+        }
+      },
+      "compare": "/result/results",
+      "response": [
+        {
+          "region_id": "rgn_0_100000001",
+          "region_ids": [
+            "rgn_0_100000001"
+          ],
+          "sketch": "skt_0"
+        },
+        {
+          "object_id": "obj_1"
+        },
+        {
+          "region_id": "rgn_2_100000001",
+          "region_ids": [
+            "rgn_2_100000001"
+          ],
+          "sketch": "skt_2"
+        },
+        {
+          "object_id": "obj_3"
+        }
+      ]
+    },
+    {
+      "note": "a rehearsed subtract read back with hew.query.mesh through $ref sees the notched box",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "cut",
+              "method": "hew.solid.subtract",
+              "params": {
+                "a": "obj_1",
+                "b": "obj_3"
+              }
+            },
+            {
+              "method": "hew.query.mesh",
+              "params": {
+                "id": {
+                  "$ref": "cut#/result"
+                }
+              }
+            }
+          ],
+          "dry_run": true
+        }
+      },
+      "outcome": "dry_run",
+      "compare": "/result/results/1/triangle_count",
+      "response": 28
+    },
+    {
+      "note": "the rehearsal left the committed undo depth as it was",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 12,
+        "method": "hew.history.status",
+        "params": {}
+      },
+      "compare": "/result/undo_depth",
+      "response": 1
+    }
+  ]
+}

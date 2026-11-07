@@ -1550,7 +1550,7 @@ impl Sketch {
     /// The first segment the sticky rules refuse, as [`Sketch::add_segment`]
     /// refuses it; the sketch then holds the segments before it, the
     /// regions recomputed, and the caller decides (a lift discards it).
-    pub(crate) fn add_segments(&mut self, segs: &[(Point3, Point3)]) -> Result<(), SketchError> {
+    pub fn add_segments(&mut self, segs: &[(Point3, Point3)]) -> Result<(), SketchError> {
         let curve = self.active_curve;
         let segs: Vec<(Point3, Point3, Option<SketchCurveId>)> =
             segs.iter().map(|&(a, b)| (a, b, curve)).collect();

@@ -675,6 +675,2772 @@ Re-express a definition in a new frame; every placement is compensated, so nothi
 - `invalid_frame` — That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions.
 - `rebase_during_session` — Finish editing the component before changing its axes.
 
+## hew.compute
+
+### `hew.compute.boolean`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Union, subtract, or intersect two solids without touching the document; answers the result's measure, mesh, topology, or shell count.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "a": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "b": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "op": {
+      "enum": [
+        "union",
+        "subtract",
+        "intersect"
+      ],
+      "type": "string"
+    },
+    "want": {
+      "description": "the result blocks to answer; defaults to [\"measure\"]",
+      "items": {
+        "enum": [
+          "mesh",
+          "topology",
+          "measure",
+          "shells"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "op",
+    "a",
+    "b"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "measure": {
+      "properties": {
+        "area": {
+          "description": "square meters, holes subtracted",
+          "type": "number"
+        },
+        "bbox": {
+          "properties": {
+            "max": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "min": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "volume": {
+          "description": "cubic meters; null for an object that is not watertight",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "volume",
+        "area",
+        "bbox"
+      ],
+      "type": "object"
+    },
+    "mesh": {
+      "additionalProperties": false,
+      "properties": {
+        "face_indices_base64": {
+          "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+          "type": "string"
+        },
+        "indices_base64": {
+          "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+          "type": "string"
+        },
+        "normals_base64": {
+          "description": "f32 little-endian xyz per vertex, unit length",
+          "type": "string"
+        },
+        "parts": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "face_index_base": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "id": {
+                "description": "null on a computed mesh",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "index_base": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "index_count": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "face_index_base",
+              "index_base",
+              "index_count"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "positions_base64": {
+          "description": "f32 little-endian xyz per vertex",
+          "type": "string"
+        },
+        "triangle_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vertex_count": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "vertex_count",
+        "triangle_count",
+        "positions_base64",
+        "normals_base64",
+        "indices_base64",
+        "face_indices_base64",
+        "parts"
+      ],
+      "type": "object"
+    },
+    "shells": {
+      "description": "connected pieces in the result",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "solid": {
+      "description": "false when nothing is left (no other block then)",
+      "type": "boolean"
+    },
+    "topology": {
+      "additionalProperties": false,
+      "properties": {
+        "edges": {
+          "items": {
+            "description": "{index, a, b (vertex indices), faces: [face indices, 1 or 2], curve: {kind: \"circle\", center, axis, radius} | null, attrs: the edge's attribute dictionary, {} for none}",
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "faces": {
+          "items": {
+            "description": "{index, plane: {point, normal}, outer: [vertex indices], holes: [[...]], material, back_material, surface: {kind: \"cylinder\", axis_point, axis, radius} | null, area, attrs: the face's attribute dictionary, {} for none}",
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "object": {
+          "description": "null on a computed solid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vertices": {
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "object",
+        "vertices",
+        "faces",
+        "edges"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "solid"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `mirrored_pose`
+- `compute_busy`
+- `compute_too_large`
+- `mesh_too_large`
+- `operand_not_solid` — Combining needs a solid on both sides. To make it solid, select it and choose Object ▸ Make Solid…
+- `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
+- `nothing_removed` — Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid.
+- `singular_transform` — One object's placement is scaled down to nothing, so the operation can't run.
+
+### `hew.compute.measure`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Volume, surface area, bounding box, and centroid of a solid.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "solid": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "required": [
+    "solid"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "area": {
+      "description": "square meters, holes subtracted",
+      "type": "number"
+    },
+    "bbox": {
+      "properties": {
+        "max": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "min": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "min",
+        "max"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "centroid": {
+      "description": "the volume centroid; null for an object that is not watertight",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "volume": {
+      "description": "cubic meters; null for an object that is not watertight",
+      "type": [
+        "number",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "volume",
+    "area",
+    "bbox",
+    "centroid"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `mirrored_pose`
+- `compute_busy`
+- `compute_too_large`
+
+### `hew.compute.offset`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Offset closed 2D loops outward or inward by a distance.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "distance": {
+      "description": "positive grows the material, negative shrinks it",
+      "type": "number"
+    },
+    "join": {
+      "description": "miter (the default); round is reserved and not available yet",
+      "enum": [
+        "miter",
+        "round"
+      ],
+      "type": "string"
+    },
+    "loops": {
+      "description": "closed 2D loops, the first the outer boundary, the rest holes, in either winding",
+      "items": {
+        "items": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "minItems": 3,
+        "type": "array"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "loops",
+    "distance"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "loops": {
+      "items": {
+        "properties": {
+          "edges": {
+            "items": {
+              "oneOf": [
+                {
+                  "properties": {
+                    "a": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "b": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "line"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "a",
+                    "b"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "ccw": {
+                      "type": "boolean"
+                    },
+                    "center": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "end": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "arc"
+                    },
+                    "radius": {
+                      "type": "number"
+                    },
+                    "start": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "center",
+                    "radius",
+                    "start",
+                    "end",
+                    "ccw"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "center": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "circle"
+                    },
+                    "radius": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "center",
+                    "radius"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "outer": {
+            "description": "an outer boundary (counter-clockwise), else a hole (clockwise)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "outer",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "loops"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `offset_too_small` — That offset distance is too small to make a new boundary. Drag further, or type an exact distance.
+- `offset_collapsed` — The shape can't absorb that offset — its boundary would collapse, cross itself, or spike out of a sharp corner. Try a smaller distance, or soften the sharpest corner.
+- `compute_busy`
+
+### `hew.compute.outline`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+A part's outline in a frame's xy plane: its largest face, or its silhouette, with arcs and circles kept analytic.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "frame": {
+      "description": "\"part\" (the default: hew.query.part_frame's frame) or {origin, x, y, z}, orthonormal and right-handed",
+      "oneOf": [
+        {
+          "enum": [
+            "part"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "origin": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "x": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "y": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "z": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            }
+          },
+          "required": [
+            "origin",
+            "x",
+            "y",
+            "z"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "id": {
+      "description": "a world node's public id",
+      "type": "string"
+    },
+    "path": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "which": {
+      "description": "largest_face: the loops of the part's largest face; projection: the silhouette seen along the frame's z",
+      "enum": [
+        "largest_face",
+        "projection"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "which"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "loops": {
+      "items": {
+        "properties": {
+          "edges": {
+            "items": {
+              "oneOf": [
+                {
+                  "properties": {
+                    "a": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "b": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "line"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "a",
+                    "b"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "ccw": {
+                      "type": "boolean"
+                    },
+                    "center": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "end": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "arc"
+                    },
+                    "radius": {
+                      "type": "number"
+                    },
+                    "start": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "center",
+                    "radius",
+                    "start",
+                    "end",
+                    "ccw"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "center": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "circle"
+                    },
+                    "radius": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "center",
+                    "radius"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "outer": {
+            "description": "an outer boundary (counter-clockwise), else a hole (clockwise)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "outer",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "loops"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `invalid_frame` — That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions.
+- `no_part_frame` — That part has no faces to measure.
+- `compute_busy`
+- `compute_too_large`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+
+### `hew.compute.project`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+A single part's flat drawing on a plane, its faces grouped by depth into layers (not available yet).
+
+> **Not yet implemented.** Every call answers the `unimplemented` refusal (docs/agents/HEW_API.md §14's burn-down posture).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "plane": {
+      "additionalProperties": false,
+      "description": "world coordinates",
+      "properties": {
+        "normal": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "origin": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin",
+        "normal"
+      ],
+      "type": "object"
+    },
+    "solid": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "want": {
+      "items": {
+        "enum": [
+          "outline",
+          "layers"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "solid",
+    "plane"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "layers": {
+      "items": {
+        "properties": {
+          "depth": {
+            "type": "number"
+          },
+          "loops": {
+            "items": {
+              "properties": {
+                "edges": {
+                  "items": {
+                    "properties": {
+                      "a": {
+                        "items": {
+                          "type": "number"
+                        },
+                        "maxItems": 2,
+                        "minItems": 2,
+                        "type": "array"
+                      },
+                      "b": {
+                        "items": {
+                          "type": "number"
+                        },
+                        "maxItems": 2,
+                        "minItems": 2,
+                        "type": "array"
+                      },
+                      "kind": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "outer": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "outer",
+                "edges"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "depth",
+          "loops"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "outline": {
+      "items": {
+        "properties": {
+          "edges": {
+            "items": {
+              "properties": {
+                "a": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "b": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "kind": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "outer": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "outer",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unimplemented`
+
+### `hew.compute.shells`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Split a solid into its connected pieces without touching the document.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "solid": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "want_mesh": {
+      "description": "answer each piece's mesh too; defaults to false",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "solid"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "shells": {
+      "items": {
+        "properties": {
+          "measure": {
+            "properties": {
+              "area": {
+                "description": "square meters, holes subtracted",
+                "type": "number"
+              },
+              "bbox": {
+                "properties": {
+                  "max": {
+                    "items": {
+                      "type": "number"
+                    },
+                    "maxItems": 3,
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "min": {
+                    "items": {
+                      "type": "number"
+                    },
+                    "maxItems": 3,
+                    "minItems": 3,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "min",
+                  "max"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "volume": {
+                "description": "cubic meters; null for an object that is not watertight",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "volume",
+              "area",
+              "bbox"
+            ],
+            "type": "object"
+          },
+          "mesh": {
+            "additionalProperties": false,
+            "properties": {
+              "face_indices_base64": {
+                "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+                "type": "string"
+              },
+              "indices_base64": {
+                "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+                "type": "string"
+              },
+              "normals_base64": {
+                "description": "f32 little-endian xyz per vertex, unit length",
+                "type": "string"
+              },
+              "parts": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "face_index_base": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "id": {
+                      "description": "null on a computed mesh",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "index_base": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "index_count": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "face_index_base",
+                    "index_base",
+                    "index_count"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "positions_base64": {
+                "description": "f32 little-endian xyz per vertex",
+                "type": "string"
+              },
+              "triangle_count": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "vertex_count": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "vertex_count",
+              "triangle_count",
+              "positions_base64",
+              "normals_base64",
+              "indices_base64",
+              "face_indices_base64",
+              "parts"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "measure"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "count",
+    "shells"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `mirrored_pose`
+- `compute_busy`
+- `compute_too_large`
+- `mesh_too_large`
+
+### `hew.compute.slice`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Cut a solid by a plane without touching the document; answers both pieces.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "plane": {
+      "additionalProperties": false,
+      "description": "world coordinates",
+      "properties": {
+        "normal": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "origin": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin",
+        "normal"
+      ],
+      "type": "object"
+    },
+    "solid": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "want": {
+      "description": "the result blocks to answer; defaults to [\"measure\"]",
+      "items": {
+        "enum": [
+          "mesh",
+          "topology",
+          "measure",
+          "shells"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "solid",
+    "plane"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "positive is the piece on the side the plane normal points to",
+  "properties": {
+    "negative": {
+      "properties": {
+        "measure": {
+          "properties": {
+            "area": {
+              "description": "square meters, holes subtracted",
+              "type": "number"
+            },
+            "bbox": {
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "volume": {
+              "description": "cubic meters; null for an object that is not watertight",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "volume",
+            "area",
+            "bbox"
+          ],
+          "type": "object"
+        },
+        "mesh": {
+          "additionalProperties": false,
+          "properties": {
+            "face_indices_base64": {
+              "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+              "type": "string"
+            },
+            "indices_base64": {
+              "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+              "type": "string"
+            },
+            "normals_base64": {
+              "description": "f32 little-endian xyz per vertex, unit length",
+              "type": "string"
+            },
+            "parts": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "face_index_base": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "id": {
+                    "description": "null on a computed mesh",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "index_base": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "index_count": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "face_index_base",
+                  "index_base",
+                  "index_count"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "positions_base64": {
+              "description": "f32 little-endian xyz per vertex",
+              "type": "string"
+            },
+            "triangle_count": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "vertex_count": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "vertex_count",
+            "triangle_count",
+            "positions_base64",
+            "normals_base64",
+            "indices_base64",
+            "face_indices_base64",
+            "parts"
+          ],
+          "type": "object"
+        },
+        "shells": {
+          "description": "connected pieces in the result",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "topology": {
+          "additionalProperties": false,
+          "properties": {
+            "edges": {
+              "items": {
+                "description": "{index, a, b (vertex indices), faces: [face indices, 1 or 2], curve: {kind: \"circle\", center, axis, radius} | null, attrs: the edge's attribute dictionary, {} for none}",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "faces": {
+              "items": {
+                "description": "{index, plane: {point, normal}, outer: [vertex indices], holes: [[...]], material, back_material, surface: {kind: \"cylinder\", axis_point, axis, radius} | null, area, attrs: the face's attribute dictionary, {} for none}",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "object": {
+              "description": "null on a computed solid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "vertices": {
+              "items": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "object",
+            "vertices",
+            "faces",
+            "edges"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "positive": {
+      "properties": {
+        "measure": {
+          "properties": {
+            "area": {
+              "description": "square meters, holes subtracted",
+              "type": "number"
+            },
+            "bbox": {
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "volume": {
+              "description": "cubic meters; null for an object that is not watertight",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "volume",
+            "area",
+            "bbox"
+          ],
+          "type": "object"
+        },
+        "mesh": {
+          "additionalProperties": false,
+          "properties": {
+            "face_indices_base64": {
+              "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+              "type": "string"
+            },
+            "indices_base64": {
+              "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+              "type": "string"
+            },
+            "normals_base64": {
+              "description": "f32 little-endian xyz per vertex, unit length",
+              "type": "string"
+            },
+            "parts": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "face_index_base": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "id": {
+                    "description": "null on a computed mesh",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "index_base": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "index_count": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "face_index_base",
+                  "index_base",
+                  "index_count"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "positions_base64": {
+              "description": "f32 little-endian xyz per vertex",
+              "type": "string"
+            },
+            "triangle_count": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "vertex_count": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "vertex_count",
+            "triangle_count",
+            "positions_base64",
+            "normals_base64",
+            "indices_base64",
+            "face_indices_base64",
+            "parts"
+          ],
+          "type": "object"
+        },
+        "shells": {
+          "description": "connected pieces in the result",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "topology": {
+          "additionalProperties": false,
+          "properties": {
+            "edges": {
+              "items": {
+                "description": "{index, a, b (vertex indices), faces: [face indices, 1 or 2], curve: {kind: \"circle\", center, axis, radius} | null, attrs: the edge's attribute dictionary, {} for none}",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "faces": {
+              "items": {
+                "description": "{index, plane: {point, normal}, outer: [vertex indices], holes: [[...]], material, back_material, surface: {kind: \"cylinder\", axis_point, axis, radius} | null, area, attrs: the face's attribute dictionary, {} for none}",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "object": {
+              "description": "null on a computed solid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "vertices": {
+              "items": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "object",
+            "vertices",
+            "faces",
+            "edges"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [],
+      "type": "object"
+    }
+  },
+  "required": [
+    "positive",
+    "negative"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `mirrored_pose`
+- `compute_busy`
+- `compute_too_large`
+- `mesh_too_large`
+- `not_solid` — Only a solid can be sliced. To make it solid, select it and choose Object ▸ Make Solid…
+- `plane_misses_solid` — The slicing plane doesn't pass through the object. Position the cut so it goes through the solid.
+- `degenerate` — The cut lines up exactly with an existing face or edge, so it wouldn't create two pieces. Move the cut slightly.
+
+### `hew.compute.stretch`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Preview a section stretch of parts along one axis of a frame (not available yet).
+
+> **Not yet implemented.** Every call answers the `unimplemented` refusal (docs/agents/HEW_API.md §14's burn-down posture).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "axis": {
+      "enum": [
+        0,
+        1,
+        2
+      ],
+      "type": "integer"
+    },
+    "cutters": {
+      "oneOf": [
+        {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "positions": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "positions"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "dimension": {
+      "type": "number"
+    },
+    "distance": {
+      "type": "number"
+    },
+    "frame": {
+      "oneOf": [
+        {
+          "enum": [
+            "active",
+            "context",
+            "entity"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "origin": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "x": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "y": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "z": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            }
+          },
+          "required": [
+            "origin",
+            "x",
+            "y",
+            "z"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "mode": {
+      "oneOf": [
+        {
+          "enum": [
+            "end",
+            "centered"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "interior": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "interior"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "paths": {
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "paths",
+    "axis"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "applied": {
+      "type": "number"
+    },
+    "cutters": {
+      "items": {
+        "type": "number"
+      },
+      "type": "array"
+    },
+    "max_compression": {
+      "type": "number"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unimplemented`
+
 ## hew.context
 
 ### `hew.context.enter`
@@ -1892,6 +4658,10 @@ Execute commands in order, atomically, as one labeled undo entry.
       "minItems": 1,
       "type": "array"
     },
+    "dry_run": {
+      "description": "rehearse: run the envelope on a copy of the document and answer what a commit would, changing nothing (docs/agents/HEW_API.md §6.6); needs only read permissions; no coalesce",
+      "type": "boolean"
+    },
     "expect_generation": {
       "description": "refuse with generation_moved, before any command runs, unless the document's history generation is this value (docs/agents/HEW_API.md §6.5)",
       "minimum": 0,
@@ -1913,6 +4683,10 @@ Execute commands in order, atomically, as one labeled undo entry.
 ```json
 {
   "properties": {
+    "dry_run": {
+      "description": "true on a rehearsal's answer",
+      "type": "boolean"
+    },
     "label": {
       "type": "string"
     },
@@ -1932,6 +4706,8 @@ Execute commands in order, atomically, as one labeled undo entry.
 
 - `ref_resolution_failed`
 - `generation_moved`
+- `dry_run_host_command`
+- `compute_busy`
 
 ## hew.entity
 
@@ -10101,7 +12877,7 @@ Slice a solid by a plane into two solids; the object may be a path to a definiti
 - **Served:** kernel
 - **Permission:** model.write
 
-Boolean subtraction of two solids; a may be a path to a definition member, cut through that placement so every placement shows the cut.
+Boolean subtraction of two solids; a may be a path to a definition member, cut through that placement so every placement shows the cut, by a world object or a transient prism or box.
 
 **Params schema:**
 
@@ -10133,7 +12909,7 @@ Boolean subtraction of two solids; a may be a path to a definition member, cut t
       ]
     },
     "b": {
-      "description": "a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path",
+      "description": "a world node id; with a by path, a world object (consumed), {path} to a member of the same definition by the same path, or a transient cutter {prism} | {box} in world coordinates (no object is created)",
       "oneOf": [
         {
           "type": "string"
@@ -10151,6 +12927,32 @@ Boolean subtraction of two solids; a may be a path to a definition member, cut t
           },
           "required": [
             "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "description": "{plane: {origin, normal}, loops: [[[x,y,z], ...], ...], distance}: the first loop outer, the rest holes",
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "description": "{min, max, pose?}",
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
           ],
           "type": "object"
         }
@@ -10196,6 +12998,8 @@ Boolean subtraction of two solids; a may be a path to a definition member, cut t
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `nothing_removed` — Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid.
+- `mirrored_pose`
+- `compute_too_large`
 
 ### `hew.solid.thicken`
 

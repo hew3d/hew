@@ -501,9 +501,9 @@ locator that `hew.material.paint`, `hew.solid.push_pull`, and
 - **Occupied-space check.** Shoot with `all: true` along a groove's
   center line. Crossings come in entry and exit pairs per part, so an odd
   count means the line starts inside a part. For volumes, intersect a
-  copy of the candidate solid with the part using `hew.solid.intersect`
-  inside a compound you abort; a non-mutating `hew.compute.boolean`
-  arrives with the compute commands.
+  candidate solid with the part using `hew.compute.boolean` with `op:
+  "intersect"` (see "Checking before committing"): nothing is created,
+  and `measure.volume` is the overlap.
 
 Hidden parts fall through unless `include_hidden: true`.
 
@@ -532,7 +532,15 @@ software rasterizer's shaded look: no textures, edges, or section planes.
 ### Outlines
 
 A 2D outline of a part in its own frame, for nesting irregular parts on
-a sheet, comes from either of two reads:
+a sheet, is one call: `hew.compute.outline { id | path, which }`, in the
+part frame by default. `which: "largest_face"` gives the loops of the
+part's largest face; `which: "projection"` gives its silhouette seen along
+the frame's `z`. Both keep arcs and circles seen face-on analytic, so a
+hole drilled through the part comes back as one `circle` edge. Outer loops
+run counter-clockwise and holes clockwise. `hew.compute.offset` grows or
+shrinks such loops for a tool radius or a kerf.
+
+The same outline can also be built from two reads:
 
 - **Any part.** Read the frame with `hew.query.part_frame`, then ask
   `hew.view.line_drawing` for `selection: [the part]`, `format:
@@ -585,6 +593,53 @@ the number of slots along an axis counting the original, so `[{ count:
 2, step: [w, 0, 0] }, { count: 3, step: [0, d, 0] }]` fills the other
 five slots of a 2 × 3 field. A grid takes no `translation`; `copy.count`
 keeps its own meaning (that many copies at the step and its multiples).
+
+## Checking before committing
+
+Two ways to ask "what would this do?" without changing the document:
+
+- **A dry run** rehearses a whole envelope: `hew.doc.transact` with
+  `dry_run: true` runs your commands on a copy and answers exactly what a
+  commit would, the same results (the ids a commit would mint included)
+  or the same refusal at the same index, with `dry_run: true` beside
+  them. Put reads after the edits to read the rehearsed geometry back in
+  the same call: a `hew.query.mesh` or `hew.query.measure` on the
+  extruded object through `$ref`. Nothing changes: no undo entry, no
+  event, no generation move. Use it once, just before you commit, to
+  check that the commit will go through and what it will produce;
+  `expect_generation` works as it does for a commit.
+- **A computation** answers one geometry question: `hew.compute.boolean`,
+  `slice`, `shells`, `measure`, `outline`, and `offset` take solids
+  (an object by id or path, possibly re-posed, or a prism or box you
+  describe inline) and return a volume, a mesh, pieces, or loops. Only the
+  operands are copied, so this is the call for a preview on every pointer
+  move: "what is left of this board if I cut this groove", "do these two
+  parts overlap".
+
+A dry run needs only `model.read`: a command that would need
+`model.write` or `attributes.write` counts as a read inside it, because
+nothing is committed, so a read-only plugin can check an edit it is not
+allowed to make. Your attribute namespace still applies: a rehearsed
+write under a namespace you do not own refuses as the commit would.
+
+A dry run cannot rehearse what is not an edit of the model: files, the
+library, the screen, the selection, hiding and showing, a Scene's apply,
+or another plugin's command. Those refuse `dry_run_host_command`; run them
+for real. Undo and the other solitary commands are `-32602` in a dry
+run. A dry run copies the whole document, so do not send one per pointer
+move.
+
+One computation runs at a time per connection; a second one sent while
+the first runs is refused `compute_busy`. Do not queue previews behind
+the pointer: when the pointer moves again before an answer arrives, drop
+the stale request and send the newest. A computation over more than
+2,000,000 triangles is refused `compute_too_large`; compute on one part
+at a time.
+
+To cut a part where it sits, in every placement, without creating a
+cutter object: `hew.solid.subtract` with `a` as the part's path and `b` a
+`{ prism }` or `{ box }` in world coordinates. It is one undo entry, and
+undo brings the part back as it was.
 
 ## Moving a nested part
 

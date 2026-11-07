@@ -866,8 +866,8 @@ The registry classes every command, and the class governs placement:
   unknown source (`unknown_tag`), a target already in use
   (`duplicate_tag`; tags are never merged), and an empty or self-nested
   target (`invalid_tag_path`).
-- **Read-only** commands — `hew.query.*`, `hew.meta.*`, and
-  `hew.attr.get` — are legal anywhere: standalone (adding no undo
+- **Read-only** commands — `hew.query.*`, `hew.compute.*`, `hew.meta.*`,
+  and `hew.attr.get` — are legal anywhere: standalone (adding no undo
   entry), or interleaved inside a transaction, where their results are
   legitimate `$ref` sources (measure mid-plan, use the number).
 - **Solitary** commands — document lifecycle (`hew.doc.new`, `open`,
@@ -928,6 +928,54 @@ pushed (each command's own and the transaction's), every undo and redo,
 and every coalesced commit. This is the default write pattern for
 plugins (docs/agents/PLUGINS.md invariant 13).
 
+### 6.6 Rehearsal (`dry_run`)
+
+**`dry_run: true`** on `hew.doc.transact` rehearses the envelope: it runs
+on a copy of the document and answers exactly what a commit would answer,
+then the copy is dropped. Nothing changes: no undo entry, no history
+generation or epoch move, no event, no `document_changed`, no
+recording, no selection or view effect. The answer is the commit's
+`{results, label}` with `dry_run: true` beside them; the results are
+byte for byte the ones the same envelope committed now would return, the
+ids a commit would mint included, so a plugin can rehearse an edit and
+read the rehearsed geometry back in the same call (a `hew.query.mesh`
+after the edit, through `$ref`). A refusal is the commit's refusal, same
+`failed_index`, same name.
+
+- **Checks.** The envelope checks come first, as for a commit and
+  before the attachment check: a rehearsal against a stale read refuses
+  `generation_moved`, a `coalesce` outside 1..=64 bytes is `-32602`, and
+  only then does an unattached connection get `-32002`. A `coalesce` of
+  any length is `-32602` ("coalesce does not apply to a dry run; nothing
+  is committed"). A document-busy host refuses a dry run as it refuses
+  any frame.
+- **Reads.** What a command reads from its host (the app's in-context
+  entries and armed gesture for `hew.query.context`, the selection, the
+  isolation, the open documents) is the live host's answer, as for a
+  commit; only the library stays out of reach. Every write to the host
+  is refused (below).
+- **The host is told.** Every answer to a dry run is one, refusals made
+  before the rehearsal ran included (`compute_busy`, `document_busy`, a
+  permission or attachment check): the desktop app tags it and skips
+  what it does after an edit (recording, the viewport refresh, the
+  selection write-back), and `hew-cli dispatch --file` does not save.
+- **Permission.** A dry run needs read permissions only: a command whose
+  permission is `model.write` or `attributes.write` (any namespace)
+  counts as `model.read`: a plugin allowed only to read may rehearse an
+  edit it may not commit, which leaks nothing. The attribute namespace rule
+  (§8) still runs inside the rehearsal, so a rehearsed write under a
+  namespace the grant does not own refuses `attr_namespace_not_granted`
+  as a commit would.
+- **What cannot be rehearsed.** A Host-served command (files, the
+  library, the screen, the selection), a plugin command, and a view
+  effect a command would ask of the host (`hew.view.hide`, a Scene's
+  apply) refuse `-32000` `dry_run_host_command` with `detail: { method }`
+  and the command's index. A solitary Kernel-served command
+  (`hew.history.undo`, `hew.doc.attach`, …) is `-32602`.
+- **Cost.** One copy of the whole document per call. That is right for a
+  check before a commit and wrong for a preview on every pointer move:
+  previews use `hew.compute.*` (§7.6), which copy only their operands.
+
 ## 7. Command surface
 
 The namespaces below and the semantics stated for them are normative; the
@@ -943,6 +991,7 @@ for, not shipped.
 | `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack as `stack`, the app's in-context entries as `fallback`, whether a tool gesture is armed as `armed`; headless: `fallback: []`, `armed: false`), `changes_since` (what changed since a history generation, §4.5), `occurrences`, `part_frame`, `mesh`, `topology` (§7.4) | Required (`changes_since`, `occurrences`, `part_frame`, `mesh`, `topology` Standard) |
 | `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` (a sketch region, or a face/plane region by unit key), `units` (list a plane's drawing as units), `move`, `rotate`, `scale`, `copy`, `delete` (edit units on a plane) | Required (`units`, `move`, `rotate`, `scale`, `copy`, `delete` Standard) |
 | `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice` (`subtract`, `slice`, and `push_pull` also on a definition member through a path, below), `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form), `cap`, `delete_faces`, `mark_surface`, `thicken` (repair open objects, see below) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint`, and the repair commands Standard) |
+| `hew.compute` | `boolean`, `slice`, `shells`, `measure`, `outline`, `offset`: pure computations on transient solids that never change the document (§7.6); `project` and `stretch` are declared and refuse `unimplemented` until the flat-drawing projection and section stretch land | Standard |
 | `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy, array, and grid forms), `rotate`, `scale` (each also on members of one definition through a path, below), `set_frame` (a part's frame override, §7.4) | Required (`set_frame` Standard) |
 | `hew.context` | `enter`, `exit` | Required |
 | `hew.group` | `create`, `explode`, `reparent` | Required (`reparent` Standard) |
@@ -1491,7 +1540,12 @@ Semantics notes, normative:
   is mapped into the definition's frame through the path's composed pose,
   the subtract runs inside the definition, and the cutter is consumed;
   every placement shows the cut, and the result is a member that keeps
-  `a`'s name, tags, and attributes (`result` is its id). With `b` a member
+  `a`'s name, tags, and attributes (`result` is its id). `b` may instead
+  be a transient cutter, a `SolidSpec` `{prism}` or `{box}` in world
+  coordinates (§7.6): the same cut, one undo entry, and no object is
+  created for the cutter, so a machining is one call (undo brings back
+  only the host). A transient cutter beside a world `a`, or under
+  `union` or `intersect`, is `-32602`. With `b` a member
   of the same definition by the same path (`{"path": […]}`), `union`,
   `subtract`, and `intersect` all run between the two members inside the
   definition. A union or intersect of a path member with a world object
@@ -2110,6 +2164,79 @@ its solids-only rule. The SketchUp formats write
 the whole document, so `selection` with `skp` or `skp2017` is a params
 error. An empty `selection` is a params error.
 
+### 7.6 Compute
+
+`hew.compute.*` are pure functions over solids: read-only,
+`model.read`, served on every host (headless included), never creating an
+entity and never returning an id. They are what a plugin calls at
+pointer-move rate for a preview, a fit check, an outline, or a volume;
+`dry_run` (§6.6) is the whole-envelope rehearsal before a commit.
+
+**`SolidSpec`**, a solid operand, resolves to a transient solid in world
+coordinates:
+
+- `{ id | path, pose? }`: exactly one object (a group or instance refuses
+  `not_an_object`: name its objects one at a time), at its world pose.
+  `pose` (12 numbers, row-major 3×4) REPLACES the world pose. A pose that
+  mirrors, or a mirrored placement measured without a `pose`, refuses
+  `mirrored_pose` (solids never reflect; pass the un-mirrored frame and
+  flip the answer yourself).
+- `{ prism: { plane: { origin, normal }, loops: [[[x,y,z], …], …],
+  distance } }`: built the way `hew.solid.extrude` builds a solid from
+  drawn loops; the first loop is the outer boundary, the rest are holes,
+  which must lie strictly inside it and apart from each other. Every
+  loop is simple: one that crosses or touches itself (a bowtie, a loop
+  through one point twice) or another loop is `-32602`, never a part of
+  it kept. So are fewer than 3 points, a point off the plane, two
+  consecutive points that coincide, a non-finite number, a zero
+  `distance`, and a prism so large its area or volume is not a finite
+  number. The message says which. The same loop rules hold for
+  `hew.compute.offset`.
+- `{ box: { min, max, pose? } }`: the prism of its bottom rectangle,
+  `distance = max.z - min.z`, then `pose`; `min < max` on every axis.
+
+Exactly one form per operand; an unknown member is `-32602`.
+
+| Command | Params | Result |
+|---|---|---|
+| `hew.compute.boolean` | `{ op: "union" \| "subtract" \| "intersect", a, b, want? }` | `{ solid, mesh?, topology?, measure?, shells? }`; `solid: false` and no other block when nothing is left (an intersect of disjoint solids). The geometry is what the committed boolean would leave. `want` lists `mesh`, `topology`, `measure`, `shells` (a count); default `["measure"]`. Refusals are the boolean's by name (`degenerate_contact`, `nothing_removed`, `operand_not_solid`). |
+| `hew.compute.slice` | `{ solid, plane: { origin, normal }, want? }` | `{ positive, negative }`, each with the wanted blocks; `positive` is the piece on the side the normal points to. Refuses `plane_misses_solid`, `degenerate`, `not_solid`. |
+| `hew.compute.shells` | `{ solid, want_mesh? }` | `{ count, shells: [{ measure, mesh? }] }`: the solid's connected pieces. |
+| `hew.compute.measure` | `{ solid }` | `{ volume, area, bbox: { min, max }, centroid }`; `volume` and `centroid` are `null` for a solid that is not watertight. |
+| `hew.compute.outline` | `{ id \| path, frame?, which }` | `{ loops: [{ outer, edges }] }` in the frame's xy. `which: "largest_face"`: the loops of the part's largest face (ties: the one facing the frame's +z). `which: "projection"`: the silhouette of every face seen along the frame's z. `frame`: `"part"` (the default, `hew.query.part_frame`'s frame) or `{ origin, x, y, z }`, orthonormal and right-handed, else `invalid_frame`. Edges are `{ kind: "line", a, b }`, `{ kind: "arc", center, radius, start, end, ccw }`, or `{ kind: "circle", center, radius }`; a circle whose axis is the frame's z stays analytic, any other edge is a line. Outer loops run counter-clockwise, holes clockwise. |
+| `hew.compute.offset` | `{ loops: [[[x, y], …], …], distance, join? }` | `{ loops }` in the outline shape; the first input loop is the outer boundary, in either winding. Positive grows the material. Refuses `offset_too_small`, `offset_collapsed`. `join: "miter"` is the default; `"round"` is reserved and `-32602` until the kernel has round joins. |
+| `hew.compute.project` | `{ solid, plane, want? }` | declared, `implemented: false` until the flat-drawing projection lands |
+| `hew.compute.stretch` | `{ paths, frame, axis, cutters, mode, distance \| dimension }` | declared, `implemented: false` until section stretch lands |
+
+`mesh` and `topology` blocks have the shapes of `hew.query.mesh` and
+`hew.query.topology` (§7.4) without `generation` and `epoch` (a
+computation is not tied to a document state), with `parts[].id` and
+`object` `null`. A `mesh` past 64 MiB of buffers refuses
+`mesh_too_large`. `measure` is `{ volume, area, bbox }`.
+
+**Caps.** The inputs of one call may hold at most 2,000,000 triangles,
+counted from face loop sizes before any work (for a prism, six per loop
+point, before it is built); past that the call refuses
+`compute_too_large` with `detail: { triangles, limit }`. The loops of
+one prism or offset hold at most 20,000 points (`-32602` past that). One computation
+runs at a time per connection: a second call while one runs refuses
+`compute_busy` (`detail: { limit: 1 }`). A connection's frames are served
+one at a time today, so a caller that waits for each answer never sees
+it; a host that serves computations off its dispatch thread holds the
+connection's gate across each one. Send the newest preview; do not queue
+older ones behind the pointer.
+
+**Error codes**, the names this section and §6.6 add:
+
+| Name | Code | `detail` |
+|---|---|---|
+| `dry_run_host_command` | `-32000` | `{ method }` |
+| `compute_busy` | `-32000` | `{ limit: 1 }` |
+| `compute_too_large` | `-32000` | `{ triangles, limit }` |
+| `mirrored_pose` | `-32000` | `{}` |
+| `invalid_frame` | `-32000` | `{}` |
+| `dry_run` with `coalesce` | `-32602` | none |
+
 ## 8. Attribute dictionaries
 
 Every Object, Group, Component definition, Instance, Sketch, Guide,
@@ -2336,7 +2463,7 @@ registry (the `Permission` line of each entry in `API_REFERENCE.gen.md`):
 | Permission | What it reaches |
 |---|---|
 | `always` | `hew.meta.hello`, `hew.meta.capabilities`, `hew.doc.attach` (to the connection's own document), `hew.doc.transact` (declaration only; every grant has it) |
-| `model.read` | the read surface: `hew.query.*`, `hew.attr.get`, `hew.meta.documents`, `hew.history.status`, scene and library listings, `hew.doc.health`, `hew.solid.imprints`, `hew.sketch.units`, `hew.view.snapshot`, `hew.view.line_drawing`, `hew.print.pdf` |
+| `model.read` | the read surface: `hew.query.*`, `hew.compute.*` (§7.6), `hew.attr.get`, `hew.meta.documents`, `hew.history.status`, scene and library listings, `hew.doc.health`, `hew.solid.imprints`, `hew.sketch.units`, `hew.view.snapshot`, `hew.view.line_drawing`, `hew.print.pdf` |
 | `model.write` | every modeling command, `hew.scenes.add`/`update`/`rename`/`remove`/`reorder`/`apply`, `hew.history.undo`/`redo`, `hew.doc.purge_unused` |
 | `attributes.write` | `hew.attr.set`, `hew.attr.delete` (under the namespace rule below) |
 | `view` | `hew.view.camera`, `hew.view.zoom_extents`, `hew.view.units`, `hew.selection.*`, `hew.view.hide`/`show`/`show_all`/`hidden`/`isolate`/`clear_isolation`/`zoom_to` (§7.3), `hew.view.enter`/`exit`/`exit_all` (§6.3); the `selection_changed` and `tool_changed` events |
@@ -2345,6 +2472,12 @@ registry (the `Permission` line of each entry in `API_REFERENCE.gen.md`):
 | `documents.other` | `hew.doc.new`, `hew.doc.open`, `hew.doc.focus`, the `document` parameter of `hew.doc.attach`, `close`, `revert`, and `focus`, and the envelope `document` member (§4.2) |
 | `library` | `hew.library.insert`, `save`, `remove`, `update_meta` |
 | `first_party` | declaration only: commands no restricted grant reaches |
+
+A dry run (`hew.doc.transact` with `dry_run: true`, §6.6) changes
+nothing, so it needs read permissions only: for each command it holds,
+`model.write` and `attributes.write` are satisfied by `model.read`.
+Every other permission is checked as for a commit, and the attribute
+namespace rule still applies.
 
 `files`, `clipboard`, and `network:<host>` are part of the vocabulary
 for commands that later protocol revisions add; no protocol-1 command

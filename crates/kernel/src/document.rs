@@ -1242,7 +1242,11 @@ enum DocAction {
         op: BooleanOp,
         result: ObjectId,
         a: ObjectId,
-        b: ObjectId,
+        /// The consumed second operand; `None` when the tool was a transient
+        /// solid that never had a record
+        /// ([`Document::subtract_solid_through_placement`]), so undo has no
+        /// operand to bring back but `a`.
+        b: Option<ObjectId>,
         /// The exact before/after `detached` snapshot of every annotation
         /// [`Document::reevaluate_liveness_recorded`] changed when `a`/`b`
         /// were consumed — undo/redo restore it verbatim, mirroring
@@ -2583,7 +2587,11 @@ impl DocAction {
                 v
             }
             DocAction::ObjectOp { object } => vec![*object],
-            DocAction::Boolean { result, a, b, .. } => vec![*result, *a, *b],
+            DocAction::Boolean { result, a, b, .. } => {
+                let mut v = vec![*result, *a];
+                v.extend(*b);
+                v
+            }
             DocAction::BooleanNodes {
                 result_objects,
                 hidden_operands,
@@ -13813,21 +13821,14 @@ impl Document {
             return Err(DocumentError::GroupedOperand);
         }
 
-        let mut result = Object::boolean(op, &rec_a.object, &rec_b.object, &Transform::IDENTITY)
-            .map_err(DocumentError::Boolean)?;
-
         // Dissolve the coplanar seams the boolean introduced (two coplanar
         // top faces joined by a union must read as ONE face), but preserve
         // coplanar edges the operands already had — those are face imprints
         // drawn but not yet extruded, not seams. Runs BEFORE the result is
         // inserted, so undo/redo of the boolean is untouched.
-        let preserve: Vec<_> = rec_a
-            .object
-            .coplanar_edge_segments()
-            .into_iter()
-            .chain(rec_b.object.coplanar_edge_segments())
-            .collect();
-        result.merge_coplanar_faces(&preserve);
+        let result =
+            Object::boolean_product(op, &rec_a.object, &rec_b.object, &Transform::IDENTITY)
+                .map_err(DocumentError::Boolean)?;
         // The result carries operand `a`'s identity (a board cut by a tool
         // is still that board); `b`'s is consumed with it.
         let (name, tags) = (rec_a.name.clone(), rec_a.tags.clone());
@@ -13854,7 +13855,7 @@ impl Document {
                 op,
                 result: id,
                 a,
-                b,
+                b: Some(b),
                 reanchored,
             },
             carried,
@@ -13981,7 +13982,7 @@ impl Document {
                 op,
                 result: id,
                 a,
-                b,
+                b: Some(b),
                 reanchored,
             },
             carried,
@@ -22841,6 +22842,22 @@ impl Document {
         self.record_whole(crate::changes::ChangeKind::Abort, before);
     }
 
+    /// The refusal [`Document::commit_transaction`] would make for a
+    /// rehearsal: `self` is a clone of `original` (`Document::clone`) on
+    /// which an envelope's commands ran with no bracket open, and the
+    /// answer is what a commit of the same commands, run on `original`
+    /// inside [`Document::begin_transaction`], would refuse with
+    /// (`TransactionHistoryDisturbed`, `TransactionSessionUnbalanced`,
+    /// `TransactionGestureUnbalanced`), or `None`.
+    ///
+    /// A rehearsal costs ONE clone: the untouched `original` stands in for
+    /// the bracket's snapshot, so the clone is not snapshotted again, and a
+    /// refused rehearsal is simply dropped instead of restored. The API's
+    /// dry run (docs/agents/HEW_API.md §6) is built on this.
+    pub fn rehearsal_disturbance(&self, original: &Document) -> Option<DocumentError> {
+        self.bracket_disturbance(original, original.undo.actions.len())
+    }
+
     /// The three refusals a bracket makes at commit, against the snapshot
     /// taken at its begin and the undo depth then
     /// ([`Document::commit_transaction`] documents each).
@@ -24114,14 +24131,16 @@ impl Document {
                     rec.hidden = true;
                 }
                 self.objects[a].hidden = false;
-                self.objects[b].hidden = false;
+                if let Some(b) = b {
+                    self.objects[b].hidden = false;
+                }
                 let (components_touched, instances_touched) = self.def_owner_change(result);
                 for r in reanchored {
                     self.annotations[r.annotation].annotation = r.before.clone();
                     self.annotations[r.annotation].detached = r.before_detached;
                 }
                 DocChange {
-                    objects_touched: vec![result, a, b],
+                    objects_touched: [result, a].into_iter().chain(b).collect(),
                     sketches_touched: Vec::new(),
                     groups_touched: Vec::new(),
                     instances_touched,
@@ -25921,14 +25940,16 @@ impl Document {
                     rec.hidden = false;
                 }
                 self.objects[a].hidden = true;
-                self.objects[b].hidden = true;
+                if let Some(b) = b {
+                    self.objects[b].hidden = true;
+                }
                 let (components_touched, instances_touched) = self.def_owner_change(result);
                 for r in reanchored {
                     self.annotations[r.annotation].annotation = r.after.clone();
                     self.annotations[r.annotation].detached = r.after_detached;
                 }
                 DocChange {
-                    objects_touched: vec![result, a, b],
+                    objects_touched: [result, a].into_iter().chain(b).collect(),
                     sketches_touched: Vec::new(),
                     groups_touched: Vec::new(),
                     instances_touched,

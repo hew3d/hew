@@ -246,6 +246,32 @@ impl Grant {
         within_ceiling(self.ceiling, decl) && held
     }
 
+    /// Whether this grant may REHEARSE `decl` inside a dry run
+    /// (`hew.doc.transact` with `dry_run: true`, docs/agents/HEW_API.md §6.6):
+    /// the document is never touched, so a command that needs `model.write`
+    /// or `attributes.write` (any namespace) counts as needing `model.read`.
+    /// Every other permission, the ceiling, and the `Always` and
+    /// `FirstParty` rules apply exactly as in [`Grant::grants`]. The
+    /// namespace rule inside an attribute handler still runs, so a rehearsed
+    /// write under a namespace the grant does not own refuses as a commit
+    /// would. A command the grant may call it may also rehearse. The one
+    /// place this mapping lives.
+    pub fn grants_for_dry_run(&self, decl: &CommandDecl) -> bool {
+        if self.grants(decl) {
+            return true;
+        }
+        match decl.permission {
+            Permission::ModelWrite
+            | Permission::AttributesWrite
+            | Permission::AttributesWriteNs(_) => {
+                let mut as_read = decl.clone();
+                as_read.permission = Permission::ModelRead;
+                self.grants(&as_read)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether this grant may write attributes under `ns`. The `hew`
     /// reservation is checked separately, first, by the caller.
     pub fn may_write_attr_namespace(&self, ns: &str) -> bool {

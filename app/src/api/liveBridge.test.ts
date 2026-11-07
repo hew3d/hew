@@ -845,6 +845,30 @@ describe('installLiveBridge', () => {
     expect(reconcileVisibility).not.toHaveBeenCalled()
   })
 
+  it('does not refresh after a dry run, however the reply reads', async () => {
+    // A rehearsal answers success for a mutating envelope; only the tag
+    // says nothing changed.
+    installLiveBridge(deps)
+    await flush()
+    fire('hew://api-connection-open', { connId: 3 })
+    scene.api_dispatch.mockReturnValue(
+      JSON.stringify({
+        reply: '{"jsonrpc":"2.0","id":2,"result":{"label":"Box","results":[{}],"dry_run":true}}',
+        dry_run: true,
+      }),
+    )
+    fire('hew://api-frame', {
+      connId: 3,
+      frame: '{"jsonrpc":"2.0","id":2,"method":"hew.doc.transact","params":{"dry_run":true,"commands":[]}}',
+    })
+    await vi.waitFor(() => {
+      expect(emitMock).toHaveBeenCalled()
+    })
+    expect(refreshScene).not.toHaveBeenCalled()
+    expect(reconcile).not.toHaveBeenCalled()
+    expect(reconcileVisibility).not.toHaveBeenCalled()
+  })
+
   it('does not refresh after a refused mutating command', async () => {
     installLiveBridge(deps)
     await flush()
@@ -1403,5 +1427,37 @@ describe('dispatchFrameNow', () => {
     expect(reseedViewState).toHaveBeenCalledTimes(1)
     expect(selectMany).toHaveBeenCalledWith([{ kind: 'object', id: 2n }], 'replace')
     expect(scene.take_pending_view_directives).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not refresh after a dry run', () => {
+    const reconcile = vi.fn()
+    const reconcileVisibility = vi.fn()
+    const scene = {
+      set_display_units: vi.fn(),
+      set_ui_gesture_armed: vi.fn(),
+      api_dispatch: vi.fn(() =>
+        JSON.stringify({
+          reply: '{"jsonrpc":"2.0","id":4,"result":{"label":"Box","results":[{}],"dry_run":true}}',
+          dry_run: true,
+        }),
+      ),
+      api_method_mutates: vi.fn(() => true),
+      take_pending_view_directives: vi.fn(() => '[]'),
+      drain_events: vi.fn(() => '[]'),
+    }
+    const reply = dispatchFrameNow(
+      {
+        getScene: () => scene as unknown as Scene,
+        getViewportApi: () => null,
+        reconcile,
+        reconcileVisibility,
+      },
+      scene as unknown as Scene,
+      5,
+      '{"jsonrpc":"2.0","id":4,"method":"hew.doc.transact","params":{"dry_run":true,"commands":[]}}',
+    )
+    expect(reply).toContain('"dry_run":true')
+    expect(reconcile).not.toHaveBeenCalled()
+    expect(reconcileVisibility).not.toHaveBeenCalled()
   })
 })

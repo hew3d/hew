@@ -1237,7 +1237,7 @@ impl LiveSession {
         let mut forwarded = request.clone();
         forwarded.document = None;
         match conn.dispatch(&registry, &mut doc, &mut host, forwarded) {
-            DispatchOutcome::Reply(response) => Some(response),
+            DispatchOutcome::Reply(response) | DispatchOutcome::DryRun(response) => Some(response),
             // This registry holds no plugin commands to forward.
             DispatchOutcome::Dropped | DispatchOutcome::Forward(_) => None,
         }

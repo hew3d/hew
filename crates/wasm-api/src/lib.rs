@@ -338,6 +338,17 @@ const USER_CONTEXT_EFFECTS: &[&str] = &["hew.view.enter", "hew.view.exit", "hew.
 enum FrameOutcome {
     Reply(String),
     Pending(Box<api::ForwardRequest>),
+    /// The reply to a dry run: the document was never touched, so nothing
+    /// was recorded, resynced, or written back.
+    DryRun(String),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times a dispatch reached the post-dispatch write-back of
+    /// the selection, isolation, and view directives: a test reads it to
+    /// prove a dry run never does.
+    static WRITE_BACKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// A forward [`Scene::api_dispatch`] handed out and has not seen completed.
@@ -3402,6 +3413,9 @@ impl Scene {
     ) -> Option<String> {
         let tagged = match self.api_dispatch_outcome(conn_id, frame, scope)? {
             FrameOutcome::Reply(reply) => serde_json::json!({ "reply": reply }),
+            // The host skips the refresh it runs after a mutation (the
+            // inference rebuild included): nothing changed.
+            FrameOutcome::DryRun(reply) => serde_json::json!({ "reply": reply, "dry_run": true }),
             FrameOutcome::Pending(forward) => {
                 serde_json::json!({ "pending": { "token": forward.token, "forward": forward } })
             }
@@ -3445,7 +3459,7 @@ impl Scene {
     #[cfg(test)]
     fn api_dispatch_reply(&mut self, conn_id: u32, frame: &str) -> Option<String> {
         match self.api_dispatch_outcome(conn_id, frame, DispatchScope::Plain)? {
-            FrameOutcome::Reply(reply) => Some(reply),
+            FrameOutcome::Reply(reply) | FrameOutcome::DryRun(reply) => Some(reply),
             FrameOutcome::Pending(forward) => panic!("{} forwarded", forward.method),
         }
     }
@@ -3495,9 +3509,15 @@ impl Scene {
                 "refused",
                 api::transact::document_busy().into_data(0, &request.method),
             );
-            return Some(FrameOutcome::Reply(
-                serde_json::to_string(&resp).expect("Response serializes"),
-            ));
+            let resp = serde_json::to_string(&resp).expect("Response serializes");
+            // A dry run refused here is still answered as one.
+            return Some(
+                if api::is_dry_run(&request.method, request.params.as_ref()) {
+                    FrameOutcome::DryRun(resp)
+                } else {
+                    FrameOutcome::Reply(resp)
+                },
+            );
         }
         // The provider's grant for the compound's recording, when no
         // connection of its own was open at begin.
@@ -3582,6 +3602,15 @@ impl Scene {
         };
         let resp = match outcome {
             api::DispatchOutcome::Reply(resp) => resp,
+            // A rehearsal ran on a clone with a host of its own: no
+            // recording, no resync, no selection or isolation write-back,
+            // no view directives (`pending_view_directives` was cleared
+            // above and stays empty).
+            api::DispatchOutcome::DryRun(resp) => {
+                return Some(FrameOutcome::DryRun(
+                    serde_json::to_string(&resp).expect("Response serializes"),
+                ));
+            }
             // A dropped client-originated notification: no side effect,
             // no reply (§4.1).
             api::DispatchOutcome::Dropped => return None,
@@ -3626,6 +3655,8 @@ impl Scene {
             }
         }
         if resp.error.is_none() {
+            #[cfg(test)]
+            WRITE_BACKS.with(|n| n.set(n.get() + 1));
             // A bare hide or show writes persisted view state without
             // mutating the document's history; it is recorded so a
             // reproducer replays to the same document (inside a
@@ -13000,7 +13031,7 @@ impl Scene {
     fn replay_frame(&mut self, conn: u32, frame: &str) -> Result<(), ApiError> {
         let reply = match self.api_dispatch_outcome(conn, frame, DispatchScope::Replay) {
             None => None,
-            Some(FrameOutcome::Reply(reply)) => Some(reply),
+            Some(FrameOutcome::Reply(reply) | FrameOutcome::DryRun(reply)) => Some(reply),
             Some(FrameOutcome::Pending(forward)) => {
                 return Err(ApiError::new(
                     "REPLAY",
@@ -21885,6 +21916,128 @@ mod tests {
         assert_eq!(reply["error"]["data"]["refusal"], "document_busy");
         assert!(scene.doc.sketch_ids().is_empty(), "nothing ran");
         scene.compound_abort(kt).unwrap();
+    }
+
+    /// A dry run (docs/agents/HEW_API.md §6.6) touches only a clone: the
+    /// tagged answer says so, nothing is recorded, no resync runs (the face
+    /// range cache and the health cache keep their entries), the selection
+    /// mirror is not written back, and no view directive is left.
+    #[test]
+    fn a_dry_run_records_nothing_and_skips_every_post_dispatch_step() {
+        recording::reset();
+        recording::start();
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let made = tagged_reply(scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","id":2,"method":"hew.doc.transact","params":{"commands":[
+                {"method":"hew.sketch.draw_rect","as":"p","params":{"plane":{"ground":true},"corner_a":[0,0,0],"corner_b":[1,1,0]}},
+                {"method":"hew.solid.extrude","params":{"region":{"$ref":"p#/region_id"},"distance":1.0}}]}}"#,
+        ));
+        assert!(made.get("error").is_none(), "{made}");
+        let calls_before = recording::peek_calls().len();
+        let objects = scene.doc.live_object_ids();
+        let sketch_count = scene.doc.sketch_ids().len();
+        // A cache entry a resync would drop.
+        scene.face_range_cache.insert(objects[0], Vec::new());
+        let cache_len = scene.face_range_cache.len();
+        scene
+            .set_ui_selection(r#"[{"kind":"sketch","id":"1"}]"#)
+            .unwrap();
+        let selection = scene.ui_selection.clone();
+        let generation = scene.doc.history_generation();
+        let write_backs = WRITE_BACKS.with(std::cell::Cell::get);
+        let frame = r#"{"jsonrpc":"2.0","id":3,"method":"hew.doc.transact","params":{"dry_run":true,"commands":[
+            {"method":"hew.sketch.draw_rect","as":"p","params":{"plane":{"ground":true},"corner_a":[5,5,0],"corner_b":[6,6,0]}},
+            {"method":"hew.solid.extrude","params":{"region":{"$ref":"p#/region_id"},"distance":1.0}}]}}"#;
+        let tagged: serde_json::Value =
+            serde_json::from_str(&scene.api_dispatch(conn, frame).unwrap()).unwrap();
+        assert_eq!(tagged["dry_run"], true, "{tagged}");
+        let reply: serde_json::Value =
+            serde_json::from_str(tagged["reply"].as_str().unwrap()).unwrap();
+        assert_eq!(reply["result"]["dry_run"], true, "{reply}");
+        assert_eq!(
+            recording::peek_calls().len(),
+            calls_before,
+            "nothing recorded"
+        );
+        assert_eq!(scene.face_range_cache.len(), cache_len, "no resync");
+        assert_eq!(
+            scene.ui_selection, selection,
+            "the selection mirror is untouched"
+        );
+        // The selection a rehearsal hands back is the seed it was given, so
+        // the mirror comparing equal cannot tell a write-back from none;
+        // the count can.
+        assert_eq!(
+            WRITE_BACKS.with(std::cell::Cell::get),
+            write_backs,
+            "no selection, isolation, or directive write-back"
+        );
+        assert_eq!(scene.take_pending_view_directives(), "[]");
+        assert_eq!(scene.doc.history_generation(), generation);
+        assert_eq!(scene.doc.live_object_ids(), objects);
+        assert_eq!(scene.doc.sketch_ids().len(), sketch_count);
+        recording::reset();
+    }
+
+    /// The host's busy backstop answers a dry run like any other frame
+    /// while a plugin command holds the document.
+    #[test]
+    fn a_dry_run_during_a_compound_is_document_busy() {
+        let (mut scene, caller, _provider) = compound_scene();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let frame = r#"{"jsonrpc":"2.0","id":16,"method":"hew.doc.transact","params":{"dry_run":true,"commands":[
+            {"method":"hew.query.scene","params":{}}]}}"#;
+        let tagged: serde_json::Value =
+            serde_json::from_str(&scene.api_dispatch(caller, frame).unwrap()).unwrap();
+        assert_eq!(tagged["dry_run"], true, "still answered as a dry run");
+        let reply = tagged_reply(Some(tagged.to_string()));
+        assert_eq!(
+            reply["error"]["data"]["refusal"], "document_busy",
+            "{reply}"
+        );
+        scene.compound_abort(kt).unwrap();
+        let reply = tagged_reply(scene.api_dispatch(caller, frame));
+        assert!(reply.get("error").is_none(), "{reply}");
+    }
+
+    /// Every compute command answers on the live host too.
+    #[test]
+    fn compute_commands_answer_on_the_live_host() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let made = tagged_reply(scene.api_dispatch(conn, &rect_frame(2, 0.0)));
+        assert!(made.get("error").is_none(), "{made}");
+        let generation = scene.doc.history_generation();
+        let unit = r#"{"box":{"min":[0,0,0],"max":[1,1,1]}}"#;
+        for (method, params) in [
+            ("hew.compute.measure", format!(r#"{{"solid":{unit}}}"#)),
+            (
+                "hew.compute.boolean",
+                format!(
+                    r#"{{"op":"subtract","a":{unit},"b":{{"box":{{"min":[0.5,0,0],"max":[2,1,1]}}}}}}"#
+                ),
+            ),
+            (
+                "hew.compute.slice",
+                format!(r#"{{"solid":{unit},"plane":{{"origin":[0.5,0,0],"normal":[1,0,0]}}}}"#),
+            ),
+            ("hew.compute.shells", format!(r#"{{"solid":{unit}}}"#)),
+            (
+                "hew.compute.offset",
+                r#"{"loops":[[[0,0],[1,0],[1,1],[0,1]]],"distance":0.1}"#.to_string(),
+            ),
+        ] {
+            let frame =
+                format!(r#"{{"jsonrpc":"2.0","id":4,"method":"{method}","params":{params}}}"#);
+            let reply = tagged_reply(scene.api_dispatch(conn, &frame));
+            assert!(reply.get("error").is_none(), "{method}: {reply}");
+        }
+        assert_eq!(scene.doc.history_generation(), generation);
     }
 
     /// Every document-mutating `Scene` method refuses while a compound is

@@ -230,6 +230,163 @@ export interface ComponentRebaseResult {
 }
 
 /**
+ * `hew.compute.boolean` (v1) — Union, subtract, or intersect two solids without touching the document; answers the result's measure, mesh, topology, or shell count.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large, mesh_too_large, operand_not_solid, degenerate_contact, nothing_removed, singular_transform
+ */
+export interface ComputeBooleanParams {
+  /** SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}} */
+  a: { id: string; pose?: number[] } | { path: string[]; pose?: number[] } | { prism: { distance: number; loops: [number, number, number][][]; plane: { normal: [number, number, number]; origin: [number, number, number] } } } | { box: { max: [number, number, number]; min: [number, number, number]; pose?: number[] } }
+  /** SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}} */
+  b: { id: string; pose?: number[] } | { path: string[]; pose?: number[] } | { prism: { distance: number; loops: [number, number, number][][]; plane: { normal: [number, number, number]; origin: [number, number, number] } } } | { box: { max: [number, number, number]; min: [number, number, number]; pose?: number[] } }
+  op: "union" | "subtract" | "intersect"
+  /** the result blocks to answer; defaults to ["measure"] */
+  want?: ("mesh" | "topology" | "measure" | "shells")[]
+}
+
+export interface ComputeBooleanResult {
+  measure?: { area: number; bbox: unknown | null; volume: number | null }
+  mesh?: { face_indices_base64: string; indices_base64: string; normals_base64: string; parts: ({ face_index_base: number; id: string | null; index_base: number; index_count: number })[]; positions_base64: string; triangle_count: number; vertex_count: number }
+  /** connected pieces in the result */
+  shells?: number
+  /** false when nothing is left (no other block then) */
+  solid: boolean
+  topology?: { edges: UnspecifiedShape[]; faces: UnspecifiedShape[]; object: string | null; vertices: [number, number, number][] }
+}
+
+/**
+ * `hew.compute.measure` (v1) — Volume, surface area, bounding box, and centroid of a solid.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large
+ */
+export interface ComputeMeasureParams {
+  /** SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}} */
+  solid: { id: string; pose?: number[] } | { path: string[]; pose?: number[] } | { prism: { distance: number; loops: [number, number, number][][]; plane: { normal: [number, number, number]; origin: [number, number, number] } } } | { box: { max: [number, number, number]; min: [number, number, number]; pose?: number[] } }
+}
+
+export interface ComputeMeasureResult {
+  /** square meters, holes subtracted */
+  area: number
+  bbox: unknown | null
+  /** the volume centroid; null for an object that is not watertight */
+  centroid: unknown | null
+  /** cubic meters; null for an object that is not watertight */
+  volume: number | null
+}
+
+/**
+ * `hew.compute.offset` (v1) — Offset closed 2D loops outward or inward by a distance.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: offset_too_small, offset_collapsed, compute_busy
+ */
+export interface ComputeOffsetParams {
+  /** positive grows the material, negative shrinks it */
+  distance: number
+  /** miter (the default); round is reserved and not available yet */
+  join?: "miter" | "round"
+  /** closed 2D loops, the first the outer boundary, the rest holes, in either winding */
+  loops: [number, number][][]
+}
+
+export interface ComputeOffsetResult {
+  loops: ({ edges: ({ a: [number, number]; b: [number, number]; kind: UnspecifiedShape } | { ccw: boolean; center: [number, number]; end: [number, number]; kind: UnspecifiedShape; radius: number; start: [number, number] } | { center: [number, number]; kind: UnspecifiedShape; radius: number })[]; outer: boolean })[]
+}
+
+/**
+ * `hew.compute.outline` (v1) — A part's outline in a frame's xy plane: its largest face, or its silhouette, with arcs and circles kept analytic.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_entity, unknown_occurrence, invalid_frame, no_part_frame, compute_busy, compute_too_large, too_many_occurrences
+ */
+export interface ComputeOutlineParams {
+  /** "part" (the default: hew.query.part_frame's frame) or {origin, x, y, z}, orthonormal and right-handed */
+  frame?: "part" | { origin: [number, number, number]; x: [number, number, number]; y: [number, number, number]; z: [number, number, number] }
+  /** a world node's public id */
+  id?: string
+  path?: string[]
+  /** largest_face: the loops of the part's largest face; projection: the silhouette seen along the frame's z */
+  which: "largest_face" | "projection"
+}
+
+export interface ComputeOutlineResult {
+  loops: ({ edges: ({ a: [number, number]; b: [number, number]; kind: UnspecifiedShape } | { ccw: boolean; center: [number, number]; end: [number, number]; kind: UnspecifiedShape; radius: number; start: [number, number] } | { center: [number, number]; kind: UnspecifiedShape; radius: number })[]; outer: boolean })[]
+}
+
+/**
+ * `hew.compute.project` (v1) — A single part's flat drawing on a plane, its faces grouped by depth into layers (not available yet).
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unimplemented
+ */
+export interface ComputeProjectParams {
+  /** world coordinates */
+  plane: { normal: [number, number, number]; origin: [number, number, number] }
+  /** SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}} */
+  solid: { id: string; pose?: number[] } | { path: string[]; pose?: number[] } | { prism: { distance: number; loops: [number, number, number][][]; plane: { normal: [number, number, number]; origin: [number, number, number] } } } | { box: { max: [number, number, number]; min: [number, number, number]; pose?: number[] } }
+  want?: ("outline" | "layers")[]
+}
+
+export interface ComputeProjectResult {
+  layers?: { depth: number; loops: { edges: { a?: [number, number]; b?: [number, number]; kind?: string }[]; outer: boolean }[] }[]
+  outline?: { edges: { a?: [number, number]; b?: [number, number]; kind?: string }[]; outer: boolean }[]
+}
+
+/**
+ * `hew.compute.shells` (v1) — Split a solid into its connected pieces without touching the document.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large, mesh_too_large
+ */
+export interface ComputeShellsParams {
+  /** SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}} */
+  solid: { id: string; pose?: number[] } | { path: string[]; pose?: number[] } | { prism: { distance: number; loops: [number, number, number][][]; plane: { normal: [number, number, number]; origin: [number, number, number] } } } | { box: { max: [number, number, number]; min: [number, number, number]; pose?: number[] } }
+  /** answer each piece's mesh too; defaults to false */
+  want_mesh?: boolean
+}
+
+export interface ComputeShellsResult {
+  count: number
+  shells: ({ measure: { area: number; bbox: unknown | null; volume: number | null }; mesh?: { face_indices_base64: string; indices_base64: string; normals_base64: string; parts: ({ face_index_base: number; id: string | null; index_base: number; index_count: number })[]; positions_base64: string; triangle_count: number; vertex_count: number } })[]
+}
+
+/**
+ * `hew.compute.slice` (v1) — Cut a solid by a plane without touching the document; answers both pieces.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_entity, unknown_occurrence, not_an_object, mirrored_pose, compute_busy, compute_too_large, mesh_too_large, not_solid, plane_misses_solid, degenerate
+ */
+export interface ComputeSliceParams {
+  /** world coordinates */
+  plane: { normal: [number, number, number]; origin: [number, number, number] }
+  /** SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}} */
+  solid: { id: string; pose?: number[] } | { path: string[]; pose?: number[] } | { prism: { distance: number; loops: [number, number, number][][]; plane: { normal: [number, number, number]; origin: [number, number, number] } } } | { box: { max: [number, number, number]; min: [number, number, number]; pose?: number[] } }
+  /** the result blocks to answer; defaults to ["measure"] */
+  want?: ("mesh" | "topology" | "measure" | "shells")[]
+}
+
+export interface ComputeSliceResult {
+  negative: { measure?: { area: number; bbox: unknown | null; volume: number | null }; mesh?: { face_indices_base64: string; indices_base64: string; normals_base64: string; parts: ({ face_index_base: number; id: string | null; index_base: number; index_count: number })[]; positions_base64: string; triangle_count: number; vertex_count: number }; shells?: number; topology?: { edges: UnspecifiedShape[]; faces: UnspecifiedShape[]; object: string | null; vertices: [number, number, number][] } }
+  positive: { measure?: { area: number; bbox: unknown | null; volume: number | null }; mesh?: { face_indices_base64: string; indices_base64: string; normals_base64: string; parts: ({ face_index_base: number; id: string | null; index_base: number; index_count: number })[]; positions_base64: string; triangle_count: number; vertex_count: number }; shells?: number; topology?: { edges: UnspecifiedShape[]; faces: UnspecifiedShape[]; object: string | null; vertices: [number, number, number][] } }
+}
+
+/**
+ * `hew.compute.stretch` (v1) — Preview a section stretch of parts along one axis of a frame (not available yet).
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unimplemented
+ */
+export interface ComputeStretchParams {
+  axis: 0 | 1 | 2
+  cutters?: number[] | { positions: number[] }
+  dimension?: number
+  distance?: number
+  frame?: "active" | "context" | "entity" | { origin: [number, number, number]; x: [number, number, number]; y: [number, number, number]; z: [number, number, number] }
+  mode?: "end" | "centered" | { interior: number }
+  paths: (string | { path: string[] })[]
+}
+
+export interface ComputeStretchResult {
+  applied?: number
+  cutters?: number[]
+  max_compression?: number
+}
+
+/**
  * `hew.context.enter` (v1) — Open a group/component editing frame (transaction-balanced only).
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: unknown_entity, explode_session_open, explode_session_nested_group, explode_session_pose_unsupported, explode_session_grouped_instance, unknown_group, unknown_instance
@@ -446,18 +603,22 @@ export interface DocSaveResult {
 /**
  * `hew.doc.transact` (v1) — Execute commands in order, atomically, as one labeled undo entry.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: ref_resolution_failed, generation_moved
+ * Refusals: ref_resolution_failed, generation_moved, dry_run_host_command, compute_busy
  */
 export interface DocTransactParams {
   /** merge into the top undo entry when it was committed under the same key by a connection with this connection's identity (docs/agents/HEW_API.md §6.5) */
   coalesce?: string
   commands: { as?: string; method: string; params?: UnspecifiedShape }[]
+  /** rehearse: run the envelope on a copy of the document and answer what a commit would, changing nothing (docs/agents/HEW_API.md §6.6); needs only read permissions; no coalesce */
+  dry_run?: boolean
   /** refuse with generation_moved, before any command runs, unless the document's history generation is this value (docs/agents/HEW_API.md §6.5) */
   expect_generation?: number
   label?: string
 }
 
 export interface DocTransactResult {
+  /** true on a rehearsal's answer */
+  dry_run?: boolean
   label: string
   results: unknown[]
 }
@@ -1878,15 +2039,15 @@ export interface SolidSliceResult {
 }
 
 /**
- * `hew.solid.subtract` (v1) — Boolean subtraction of two solids; a may be a path to a definition member, cut through that placement so every placement shows the cut.
+ * `hew.solid.subtract` (v1) — Boolean subtraction of two solids; a may be a path to a definition member, cut through that placement so every placement shows the cut, by a world object or a transient prism or box.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, nothing_removed
+ * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, nothing_removed, mirrored_pose, compute_too_large
  */
 export interface SolidSubtractParams {
   /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
   a: string | { path: string[] }
-  /** a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path */
-  b: string | { path: string[] }
+  /** a world node id; with a by path, a world object (consumed), {path} to a member of the same definition by the same path, or a transient cutter {prism} | {box} in world coordinates (no object is created) */
+  b: string | { path: string[] } | { prism: UnspecifiedShape } | { box: UnspecifiedShape }
 }
 
 export interface SolidSubtractResult {
@@ -2294,6 +2455,17 @@ export class HewApiClient {
     makeUnique: (params: ComponentMakeUniqueParams): Promise<ComponentMakeUniqueResult> => this.mutate('hew.component.make_unique', params),
     place: (params: ComponentPlaceParams): Promise<ComponentPlaceResult> => this.mutate('hew.component.place', params),
     rebase: (params: ComponentRebaseParams): Promise<ComponentRebaseResult> => this.mutate('hew.component.rebase', params),
+  }
+
+  readonly compute = {
+    boolean: (params: ComputeBooleanParams): Promise<ComputeBooleanResult> => this.call('hew.compute.boolean', params),
+    measure: (params: ComputeMeasureParams): Promise<ComputeMeasureResult> => this.call('hew.compute.measure', params),
+    offset: (params: ComputeOffsetParams): Promise<ComputeOffsetResult> => this.call('hew.compute.offset', params),
+    outline: (params: ComputeOutlineParams): Promise<ComputeOutlineResult> => this.call('hew.compute.outline', params),
+    project: (params: ComputeProjectParams): Promise<ComputeProjectResult> => this.call('hew.compute.project', params),
+    shells: (params: ComputeShellsParams): Promise<ComputeShellsResult> => this.call('hew.compute.shells', params),
+    slice: (params: ComputeSliceParams): Promise<ComputeSliceResult> => this.call('hew.compute.slice', params),
+    stretch: (params: ComputeStretchParams): Promise<ComputeStretchResult> => this.call('hew.compute.stretch', params),
   }
 
   readonly context = {

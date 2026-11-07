@@ -388,6 +388,12 @@ fn boolean_op(ctx: &mut Ctx, params: &Value, op: kernel::BooleanOp) -> Result<Va
         b: Value,
     }
     let p: P = parse_params(params)?;
+    // A transient cutter (Addendum B6): `b` as a `SolidSpec` prism or box,
+    // so a machining through a placement is one call with no temporary
+    // object.
+    if p.b.get("prism").is_some() || p.b.get("box").is_some() {
+        return subtract_transient(ctx, op, &p.a, &p.b);
+    }
     let (a, b) = match (resolve_operand(ctx, &p.a)?, resolve_operand(ctx, &p.b)?) {
         (Operand::World(a), Operand::World(b)) => (a, b),
         (Operand::World(_), Operand::Member { .. }) => return Err(path_operand_rule()),
@@ -459,6 +465,40 @@ fn boolean_through_path(
             ));
         }
     };
+    Ok(serde_json::json!({ "result": public_id_of(ctx, EntityRef::Object(result)) }))
+}
+
+/// `hew.solid.subtract` with `a` a definition member reached by a path and
+/// `b` a `SolidSpec` prism or box in world coordinates: the cutter is never
+/// a record, it maps into the definition through the path's pose, and every
+/// placement shows the cut ([`kernel::Document::subtract_solid_through_placement`]).
+/// A world `a`, or a union or intersect, refuses `-32602`.
+fn subtract_transient(
+    ctx: &mut Ctx,
+    op: kernel::BooleanOp,
+    a: &Value,
+    b: &Value,
+) -> Result<Value, CmdError> {
+    if op != kernel::BooleanOp::Subtract {
+        return Err(CmdError::Params(
+            "a prism or box b can only be subtracted".into(),
+        ));
+    }
+    let Operand::Member {
+        path,
+        node: NodeId::Object(host),
+    } = resolve_operand(ctx, a)?
+    else {
+        return Err(CmdError::Params(
+            "a prism or box b cuts a member reached by a path ending at an object; for a world a, extrude the cutter or use hew.compute.boolean".into(),
+        ));
+    };
+    refuse_path_on_loan(ctx, &path)?;
+    let cutter = crate::solid_spec::resolve_solid(ctx, b)?;
+    crate::solid_spec::check_compute_size(&[&cutter])?;
+    let (result, _change) = ctx
+        .doc
+        .subtract_solid_through_placement(&path, host, &cutter)?;
     Ok(serde_json::json!({ "result": public_id_of(ctx, EntityRef::Object(result)) }))
 }
 

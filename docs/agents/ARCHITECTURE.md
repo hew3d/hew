@@ -697,6 +697,22 @@ its children's records and adds one `full` record. The ring is never serialized 
 The API builds `document_changed` events and `hew.query.changes_since`
 from it (HEW_API.md §4.5).
 
+**Rehearsals.** An API dry run (HEW_API.md §6.6) runs an envelope's
+commands on one clone of the `Document` with no bracket open, against a
+host that refuses every view or selection effect, and drops the clone.
+The untouched original stands in for the bracket's snapshot:
+`Document::rehearsal_disturbance` makes the same three refusals a commit
+would (history disturbed, session or gesture unbalanced) by comparing the
+clone with it, so a rehearsal answers exactly what the commit would at
+the cost of one clone, and the live document's history, epoch, and change
+ring never move. The pure computations (`hew.compute.*`, §7.6) copy only
+their operands and run the kernel's pure functions on them
+(`Object::boolean_product`, the same product a committed boolean
+records). A cut through a placement can take such a transient solid as
+its cutter (`Document::subtract_solid_through_placement`): its
+`DocAction::Boolean` carries no `b`, so undo has only the host to bring
+back.
+
 ## 3. Crate and Module Topology
 
 | Crate / module | Responsibility | Depends on |

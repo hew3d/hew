@@ -135,7 +135,7 @@ fn run_script_embedded(
                 // A client-originated notification (no id) — dropped
                 // unexecuted, per §4.1; nothing to print.
             }
-            DispatchOutcome::Reply(response) => {
+            DispatchOutcome::Reply(response) | DispatchOutcome::DryRun(response) => {
                 if record_reply(&mut responses, &response) {
                     return RunOutcome {
                         exit_code: 1,
@@ -254,7 +254,7 @@ fn run_script_live(
             // A live session reads replies off the socket; it never
             // forwards.
             Ok(DispatchOutcome::Dropped | DispatchOutcome::Forward(_)) => {}
-            Ok(DispatchOutcome::Reply(response)) => {
+            Ok(DispatchOutcome::Reply(response) | DispatchOutcome::DryRun(response)) => {
                 let value = serde_json::to_value(&response).expect("Response serializes");
                 if response.error.is_some() {
                     println!("{value}");
@@ -412,7 +412,8 @@ pub fn dispatch_file(file: &Path, method: &str, params: serde_json::Value) -> Di
 
     // Save back only after a command that can change the document — the
     // registry's own `mutates_document` (a read-only query, a snapshot, a
-    // line drawing, or a print leaves the file byte-for-byte alone).
+    // line drawing, a print, or a dry run leaves the file byte-for-byte
+    // alone).
     let read_only = registry
         .get(method)
         .map(|c| !c.mutates_document)
@@ -425,15 +426,19 @@ pub fn dispatch_file(file: &Path, method: &str, params: serde_json::Value) -> Di
         method: method.to_string(),
         params: Some(params),
     };
-    let DispatchOutcome::Reply(response) = conn.dispatch(&registry, &mut doc, &mut host, request)
-    else {
-        eprintln!(
-            "hew-cli dispatch: {method} is a notification-shaped request internally — this is a bug"
-        );
-        return DispatchResult {
-            exit_code: 1,
-            response: None,
-        };
+    // A dry run changed nothing, so nothing is saved after it either.
+    let (response, read_only) = match conn.dispatch(&registry, &mut doc, &mut host, request) {
+        DispatchOutcome::Reply(response) => (response, read_only),
+        DispatchOutcome::DryRun(response) => (response, true),
+        DispatchOutcome::Dropped | DispatchOutcome::Forward(_) => {
+            eprintln!(
+                "hew-cli dispatch: {method} is a notification-shaped request internally — this is a bug"
+            );
+            return DispatchResult {
+                exit_code: 1,
+                response: None,
+            };
+        }
     };
     let value = serde_json::to_value(&response).expect("Response serializes");
     println!("{value}");
@@ -553,7 +558,7 @@ pub fn dispatch_live(
         params: Some(params),
     };
     match session.dispatch(request) {
-        Ok(DispatchOutcome::Reply(response)) => {
+        Ok(DispatchOutcome::Reply(response) | DispatchOutcome::DryRun(response)) => {
             let value = serde_json::to_value(&response).expect("Response serializes");
             if response.error.is_some() {
                 println!("{value}");
@@ -825,7 +830,7 @@ pub fn list_documents_live(opts: &LiveOptions) -> DispatchResult {
         document: None,
     };
     match session.dispatch(request) {
-        Ok(DispatchOutcome::Reply(response)) => {
+        Ok(DispatchOutcome::Reply(response) | DispatchOutcome::DryRun(response)) => {
             let value = serde_json::to_value(&response).expect("Response serializes");
             if response.error.is_some() {
                 eprintln!("{value}");
@@ -905,7 +910,7 @@ pub fn events_session(
         params: Some(serde_json::json!({ "events": events })),
     };
     match session.dispatch(request) {
-        Ok(DispatchOutcome::Reply(response)) => {
+        Ok(DispatchOutcome::Reply(response) | DispatchOutcome::DryRun(response)) => {
             let value = serde_json::to_value(&response).expect("Response serializes");
             eprintln!("{value}");
             if response.error.is_some() {
@@ -967,23 +972,25 @@ pub(crate) fn attach_live(
         params: Some(params),
     };
     match session.dispatch(request) {
-        Ok(DispatchOutcome::Reply(response)) => match response.error {
-            None => Ok(()),
-            Some(err) => {
-                // A refusal explains itself (`unknown_document` lists the
-                // open documents); the bare message alone is just "refused".
-                let why = err
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get("explanation"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(err.message.as_str());
-                Err(format!(
-                    "hew.doc.attach was refused: {why} (code {})",
-                    err.code
-                ))
+        Ok(DispatchOutcome::Reply(response) | DispatchOutcome::DryRun(response)) => {
+            match response.error {
+                None => Ok(()),
+                Some(err) => {
+                    // A refusal explains itself (`unknown_document` lists the
+                    // open documents); the bare message alone is just "refused".
+                    let why = err
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("explanation"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(err.message.as_str());
+                    Err(format!(
+                        "hew.doc.attach was refused: {why} (code {})",
+                        err.code
+                    ))
+                }
             }
-        },
+        }
         Ok(DispatchOutcome::Dropped | DispatchOutcome::Forward(_)) => {
             unreachable!("attach's request always carries an id, and a live session never forwards")
         }
@@ -1007,7 +1014,7 @@ fn run_silently(
         method: method.to_string(),
         params: Some(params),
     };
-    let DispatchOutcome::Reply(response) =
+    let (DispatchOutcome::Reply(response) | DispatchOutcome::DryRun(response)) =
         conn.dispatch(&Registry::protocol_1(), doc, host, request)
     else {
         return Some("dropped unexpectedly".to_string());

@@ -323,6 +323,42 @@ fn dispatch_file_read_only_command_does_not_rewrite_the_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A dry run changes nothing, so `dispatch --file` never saves after one:
+/// on a read-only file it answers the rehearsal and exits 0, where a save
+/// would fail.
+#[test]
+fn dispatch_file_dry_run_does_not_save_back() {
+    let dir = scratch_dir("dispatch-dry-run");
+    let path = dir.join("box.hew");
+    let original = box_document().save();
+    std::fs::write(&path, &original).unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&path, perms.clone()).unwrap();
+
+    let outcome = hew_cli::run::dispatch_file(
+        &path,
+        "hew.doc.transact",
+        serde_json::json!({ "dry_run": true, "commands": [
+            { "method": "hew.sketch.draw_rect", "as": "p", "params": { "plane": { "ground": true }, "corner_a": [5, 5, 0], "corner_b": [6, 6, 0] } },
+            { "method": "hew.solid.extrude", "params": { "region": { "$ref": "p#/region_id" }, "distance": 1.0 } }
+        ] }),
+    );
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&path, perms).unwrap();
+    assert_eq!(outcome.exit_code, 0, "response: {:?}", outcome.response);
+    let response = outcome.response.expect("a response");
+    assert_eq!(response["result"]["dry_run"], true, "{response}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        original,
+        "the file is untouched"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ------------------------------------------------------------------ export
 
 /// `CliHost::export_document("stl")` over a real box document: a
@@ -455,7 +491,7 @@ fn cli_host_reads_a_texture_path_for_material_create() {
             document: None,
         };
         match conn.dispatch(&api::Registry::protocol_1(), doc, &mut host, request) {
-            DispatchOutcome::Reply(r) => r,
+            DispatchOutcome::Reply(r) | DispatchOutcome::DryRun(r) => r,
             DispatchOutcome::Dropped | DispatchOutcome::Forward(_) => unreachable!(),
         }
     };
@@ -494,6 +530,105 @@ fn cli_host_reads_a_texture_path_for_material_create() {
         "load_failed"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ----------------------------------------------------------------- compute
+
+/// The headless host serves every `hew.compute.*` command and the dry run:
+/// nothing in either reaches the host, and the document is unchanged.
+#[test]
+fn cli_host_serves_compute_and_dry_runs() {
+    use api::{Connection, DispatchOutcome, Grant, Request, RequestId};
+    let mut conn = Connection::new(Grant::core(), "t");
+    let mut doc = Document::new();
+    let mut host = CliHost::new();
+    let mut call = |id: i64, method: &str, params: serde_json::Value, doc: &mut Document| {
+        let request = Request {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RequestId::Number(id)),
+            method: method.to_string(),
+            params: Some(params),
+            document: None,
+        };
+        match conn.dispatch(&api::Registry::protocol_1(), doc, &mut host, request) {
+            DispatchOutcome::Reply(r) => (r, false),
+            DispatchOutcome::DryRun(r) => (r, true),
+            DispatchOutcome::Dropped | DispatchOutcome::Forward(_) => unreachable!(),
+        }
+    };
+    call(
+        1,
+        "hew.meta.hello",
+        serde_json::json!({"protocol": 1}),
+        &mut doc,
+    );
+    call(2, "hew.doc.new", serde_json::json!({}), &mut doc);
+    let (made, _) = call(
+        3,
+        "hew.doc.transact",
+        serde_json::json!({ "commands": [
+            { "method": "hew.sketch.draw_rect", "as": "p", "params": { "plane": { "ground": true }, "corner_a": [0, 0, 0], "corner_b": [1, 1, 0] } },
+            { "method": "hew.solid.extrude", "params": { "region": { "$ref": "p#/region_id" }, "distance": 1.0 } }
+        ] }),
+        &mut doc,
+    );
+    assert!(made.error.is_none(), "{:?}", made.error);
+    let id = made.result.unwrap()["results"][1]["object_id"].clone();
+    let before = doc.save();
+    let unit = serde_json::json!({ "box": { "min": [0, 0, 0], "max": [1, 1, 1] } });
+    for (method, params) in [
+        (
+            "hew.compute.measure",
+            serde_json::json!({ "solid": { "id": id } }),
+        ),
+        (
+            "hew.compute.boolean",
+            serde_json::json!({ "op": "intersect", "a": { "id": id }, "b": unit, "want": ["mesh", "topology", "measure", "shells"] }),
+        ),
+        (
+            "hew.compute.slice",
+            serde_json::json!({ "solid": unit, "plane": { "origin": [0.5, 0, 0], "normal": [1, 0, 0] } }),
+        ),
+        (
+            "hew.compute.shells",
+            serde_json::json!({ "solid": unit, "want_mesh": true }),
+        ),
+        (
+            "hew.compute.outline",
+            serde_json::json!({ "id": id, "which": "largest_face" }),
+        ),
+        (
+            "hew.compute.outline",
+            serde_json::json!({ "id": id, "which": "projection" }),
+        ),
+        (
+            "hew.compute.offset",
+            serde_json::json!({ "loops": [[[0, 0], [1, 0], [1, 1], [0, 1]]], "distance": 0.1 }),
+        ),
+    ] {
+        let (r, dry) = call(4, method, params, &mut doc);
+        assert!(r.error.is_none(), "{method}: {:?}", r.error);
+        assert!(!dry);
+    }
+    for method in ["hew.compute.project", "hew.compute.stretch"] {
+        let (r, _) = call(5, method, serde_json::json!({}), &mut doc);
+        assert_eq!(r.error.unwrap().data.unwrap()["refusal"], "unimplemented");
+    }
+    let (r, dry) = call(
+        6,
+        "hew.doc.transact",
+        serde_json::json!({ "dry_run": true, "commands": [
+            { "method": "hew.solid.subtract", "as": "cut", "params": { "a": id, "b": id } }
+        ] }),
+        &mut doc,
+    );
+    assert!(dry, "answered as a dry run");
+    assert_eq!(
+        r.error.unwrap().data.unwrap()["refusal"],
+        "degenerate_contact",
+        "the rehearsal refuses as the commit would"
+    );
+    assert_eq!(doc.save(), before, "nothing changed");
 }
 
 // ------------------------------------------------------------------ import
@@ -1443,7 +1578,7 @@ fn snapshot_depth_and_normals_passes_inline_and_as_sidecars() {
             document: None,
         };
         match conn.dispatch(&api::Registry::protocol_1(), doc, host, request) {
-            DispatchOutcome::Reply(r) => r,
+            DispatchOutcome::Reply(r) | DispatchOutcome::DryRun(r) => r,
             DispatchOutcome::Dropped | DispatchOutcome::Forward(_) => unreachable!(),
         }
     };

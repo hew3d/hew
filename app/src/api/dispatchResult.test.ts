@@ -15,6 +15,15 @@ describe('parseDispatch', () => {
     expect(parseDispatch(JSON.stringify({ reply: frame }))).toEqual({ kind: 'reply', frame })
   })
 
+  it('reads a dry run reply as a reply marked dryRun', () => {
+    const frame = '{"jsonrpc":"2.0","id":1,"result":{"results":[],"label":"x","dry_run":true}}'
+    expect(parseDispatch(JSON.stringify({ reply: frame, dry_run: true }))).toEqual({
+      kind: 'reply',
+      frame,
+      dryRun: true,
+    })
+  })
+
   it('reads a pending forward with its token and request', () => {
     const forward = {
       token: 3,

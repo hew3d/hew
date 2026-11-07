@@ -369,19 +369,38 @@ fn mesh_limited(ctx: &mut Ctx, params: &Value, limit: usize) -> Result<Value, Cm
     let space = space(&p)?;
     let occ = target(ctx, &p)?;
     let leaves = leaves_in(ctx, &occ, space)?;
-
-    let mut positions: Vec<f32> = Vec::new();
-    let mut normals: Vec<f32> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-    let mut face_indices: Vec<u32> = Vec::new();
     let mut parts = Vec::with_capacity(leaves.len());
-    let mut face_base: u32 = 0;
-    let mut bytes = 0usize;
     for (o, pose) in leaves {
         let Some(obj) = ctx.doc.object(o) else {
             continue;
         };
-        let rm = tessellate::tessellate(obj, ctx.doc.materials())
+        parts.push((
+            obj,
+            pose,
+            Value::String(public(ctx, &EntityRef::Object(o))?),
+        ));
+    }
+    mesh_block(ctx.doc, &parts, limit)
+}
+
+/// The `hew.query.mesh` result shape (without the clock) for `parts`, each
+/// an Object, the pose that maps it into the result's space, and its
+/// `parts[].id` (`null` for a transient compute result). Past `limit`
+/// buffer bytes it refuses `mesh_too_large` rather than truncating.
+pub(crate) fn mesh_block(
+    doc: &kernel::Document,
+    parts_in: &[(&kernel::Object, Transform, Value)],
+    limit: usize,
+) -> Result<Value, CmdError> {
+    let mut positions: Vec<f32> = Vec::new();
+    let mut normals: Vec<f32> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let mut face_indices: Vec<u32> = Vec::new();
+    let mut parts = Vec::with_capacity(parts_in.len());
+    let mut face_base: u32 = 0;
+    for (obj, pose, id) in parts_in {
+        let (obj, pose) = (*obj, *pose);
+        let rm = tessellate::tessellate(obj, doc.materials())
             .map_err(|e| CmdError::Internal(format!("tessellation failed: {e}")))?;
         let face_order: std::collections::BTreeMap<kernel::FaceId, u32> = obj
             .faces()
@@ -437,20 +456,19 @@ fn mesh_limited(ctx: &mut Ctx, params: &Value, limit: usize) -> Result<Value, Cm
             }
             face_indices.push(face_base + vertex_face[(a - vertex_base) as usize]);
         }
-        bytes =
+        let bytes =
             positions.len() * 4 + normals.len() * 4 + indices.len() * 4 + face_indices.len() * 4;
         if bytes > limit {
             return Err(mesh_too_large(bytes, limit));
         }
         parts.push(json!({
-            "id": public(ctx, &EntityRef::Object(o))?,
+            "id": id,
             "face_index_base": face_base,
             "index_base": index_base,
             "index_count": indices.len() - index_base,
         }));
         face_base += obj.faces().len() as u32;
     }
-    let _ = bytes;
     let le = |v: &[f32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
     let le32 = |v: &[u32]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
     Ok(json!({
@@ -484,6 +502,19 @@ fn topology(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         Space::World => occ.pose,
         Space::Local => Transform::IDENTITY,
     };
+    let id = Value::String(public(ctx, &EntityRef::Object(oid))?);
+    Ok(topology_block(ctx.doc, obj, pose, id))
+}
+
+/// The `hew.query.topology` result shape (without the clock) for `obj`
+/// under `pose`; `object` is its public id, or `null` for a transient
+/// compute result.
+pub(crate) fn topology_block(
+    doc: &kernel::Document,
+    obj: &kernel::Object,
+    pose: Transform,
+    object: Value,
+) -> Value {
     let map_p = |q: Point3| pose.apply_point(q);
     let map_n = |n: Vec3| pose.apply_normal(n).normalized().unwrap_or(n);
     let scale = pose.similarity_scale();
@@ -522,7 +553,7 @@ fn topology(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let material_id = |m: Option<kernel::MaterialId>| -> Option<String> {
         let m = m?;
         let e = EntityRef::Material(m);
-        ctx.doc.sid_of(&e).map(|s| crate::ids::public_id(&e, s))
+        doc.sid_of(&e).map(|s| crate::ids::public_id(&e, s))
     };
     let mut faces = Vec::with_capacity(obj.faces().len());
     for (k, (fid, f)) in obj.faces().iter().enumerate() {
@@ -601,12 +632,12 @@ fn topology(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             "attrs": super::attrs::element_attrs_json(obj.edge_attrs(eid)),
         }));
     }
-    Ok(json!({
-        "object": public(ctx, &EntityRef::Object(oid))?,
+    json!({
+        "object": object,
         "vertices": vertices,
         "faces": faces,
         "edges": edges,
-    }))
+    })
 }
 
 #[cfg(test)]

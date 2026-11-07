@@ -130,6 +130,19 @@ with "as", then reference what it made: {"$ref": "rect#/region_id"} for
 an id, {"$face": "circle#face"} for a face the previous command cut.
 Draw-then-extrude belongs in one transaction, not two.
 
+TRY AN EDIT BEFORE MAKING IT
+Add "dry_run": true to a hew_transact call to rehearse it: the answer is
+what the real call would answer, the ids it would mint included, with
+"dry_run": true beside it, and the document does not change. Commands
+that touch files, the library, the selection, or the screen refuse
+dry_run_host_command in a rehearsal.
+
+COMPUTE WITHOUT EDITING
+hew_query serves hew.compute.measure, boolean, slice, shells, outline,
+and offset: volume and area, a boolean's result, a cut, an outline, or
+an offset loop, worked out on objects or on a box or prism you describe
+inline, without changing the document.
+
 START HERE
 Call hew_capabilities first. It returns every command with its exact
 parameters, results, and the refusals it can answer — that is the
@@ -224,7 +237,7 @@ impl McpServer {
                 method: method.to_string(),
                 params: Some(params),
             };
-            let DispatchOutcome::Reply(response) =
+            let (DispatchOutcome::Reply(response) | DispatchOutcome::DryRun(response)) =
                 conn.dispatch(&registry, &mut doc, &mut host, request)
             else {
                 panic!("{method} is a request, not a notification");
@@ -560,7 +573,7 @@ impl McpServer {
             })?,
         };
         self.refresh_on_plugin_state();
-        let DispatchOutcome::Reply(response) = outcome else {
+        let (DispatchOutcome::Reply(response) | DispatchOutcome::DryRun(response)) = outcome else {
             return Err(JsonRpcErr {
                 code: -32603,
                 message: "internal error: envelope dropped unexpectedly".to_string(),
@@ -698,11 +711,14 @@ pub fn generate_tools(registry: &Registry, grant: &Grant) -> Vec<Value> {
         }),
         json!({
             "name": "hew_transact",
-            "description": "Run hew.* commands in order as one undo entry. Every edit goes through this. Put a draw and the extrude that consumes it in the SAME call, labeling the draw with \"as\" and referencing its result: {\"$ref\": \"rect#/region_id\"} for an id, {\"$face\": \"circle#face\"} for a face it just cut. If any command refuses, none of them applied. Commands provided by installed plugins are listed by hew_capabilities with a provider; their results carry that provider.",
+            "description": "Run hew.* commands in order as one undo entry. Every edit goes through this. Put a draw and the extrude that consumes it in the SAME call, labeling the draw with \"as\" and referencing its result: {\"$ref\": \"rect#/region_id\"} for an id, {\"$face\": \"circle#face\"} for a face it just cut. If any command refuses, none of them applied. Set dry_run to true to rehearse the call: it answers what the real call would, ids included, and changes nothing. Commands provided by installed plugins are listed by hew_capabilities with a provider; their results carry that provider.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "label": { "type": "string" },
+                    "dry_run": { "type": "boolean", "description": "rehearse: answer what the call would, change nothing" },
+                    "expect_generation": { "type": "integer", "minimum": 0, "description": "refuse generation_moved unless the document is at this history generation" },
+                    "coalesce": { "type": "string", "minLength": 1, "maxLength": 64, "description": "merge into the top undo entry when this connection committed it under the same key; not with dry_run" },
                     "commands": {
                         "type": "array",
                         "items": {
@@ -722,7 +738,7 @@ pub fn generate_tools(registry: &Registry, grant: &Grant) -> Vec<Value> {
         }),
         json!({
             "name": "hew_query",
-            "description": "Run one read-only command (hew.query.*, hew.meta.*, hew.attr.get) — measuring, resolving an id, listing faces, raycasting — or one of the read-side Library commands (hew.library.list/describe/remove/update_meta): browsing, deleting, or renaming a saved item. None of these change the attached DOCUMENT (remove/update_meta change on-disk library state, not the document itself). Use hew_transact for anything that does. Commands provided by installed plugins are listed by hew_capabilities with a provider; their results carry that provider.",
+            "description": "Run one read-only command (hew.query.*, hew.compute.*, hew.meta.*, hew.attr.get) — measuring, resolving an id, listing faces, raycasting, computing a boolean, cut, outline, or offset without editing — or one of the read-side Library commands (hew.library.list/describe/remove/update_meta): browsing, deleting, or renaming a saved item. None of these change the attached DOCUMENT (remove/update_meta change on-disk library state, not the document itself). Use hew_transact for anything that does. Commands provided by installed plugins are listed by hew_capabilities with a provider; their results carry that provider.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1500,6 +1516,73 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["error"]["code"], -32602);
+    }
+
+    /// A dry run and the compute commands are reachable, and said to be:
+    /// `hew_transact` advertises `dry_run` (a client validating against the
+    /// schema would otherwise drop it), `hew_query` admits `hew.compute.*`
+    /// (class read-only), and the instructions name both.
+    #[test]
+    fn mcp_advertises_dry_runs_and_compute() {
+        let mut server = McpServer::new();
+        let line = server
+            .handle_line(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#)
+            .unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        let tools = v["result"]["tools"].as_array().unwrap();
+        let tool = |name: &str| {
+            tools
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap_or_else(|| panic!("{name}"))
+                .clone()
+        };
+        let transact = tool("hew_transact");
+        assert_eq!(
+            transact["inputSchema"]["properties"]["dry_run"]["type"],
+            "boolean"
+        );
+        assert!(
+            transact["description"]
+                .as_str()
+                .unwrap()
+                .contains("dry_run")
+        );
+        assert!(
+            tool("hew_query")["description"]
+                .as_str()
+                .unwrap()
+                .contains("hew.compute.")
+        );
+        assert!(INSTRUCTIONS.contains("dry_run") && INSTRUCTIONS.contains("hew.compute."));
+
+        let call = |server: &mut McpServer, id: u32, name: &str, arguments: Value| {
+            let frame = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": { "name": name, "arguments": arguments } });
+            let line = server.handle_line(&frame.to_string()).unwrap();
+            let v: Value = serde_json::from_str(&line).unwrap();
+            let text = v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{v}"))
+                .to_string();
+            serde_json::from_str::<Value>(&text).unwrap()
+        };
+        let measured = call(
+            &mut server,
+            2,
+            "hew_query",
+            json!({ "method": "hew.compute.measure",
+                "params": { "solid": { "box": { "min": [0, 0, 0], "max": [1, 2, 3] } } } }),
+        );
+        assert_eq!(measured["result"]["volume"], 6.0, "{measured}");
+        let rehearsed = call(
+            &mut server,
+            3,
+            "hew_transact",
+            json!({ "dry_run": true, "commands": [{ "method": "hew.sketch.draw_rect",
+                "params": { "plane": { "ground": true }, "corner_a": [0, 0, 0], "corner_b": [1, 1, 0] } }] }),
+        );
+        assert_eq!(rehearsed["result"]["dry_run"], true, "{rehearsed}");
     }
 
     #[test]

@@ -285,6 +285,22 @@ fn attr_target_schema() -> serde_json::Value {
     })
 }
 
+/// A list of `{ outer, edges }` loops in a plane's xy (the
+/// `hew.compute.outline` shape), for the reserved `hew.compute.project`.
+fn loops_result_items(xy: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "outer": { "type": "boolean" },
+                "edges": { "type": "array", "items": { "type": "object", "properties": { "kind": { "type": "string" }, "a": xy, "b": xy } } }
+            },
+            "required": ["outer", "edges"]
+        }
+    })
+}
+
 /// `{ id?, path? }` (exactly one), with `space` for the buffer reads.
 fn occurrence_target_schema(with_space: bool) -> serde_json::Value {
     let mut properties = serde_json::json!({
@@ -790,7 +806,7 @@ impl Registry {
             M,
             Kernel,
             Req,
-            "Boolean subtraction of two solids; a may be a path to a definition member, cut through that placement so every placement shows the cut.",
+            "Boolean subtraction of two solids; a may be a path to a definition member, cut through that placement so every placement shows the cut, by a world object or a transient prism or box.",
         );
         add(
             "hew.solid.intersect",
@@ -805,6 +821,64 @@ impl Registry {
             Kernel,
             Req,
             "Slice a solid by a plane into two solids; the object may be a path to a definition member, sliced in the definition.",
+        );
+        // hew.compute — pure computations on transient solids (HEW_API.md
+        // §7 "Compute"): the document is read, never changed.
+        add(
+            "hew.compute.boolean",
+            R,
+            Kernel,
+            Std,
+            "Union, subtract, or intersect two solids without touching the document; answers the result's measure, mesh, topology, or shell count.",
+        );
+        add(
+            "hew.compute.slice",
+            R,
+            Kernel,
+            Std,
+            "Cut a solid by a plane without touching the document; answers both pieces.",
+        );
+        add(
+            "hew.compute.shells",
+            R,
+            Kernel,
+            Std,
+            "Split a solid into its connected pieces without touching the document.",
+        );
+        add(
+            "hew.compute.measure",
+            R,
+            Kernel,
+            Std,
+            "Volume, surface area, bounding box, and centroid of a solid.",
+        );
+        add(
+            "hew.compute.outline",
+            R,
+            Kernel,
+            Std,
+            "A part's outline in a frame's xy plane: its largest face, or its silhouette, with arcs and circles kept analytic.",
+        );
+        add(
+            "hew.compute.offset",
+            R,
+            Kernel,
+            Std,
+            "Offset closed 2D loops outward or inward by a distance.",
+        );
+        add(
+            "hew.compute.project",
+            R,
+            Kernel,
+            Std,
+            "A single part's flat drawing on a plane, its faces grouped by depth into layers (not available yet).",
+        );
+        add(
+            "hew.compute.stretch",
+            R,
+            Kernel,
+            Std,
+            "Preview a section stretch of parts along one axis of a frame (not available yet).",
         );
         add(
             "hew.solid.follow_me",
@@ -1549,11 +1623,20 @@ impl Registry {
                 .get_mut("hew.doc.transact")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.refusals = vec!["ref_resolution_failed", "generation_moved"];
+            cmd.refusals = vec![
+                "ref_resolution_failed",
+                "generation_moved",
+                "dry_run_host_command",
+                "compute_busy",
+            ];
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
                     "label": { "type": "string" },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "rehearse: run the envelope on a copy of the document and answer what a commit would, changing nothing (docs/agents/HEW_API.md §6.6); needs only read permissions; no coalesce"
+                    },
                     "expect_generation": {
                         "type": "integer",
                         "minimum": 0,
@@ -1585,7 +1668,8 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "results": { "type": "array" },
-                    "label": { "type": "string" }
+                    "label": { "type": "string" },
+                    "dry_run": { "type": "boolean", "description": "true on a rehearsal's answer" }
                 },
                 "required": ["results", "label"]
             });
@@ -5173,6 +5257,29 @@ impl Registry {
             operand_b["description"] = serde_json::json!(
                 "a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path"
             );
+            // Subtract alone takes a transient cutter beside a path `a`
+            // (Addendum B6): a SolidSpec prism or box, world coordinates.
+            let mut subtract_b = operand_b.clone();
+            subtract_b["oneOf"]
+                .as_array_mut()
+                .expect("a oneOf")
+                .extend([
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": { "prism": { "type": "object", "description": "{plane: {origin, normal}, loops: [[[x,y,z], ...], ...], distance}: the first loop outer, the rest holes" } },
+                        "required": ["prism"],
+                        "additionalProperties": false
+                    }),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": { "box": { "type": "object", "description": "{min, max, pose?}" } },
+                        "required": ["box"],
+                        "additionalProperties": false
+                    }),
+                ]);
+            subtract_b["description"] = serde_json::json!(
+                "a world node id; with a by path, a world object (consumed), {path} to a member of the same definition by the same path, or a transient cutter {prism} | {box} in world coordinates (no object is created)"
+            );
             let boolean_params = serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -5213,13 +5320,17 @@ impl Registry {
                 .get_mut("hew.solid.subtract")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.params_schema = boolean_params.clone();
+            let mut subtract_params = boolean_params.clone();
+            subtract_params["properties"]["b"] = subtract_b;
+            cmd.params_schema = subtract_params;
             cmd.result_schema = boolean_result.clone();
             cmd.refusals = boolean_refusals();
             // Subtract alone refuses when its cutter is disjoint from, or
             // only touches, the target: union and intersect have an honest
             // answer there (two shells; an empty result).
             cmd.refusals.push("nothing_removed");
+            // A transient cutter's own refusals.
+            cmd.refusals.extend(["mirrored_pose", "compute_too_large"]);
 
             let cmd = commands
                 .get_mut("hew.solid.intersect")
@@ -5511,6 +5622,401 @@ impl Registry {
                 .get_mut(name)
                 .expect("declared above")
                 .mutates_document = true;
+        }
+
+        // hew.compute.* (HEW_API.md §7 "Compute"): pure computations on
+        // `SolidSpec` operands (`crate::solid_spec`), served on every host.
+        {
+            let xyz = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
+            let xy = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 });
+            let pose = serde_json::json!({
+                "type": "array", "items": { "type": "number" }, "minItems": 12, "maxItems": 12,
+                "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose"
+            });
+            let plane = serde_json::json!({
+                "type": "object",
+                "properties": { "origin": xyz.clone(), "normal": xyz.clone() },
+                "required": ["origin", "normal"],
+                "additionalProperties": false,
+                "description": "world coordinates"
+            });
+            let solid_spec = serde_json::json!({
+                "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": { "id": { "type": "string" }, "pose": pose.clone() },
+                        "required": ["id"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                            "pose": pose.clone()
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "prism": {
+                                "type": "object",
+                                "properties": {
+                                    "plane": plane.clone(),
+                                    "loops": { "type": "array", "minItems": 1, "items": { "type": "array", "minItems": 3, "items": xyz.clone() } },
+                                    "distance": { "type": "number" }
+                                },
+                                "required": ["plane", "loops", "distance"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "required": ["prism"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "box": {
+                                "type": "object",
+                                "properties": { "min": xyz.clone(), "max": xyz.clone(), "pose": pose.clone() },
+                                "required": ["min", "max"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "required": ["box"],
+                        "additionalProperties": false
+                    }
+                ]
+            });
+            let want = serde_json::json!({
+                "type": "array",
+                "items": { "type": "string", "enum": ["mesh", "topology", "measure", "shells"] },
+                "description": "the result blocks to answer; defaults to [\"measure\"]"
+            });
+            let bbox = serde_json::json!({
+                "type": ["object", "null"],
+                "properties": { "min": xyz.clone(), "max": xyz.clone() },
+                "required": ["min", "max"]
+            });
+            let measure = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "volume": { "type": ["number", "null"], "description": "cubic meters; null for an object that is not watertight" },
+                    "area": { "type": "number", "description": "square meters, holes subtracted" },
+                    "bbox": bbox.clone()
+                },
+                "required": ["volume", "area", "bbox"]
+            });
+            // The query shapes, with the ids a transient result does not
+            // have made nullable.
+            let mut mesh = commands
+                .get("hew.query.mesh")
+                .expect("declared above")
+                .result_schema
+                .clone();
+            mesh["properties"]["parts"]["items"]["properties"]["id"] = serde_json::json!({ "type": ["string", "null"], "description": "null on a computed mesh" });
+            let mut topology = commands
+                .get("hew.query.topology")
+                .expect("declared above")
+                .result_schema
+                .clone();
+            topology["properties"]["object"] = serde_json::json!({ "type": ["string", "null"], "description": "null on a computed solid" });
+            let blocks = |solid: bool| {
+                let mut properties = serde_json::json!({
+                    "mesh": mesh.clone(),
+                    "topology": topology.clone(),
+                    "measure": measure.clone(),
+                    "shells": { "type": "integer", "minimum": 0, "description": "connected pieces in the result" }
+                });
+                let mut required = serde_json::json!([]);
+                if solid {
+                    properties["solid"] = serde_json::json!({ "type": "boolean", "description": "false when nothing is left (no other block then)" });
+                    required = serde_json::json!(["solid"]);
+                }
+                serde_json::json!({ "type": "object", "properties": properties, "required": required })
+            };
+            let solid_refusals = || {
+                vec![
+                    "unknown_entity",
+                    "unknown_occurrence",
+                    "not_an_object",
+                    "mirrored_pose",
+                    "compute_busy",
+                    "compute_too_large",
+                    "mesh_too_large",
+                ]
+            };
+            let edge = serde_json::json!({
+                "oneOf": [
+                    { "type": "object", "properties": { "kind": { "const": "line" }, "a": xy.clone(), "b": xy.clone() }, "required": ["kind", "a", "b"] },
+                    { "type": "object", "properties": { "kind": { "const": "arc" }, "center": xy.clone(), "radius": { "type": "number" }, "start": xy.clone(), "end": xy.clone(), "ccw": { "type": "boolean" } }, "required": ["kind", "center", "radius", "start", "end", "ccw"] },
+                    { "type": "object", "properties": { "kind": { "const": "circle" }, "center": xy.clone(), "radius": { "type": "number" } }, "required": ["kind", "center", "radius"] }
+                ]
+            });
+            let loops_result = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "loops": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "outer": { "type": "boolean", "description": "an outer boundary (counter-clockwise), else a hole (clockwise)" },
+                                "edges": { "type": "array", "items": edge }
+                            },
+                            "required": ["outer", "edges"]
+                        }
+                    }
+                },
+                "required": ["loops"]
+            });
+
+            let cmd = commands
+                .get_mut("hew.compute.boolean")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "op": { "type": "string", "enum": ["union", "subtract", "intersect"] },
+                    "a": solid_spec.clone(),
+                    "b": solid_spec.clone(),
+                    "want": want.clone()
+                },
+                "required": ["op", "a", "b"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = blocks(true);
+            cmd.refusals = solid_refusals();
+            cmd.refusals.extend([
+                "operand_not_solid",
+                "degenerate_contact",
+                "nothing_removed",
+                "singular_transform",
+            ]);
+
+            let cmd = commands
+                .get_mut("hew.compute.slice")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "solid": solid_spec.clone(), "plane": plane.clone(), "want": want.clone() },
+                "required": ["solid", "plane"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "positive": blocks(false),
+                    "negative": blocks(false)
+                },
+                "required": ["positive", "negative"],
+                "description": "positive is the piece on the side the plane normal points to"
+            });
+            cmd.refusals = solid_refusals();
+            cmd.refusals
+                .extend(["not_solid", "plane_misses_solid", "degenerate"]);
+
+            let cmd = commands
+                .get_mut("hew.compute.shells")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "solid": solid_spec.clone(),
+                    "want_mesh": { "type": "boolean", "description": "answer each piece's mesh too; defaults to false" }
+                },
+                "required": ["solid"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer", "minimum": 0 },
+                    "shells": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "measure": measure.clone(), "mesh": mesh.clone() },
+                            "required": ["measure"]
+                        }
+                    }
+                },
+                "required": ["count", "shells"]
+            });
+            cmd.refusals = solid_refusals();
+
+            let cmd = commands
+                .get_mut("hew.compute.measure")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "solid": solid_spec.clone() },
+                "required": ["solid"],
+                "additionalProperties": false
+            });
+            let mut with_centroid = measure.clone();
+            with_centroid["properties"]["centroid"] = serde_json::json!({
+                "type": ["array", "null"], "items": { "type": "number" }, "minItems": 3, "maxItems": 3,
+                "description": "the volume centroid; null for an object that is not watertight"
+            });
+            with_centroid["required"] = serde_json::json!(["volume", "area", "bbox", "centroid"]);
+            cmd.result_schema = with_centroid;
+            cmd.refusals = solid_refusals();
+            cmd.refusals.retain(|r| *r != "mesh_too_large");
+
+            let cmd = commands
+                .get_mut("hew.compute.outline")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "a world node's public id" },
+                    "path": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                    "frame": {
+                        "description": "\"part\" (the default: hew.query.part_frame's frame) or {origin, x, y, z}, orthonormal and right-handed",
+                        "oneOf": [
+                            { "type": "string", "enum": ["part"] },
+                            {
+                                "type": "object",
+                                "properties": { "origin": xyz.clone(), "x": xyz.clone(), "y": xyz.clone(), "z": xyz.clone() },
+                                "required": ["origin", "x", "y", "z"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    },
+                    "which": {
+                        "type": "string",
+                        "enum": ["largest_face", "projection"],
+                        "description": "largest_face: the loops of the part's largest face; projection: the silhouette seen along the frame's z"
+                    }
+                },
+                "required": ["which"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = loops_result.clone();
+            cmd.refusals = vec![
+                "unknown_entity",
+                "unknown_occurrence",
+                "invalid_frame",
+                "no_part_frame",
+                "compute_busy",
+                "compute_too_large",
+                "too_many_occurrences",
+            ];
+
+            let cmd = commands
+                .get_mut("hew.compute.offset")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "loops": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "array", "minItems": 3, "items": xy.clone() },
+                        "description": "closed 2D loops, the first the outer boundary, the rest holes, in either winding"
+                    },
+                    "distance": { "type": "number", "description": "positive grows the material, negative shrinks it" },
+                    "join": { "type": "string", "enum": ["miter", "round"], "description": "miter (the default); round is reserved and not available yet" }
+                },
+                "required": ["loops", "distance"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = loops_result;
+            cmd.refusals = vec!["offset_too_small", "offset_collapsed", "compute_busy"];
+
+            // Reserved rows (core C6 and C7): the shapes are pinned now and
+            // may change with their bodies.
+            let cmd = commands
+                .get_mut("hew.compute.project")
+                .expect("declared above");
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "solid": solid_spec.clone(),
+                    "plane": plane.clone(),
+                    "want": { "type": "array", "items": { "type": "string", "enum": ["outline", "layers"] } }
+                },
+                "required": ["solid", "plane"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "outline": loops_result_items(&xy),
+                    "layers": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "depth": { "type": "number" }, "loops": loops_result_items(&xy) },
+                            "required": ["depth", "loops"]
+                        }
+                    }
+                }
+            });
+            let cmd = commands
+                .get_mut("hew.compute.stretch")
+                .expect("declared above");
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "paths": { "type": "array", "items": occurrence_locator_schema() },
+                    "frame": {
+                        "oneOf": [
+                            { "type": "string", "enum": ["active", "context", "entity"] },
+                            {
+                                "type": "object",
+                                "properties": { "origin": xyz.clone(), "x": xyz.clone(), "y": xyz.clone(), "z": xyz.clone() },
+                                "required": ["origin", "x", "y", "z"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    },
+                    "axis": { "type": "integer", "enum": [0, 1, 2] },
+                    "cutters": {
+                        "oneOf": [
+                            { "type": "array", "items": { "type": "number" } },
+                            {
+                                "type": "object",
+                                "properties": { "positions": { "type": "array", "items": { "type": "number" } } },
+                                "required": ["positions"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    },
+                    "mode": {
+                        "oneOf": [
+                            { "type": "string", "enum": ["end", "centered"] },
+                            {
+                                "type": "object",
+                                "properties": { "interior": { "type": "integer", "minimum": 0 } },
+                                "required": ["interior"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    },
+                    "distance": { "type": "number" },
+                    "dimension": { "type": "number" }
+                },
+                "required": ["paths", "axis"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "applied": { "type": "number" },
+                    "max_compression": { "type": "number" },
+                    "cutters": { "type": "array", "items": { "type": "number" } }
+                }
+            });
         }
 
         // The document's clock on every read of the model and of its
@@ -5863,6 +6369,14 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.view.snapshot",
                 "hew.view.line_drawing",
                 "hew.print.pdf",
+                "hew.compute.boolean",
+                "hew.compute.slice",
+                "hew.compute.shells",
+                "hew.compute.measure",
+                "hew.compute.outline",
+                "hew.compute.offset",
+                "hew.compute.project",
+                "hew.compute.stretch",
             ],
         ),
         (

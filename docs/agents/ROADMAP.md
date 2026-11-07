@@ -1402,7 +1402,18 @@ below.
   surface exports `wrap_linked`, `is_linked`, `set_linked`,
   `owner_definition`, and `duplicate_selection_array_linked`. The app and
   the bus still copy independently. A boolean's
-  result keeps its first operand's name, tags, and attributes. The snap
+  result keeps its first operand's name, tags, and attributes. A plugin
+  checks before it commits: `hew.doc.transact` with `dry_run: true`
+  rehearses a whole envelope on a copy of the document and answers what
+  the commit would, needing only read permissions (HEW_API.md §6.6), and
+  `hew.compute.boolean`, `slice`, `shells`, `measure`, `outline`, and
+  `offset` answer geometry questions on transient solids (an object, a
+  re-posed object, or a prism or box described inline) without touching
+  the document, one at a time per connection and capped at 2,000,000
+  triangles (HEW_API.md §7.6). `hew.solid.subtract` cuts a part through
+  its path with such a prism or box, no cutter object created.
+  `hew.compute.project` and `hew.compute.stretch` are declared and wait
+  for the flat-drawing projection and section stretch in core. The snap
   service can lock to any direction through an
   anchor, for plugin tools to use. A component placement carries its own
   material (manifest v24), shown on member faces nobody painted, the

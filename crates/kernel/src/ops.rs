@@ -5843,6 +5843,34 @@ impl Object {
         crate::boolean::execute(op, a, b, b_to_a)
     }
 
+    /// [`Object::boolean`] as the document commits it: the coplanar seams
+    /// the boolean introduced are dissolved
+    /// ([`Object::merge_coplanar_faces`]) while the coplanar edges either
+    /// operand already had (drawn imprints, carried into `a`'s frame
+    /// through `b_to_a`) are kept. [`Document::boolean`](crate::Document::boolean)
+    /// and the boolean through a placement commit exactly this product, so
+    /// a pure computation of the same two solids (the API's
+    /// `hew.compute.boolean`) yields the same geometry the commit would.
+    ///
+    /// # Errors
+    /// As [`Object::boolean`].
+    pub fn boolean_product(
+        op: BooleanOp,
+        a: &Object,
+        b: &Object,
+        b_to_a: &Transform,
+    ) -> Result<Object, BooleanError> {
+        let mut result = Object::boolean(op, a, b, b_to_a)?;
+        let mut preserve = a.coplanar_edge_segments();
+        preserve.extend(
+            b.coplanar_edge_segments()
+                .into_iter()
+                .map(|(p, q)| (b_to_a.apply_point(p), b_to_a.apply_point(q))),
+        );
+        result.merge_coplanar_faces(&preserve);
+        Ok(result)
+    }
+
     /// Partition this Object's faces into connected components by shared-edge
     /// (twin) adjacency, rebuilding each component as its own independent
     /// Object.

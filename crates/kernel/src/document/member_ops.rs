@@ -31,6 +31,13 @@ use super::{
     NodeId, ObjectOwner, ObjectRecord, merge_unique,
 };
 
+/// The tool of a subtract through a placement: a world Object's record,
+/// consumed, or a transient world solid no record holds.
+enum PlacementTool<'a> {
+    Record(ObjectId),
+    Transient(&'a Object),
+}
+
 impl Document {
     /// Whether any definition a path passes through — the definition each
     /// listed instance places — is on loan to an open component session.
@@ -516,6 +523,41 @@ impl Document {
         if op != BooleanOp::Subtract {
             return Err(DocumentError::BooleanOperandHasInstance);
         }
+        self.cut_through_placement(path, host, PlacementTool::Record(tool))
+    }
+
+    /// [`Document::boolean_through_placement`] with a transient cutter: a
+    /// watertight solid in WORLD coordinates that no record holds (the
+    /// API's `SolidSpec` prism, Addendum B6), so a machining through a
+    /// placement is one call with no temporary object. `host` minus the
+    /// cutter runs in the definition's frame, every placement shows the
+    /// cut, and the one [`DocAction::Boolean`] it records carries no `b`:
+    /// undo brings back only the host.
+    ///
+    /// # Errors
+    /// As [`Document::boolean_through_placement`], less the tool's own
+    /// record checks; a cutter that is not a watertight solid refuses
+    /// [`DocumentError::Boolean`] from the engine.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn subtract_solid_through_placement(
+        &mut self,
+        path: &[InstanceId],
+        host: ObjectId,
+        cutter: &Object,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "subtract_solid_through_placement", depth = path.len());
+        self.cut_through_placement(path, host, PlacementTool::Transient(cutter))
+    }
+
+    /// The subtract both forms above share.
+    fn cut_through_placement(
+        &mut self,
+        path: &[InstanceId],
+        host: ObjectId,
+        tool: PlacementTool<'_>,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        let op = BooleanOp::Subtract;
         self.refuse_during_any_session()?;
         let (component, pose) = self.placement_target(path)?;
         let rec_host = self
@@ -526,31 +568,31 @@ impl Document {
                     && matches!(r.owner, ObjectOwner::Definition { def, .. } if def == component)
             })
             .ok_or(DocumentError::UnknownObject)?;
-        let rec_tool = self
-            .objects
-            .get(tool)
-            .filter(|r| !r.hidden && r.is_world())
-            .ok_or(DocumentError::UnknownObject)?;
-        // A replacing op: a grouped operand would leave its group listing a
-        // consumed node (`Document::boolean`'s posture).
-        if rec_host.group_parent().is_some() || rec_tool.group_parent().is_some() {
+        let (tool_id, tool_object) = match tool {
+            PlacementTool::Record(tool) => {
+                let rec_tool = self
+                    .objects
+                    .get(tool)
+                    .filter(|r| !r.hidden && r.is_world())
+                    .ok_or(DocumentError::UnknownObject)?;
+                // A replacing op: a grouped operand would leave its group
+                // listing a consumed node (`Document::boolean`'s posture).
+                if rec_tool.group_parent().is_some() {
+                    return Err(DocumentError::GroupedOperand);
+                }
+                (Some(tool), &rec_tool.object)
+            }
+            PlacementTool::Transient(cutter) => (None, cutter),
+        };
+        if rec_host.group_parent().is_some() {
             return Err(DocumentError::GroupedOperand);
         }
         let to_def = pose.inverse().map_err(DocumentError::Transform)?;
 
-        let mut result = Object::boolean(op, &rec_host.object, &rec_tool.object, &to_def)
-            .map_err(DocumentError::Boolean)?;
         // Keep the coplanar edges either operand already had (imprints), in
         // the definition's frame; dissolve the seams the boolean added.
-        let mut preserve = rec_host.object.coplanar_edge_segments();
-        preserve.extend(
-            rec_tool
-                .object
-                .coplanar_edge_segments()
-                .into_iter()
-                .map(|(a, b)| (to_def.apply_point(a), to_def.apply_point(b))),
-        );
-        result.merge_coplanar_faces(&preserve);
+        let result = Object::boolean_product(op, &rec_host.object, tool_object, &to_def)
+            .map_err(DocumentError::Boolean)?;
 
         let (name, tags) = (rec_host.name.clone(), rec_host.tags.clone());
         let id = self.insert_object_record(ObjectRecord {
@@ -566,12 +608,15 @@ impl Document {
         });
         self.copy_attrs(&EntityRef::Object(host), EntityRef::Object(id));
         self.objects[host].hidden = true;
-        self.objects[tool].hidden = true;
+        let mut consumed = vec![NodeId::Object(host)];
+        if let Some(tool) = tool_id {
+            self.objects[tool].hidden = true;
+            consumed.push(NodeId::Object(tool));
+        }
         // Membership is structural: the consumed host stays listed, hidden,
         // as `boolean_in_component` leaves its operands.
         self.components[component].members.push(NodeId::Object(id));
-        let reanchored =
-            self.reevaluate_liveness_recorded(&[NodeId::Object(host), NodeId::Object(tool)]);
+        let reanchored = self.reevaluate_liveness_recorded(&consumed);
         let carried = self.carry_owned_sketches(&[host], &[id]);
         let carried_sketches: Vec<SketchId> = carried
             .iter()
@@ -582,7 +627,7 @@ impl Document {
                 op,
                 result: id,
                 a: host,
-                b: tool,
+                b: tool_id,
                 reanchored,
             },
             carried,
@@ -591,7 +636,7 @@ impl Document {
         self.debug_validate();
 
         let mut change = DocChange {
-            objects_touched: vec![host, tool, id],
+            objects_touched: [host].into_iter().chain(tool_id).chain([id]).collect(),
             components_touched: vec![component],
             instances_touched: self.placing_instances(component),
             ..Default::default()

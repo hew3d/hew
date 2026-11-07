@@ -55,7 +55,7 @@ fn send(
         document: document.map(str::to_string),
     };
     match conn.dispatch(&REGISTRY, doc, host, request) {
-        DispatchOutcome::Reply(r) => r,
+        DispatchOutcome::Reply(r) | DispatchOutcome::DryRun(r) => r,
         DispatchOutcome::Dropped => panic!("a request with an id is never dropped"),
         DispatchOutcome::Forward(f) => {
             panic!("no plugin is registered, yet {} forwarded", f.method)
@@ -146,6 +146,53 @@ proptest! {
         let fresh = capabilities_after(&a, 0);
         prop_assert_eq!(&fresh, &capabilities_after(&b, 0));
         prop_assert_eq!(&fresh, &capabilities_after(&a, 5));
+    }
+
+    /// A dry run never needs more than a commit: whatever a grant may call,
+    /// it may rehearse (docs/agents/HEW_API.md §6.6), and the rehearsal reach still stops at
+    /// the grant's ceiling.
+    #[test]
+    fn grants_for_dry_run_covers_grants(perms in arb_permissions(), app in any::<bool>()) {
+        let registry = Registry::protocol_1();
+        let grant = if app {
+            Grant::connected_app("pair_1", perms)
+        } else {
+            Grant::plugin("com.example.p", Some("doc_1"), perms)
+        };
+        for c in registry.commands() {
+            if grant.grants(c) {
+                prop_assert!(grant.grants_for_dry_run(c), "{} granted but not rehearsable", c.name);
+            }
+            if grant.grants_for_dry_run(c) {
+                prop_assert!(within_ceiling(grant.ceiling, c), "{} exceeds the ceiling", c.name);
+            }
+        }
+    }
+}
+
+/// `model.read` alone rehearses exactly the Kernel-served commands that
+/// need `model.read`, `model.write`, or `attributes.write` (any form), plus
+/// what every connection may call.
+#[test]
+fn model_read_alone_rehearses_reads_and_writes_only() {
+    let registry = Registry::protocol_1();
+    let grant = Grant::plugin(
+        "com.example.p",
+        Some("doc_1"),
+        BTreeSet::from([Permission::ModelRead]),
+    );
+    for c in registry.commands() {
+        let expected = match c.permission {
+            Permission::Always => true,
+            Permission::ModelRead
+            | Permission::ModelWrite
+            | Permission::AttributesWrite
+            | Permission::AttributesWriteNs(_) => within_ceiling(grant.ceiling, c),
+            _ => false,
+        };
+        // Host-served and plugin commands pass this check and are refused
+        // by the dry run's static pass instead (`dry_run_host_command`).
+        assert_eq!(grant.grants_for_dry_run(c), expected, "{}", c.name);
     }
 }
 

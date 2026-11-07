@@ -640,7 +640,7 @@ export function dispatchFrameNow(
     result.kind === 'reply'
       ? result.frame
       : completeForward(scene, wasmId, result.token, result.forward.request_id)
-  const mutated = result.kind === 'reply' && shouldRefreshAfterDispatch(scene, frame, reply)
+  const mutated = result.kind === 'reply' && result.dryRun !== true && shouldRefreshAfterDispatch(scene, frame, reply)
   afterDispatch(deps, scene, reply, mutated)
   pumpEvents(scene)
   return reply
@@ -993,7 +993,7 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     const mutated =
       result.kind === 'pending'
         ? result.forward.mutating && replySucceeded(reply)
-        : shouldRefreshAfterDispatch(scene, frame, reply)
+        : result.dryRun !== true && shouldRefreshAfterDispatch(scene, frame, reply)
     // Re-render, then the view effects the dispatch left (camera, units, a
     // Scene activation, the selection, hide and show, isolation, framing),
     // in the order its commands ran.

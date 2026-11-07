@@ -39,6 +39,104 @@ pub enum DispatchOutcome {
     /// [`Connection::complete_forward`], which shapes the response
     /// (docs/agents/HEW_API.md §10.2).
     Forward(ForwardRequest),
+    /// The answer to a dry run (`hew.doc.transact` with `dry_run: true`,
+    /// docs/agents/HEW_API.md §6.6), success and failure alike, a refusal
+    /// made before the rehearsal ran (`compute_busy`, a permission or
+    /// document check) included: a reply like
+    /// [`DispatchOutcome::Reply`], after which the host does NOTHING it does
+    /// for a mutation (no recording, no resync, no selection or view
+    /// write-back): the document it holds was never touched.
+    DryRun(Response),
+}
+
+impl DispatchOutcome {
+    /// The response a reply or a dry run carries; `None` for a dropped
+    /// notification or a forward.
+    pub fn into_response(self) -> Option<Response> {
+        match self {
+            DispatchOutcome::Reply(r) | DispatchOutcome::DryRun(r) => Some(r),
+            DispatchOutcome::Dropped | DispatchOutcome::Forward(_) => None,
+        }
+    }
+}
+
+/// The one-computation-at-a-time gate of a connection (`hew.compute.*`,
+/// docs/agents/HEW_API.md §7): while it is held, a compute call on the same
+/// connection answers `compute_busy` before any work. Every transport today
+/// serves a connection's frames one at a time, so a serial caller never
+/// sees it; a host that runs a computation off its dispatch thread holds
+/// the gate ([`Connection::compute_gate`]) across it.
+#[derive(Debug, Clone, Default)]
+pub struct ComputeGate(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl ComputeGate {
+    /// Takes the gate, or `None` when a computation already holds it. The
+    /// guard releases it when dropped, on every exit path.
+    pub fn try_acquire(&self) -> Option<ComputeGuard> {
+        use std::sync::atomic::Ordering;
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| ComputeGuard(self.0.clone()))
+    }
+
+    /// Whether a computation holds the gate now.
+    pub fn is_held(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// A held [`ComputeGate`]; dropping it releases the gate.
+#[derive(Debug)]
+pub struct ComputeGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for ComputeGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// `compute_busy`: a computation from this connection is still running.
+fn compute_busy(id: Option<RequestId>, index: usize, method: &str) -> Response {
+    Response::err_with(
+        id,
+        codes::REFUSED,
+        "refused",
+        Refusal::api(
+            "compute_busy",
+            "Another computation from this connection is still running. Wait for it, or drop the older request, then send this one.",
+        )
+        .with_detail(serde_json::json!({ "limit": 1 }))
+        .into_data(index, method),
+    )
+}
+
+/// Whether a request is a dry run: `hew.doc.transact` with `dry_run: true`
+/// (docs/agents/HEW_API.md §6.6).
+pub fn is_dry_run(method: &str, params: Option<&serde_json::Value>) -> bool {
+    method == "hew.doc.transact"
+        && params.and_then(|p| p.get("dry_run")) == Some(&serde_json::Value::Bool(true))
+}
+
+/// The compute command a request runs, with its index in the envelope: a
+/// `hew.compute.*` request itself, or the first one inside a transact
+/// envelope.
+fn compute_in(name: &str, params: Option<&serde_json::Value>) -> Option<(usize, String)> {
+    if name.starts_with("hew.compute.") {
+        return Some((0, name.to_string()));
+    }
+    if name != "hew.doc.transact" {
+        return None;
+    }
+    params?
+        .get("commands")?
+        .as_array()?
+        .iter()
+        .enumerate()
+        .find_map(|(i, c)| {
+            let m = c.get("method")?.as_str()?;
+            m.starts_with("hew.compute.").then(|| (i, m.to_string()))
+        })
 }
 
 /// A plugin command call the dispatcher validated and did not execute.
@@ -121,6 +219,7 @@ struct PendingForward {
 enum Replied {
     Response(Response),
     Forward(ForwardRequest),
+    DryRun(Response),
 }
 
 impl From<Response> for Replied {
@@ -159,6 +258,8 @@ pub struct Connection {
     /// The events this connection subscribed to (`hew.event.subscribe`),
     /// each one its grant could receive when it subscribed.
     subscriptions: BTreeSet<String>,
+    /// One `hew.compute.*` call at a time ([`ComputeGate`]).
+    compute_gate: ComputeGate,
 }
 
 impl Connection {
@@ -174,7 +275,15 @@ impl Connection {
             read_scope_depth: 0,
             active_forward: None,
             subscriptions: BTreeSet::new(),
+            compute_gate: ComputeGate::default(),
         }
+    }
+
+    /// This connection's compute gate: a host that serves a `hew.compute.*`
+    /// call off its dispatch thread holds it across the computation, so a
+    /// second call answers `compute_busy` (docs/agents/HEW_API.md §7).
+    pub fn compute_gate(&self) -> ComputeGate {
+        self.compute_gate.clone()
     }
 
     /// Whether a frame of `event` goes to this connection: it subscribed,
@@ -285,9 +394,15 @@ impl Connection {
         let Some(id) = request.id.clone() else {
             return DispatchOutcome::Dropped;
         };
+        // Every answer to a dry run is tagged as one, a refusal made
+        // before the rehearsal ran (`compute_busy`, a permission or
+        // document check) included: none of them touched the document.
+        let dry_run = is_dry_run(&request.method, request.params.as_ref());
         match self.reply(registry, doc, host, id, request) {
+            Replied::Response(response) if dry_run => DispatchOutcome::DryRun(response),
             Replied::Response(response) => DispatchOutcome::Reply(response),
             Replied::Forward(forward) => DispatchOutcome::Forward(forward),
+            Replied::DryRun(response) => DispatchOutcome::DryRun(response),
         }
     }
 
@@ -409,6 +524,15 @@ impl Connection {
         if self.read_scope_depth > 0 && cmd.mutates_document && name != "hew.doc.transact" {
             return read_only_forward(id).into();
         }
+        // One computation at a time per connection, refused before any
+        // work; the guard releases the gate on every exit path.
+        let _compute = match compute_in(name, request.params.as_ref()) {
+            Some((index, method)) => match self.compute_gate.try_acquire() {
+                Some(guard) => Some(guard),
+                None => return compute_busy(id, index, &method).into(),
+            },
+            None => None,
+        };
         // A plugin-provided command never executes here: it is validated
         // and handed back for its plugin (docs/agents/HEW_API.md §10.2).
         if cmd.is_plugin() {
@@ -443,6 +567,27 @@ impl Connection {
             }
             "hew.doc.transact" => {
                 let params = request.params.unwrap_or(serde_json::json!({}));
+                // A dry run is answered whole here, success or failure, as
+                // its own outcome, so the host skips everything it does
+                // after a mutation (docs/agents/HEW_API.md §6.6).
+                // The envelope's own checks come first, as for a commit
+                // (below), and only then the attachment check.
+                if params.get("dry_run") == Some(&serde_json::Value::Bool(true)) {
+                    if let Ok(tx) = serde_json::from_value::<transact::TxParams>(params.clone())
+                        && let Err(e) = transact::precheck(doc, &tx)
+                    {
+                        return Replied::DryRun(tx_error_response(id, e, &params));
+                    }
+                    let response = if !self.attached && !explicit {
+                        Response::err(id, codes::NO_DOCUMENT, "no document attached")
+                    } else {
+                        match transact::run_dry(doc, host, registry, &self.grant, &params) {
+                            Ok(result) => Response::ok(id, result),
+                            Err(e) => tx_error_response(id, e, &params),
+                        }
+                    };
+                    return Replied::DryRun(response);
+                }
                 // The envelope's own checks (`expect_generation`, the
                 // `coalesce` bounds) come first, for every envelope shape:
                 // a plugin command's, the inline attach, and the rest,

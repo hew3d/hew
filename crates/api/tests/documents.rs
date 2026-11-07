@@ -47,7 +47,7 @@ fn send(
         document: document.map(str::to_string),
     };
     match conn.dispatch(&REGISTRY, doc, host, request) {
-        DispatchOutcome::Reply(r) => r,
+        DispatchOutcome::Reply(r) | DispatchOutcome::DryRun(r) => r,
         DispatchOutcome::Dropped => panic!("a request with an id is never dropped"),
         DispatchOutcome::Forward(f) => {
             panic!("no plugin is registered, yet {} forwarded", f.method)

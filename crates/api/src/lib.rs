@@ -33,12 +33,15 @@ pub mod paths;
 pub mod print_layout;
 pub mod refusal;
 pub mod registry;
+pub mod rehearsal;
 pub mod schema_check;
 pub mod selection;
+pub mod solid_spec;
 pub mod transact;
 
 pub use dispatch::{
-    Connection, DispatchOutcome, ForwardCaller, ForwardFailure, ForwardReply, ForwardRequest,
+    ComputeGate, ComputeGuard, Connection, DispatchOutcome, ForwardCaller, ForwardFailure,
+    ForwardReply, ForwardRequest, is_dry_run,
 };
 pub use envelope::{ErrorObject, Request, RequestId, Response, codes};
 pub use grant::{Ceiling, Grant, Permission, within_ceiling};

@@ -127,6 +127,7 @@ pub mod attrs;
 /// `hew.view.camera` (view.rs) — not a command namespace of its own, so
 /// it carries no `handler`.
 mod camera;
+pub mod compute;
 pub mod doc;
 pub mod draft;
 pub mod entity;
@@ -164,4 +165,5 @@ pub fn handler(name: &str) -> Option<Handler> {
         .or_else(|| scenes::handler(name))
         .or_else(|| print::handler(name))
         .or_else(|| library::handler(name))
+        .or_else(|| compute::handler(name))
 }

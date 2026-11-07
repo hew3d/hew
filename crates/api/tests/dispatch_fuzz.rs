@@ -447,6 +447,17 @@ fn hostile_envelope_case(grant: Grant, request: Request) -> Result<(), TestCaseE
                 );
                 prop_assert_eq!(doc.undo_depth(), depth_before);
             }
+            DispatchOutcome::DryRun(response) => {
+                // A rehearsal answers like any reply and never touches the
+                // document, success or failure.
+                assert_well_formed_reply(&response)?;
+                prop_assert_eq!(
+                    doc.save(),
+                    bytes_before,
+                    "a dry run must leave the document untouched"
+                );
+                prop_assert_eq!(doc.undo_depth(), depth_before);
+            }
             DispatchOutcome::Reply(response) => {
                 assert_well_formed_reply(&response)?;
                 let depth_after = doc.undo_depth();
@@ -1081,7 +1092,7 @@ proptest! {
             let id = RequestId::Number(100 + i as i64);
             let outcome = conn.dispatch(&registry, &mut doc, &mut NoHost, req(Some(id.clone()), method.clone(), Some(params)));
             let response = match outcome {
-                DispatchOutcome::Reply(r) => r,
+                DispatchOutcome::Reply(r) | DispatchOutcome::DryRun(r) => r,
                 DispatchOutcome::Forward(f) => {
                     prop_assert_eq!(&f.method, &method);
                     prop_assert!(f.timeout_ms <= 50_000);

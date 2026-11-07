@@ -68,7 +68,16 @@ struct Frame {
     /// compared with `response`.
     #[serde(default)]
     compare: Option<String>,
+    /// The outcome kind the dispatcher must answer with: `"reply"` (the
+    /// default), or `"dry_run"` for a rehearsal (docs/agents/HEW_API.md
+    /// §6.6), whose body alone cannot prove the host was told.
+    #[serde(default = "reply_outcome")]
+    outcome: String,
     response: serde_json::Value,
+}
+
+fn reply_outcome() -> String {
+    "reply".into()
 }
 
 #[derive(serde::Deserialize)]
@@ -131,8 +140,21 @@ fn replay(path: &str) {
         let request: Request =
             serde_json::from_value(frame.request.clone()).expect("request parses");
         let outcome = conn.dispatch(&registry, &mut doc, &mut host, request);
+        let kind = match &outcome {
+            DispatchOutcome::DryRun(_) => "dry_run",
+            _ => "reply",
+        };
+        if frame.forward.is_none() {
+            assert_eq!(
+                kind, frame.outcome,
+                "frame {i} ({}) answered as the wrong outcome",
+                frame.note
+            );
+        }
         let response = match (outcome, &frame.forward) {
-            (DispatchOutcome::Reply(response), None) => response,
+            (DispatchOutcome::Reply(response) | DispatchOutcome::DryRun(response), None) => {
+                response
+            }
             (DispatchOutcome::Forward(forward), Some(expected)) => {
                 let projected = json!({
                     "plugin": forward.plugin,
@@ -228,6 +250,30 @@ fn forwarding_transcript_matches_the_golden() {
     replay(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/transcripts/forwarding.json"
+    ));
+}
+
+/// Dry runs (docs/agents/HEW_API.md §6.6): a rehearsal answers the ids a
+/// commit would mint and moves neither the generation nor the undo depth;
+/// `coalesce` is `-32602`; a Host-served command refuses
+/// `dry_run_host_command`; a stale `expect_generation` refuses first; a
+/// rehearsed subtract is read back through `$ref` in the same call.
+#[test]
+fn dry_run_transcript_matches_the_golden() {
+    replay(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/transcripts/dry_run.json"
+    ));
+}
+
+/// Pure computations (docs/agents/HEW_API.md §7 "Compute"): measure,
+/// boolean, slice, shells, and offset on transient solids, the two
+/// reserved rows, and refusals by name.
+#[test]
+fn compute_transcript_matches_the_golden() {
+    replay(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/transcripts/compute.json"
     ));
 }
 

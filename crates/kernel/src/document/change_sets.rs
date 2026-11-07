@@ -262,7 +262,7 @@ impl Document {
                 ..
             } => {
                 b.object(Added, *result);
-                b.objects(Removed, [*a, *other]);
+                b.objects(Removed, std::iter::once(*a).chain(*other));
                 b.owner_defs(&[*result], &[], &[]);
                 b.reanchored(reanchored);
             }

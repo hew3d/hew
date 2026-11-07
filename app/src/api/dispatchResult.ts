@@ -7,7 +7,7 @@
 
 export type DispatchResult =
   | { kind: 'none' }
-  | { kind: 'reply'; frame: string }
+  | { kind: 'reply'; frame: string; dryRun?: true }
   | { kind: 'pending'; token: number; forward: ForwardRequestJson }
 
 /** `api::ForwardRequest` as JSON. */
@@ -37,8 +37,14 @@ export function parseDispatch(raw: string | undefined): DispatchResult {
     parsed = undefined
   }
   if (typeof parsed === 'object' && parsed !== null) {
-    const tagged = parsed as { reply?: unknown; pending?: unknown }
-    if (typeof tagged.reply === 'string') return { kind: 'reply', frame: tagged.reply }
+    const tagged = parsed as { reply?: unknown; pending?: unknown; dry_run?: unknown }
+    // A dry run (docs/agents/HEW_API.md §6.6) changed nothing, so the caller
+    // skips everything it does after a mutation.
+    if (typeof tagged.reply === 'string') {
+      return tagged.dry_run === true
+        ? { kind: 'reply', frame: tagged.reply, dryRun: true }
+        : { kind: 'reply', frame: tagged.reply }
+    }
     const pending = tagged.pending as { token?: unknown; forward?: unknown } | undefined
     if (
       typeof pending === 'object' &&
