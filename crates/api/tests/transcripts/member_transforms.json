@@ -1,0 +1,679 @@
+{
+  "frames": [
+    {
+      "compare": "/result/profile",
+      "note": "the handshake",
+      "request": {
+        "id": 0,
+        "jsonrpc": "2.0",
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": "core"
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "compare": "/result/label",
+      "note": "box a",
+      "request": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  1.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "a"
+        }
+      },
+      "response": "a"
+    },
+    {
+      "compare": "/result/label",
+      "note": "box b",
+      "request": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  2.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  3.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "b"
+        }
+      },
+      "response": "b"
+    },
+    {
+      "note": "a component of a and b",
+      "request": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "method": "hew.component.create",
+        "params": {
+          "members": [
+            "obj_1",
+            "obj_3"
+          ]
+        }
+      },
+      "response": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.create",
+          "results": [
+            {
+              "component": "cmp_4",
+              "instance": "ins_5"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "a mirrored placement across x = 10",
+      "request": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "method": "hew.component.place",
+        "params": {
+          "component": "cmp_4",
+          "pose": [
+            -1.0,
+            0.0,
+            0.0,
+            20.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      },
+      "response": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.place",
+          "results": [
+            {
+              "instance": "ins_6"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/bbox",
+      "note": "the mirrored placement's bounds before",
+      "request": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "method": "hew.query.entity",
+        "params": {
+          "id": "ins_6"
+        }
+      },
+      "response": {
+        "max": [
+          20.0,
+          1.0,
+          1.0
+        ],
+        "min": [
+          17.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "note": "move a 100 mm along world +x through the mirrored path",
+      "request": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.move",
+        "params": {
+          "ids": [
+            {
+              "path": [
+                "ins_6",
+                "obj_1"
+              ]
+            }
+          ],
+          "translation": [
+            0.1,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "response": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.entity.move",
+          "results": [
+            {}
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/bbox",
+      "note": "under the mirrored placement a moved +x",
+      "request": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "method": "hew.query.entity",
+        "params": {
+          "id": "ins_6"
+        }
+      },
+      "response": {
+        "max": [
+          20.1,
+          1.0,
+          1.0
+        ],
+        "min": [
+          17.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "compare": "/result/bbox",
+      "note": "under the plain placement a moved -x, the mirror image",
+      "request": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "method": "hew.query.entity",
+        "params": {
+          "id": "ins_5"
+        }
+      },
+      "response": {
+        "max": [
+          3.0,
+          1.0,
+          1.0
+        ],
+        "min": [
+          -0.10000000000000142,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "compare": "/result/results/0/ids",
+      "note": "two copies of a through the path, 2 m apart along world +y",
+      "request": {
+        "id": 10,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.move",
+        "params": {
+          "copy": {
+            "count": 2
+          },
+          "ids": [
+            {
+              "path": [
+                "ins_6",
+                "obj_1"
+              ]
+            }
+          ],
+          "translation": [
+            0.0,
+            2.0,
+            0.0
+          ]
+        }
+      },
+      "response": [
+        "obj_7",
+        "obj_8"
+      ]
+    },
+    {
+      "compare": "/result/bbox",
+      "note": "both copies show in the plain placement",
+      "request": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "method": "hew.query.entity",
+        "params": {
+          "id": "ins_5"
+        }
+      },
+      "response": {
+        "max": [
+          3.0,
+          5.0,
+          1.0
+        ],
+        "min": [
+          -0.10000000000000142,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "note": "a quarter turn of b about world z through its mirrored corner",
+      "request": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.rotate",
+        "params": {
+          "angle": 1.5707963267948966,
+          "axis": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "ids": [
+            {
+              "path": [
+                "ins_6",
+                "obj_3"
+              ]
+            }
+          ],
+          "pivot": [
+            18.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "response": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.entity.rotate",
+          "results": [
+            {}
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/bbox",
+      "note": "b turned in the mirrored placement",
+      "request": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "method": "hew.query.entity",
+        "params": {
+          "id": "ins_6"
+        }
+      },
+      "response": {
+        "max": [
+          20.1,
+          5.0,
+          1.0
+        ],
+        "min": [
+          17.0,
+          -1.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "compare": "/error/code",
+      "note": "ids from two scopes refuse",
+      "request": {
+        "id": 14,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.move",
+        "params": {
+          "ids": [
+            "ins_5",
+            {
+              "path": [
+                "ins_6",
+                "obj_1"
+              ]
+            }
+          ],
+          "translation": [
+            1.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "response": -32602
+    },
+    {
+      "compare": "/result/label",
+      "note": "a world cutter over the mirrored copy of a",
+      "request": {
+        "id": 15,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  19.5,
+                  0.25,
+                  0.0
+                ],
+                "corner_b": [
+                  20.5,
+                  0.75,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 2.0,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "cutter"
+        }
+      },
+      "response": "cutter"
+    },
+    {
+      "note": "subtract through the mirrored path",
+      "request": {
+        "id": 16,
+        "jsonrpc": "2.0",
+        "method": "hew.solid.subtract",
+        "params": {
+          "a": {
+            "path": [
+              "ins_6",
+              "obj_1"
+            ]
+          },
+          "b": "obj_a"
+        }
+      },
+      "response": {
+        "id": 16,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.solid.subtract",
+          "results": [
+            {
+              "result": "obj_b"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/occurrences/0/id",
+      "note": "the cut member is listed under the plain placement too",
+      "request": {
+        "id": 17,
+        "jsonrpc": "2.0",
+        "method": "hew.query.occurrences",
+        "params": {
+          "roots": [
+            {
+              "path": [
+                "ins_5",
+                "obj_b"
+              ]
+            }
+          ]
+        }
+      },
+      "response": "obj_b"
+    },
+    {
+      "note": "undo the subtract",
+      "request": {
+        "id": 18,
+        "jsonrpc": "2.0",
+        "method": "hew.history.undo",
+        "params": {}
+      },
+      "response": {
+        "id": 18,
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "note": "a placement turned a quarter about z and shifted to x = 30, a pose that is not its own inverse",
+      "request": {
+        "id": 19,
+        "jsonrpc": "2.0",
+        "method": "hew.component.place",
+        "params": {
+          "component": "cmp_4",
+          "pose": [
+            0.0,
+            -1.0,
+            0.0,
+            30.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      },
+      "response": {
+        "id": 19,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.place",
+          "results": [
+            {
+              "instance": "ins_c"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/bbox",
+      "note": "the turned placement's bounds before",
+      "request": {
+        "id": 20,
+        "jsonrpc": "2.0",
+        "method": "hew.query.entity",
+        "params": {
+          "id": "ins_c"
+        }
+      },
+      "response": {
+        "max": [
+          31.0,
+          3.0,
+          1.0
+        ],
+        "min": [
+          25.0,
+          -0.10000000000000142,
+          0.0
+        ]
+      }
+    },
+    {
+      "note": "move b 500 mm along world +x through the turned path",
+      "request": {
+        "id": 21,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.move",
+        "params": {
+          "ids": [
+            {
+              "path": [
+                "ins_c",
+                "obj_3"
+              ]
+            }
+          ],
+          "translation": [
+            0.5,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "response": {
+        "id": 21,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.entity.move",
+          "results": [
+            {}
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/bbox",
+      "note": "under the turned placement b moved +x: the far edge goes from 31 to 31.5 (the wrong conjugation order gives 30.5)",
+      "request": {
+        "id": 22,
+        "jsonrpc": "2.0",
+        "method": "hew.query.entity",
+        "params": {
+          "id": "ins_c"
+        }
+      },
+      "response": {
+        "max": [
+          31.5,
+          3.0,
+          1.0
+        ],
+        "min": [
+          25.0,
+          -0.10000000000000142,
+          0.0
+        ]
+      }
+    },
+    {
+      "compare": "/result/bbox",
+      "note": "in the plain placement b moved along local -y, the turn's preimage of world +x",
+      "request": {
+        "id": 23,
+        "jsonrpc": "2.0",
+        "method": "hew.query.entity",
+        "params": {
+          "id": "ins_5"
+        }
+      },
+      "response": {
+        "max": [
+          3.0,
+          5.0,
+          1.0
+        ],
+        "min": [
+          -0.10000000000000142,
+          -1.5,
+          0.0
+        ]
+      }
+    }
+  ],
+  "profile": "core"
+}

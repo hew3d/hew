@@ -7476,6 +7476,76 @@ impl Scene {
         Ok(id.data().as_ffi())
     }
 
+    /// A boolean whose host is a definition member seen through a
+    /// placement and whose tool is a world object (Addendum D §5, "Subtract,
+    /// host is a placement"): the tool maps into the definition's frame
+    /// through the inverse of `path`'s composed pose, the boolean runs
+    /// inside the definition, the world tool is consumed, and every
+    /// placement shows the result, which keeps the host's name, tags, and
+    /// attributes. One undo entry. See
+    /// [`kernel::Document::boolean_through_placement`].
+    ///
+    /// `path` is the placement's instance chain, outermost first (`[a]` for
+    /// a world instance `a`). `host` is the member object; `None` takes the
+    /// definition's only live member when that is a single object; a
+    /// definition of several live parts refuses `AmbiguousHost`, one with
+    /// no live part `BooleanOperandEmpty`, one whose only part is a group
+    /// `GroupedOperand`, one whose only part is a nested placement
+    /// `BooleanOperandHasInstance`, and a stale one `UnknownComponent`.
+    /// `op` is 1 = subtract (`host - tool`); 0 = union and 2 = intersect
+    /// refuse `BooleanOperandHasInstance`, since world material cannot
+    /// join a shared definition (unlink first). Returns `{"result": "<handle>"}`, the
+    /// new member's handle as a decimal string.
+    pub fn boolean_through_placement_json(
+        &mut self,
+        path: Vec<u64>,
+        host: Option<u64>,
+        tool: u64,
+        op: u8,
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let bop = match op {
+            0 => BooleanOp::Union,
+            1 => BooleanOp::Subtract,
+            2 => BooleanOp::Intersect,
+            _ => return Err(ApiError("BadOp: op must be 0, 1, or 2".to_string())),
+        };
+        let instances: Vec<InstanceId> = path.iter().map(|&i| instance_id(i)).collect();
+        let host_id = match host {
+            Some(h) => object_id(h),
+            None => {
+                let def = instances
+                    .last()
+                    .and_then(|&i| self.doc.instance_def(i))
+                    .ok_or_else(|| doc_err(kernel::DocumentError::UnknownInstance))?;
+                // A stale definition, one with no live part, or one whose
+                // only part is a group or a nested placement refuses with
+                // its own kernel code; several parts need a named host.
+                self.doc
+                    .sole_member_object(def)
+                    .map_err(doc_err)?
+                    .ok_or_else(|| {
+                        ApiError::new(
+                            "AmbiguousHost",
+                            "the placement holds more than one part; name the one to cut",
+                        )
+                    })?
+            }
+        };
+        let (id, change) = self
+            .doc
+            .boolean_through_placement(&instances, host_id, object_id(tool), bop)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::BooleanThroughPlacement {
+            path,
+            host,
+            tool,
+            op,
+        });
+        Ok(serde_json::json!({ "result": id.data().as_ffi().to_string() }).to_string())
+    }
+
     /// [`Scene::slice_object`] on a member of `instance`'s definition
     /// (component-edit-parity.md phase K2): `plane` is 6 floats
     /// `[px,py,pz,nx,ny,nz]` in WORLD space, mapped into definition-local
@@ -12461,6 +12531,14 @@ impl Scene {
                     b,
                 } => {
                     self.boolean_in_component(component, op, a, b)?;
+                }
+                BooleanThroughPlacement {
+                    path,
+                    host,
+                    tool,
+                    op,
+                } => {
+                    self.boolean_through_placement_json(path, host, tool, op)?;
                 }
                 SliceDefMember {
                     instance,
@@ -19590,6 +19668,109 @@ mod tests {
         );
         assert_eq!(replayed.save(), scene.save());
         let _ = e;
+    }
+
+    /// `boolean_through_placement_json`: a world cutter over a mirrored
+    /// placement of a one-member definition cuts the member (host taken as
+    /// the definition's only part), every placement shows it, one undo
+    /// entry; a two-part definition refuses `AmbiguousHost` without a
+    /// host; and the call records and replays to the same state.
+    #[test]
+    fn boolean_through_placement_cuts_the_definition_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[a]).unwrap();
+        // A mirrored placement at x ∈ [19, 20].
+        let mirrored = scene
+            .place_instance(
+                scene.instance_def(inst).unwrap(),
+                &[
+                    -1.0, 0.0, 0.0, 20.0, //
+                    0.0, 1.0, 0.0, 0.0, //
+                    0.0, 0.0, 1.0, 0.0,
+                ],
+            )
+            .unwrap();
+        let (ts, tr) = ground_unit_square_at(&mut scene, 19.5, 0.0);
+        let tool = scene.extrude_region(ts, tr, 2.0).unwrap();
+        let depth = scene.doc.undo_depth();
+        let json = scene
+            .boolean_through_placement_json(vec![mirrored], None, tool, 1)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let result: u64 = v["result"].as_str().unwrap().parse().unwrap();
+        assert_eq!(scene.doc.undo_depth(), depth + 1);
+        assert_eq!(
+            scene.doc.object_owner_component(object_id(result)),
+            scene.instance_def(inst).map(component_id)
+        );
+        assert!(!scene.doc.is_world_object(object_id(tool)));
+
+        // Two parts: the host must be named.
+        let (s2, r2) = ground_unit_square_at(&mut scene, 40.0, 0.0);
+        let b = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let (s3, r3) = ground_unit_square_at(&mut scene, 42.0, 0.0);
+        let c = scene.extrude_region(s3, r3, 1.0).unwrap();
+        let pair = scene.make_component(&[0, 0], &[b, c]).unwrap();
+        let (s4, r4) = ground_unit_square_at(&mut scene, 40.5, 0.0);
+        let cutter = scene.extrude_region(s4, r4, 2.0).unwrap();
+        let err = scene
+            .boolean_through_placement_json(vec![pair], None, cutter, 1)
+            .unwrap_err();
+        assert!(err.0.starts_with("AmbiguousHost"), "{}", err.0);
+        scene
+            .boolean_through_placement_json(vec![pair], Some(b), cutter, 1)
+            .unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let recorded = scene.take_recording();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&recorded).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save());
+    }
+
+    /// `boolean_through_placement_json` without a host names why no part
+    /// can be taken: a definition whose one part is a group refuses
+    /// `GroupedOperand`, one whose one part is a nested placement
+    /// `BooleanOperandHasInstance`, never `AmbiguousHost`; a union or
+    /// intersect with a world tool refuses `BooleanOperandHasInstance`.
+    /// Nothing changes on any refusal.
+    #[test]
+    fn boolean_through_placement_without_a_host_names_the_reason() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.group_nodes(&[0], &[a]).unwrap();
+        let grouped = scene.make_component(&[1], &[g]).unwrap();
+        let (ts, tr) = ground_unit_square_at(&mut scene, 0.5, 0.0);
+        let tool = scene.extrude_region(ts, tr, 2.0).unwrap();
+
+        let (s2, r2) = ground_unit_square_at(&mut scene, 10.0, 0.0);
+        let inner_obj = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let inner = scene.make_component(&[0], &[inner_obj]).unwrap();
+        let nested = scene.make_component(&[2], &[inner]).unwrap();
+
+        let (s3, r3) = ground_unit_square_at(&mut scene, 20.0, 0.0);
+        let solo_obj = scene.extrude_region(s3, r3, 1.0).unwrap();
+        let solo = scene.make_component(&[0], &[solo_obj]).unwrap();
+
+        let before = scene.save();
+        let depth = scene.doc.undo_depth();
+        let code = |r: Result<String, ApiError>| r.unwrap_err().0;
+        let e = code(scene.boolean_through_placement_json(vec![grouped], None, tool, 1));
+        assert!(e.starts_with("GroupedOperand"), "{e}");
+        let e = code(scene.boolean_through_placement_json(vec![nested], None, tool, 1));
+        assert!(e.starts_with("BooleanOperandHasInstance"), "{e}");
+        for op in [0, 2] {
+            let e = code(scene.boolean_through_placement_json(vec![solo], None, tool, op));
+            assert!(e.starts_with("BooleanOperandHasInstance"), "op {op}: {e}");
+        }
+        assert_eq!(scene.doc.undo_depth(), depth);
+        assert_eq!(scene.save(), before);
     }
 
     /// `draft_loop_in_instance` maps a WORLD-space loop through the

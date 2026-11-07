@@ -804,6 +804,10 @@ a mode the API does not model yet. The gap is registry-documented; an
 agent's recourse is `make_unique` or `explode`, and fallback-mode
 editing can arrive additively later (§9).
 
+Moving, turning, scaling, copying, or cutting a definition member does
+not need a session at all: the path forms of §7 edit the definition
+directly, in world terms, with every placement following.
+
 ### 6.4 What a transaction may contain
 
 The registry classes every command, and the class governs placement:
@@ -905,8 +909,8 @@ for, not shipped.
 | `hew.doc` | `attach` (to a named document, §4.2), `transact`, `new`, `open` (the desktop app opens each into a new background window), `close`, `focus` (desktop app windows; `app` profile), `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats), `purge_unused` (delete every unused palette material and component definition, one undo entry), `health` (every open object with its verdict, open rims and seam family) | Required (`import`, `purge_unused`, `health`, `close`, `focus` Standard) |
 | `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack), `changes_since` (what changed since a history generation, §4.5), `occurrences`, `part_frame`, `mesh`, `topology` (§7.4) | Required (`changes_since`, `occurrences`, `part_frame`, `mesh`, `topology` Standard) |
 | `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` (a sketch region, or a face/plane region by unit key), `units` (list a plane's drawing as units), `move`, `rotate`, `scale`, `copy`, `delete` (edit units on a plane) | Required (`units`, `move`, `rotate`, `scale`, `copy`, `delete` Standard) |
-| `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form), `cap`, `delete_faces`, `mark_surface`, `thicken` (repair open objects, see below) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint`, and the repair commands Standard) |
-| `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy, array, and grid forms), `rotate`, `scale`, `set_frame` (a part's frame override, §7.4) | Required (`set_frame` Standard) |
+| `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice` (`subtract`, `slice`, and `push_pull` also on a definition member through a path, below), `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form), `cap`, `delete_faces`, `mark_surface`, `thicken` (repair open objects, see below) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint`, and the repair commands Standard) |
+| `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy, array, and grid forms), `rotate`, `scale` (each also on members of one definition through a path, below), `set_frame` (a part's frame override, §7.4) | Required (`set_frame` Standard) |
 | `hew.context` | `enter`, `exit` | Required |
 | `hew.group` | `create`, `explode`, `reparent` | Required (`reparent` Standard) |
 | `hew.component` | `create`, `place`, `make_unique`, `explode`, `rebase` (new definition axes, nothing moves), `flip_instance` (mirror one placement) (§7.4) | Standard |
@@ -1422,6 +1426,56 @@ Semantics notes, normative:
   as a surface on purpose (`accepted: false` clears it): stored in the
   object's `hew.health` attributes, no geometry, and `hew.doc.health`
   keeps listing it with `accepted: true`.
+- **Transforming a part through a path.** `hew.entity.move`, `rotate`,
+  and `scale` take each `ids` entry as a public id or an occurrence
+  locator `{"path": [instance, …, member]}` (§5.2, §7.4). One call is one
+  scope: every entry names a world node (or sketch), or every entry names
+  a member of ONE definition reached by the SAME instance path; a mix, two
+  definitions, or two paths to one definition is `-32602` ("ids must all
+  be world nodes or members of one definition reached by the same path").
+  A path whose leaf is a world node counts as that node's id; a path that
+  leads nowhere refuses `unknown_occurrence`. The gesture stays in world
+  terms — `translation`, `from`/`to`, `pivot`, `axis`, and `anchor` are
+  world values, exactly as for a world node — and Hew applies it in the
+  definition's own frame (`t_local = P⁻¹ · t · P`, `P` the path's
+  composed pose), so the member moves where the user would have dragged
+  it under that placement, and every other placement of the definition
+  follows with its own pose (a mirrored placement shows the mirror image
+  of the move). A member group's leaves bake once and a member instance's
+  pose composes, as for a world selection. `copy` (a count or a grid)
+  clones the members inside the same definition, so every placement
+  shows the copies; the result's `ids` are the copies' ids. Each call is
+  one undo entry. While the definition — or one the path passes through —
+  is open for editing, its members are world nodes, and the path form
+  refuses `explode_session_scope`: transform the world rows instead. A
+  copy also refuses `explode_session_scope` while any editing session is
+  open, even one on an unrelated definition, because closing a session
+  folds every node made since it opened into the open container. A member that left
+  the definition between resolution and the edit refuses
+  `unknown_entity`.
+- **Cutting a part through a path.** `hew.solid.subtract` takes `a` as
+  `{"path": [instance, …, object]}`: with `b` a world object, the cutter
+  is mapped into the definition's frame through the path's composed pose,
+  the subtract runs inside the definition, and the cutter is consumed;
+  every placement shows the cut, and the result is a member that keeps
+  `a`'s name, tags, and attributes (`result` is its id). With `b` a member
+  of the same definition by the same path (`{"path": […]}`), `union`,
+  `subtract`, and `intersect` all run between the two members inside the
+  definition. A union or intersect of a path member with a world object
+  refuses `-32602`: the result would move world material into a shared
+  definition, which unlinking is for; and `b` must not be a path member
+  when `a` is a world node. `hew.solid.slice` takes `object` as a path to
+  a member; the `plane` stays in world coordinates and both pieces stay in
+  the definition. `hew.solid.push_pull` takes a face locator whose
+  `object` is a path to a member; `at` and `ray` stay in that object's own
+  frame, as `hew.query.raycast` reports them, and the push reaches every
+  placement as a definition member's always does. A host or object inside
+  a member group refuses `grouped_operand` (for a boolean between two
+  members, either one). The on-loan rule above applies to all of them,
+  and the ones that make new members, a subtract with a world `b`, a
+  boolean between two members, and a slice, also refuse
+  `explode_session_scope` while any editing session is open, as a copy
+  does.
 - `hew.entity.move` with `copy` over a Sketch selection refuses typed at
   1.0, whatever the count: the UI's sketch copy is tool-layer replay
   through the sticky rules, and the kernel-side sketch duplicate op does

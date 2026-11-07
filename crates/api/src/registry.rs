@@ -790,7 +790,7 @@ impl Registry {
             M,
             Kernel,
             Req,
-            "Boolean subtraction of two solids.",
+            "Boolean subtraction of two solids; a may be a path to a definition member, cut through that placement so every placement shows the cut.",
         );
         add(
             "hew.solid.intersect",
@@ -804,7 +804,7 @@ impl Registry {
             M,
             Kernel,
             Req,
-            "Slice a solid by a plane into two solids.",
+            "Slice a solid by a plane into two solids; the object may be a path to a definition member, sliced in the definition.",
         );
         add(
             "hew.solid.follow_me",
@@ -859,21 +859,21 @@ impl Registry {
             M,
             Kernel,
             Req,
-            "Translate (with copy/array forms) by vector or from→to points.",
+            "Translate (with copy/array forms) by vector or from→to points; ids may be paths to members of one definition, moved in world terms with every placement following.",
         );
         add(
             "hew.entity.rotate",
             M,
             Kernel,
             Req,
-            "Rotate about a pivot and axis by an angle.",
+            "Rotate about a pivot and axis by an angle; ids may be paths to members of one definition, turned in world terms with every placement following.",
         );
         add(
             "hew.entity.scale",
             M,
             Kernel,
             Req,
-            "Scale about an anchor with per-axis factors; a negative factor mirrors.",
+            "Scale about an anchor with per-axis factors; a negative factor mirrors. ids may be paths to members of one definition, scaled in world terms with every placement following.",
         );
         add(
             "hew.entity.set_frame",
@@ -3236,13 +3236,21 @@ impl Registry {
                 "explode_session_scope",
             ];
         }
+        // `ids` of move/rotate/scale: world ids, or occurrence paths to
+        // members of ONE definition by ONE path (HEW_API.md §7).
+        let transform_ids_schema = serde_json::json!({
+            "type": "array",
+            "minItems": 1,
+            "items": occurrence_locator_schema(),
+            "description": "world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602"
+        });
         {
             let cmd = commands.get_mut("hew.entity.move").expect("declared above");
             cmd.implemented = true;
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "ids": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                    "ids": transform_ids_schema.clone(),
                     "translation": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                     "from": {},
                     "to": {},
@@ -3287,6 +3295,10 @@ impl Registry {
                 "unknown_group",
                 "unknown_instance",
                 "unknown_sketch",
+                "unknown_occurrence",
+                "unknown_component",
+                "explode_session_scope",
+                "component_expansion_exceeded",
             ];
         }
         {
@@ -3297,7 +3309,7 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "ids": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                    "ids": transform_ids_schema.clone(),
                     "pivot": {},
                     "axis": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                     "angle": { "type": "number" },
@@ -3325,6 +3337,10 @@ impl Registry {
                 "unknown_group",
                 "unknown_instance",
                 "unknown_sketch",
+                "unknown_occurrence",
+                "unknown_component",
+                "explode_session_scope",
+                "component_expansion_exceeded",
             ];
         }
         {
@@ -3335,7 +3351,7 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "ids": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                    "ids": transform_ids_schema.clone(),
                     "anchor": {},
                     "factors": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
                 },
@@ -3355,6 +3371,9 @@ impl Registry {
                 "unknown_group",
                 "unknown_instance",
                 "unknown_sketch",
+                "unknown_occurrence",
+                "unknown_component",
+                "explode_session_scope",
             ];
         }
         {
@@ -5021,10 +5040,14 @@ impl Registry {
                 .get_mut("hew.solid.push_pull")
                 .expect("declared above");
             cmd.implemented = true;
+            let mut push_face = face_locator_schema.clone();
+            push_face["description"] = serde_json::json!(
+                "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}; object may be {path: [instance, …, object]} to reach a definition member through a placement (at and ray stay in the object's own frame)"
+            );
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "face": face_locator_schema,
+                    "face": push_face,
                     "distance": { "type": "number" }
                 },
                 "required": ["face", "distance"]
@@ -5054,13 +5077,23 @@ impl Registry {
                 "ambiguous_locator",
                 "face_token_unknown",
                 "face_token_stale",
+                "unknown_occurrence",
+                "explode_session_scope",
             ];
 
+            let mut operand_a = occurrence_locator_schema();
+            operand_a["description"] = serde_json::json!(
+                "a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows"
+            );
+            let mut operand_b = occurrence_locator_schema();
+            operand_b["description"] = serde_json::json!(
+                "a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path"
+            );
             let boolean_params = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "a": { "type": "string", "description": "a node id: obj_/grp_/ins_" },
-                    "b": { "type": "string", "description": "a node id: obj_/grp_/ins_" }
+                    "a": operand_a,
+                    "b": operand_b
                 },
                 "required": ["a", "b"]
             });
@@ -5080,6 +5113,9 @@ impl Registry {
                     "unknown_group",
                     "unknown_instance",
                     "unknown_entity",
+                    "unknown_occurrence",
+                    "unknown_component",
+                    "explode_session_scope",
                 ]
             };
 
@@ -5114,11 +5150,25 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "object": { "type": "string" },
+                    "object": {
+                        "oneOf": [
+                            { "type": "string" },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "path": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                                },
+                                "required": ["path"],
+                                "additionalProperties": false
+                            }
+                        ],
+                        "description": "a world object id, or {path: [instance, …, object]}: a definition member through one placement; the pieces stay in the definition and every placement follows"
+                    },
                     "plane": {
                         "type": "object",
                         "properties": { "origin": point_schema.clone(), "normal": point_schema.clone() },
-                        "required": ["origin", "normal"]
+                        "required": ["origin", "normal"],
+                        "description": "world coordinates, also through a path"
                     }
                 },
                 "required": ["object", "plane"]
@@ -5134,6 +5184,11 @@ impl Registry {
                 "degenerate",
                 "unknown_object",
                 "unknown_entity",
+                "unknown_occurrence",
+                "unknown_instance",
+                "unknown_component",
+                "grouped_operand",
+                "explode_session_scope",
             ];
 
             let cmd = commands

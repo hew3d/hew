@@ -14,7 +14,7 @@
 use super::{CmdError, Ctx, Handler};
 use crate::locate;
 use crate::refusal::Refusal;
-use kernel::{EntityRef, NodeId, SketchId, Transform, Vec3};
+use kernel::{ComponentId, EntityRef, InstanceId, NodeId, SketchId, Transform, Vec3};
 use serde_json::Value;
 use std::num::NonZeroU32;
 
@@ -262,7 +262,7 @@ fn grid_placements(grid: &[GridAxis]) -> Result<Vec<Transform>, CmdError> {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MoveParams {
-    ids: Vec<String>,
+    ids: Vec<Value>,
     #[serde(default)]
     translation: Option<[f64; 3]>,
     #[serde(default)]
@@ -273,21 +273,127 @@ struct MoveParams {
     copy: Option<CopySpec>,
 }
 
-/// Splits resolved ids into their `NodeId` and `SketchId` targets,
-/// refusing typed on the first id that names neither.
-fn split_ids(ctx: &Ctx, ids: &[String]) -> Result<(Vec<NodeId>, Vec<SketchId>), CmdError> {
+/// What a `move`/`rotate`/`scale` call's `ids` name: world nodes and
+/// sketches (today's form), or members of ONE definition reached by ONE
+/// occurrence path (docs/agents/HEW_API.md §7, "Transforming a part through
+/// a path"). Never both: one call, one scope, one undo entry.
+enum TransformTargets {
+    World {
+        nodes: Vec<NodeId>,
+        sketches: Vec<SketchId>,
+    },
+    Members {
+        component: ComponentId,
+        /// The instance chain, outermost first, without the leaves.
+        path: Vec<InstanceId>,
+        nodes: Vec<NodeId>,
+        /// world ← the definition's frame, [`kernel::Document::path_pose`].
+        path_pose: Transform,
+    },
+}
+
+fn one_scope_refusal() -> CmdError {
+    CmdError::Params(
+        "ids must all be world nodes or members of one definition reached by the same path".into(),
+    )
+}
+
+/// Resolves `ids`: each a public id (a world node or sketch) or an
+/// occurrence locator `{ "path": [instance, …, leaf] }`. A path whose leaf
+/// is a world node (no instance before it) counts as that node's id. Every
+/// path entry must share one instance chain; a mix of world entries and
+/// member paths is `-32602`.
+fn resolve_transform_targets(ctx: &Ctx, ids: &[Value]) -> Result<TransformTargets, CmdError> {
     let mut nodes = Vec::new();
     let mut sketches = Vec::new();
-    for id in ids {
-        match ctx.resolver().resolve(id) {
-            Some(EntityRef::Object(o)) => nodes.push(NodeId::Object(o)),
-            Some(EntityRef::Group(g)) => nodes.push(NodeId::Group(g)),
-            Some(EntityRef::Instance(i)) => nodes.push(NodeId::Instance(i)),
-            Some(EntityRef::Sketch(s)) => sketches.push(s),
-            _ => return Err(unknown_entity(id)),
+    let mut saw_world = false;
+    let mut member: Option<(Vec<InstanceId>, ComponentId)> = None;
+    let mut members = Vec::new();
+    for v in ids {
+        if let Some(id) = v.as_str() {
+            match ctx.resolver().resolve(id) {
+                Some(EntityRef::Object(o)) => nodes.push(NodeId::Object(o)),
+                Some(EntityRef::Group(g)) => nodes.push(NodeId::Group(g)),
+                Some(EntityRef::Instance(i)) => nodes.push(NodeId::Instance(i)),
+                Some(EntityRef::Sketch(s)) => sketches.push(s),
+                _ => return Err(unknown_entity(id)),
+            }
+            saw_world = true;
+            continue;
+        }
+        let occ = locate::resolve_occurrence_locator(ctx, v)?;
+        let Some(def) = occ.owner_def.filter(|_| !occ.path.is_empty()) else {
+            nodes.push(occ.node);
+            saw_world = true;
+            continue;
+        };
+        match &member {
+            None => member = Some((occ.path.clone(), def)),
+            Some((path, _)) if *path == occ.path => {}
+            Some(_) => return Err(one_scope_refusal()),
+        }
+        members.push(occ.node);
+    }
+    match member {
+        None => Ok(TransformTargets::World { nodes, sketches }),
+        Some(_) if saw_world => Err(one_scope_refusal()),
+        Some((path, component)) => {
+            let path_pose = ctx
+                .doc
+                .path_pose(&path)
+                .ok_or_else(locate::unknown_occurrence)?;
+            Ok(TransformTargets::Members {
+                component,
+                path,
+                nodes: members,
+                path_pose,
+            })
         }
     }
-    Ok((nodes, sketches))
+}
+
+/// The definition-frame transform a WORLD gesture `t` becomes through a
+/// placement whose composed pose is `pose` (world ← definition):
+/// `t_local = pose⁻¹ · t · pose`, which in [`Transform::then`]'s order
+/// (`self` first) is `pose`, then `t`, then `pose⁻¹` — a definition point
+/// goes to the world, moves as the user asked, and comes back.
+fn world_to_definition(pose: &Transform, t: &Transform) -> Result<Transform, CmdError> {
+    let inverse = pose.inverse().map_err(kernel::DocumentError::Transform)?;
+    Ok(pose.then(t).then(&inverse))
+}
+
+/// A member edit's kernel refusals, with the member checks surfaced as
+/// `unknown_entity` (the path resolved, so the member left the definition
+/// in between — a transaction's earlier command).
+fn member_error(e: kernel::DocumentError) -> CmdError {
+    use kernel::DocumentError as E;
+    match e {
+        E::UnknownObject | E::UnknownGroup | E::UnknownInstance => CmdError::Refusal(Refusal::api(
+            "unknown_entity",
+            "A listed entity is no longer a live member of the definition its path reaches.",
+        )),
+        other => other.into(),
+    }
+}
+
+/// The on-loan check every path edit makes first: a definition the path
+/// passes through that is open for editing holds its members as world
+/// nodes, so the path edit refuses and the caller edits the world rows.
+fn refuse_path_on_loan(ctx: &Ctx, path: &[InstanceId]) -> Result<(), CmdError> {
+    if ctx.doc.path_on_loan(path) {
+        return Err(kernel::DocumentError::ExplodeSessionScope.into());
+    }
+    Ok(())
+}
+
+/// Splits `ids` into world `NodeId` and `SketchId` targets, refusing a
+/// member path with the one-scope message (for the forms that take world
+/// targets only).
+fn world_targets(ctx: &Ctx, ids: &[Value]) -> Result<(Vec<NodeId>, Vec<SketchId>), CmdError> {
+    match resolve_transform_targets(ctx, ids)? {
+        TransformTargets::World { nodes, sketches } => Ok((nodes, sketches)),
+        TransformTargets::Members { .. } => Err(one_scope_refusal()),
+    }
 }
 
 fn mixed_selection_refusal() -> CmdError {
@@ -333,7 +439,25 @@ fn move_(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             ));
         }
         let placements = grid_placements(grid)?;
-        let (nodes, sketches) = split_ids(ctx, &p.ids)?;
+        if let TransformTargets::Members {
+            component,
+            path,
+            nodes,
+            path_pose,
+        } = resolve_transform_targets(ctx, &p.ids)?
+        {
+            refuse_path_on_loan(ctx, &path)?;
+            let local: Vec<Transform> = placements
+                .iter()
+                .map(|t| world_to_definition(&path_pose, t))
+                .collect::<Result<_, _>>()?;
+            let (roots, _) = ctx
+                .doc
+                .duplicate_def_members_placements(component, &nodes, &local)
+                .map_err(member_error)?;
+            return Ok(serde_json::json!({ "ids": public_ids(ctx, &roots) }));
+        }
+        let (nodes, sketches) = world_targets(ctx, &p.ids)?;
         if !sketches.is_empty() {
             if !nodes.is_empty() {
                 return Err(mixed_selection_refusal());
@@ -364,7 +488,10 @@ fn move_(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         };
     let t = Transform::translation(offset);
 
-    let (nodes, sketches) = split_ids(ctx, &p.ids)?;
+    let (nodes, sketches) = match resolve_transform_targets(ctx, &p.ids)? {
+        TransformTargets::World { nodes, sketches } => (nodes, sketches),
+        members => return apply_member_transform(ctx, members, &t, p.copy),
+    };
     if !nodes.is_empty() && !sketches.is_empty() {
         return Err(mixed_selection_refusal());
     }
@@ -411,6 +538,48 @@ fn apply_node_transform(
     Ok(serde_json::json!({ "ids": public_ids(ctx, &ids) }))
 }
 
+/// [`apply_node_transform`] for members reached by a path: the world
+/// gesture `t` is conjugated into the definition's frame and applied there
+/// (every placement follows), or with `copy` the clones land in the
+/// definition at that step.
+fn apply_member_transform(
+    ctx: &mut Ctx,
+    targets: TransformTargets,
+    t: &Transform,
+    copy: Option<CopySpec>,
+) -> Result<Value, CmdError> {
+    let TransformTargets::Members {
+        component,
+        path,
+        nodes,
+        path_pose,
+    } = targets
+    else {
+        return Err(CmdError::Internal(
+            "apply_member_transform takes member targets".into(),
+        ));
+    };
+    refuse_path_on_loan(ctx, &path)?;
+    let local = world_to_definition(&path_pose, t)?;
+    let Some(copy) = copy else {
+        ctx.doc
+            .transform_def_members(component, &nodes, &local)
+            .map_err(member_error)?;
+        return Ok(serde_json::json!({}));
+    };
+    let count = copy.count.unwrap_or(1);
+    if count > API_MAX_ARRAY_COUNT {
+        return Err(array_count_too_large());
+    }
+    let count = NonZeroU32::new(count)
+        .ok_or_else(|| CmdError::Params("copy count must be positive".into()))?;
+    let (roots, _) = ctx
+        .doc
+        .duplicate_def_members_array(component, &nodes, &local, count)
+        .map_err(member_error)?;
+    Ok(serde_json::json!({ "ids": public_ids(ctx, &roots) }))
+}
+
 /// The public ids of nodes a copy just created.
 fn public_ids(ctx: &Ctx, ids: &[NodeId]) -> Vec<String> {
     let resolver = ctx.resolver();
@@ -436,7 +605,7 @@ fn node_entity(n: NodeId) -> EntityRef {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RotateParams {
-    ids: Vec<String>,
+    ids: Vec<Value>,
     pivot: Value,
     axis: [f64; 3],
     angle: f64,
@@ -474,7 +643,10 @@ fn rotate(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         .then(&r)
         .then(&Transform::translation(pivot_v));
 
-    let (nodes, sketches) = split_ids(ctx, &p.ids)?;
+    let (nodes, sketches) = match resolve_transform_targets(ctx, &p.ids)? {
+        TransformTargets::World { nodes, sketches } => (nodes, sketches),
+        members => return apply_member_transform(ctx, members, &t, p.copy),
+    };
     if !sketches.is_empty() {
         // Rotate is a node-space transform in this registry slice;
         // sketches ride the same one-sketch-per-envelope / no-copy rule
@@ -497,7 +669,7 @@ fn rotate(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScaleParams {
-    ids: Vec<String>,
+    ids: Vec<Value>,
     anchor: Value,
     factors: [f64; 3],
 }
@@ -520,7 +692,10 @@ fn scale(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         .then(&s)
         .then(&Transform::translation(anchor_v));
 
-    let (nodes, sketches) = split_ids(ctx, &p.ids)?;
+    let (nodes, sketches) = match resolve_transform_targets(ctx, &p.ids)? {
+        TransformTargets::World { nodes, sketches } => (nodes, sketches),
+        members => return apply_member_transform(ctx, members, &t, None),
+    };
     if !sketches.is_empty() {
         if !nodes.is_empty() || sketches.len() > 1 {
             return Err(mixed_selection_refusal());
@@ -607,4 +782,25 @@ fn set_frame(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     ctx.doc
         .attr_set(target, FRAME_NAMESPACE, FRAME_KEY, AttrValue::Map(m))?;
     Ok(serde_json::json!({ "id": p.id, "source": "attribute" }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::world_to_definition;
+    use kernel::{Point3, Transform, Vec3};
+
+    /// The conjugation order against a known point: under a quarter turn
+    /// about z then +5 along x, definition (0,0,0) sits at world (5,0,0);
+    /// a world +x move takes it to world (6,0,0), which is definition
+    /// (0,−1,0). The other order (pose⁻¹ first) would answer (0,1,0).
+    #[test]
+    fn world_to_definition_applies_pose_then_t_then_inverse() {
+        let pose = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), std::f64::consts::FRAC_PI_2)
+            .unwrap()
+            .then(&Transform::translation(Vec3::new(5.0, 0.0, 0.0)));
+        let t = Transform::translation(Vec3::new(1.0, 0.0, 0.0));
+        let local = world_to_definition(&pose, &t).unwrap();
+        let got = local.apply_point(Point3::new(0.0, 0.0, 0.0));
+        assert!(got.approx_eq(Point3::new(0.0, -1.0, 0.0), 1e-12), "{got:?}");
+    }
 }

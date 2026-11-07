@@ -1995,7 +1995,7 @@ Delete an entity.
 - **Served:** kernel
 - **Permission:** model.write
 
-Translate (with copy/array forms) by vector or from→to points.
+Translate (with copy/array forms) by vector or from→to points; ids may be paths to members of one definition, moved in world terms with every placement following.
 
 **Params schema:**
 
@@ -2045,8 +2045,29 @@ Translate (with copy/array forms) by vector or from→to points.
     },
     "from": {},
     "ids": {
+      "description": "world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602",
       "items": {
-        "type": "string"
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "minItems": 1,
       "type": "array"
@@ -2097,6 +2118,10 @@ Translate (with copy/array forms) by vector or from→to points.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
 
 ### `hew.entity.rename`
 
@@ -2159,7 +2184,7 @@ Rename an entity.
 - **Served:** kernel
 - **Permission:** model.write
 
-Rotate about a pivot and axis by an angle.
+Rotate about a pivot and axis by an angle; ids may be paths to members of one definition, turned in world terms with every placement following.
 
 **Params schema:**
 
@@ -2190,8 +2215,29 @@ Rotate about a pivot and axis by an angle.
       "type": "object"
     },
     "ids": {
+      "description": "world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602",
       "items": {
-        "type": "string"
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "minItems": 1,
       "type": "array"
@@ -2236,6 +2282,10 @@ Rotate about a pivot and axis by an angle.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
 
 ### `hew.entity.scale`
 
@@ -2245,7 +2295,7 @@ Rotate about a pivot and axis by an angle.
 - **Served:** kernel
 - **Permission:** model.write
 
-Scale about an anchor with per-axis factors; a negative factor mirrors.
+Scale about an anchor with per-axis factors; a negative factor mirrors. ids may be paths to members of one definition, scaled in world terms with every placement following.
 
 **Params schema:**
 
@@ -2263,8 +2313,29 @@ Scale about an anchor with per-axis factors; a negative factor mirrors.
       "type": "array"
     },
     "ids": {
+      "description": "world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602",
       "items": {
-        "type": "string"
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "minItems": 1,
       "type": "array"
@@ -2298,6 +2369,9 @@ Scale about an anchor with per-axis factors; a negative factor mirrors.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.entity.set_frame`
 
@@ -9428,12 +9502,52 @@ Boolean intersection of two solids.
 {
   "properties": {
     "a": {
-      "description": "a node id: obj_/grp_/ins_",
-      "type": "string"
+      "description": "a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "b": {
-      "description": "a node id: obj_/grp_/ins_",
-      "type": "string"
+      "description": "a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "required": [
@@ -9471,6 +9585,9 @@ Boolean intersection of two solids.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.solid.mark_surface`
 
@@ -9612,7 +9729,7 @@ Push/pull a face of a solid with the tool's full semantics.
       "type": "number"
     },
     "face": {
-      "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}",
+      "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}; object may be {path: [instance, …, object]} to reach a definition member through a placement (at and ray stay in the object's own frame)",
       "type": "object"
     }
   },
@@ -9664,6 +9781,8 @@ Push/pull a face of a solid with the tool's full semantics.
 - `ambiguous_locator`
 - `face_token_unknown`
 - `face_token_stale`
+- `unknown_occurrence`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.solid.rotate_imprint`
 
@@ -9829,7 +9948,7 @@ Kept for compatibility: uniformly scale a drawn shape about an anchor in its pla
 - **Served:** kernel
 - **Permission:** model.write
 
-Slice a solid by a plane into two solids.
+Slice a solid by a plane into two solids; the object may be a path to a definition member, sliced in the definition.
 
 **Params schema:**
 
@@ -9837,9 +9956,31 @@ Slice a solid by a plane into two solids.
 {
   "properties": {
     "object": {
-      "type": "string"
+      "description": "a world object id, or {path: [instance, …, object]}: a definition member through one placement; the pieces stay in the definition and every placement follows",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "plane": {
+      "description": "world coordinates, also through a path",
       "properties": {
         "normal": {
           "oneOf": [
@@ -9916,6 +10057,11 @@ Slice a solid by a plane into two solids.
 - `degenerate` — The cut lines up exactly with an existing face or edge, so it wouldn't create two pieces. Move the cut slightly.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_occurrence`
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.solid.subtract`
 
@@ -9925,7 +10071,7 @@ Slice a solid by a plane into two solids.
 - **Served:** kernel
 - **Permission:** model.write
 
-Boolean subtraction of two solids.
+Boolean subtraction of two solids; a may be a path to a definition member, cut through that placement so every placement shows the cut.
 
 **Params schema:**
 
@@ -9933,12 +10079,52 @@ Boolean subtraction of two solids.
 {
   "properties": {
     "a": {
-      "description": "a node id: obj_/grp_/ins_",
-      "type": "string"
+      "description": "a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "b": {
-      "description": "a node id: obj_/grp_/ins_",
-      "type": "string"
+      "description": "a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "required": [
@@ -9976,6 +10162,9 @@ Boolean subtraction of two solids.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `nothing_removed` — Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid.
 
 ### `hew.solid.thicken`
@@ -10066,12 +10255,52 @@ Boolean union of two solids.
 {
   "properties": {
     "a": {
-      "description": "a node id: obj_/grp_/ins_",
-      "type": "string"
+      "description": "a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "b": {
-      "description": "a node id: obj_/grp_/ins_",
-      "type": "string"
+      "description": "a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "required": [
@@ -10109,6 +10338,9 @@ Boolean union of two solids.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ## hew.tag
 

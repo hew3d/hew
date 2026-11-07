@@ -8418,6 +8418,10 @@ msgstr ""
 msgid "This component is used inside another component's definition. Make that component's instances unique or explode them first, or delete the outer component."
 msgstr ""
 
+#: src/kernelErrors.ts
+msgid "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
+msgstr ""
+
 #: src/panels/UnsavedChangesDialog.tsx
 msgid "This document has unsaved changes."
 msgstr ""

@@ -612,6 +612,21 @@ retargeting anything. That model remains fully supported for exactly
 these cases; the session stack is the default path, not a replacement for
 it.
 
+The API's path forms use the same through-the-pose model with no session
+at all: a move, turn, scale, copy, boolean, or slice addressed to a
+member by an occurrence path (`Document::transform_def_members`,
+`duplicate_def_members_array`, `boolean_through_placement`,
+`boolean_members_through_placement`, `slice_through_placement`) is conjugated, or mapped, through the path's
+composed pose (`Document::path_pose`) and applied to the definition in
+its own frame, so every placement follows in one undo entry; a
+definition on loan to an open session refuses them, because its members
+are world nodes for the session's duration. The ones that make new
+members (copy, boolean, slice) refuse while any session is open, since a
+session close folds every node made since its open into the open
+container. `boolean_through_placement` runs only a subtract: a union or
+intersect with a world tool would move world material into every
+placement, which unlinking is for (Addendum D §5).
+
 The stack also gives in-context resize a natural target: the Tape
 Measure's measure-then-type-a-length gesture, which resizes the whole
 model at the top level, instead resizes exactly the innermost open

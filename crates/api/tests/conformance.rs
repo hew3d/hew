@@ -289,6 +289,22 @@ fn occurrences_transcript_matches_the_golden() {
     ));
 }
 
+/// Members transformed and cut through an occurrence path
+/// (HEW_API.md §7): a member moved along world +x through a mirrored
+/// placement moves +x there and −x in the plain placement, two copies land
+/// in the definition and show in every placement, a member turned about a
+/// world axis, ids from two scopes refused, a world cutter subtracted
+/// through the mirrored path with the result listed under the plain
+/// placement too, and a member moved through a quarter-turned placement
+/// (a pose that is not its own inverse, so the conjugation order shows).
+#[test]
+fn member_transforms_transcript_matches_the_golden() {
+    replay(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/transcripts/member_transforms.json"
+    ));
+}
+
 /// Raycast through nested and mirrored placements: the occurrence path,
 /// leaf, and face locator of a hit, `exclude` by id and by path, a mirrored
 /// face's outward normal, `all` with `max_distance`, and the missed and

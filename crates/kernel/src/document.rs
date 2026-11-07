@@ -35,6 +35,7 @@ use std::num::NonZeroU32;
 
 mod change_sets;
 mod draft;
+mod member_ops;
 mod occurrences;
 pub use draft::{
     DraftCurveRun, DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore, DraftUnit,
@@ -12106,6 +12107,65 @@ impl Document {
         }
     }
 
+    /// The definitions owning any of the listed records (an object's
+    /// `ObjectOwner::Definition`, a group's or instance's `owner_def`), each
+    /// once in first-seen order, and every instance placing one of them —
+    /// what an undo or redo of a definition-member transform or copy
+    /// reports so every placement re-resolves. Both empty for world
+    /// records.
+    fn def_owners_change(
+        &self,
+        objects: &[ObjectId],
+        groups: &[GroupId],
+        instances: &[InstanceId],
+    ) -> (Vec<ComponentId>, Vec<InstanceId>) {
+        let mut components: Vec<ComponentId> = Vec::new();
+        let mut note = |c: Option<ComponentId>| {
+            if let Some(c) = c
+                && !components.contains(&c)
+            {
+                components.push(c);
+            }
+        };
+        for &o in objects {
+            note(self.objects.get(o).and_then(|r| match r.owner {
+                ObjectOwner::Definition { def, .. } => Some(def),
+                ObjectOwner::World { .. } => None,
+            }));
+        }
+        for &g in groups {
+            note(self.groups.get(g).and_then(|r| r.owner_def));
+        }
+        for &i in instances {
+            note(self.instances.get(i).and_then(|r| r.owner_def));
+        }
+        let mut placing: Vec<InstanceId> = Vec::new();
+        for &c in &components {
+            for i in self.placing_instances(c) {
+                if !placing.contains(&i) {
+                    placing.push(i);
+                }
+            }
+        }
+        (components, placing)
+    }
+
+    /// The groups holding any of `sketches` (a group's drawing,
+    /// [`Document::set_sketch_group`]), each once in first-seen order. A
+    /// transform that moved only a member group's drawing names its owner
+    /// definition through these.
+    fn holding_groups(&self, sketches: &[SketchId]) -> Vec<GroupId> {
+        let mut out: Vec<GroupId> = Vec::new();
+        for s in sketches {
+            if let Some(&g) = self.group_sketches.get(s)
+                && !out.contains(&g)
+            {
+                out.push(g);
+            }
+        }
+        out
+    }
+
     /// Component/instance touch set for a definition-owned sketch.
     fn def_sketch_owner_change(&self, id: SketchId) -> (Vec<ComponentId>, Vec<InstanceId>) {
         match self.sketch_owner_component(id) {
@@ -14088,6 +14148,21 @@ impl Document {
         let n = plane.normal();
         info!(target: "kernel::op", op = "slice_def_member", nx = n.x, ny = n.y, nz = n.z);
         let (component, pose) = self.instance_component(instance)?;
+        self.slice_member_through_pose(component, &pose, object, plane)
+    }
+
+    /// The body of [`Document::slice_def_member`] and
+    /// [`Document::slice_through_placement`]: cuts `object`, a live member
+    /// of `component`, by the WORLD `plane` mapped into the definition's
+    /// frame through `pose⁻¹` (`pose` is world ← definition). Same results
+    /// and errors as [`Document::slice_def_member`] past its instance check.
+    fn slice_member_through_pose(
+        &mut self,
+        component: ComponentId,
+        pose: &Transform,
+        object: ObjectId,
+        plane: &Plane,
+    ) -> Result<((ObjectId, ObjectId), DocChange), DocumentError> {
         let pose_inv = pose.inverse().map_err(DocumentError::Transform)?;
         // Side-keeping: the positive piece is the one on the WORLD plane's
         // normal side, so the local plane's normal must be the pose-inverse
@@ -16299,6 +16374,42 @@ impl Document {
         })
     }
 
+    /// What an undo or redo of a [`DocAction::TransformSelection`]
+    /// reports: the restored objects, sketches, and instances, plus — for
+    /// a definition-member transform ([`Document::transform_def_members`])
+    /// — the owning definitions and every instance placing them, found
+    /// through the objects, the instances, and the groups holding the
+    /// sketches (a member group may hold only drawing). World
+    /// transforms own no definition, so those two lists add nothing.
+    fn transform_selection_change(
+        &self,
+        objects: &[(ObjectId, Object)],
+        sketches: &[(SketchId, Sketch)],
+        instances: &[(InstanceId, Transform)],
+    ) -> DocChange {
+        let objects_touched: Vec<ObjectId> = objects.iter().map(|&(id, _)| id).collect();
+        let mut instances_touched: Vec<InstanceId> = instances.iter().map(|&(i, _)| i).collect();
+        let sketch_ids: Vec<SketchId> = sketches.iter().map(|&(id, _)| id).collect();
+        let (components_touched, placing) = self.def_owners_change(
+            &objects_touched,
+            &self.holding_groups(&sketch_ids),
+            &instances_touched,
+        );
+        for i in placing {
+            if !instances_touched.contains(&i) {
+                instances_touched.push(i);
+            }
+        }
+        DocChange {
+            objects_touched,
+            sketches_touched: sketches.iter().map(|&(id, _)| id).collect(),
+            groups_touched: Vec::new(),
+            instances_touched,
+            components_touched,
+            guides_touched: Vec::new(),
+        }
+    }
+
     /// The live object-owned sketches of `objects`, in first-listing order,
     /// without duplicates — the sketches that ride along when those objects
     /// are transformed.
@@ -16935,10 +17046,8 @@ impl Document {
         // either: the session's frame is captured from the entered pose
         // and the sibling renders through it (ARCHITECTURE.md 2.11).
         self.refuse_def_on_loan(def)?;
-        let rec = &mut self.instances[instance];
-        let prev = rec.pose;
-        let next = prev.then(t);
-        rec.pose = next;
+        let prev = self.compose_instance_pose(instance, t);
+        let next = self.instances[instance].pose;
         // `t` is exactly the world-space delta this call composed into the
         // pose (`next = prev.then(t)`), so it carries a world-space anchor
         // point through precisely the same way a baked object transform
@@ -16957,6 +17066,19 @@ impl Document {
             instances_touched: vec![instance],
             ..Default::default()
         })
+    }
+
+    /// Composes `t` into `instance`'s pose (`pose' = pose.then(t)`) and
+    /// returns the prior pose. The one place an instance pose takes a
+    /// transform for [`Document::transform_instance`] (a world instance) and
+    /// [`Document::transform_def_members`] (a member instance, `t` in its
+    /// owner's frame). The caller has checked the instance is live and `t`
+    /// invertible.
+    fn compose_instance_pose(&mut self, instance: InstanceId, t: &Transform) -> Transform {
+        let rec = &mut self.instances[instance];
+        let prev = rec.pose;
+        rec.pose = prev.then(t);
+        prev
     }
 
     /// Re-express `component` in the frame `(origin, x, y)` given in its
@@ -20233,7 +20355,7 @@ impl Document {
         let parent = self.node_parent(node);
         let mut created = CreatedClone::default();
         let sid_mark = self.next_sid;
-        let root = match self.clone_subtree(node, parent, placement, &mut created) {
+        let root = match self.clone_subtree(node, parent, None, placement, &mut created) {
             Ok(root) => root,
             Err(e) => {
                 // Roll back any records inserted before the failure so the
@@ -20392,7 +20514,7 @@ impl Document {
         for placement in placements {
             for &node in nodes {
                 let parent = self.node_parent(node);
-                match self.clone_subtree(node, parent, placement, &mut created) {
+                match self.clone_subtree(node, parent, None, placement, &mut created) {
                     Ok(root) => roots.push((root, parent)),
                     Err(e) => {
                         // Roll back every record inserted so far so the
@@ -20454,6 +20576,7 @@ impl Document {
             self.attrs.remove(&AttrTarget::Entity(EntityRef::Sketch(s)));
             self.object_sketches.remove(&s);
             self.group_sketches.remove(&s);
+            self.def_sketches.remove(&s);
             self.sketch_tags.remove(&s);
         }
         for o in created.objects {
@@ -20479,10 +20602,18 @@ impl Document {
     /// `placement` per kind (see [`Document::duplicate_node`]). Newly created ids
     /// are pushed onto `created` as they are inserted, so the caller can roll back
     /// on error and record one atomic action. Returns the cloned node's id.
+    ///
+    /// `owner` is who owns the clones: `None` makes world nodes (a world
+    /// copy); `Some(def)` makes every cloned object
+    /// `ObjectOwner::Definition { def }` and every cloned group or instance
+    /// `owner_def: Some(def)` (a copy inside a definition,
+    /// [`Document::duplicate_def_members_array`]). `new_parent` is the
+    /// containing group either way.
     fn clone_subtree(
         &mut self,
         node: NodeId,
         new_parent: Option<GroupId>,
+        owner: Option<ComponentId>,
         placement: &Transform,
         created: &mut CreatedClone,
     ) -> Result<NodeId, DocumentError> {
@@ -20507,11 +20638,19 @@ impl Document {
                     })
                     .collect::<Result<_, _>>()
                     .map_err(DocumentError::Transform)?;
+                let owner_def = owner;
+                let owner = match owner {
+                    None => ObjectOwner::World { parent: new_parent },
+                    Some(def) => ObjectOwner::Definition {
+                        def,
+                        parent: new_parent,
+                    },
+                };
                 let new_id = self.insert_object_record(ObjectRecord {
                     object,
                     history: History::new(),
                     hidden: false,
-                    owner: ObjectOwner::World { parent: new_parent },
+                    owner,
                     name,
                     tags,
                 });
@@ -20523,6 +20662,11 @@ impl Document {
                     let copy = self.insert_sketch_record(sk);
                     created.sketches.push(copy);
                     self.object_sketches.insert(copy, new_id);
+                    // A definition member's drawing is a definition sketch
+                    // too (`object_sketches`' doc comment).
+                    if let Some(def) = owner_def {
+                        self.def_sketches.insert(copy, def);
+                    }
                     self.carry_sketch_tags(s, copy);
                 }
                 Ok(NodeId::Object(new_id))
@@ -20540,7 +20684,7 @@ impl Document {
                     def,
                     pose,
                     parent: new_parent,
-                    owner_def: None,
+                    owner_def: owner,
                     hidden: false,
                     name,
                     tags,
@@ -20557,7 +20701,7 @@ impl Document {
                 let new_gid = self.insert_group_record(GroupRecord {
                     members: Vec::new(),
                     parent: new_parent,
-                    owner_def: None,
+                    owner_def: owner,
                     hidden: false,
                     name,
                     tags,
@@ -20566,7 +20710,7 @@ impl Document {
                 self.copy_attrs(&EntityRef::Group(id), EntityRef::Group(new_gid));
                 let mut new_members = Vec::with_capacity(members.len());
                 for m in members {
-                    let child = self.clone_subtree(m, Some(new_gid), placement, created)?;
+                    let child = self.clone_subtree(m, Some(new_gid), owner, placement, created)?;
                     new_members.push(child);
                 }
                 self.groups[new_gid].members = new_members;
@@ -20587,6 +20731,9 @@ impl Document {
                     let copy = self.insert_sketch_record(sk);
                     created.sketches.push(copy);
                     self.group_sketches.insert(copy, new_gid);
+                    if let Some(def) = owner {
+                        self.def_sketches.insert(copy, def);
+                    }
                     if !tags.is_empty() {
                         self.sketch_tags.insert(copy, tags);
                     }
@@ -23054,14 +23201,7 @@ impl Document {
                     self.annotations[r.annotation].annotation = r.before.clone();
                     self.annotations[r.annotation].detached = r.before_detached;
                 }
-                DocChange {
-                    objects_touched: objects.iter().map(|&(id, _)| id).collect(),
-                    sketches_touched: sketches.iter().map(|&(id, _)| id).collect(),
-                    groups_touched: Vec::new(),
-                    instances_touched: instances.iter().map(|&(i, _)| i).collect(),
-                    components_touched: Vec::new(),
-                    guides_touched: Vec::new(),
-                }
+                self.transform_selection_change(objects, sketches, instances)
             }
             DocAction::RearrangedSketchVertex { sketch, before, .. } => {
                 // Undo a re-arranging vertex drag by restoring the recorded
@@ -23368,6 +23508,11 @@ impl Document {
                         change.groups_touched.push(pg);
                     }
                 }
+                // Clones made inside a definition
+                // (`duplicate_def_members_array`): every placement re-resolves.
+                let (components, placing) = self.def_owners_change(objects, groups, instances);
+                change.components_touched = components;
+                merge_unique(&mut change.instances_touched, placing);
                 change
             }
             &DocAction::CreatedGuide { guide } => {
@@ -24808,14 +24953,7 @@ impl Document {
                     self.annotations[r.annotation].annotation = r.after.clone();
                     self.annotations[r.annotation].detached = r.after_detached;
                 }
-                DocChange {
-                    objects_touched: objects.iter().map(|&(id, _)| id).collect(),
-                    sketches_touched: sketches.iter().map(|&(id, _)| id).collect(),
-                    groups_touched: Vec::new(),
-                    instances_touched: instances.iter().map(|&(i, _)| i).collect(),
-                    components_touched: Vec::new(),
-                    guides_touched: Vec::new(),
-                }
+                self.transform_selection_change(objects, sketches, instances)
             }
             DocAction::RearrangedSketchVertex { sketch, after, .. } => {
                 // Redo a re-arranging vertex drag by restoring the recorded
@@ -25108,6 +25246,11 @@ impl Document {
                         change.groups_touched.push(pg);
                     }
                 }
+                // Clones made inside a definition
+                // (`duplicate_def_members_array`): every placement re-resolves.
+                let (components, placing) = self.def_owners_change(objects, groups, instances);
+                change.components_touched = components;
+                merge_unique(&mut change.instances_touched, placing);
                 change
             }
             &DocAction::CreatedGuide { guide } => {

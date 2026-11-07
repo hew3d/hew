@@ -1,8 +1,8 @@
 //! Structure-and-session fuzz harness (DEVELOPMENT.md rule 3): random
 //! sequences of the tree-shaping ops — make component, group, ungroup,
 //! reparent, explode, place, make unique (one instance, and by occurrence
-//! path), duplicate, delete, delete
-//! definition — interleaved with component and group EDITING SESSIONS
+//! path), duplicate, delete, delete definition, transform and copy
+//! definition members in place — interleaved with component and group EDITING SESSIONS
 //! (opened, stacked, closed innermost-first) and undo/redo, over a document
 //! of plain boxes.
 //!
@@ -85,6 +85,18 @@ enum Op {
     OpenGroupSession {
         sel: usize,
     },
+    /// Move a member of a definition in the definition's frame
+    /// (`transform_def_members`).
+    TransformDefMember {
+        comp: usize,
+        sel: usize,
+    },
+    /// Copy a member of a definition into the same definition, twice
+    /// (`duplicate_def_members_array`).
+    DuplicateDefMembers {
+        comp: usize,
+        sel: usize,
+    },
     /// Delete every object inside the open component session, so the close
     /// empties the definition (the grouped-sibling emptied-close defect).
     DeleteSessionMembers,
@@ -110,6 +122,8 @@ fn arb_op() -> impl Strategy<Value = Op> {
         2 => sel().prop_map(|sel| Op::Delete { sel }),
         1 => sel().prop_map(|sel| Op::DeleteSelection { sel }),
         1 => sel().prop_map(|comp| Op::DeleteDefinition { comp }),
+        2 => (sel(), sel()).prop_map(|(comp, sel)| Op::TransformDefMember { comp, sel }),
+        1 => (sel(), sel()).prop_map(|(comp, sel)| Op::DuplicateDefMembers { comp, sel }),
         3 => sel().prop_map(|sel| Op::OpenComponentSession { sel }),
         3 => sel().prop_map(|sel| Op::OpenGroupSession { sel }),
         2 => Just(Op::DeleteSessionMembers),
@@ -292,6 +306,25 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
         Op::DeleteDefinition { comp } => {
             if let Some(c) = pick(&comps, comp) {
                 let _ = doc.delete_definition(c);
+            }
+        }
+        Op::TransformDefMember { comp, sel } => {
+            if let Some(c) = pick(&comps, comp)
+                && let Some(n) = pick(&doc.def_member_nodes(c).unwrap_or_default(), sel)
+            {
+                let t = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), 0.25)
+                    .expect("rotation")
+                    .then(&Transform::translation(Vec3::new(0.3, -0.2, 0.1)));
+                let _ = doc.transform_def_members(c, &[n], &t);
+            }
+        }
+        Op::DuplicateDefMembers { comp, sel } => {
+            if let Some(c) = pick(&comps, comp)
+                && let Some(n) = pick(&doc.def_member_nodes(c).unwrap_or_default(), sel)
+            {
+                let step = Transform::translation(Vec3::new(0.0, 1.5, 0.0));
+                let count = std::num::NonZeroU32::new(2).expect("nonzero");
+                let _ = doc.duplicate_def_members_array(c, &[n], &step, count);
             }
         }
         Op::OpenComponentSession { sel } => {

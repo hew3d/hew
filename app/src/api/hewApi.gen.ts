@@ -475,14 +475,15 @@ export interface EntityDeleteParams {
 export interface EntityDeleteResult {}
 
 /**
- * `hew.entity.move` (v1) — Translate (with copy/array forms) by vector or from→to points.
+ * `hew.entity.move` (v1) — Translate (with copy/array forms) by vector or from→to points; ids may be paths to members of one definition, moved in world terms with every placement following.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, mixed_selection_unsupported, sketch_copy_unsupported, array_count_too_large, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch
+ * Refusals: unknown_entity, mixed_selection_unsupported, sketch_copy_unsupported, array_count_too_large, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope, component_expansion_exceeded
  */
 export interface EntityMoveParams {
   copy?: { count?: number; grid?: { count: number; step: [number, number, number] }[] }
   from?: UnspecifiedShape
-  ids: string[]
+  /** world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602 */
+  ids: (string | { path: string[] })[]
   to?: UnspecifiedShape
   translation?: [number, number, number]
 }
@@ -505,15 +506,16 @@ export interface EntityRenameParams {
 export interface EntityRenameResult {}
 
 /**
- * `hew.entity.rotate` (v1) — Rotate about a pivot and axis by an angle.
+ * `hew.entity.rotate` (v1) — Rotate about a pivot and axis by an angle; ids may be paths to members of one definition, turned in world terms with every placement following.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, mixed_selection_unsupported, sketch_copy_unsupported, array_count_too_large, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch
+ * Refusals: unknown_entity, mixed_selection_unsupported, sketch_copy_unsupported, array_count_too_large, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope, component_expansion_exceeded
  */
 export interface EntityRotateParams {
   angle: number
   axis: [number, number, number]
   copy?: { count?: number }
-  ids: string[]
+  /** world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602 */
+  ids: (string | { path: string[] })[]
   pivot: UnspecifiedShape
 }
 
@@ -522,14 +524,15 @@ export interface EntityRotateResult {
 }
 
 /**
- * `hew.entity.scale` (v1) — Scale about an anchor with per-axis factors; a negative factor mirrors.
+ * `hew.entity.scale` (v1) — Scale about an anchor with per-axis factors; a negative factor mirrors. ids may be paths to members of one definition, scaled in world terms with every placement following.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, mixed_selection_unsupported, empty_selection, unknown_object, unknown_group, unknown_instance, unknown_sketch
+ * Refusals: unknown_entity, mixed_selection_unsupported, empty_selection, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope
  */
 export interface EntityScaleParams {
   anchor: UnspecifiedShape
   factors: [number, number, number]
-  ids: string[]
+  /** world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602 */
+  ids: (string | { path: string[] })[]
 }
 
 export interface EntityScaleResult {}
@@ -1757,13 +1760,13 @@ export interface SolidImprintsResult {
 /**
  * `hew.solid.intersect` (v1) — Boolean intersection of two solids.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity
+ * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope
  */
 export interface SolidIntersectParams {
-  /** a node id: obj_/grp_/ins_ */
-  a: string
-  /** a node id: obj_/grp_/ins_ */
-  b: string
+  /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
+  a: string | { path: string[] }
+  /** a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path */
+  b: string | { path: string[] }
 }
 
 export interface SolidIntersectResult {
@@ -1804,11 +1807,11 @@ export interface SolidMoveImprintResult {
 /**
  * `hew.solid.push_pull` (v1) — Push/pull a face of a solid with the tool's full semantics.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: object_not_solid, distance_too_small, would_vanish, non_manifold_result, not_a_sub_face, radius_vanishes, wall_neighbor_non_planar, unknown_face, unknown_object, unknown_component, grouped_operand, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale
+ * Refusals: object_not_solid, distance_too_small, would_vanish, non_manifold_result, not_a_sub_face, radius_vanishes, wall_neighbor_non_planar, unknown_face, unknown_object, unknown_component, grouped_operand, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, unknown_occurrence, explode_session_scope
  */
 export interface SolidPushPullParams {
   distance: number
-  /** HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {"$face":"label#key"} */
+  /** HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {"$face":"label#key"}; object may be {path: [instance, …, object]} to reach a definition member through a placement (at and ray stay in the object's own frame) */
   face: UnspecifiedShape
 }
 
@@ -1854,12 +1857,14 @@ export interface SolidScaleImprintResult {
 }
 
 /**
- * `hew.solid.slice` (v1) — Slice a solid by a plane into two solids.
+ * `hew.solid.slice` (v1) — Slice a solid by a plane into two solids; the object may be a path to a definition member, sliced in the definition.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: not_solid, plane_misses_solid, degenerate, unknown_object, unknown_entity
+ * Refusals: not_solid, plane_misses_solid, degenerate, unknown_object, unknown_entity, unknown_occurrence, unknown_instance, unknown_component, grouped_operand, explode_session_scope
  */
 export interface SolidSliceParams {
-  object: string
+  /** a world object id, or {path: [instance, …, object]}: a definition member through one placement; the pieces stay in the definition and every placement follows */
+  object: string | { path: string[] }
+  /** world coordinates, also through a path */
   plane: { normal: [number, number, number] | UnspecifiedShape; origin: [number, number, number] | UnspecifiedShape }
 }
 
@@ -1869,15 +1874,15 @@ export interface SolidSliceResult {
 }
 
 /**
- * `hew.solid.subtract` (v1) — Boolean subtraction of two solids.
+ * `hew.solid.subtract` (v1) — Boolean subtraction of two solids; a may be a path to a definition member, cut through that placement so every placement shows the cut.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, nothing_removed
+ * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, nothing_removed
  */
 export interface SolidSubtractParams {
-  /** a node id: obj_/grp_/ins_ */
-  a: string
-  /** a node id: obj_/grp_/ins_ */
-  b: string
+  /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
+  a: string | { path: string[] }
+  /** a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path */
+  b: string | { path: string[] }
 }
 
 export interface SolidSubtractResult {
@@ -1907,13 +1912,13 @@ export interface SolidThickenResult {
 /**
  * `hew.solid.union` (v1) — Boolean union of two solids.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity
+ * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope
  */
 export interface SolidUnionParams {
-  /** a node id: obj_/grp_/ins_ */
-  a: string
-  /** a node id: obj_/grp_/ins_ */
-  b: string
+  /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
+  a: string | { path: string[] }
+  /** a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path */
+  b: string | { path: string[] }
 }
 
 export interface SolidUnionResult {

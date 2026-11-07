@@ -239,6 +239,8 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`This operation can't target an object inside a group. Ungroup it, or leave the group context, first.`,
   BooleanOperandHasInstance:
     msg`Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.`,
+  AmbiguousHost:
+    msg`This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again.`,
   BooleanOperandNotSolid:
     msg`Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…`,
   BooleanOperandEmpty:

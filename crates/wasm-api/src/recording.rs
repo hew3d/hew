@@ -965,6 +965,14 @@ pub enum RecordedCall {
         a: u64,
         b: u64,
     },
+    /// `boolean_through_placement_json(path, host, tool, op)`.
+    BooleanThroughPlacement {
+        path: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<u64>,
+        tool: u64,
+        op: u8,
+    },
     /// `slice_def_member(instance, object, plane)`.
     SliceDefMember {
         instance: u64,

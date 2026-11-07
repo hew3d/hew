@@ -554,6 +554,42 @@ the number of slots along an axis counting the original, so `[{ count:
 five slots of a 2 × 3 field. A grid takes no `translation`; `copy.count`
 keeps its own meaning (that many copies at the step and its multiples).
 
+## Moving a nested part
+
+A Smart Handle moves, turns, scales, copies, or cuts a part wherever it
+is nested, in the same world terms the person drags in, and every copy of
+the part follows (HEW_API.md §7, "Transforming a part through a path").
+
+1. **Pick with a path.** `hew.query.raycast` or `hew.query.occurrences`
+   gives the part's `path` (the instances above it) and its id. The
+   locator is `{ path: [...row.path, row.id] }`.
+2. **Move with the same path, by a world delta.**
+   `await hew.entity.move({ ids: [{ path: [...row.path, row.id] }], translation: [0.1, 0, 0] })`
+   moves the part 100 mm along world +x under that placement. Hew
+   applies the move inside the definition, so every other placement of
+   it moves too, each through its own pose: a mirrored copy moves the
+   mirror image. `rotate` (world `pivot` and `axis`) and `scale` (world
+   `anchor`) work the same way. Do not convert to definition space; Hew
+   does that.
+3. **Copy inside the part's definition** with `copy: { count }` (or a
+   grid) on the same call: the copies are new members, so they show in
+   every placement. The result's `ids` are the copies.
+4. **Cut through a placement.** `hew.solid.subtract({ a: { path: [...row.path, row.id] }, b: cutter })`
+   cuts a world cutter body out of the part as it sits in that
+   placement; the cutter is consumed, and every placement shows the cut.
+   `hew.solid.slice` and `hew.solid.push_pull` take the same path form.
+
+All the parts in one call must be members of one definition reached by
+the same path; to move a world part and a nested one together, send two
+commands in one `hew.doc.transact`. Each command is one undo entry. While
+the person has that definition open for editing, its parts are world
+rows, the path form refuses `explode_session_scope`, and the plugin moves
+the world rows instead. A copy, a subtract, a boolean between two parts,
+or a slice through a path also refuses `explode_session_scope` while the
+person has any definition or group open for editing, even an unrelated
+one: closing it would gather the new parts into it. Ask the person to
+finish editing, then retry.
+
 ## Materials
 
 Paint lives in three places, and a face shows the first one it finds:

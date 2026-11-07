@@ -164,6 +164,15 @@ impl Builder<'_> {
             self.set.attrs.push(change);
         }
     }
+    /// The definitions owning any of the listed records, as `modified`: a
+    /// member edited, copied, or replaced in place changes its definition
+    /// (as [`DocAction::DefObjectOp`] reports). World records add nothing.
+    fn owner_defs(&mut self, objects: &[ObjectId], groups: &[GroupId], instances: &[InstanceId]) {
+        let (defs, _) = self.doc.def_owners_change(objects, groups, instances);
+        for c in defs {
+            self.component(List::Modified, c);
+        }
+    }
     fn union(&mut self, other: &ChangeSet) {
         self.set.union_with(other);
     }
@@ -223,6 +232,7 @@ impl Document {
             } => {
                 b.object(Added, *result);
                 b.objects(Removed, [*a, *other]);
+                b.owner_defs(&[*result], &[], &[]);
                 b.reanchored(reanchored);
             }
             DocAction::BooleanNodes {
@@ -251,6 +261,7 @@ impl Document {
             } => {
                 b.objects(Added, [*a, *other]);
                 b.object(Removed, *source);
+                b.owner_defs(&[*source], &[], &[]);
                 b.reanchored(reanchored);
             }
             DocAction::Repaired {
@@ -313,6 +324,13 @@ impl Document {
                 b.objects(Modified, objects.iter().map(|(o, _)| *o));
                 b.sketches(Modified, sketches.iter().map(|(s, _)| *s));
                 b.instances(Modified, instances.iter().map(|(i, _)| *i));
+                let objs: Vec<ObjectId> = objects.iter().map(|(o, _)| *o).collect();
+                let insts: Vec<InstanceId> = instances.iter().map(|(i, _)| *i).collect();
+                // A member group holding only drawing names its definition
+                // through the group.
+                let sks: Vec<SketchId> = sketches.iter().map(|(s, _)| *s).collect();
+                let groups = self.holding_groups(&sks);
+                b.owner_defs(&objs, &groups, &insts);
                 b.reanchored(reanchored);
             }
             DocAction::Rescale { .. } => b.set.full = true,
@@ -425,6 +443,7 @@ impl Document {
                 for (_, parent) in roots {
                     b.parent(*parent);
                 }
+                b.owner_defs(objects, groups, instances);
             }
             DocAction::CreatedGuide { guide } => b.guide(Added, *guide),
             DocAction::DeletedGuide { guide } => b.guide(Removed, *guide),

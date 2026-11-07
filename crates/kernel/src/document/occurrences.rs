@@ -415,6 +415,24 @@ impl Document {
         self.occurrence_row(&item, &sh)
     }
 
+    /// The composed pose of `path`: world ← the frame of the definition the
+    /// last instance places, which is the frame the nodes that path leads
+    /// to are expressed in. Identity for an empty path. `None` when an
+    /// element is not a listable instance or the chain does not nest (the
+    /// same resolution [`Document::occurrence_at`] uses). A definition on
+    /// loan to an open session composes the session's inverse pose, as the
+    /// walk does.
+    pub fn path_pose(&self, path: &[InstanceId]) -> Option<Transform> {
+        let Some((&last, outer)) = path.split_last() else {
+            return Some(Transform::IDENTITY);
+        };
+        let sh = self.session_hidden();
+        let item = self.occurrence_item(outer, NodeId::Instance(last), &sh)?;
+        let rec = self.instances.get(last)?;
+        let pose = rec.pose.then(&item.base);
+        Some(self.member_base(rec.def, &pose))
+    }
+
     /// The walk item [`Document::occurrence_at`] resolves to.
     fn occurrence_item(
         &self,
