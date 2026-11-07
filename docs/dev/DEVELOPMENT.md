@@ -157,6 +157,33 @@ holding a JSON manifest and binary geometry buffers). Its spec lives in
 `docs/dev/HEW_FILE_FORMAT.md` and any serialization change must update that spec
 in the same commit.
 
+**The website** (`site/`) is built by Cloudflare Pages from the `site-live`
+branch, not from `main`, so hew3d.com describes the release people can
+download while `main` carries the Learn pages for features that have not
+shipped yet. Docs for a feature still land on `main` in the feature's own
+commit; nothing changes about how you write them. `site-live` is a pointer,
+never a branch anyone commits to: the release workflow moves it to each
+`vX.Y.Z` tag, and only forward, judged by the version in
+`site/src/data/releases.json`, so an out-of-order or re-run release never
+rewinds it. The job runs from the workflow file at the tagged commit, so a
+patch tag cut from an older release branch moves the pointer only if that
+branch carries the job. With Pages' default preview setting, a push to `main`
+only produces a preview deployment at `https://main.<pages-project>.pages.dev`
+(the project name is in the Cloudflare dashboard), which is the user guide for
+the next release and the place to proofread it. A site fix that cannot wait
+for the next release goes to `main` first, then onto the branch from a
+throwaway worktree based on the remote tip, never on a stale local branch:
+
+```sh
+git fetch origin
+git worktree add -B site-live ../hew-site-fix origin/site-live
+# cherry-pick the fix, then a plain push; a rejected push means a stale base
+```
+
+The next release moves the pointer to its tag, so the fix must be in that
+tag's history: if the release is cut from a release branch rather than
+`main`, cherry-pick the fix there too.
+
 ## 3. The rules
 
 These are non-negotiable. They are cited from code comments as
