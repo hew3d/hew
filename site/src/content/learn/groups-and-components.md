@@ -64,7 +64,7 @@ Object Info also counts the siblings: a selected instance's Type reads "Componen
 
 Two commands take an instance out of the shared-definition world, both available on the contextual dock when an instance is selected:
 
-- **Make Unique** detaches this instance into its own new definition. Use it when one screw needs to be different from its siblings. The new component is named "Screw Copy" (then "Screw Copy 2", and so on) — unless the instance had its own name, which becomes the new definition's name.
+- **Make Unique** detaches this instance into its own new definition. Use it when one screw needs to be different from its siblings. The new component is named "Screw Copy" (then "Screw Copy 2", and so on) — unless the instance had its own name, which becomes the new definition's name. The pieces inside keep their names and tags, so a board you copied is still called "Leg" after Make Unique.
 - **Explode** bakes the instance down into ordinary, independent geometry in place. The definition (and other instances) are unaffected.
 
 ## Components panel

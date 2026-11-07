@@ -37,6 +37,10 @@ use serde::{Deserialize, Serialize};
 /// exact version equality.
 pub const RECORDING_FORMAT_VERSION: u32 = 2;
 
+fn default_true() -> bool {
+    true
+}
+
 /// One committed `Scene` mutation, captured with the exact arguments needed to
 /// re-issue it. `#[serde(tag = "method")]` gives a self-describing JSON object
 /// per call (`{"method":"extrude_region","sketch":…,"region":…,"distance":…}`).
@@ -374,6 +378,16 @@ pub enum RecordedCall {
     ExplodeInstance { instance: u64 },
     /// `make_unique(instance)`.
     MakeUnique { instance: u64 },
+    /// `make_unique_by_path_json(path, cascade, deep)`. `MakeUnique` stays
+    /// for the one-instance entry point and keeps replaying old recordings.
+    MakeUniqueByPath {
+        path: Vec<u64>,
+        /// Absent in a hand-written recording: the default, `true`.
+        #[serde(default = "default_true")]
+        cascade: bool,
+        #[serde(default)]
+        deep: bool,
+    },
     /// `open_explode_session(instance)` (docs/design/explode-session-
     /// prototype.md, a `proto/explode-session` prototype).
     OpenExplodeSession { instance: u64 },

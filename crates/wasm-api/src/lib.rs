@@ -6209,6 +6209,72 @@ impl Scene {
         Ok(new_def.data().as_ffi())
     }
 
+    /// "Make Unique" by occurrence path. `path` is instance handles, outermost
+    /// first; the last is the placement to fork. `cascade` forks every
+    /// definition on the path so only that placement diverges (otherwise only
+    /// the last definition is forked, in place); `deep` also forks the
+    /// definitions nested inside the leaf's. Returns JSON
+    /// `{ "component": "<ffi>", "instance": "<ffi>", "remap": {
+    ///   "objects": [["<old>","<new>"], ...], "groups": [...],
+    ///   "instances": [...], "components": [...] } }`
+    /// with every handle as a decimal string (as `part_frame_json` does).
+    /// `instance` is the placement at the end of the path after the call.
+    ///
+    /// # Errors
+    /// As [`Scene::make_unique`] (`UnknownInstance`, `UnknownComponent`,
+    /// `ExplodeSessionScope` for a definition on loan to a session), plus
+    /// `BadNodeList` for an empty path.
+    pub fn make_unique_by_path_json(
+        &mut self,
+        path: Vec<u64>,
+        cascade: bool,
+        deep: bool,
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        if path.is_empty() {
+            return Err(ApiError::new(
+                "BadNodeList",
+                "the path needs at least one instance",
+            ));
+        }
+        let ids: Vec<InstanceId> = path.iter().map(|&h| instance_id(h)).collect();
+        let (component, instance, remap, change) = self
+            .doc
+            .make_unique_by_path(&ids, cascade, deep)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::MakeUniqueByPath {
+            path,
+            cascade,
+            deep,
+        });
+        fn pairs<K: slotmap::Key, V: slotmap::Key>(
+            map: &std::collections::BTreeMap<K, V>,
+        ) -> serde_json::Value {
+            serde_json::Value::Array(
+                map.iter()
+                    .map(|(k, v)| {
+                        serde_json::json!([
+                            k.data().as_ffi().to_string(),
+                            v.data().as_ffi().to_string()
+                        ])
+                    })
+                    .collect(),
+            )
+        }
+        Ok(serde_json::json!({
+            "component": component.data().as_ffi().to_string(),
+            "instance": instance.data().as_ffi().to_string(),
+            "remap": {
+                "objects": pairs(&remap.objects),
+                "groups": pairs(&remap.groups),
+                "instances": pairs(&remap.instances),
+                "components": pairs(&remap.components),
+            },
+        })
+        .to_string())
+    }
+
     /// Opens an explode session on `instance` (docs/design/explode-session-
     /// prototype.md, a `proto/explode-session` prototype): temporarily bakes
     /// the instance's definition's live members/sketches into WORLD-owned
@@ -11807,6 +11873,13 @@ impl Scene {
                 }
                 MakeUnique { instance } => {
                     self.make_unique(instance)?;
+                }
+                MakeUniqueByPath {
+                    path,
+                    cascade,
+                    deep,
+                } => {
+                    self.make_unique_by_path_json(path, cascade, deep)?;
                 }
                 OpenExplodeSession { instance } => {
                     self.open_explode_session(instance)?;
@@ -18739,6 +18812,112 @@ mod tests {
         assert_eq!(scene.instance_def(inst), Some(comp));
     }
 
+    /// A world box folded into a component holding a nested instance: the
+    /// outer instance, the nested member instance, and the two definitions.
+    fn nested_scene(scene: &mut Scene) -> (u64, u64, u64, u64) {
+        let (s1, r1) = ground_unit_square(scene);
+        let inner_box = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let inner = scene.make_component(&[0], &[inner_box]).unwrap();
+        let inner_def = scene.instance_def(inner).unwrap();
+        let (s2, r2) = ground_unit_square_at(scene, 3.0, 0.0);
+        let outer_box = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let outer = scene.make_component(&[0, 2], &[outer_box, inner]).unwrap();
+        let outer_def = scene.instance_def(outer).unwrap();
+        (outer, inner, outer_def, inner_def)
+    }
+
+    #[test]
+    fn make_unique_by_path_json_returns_decimal_string_ids_and_the_remap() {
+        let mut scene = Scene::new();
+        let (outer, inner, outer_def, inner_def) = nested_scene(&mut scene);
+        let json = scene
+            .make_unique_by_path_json(vec![outer, inner], true, false)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let handle = |x: &serde_json::Value| -> u64 {
+            x.as_str()
+                .expect("every handle is a decimal string")
+                .parse()
+                .unwrap()
+        };
+        let component = handle(&v["component"]);
+        let instance = handle(&v["instance"]);
+        let components: Vec<(u64, u64)> = v["remap"]["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (handle(&p[0]), handle(&p[1])))
+            .collect();
+        assert_eq!(components.len(), 2, "both definitions on the path fork");
+        assert!(components.contains(&(inner_def, component)));
+        let new_outer = components
+            .iter()
+            .find(|(old, _)| *old == outer_def)
+            .unwrap()
+            .1;
+        assert_eq!(scene.instance_def(outer), Some(new_outer));
+        let instances: Vec<(u64, u64)> = v["remap"]["instances"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (handle(&p[0]), handle(&p[1])))
+            .collect();
+        assert!(
+            instances.contains(&(inner, instance)),
+            "the returned placement is the nested instance's copy"
+        );
+        assert_eq!(scene.instance_def(instance), Some(component));
+        assert_eq!(scene.instance_def(inner), Some(inner_def));
+        assert_eq!(v["remap"]["objects"].as_array().unwrap().len(), 2);
+        assert!(v["remap"]["groups"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn make_unique_by_path_json_refuses_an_empty_path_with_bad_node_list() {
+        let mut scene = Scene::new();
+        let before = scene.state_hash();
+        let err = scene
+            .make_unique_by_path_json(Vec::new(), true, false)
+            .unwrap_err();
+        assert!(err.to_string().starts_with("BadNodeList"), "{err}");
+        assert_eq!(scene.state_hash(), before);
+    }
+
+    #[test]
+    fn make_unique_by_path_records_and_replays_to_the_same_state_hash() {
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (outer, inner, outer_def, _) = nested_scene(&mut scene);
+        const SHIFT_X6: [f64; 12] = [1.0, 0.0, 0.0, 6.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scene.place_instance(outer_def, &SHIFT_X6).unwrap();
+        scene
+            .make_unique_by_path_json(vec![outer, inner], true, true)
+            .unwrap();
+        // The old one-instance call still records its own variant.
+        let other = scene.place_instance(outer_def, &SHIFT_X6).unwrap();
+        scene.make_unique(other).unwrap();
+        scene.scene_undo().unwrap();
+        scene.scene_redo().unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("\"make_unique_by_path\""), "{json}");
+        assert!(json.contains("\"make_unique\""), "{json}");
+
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    #[test]
+    fn make_unique_still_returns_the_new_component_handle() {
+        let mut scene = Scene::new();
+        let (outer, _, outer_def, _) = nested_scene(&mut scene);
+        let new_comp = scene.make_unique(outer).unwrap();
+        assert_ne!(new_comp, outer_def);
+        assert_eq!(scene.instance_def(outer), Some(new_comp));
+    }
+
     /// `sketch_edge_endpoints` promises WORLD endpoints, but a def-owned
     /// sketch's edges are DEFINITION-local — a raw answer would hand a
     /// Tape-Measure-style caller coordinates in the wrong frame (the same bug
@@ -20525,7 +20704,8 @@ mod tests {
         let base = scene.extrude_region(s2, r2, 1.0).unwrap();
         let instance = scene.make_component(&[0], &[base]).unwrap();
         // Reflect across X (determinant < 0) — `transform_instance` allows a
-        // mirrored pose (only explode/make_unique refuse one).
+        // mirrored pose, and neither explode nor make_unique refuses one (a
+        // reflection bakes).
         const MIRROR_X: [f64; 12] = [-1.0, 0.0, 0.0, 6.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
         scene.transform_instance(instance, &MIRROR_X).unwrap();
 

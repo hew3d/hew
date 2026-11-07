@@ -1,6 +1,7 @@
 //! Structure-and-session fuzz harness (DEVELOPMENT.md rule 3): random
 //! sequences of the tree-shaping ops — make component, group, ungroup,
-//! reparent, explode, place, make unique, duplicate, delete, delete
+//! reparent, explode, place, make unique (one instance, and by occurrence
+//! path), duplicate, delete, delete
 //! definition — interleaved with component and group EDITING SESSIONS
 //! (opened, stacked, closed innermost-first) and undo/redo, over a document
 //! of plain boxes.
@@ -17,13 +18,16 @@
 //!   do not fire;
 //! - `load(save_for_persistence())` succeeds — the autosave path, which
 //!   serializes as if every open session were closed;
-//! - with no session open, `load(save())` succeeds too.
+//! - with no session open, `load(save())` succeeds too;
+//! - a make-unique-by-path fork keeps the occurrence walk's instance row
+//!   count, and undo then redo of it reproduces the state hash both ways
+//!   (a refused one leaves the document unchanged).
 //!
 //! Failures shrink to a short op list. Run deeper than the default 256
 //! cases with `PROPTEST_CASES=20000 cargo test -p kernel --test
 //! session_fuzz`.
 
-use kernel::{Document, NodeId, ObjectId, Plane, Point3, Transform, Vec3};
+use kernel::{Document, InstanceId, NodeId, ObjectId, Plane, Point3, Transform, Vec3};
 use proptest::prelude::*;
 
 /// Abstract op; selectors resolve against live ids at apply time, so a
@@ -56,6 +60,12 @@ enum Op {
     },
     MakeUnique {
         sel: usize,
+    },
+    /// Fork one placement by its occurrence path (any depth).
+    MakeUniqueByPath {
+        sel: usize,
+        cascade: bool,
+        deep: bool,
     },
     Duplicate {
         sel: usize,
@@ -94,6 +104,8 @@ fn arb_op() -> impl Strategy<Value = Op> {
         1 => sel().prop_map(|sel| Op::Explode { sel }),
         2 => sel().prop_map(|comp| Op::Place { comp }),
         1 => sel().prop_map(|sel| Op::MakeUnique { sel }),
+        2 => (sel(), any::<bool>(), any::<bool>())
+            .prop_map(|(sel, cascade, deep)| Op::MakeUniqueByPath { sel, cascade, deep }),
         1 => sel().prop_map(|sel| Op::Duplicate { sel }),
         2 => sel().prop_map(|sel| Op::Delete { sel }),
         1 => sel().prop_map(|sel| Op::DeleteSelection { sel }),
@@ -142,10 +154,75 @@ fn pick<T: Copy>(items: &[T], sel: usize) -> Option<T> {
     (!items.is_empty()).then(|| items[sel % items.len()])
 }
 
+/// Every visible instance placement as its occurrence path (instance ids
+/// from the world down, the placement itself last).
+fn instance_paths(doc: &Document) -> Vec<Vec<InstanceId>> {
+    doc.occurrences(None, false)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|o| match o.node {
+            NodeId::Instance(i) => {
+                let mut path = o.path;
+                path.push(i);
+                Some(path)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn instance_rows(doc: &Document) -> usize {
+    doc.occurrences(None, true)
+        .unwrap_or_default()
+        .iter()
+        .filter(|o| matches!(o.node, NodeId::Instance(_)))
+        .count()
+}
+
+/// `make_unique_by_path` on the path `sel` picks. A refusal is legal; a
+/// fork must keep the placement count and undo then redo exactly.
+fn make_unique_by_path(
+    doc: &mut Document,
+    sel: usize,
+    cascade: bool,
+    deep: bool,
+) -> Result<(), String> {
+    let paths = instance_paths(doc);
+    let Some(path) = (!paths.is_empty()).then(|| paths[sel % paths.len()].clone()) else {
+        return Ok(());
+    };
+    let rows = instance_rows(doc);
+    let before = doc.state_hash();
+    if doc.make_unique_by_path(&path, cascade, deep).is_err() {
+        if doc.state_hash() != before {
+            return Err("a refused fork changed the document".to_string());
+        }
+        return Ok(());
+    }
+    if instance_rows(doc) != rows {
+        return Err(format!(
+            "the fork changed the placement count from {rows} to {}",
+            instance_rows(doc)
+        ));
+    }
+    let after = doc.state_hash();
+    doc.undo()
+        .map_err(|e| format!("undo of the fork refused: {e}"))?;
+    if doc.state_hash() != before {
+        return Err("undo of the fork did not restore the document".to_string());
+    }
+    doc.redo()
+        .map_err(|e| format!("redo of the fork refused: {e}"))?;
+    if doc.state_hash() != after {
+        return Err("redo of the fork did not reproduce it".to_string());
+    }
+    Ok(())
+}
+
 /// Applies one op. A typed refusal is a legal answer and is ignored; what
 /// must never happen is a panic or a document that no longer reopens, both
 /// checked by the caller.
-fn apply(doc: &mut Document, op: &Op) {
+fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
     let nodes = live_nodes(doc);
     let instances = doc.instance_ids();
     let groups = doc.group_ids();
@@ -194,6 +271,9 @@ fn apply(doc: &mut Document, op: &Op) {
                 let _ = doc.make_unique(i);
             }
         }
+        Op::MakeUniqueByPath { sel, cascade, deep } => {
+            return make_unique_by_path(doc, sel, cascade, deep);
+        }
         Op::Duplicate { sel } => {
             if let Some(n) = pick(&nodes, sel) {
                 let _ = doc.duplicate_node(n, &Transform::translation(Vec3::new(0.5, 0.5, 0.0)));
@@ -239,6 +319,7 @@ fn apply(doc: &mut Document, op: &Op) {
             let _ = doc.redo();
         }
     }
+    Ok(())
 }
 
 fn check_reopens(doc: &Document, step: usize, op: &Op) -> Result<(), TestCaseError> {
@@ -372,7 +453,8 @@ fn run_case(boxes: usize, ops: Vec<Op>) -> Result<(), TestCaseError> {
         add_box(&mut doc, 3.0 * i as f64);
     }
     for (step, op) in ops.iter().enumerate() {
-        apply(&mut doc, op);
+        apply(&mut doc, op)
+            .map_err(|e| TestCaseError::fail(format!("step {step} ({op:?}): {e}")))?;
         check_reopens(&doc, step, op)?;
         check_sibling_render(&doc, step, op)?;
     }

@@ -259,6 +259,7 @@ longer replay.
 | `transform_instance` | `instance`, `affine[12]` | compose an affine into an instance's pose |
 | `explode_instance` | `instance` | bake an instance into independent world objects |
 | `make_unique` | `instance` | detach an instance onto a private definition copy |
+| `make_unique_by_path` | `path[]`, `cascade`, `deep` | fork the placement at the end of an instance path (outermost first) onto a private definition copy; `cascade` forks every definition on the path so only that placement diverges, `deep` also forks the definitions nested inside the leaf's. One undo entry |
 | `push_pull_in_component` | `component`, `object`, `face`, `distance` | push/pull a face inside a component definition |
 | `set_node_name` | `kind`, `id`, `name` (string or null) | rename a node / clear its name |
 | `add_node_tag` / `remove_node_tag` | `kind`, `id`, `path[]` (segments) | assign / unassign a tag path on a node |

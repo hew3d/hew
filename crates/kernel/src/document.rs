@@ -634,6 +634,20 @@ pub enum HistoryOrigin {
     Connection(String),
 }
 
+/// Every id one [`Document::make_unique_by_path`] call created, keyed by
+/// the id each one copies: member Objects, Groups, and Instances (under a
+/// cascade, the copies of the later path elements too), and each forked
+/// definition (old definition to its new private copy). Only new ids are
+/// values; an instance the call repointed in place keeps its id and is not
+/// listed, and no id is both a key and a value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Remap {
+    pub objects: BTreeMap<ObjectId, ObjectId>,
+    pub groups: BTreeMap<GroupId, GroupId>,
+    pub instances: BTreeMap<InstanceId, InstanceId>,
+    pub components: BTreeMap<ComponentId, ComponentId>,
+}
+
 /// The label and origin a committed transaction stamps on its compound
 /// history entry ([`Document::commit_transaction`]). Read back through
 /// [`Document::peek_undo_meta`] — the source for the API's
@@ -1773,9 +1787,9 @@ enum DocAction {
         /// untouched. Undo clears, redo sets again, as `baked_materials`.
         baked_instance_materials: Vec<InstanceId>,
     },
-    /// `make_unique` repointed an instance from its shared definition onto
-    /// a fresh private copy. Undo repoints to `prev_def` and hides `new_def`;
-    /// redo reverses.
+    /// `make_unique` (or one step of `make_unique_by_path`) repointed an
+    /// instance from its shared definition onto a fresh private copy. Undo
+    /// repoints to `prev_def` and hides `new_def`; redo reverses.
     MadeUnique {
         instance: InstanceId,
         prev_def: ComponentId,
@@ -1783,8 +1797,22 @@ enum DocAction {
         /// The instance's own name at the moment of the op. A set name is
         /// promoted to the new definition's name and cleared off the
         /// instance, so undo restores it and redo re-clears it (an unnamed
-        /// instance round-trips as a no-op either way).
+        /// instance round-trips as a no-op either way). A nested fork of a
+        /// deep `make_unique_by_path` never promotes and records `None`, so
+        /// its instance keeps its name through undo and redo.
         prev_instance_name: Option<String>,
+        /// Every entity this step created, as `(new, source)` pairs in
+        /// creation order: the new definition first, then its member
+        /// objects, groups, and instances, then its cloned sketches. Undo
+        /// and redo ignore it (the copies hide and reveal with `new_def`'s
+        /// subtree); change sets list the new entities as added.
+        copied: Vec<(EntityRef, EntityRef)>,
+        /// Other instances, all created earlier in the same deep
+        /// `make_unique_by_path` call, that placed `prev_def` and were
+        /// repointed to the shared `new_def` (one private copy per old
+        /// definition per call). Their names are untouched. Undo repoints
+        /// them to `prev_def`, redo to `new_def`.
+        shared: Vec<InstanceId>,
     },
     /// `open_explode_session` baked `component`'s live members/sketches into
     /// world ownership at `pose` and hid the entered instance
@@ -4698,6 +4726,23 @@ impl Document {
     fn copy_attrs(&mut self, from: &EntityRef, to: EntityRef) {
         if let Some(dict) = self.attrs.get(&AttrTarget::Entity(from.clone())).cloned() {
             self.attrs.insert(AttrTarget::Entity(to), dict);
+        }
+    }
+
+    /// [`Self::copy_attrs`] for a copy that is a new entity in this same
+    /// document: the `hew.library` provenance and `hew.clipboard` origin
+    /// stamps are assertions about the SOURCE entity, so they do not
+    /// travel (the library copy strips them the same way). Client
+    /// namespaces copy verbatim.
+    fn copy_identity_attrs(&mut self, from: &EntityRef, to: EntityRef) {
+        let key = AttrTarget::Entity(to.clone());
+        self.copy_attrs(from, to);
+        if let Some(dict) = self.attrs.get_mut(&key) {
+            dict.remove(LIBRARY_ATTR_NS);
+            dict.remove(CLIPBOARD_ATTR_NS);
+            if dict.is_empty() {
+                self.attrs.remove(&key);
+            }
         }
     }
 
@@ -13439,7 +13484,8 @@ impl Document {
     /// Document objects share the world frame, so the operands map with the
     /// identity transform. On success the operands are hidden and the result is
     /// the only visible product; on `Err` nothing changes (the op's strong
-    /// guarantee) and the operands stay visible.
+    /// guarantee) and the operands stay visible. The result keeps operand
+    /// `a`'s name, tags, and attributes; nothing of `b`'s carries over.
     ///
     /// # Errors
     /// - [`DocumentError::UnknownObject`] — an operand is stale or hidden.
@@ -13495,15 +13541,19 @@ impl Document {
             .chain(rec_b.object.coplanar_edge_segments())
             .collect();
         result.merge_coplanar_faces(&preserve);
+        // The result carries operand `a`'s identity (a board cut by a tool
+        // is still that board); `b`'s is consumed with it.
+        let (name, tags) = (rec_a.name.clone(), rec_a.tags.clone());
 
         let id = self.insert_object_record(ObjectRecord {
             object: result,
             history: History::new(),
             hidden: false,
             owner: ObjectOwner::World { parent: None },
-            name: None,
-            tags: Vec::new(),
+            name,
+            tags,
         });
+        self.copy_identity_attrs(&EntityRef::Object(a), EntityRef::Object(id));
         self.objects[a].hidden = true;
         self.objects[b].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(a), NodeId::Object(b)]);
@@ -13541,7 +13591,8 @@ impl Document {
     /// definition (component-edit-parity.md phase K2): unions/subtracts/
     /// intersects `a` and `b` — both members of `component` — into a new
     /// member that replaces them; every instance of `component` sees the
-    /// result at once. `a`/`b` map with the identity transform (a
+    /// result at once. The result keeps operand `a`'s name, tags, and
+    /// attributes, as in [`Document::boolean`]. `a`/`b` map with the identity transform (a
     /// definition's members already share one local frame, exactly like two
     /// world objects share the world frame in [`Document::boolean`]) — no
     /// instance/pose is involved, matching this surface's literal signature
@@ -13609,6 +13660,9 @@ impl Document {
             .chain(rec_b.object.coplanar_edge_segments())
             .collect();
         result.merge_coplanar_faces(&preserve);
+        // The result carries operand `a`'s identity, as in
+        // `Document::boolean`; `b`'s is consumed with it.
+        let (name, tags) = (rec_a.name.clone(), rec_a.tags.clone());
 
         let id = self.insert_object_record(ObjectRecord {
             object: result,
@@ -13618,9 +13672,10 @@ impl Document {
                 def: component,
                 parent: None,
             },
-            name: None,
-            tags: Vec::new(),
+            name,
+            tags,
         });
+        self.copy_identity_attrs(&EntityRef::Object(a), EntityRef::Object(id));
         self.objects[a].hidden = true;
         self.objects[b].hidden = true;
         // Shared-geometry birth (component-edit-parity.md phase K2):
@@ -16308,17 +16363,16 @@ impl Document {
     /// one identity-posed instance in their place (ARCHITECTURE.md) — the
     /// "Make Component" act.
     ///
-    /// The selection is flattened to its leaf world objects
-    /// ([`Document::leaf_objects_under`] over each member); those objects are
-    /// re-owned as [`ObjectOwner::Definition`] members of the new
-    /// [`ComponentDef`] **without moving any geometry** (the definition-local
-    /// frame *is* the world frame at creation), and a single instance with
-    /// `pose == Transform::IDENTITY` is created at the selection's shared parent
-    /// — so creation is a visual no-op. Any selected groups/instances are
-    /// consumed (hidden); their internal structure is flattened away (nested
-    /// definitions are deferred). The instance becomes the unit of
-    /// selection/transform; editing the shared geometry later goes through
-    /// [`Document::apply_def_op`].
+    /// The selected nodes fold in whole: each becomes a direct member of the
+    /// new [`ComponentDef`], selected groups and instances with their
+    /// subtrees intact (a selected instance nests its definition inside the
+    /// new one). Every leaf object beneath the selection is re-owned as an
+    /// [`ObjectOwner::Definition`] member **without moving any geometry**
+    /// (the definition-local frame *is* the world frame at creation), and a
+    /// single instance with `pose == Transform::IDENTITY` is created at the
+    /// selection's shared parent — so creation is a visual no-op. The
+    /// instance becomes the unit of selection/transform; editing the shared
+    /// geometry later goes through [`Document::apply_def_op`].
     ///
     /// The new component inherits its display identity from the selection.
     /// A single selected node passes its name on as the **definition name**
@@ -16360,8 +16414,7 @@ impl Document {
         &mut self,
         members: &[NodeId],
     ) -> Result<(ComponentId, InstanceId, DocChange), DocumentError> {
-        // A component minted mid-session would either nest (definition
-        // inside a definition — unsupported) or steal session members into
+        // A component minted mid-session would steal session members into
         // a second definition out from under the close.
         self.refuse_during_component_session()?;
         // Under a group frame every selected node must be session geometry
@@ -17556,13 +17609,16 @@ impl Document {
     }
 
     /// Copy one def-owned member instance into `new_def` for
-    /// [`Document::make_unique`]: same inner definition (shared — unique is
-    /// one level deep), same def-local pose, owned by the private copy.
+    /// [`Document::make_unique_by_path`]: same inner definition (shared —
+    /// a plain fork is one level deep; a deep one repoints the copy
+    /// afterwards), same def-local pose, owned by the private copy. The
+    /// `(copy, source)` pair is appended to `copied`.
     fn unique_copy_instance(
         &mut self,
         src: InstanceId,
         new_def: ComponentId,
         parent: Option<GroupId>,
+        copied: &mut Vec<(EntityRef, EntityRef)>,
     ) -> InstanceId {
         let rec = &self.instances[src];
         let (def, pose, name, tags) = (rec.def, rec.pose, rec.name.clone(), rec.tags.clone());
@@ -17581,12 +17637,15 @@ impl Document {
         if self.user_hidden_instances.contains(&src) {
             self.user_hidden_instances.insert(iid);
         }
+        copied.push((EntityRef::Instance(iid), EntityRef::Instance(src)));
         iid
     }
 
     /// Deep-copy one def-owned member group's subtree into `new_def` for
-    /// [`Document::make_unique`]: def-local coordinates copy verbatim,
-    /// nested instances copy via [`Document::unique_copy_instance`].
+    /// [`Document::make_unique_by_path`]: def-local coordinates copy
+    /// verbatim, nested instances copy via
+    /// [`Document::unique_copy_instance`]. Every copy's `(copy, source)`
+    /// pair is appended to `copied` in creation order.
     fn unique_copy_group(
         &mut self,
         src: GroupId,
@@ -17594,6 +17653,7 @@ impl Document {
         parent: Option<GroupId>,
         member_copies: &mut BTreeMap<ObjectId, ObjectId>,
         group_copies: &mut BTreeMap<GroupId, GroupId>,
+        copied: &mut Vec<(EntityRef, EntityRef)>,
     ) -> GroupId {
         let (name, tags, src_members) = {
             let rec = &self.groups[src];
@@ -17612,27 +17672,15 @@ impl Document {
             self.user_hidden_groups.insert(gid);
         }
         group_copies.insert(src, gid);
+        copied.push((EntityRef::Group(gid), EntityRef::Group(src)));
         let mut members: Vec<NodeId> = Vec::with_capacity(src_members.len());
         for m in src_members {
             match m {
                 NodeId::Object(o) => {
-                    let Some(rec) = self.objects.get(o).filter(|r| !r.hidden) else {
+                    if self.objects.get(o).is_none_or(|r| r.hidden) {
                         continue;
-                    };
-                    let (object, name, tags) =
-                        (rec.object.clone(), rec.name.clone(), rec.tags.clone());
-                    let id = self.insert_object_record(ObjectRecord {
-                        object,
-                        history: History::new(),
-                        hidden: false,
-                        owner: ObjectOwner::Definition {
-                            def: new_def,
-                            parent: Some(gid),
-                        },
-                        name,
-                        tags,
-                    });
-                    self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
+                    }
+                    let id = self.unique_copy_object(o, new_def, Some(gid), copied);
                     member_copies.insert(o, id);
                     members.push(NodeId::Object(id));
                 }
@@ -17640,21 +17688,60 @@ impl Document {
                     if self.groups.get(g).is_none_or(|r| r.hidden) {
                         continue;
                     }
-                    let child =
-                        self.unique_copy_group(g, new_def, Some(gid), member_copies, group_copies);
+                    let child = self.unique_copy_group(
+                        g,
+                        new_def,
+                        Some(gid),
+                        member_copies,
+                        group_copies,
+                        copied,
+                    );
                     members.push(NodeId::Group(child));
                 }
                 NodeId::Instance(i) => {
                     if self.instances.get(i).is_none_or(|r| r.hidden) {
                         continue;
                     }
-                    let child = self.unique_copy_instance(i, new_def, Some(gid));
+                    let child = self.unique_copy_instance(i, new_def, Some(gid), copied);
                     members.push(NodeId::Instance(child));
                 }
             }
         }
         self.groups[gid].members = members;
         gid
+    }
+
+    /// Copy one def-owned member Object into `new_def` for
+    /// [`Document::make_unique_by_path`]: def-local geometry verbatim, a
+    /// fresh per-object history, and the source's name, tags, and
+    /// attributes (a forked board keeps its identity). The `(copy, source)`
+    /// pair is appended to `copied`.
+    fn unique_copy_object(
+        &mut self,
+        src: ObjectId,
+        new_def: ComponentId,
+        parent: Option<GroupId>,
+        copied: &mut Vec<(EntityRef, EntityRef)>,
+    ) -> ObjectId {
+        let rec = &self.objects[src];
+        let (object, name, tags) = (rec.object.clone(), rec.name.clone(), rec.tags.clone());
+        let id = self.insert_object_record(ObjectRecord {
+            object,
+            history: History::new(),
+            hidden: false,
+            owner: ObjectOwner::Definition {
+                def: new_def,
+                parent,
+            },
+            name,
+            tags,
+        });
+        self.copy_identity_attrs(&EntityRef::Object(src), EntityRef::Object(id));
+        if self.user_hidden_objects.contains(&src) {
+            self.user_hidden_objects.insert(id);
+        }
+        copied.push((EntityRef::Object(id), EntityRef::Object(src)));
+        id
     }
 
     /// Hide or reveal every node in `def`'s OWN subtree (members, and
@@ -17825,6 +17912,7 @@ impl Document {
     /// fresh [`ComponentDef`] and the instance is repointed to it (pose
     /// unchanged), so later [`Document::apply_def_op`] edits to this instance no
     /// longer affect its former siblings. Recorded as [`DocAction::MadeUnique`].
+    /// The copies keep their sources' names, tags, and attributes.
     ///
     /// The new definition is a new component, so it gets its own name:
     /// - the instance's **own name, if set, is promoted** to the definition
@@ -17833,11 +17921,19 @@ impl Document {
     /// - otherwise the old definition's name with `" Copy"` appended — and if
     ///   a live definition already holds that name, `" Copy 2"`, `" Copy 3"`,
     ///   … (the lowest free number);
-    /// - a nameless source definition (possible only via import — native
-    ///   definitions are always named) yields a nameless copy.
+    /// - a definition made by "Make Component" always has a name; one made
+    ///   by a linked copy takes its wrapped node's name, which may be none,
+    ///   so a nameless source yields a nameless copy.
+    ///
+    /// The one-element form of [`Document::make_unique_by_path`], without
+    /// the remap.
     ///
     /// # Errors
-    /// - [`DocumentError::UnknownInstance`] — the instance is stale/hidden.
+    /// - [`DocumentError::UnknownInstance`] — the instance is stale, hidden,
+    ///   or owned by a definition (a member instance is not a world
+    ///   operand; [`Document::make_unique_by_path`] forks one by its path).
+    /// - [`DocumentError::ExplodeSessionOpen`] — the definition is on loan
+    ///   to an open session.
     ///
     /// On `Err` the document is untouched.
     pub fn make_unique(
@@ -17847,14 +17943,236 @@ impl Document {
         // A def-owned member instance is not a world operand — repointing
         // it would silently edit the OUTER definition's shared content
         // (nested-components review).
-        let prev_def = match self.instances.get(instance) {
+        let def = match self.instances.get(instance) {
             Some(rec) if !rec.hidden && rec.owner_def.is_none() => rec.def,
             _ => return Err(DocumentError::UnknownInstance),
         };
         // The members of an on-loan definition are world-baked right now;
         // copying them into a new definition would copy baked coordinates
-        // as def-local ones (ARCHITECTURE.md 2.11).
-        self.refuse_def_on_loan(prev_def)?;
+        // as def-local ones (ARCHITECTURE.md 2.11). This entry point keeps
+        // its own refusal; the path form answers `ExplodeSessionScope`.
+        self.refuse_def_on_loan(def)?;
+        let (new_def, _, _, change) = self.make_unique_by_path(&[instance], true, false)?;
+        Ok((new_def, change))
+    }
+
+    /// "Make Unique" by occurrence path: fork the placement at the end of
+    /// `path` (instance ids from the world down, the last one included, the
+    /// same chain as [`Occurrence::path`] plus its node) onto a private
+    /// copy of its definition, and report every id the fork created.
+    ///
+    /// - `cascade: true` forks every instance on the path in turn,
+    ///   outermost first, so only the placement at the end of the path
+    ///   diverges: each later path element is found through the remap as
+    ///   its copy inside the previous step's new definition.
+    /// - `cascade: false` forks only the last instance's definition, in
+    ///   place inside its owner definition; every placement of the outer
+    ///   definitions sees the change.
+    /// - `deep: true` also gives every instance inside the leaf's forked
+    ///   definition a private copy of its own definition, recursively;
+    ///   instances in that tree that placed the same old definition share
+    ///   one new copy of it. The intermediate forks of a cascade stay one
+    ///   level deep, so the definitions beside the path stay shared.
+    ///   `deep: false` keeps SketchUp's one-level semantics.
+    ///
+    /// Each fork follows [`Document::make_unique`]'s naming (a path
+    /// instance's own name is promoted); a nested fork of `deep` never
+    /// promotes, so its instance keeps its name and the new definition
+    /// reads `"<def> Copy"`. A forked definition keeps every attribute
+    /// (`hew/linked` included) except the `hew.library` provenance stamp.
+    ///
+    /// Returns the new definition of the last path element, the placement
+    /// at the end of the path after the call (the last element itself when
+    /// it was repointed in place, otherwise its copy from the remap), the
+    /// remap (new ids keyed by the id each copies; a record repointed in
+    /// place is never listed), and the change. One undo entry: a plain
+    /// [`DocAction::MadeUnique`] for a call that forks once, else a
+    /// "Make Unique" [`DocAction::Compound`] of its steps.
+    ///
+    /// # Errors
+    /// - [`DocumentError::EmptySelection`] — `path` is empty.
+    /// - [`DocumentError::UnknownInstance`] — a path element is stale or
+    ///   hidden, `path[0]` is not a world instance, or `path[i]` is not a
+    ///   member of `path[i - 1]`'s definition.
+    /// - [`DocumentError::UnknownComponent`] — a path element places a
+    ///   stale or hidden definition.
+    /// - [`DocumentError::ExplodeSessionScope`] — a definition the call
+    ///   would read or fork is on loan to an open session.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn make_unique_by_path(
+        &mut self,
+        path: &[InstanceId],
+        cascade: bool,
+        deep: bool,
+    ) -> Result<(ComponentId, InstanceId, Remap, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "make_unique_by_path", depth = path.len(), cascade, deep);
+        let defs = self.resolve_unique_chain(path)?;
+        let last = path.len() - 1;
+        if deep {
+            let leaf_def = defs[last];
+            if self
+                .defs_on_loan()
+                .into_iter()
+                .any(|d| self.def_reaches(leaf_def, d))
+            {
+                return Err(DocumentError::ExplodeSessionScope);
+            }
+        }
+        let steps: Vec<usize> = if cascade {
+            (0..path.len()).collect()
+        } else {
+            vec![last]
+        };
+        // A call that may fork more than once can fail between forks only
+        // through an invariant the checks above cannot see; the checkpoint
+        // makes even that leave the document untouched.
+        let checkpoint = (steps.len() > 1 || deep).then(|| self.clone());
+        let mut remap = Remap::default();
+        let mut share: BTreeMap<ComponentId, ComponentId> = BTreeMap::new();
+        let mut actions: Vec<DocAction> = Vec::new();
+        let mut sketches: Vec<SketchId> = Vec::new();
+        let mut in_place: Vec<InstanceId> = Vec::new();
+        let mut result: Result<(ComponentId, InstanceId), DocumentError> =
+            Err(DocumentError::EmptySelection);
+        for &i in &steps {
+            // After the first cascade step, the path element is a member of
+            // a definition this call just forked: its copy is the one to fork.
+            let target = if cascade && i > 0 {
+                match remap.instances.get(&path[i]) {
+                    Some(&copy) => copy,
+                    None => {
+                        result = Err(DocumentError::UnknownInstance);
+                        break;
+                    }
+                }
+            } else {
+                in_place.push(path[i]);
+                path[i]
+            };
+            match self.fork_instance_definition(
+                target,
+                true,
+                deep && i == last,
+                &mut share,
+                &mut remap,
+                &mut actions,
+                &mut sketches,
+            ) {
+                Ok(new_def) => result = Ok((new_def, target)),
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+        let (new_def, leaf) = match result {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(checkpoint) = checkpoint {
+                    *self = checkpoint;
+                }
+                return Err(e);
+            }
+        };
+
+        let action = if actions.len() == 1 {
+            actions.pop().expect("one action")
+        } else {
+            DocAction::Compound {
+                actions,
+                meta: Some(CompoundMeta {
+                    label: "Make Unique".to_string(),
+                    origin: HistoryOrigin::User,
+                    coalesce: None,
+                }),
+            }
+        };
+        self.undo.push(action);
+        self.commit_new_action();
+        self.debug_validate();
+
+        let mut instances_touched = in_place;
+        let mut components_touched: Vec<ComponentId> = Vec::new();
+        for (&old, &new) in &remap.components {
+            merge_unique(&mut components_touched, vec![old, new]);
+            merge_unique(&mut instances_touched, self.placing_instances(old));
+            merge_unique(&mut instances_touched, self.placing_instances(new));
+        }
+        Ok((
+            new_def,
+            leaf,
+            remap,
+            DocChange {
+                instances_touched,
+                components_touched,
+                // The clones need to be registered with inference too — same
+                // as `explode_instance`'s `created_sketches` reporting its
+                // baked world sketches — or the private copy's drafting
+                // surface stays snap-blind until an unrelated op happens to
+                // touch it.
+                sketches_touched: sketches,
+                ..Default::default()
+            },
+        ))
+    }
+
+    /// Validate a [`Document::make_unique_by_path`] chain and return the
+    /// definition each element places: `path[0]` a live, visible world
+    /// instance, each later element a live, visible member of the previous
+    /// element's definition, every placed definition live and visible and
+    /// not on loan to a session (its members would be world-baked).
+    fn resolve_unique_chain(&self, path: &[InstanceId]) -> Result<Vec<ComponentId>, DocumentError> {
+        if path.is_empty() {
+            return Err(DocumentError::EmptySelection);
+        }
+        let on_loan = self.defs_on_loan();
+        let mut defs: Vec<ComponentId> = Vec::with_capacity(path.len());
+        let mut owner: Option<ComponentId> = None;
+        for &i in path {
+            let def = match self.instances.get(i) {
+                Some(rec) if !rec.hidden && rec.owner_def == owner => rec.def,
+                _ => return Err(DocumentError::UnknownInstance),
+            };
+            if self.components.get(def).is_none_or(|c| c.hidden) {
+                return Err(DocumentError::UnknownComponent);
+            }
+            // Checked before the next element's ownership: a definition on
+            // loan has its member instances surfaced into the world, so the
+            // chain through it would otherwise read as broken.
+            if on_loan.contains(&def) {
+                return Err(DocumentError::ExplodeSessionScope);
+            }
+            defs.push(def);
+            owner = Some(def);
+        }
+        Ok(defs)
+    }
+
+    /// One fork for [`Document::make_unique_by_path`]: copy `instance`'s
+    /// definition's live members (names, tags, attributes kept) and live
+    /// def-owned sketches into a new definition, repoint `instance` onto
+    /// it, record every copy in `remap`, and append the step's
+    /// [`DocAction::MadeUnique`] to `actions` (not pushed). `promote` moves
+    /// the instance's own name onto the new definition. Under `deep`, every
+    /// instance copied into the new definition is then repointed onto a
+    /// private copy of its own definition — forked once per old definition
+    /// per call through `share`, recursively. Returns the new definition.
+    #[allow(clippy::too_many_arguments)]
+    fn fork_instance_definition(
+        &mut self,
+        instance: InstanceId,
+        promote: bool,
+        deep: bool,
+        share: &mut BTreeMap<ComponentId, ComponentId>,
+        remap: &mut Remap,
+        actions: &mut Vec<DocAction>,
+        sketches: &mut Vec<SketchId>,
+    ) -> Result<ComponentId, DocumentError> {
+        let prev_def = match self.instances.get(instance) {
+            Some(rec) if !rec.hidden => rec.def,
+            _ => return Err(DocumentError::UnknownInstance),
+        };
         let members: Vec<NodeId> = match self.components.get(prev_def) {
             Some(c) if !c.hidden => c
                 .members
@@ -17869,9 +18187,14 @@ impl Document {
             _ => return Err(DocumentError::UnknownComponent),
         };
 
-        // Name the new definition per the doc comment: promote the instance
-        // name if set, else derive a "<def> Copy" name from the source def.
-        let prev_instance_name = self.instances[instance].name.clone();
+        // Name the new definition per `make_unique`'s doc comment: promote
+        // the instance name if set, else derive a "<def> Copy" name from the
+        // source def.
+        let prev_instance_name = if promote {
+            self.instances[instance].name.clone()
+        } else {
+            None
+        };
         let new_name = match (
             &prev_instance_name,
             self.components[prev_def].name.as_deref(),
@@ -17891,6 +18214,10 @@ impl Document {
             hidden: false,
             name: new_name,
         });
+        let mut copied: Vec<(EntityRef, EntityRef)> = vec![(
+            EntityRef::Component(new_def),
+            EntityRef::Component(prev_def),
+        )];
         self.copy_attrs(
             &EntityRef::Component(prev_def),
             EntityRef::Component(new_def),
@@ -17902,7 +18229,8 @@ impl Document {
         // is divergence. A copied stamp would let a later insert of the
         // pristine item silently reuse the user's edited private geometry
         // (adversarial review S1). Client namespaces still deep-copy per
-        // docs/agents/HEW_API.md §8.
+        // docs/agents/HEW_API.md §8, `hew/linked` included (a set of one
+        // placement is still a linked set).
         if let Some(dict) = self
             .attrs
             .get_mut(&AttrTarget::Entity(EntityRef::Component(new_def)))
@@ -17911,7 +18239,8 @@ impl Document {
         }
         // One-level-deep semantics, exactly SketchUp's: objects and group
         // subtrees copy, but a member instance's copy still SHARES its own
-        // inner definition — making the outer unique never forks the inner.
+        // inner definition — making the outer unique never forks the inner
+        // (unless `deep`, below).
         let mut new_members: Vec<NodeId> = Vec::with_capacity(members.len());
         // Old member -> its private copy, so a copied object-owned sketch
         // stays owned by the copy of its owner.
@@ -17920,19 +18249,7 @@ impl Document {
         for m in members {
             match m {
                 NodeId::Object(o) => {
-                    let object = self.objects[o].object.clone();
-                    let id = self.insert_object_record(ObjectRecord {
-                        object,
-                        history: History::new(),
-                        hidden: false,
-                        owner: ObjectOwner::Definition {
-                            def: new_def,
-                            parent: None,
-                        },
-                        name: None,
-                        tags: Vec::new(),
-                    });
-                    self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
+                    let id = self.unique_copy_object(o, new_def, None, &mut copied);
                     member_copies.insert(o, id);
                     new_members.push(NodeId::Object(id));
                 }
@@ -17943,11 +18260,12 @@ impl Document {
                         None,
                         &mut member_copies,
                         &mut group_copies,
+                        &mut copied,
                     );
                     new_members.push(NodeId::Group(gid));
                 }
                 NodeId::Instance(i) => {
-                    let iid = self.unique_copy_instance(i, new_def, None);
+                    let iid = self.unique_copy_instance(i, new_def, None, &mut copied);
                     new_members.push(NodeId::Instance(iid));
                 }
             }
@@ -17975,7 +18293,6 @@ impl Document {
             .filter(|&(sid, &c)| c == prev_def && !self.sketch_tombstoned(sid))
             .map(|(&sid, _)| sid)
             .collect();
-        let mut cloned_sketches: Vec<SketchId> = Vec::with_capacity(source_sketches.len());
         for sid in source_sketches {
             let clone = self.sketches[sid].clone();
             let new_sid = self.insert_sketch_record(clone);
@@ -17999,34 +18316,68 @@ impl Document {
             {
                 self.object_sketches.insert(new_sid, copy);
             }
-            cloned_sketches.push(new_sid);
+            copied.push((EntityRef::Sketch(new_sid), EntityRef::Sketch(sid)));
+            sketches.push(new_sid);
         }
 
         self.instances[instance].def = new_def;
 
-        self.undo.push(DocAction::MadeUnique {
+        remap.components.insert(prev_def, new_def);
+        share.insert(prev_def, new_def);
+        let mut copied_instances: Vec<InstanceId> = Vec::new();
+        for (new, src) in &copied {
+            match (new, src) {
+                (EntityRef::Object(n), EntityRef::Object(s)) => {
+                    remap.objects.insert(*s, *n);
+                }
+                (EntityRef::Group(n), EntityRef::Group(s)) => {
+                    remap.groups.insert(*s, *n);
+                }
+                (EntityRef::Instance(n), EntityRef::Instance(s)) => {
+                    remap.instances.insert(*s, *n);
+                    copied_instances.push(*n);
+                }
+                _ => {}
+            }
+        }
+        actions.push(DocAction::MadeUnique {
             instance,
             prev_def,
             new_def,
             prev_instance_name,
+            copied,
+            shared: Vec::new(),
         });
-        self.commit_new_action();
-        self.debug_validate();
 
-        Ok((
-            new_def,
-            DocChange {
-                instances_touched: vec![instance],
-                components_touched: vec![prev_def, new_def],
-                // The clones need to be registered with inference too — same
-                // as `explode_instance`'s `created_sketches` reporting its
-                // baked world sketches — or the private copy's drafting
-                // surface stays snap-blind until an unrelated op happens to
-                // touch it.
-                sketches_touched: cloned_sketches,
-                ..Default::default()
-            },
-        ))
+        if deep {
+            for copy in copied_instances {
+                let inner = self.instances[copy].def;
+                match share.get(&inner).copied() {
+                    Some(shared_def) => {
+                        // One private copy per old definition per call: this
+                        // copy joins the one an earlier copy made, recorded
+                        // on the step that made it.
+                        self.instances[copy].def = shared_def;
+                        let step = actions
+                            .iter_mut()
+                            .find_map(|a| match a {
+                                DocAction::MadeUnique {
+                                    new_def, shared, ..
+                                } if *new_def == shared_def => Some(shared),
+                                _ => None,
+                            })
+                            .expect("a shared definition was made by a step of this call");
+                        step.push(copy);
+                    }
+                    None => {
+                        self.fork_instance_definition(
+                            copy, false, true, share, remap, actions, sketches,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(new_def)
     }
 
     // ---------------------------------------------------------- explode session
@@ -23204,20 +23555,31 @@ impl Document {
                 prev_def,
                 new_def,
                 prev_instance_name,
+                shared,
+                ..
             } => {
                 let (instance, prev_def, new_def) = (*instance, *prev_def, *new_def);
                 self.instances[instance].def = prev_def;
-                // Restore the instance name a promotion cleared (a no-op for
-                // an instance that was unnamed at the op).
-                self.instances[instance].name = prev_instance_name.clone();
+                // Restore the instance name a promotion cleared. Nothing to
+                // restore when none was promoted: by LIFO the name is what
+                // the op left, which it never touched.
+                if prev_instance_name.is_some() {
+                    self.instances[instance].name = prev_instance_name.clone();
+                }
+                for &i in shared {
+                    self.instances[i].def = prev_def;
+                }
                 self.set_def_subtree_hidden(new_def, true);
                 // Any sketch drawn INTO the private copy (component-edit-
                 // parity.md phase K1) goes dark with `new_def` by derivation
                 // (`sketch_tombstoned`), as in `MadeComponent`'s undo.
                 let sketches_touched = self.live_def_sketches_of(new_def);
                 self.components[new_def].hidden = true;
+                let mut instances_touched = vec![instance];
+                instances_touched.extend(shared.iter().copied());
+                merge_unique(&mut instances_touched, self.placing_instances(prev_def));
                 DocChange {
-                    instances_touched: vec![instance],
+                    instances_touched,
                     components_touched: vec![prev_def, new_def],
                     sketches_touched,
                     ..Default::default()
@@ -24919,25 +25281,37 @@ impl Document {
                 change.groups_touched.extend(parent);
                 change
             }
-            &DocAction::MadeUnique {
+            DocAction::MadeUnique {
                 instance,
                 prev_def,
                 new_def,
+                prev_instance_name,
+                shared,
                 ..
             } => {
+                let (instance, prev_def, new_def) = (*instance, *prev_def, *new_def);
                 self.components[new_def].hidden = false;
                 self.set_def_subtree_hidden(new_def, false);
                 // Revealing `new_def` brings back the sketches it owned when
                 // it was dissolved (derived, see the undo arm above).
                 let sketches_touched = self.live_def_sketches_of(new_def);
                 self.instances[instance].def = new_def;
+                for &i in shared {
+                    self.instances[i].def = new_def;
+                }
                 // Re-clear the instance name a promotion moved onto the new
                 // definition (exact by LIFO: at redo time the name is the
                 // recorded `prev_instance_name` again, and the op left it
-                // `None` — unconditionally for an unnamed instance too).
-                self.instances[instance].name = None;
+                // `None`). A step that promoted nothing leaves the name as
+                // the op did.
+                if prev_instance_name.is_some() {
+                    self.instances[instance].name = None;
+                }
+                let mut instances_touched = vec![instance];
+                instances_touched.extend(shared.iter().copied());
+                merge_unique(&mut instances_touched, self.placing_instances(new_def));
                 DocChange {
-                    instances_touched: vec![instance],
+                    instances_touched,
                     components_touched: vec![prev_def, new_def],
                     sketches_touched,
                     ..Default::default()

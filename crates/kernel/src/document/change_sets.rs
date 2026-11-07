@@ -486,11 +486,21 @@ impl Document {
                 instance,
                 prev_def,
                 new_def,
+                copied,
+                shared,
                 ..
             } => {
                 b.component(Added, *new_def);
                 b.instance(Modified, *instance);
                 b.component(Modified, *prev_def);
+                // The private copy's members and cloned sketches are new
+                // entities a consumer would otherwise never hear of.
+                for (new, _) in copied {
+                    b.put(Added, new.clone());
+                }
+                // Copies made earlier in the same call, repointed onto the
+                // shared private definition.
+                b.instances(Modified, shared.iter().copied());
             }
             // Entering or leaving an edit is bookkeeping, and its change
             // set is empty on purpose: the open bakes the component's

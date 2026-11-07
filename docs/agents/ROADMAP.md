@@ -299,7 +299,8 @@ below.
   graph stays acyclic and bounded — a component cannot contain itself,
   and nesting past 64 levels or a million rendered parts is refused
 - Make Unique (detach an instance into its own copy, named "<definition>
-  Copy" — or after the instance's own name if it has one) and Explode
+  Copy" — or after the instance's own name if it has one; the copied
+  members keep their names, tags, and attributes) and Explode
   (bake an instance back into ordinary geometry; a nested member
   surfaces as an ordinary instance, its geometry still shared)
 - Copy/Cut/Paste and Paste In Place of component instances stay linked
@@ -1385,7 +1386,14 @@ below.
   placement (`hew.component.flip_instance`), sets or clears a part's
   frame override (`hew.entity.set_frame`), and copies a selection into a
   grid of up to three axes in one undo step (`hew.entity.move`'s
-  `copy.grid`); the snap service can lock to any direction through an
+  `copy.grid`). The kernel forks one placement at any depth by its
+  occurrence path and reports every id the fork created
+  (`Document::make_unique_by_path`: with the cascade, only that placement
+  diverges; `deep` forks the nested definitions too; one undo entry),
+  exported to the app as `make_unique_by_path_json`; its bus command
+  (`hew.component.make_unique` by path) is still to come. A boolean's
+  result keeps its first operand's name, tags, and attributes. The snap
+  service can lock to any direction through an
   anchor, for plugin tools to use. A component placement carries its own
   material (manifest v24), shown on member faces nobody painted, the
   nearest painted placement winning; `hew.material.paint` sets it or a

@@ -363,6 +363,11 @@ directly into vertex and plane data. This keeps the kernel's core geometry
 representation pose-free everywhere except Component instances, which is the
 one place a persistent pose earns its complexity.
 
+A placement can be forked by occurrence path (`make_unique_by_path`): with
+the cascade on, every definition on the path is forked so only that
+placement diverges; the call returns the ids it created (the remap). A
+forked definition keeps its attributes and sheds its Library provenance.
+
 Editing a definition's members is covered separately in 2.11: because a
 definition's members are already ordinary Objects (just owned by a
 `ComponentId` rather than the world), editing one in place is a matter of
