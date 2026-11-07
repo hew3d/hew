@@ -1242,3 +1242,45 @@ fn an_import_built_in_steps_is_the_import_built_at_once() {
         assert_eq!(a.state_hash(), b.state_hash(), "{name}: the same document");
     }
 }
+
+/// A radial dimension's label sits where the file's leader ends: on the
+/// leader's angle, `radius - leader[1]` (inches, negative outward) from
+/// the circle's center. The leader vector carries that length, not a
+/// unit length that would throw the label a metre off.
+#[test]
+fn radial_dimension_leader_ends_where_the_file_puts_it() {
+    let bytes = fixture("dimension-radial.skp");
+    let m = skpwright::Model::parse(&bytes).unwrap();
+    let r = &m.radial_dimensions[0];
+    assert!(r.leader[1] < 0.0, "fixture leaves the circle outward");
+    let out = skp_import::import(&bytes).unwrap();
+    let radials: Vec<_> = out
+        .scene
+        .extra
+        .annotations
+        .iter()
+        .filter_map(|a| match a {
+            kernel::Annotation::RadialDimension {
+                anchor,
+                curve,
+                leader_dir,
+                ..
+            } => Some((anchor.point, curve.center, curve.radius, *leader_dir)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(radials.len(), 1, "{:?}", out.warnings);
+    let (anchor, center, radius, dir) = radials[0];
+    let end = anchor + dir;
+    let want = radius - r.leader[1] / skpwright::INCH;
+    assert!(
+        ((end - center).length() - want).abs() < 1e-9,
+        "end {:?} is {} from the center, want {want}",
+        end,
+        (end - center).length()
+    );
+    assert!(
+        dir.dot(anchor - center) > 0.0,
+        "an outward leader points away from the center"
+    );
+}

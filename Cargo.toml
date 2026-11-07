@@ -61,7 +61,7 @@ library = { path = "crates/library" }
 # a crates.io semver pin on the hosted Skpwright releases, so CI resolves it
 # like any other dependency. No Trimble SDK material anywhere in its chain
 # (rule 7 admissibility test). Local dev clone: ../skpwright.
-skpwright = "0.5.0"
+skpwright = "0.6.0"
 
 slotmap = "1"
 proptest = "1"

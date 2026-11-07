@@ -1877,12 +1877,12 @@ impl Converter {
                         radius,
                         plane: Plane::from_point_normal(c, n).ok()?,
                     },
-                    // Negative is outward (§10.12).
-                    leader_dir: if r.leader[1] < 0.0 {
-                        radial
-                    } else {
-                        radial * -1.0
-                    },
+                    // The leader runs from the rim to its end, which lies at
+                    // `radius - leader[1]` from the center (§10.12): outward
+                    // when negative, inward otherwise, its length in inches
+                    // as stored. Hew places the label at `anchor + leader_dir`,
+                    // so the vector carries the length too.
+                    leader_dir: radial * (-r.leader[1] / skpwright::INCH),
                     text_override: dimension_override(&r.text_override),
                 };
                 Some((a, tags_through(r.layer, chain)))

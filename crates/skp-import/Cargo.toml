@@ -15,7 +15,7 @@ license.workspace = true
 [dependencies]
 kernel = { workspace = true }
 mesh-heal = { workspace = true }
-skpwright = "0.5.0"
+skpwright = "0.6.0"
 # JSON text Hew stores for an attribute value SketchUp has no type for.
 serde_json = { workspace = true }
 
