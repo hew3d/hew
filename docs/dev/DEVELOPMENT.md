@@ -184,6 +184,19 @@ The next release moves the pointer to its tag, so the fix must be in that
 tag's history: if the release is cut from a release branch rather than
 `main`, cherry-pick the fix there too.
 
+**The beta web app** (beta.hew3d.com) is a second Cloudflare Pages project,
+`hew-app-beta`, separate from the release app at app.hew3d.com. The
+`deploy-beta` job in `.github/workflows/ci.yml` deploys it on every push to
+`main`, once the gate jobs (`verify`, `relay-contract`, `bug-intake-tests`)
+are green. Builds that deploy there set `HEW_BETA_SHA`, which stamps the
+version as `<version>+beta.<sha>` and switches on the in-app beta cues and
+the "Hew Beta" PWA name. Releases, local builds, E2E builds and the
+self-hosting tarball never set it, so they are unchanged. The two Workers
+that serve same-origin routes, share-relay and bug-intake, carry
+`beta.hew3d.com` routes in their `wrangler.toml`; redeploy each with
+`npx wrangler deploy` whenever those routes change. The beta is deliberately
+unlinked from the website and the README, so do not add links to it there.
+
 ## 3. The rules
 
 These are non-negotiable. They are cited from code comments as

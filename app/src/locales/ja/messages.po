@@ -304,6 +304,10 @@ msgstr ""
 msgid "{name} — Hew"
 msgstr ""
 
+#: src/io/documentSession.ts
+msgid "{name} — Hew Beta"
+msgstr ""
+
 #. Hover tip: a thing and the container it sits in
 #: src/panels/selectionPath.ts
 msgid "{name} · in {parentLabel}"
@@ -644,6 +648,10 @@ msgstr ""
 
 #: src/io/documentSession.ts
 msgid "• {name} — Hew"
+msgstr ""
+
+#: src/io/documentSession.ts
+msgid "• {name} — Hew Beta"
 msgstr ""
 
 #: src/palette/CommandPalette.tsx
@@ -1155,6 +1163,14 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Behind"
+msgstr ""
+
+#: src/panels/MenuBar.tsx
+msgid "BETA"
+msgstr ""
+
+#: src/panels/WelcomeScreen.tsx
+msgid "Beta build {betaVersion}. Files saved here may not open in the released Hew."
 msgstr ""
 
 #. Color of the Z axis in a status-bar hint, lowercase
@@ -3567,6 +3583,10 @@ msgstr ""
 msgid "Hew {version} is available — you have {current}.\n"
 "\n"
 "Download and install it now?"
+msgstr ""
+
+#: src/shop/ShopApp.tsx
+msgid "Hew Beta"
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx

@@ -19,12 +19,13 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useLingui } from '@lingui/react/macro'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { modLabel, isMac } from '../platform'
 import { shortcutFor, toolLabel, type ToolName } from '../tools/toolRegistry'
 import type { StandardView } from '../viewport/Viewport'
 import { MENU } from '../health/healthCopy'
 import { isComposingKey } from '../input/keyboard'
+import { appVersionString, isBetaBuild } from '../buildInfo'
 
 export interface MenuBarProps {
   /** Bare document name (no dirty mark, no " — Hew" suffix — `documentSession.ts`'s
@@ -404,6 +405,19 @@ const BAR_STYLE: React.CSSProperties = {
   userSelect: 'none',
   gap: 0,
   position: 'relative',
+}
+
+const BETA_CHIP_STYLE: React.CSSProperties = {
+  padding: '1px 6px',
+  marginRight: '8px',
+  fontSize: '10px',
+  fontWeight: 600,
+  letterSpacing: '0.08em',
+  lineHeight: '14px',
+  color: 'var(--text-tertiary, #ccc)',
+  border: '1px solid var(--border-hairline, #3a3a3a)',
+  borderRadius: '3px',
+  cursor: 'default',
 }
 
 const MENU_TRIGGER_STYLE = (open: boolean, hovered: boolean): React.CSSProperties => ({
@@ -803,6 +817,7 @@ export function MenuBar({
   onFocusWindow,
 }: MenuBarProps) {
   const { t } = useLingui()
+  const betaVersion = appVersionString()
   const [openMenu, setOpenMenu] = useState<MenuId>(null)
   const barRef = useRef<HTMLDivElement>(null)
 
@@ -1638,6 +1653,14 @@ export function MenuBar({
           command-palette field lived here on Windows/Linux/Web until moved
           to the top of the tool rail on every platform — see ToolRail.tsx.) */}
       <div style={{ flex: 1 }} onMouseDown={close} />
+
+      {/* Beta build cue (beta web app only): a passive label, not a control —
+          no handler, not focusable. The tooltip carries the full version. */}
+      {isBetaBuild() && (
+        <span style={BETA_CHIP_STYLE} title={betaVersion} data-testid="beta-chip">
+          <Trans>BETA</Trans>
+        </span>
+      )}
 
       {/* Settings gear on the trailing edge — the modern menu-bar convention
           for reaching Settings (macOS reaches it via the app menu). */}
