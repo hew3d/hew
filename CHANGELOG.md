@@ -8,7 +8,33 @@ A newer Hew always opens documents saved by an older one. The reverse
 is not guaranteed: releases that change the `.hew` format say so under
 **Changed**.
 
-## [Unreleased]
+## [1.4.0] (2026-11-08) - The "All In" Release
+
+Hew now opens and saves every SketchUp file there is, from SketchUp 3
+through SketchUp 2027. Save writes the file back in the version it came in.
+Save As writes any version, including the ones SketchUp itself stopped
+writing years ago, so a 2027 model can go out as a SketchUp 8 file and come
+back. More of what a file holds survives the round trip: layer folders,
+scene timing, guide dash patterns, the section plane's look, Match Photo
+cameras, geo-location, and physically based materials, which also brings
+Metallic and Roughness sliders to the material palette.
+
+Modeling got the pieces that SketchUp hands kept reaching for. A Ctrl or
+Cmd tap keeps a drawn shape off the face under it, and drawing is now
+color-coded: blue for a shape that becomes a new object, orange for one
+that is part of a solid. Two new snaps find the point where an edge pierces
+a face and the line where two objects' faces meet. Editing one copy of a
+component leaves the other copies in view and moving with every change.
+Guides can be moved, rotated, and copied in rows and fans. A whole line is
+dimensioned with one click.
+
+This is also the first release with a wave of outside work: eight pull
+requests from two new contributors, covering the guide tools, the one-click
+dimension, three selection fixes, resizable tray sections, and the Flatpak
+install fix. Eight user-reported bugs are fixed, along with two kernel
+faults found by fuzzing. Reporters can now hear back from Help ▸ Sent
+Reports without an account, and beta.hew3d.com runs what the next release
+will be.
 
 ### Added
 
@@ -54,6 +80,10 @@ is not guaranteed: releases that change the `.hew` format say so under
 - **Open on Phone:** The share relay's route is now declared with the Worker, so a redeploy cannot drop it, and a scheduled check watches the live service. This fixes "could not reach the share server (status 405)".
 - **COLLADA:** `.dae` files from exporters that leave out the created and modified dates now import instead of failing with "expected <created>".
 - **Linux:** The Flatpak install commands and bundle now install Hew and its GNOME runtime in the same scope, with Hew supplying updates and Flathub the runtime, which is meant to fix "runtime not found" on systems where Flathub is configured per user. [#48]
+
+### Security
+
+- **All:** Updated the zip crate to 9.0.5 for CVE-2026-115905 (GHSA-m665-v7pm-7grj), a mismatch between an entry's local and central headers that could hide a file from checks.
 
 ## [1.3.1] (2026-10-26) - The "Safe to Reopen" Release
 
