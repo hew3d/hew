@@ -279,6 +279,8 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   ThicknessTooSmall: msg`That thickness is too small. Enter at least 0.001 mm.`,
   UnjoinedSeam:
     msg`Two faces in this panel meet without sharing an edge, so a thickness would leave a crack inside. Draw a line where they meet, then try again.`,
+  RejoinNotPossible:
+    msg`These pieces can't be joined into one solid. The shape has an opening, the pieces sit in different groups, or they aren't one whole split shape. Use Rejoin to close each piece instead.`,
 
   // ---------------------------------------------------------- explode session
   ExplodeSessionOpen:

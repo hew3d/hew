@@ -8739,6 +8739,10 @@ msgstr "These faces touch along more than one separate edge run, which merge can
 msgid "These objects aren't solid, so the {format} may not print cleanly:"
 msgstr "These objects aren't solid, so the {format} may not print cleanly:"
 
+#: src/kernelErrors.ts
+msgid "These pieces can't be joined into one solid. The shape has an opening, the pieces sit in different groups, or they aren't one whole split shape. Use Rejoin to close each piece instead."
+msgstr "These pieces can't be joined into one solid. The shape has an opening, the pieces sit in different groups, or they aren't one whole split shape. Use Rejoin to close each piece instead."
+
 #: src/health/healthCopy.ts
 msgid "These shapes have open sides or gaps. Most are open on purpose, like a duct, a pipe, or a box without a lid. Closing one adds a flat face across each opening, which makes it solid."
 msgstr "These shapes have open sides or gaps. Most are open on purpose, like a duct, a pipe, or a box without a lid. Closing one adds a flat face across each opening, which makes it solid."

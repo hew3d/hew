@@ -1074,7 +1074,13 @@ on its own: `cap_rims` closes flat openings with faces, `thicken_sheet`
 pulls a flat surface into a solid, `delete_faces` removes faces from an
 open Object, and marking a surface sets one attribute. Each is an ordinary
 undoable operation that commits only a result the validator accepts and
-refuses typed otherwise (`kernel::repair`).
+refuses typed otherwise (`kernel::repair`). `rejoin_as_one_solid` is built
+from them: it caps a split shape's pieces at exactly their shared rims,
+deletes the inside walls, and unions the pieces with the ordinary boolean
+(which resolves the coincident caps), as one undo entry. It takes one
+whole family, every piece and wall, under one parent; a subset, a family
+split across groups, a shape that stays open after its seams are capped,
+or pieces that meet only through a wall refuse `RejoinNotPossible`.
 
 ### 5.4 Tolerance policy
 

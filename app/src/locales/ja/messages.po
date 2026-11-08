@@ -8735,6 +8735,10 @@ msgstr ""
 msgid "These objects aren't solid, so the {format} may not print cleanly:"
 msgstr ""
 
+#: src/kernelErrors.ts
+msgid "These pieces can't be joined into one solid. The shape has an opening, the pieces sit in different groups, or they aren't one whole split shape. Use Rejoin to close each piece instead."
+msgstr ""
+
 #: src/health/healthCopy.ts
 msgid "These shapes have open sides or gaps. Most are open on purpose, like a duct, a pipe, or a box without a lid. Closing one adds a flat face across each opening, which makes it solid."
 msgstr ""

@@ -1050,6 +1050,18 @@ below.
   (`hew.doc.health` with per-rim `cappable` / `shared` / `sheet_edge`,
   `hew.solid.cap` / `thicken` / `delete_faces` / `mark_surface`, `health`
   in `hew.query`), so a script can repair a file
+- Rejoin as one solid (`Document::rejoin_as_one_solid`; wasm
+  `rejoin_as_one_solid`, recorded): one split shape's pieces are capped at
+  their shared rims, its inside walls deleted, and the pieces unioned
+  largest first into one watertight Object that keeps the largest piece's
+  name, tags, attributes, and group, as one undo step labeled "Rejoin as
+  one solid". It takes one whole family, every piece and wall; a part of
+  a family, a shape drawn with an opening, pieces or walls under
+  different parents, pieces that meet only through a wall, or a seam that
+  cannot take a cap refuses typed (`RejoinNotPossible`, or the cap's own
+  refusal) and leaves the model as it was. The Model Health button and
+  the Make Solid choice for it will be wired over the `hew.solid.rejoin`
+  bus command later
 - Binary STL export, scaled for 3D printing; export is gated on every
   object being a solid, so an exported file is guaranteed manifold
 - STL curve resolution: cylinder walls re-facet from their analytic
