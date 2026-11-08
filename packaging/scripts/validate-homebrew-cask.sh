@@ -33,8 +33,10 @@ fakehome="$(mktemp -d)"
 # persistent developer mode on; put it back the way it was.
 developer_was_off=false
 case "$(brew developer)" in *disabled*) developer_was_off=true ;; esac
+trusted=false
 cleanup() {
   brew uninstall --cask "$cask" >/dev/null 2>&1 || true
+  if $trusted; then brew untrust --cask "$cask" >/dev/null 2>&1 || true; fi
   rm -rf "$taproot" "$fakehome"
   rmdir "$(dirname "$taproot")" 2>/dev/null || true
   if $developer_was_off; then brew developer off >/dev/null 2>&1 || true; fi
@@ -46,6 +48,11 @@ cp "$here/homebrew/Casks/hew.rb" "$taproot/Casks/hew.rb"
 
 brew style --cask "$cask"
 brew audit --cask --strict --online "$cask"
+
+# Homebrew 6 and later load nothing from a tap that has not been trusted
+# (docs.brew.sh/Tap-Trust); trust this one cask, not the tap, and take the
+# trust back in cleanup. Older brews have no `trust` command and need none.
+if brew trust --cask "$cask" >/dev/null 2>&1; then trusted=true; fi
 
 brew install --cask "$cask"
 cli="$(brew --prefix)/bin/hew-cli"
