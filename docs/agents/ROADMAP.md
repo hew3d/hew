@@ -379,7 +379,13 @@ below.
   durably toggles Move between moving and copying (so an exact copy
   distance can be typed), and a committed copy refines into an array:
   typing `3x` (or `x3`) places 3 copies at the same spacing along the
-  vector, `3/` (or `/3`) places 3 copies dividing the distance —
+  vector, `3/` (or `/3`) places 3 copies dividing the distance, and two
+  counts (`4x,3x`, `x4,x3`, `*4,*3`) lay a grid of (4+1) by (3+1) slots
+  with the original at a corner, one move length apart in both
+  directions (the second direction is the horizontal perpendicular, or
+  the arrow-key axis; an arrow key while the grid is hot re-lays it; the
+  grid follows the copy kind, and a product over 1,000 copies is refused;
+  guides copy along one direction only) —
   re-enter a different count while the gesture is hot, one undo removes
   the whole array. Sketch selections copy too, keeping curve identity (a
   copied circle is a true circle): an in-plane offset replays through the
@@ -1426,7 +1432,9 @@ below.
   goes with its last placement, `promote_linked` turns one into a named
   component, change sets carry `linked` and `copied_from`, and the wasm
   surface exports `wrap_linked`, `is_linked`, `set_linked`,
-  `owner_definition`, and `duplicate_selection_array_linked`. The app and
+  `owner_definition`, `duplicate_selection_array_linked`, and
+  `duplicate_selection_placements` (with a `_linked` sibling that reports
+  the wraps; the Move grid, recorded as one call). The app and
   the bus still copy independently. A boolean's
   result keeps its first operand's name, tags, and attributes. A plugin
   checks before it commits: `hew.doc.transact` with `dry_run: true`

@@ -236,6 +236,33 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
         return JSON.stringify({ nodes, linked })
       },
     ),
+    // The grid array: one copy of every source per placement (12 floats each).
+    duplicate_selection_placements: vi.fn(
+      (_kinds: Uint8Array, ids: BigUint64Array, affines: Float64Array, _linked: boolean) => {
+        const out: { kind: string; id: bigint }[] = []
+        for (let k = 0; k < affines.length / 12; k++) {
+          for (let i = 0; i < ids.length; i++) out.push({ kind: 'object', id: nextId++ })
+        }
+        state.hash++
+        state.gen++
+        return out
+      },
+    ),
+    duplicate_selection_placements_linked: vi.fn(
+      (kinds: Uint8Array, ids: BigUint64Array, affines: Float64Array) => {
+        const nodes: { kind: string; id: string }[] = []
+        for (let k = 0; k < affines.length / 12; k++) {
+          for (let i = 0; i < ids.length; i++) nodes.push({ kind: 'instance', id: String(nextId++) })
+        }
+        const linked = Array.from(ids).map((id, i) => ({
+          source: { kind: kinds[i] === 1 ? 'group' : kinds[i] === 2 ? 'instance' : 'object', id: String(id) },
+          instance: String(nextId++),
+          definition: String(nextId++),
+        })).filter((w) => w.source.kind !== 'instance')
+        state.gen++
+        return JSON.stringify({ nodes, linked })
+      },
+    ),
     transform_selection: vi.fn(
       (_kinds: Uint8Array, _ids: BigUint64Array, _sketches: BigUint64Array, _affine: Float64Array) => {
         state.hash++
@@ -1678,5 +1705,254 @@ describe('MoveTool — the drag ghost is session geometry, mirrored onto sibling
     mirror.sync()
     expect(preview.children.filter(isSessionGhost)).toHaveLength(0)
     expect(mirror.mirrorCount).toBe(0)
+  })
+})
+
+describe('MoveTool — grid arrays (two counts)', () => {
+  /** Copy 2 m along X (or Z when `up`), leaving the array window hot. `taps`
+   *  picks the copy state: 1 = the preferred kind (linked by default), 2 = independent. */
+  function copyThenGrid(
+    t: ReturnType<typeof makeTool>,
+    taps: number,
+    spec: string,
+    lock: 'ArrowRight' | 'ArrowUp' = 'ArrowRight',
+  ): void {
+    for (let i = 0; i < taps; i += 1) t.tool.onKey(makeKeyEvent('Alt'))
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    t.tool.onKey(makeKeyEvent(lock))
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    if (spec !== '') {
+      typeKeys(t.tool, spec)
+      t.tool.onKey(makeKeyEvent('Enter'))
+    }
+  }
+
+  /** The slot translations of the latest placements call, as "x,y,z" strings. */
+  function slots(call: unknown[]): string[] {
+    const a = call[2] as Float64Array
+    const out: string[] = []
+    for (let k = 0; k < a.length; k += 12) out.push([a[k + 3], a[k + 7], a[k + 11]].map((n) => String(Math.round(n * 1e9) / 1e9 + 0)).join(','))
+    return out
+  }
+
+  beforeEach(() => setCopiesLinked(true))
+
+  it('a_two_count_spec_lands_a_grid_in_one_undo_step', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x4,x3')
+    // One undo retracts the first copy; the grid is one placements call.
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    const call = t.scene.duplicate_selection_placements.mock.calls[0]
+    expect(Array.from(call[1] as BigUint64Array)).toEqual([1n])
+    expect((call[2] as Float64Array).length).toBe(19 * 12)
+    expect(call[3]).toBe(false)
+    expect((t.onArrayCommit.mock.calls.at(-1)![0] as NodeRef[]).length).toBe(19)
+  })
+
+  it('the_grid_has_count_plus_one_by_count2_plus_one_slots_and_skips_the_original', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, '4x,3x')
+    const got = slots(t.scene.duplicate_selection_placements.mock.calls[0])
+    expect(got).toHaveLength(19)
+    expect(got).not.toContain('0,0,0')
+    const want: string[] = []
+    for (let i = 0; i <= 4; i++) for (let j = 0; j <= 3; j++) if (i + j > 0) want.push(`${2 * i},${2 * j},0`)
+    expect(got).toEqual(want)
+    expect(new Set(got).size).toBe(19)
+  })
+
+  it('direction_two_defaults_to_the_horizontal_perpendicular', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x1,x2')
+    // A move along +X puts the rows along +Y, one move length apart.
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[0])).toEqual([
+      '0,2,0', '0,4,0', '2,0,0', '2,2,0', '2,4,0',
+    ])
+  })
+
+  it('direction_two_is_x_when_the_move_is_vertical', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x1,x2', 'ArrowUp')
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[0])).toEqual([
+      '2,0,0', '4,0,0', '0,0,2', '2,0,2', '4,0,2',
+    ])
+  })
+
+  it('an_arrow_key_held_at_enter_sets_direction_two', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, '')
+    typeKeys(t.tool, 'x1,x1')
+    t.tool.onKey(makeKeyEvent('ArrowUp'))
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[0])).toEqual(['0,0,2', '2,0,0', '2,0,2'])
+  })
+
+  it('an_arrow_key_while_hot_re_resolves_direction_two', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x1,x1')
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[0])).toContain('0,2,0')
+    t.tool.onKey(makeKeyEvent('ArrowUp'))
+    // The first grid is retracted (one undo) and the new one laid in its place.
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(2)
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[1])).toEqual(['0,0,2', '2,0,0', '2,0,2'])
+    expect(t.tool.statusHint()).toContain('blue')
+    // A key parallel to the move is refused and changes nothing.
+    t.tool.onKey(makeKeyEvent('ArrowRight'))
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(2)
+    expect(t.onToast).toHaveBeenCalled()
+  })
+
+  it('an_arrow_key_with_a_two_count_spec_in_progress_only_remembers_the_axis', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, '')
+    typeKeys(t.tool, 'x2,')
+    t.tool.onKey(makeKeyEvent('ArrowUp'))
+    expect(t.scene.scene_undo).not.toHaveBeenCalled()
+    expect(t.scene.duplicate_selection_placements).not.toHaveBeenCalled()
+  })
+
+  it('arrows_pass_through_to_the_global_handler_without_a_grid_or_a_two_count_buffer', () => {
+    // A hot plain copy, with nothing typed or a plain row spec typed: arrows are not Move's.
+    const t = makeTool()
+    copyThenGrid(t, 2, '')
+    for (const k of ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown']) expect(t.tool.capturesKey(k)).toBe(false)
+    typeKeys(t.tool, 'x3')
+    expect(t.tool.capturesKey('ArrowUp')).toBe(false)
+    t.tool.onKey(makeKeyEvent('Enter')) // a plain row is laid
+    expect(t.tool.capturesKey('ArrowUp')).toBe(false)
+    t.tool.onKey(makeKeyEvent('ArrowRight'))
+    expect(t.onToast).not.toHaveBeenCalled()
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    // A comma in the buffer, or a laid grid, makes them Move's.
+    typeKeys(t.tool, 'x2,')
+    expect(t.tool.capturesKey('ArrowUp')).toBe(true)
+    t.tool.onKey(makeKeyEvent('Backspace'))
+    t.tool.onKey(makeKeyEvent('Backspace'))
+    t.tool.onKey(makeKeyEvent('Backspace'))
+    typeKeys(t.tool, 'x2,x2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.tool.capturesKey('ArrowUp')).toBe(true)
+  })
+
+  it('a_pending_arrow_with_text_in_the_buffer_leaves_the_hint_on_the_laid_axis', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x1,x1')
+    expect(t.tool.statusHint()).toContain('green')
+    typeKeys(t.tool, 'x2')
+    t.tool.onKey(makeKeyEvent('ArrowUp'))
+    // The grid on screen is still on green; nothing re-laid yet.
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    expect(t.tool.statusHint()).toContain('green')
+    expect(t.tool.statusHint()).not.toContain('blue')
+    typeKeys(t.tool, ',x1')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[1])).toEqual(['0,0,2', '2,0,0', '2,0,2', '4,0,0', '4,0,2'])
+    expect(t.tool.statusHint()).toContain('blue')
+  })
+
+  it('a_grid_on_a_diagonal_move_says_rows_run_across_the_move', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    t.tool.onKey(makeKeyEvent('Alt'))
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    t.tool.onPointerMove(makeSnap(1, 1, 0), rayThrough(1, 1))
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    typeKeys(t.tool, 'x1,x1')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    const hint = t.tool.statusHint()
+    expect(hint).toContain('across the move')
+    expect(hint).not.toContain('Type 3x')
+  })
+
+  it('an_arrow_axis_near_parallel_to_the_move_is_refused_with_a_toast', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    t.tool.onKey(makeKeyEvent('Alt'))
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    t.tool.onPointerMove(makeSnap(10, 0.5, 0), rayThrough(10, 0.5)) // about 3 degrees off red
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    typeKeys(t.tool, 'x1,x1')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    t.tool.onKey(makeKeyEvent('ArrowRight'))
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    expect(t.onToast).toHaveBeenCalledTimes(1)
+  })
+
+  it('re_entering_a_spec_replaces_the_grid', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x6')
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(2)
+    typeKeys(t.tool, 'x3,x2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    // The row of six is retracted by one undo, then the grid lands in one call.
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    expect((t.scene.duplicate_selection_placements.mock.calls[0][2] as Float64Array).length).toBe(11 * 12)
+    // And a plain count afterwards replaces the grid again.
+    typeKeys(t.tool, 'x2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(3)
+    expect(t.scene.duplicate_selection_array.mock.calls.at(-1)![3]).toBe(2)
+  })
+
+  it('the_grid_inherits_the_copy_mode', () => {
+    const linked = makeTool()
+    copyThenGrid(linked, 1, 'x4,x3')
+    expect(linked.scene.duplicate_selection_placements_linked).toHaveBeenCalledTimes(1)
+    expect(linked.scene.duplicate_selection_placements).not.toHaveBeenCalled()
+    expect((linked.scene.duplicate_selection_placements_linked.mock.calls[0][2] as Float64Array).length).toBe(19 * 12)
+    expect(linked.tool.takeLinkedWraps()).toHaveLength(1)
+
+    setCopiesLinked(false)
+    const flipped = makeTool()
+    copyThenGrid(flipped, 2, 'x4,x3') // the alternate kind is linked when the preference is off
+    expect(flipped.scene.duplicate_selection_placements_linked).toHaveBeenCalledTimes(1)
+  })
+
+  it('a_product_over_the_cap_toasts_and_changes_nothing', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x40,x40')
+    expect(t.onToast).toHaveBeenCalledWith(expect.stringContaining('limited to'))
+    expect(t.scene.scene_undo).not.toHaveBeenCalled()
+    expect(t.scene.duplicate_selection_placements).not.toHaveBeenCalled()
+    // 999 placements is the largest grid that fits: 49 x 19 slots minus one = 999.
+    typeKeys(t.tool, 'x49,x19')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+  })
+
+  it('slash_n_still_divides_the_distance_and_is_linked_in_linked_mode', () => {
+    const t = makeTool()
+    copyThenGrid(t, 1, '/4')
+    expect(t.scene.duplicate_selection_array_linked).toHaveBeenCalledTimes(2)
+    const [, , affine, count] = t.scene.duplicate_selection_array_linked.mock.calls[1]
+    expect(translationOf(affine as Float64Array)).toEqual([0.5, 0, 0])
+    expect(count).toBe(4)
+  })
+
+  it('the_grid_buffer_is_typed_with_a_comma_and_reads_back_with_the_glyph', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, '')
+    expect(t.tool.capturesKey(',')).toBe(true)
+    typeKeys(t.tool, 'x4,x3')
+    expect(t.onMeasurement).toHaveBeenLastCalledWith('×4, ×3')
+    expect(t.tool.statusHint()).toContain('4x,3x')
+  })
+
+  it('a_distance_typed_after_a_grid_re_spaces_the_whole_grid', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x1,x1')
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(2)
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[1])).toEqual(['0,3,0', '3,0,0', '3,3,0'])
   })
 })

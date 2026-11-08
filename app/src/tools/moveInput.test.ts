@@ -582,6 +582,64 @@ describe('parseArraySpec', () => {
   })
 })
 
+describe('parseArraySpec grid forms', () => {
+  it('parseArraySpec_reads_two_counts_in_every_token_order', () => {
+    const grid = { mode: 'multiply', count: 4, count2: 3 }
+    expect(parseArraySpec('x4,x3')).toEqual(grid)
+    expect(parseArraySpec('4x,3x')).toEqual(grid)
+    expect(parseArraySpec('*4,*3')).toEqual(grid)
+    expect(parseArraySpec('x4,3x')).toEqual(grid)
+    expect(parseArraySpec('4x,x3')).toEqual(grid)
+    expect(parseArraySpec('X4,X3')).toEqual(grid)
+  })
+
+  it('parseArraySpec_refuses_divide_with_a_second_count', () => {
+    expect(parseArraySpec('/4,x3')).toBeNull()
+    expect(parseArraySpec('4/,3x')).toBeNull()
+    expect(parseArraySpec('x4,/3')).toBeNull()
+    expect(parseArraySpec('x4,3/')).toBeNull()
+    expect(parseArraySpec('/4,/3')).toBeNull()
+  })
+
+  it('parseArraySpec_refuses_empty_second_token_and_zero_counts', () => {
+    expect(parseArraySpec('x4,')).toBeNull()
+    expect(parseArraySpec('x4,x')).toBeNull()
+    expect(parseArraySpec('x4,x0')).toBeNull()
+    expect(parseArraySpec('x0,x3')).toBeNull()
+    expect(parseArraySpec(',x3')).toBeNull()
+    expect(parseArraySpec('x4,3')).toBeNull()
+    expect(parseArraySpec('x4,x3,x2')).toBeNull()
+  })
+
+  it('parseArraySpec_keeps_the_one_count_forms_unchanged', () => {
+    expect(parseArraySpec('x4')).toEqual({ mode: 'multiply', count: 4 })
+    expect(parseArraySpec('x4')).not.toHaveProperty('count2')
+    expect(parseArraySpec('4/')).toEqual({ mode: 'divide', count: 4 })
+  })
+
+  it('editArrayBuffer types the grid buffer: a comma only after a complete multiply token', () => {
+    expect(editArrayBuffer('x4', ',')).toBe('x4,')
+    expect(editArrayBuffer('4x', ',')).toBe('4x,')
+    expect(editArrayBuffer('', ',')).toBe('')
+    expect(editArrayBuffer('x', ',')).toBe('x')
+    expect(editArrayBuffer('4', ',')).toBe('4')
+    expect(editArrayBuffer('4/', ',')).toBe('4/')
+    expect(editArrayBuffer('/4', ',')).toBe('/4')
+    expect(editArrayBuffer('x4,', ',')).toBe('x4,')
+    // The second token follows the one-count rules, multiply only.
+    expect(editArrayBuffer('x4,', 'x')).toBe('x4,x')
+    expect(editArrayBuffer('x4,', '*')).toBe('x4,x')
+    expect(editArrayBuffer('x4,', '3')).toBe('x4,3')
+    expect(editArrayBuffer('x4,3', 'X')).toBe('x4,3x')
+    expect(editArrayBuffer('x4,x', '3')).toBe('x4,x3')
+    expect(editArrayBuffer('x4,', '/')).toBe('x4,')
+    expect(editArrayBuffer('x4,x3', 'x')).toBe('x4,x3')
+    expect(editArrayBuffer('x4,3x', '5')).toBe('x4,3x')
+    expect(editArrayBuffer('x4,x3', 'Backspace')).toBe('x4,x')
+    expect(editArrayBuffer('x4,', 'Backspace')).toBe('x4')
+  })
+})
+
 describe('pointAlong', () => {
   it('moves distance along unit X', () => {
     const pt = pointAlong([0, 0, 0], [1, 0, 0], 3)

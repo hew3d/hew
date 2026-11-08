@@ -1518,6 +1518,33 @@ impl NodeJs {
     }
 }
 
+/// The JSON of a linked copy's result: the new placements and every wrap
+/// the copy made, handles as decimal strings (see
+/// [`Scene::duplicate_selection_array_linked`]).
+fn linked_result_json(roots: &[NodeId], change: &kernel::DocChange) -> String {
+    let node_json = |n: NodeId| {
+        let (kind, id) = match n {
+            NodeId::Object(o) => ("object", o.data().as_ffi()),
+            NodeId::Group(g) => ("group", g.data().as_ffi()),
+            NodeId::Instance(i) => ("instance", i.data().as_ffi()),
+        };
+        serde_json::json!({ "kind": kind, "id": id.to_string() })
+    };
+    let nodes: Vec<serde_json::Value> = roots.iter().map(|&n| node_json(n)).collect();
+    let linked: Vec<serde_json::Value> = change
+        .linked
+        .iter()
+        .map(|w| {
+            serde_json::json!({
+                "source": node_json(w.source),
+                "instance": w.instance.data().as_ffi().to_string(),
+                "definition": w.definition.data().as_ffi().to_string(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "nodes": nodes, "linked": linked }).to_string()
+}
+
 fn node_js(node: NodeId) -> NodeJs {
     match node {
         NodeId::Object(id) => NodeJs {
@@ -5758,27 +5785,7 @@ impl Scene {
         self.ensure_not_busy()?;
         let (roots, change) =
             self.duplicate_selection_array_core(kinds, ids, affine, count, true)?;
-        let node_json = |n: NodeId| {
-            let (kind, id) = match n {
-                NodeId::Object(o) => ("object", o.data().as_ffi()),
-                NodeId::Group(g) => ("group", g.data().as_ffi()),
-                NodeId::Instance(i) => ("instance", i.data().as_ffi()),
-            };
-            serde_json::json!({ "kind": kind, "id": id.to_string() })
-        };
-        let nodes: Vec<serde_json::Value> = roots.iter().map(|&n| node_json(n)).collect();
-        let linked: Vec<serde_json::Value> = change
-            .linked
-            .iter()
-            .map(|w| {
-                serde_json::json!({
-                    "source": node_json(w.source),
-                    "instance": w.instance.data().as_ffi().to_string(),
-                    "definition": w.definition.data().as_ffi().to_string(),
-                })
-            })
-            .collect();
-        Ok(serde_json::json!({ "nodes": nodes, "linked": linked }).to_string())
+        Ok(linked_result_json(&roots, &change))
     }
 
     /// The shared body of the two array-copy entry points: validates at the
@@ -5817,6 +5824,11 @@ impl Scene {
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
+        if rows.iter().any(|v| !v.is_finite()) {
+            return Err(ApiError(
+                "BadAffine: transform must be 12 finite floats (row-major 3x4)".to_string(),
+            ));
+        }
         let t = Transform::from_affine(rows);
         let policy = if linked {
             kernel::LinkPolicy::Linked
@@ -5833,6 +5845,109 @@ impl Scene {
             ids: ids.to_vec(),
             affine: *rows,
             count,
+            linked,
+        });
+        Ok((roots, change))
+    }
+
+    /// Copies the nodes to every placement in `affines` (row-major 3x4,
+    /// 12 floats each, concatenated), as ONE undoable step: the kernel's
+    /// [`Document::duplicate_nodes_placements`]. The Move tool's grid array
+    /// uses it: the placements are the lattice slots, original excluded.
+    /// `linked` selects the policy as in [`Scene::duplicate_selection_array`].
+    /// Returns the new nodes in placement-major order (every source's copy
+    /// at placement 0, then placement 1, …). The cap is [`MAX_ARRAY_COUNT`]
+    /// placements.
+    ///
+    /// # Errors
+    /// - `BadNodeList` — `kinds` and `ids` differ in length or name a bad
+    ///   kind.
+    /// - `DuplicateMember` — the same node is listed twice.
+    /// - `BadCount` — no placements, or more than [`MAX_ARRAY_COUNT`].
+    /// - `BadAffine` — `affines.len()` is not a multiple of 12, or a value
+    ///   is not finite.
+    /// - The rest as [`Scene::duplicate_selection_array`].
+    ///
+    /// On error the document is untouched.
+    pub fn duplicate_selection_placements(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        affines: &[f64],
+        linked: bool,
+    ) -> Result<Vec<NodeJs>, ApiError> {
+        self.ensure_not_busy()?;
+        let (roots, _) = self.duplicate_selection_placements_core(kinds, ids, affines, linked)?;
+        Ok(roots.into_iter().map(node_js).collect())
+    }
+
+    /// [`Scene::duplicate_selection_placements`] with `linked = true`,
+    /// returning the new placements and every wrap it made as JSON, in the
+    /// shape of [`Scene::duplicate_selection_array_linked`].
+    pub fn duplicate_selection_placements_linked(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        affines: &[f64],
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let (roots, change) =
+            self.duplicate_selection_placements_core(kinds, ids, affines, true)?;
+        Ok(linked_result_json(&roots, &change))
+    }
+
+    /// The shared body of the two placement entry points.
+    fn duplicate_selection_placements_core(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        affines: &[f64],
+        linked: bool,
+    ) -> Result<(Vec<NodeId>, kernel::DocChange), ApiError> {
+        self.ensure_not_busy()?;
+        if kinds.len() != ids.len() {
+            return Err(ApiError(
+                "BadNodeList: kinds and ids must be the same length".to_string(),
+            ));
+        }
+        if !affines.len().is_multiple_of(12) || affines.iter().any(|v| !v.is_finite()) {
+            return Err(ApiError(
+                "BadAffine: transforms must be 12 finite floats each (row-major 3x4)".to_string(),
+            ));
+        }
+        let n = affines.len() / 12;
+        if n == 0 || n > MAX_ARRAY_COUNT as usize {
+            return Err(ApiError::new(
+                "BadCount",
+                &format!("placements must be between 1 and {MAX_ARRAY_COUNT}"),
+            ));
+        }
+        let nodes = kinds
+            .iter()
+            .zip(ids)
+            .map(|(&k, &i)| node_id(k, i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let placements: Vec<Transform> = affines
+            .chunks_exact(12)
+            .map(|c| {
+                let rows: &[f64; 12] = c.try_into().expect("chunks of 12");
+                Transform::from_affine(rows)
+            })
+            .collect();
+        let policy = if linked {
+            kernel::LinkPolicy::Linked
+        } else {
+            kernel::LinkPolicy::Independent
+        };
+        let (roots, change) = self
+            .doc
+            .duplicate_nodes_placements(&nodes, &placements, policy)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DuplicateSelectionPlacements {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            affines: affines.to_vec(),
             linked,
         });
         Ok((roots, change))
@@ -12120,6 +12235,14 @@ impl Scene {
                 } => {
                     self.duplicate_selection_array(&kinds, &ids, &affine, count, linked)?;
                 }
+                DuplicateSelectionPlacements {
+                    kinds,
+                    ids,
+                    affines,
+                    linked,
+                } => {
+                    self.duplicate_selection_placements(&kinds, &ids, &affines, linked)?;
+                }
                 WrapLinked { kind, id } => {
                     self.wrap_linked(kind, id)?;
                 }
@@ -15446,6 +15569,159 @@ mod tests {
         let json = scene.take_recording();
         assert!(json.contains("\"linked\":true"));
         assert!(json.contains("wrap_linked") && json.contains("set_linked"));
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        recording::reset();
+    }
+
+    /// 2x2 lattice minus the origin slot: +2 x, +2 y, +2 x and y.
+    const GRID_AFFINES: [f64; 36] = [
+        1.0, 0.0, 0.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, //
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0, //
+        1.0, 0.0, 0.0, 2.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0,
+    ];
+
+    #[test]
+    fn duplicate_selection_placements_makes_placement_major_copies_in_one_undo_step() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 10.0, 0.0);
+        let b = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let roots = scene
+            .duplicate_selection_placements(&[0, 0], &[a, b], &GRID_AFFINES, false)
+            .unwrap();
+        assert_eq!(roots.len(), 6, "two sources by three placements");
+        assert_eq!(scene.object_ids().len(), 8);
+        // Placement-major: copies 0 and 1 are placement 0 of a and b.
+        let min_x = |id: u64| scene.object_bounds(id, None).unwrap()[0];
+        assert!((min_x(roots[0].id) - 2.0).abs() < 1e-9);
+        assert!((min_x(roots[1].id) - 12.0).abs() < 1e-9);
+        assert!((min_x(roots[2].id) - 0.0).abs() < 1e-9);
+        assert!((min_x(roots[4].id) - 2.0).abs() < 1e-9);
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.object_ids().len(), 2, "one undo removes every copy");
+        scene.scene_redo().unwrap();
+        assert_eq!(scene.object_ids().len(), 8);
+    }
+
+    #[test]
+    fn duplicate_selection_placements_linked_wraps_each_object_once() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let json = scene
+            .duplicate_selection_placements_linked(&[0], &[o], &GRID_AFFINES)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let nodes = v["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 3);
+        assert!(nodes.iter().all(|n| n["kind"] == "instance"));
+        let linked = v["linked"].as_array().unwrap();
+        assert_eq!(linked.len(), 1, "one wrap for the one source");
+        let def: u64 = linked[0]["definition"].as_str().unwrap().parse().unwrap();
+        for n in nodes {
+            let id: u64 = n["id"].as_str().unwrap().parse().unwrap();
+            assert_eq!(scene.instance_def(id), Some(def));
+        }
+        // The plain method with linked = true agrees on the node count.
+        let mut other = Scene::new();
+        let (s, r) = ground_unit_square(&mut other);
+        let o2 = other.extrude_region(s, r, 1.0).unwrap();
+        let roots = other
+            .duplicate_selection_placements(&[0], &[o2], &GRID_AFFINES, true)
+            .unwrap();
+        assert_eq!(roots.len(), 3);
+        assert!(roots.iter().all(|n| n.kind == "instance"));
+    }
+
+    #[test]
+    fn duplicate_selection_placements_refuses_zero_over_cap_and_bad_affine() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let err = scene
+            .duplicate_selection_placements(&[0], &[o], &[], false)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadCount"), "got {}", err.0);
+        let over: Vec<f64> = GRID_AFFINES[..12]
+            .iter()
+            .copied()
+            .cycle()
+            .take(12 * (MAX_ARRAY_COUNT as usize + 1))
+            .collect();
+        let err = scene
+            .duplicate_selection_placements(&[0], &[o], &over, false)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadCount"), "got {}", err.0);
+        let err = scene
+            .duplicate_selection_placements(&[0], &[o], &GRID_AFFINES[..13], false)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
+        let err = scene
+            .duplicate_selection_placements(&[0, 0], &[o], &GRID_AFFINES, false)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
+        assert_eq!(scene.object_ids().len(), 1, "refusals mutate nothing");
+        scene.scene_undo().unwrap();
+        assert!(scene.object_ids().is_empty(), "no stray undo entry");
+    }
+
+    #[test]
+    fn duplicate_selection_placements_refuses_non_finite_affines_and_a_repeated_node() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut affines = GRID_AFFINES.to_vec();
+            affines[20] = bad;
+            let err = scene
+                .duplicate_selection_placements(&[0], &[o], &affines, false)
+                .unwrap_err();
+            assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
+        }
+        let err = scene
+            .duplicate_selection_placements(&[0, 0], &[o, o], &GRID_AFFINES, false)
+            .unwrap_err();
+        assert!(err.0.starts_with("DuplicateMember"), "got {}", err.0);
+        assert_eq!(scene.object_ids().len(), 1, "refusals mutate nothing");
+    }
+
+    #[test]
+    fn duplicate_selection_array_refuses_a_non_finite_affine() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        for bad in [f64::NAN, f64::INFINITY] {
+            let mut step = STEP_X2;
+            step[3] = bad;
+            let err = scene
+                .duplicate_selection_array(&[0], &[o], &step, 2, false)
+                .unwrap_err();
+            assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
+        }
+        assert_eq!(scene.object_ids().len(), 1, "refusals mutate nothing");
+    }
+
+    #[test]
+    fn a_placements_recording_replays_to_the_same_state_hash() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 10.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        scene
+            .duplicate_selection_placements(&[0], &[o], &GRID_AFFINES, true)
+            .unwrap();
+        scene
+            .duplicate_selection_placements(&[0], &[p], &GRID_AFFINES, false)
+            .unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("duplicate_selection_placements"));
         let mut replayed = Scene::new();
         assert_eq!(replayed.replay(&json).unwrap(), golden);
         recording::reset();
