@@ -496,10 +496,17 @@ Hew does not decide what a part is; a plugin's rule does, from facts each
 - `solid`, on object rows: Model Health's verdict is solid (closed and
   manifold).
 - `family` and `family_closed`, on object rows: the seam family the
-  object belongs to (an index into `hew.doc.health`'s `families`, good for
-  the same `generation` only) and whether every shared rim of that family
-  can take a cap, so the family can be rejoined; both `null` for an
-  object in no family.
+  object belongs to (an index into `hew.doc.health`'s `families` over the
+  whole model, good for the current state only: recompute it from
+  `hew.doc.health` after any change, and note that a call with an
+  `objects` scope numbers its own families) and whether every shared rim of that family
+  can take a cap, so the family can be rejoined with `hew.solid.rejoin`
+  (`{family, as: "one_solid"}` answers `{object}`, one undo entry, the
+  largest piece's name, tags, and attributes kept; it refuses
+  `unknown_family`, `not_cappable`, `rejoin_not_possible`, or a cap or
+  union refusal; it takes no generation guard, so run it inside
+  `hew.doc.transact` with `expect_generation` when the index was read
+  earlier); both `null` for an object in no family.
 - `linked`, on instance rows: the definition is a set of linked copies
   rather than a named component.
 

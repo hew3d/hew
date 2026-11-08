@@ -1059,9 +1059,12 @@ below.
   a family, a shape drawn with an opening, pieces or walls under
   different parents, pieces that meet only through a wall, or a seam that
   cannot take a cap refuses typed (`RejoinNotPossible`, or the cap's own
-  refusal) and leaves the model as it was. The Model Health button and
-  the Make Solid choice for it will be wired over the `hew.solid.rejoin`
-  bus command later
+  refusal) and leaves the model as it was. The `hew.solid.rejoin` bus
+  command (`{family, as: "one_solid"}`, family resolved from the current
+  whole-model health report) exists; the Model Health button and the
+  Make Solid choice for it still repair through `hew.solid.cap` and
+  `hew.solid.delete_faces`, and moving them onto the command is still to
+  come
 - Binary STL export, scaled for 3D printing; export is gated on every
   object being a solid, so an exported file is guaranteed manifold
 - STL curve resolution: cylinder walls re-facet from their analytic
@@ -1487,9 +1490,9 @@ below.
   identical parts and left-right twins can be found (HEW_API.md §7.4).
   A part's frame through a placement honors its definition member's
   frame override. `hew.entity.flip` mirrors a selection across a plane
-  on the bus, with an optional linked mirrored copy. Still to come on the
-  bus: `hew.solid.rejoin` (Model Health's "Rejoin as one solid" in one
-  undo entry). A boolean's
+  on the bus, with an optional linked mirrored copy. `hew.solid.rejoin`
+  (Model Health's "Rejoin as one solid" in one undo entry) rejoins a seam
+  family. A boolean's
   result keeps its first operand's name, tags, and attributes. A plugin
   checks before it commits: `hew.doc.transact` with `dry_run: true`
   rehearses a whole envelope on a copy of the document and answers what

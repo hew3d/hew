@@ -1564,7 +1564,24 @@ Semantics notes, normative:
   leaky, the stance of §2. `hew.solid.mark_surface` marks an open object
   as a surface on purpose (`accepted: false` clears it): stored in the
   object's `hew.health` attributes, no geometry, and `hew.doc.health`
-  keeps listing it with `accepted: true`.
+  keeps listing it with `accepted: true`. `hew.solid.rejoin`
+  (`{family, as: "one_solid"}`, answering `{object}`) rejoins one seam
+  family of `hew.doc.health` (the index its `families` list and an
+  `hew.query.occurrences` row report, numbered over the whole model's
+  report and resolved when the call runs; an index read from a
+  `hew.doc.health` call with an `objects` scope may name a different
+  family) into a
+  single solid in one undo entry: each piece is capped at its shared rims,
+  the inside walls are deleted, and the pieces are unioned; the result
+  keeps the largest piece's name, tags, and attributes. It refuses
+  `unknown_family`, `not_cappable` (a seam rim cannot take a cap),
+  `rejoin_not_possible` (a shape drawn with an opening, members under
+  different parents, or pieces that meet only through a wall), or a cap's
+  own refusal (`invalid`, `degenerate_contact`, or a boolean operand
+  refusal from the union step), and leaves the model as it was. Params are
+  exactly `family` and `as`; the command takes no generation guard, so run
+  it inside `hew.doc.transact` with `expect_generation` when the index
+  came from an earlier read.
 - **Transforming a part through a path.** `hew.entity.move`, `rotate`,
   and `scale` take each `ids` entry as a public id or an occurrence
   locator `{"path": [instance, …, member]}` (§5.2, §7.4). One call is one

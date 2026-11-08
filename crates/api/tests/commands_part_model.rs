@@ -1003,3 +1003,225 @@ proptest! {
         prop_assert_eq!(&sa["mirror"], &sm["shape"]);
     }
 }
+
+// ---------------------------------------------------------------- rejoin
+
+/// Left (1 wide), Right (2 wide, the larger), and the flat wall between
+/// them, one seam family.
+fn split_box() -> Document {
+    let mut doc = Document::new();
+    let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+    let mut wall = half("Wall", 0.0, 1.0, &[], 0.0);
+    wall.positions = vec![
+        p(1.0, 0.0, 0.0),
+        p(1.0, 1.0, 0.0),
+        p(1.0, 1.0, 1.0),
+        p(1.0, 0.0, 1.0),
+    ];
+    wall.faces = vec![vec![0, 1, 2, 3]];
+    wall.face_materials.truncate(1);
+    wall.face_uv_frames.truncate(1);
+    wall.face_holes.truncate(1);
+    ingest(
+        &mut doc,
+        vec![
+            half("Left", 0.0, 1.0, &[3], 0.0),
+            half("Right", 1.0, 3.0, &[5], 0.0),
+            wall,
+        ],
+    );
+    doc
+}
+
+#[test]
+fn rejoin_joins_a_closed_family_into_one_solid() {
+    let mut doc = split_box();
+    let depth = doc.undo_depth();
+    let r = ok(
+        &mut doc,
+        "hew.solid.rejoin",
+        json!({ "family": 0, "as": "one_solid" }),
+    );
+    let joined = r["results"][0]["object"].as_str().unwrap().to_string();
+    assert_eq!(
+        doc.live_object_ids().len(),
+        1,
+        "the seam pair is one Object"
+    );
+    let o = doc.live_object_ids()[0];
+    assert_eq!(obj(&doc, o), joined);
+    assert!(doc.health_report(None).rows.is_empty(), "nothing is open");
+    assert_eq!(doc.undo_depth(), depth + 1, "one undo entry");
+    // Closed, and exactly the two pieces' volume (1 + 2): nothing lost to
+    // the deleted wall, nothing doubled.
+    let volume = doc
+        .object(o)
+        .unwrap()
+        .volume()
+        .expect("the result is closed");
+    assert!((volume - 3.0).abs() < 1e-9, "volume {volume}");
+    assert_eq!(doc.object_name(o), Some("Right"), "the larger piece's name");
+    doc.undo().unwrap();
+    assert_eq!(doc.live_object_ids().len(), 3);
+}
+
+#[test]
+fn rejoin_refuses_unknown_family() {
+    let mut doc = split_box();
+    let bytes = doc.save();
+    assert_eq!(
+        refusal(
+            &mut doc,
+            "hew.solid.rejoin",
+            json!({ "family": 7, "as": "one_solid" })
+        ),
+        "unknown_family"
+    );
+    assert_eq!(doc.save(), bytes);
+    for bad in [
+        json!({ "family": 0 }),
+        json!({ "family": 0, "as": "two_solids" }),
+        json!({ "family": 0, "as": "one_solid", "extra": 1 }),
+    ] {
+        params_error(&mut doc, &mut NoHost, "hew.solid.rejoin", bad);
+        assert_eq!(doc.save(), bytes, "a params error changes nothing");
+    }
+}
+
+#[test]
+fn rejoin_refuses_a_family_that_is_not_closed() {
+    let mut doc = Document::new();
+    ingest(
+        &mut doc,
+        vec![
+            half("Left", 0.0, 1.0, &[3], 0.1),
+            half("Right", 1.0, 2.0, &[5], 0.1),
+        ],
+    );
+    let bytes = doc.save();
+    assert_eq!(
+        refusal(
+            &mut doc,
+            "hew.solid.rejoin",
+            json!({ "family": 0, "as": "one_solid" })
+        ),
+        "not_cappable"
+    );
+    assert_eq!(doc.save(), bytes);
+}
+
+/// One open piece and the flat wall that closes it: a family of one
+/// cell, which the kernel refuses as `rejoin_not_possible` (the family
+/// the handler passes is whole, so the kernel's structural refusals are
+/// what a bus caller meets).
+#[test]
+fn rejoin_surfaces_the_kernels_refusal_for_a_family_of_one_piece() {
+    let mut doc = Document::new();
+    let mut wall = half("Wall", 0.0, 1.0, &[], 0.0);
+    let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+    wall.positions = vec![
+        p(1.0, 0.0, 0.0),
+        p(1.0, 1.0, 0.0),
+        p(1.0, 1.0, 1.0),
+        p(1.0, 0.0, 1.0),
+    ];
+    wall.faces = vec![vec![0, 1, 2, 3]];
+    wall.face_materials.truncate(1);
+    wall.face_uv_frames.truncate(1);
+    wall.face_holes.truncate(1);
+    ingest(&mut doc, vec![half("Left", 0.0, 1.0, &[3], 0.0), wall]);
+    let bytes = doc.save();
+    assert_eq!(
+        refusal(
+            &mut doc,
+            "hew.solid.rejoin",
+            json!({ "family": 0, "as": "one_solid" })
+        ),
+        "rejoin_not_possible"
+    );
+    assert_eq!(doc.save(), bytes);
+}
+
+/// `family` is numbered over the whole-model report, whatever scope a
+/// `hew.doc.health` call was given.
+#[test]
+fn rejoin_family_is_numbered_over_the_whole_model() {
+    let mut doc = split_box();
+    // A second, separate family far away, so a scoped report can renumber.
+    ingest(
+        &mut doc,
+        vec![
+            half("FarLeft", 10.0, 11.0, &[3], 0.0),
+            half("FarRight", 11.0, 12.0, &[5], 0.0),
+        ],
+    );
+    let whole = doc.health_report(None).families;
+    assert_eq!(whole.len(), 2);
+    let far = by_name(&doc, "FarLeft");
+    let scoped = doc
+        .health_report(Some(&[far, by_name(&doc, "FarRight")]))
+        .families;
+    assert_eq!(
+        scoped.len(),
+        1,
+        "the scoped report renumbers its family to 0"
+    );
+    // Index 0 joins the whole report's family 0 (Left/Right/Wall), not the
+    // scoped one.
+    ok(
+        &mut doc,
+        "hew.solid.rejoin",
+        json!({ "family": 0, "as": "one_solid" }),
+    );
+    assert!(
+        doc.live_object_ids().contains(&far),
+        "the far pair is untouched"
+    );
+}
+
+/// The refusals the registry lists for `hew.solid.rejoin` are the codes the
+/// command emits, and each is a name the bus can return.
+#[test]
+fn rejoin_listed_refusals_include_what_it_returns() {
+    let listed = &REGISTRY.get("hew.solid.rejoin").unwrap().refusals;
+    for code in [
+        "unknown_family",
+        "not_cappable",
+        "rejoin_not_possible",
+        "degenerate_contact",
+        "boolean_operand_not_solid",
+        "boolean_operand_empty",
+        "invalid",
+    ] {
+        assert!(listed.iter().any(|r| r == code), "{code} is listed");
+    }
+    let mut doc = split_box();
+    let mut seen = Vec::new();
+    seen.push(refusal(
+        &mut doc,
+        "hew.solid.rejoin",
+        json!({ "family": 9, "as": "one_solid" }),
+    ));
+    for code in &seen {
+        assert!(listed.iter().any(|r| r == code), "{code} is listed");
+    }
+}
+
+#[test]
+fn rejoin_label_and_class_match_union() {
+    let (rejoin, union) = (
+        REGISTRY.get("hew.solid.rejoin").unwrap(),
+        REGISTRY.get("hew.solid.union").unwrap(),
+    );
+    assert_eq!(rejoin.class, union.class);
+    assert_eq!(rejoin.served, union.served);
+    assert_eq!(rejoin.permission, union.permission);
+    assert!(rejoin.implemented);
+    let mut doc = split_box();
+    let r = ok(
+        &mut doc,
+        "hew.solid.rejoin",
+        json!({ "family": 0, "as": "one_solid" }),
+    );
+    assert_eq!(r["label"], "hew.solid.rejoin");
+}

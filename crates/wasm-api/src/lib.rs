@@ -16334,6 +16334,31 @@ mod tests {
         recording::reset();
     }
 
+    #[test]
+    fn a_rejoin_over_the_bus_replays_to_the_same_state_hash() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        import_split_box(&mut scene);
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                r#"{"jsonrpc":"2.0","id":2,"method":"hew.solid.rejoin","params":{"family":0,"as":"one_solid"}}"#,
+            )
+            .expect("rejoin replies");
+        assert!(reply.contains("\"result\""), "rejoin succeeds: {reply}");
+        assert_eq!(scene.doc.live_object_ids().len(), 1);
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("hew.solid.rejoin"));
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        recording::reset();
+    }
+
     /// `history_generation` crosses the FFI with the kernel's semantics: it
     /// bumps on a committed mutation, on undo, and on redo — and stays put
     /// across the non-undoable view-state toggles the eye icons drive.
