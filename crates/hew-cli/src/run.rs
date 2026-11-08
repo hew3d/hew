@@ -290,15 +290,17 @@ fn run_script_live(
                 // caller wants the file, so report the file — the same
                 // thing a one-shot dispatch reports.
                 if let Some(path) = write_path {
-                    if let Err(msg) = write_live_bytes(&value, &path) {
-                        // The same reply a host that owned the filesystem
-                        // would have given, on stdout where a script reads it.
-                        let failed = write_failure_reply(&value, &method, &msg);
-                        println!("{failed}");
-                        responses.push(failed);
-                        return Err(1);
-                    }
-                    let saved = serde_json::json!({ "saved": path });
+                    let saved = match finish_client_write(&value, &path) {
+                        Ok(saved) => saved,
+                        Err(msg) => {
+                            // The same reply a host that owned the filesystem
+                            // would have given, on stdout where a script reads it.
+                            let failed = write_failure_reply(&value, &method, &msg);
+                            println!("{failed}");
+                            responses.push(failed);
+                            return Err(1);
+                        }
+                    };
                     println!("{saved}");
                     responses.push(saved);
                 } else if record_reply(responses, &response) {
@@ -598,8 +600,8 @@ pub fn dispatch_live(
                 };
             }
             if let Some(path) = client_write_path {
-                match write_live_bytes(&value, &path) {
-                    Ok(()) => println!("{}", serde_json::json!({"saved": path})),
+                match finish_client_write(&value, &path) {
+                    Ok(saved) => println!("{saved}"),
                     Err(msg) => {
                         let failed = write_failure_reply(&value, method, &msg);
                         println!("{failed}");
@@ -650,6 +652,13 @@ pub(crate) fn take_client_write_path(
         // file), which a client-side write could not do. Export has no such
         // state and is still written here.
         "hew.doc.export" => strip_path(params),
+        // The live host renders and hands the file back as bytes, but it
+        // has no disk: with a `path` it refuses `host_capability_missing`.
+        // Stripped here, the same bytes come back inline and are written
+        // once, on this side (`finish_client_write`). An older app that
+        // cannot render at all still answers through the client-side
+        // fallback in `live.rs`.
+        "hew.view.snapshot" | "hew.view.line_drawing" => strip_render_path(method, params),
         // A solitary command wrapped in a one-command transaction is the
         // SAME command — §6.4 calls that the canonical way to invoke one,
         // and §13 gives an MCP client no other shape for a command that
@@ -663,14 +672,16 @@ pub(crate) fn take_client_write_path(
             let [only] = commands.as_slice() else {
                 return (params, None);
             };
-            if !matches!(
-                only.get("method").and_then(|m| m.as_str()),
-                Some("hew.doc.export")
-            ) {
-                return (params, None);
-            }
+            let inner_method = match only.get("method").and_then(|m| m.as_str()) {
+                Some(m @ ("hew.doc.export" | "hew.view.snapshot" | "hew.view.line_drawing")) => m,
+                _ => return (params, None),
+            };
             let inner = only.get("params").cloned().unwrap_or_else(empty_object);
-            let (inner, path) = strip_path(inner);
+            let (inner, path) = if inner_method == "hew.doc.export" {
+                strip_path(inner)
+            } else {
+                strip_render_path(inner_method, inner)
+            };
             let Some(path) = path else {
                 return (params, None);
             };
@@ -680,6 +691,22 @@ pub(crate) fn take_client_write_path(
         }
         _ => (params, None),
     }
+}
+
+/// [`strip_path`] for a render command, except where the path is not a
+/// plain "write the bytes here": a line drawing's `path` applies to `svg`
+/// only, so a `segments` request keeps it and the host refuses it as it
+/// would headless.
+fn strip_render_path(
+    method: &str,
+    params: serde_json::Value,
+) -> (serde_json::Value, Option<String>) {
+    if method == "hew.view.line_drawing"
+        && params.get("format").and_then(|f| f.as_str()) == Some("segments")
+    {
+        return (params, None);
+    }
+    strip_path(params)
 }
 
 fn empty_object() -> serde_json::Value {
@@ -781,6 +808,76 @@ pub(crate) fn write_failure_reply(
     }
 }
 
+/// Writes what a live reply carried (its document or mesh bytes, a snapshot's
+/// images, a line drawing's SVG) to `path` and returns the result a
+/// filesystem host would have answered: `{ "saved": path }` for a save or
+/// export, and for a render the same members headless gives, with the file
+/// paths in place of the inline base64 (`path`, `id_buffer_path`,
+/// `depth_path`, `normals_path`).
+pub(crate) fn finish_client_write(
+    response: &serde_json::Value,
+    path: &str,
+) -> Result<serde_json::Value, String> {
+    let result = response
+        .pointer("/result/results/0")
+        .or_else(|| response.pointer("/result"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let write = |to: &str, b64: &str| -> Result<(), String> {
+        let bytes =
+            decode_base64(b64).ok_or_else(|| "the render bytes were malformed".to_string())?;
+        write_file(to, &bytes)
+    };
+    if let Some(png) = result.get("png_base64").and_then(|v| v.as_str()) {
+        write(path, png)?;
+        let mut out = serde_json::json!({
+            "path": path,
+            "width": result["width"],
+            "height": result["height"],
+        });
+        for (inline, suffix, file_key) in [
+            ("id_buffer_base64", ".ids.bin", "id_buffer_path"),
+            ("depth_png_base64", ".depth.png", "depth_path"),
+            ("normals_png_base64", ".normals.png", "normals_path"),
+        ] {
+            if let Some(b64) = result.get(inline).and_then(|v| v.as_str()) {
+                let to = format!("{path}{suffix}");
+                write(&to, b64)?;
+                out[file_key] = serde_json::Value::String(to);
+            }
+        }
+        for key in ["id_palette", "depth_near", "depth_far", "depth_bits"] {
+            if let Some(v) = result.get(key) {
+                out[key] = v.clone();
+            }
+        }
+        return Ok(out);
+    }
+    if let Some(svg) = result.get("svg").and_then(|v| v.as_str()) {
+        write_file(path, svg.as_bytes())?;
+        return Ok(serde_json::json!({
+            "path": path,
+            "count": result["count"],
+            "bounds": result["bounds"],
+        }));
+    }
+    write_live_bytes(response, path)?;
+    Ok(serde_json::json!({ "saved": path }))
+}
+
+/// `std::fs::write` answering the `save_failed` refusal text
+/// [`write_live_bytes`] does, so every client-side write fails alike.
+fn write_file(path: &str, bytes: &[u8]) -> Result<(), String> {
+    std::fs::write(path, bytes).map_err(|e| {
+        serde_json::json!({
+            "refusal": "save_failed",
+            "explanation": format!("{path}: {e}"),
+            "detail": { "path": path },
+        })
+        .to_string()
+    })
+}
+
 pub(crate) fn write_live_bytes(response: &serde_json::Value, path: &str) -> Result<(), String> {
     // Both shapes are real: a bare `hew.doc.save` answers its own result,
     // while the one-command transaction §6.4 calls canonical (and the
@@ -797,14 +894,7 @@ pub(crate) fn write_live_bytes(response: &serde_json::Value, path: &str) -> Resu
     // that host would (`save_failed`, declared for both commands) rather
     // than free text — a client parsing refusals should not have to
     // special-case which side of the connection did the writing.
-    std::fs::write(path, bytes).map_err(|e| {
-        serde_json::json!({
-            "refusal": "save_failed",
-            "explanation": format!("{path}: {e}"),
-            "detail": { "path": path },
-        })
-        .to_string()
-    })
+    write_file(path, &bytes)
 }
 
 /// `hew-cli documents --live`: prints one JSON object per open document.
@@ -1074,8 +1164,79 @@ mod tests {
 
 #[cfg(test)]
 mod save_roundtrip_tests {
-    use super::{decode_base64, take_client_write_path, write_failure_reply};
+    use super::{decode_base64, finish_client_write, take_client_write_path, write_failure_reply};
     use serde_json::json;
+
+    /// A live render with a `path` is sent without it and written here, once.
+    #[test]
+    fn a_live_render_command_has_its_path_stripped_bare_or_wrapped() {
+        for method in ["hew.view.snapshot", "hew.view.line_drawing"] {
+            let (params, path) =
+                take_client_write_path(method, json!({"path": "/tmp/a.png", "width": 64}));
+            assert_eq!(path.as_deref(), Some("/tmp/a.png"));
+            assert!(params.get("path").is_none());
+            assert_eq!(params["width"], 64);
+
+            let wrapped =
+                json!({"commands":[{"method": method, "params": {"path": "/tmp/a.png"}}]});
+            let (params, path) = take_client_write_path("hew.doc.transact", wrapped);
+            assert_eq!(path.as_deref(), Some("/tmp/a.png"));
+            assert!(params["commands"][0]["params"].get("path").is_none());
+
+            // No path: nothing to take.
+            let (_, path) = take_client_write_path(method, json!({}));
+            assert_eq!(path, None);
+        }
+        // A segments line drawing keeps its path, so the host refuses it as
+        // it does headless.
+        let (params, path) = take_client_write_path(
+            "hew.view.line_drawing",
+            json!({"path": "/tmp/a.svg", "format": "segments"}),
+        );
+        assert_eq!(path, None);
+        assert_eq!(params["path"], "/tmp/a.svg");
+    }
+
+    #[test]
+    fn finishing_a_render_write_puts_every_pass_in_its_file_and_answers_the_headless_shape() {
+        let dir = std::env::temp_dir().join(format!("hew-cli-render-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot.png");
+        let path = path.to_str().unwrap();
+        let reply = json!({"jsonrpc":"2.0","id":1,"result":{"results":[{
+            "png_base64":"Zm9v","width":2,"height":3,
+            "id_buffer_base64":"YmFy","id_palette":["a"],
+            "depth_png_base64":"YmF6","depth_near":1.0,"depth_far":2.0,"depth_bits":8,
+            "normals_png_base64":"cXV4"
+        }]}});
+        let out = finish_client_write(&reply, path).unwrap();
+        assert_eq!(out["path"], path);
+        assert_eq!(out["width"], 2);
+        assert_eq!(std::fs::read(path).unwrap(), b"foo");
+        assert_eq!(std::fs::read(format!("{path}.ids.bin")).unwrap(), b"bar");
+        assert_eq!(std::fs::read(format!("{path}.depth.png")).unwrap(), b"baz");
+        assert_eq!(
+            std::fs::read(format!("{path}.normals.png")).unwrap(),
+            b"qux"
+        );
+        assert_eq!(out["id_buffer_path"], format!("{path}.ids.bin"));
+        assert_eq!(out["depth_far"], 2.0);
+        assert!(out.get("png_base64").is_none());
+
+        let svg = dir.join("d.svg");
+        let svg = svg.to_str().unwrap();
+        let reply = json!({"result":{"svg":"<svg/>","count":4,"bounds":[0,0,1,1]}});
+        let out = finish_client_write(&reply, svg).unwrap();
+        assert_eq!(out, json!({"path": svg, "count": 4, "bounds": [0,0,1,1]}));
+        assert_eq!(std::fs::read(svg).unwrap(), b"<svg/>");
+
+        // An export still answers `saved`.
+        let stl = dir.join("m.stl");
+        let stl = stl.to_str().unwrap();
+        let out = finish_client_write(&json!({"result":{"bytes_base64":"Zm9v"}}), stl).unwrap();
+        assert_eq!(out, json!({"saved": stl}));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// A solitary command wrapped in a one-command transaction is the
     /// same command — §6.4 calls that the canonical way to invoke one,

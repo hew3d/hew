@@ -1398,7 +1398,12 @@ below.
   face locator, and can list every crossing (`hew.query.raycast`'s `all`,
   `max_distance`, `exclude`, `include_hidden`); `hew.query.measure` by
   id or path gives a part's volume, area, and bounding box, summing the
-  members of groups and instances (HEW_API.md §7.4). The app itself
+  members of groups and instances (HEW_API.md §7.4). A file's bytes
+  become one unplaced component definition
+  (`hew.component.import_definition`: `.hew`, `.skp`, glTF/GLB, STL,
+  COLLADA), and importing the same bytes again returns that definition
+  instead of making another, so a hardware or cabinet-module library is
+  one definition per model (HEW_API.md §7, document commands). The app itself
   renders `hew.view.snapshot` (of a selection, or a definition's `cmp_` id,
   on a transparent background) and `hew.view.line_drawing` through the
   shared `crates/headless-render`, byte for byte what `hew-cli` produces

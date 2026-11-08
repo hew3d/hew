@@ -33,7 +33,9 @@
 //! cases with `PROPTEST_CASES=20000 cargo test -p kernel --test
 //! session_fuzz`.
 
-use kernel::{Document, InstanceId, NodeId, ObjectId, Plane, Point3, Transform, Vec3};
+use kernel::{
+    Document, InstanceId, LibraryProvenance, NodeId, ObjectId, Plane, Point3, Transform, Vec3,
+};
 use proptest::prelude::*;
 
 /// Abstract op; selectors resolve against live ids at apply time, so a
@@ -122,6 +124,13 @@ enum Op {
     UnlinkPlacement {
         sel: usize,
     },
+    /// Wrap a copy of a node's content as an unplaced definition
+    /// (`insert_as_definition`); `key` picks one of three provenances so
+    /// repeats reuse.
+    InsertAsDefinition {
+        sel: usize,
+        key: u8,
+    },
     CloseSession,
     Undo,
     Redo,
@@ -153,6 +162,7 @@ fn arb_op() -> impl Strategy<Value = Op> {
         2 => sel().prop_map(|sel| Op::DuplicateLinked { sel }),
         1 => sel().prop_map(|sel| Op::DeleteLinkedPlacement { sel }),
         1 => sel().prop_map(|sel| Op::UnlinkPlacement { sel }),
+        2 => (sel(), 0u8..3).prop_map(|(sel, key)| Op::InsertAsDefinition { sel, key }),
         3 => Just(Op::CloseSession),
         2 => Just(Op::Undo),
         2 => Just(Op::Redo),
@@ -490,6 +500,30 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
                 ));
             }
             return undo_redo_exact(doc, before, "unlink");
+        }
+        Op::InsertAsDefinition { sel, key } => {
+            let Some(n) = pick(&nodes, sel) else {
+                return Ok(());
+            };
+            let Ok(item) = doc.extract_item(&[n], false) else {
+                return Ok(());
+            };
+            let prov = LibraryProvenance {
+                source_id: "import:fuzz".to_string(),
+                content_hash: key.to_string(),
+            };
+            let before = doc.state_hash();
+            match doc.insert_as_definition(&item, Some("Wrapped"), prov) {
+                Err(_) if doc.state_hash() != before => {
+                    return Err("a refused insert_as_definition changed the document".to_string());
+                }
+                Err(_) => {}
+                Ok((_, true, _)) if doc.state_hash() != before => {
+                    return Err("a reused definition changed the document".to_string());
+                }
+                Ok((_, true, _)) => {}
+                Ok((_, false, _)) => return undo_redo_exact(doc, before, "definition insert"),
+            }
         }
         Op::CloseSession => {
             let _ = doc.close_innermost_session();

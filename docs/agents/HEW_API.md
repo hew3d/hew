@@ -1226,6 +1226,32 @@ Semantics notes, normative:
   `[1,0,0]`, `v` `[0,1,0]`, 1 m wide. The bytes are kept as they are; a
   picture over 64 megapixels, or one whose size cannot be read, refuses
   `load_failed`. The report adds `picture: {width, height}`.
+- `hew.component.import_definition` `{bytes_base64, format, name?,
+  units?, images?}` turns a file's bytes into one **unplaced** component
+  definition and answers `{definition, reused, report: {objects,
+  members}}`. `format` is `hew`, `skp`, `glb`, `gltf`, `stl`, or `dae`
+  (a picture format refuses `unsupported_for_definition`); `units` and
+  `images` mean what they do for `hew.doc.import`. There is no `path`
+  member: the call carries the bytes, so a plugin needs no file
+  permission, and it requires `model.write`, not `documents.save`. A
+  `.hew` file is read directly; the other formats go through the host's
+  importers into a scratch document, so nothing lands in the world and
+  the import report is not kept. The whole world content of the file
+  becomes the definition's members in the definition's own frame
+  (nested definitions come along). The definition is stamped with the
+  SHA-256 of the format, the `units`, the bytes, and the `images` (each
+  image's uri, format, and bytes; `hew.library` provenance, a fixed
+  definition marker): a later import of the same bytes in the same
+  format with the same units and images answers the same `definition`
+  with `reused: true`, adds no undo entry, and keeps the first import's
+  name. A different `units` or `images` is a different definition. A new definition is
+  one undo entry. Place it with `hew.component.place`. The file plus all
+  its images over 64 MiB refuse `import_too_large` (checked on the
+  encoded length, before anything is decoded); a name is at most 128 bytes with no control
+  characters (default `"Imported"`); an empty file refuses `empty_group`,
+  and it refuses `explode_session_scope` while an editing session is
+  open. The live app records the whole frame for replay, so the file
+  bytes ride the recording. It cannot be rehearsed in a dry run.
 - `hew.solid.extrude` consumes a region exactly as the push/pull tool
   does: the profile becomes the new solid's base face and leaves the
   sketch. `hew.solid.push_pull` on an existing solid's face carries the
@@ -2814,8 +2840,10 @@ at parity or a stated, reasoned difference:
 | `hew.doc.save`, no path, never saved | refuses `path_required` | hands the bytes back (the app cannot ask where) |
 | `hew.doc.export` | writes the file | `hew-cli` writes it from the bytes the app returns |
 | `hew.doc.import` | reads the file (and a COLLADA file's textures) | the same: `hew-cli` reads them and sends `bytes_base64`/`images`; the app merges additively, one undo entry, and records it for replay |
+| `hew.component.import_definition` | decodes the bytes it is sent | the same; the definition is reused by content hash on both hosts, and the app records the whole frame for replay |
 | `hew.material.create {texture: {path}}` | the host reads the image | the same: `hew-cli` reads it and sends `texture.bytes_base64` in place of `path` |
-| `hew.view.snapshot`, `line_drawing`, `hew.print.pdf` | software renderer | `hew-cli` renders a copy of the document's saved bytes with the same renderer, from the camera the request names or the one the user is looking at |
+| `hew.view.snapshot`, `line_drawing` with `path` | writes the file | `hew-cli` sends the request without `path` and writes the bytes the app returns, once, answering the headless result (`path`, and the `.ids.bin`, `.depth.png`, `.normals.png` files for those passes); a raw socket client that sends `path` gets `host_capability_missing` |
+| `hew.view.snapshot`, `line_drawing`, `hew.print.pdf` | software renderer | the app renders snapshot and line drawing; `hew.print.pdf`, and either of those on an older app that cannot render, `hew-cli` renders a copy of the document's saved bytes with the same renderer, from the camera the request names or the one the user is looking at |
 | `hew.library.*` | the library folder | the library folder, on the client's side (§12.1); `save` records the document's file as `source_doc` as headless does |
 | `hew.view.camera`, `zoom_extents`, `units` | refused (`core` profile) | take effect in the window |
 | `hew.view.hide`, `show`, `show_all`, `hidden`, `isolate`, `clear_isolation`, `zoom_to` | refused (`core` profile) | take effect in the window (§7.3) |

@@ -4309,7 +4309,8 @@ impl Document {
     /// lifetime; see the `next_sid` field for why it is never serialized.
     pub(crate) fn mint_sid(&mut self) -> u64 {
         let sid = self.next_sid;
-        self.next_sid += 1;
+        // Saturating: a loaded file may carry a sid at the top of the range.
+        self.next_sid = self.next_sid.saturating_add(1);
         sid
     }
 
@@ -6013,7 +6014,7 @@ impl Document {
             .copied()
             .chain(raw.scenes.iter().map(|s| s.sid))
             .max()
-            .map_or(0, |m| m + 1);
+            .map_or(0, |m| m.saturating_add(1));
         doc.next_sid = doc.next_sid.max(past);
         for (i, &aid) in annotation_ids.iter().enumerate() {
             doc.restore_sid(
@@ -6025,7 +6026,7 @@ impl Document {
             .sids
             .values()
             .max()
-            .map_or(0, |m| m + 1)
+            .map_or(0, |m| m.saturating_add(1))
             .max(doc.next_sid);
 
         // ── Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8) ────
@@ -6166,7 +6167,7 @@ impl Document {
             doc.scenes = raw.scenes;
             // Scene sids share the entity counter; re-seat it past them too.
             if let Some(max) = doc.scenes.iter().map(|s| s.sid).max() {
-                doc.next_sid = doc.next_sid.max(max + 1);
+                doc.next_sid = doc.next_sid.max(max.saturating_add(1));
             }
         }
 
@@ -7567,6 +7568,125 @@ impl Document {
             linked: Vec::new(),
         };
         Ok((ctx.report, change))
+    }
+
+    /// Make `item`'s whole world content one component definition in this
+    /// document, unplaced, named `name`. The definition is stamped with
+    /// `provenance` and the fixed marker [`WRAPPED_DEF_SID`]; a later call
+    /// with the same provenance returns that definition again (`true`)
+    /// without touching the document or the undo stack, so any number of
+    /// imports of the same bytes make one definition. Nested definitions
+    /// the item places are copied fresh with the import's provenance (the
+    /// copy resolver's provenance reuse only matches the same import's own
+    /// stamp, so nothing is shared across different items). The item's tag
+    /// registry is registered like [`Document::insert_document`] does, with
+    /// the source's hidden flags for newly added tags. Objects, components,
+    /// instances, groups, sketches and the new tags land as one undo step
+    /// that hides them again (redo restores them). Palette materials the
+    /// copy adds are NOT undone, like every palette addition: an
+    /// unreferenced entry is harmless.
+    ///
+    /// # Errors
+    ///
+    /// - [`DocumentError::ExplodeSessionScope`] during a component session.
+    /// - [`DocumentError::EmptyGroup`] — `item` has no world content.
+    /// - [`DocumentError::ComponentExpansionExceeded`] — the item's own
+    ///   placement expansion passes the width bound. The document's total is
+    ///   not consulted: the wrapper is unplaced and its member instances live
+    ///   inside the definition, so the import adds no placements here; a
+    ///   later placement is gated by its own op.
+    pub fn insert_as_definition(
+        &mut self,
+        item: &Document,
+        name: Option<&str>,
+        provenance: LibraryProvenance,
+    ) -> Result<(ComponentId, bool, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "insert_as_definition");
+        self.refuse_during_component_session()?;
+        if let Some(existing) = self.find_library_definition(&provenance, Some(WRAPPED_DEF_SID)) {
+            return Ok((existing, true, DocChange::default()));
+        }
+        let roots = item.top_level_nodes();
+        if roots.is_empty() {
+            return Err(DocumentError::EmptyGroup);
+        }
+        if item.expanded_total() > MAX_EXPANDED_PLACEMENTS {
+            return Err(DocumentError::ComponentExpansionExceeded);
+        }
+
+        let mut ctx = LibraryCopy::new(Some(provenance.clone()));
+        let new_cid = self.insert_component_record(ComponentDef {
+            members: Vec::new(),
+            hidden: false,
+            name: name
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_string),
+        });
+        let mut members: Vec<NodeId> = Vec::with_capacity(roots.len());
+        for root in roots {
+            match root {
+                NodeId::Object(o) => members.push(NodeId::Object(library_copy_object(
+                    self,
+                    item,
+                    o,
+                    ObjectOwner::Definition {
+                        def: new_cid,
+                        parent: None,
+                    },
+                    None,
+                    &mut ctx,
+                ))),
+                NodeId::Group(g) => members.push(NodeId::Group(library_copy_def_group(
+                    self, item, g, new_cid, None, &mut ctx,
+                ))),
+                NodeId::Instance(i) => members.push(NodeId::Instance(library_copy_def_instance(
+                    self, item, i, new_cid, None, &mut ctx,
+                ))),
+            }
+        }
+        self.components[new_cid].members = members;
+        self.stamp_library_provenance(
+            EntityRef::Component(new_cid),
+            &provenance,
+            Some(WRAPPED_DEF_SID),
+        );
+        ctx.all_components.push(new_cid);
+
+        // Tag registry, as `insert_document` step 4: only newly registered
+        // paths are recorded (and undone).
+        let mut tags_added: Vec<(Vec<String>, bool)> = Vec::new();
+        for (path, &hidden) in item.tag_meta.iter() {
+            if !path.is_empty() && !self.tag_meta.contains_key(path) {
+                self.register_tag(path.clone(), hidden);
+                tags_added.push((path.clone(), hidden));
+            }
+        }
+
+        self.undo.push(DocAction::Imported {
+            roots: Vec::new(),
+            objects: ctx.all_objects.clone(),
+            components: ctx.all_components.clone(),
+            instances: ctx.all_instances.clone(),
+            groups: ctx.all_groups.clone(),
+            guides: Vec::new(),
+            tags: tags_added,
+            sketches: ctx.all_sketches.clone(),
+            annotations: Vec::new(),
+            attrs: Vec::new(),
+        });
+        self.commit_new_action();
+        self.debug_validate();
+        let change = DocChange {
+            objects_touched: ctx.all_objects,
+            sketches_touched: ctx.all_sketches,
+            groups_touched: ctx.all_groups,
+            instances_touched: ctx.all_instances,
+            components_touched: ctx.all_components,
+            guides_touched: Vec::new(),
+            linked: Vec::new(),
+        };
+        Ok((new_cid, false, change))
     }
 
     /// Copies `item`'s material palette into this document's, content-
@@ -28040,6 +28160,13 @@ fn ingest_build_node(
 /// while no external client can).
 const LIBRARY_ATTR_NS: &str = "hew.library";
 
+/// The definition-sid marker of a definition [`Document::insert_as_definition`]
+/// made from a whole item: no real definition sid is this value, so a
+/// wrapped definition never matches a library insert's per-definition
+/// lookup, nor the reverse. A file-carried sid equal to it is stamped as
+/// "no sid" on copy, so crafted bytes cannot stand in for the wrapper.
+pub const WRAPPED_DEF_SID: u64 = u64::MAX;
+
 /// The first-party attribute namespace `hew` (docs/dev/HEW_FILE_FORMAT.md,
 /// attributes): the home of [`LINKED_ATTR_KEY`].
 pub const HEW_ATTR_NS: &str = "hew";
@@ -28377,7 +28504,8 @@ fn library_copy_def(
         dst.stamp_library_provenance(
             EntityRef::Component(new_cid),
             &prov,
-            src.sid_of(&EntityRef::Component(cid)),
+            src.sid_of(&EntityRef::Component(cid))
+                .filter(|&s| s != WRAPPED_DEF_SID),
         );
     }
     ctx.all_components.push(new_cid);

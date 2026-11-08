@@ -738,7 +738,9 @@ impl Host for LiveHost {
         let (report, _change) = doc
             .ingest(scene, missing)
             .map_err(|e| Refusal::from_document_error(&e))?;
-        record();
+        if options.record {
+            record();
+        }
         Ok(serde_json::json!({
             "objects_created": report.objects_created,
             "watertight": report.watertight,

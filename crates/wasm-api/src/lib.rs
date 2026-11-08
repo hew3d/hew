@@ -22354,6 +22354,50 @@ mod tests {
         assert_eq!(replayed.doc.undo_depth(), scene.doc.undo_depth());
     }
 
+    /// A live `hew.component.import_definition` is recorded as its whole
+    /// frame (the scratch-document import inside it must not also record a
+    /// world merge), replays to the same document, and the second import
+    /// of the same bytes is a reuse that adds no undo entry.
+    #[test]
+    fn live_import_definition_is_recorded_whole_and_replays() {
+        recording::reset();
+        recording::start();
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let stl = include_bytes!("../../../app/e2e/fixtures/stl/cube_open.stl");
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": 40, "method": "hew.component.import_definition",
+            "params": { "format": "stl", "units": "mm", "name": "Cube",
+                        "bytes_base64": api::commands::doc::encode_base64(stl) },
+        })
+        .to_string();
+        let first: serde_json::Value =
+            serde_json::from_str(&scene.api_dispatch_reply(conn, &frame).unwrap()).unwrap();
+        assert!(first.get("error").is_none(), "{first}");
+        assert_eq!(first["result"]["reused"], false, "{first}");
+        let calls = recording::peek_calls();
+        assert!(
+            matches!(
+                calls.as_slice(),
+                [recording::RecordedCall::ApiDispatch { .. }]
+            ),
+            "one whole-frame record, no world merge: {calls:?}"
+        );
+        assert!(scene.doc.top_level_nodes().is_empty());
+        let depth = scene.doc.undo_depth();
+        let again: serde_json::Value =
+            serde_json::from_str(&scene.api_dispatch_reply(conn, &frame).unwrap()).unwrap();
+        assert_eq!(again["result"]["reused"], true, "{again}");
+        assert_eq!(scene.doc.undo_depth(), depth);
+        let rec = scene.take_recording();
+        recording::reset();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&rec).unwrap(), scene.doc.state_hash());
+        assert!(replayed.doc.top_level_nodes().is_empty());
+        assert_eq!(replayed.doc.component_ids().len(), 1);
+    }
+
     fn hello_and_attach(scene: &mut Scene, conn: u32) {
         assert!(
             scene

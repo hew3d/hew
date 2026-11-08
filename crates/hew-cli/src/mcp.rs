@@ -171,6 +171,11 @@ document — re-inserting the same item reuses its existing definition
 instead of duplicating it) and hew.library.save (save a selection, or
 the whole document with no selection, as a new item). Every command
 addresses an item by its id or its library-relative path.
+hew_transact also serves hew.component.import_definition: send a file's
+bytes (bytes_base64) with its format (hew, skp, glb, gltf, stl, dae) and
+get one unplaced component definition back; send the same bytes again and
+you get that definition ("reused": true), not a copy. Place it with
+hew.component.place.
 
 IF YOU ARE NOT SURE HOW TO MODEL SOMETHING
 Plan it the way you would in SketchUp, then translate. Hew deliberately
@@ -600,14 +605,16 @@ impl McpServer {
             && response.error.is_none()
         {
             {
-                crate::run::write_live_bytes(&value, &path).map_err(|message| JsonRpcErr {
-                    code: -32603,
-                    message,
+                let saved = crate::run::finish_client_write(&value, &path).map_err(|message| {
+                    JsonRpcErr {
+                        code: -32603,
+                        message,
+                    }
                 })?;
                 // Report what a filesystem host would have: the file, not
                 // a megabyte of base64 the caller has no use for.
                 return Ok(serde_json::json!({
-                    "jsonrpc": "2.0", "id": "mcp", "result": { "saved": path }
+                    "jsonrpc": "2.0", "id": "mcp", "result": saved
                 }));
             }
         }

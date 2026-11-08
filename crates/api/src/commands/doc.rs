@@ -26,6 +26,7 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.doc.revert" => Some(revert_doc),
         "hew.doc.export" => Some(export_doc),
         "hew.doc.import" => Some(import_doc),
+        "hew.component.import_definition" => Some(import_definition),
         "hew.view.snapshot" => Some(snapshot),
         _ => None,
     }
@@ -449,6 +450,184 @@ fn import_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         .import_document(ctx.doc, &path, &options)
         .map_err(CmdError::Refusal)?;
     Ok(serde_json::json!({ "report": report }))
+}
+
+// ------------------------------------------- hew.component.import_definition
+
+/// The most `hew.component.import_definition` accepts: the file's bytes
+/// plus every image's bytes. The live app records the whole command frame
+/// for replay, and its recording embeds no import over this size.
+const MAX_IMPORT_DEFINITION_BYTES: usize = 64 << 20;
+
+/// The longest definition name, in bytes.
+const MAX_DEFINITION_NAME_BYTES: usize = 128;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportDefinitionParams {
+    bytes_base64: String,
+    format: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    units: Option<String>,
+    #[serde(default)]
+    images: Option<std::collections::BTreeMap<String, ImportImageParam>>,
+}
+
+/// The exact decoded length a base64 string of `encoded_len` characters can
+/// reach (padding only lowers it), so the cap is checked before decoding.
+fn max_decoded_len(encoded_len: usize) -> usize {
+    encoded_len / 4 * 3
+}
+
+/// The reuse key of an imported definition: SHA-256 hex over everything
+/// that shapes the result: the format name, the units (an STL's scale), the
+/// file's bytes, and every image (uri, format, bytes) in uri order. Each
+/// field is length-prefixed so no two inputs share a stream. Different
+/// units or images are therefore a different definition; the same bytes
+/// read as another format never collide. Computed here so every host lands
+/// on one key.
+fn definition_content_hash(
+    format: &str,
+    units: Option<&str>,
+    bytes: &[u8],
+    images: &std::collections::BTreeMap<String, ImportImage>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    fn field(h: &mut Sha256, data: &[u8]) {
+        h.update((data.len() as u64).to_be_bytes());
+        h.update(data);
+    }
+    let mut h = Sha256::new();
+    field(&mut h, format.as_bytes());
+    field(&mut h, units.unwrap_or("").as_bytes());
+    field(&mut h, bytes);
+    h.update((images.len() as u64).to_be_bytes());
+    for (uri, image) in images {
+        field(&mut h, uri.as_bytes());
+        field(&mut h, image.format.as_deref().unwrap_or("").as_bytes());
+        field(&mut h, &image.bytes);
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn import_too_large(total: usize) -> CmdError {
+    CmdError::Refusal(Refusal::api(
+        "import_too_large",
+        &format!(
+            "That import is {total} bytes (file plus images); a definition import takes at most {MAX_IMPORT_DEFINITION_BYTES}."
+        ),
+    ))
+}
+
+fn import_definition(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let ImportDefinitionParams {
+        bytes_base64,
+        format,
+        name,
+        units,
+        images,
+    } = parse(params)?;
+    let format = format.to_ascii_lowercase();
+    match format.as_str() {
+        "hew" | "skp" | "glb" | "gltf" | "stl" | "dae" => {}
+        "png" | "jpg" | "jpeg" => {
+            return Err(CmdError::Refusal(Refusal::api(
+                "unsupported_for_definition",
+                "A picture is placed with hew.doc.import; it cannot become a component definition here.",
+            )));
+        }
+        other => {
+            return Err(CmdError::Params(format!(
+                "format must be one of hew, skp, glb, gltf, stl, dae; got \"{other}\""
+            )));
+        }
+    }
+    let name = match name {
+        Some(n) => {
+            let n = n.trim().to_string();
+            if n.len() > MAX_DEFINITION_NAME_BYTES || n.chars().any(char::is_control) {
+                return Err(CmdError::Params(format!(
+                    "name must be at most {MAX_DEFINITION_NAME_BYTES} bytes with no control characters"
+                )));
+            }
+            n
+        }
+        None => String::new(),
+    };
+    // The cap, on the encoded lengths, before any decode allocates.
+    let images = images.unwrap_or_default();
+    let encoded_total = images
+        .values()
+        .map(|i| i.bytes_base64.trim().len())
+        .fold(bytes_base64.trim().len(), usize::saturating_add);
+    if max_decoded_len(encoded_total) > MAX_IMPORT_DEFINITION_BYTES {
+        return Err(import_too_large(max_decoded_len(encoded_total)));
+    }
+    let bytes = decode_base64(&bytes_base64)
+        .ok_or_else(|| CmdError::Params("bytes_base64 is not valid base64".into()))?;
+    let mut decoded_images = std::collections::BTreeMap::new();
+    for (uri, image) in images {
+        let image_bytes = decode_base64(&image.bytes_base64).ok_or_else(|| {
+            CmdError::Params(format!("images[{uri}].bytes_base64 is not valid base64"))
+        })?;
+        decoded_images.insert(
+            uri,
+            ImportImage {
+                bytes: image_bytes,
+                format: image.format,
+            },
+        );
+    }
+    let total = decoded_images
+        .values()
+        .map(|i| i.bytes.len())
+        .fold(bytes.len(), usize::saturating_add);
+    if total > MAX_IMPORT_DEFINITION_BYTES {
+        return Err(import_too_large(total));
+    }
+    let hash = definition_content_hash(&format, units.as_deref(), &bytes, &decoded_images);
+    let provenance = kernel::LibraryProvenance {
+        source_id: format!("import:{hash}"),
+        content_hash: hash,
+    };
+    let item = if format == "hew" {
+        kernel::Document::load(&bytes).map_err(|e| {
+            CmdError::Refusal(Refusal::api(
+                "load_failed",
+                &format!("the bytes are not a valid .hew document: {e:?}"),
+            ))
+        })?
+    } else {
+        let options = ImportOptions {
+            units,
+            record: false,
+            images: decoded_images,
+            bytes: Some(bytes),
+            ..ImportOptions::default()
+        };
+        let mut scratch = kernel::Document::new();
+        ctx.host
+            .import_document(&mut scratch, &format!("import.{format}"), &options)
+            .map_err(CmdError::Refusal)?;
+        scratch
+    };
+    let name = if name.is_empty() { "Imported" } else { &name };
+    let (cid, reused, _) = ctx
+        .doc
+        .insert_as_definition(&item, Some(name), provenance)?;
+    let resolver = ctx.resolver();
+    let definition = resolver
+        .public_of(ctx.doc, &kernel::EntityRef::Component(cid))
+        .expect("just created or found");
+    let objects = ctx.doc.def_members(cid).map_or(0, |m| m.len());
+    let members = ctx.doc.def_member_nodes(cid).map_or(0, |m| m.len());
+    Ok(serde_json::json!({
+        "definition": definition,
+        "reused": reused,
+        "report": { "objects": objects, "members": members },
+    }))
 }
 
 // --------------------------------------------------------- hew.view.snapshot

@@ -489,6 +489,120 @@ Mirror one world instance across one of its definition's local axes.
 
 - `unknown_entity`
 
+### `hew.component.import_definition`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** model.write
+
+Turn a file's bytes (hew, skp, glb, gltf, stl, dae) into one unplaced component definition, reusing the definition an earlier import of the same bytes made. Place it with hew.component.place.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "bytes_base64": {
+      "description": "the file's bytes; at most 64 MiB together with all images",
+      "type": "string"
+    },
+    "format": {
+      "description": "the file's format; a picture format is refused",
+      "enum": [
+        "hew",
+        "skp",
+        "glb",
+        "gltf",
+        "stl",
+        "dae"
+      ],
+      "type": "string"
+    },
+    "images": {
+      "additionalProperties": {
+        "type": "object"
+      },
+      "description": "COLLADA texture images by the uri the file uses: {bytes_base64, format: png|jpeg}",
+      "type": "object"
+    },
+    "name": {
+      "description": "the definition's name when this import creates it (a later import of the same bytes keeps the first name); at most 128 bytes, no control characters; default \"Imported\"",
+      "type": "string"
+    },
+    "units": {
+      "description": "meters-per-source-unit hint; STL requires it, other formats ignore it",
+      "enum": [
+        "m",
+        "mm",
+        "cm",
+        "in"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "bytes_base64",
+    "format"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "definition": {
+      "description": "the definition's cmp_ id, ready for hew.component.place",
+      "type": "string"
+    },
+    "report": {
+      "properties": {
+        "members": {
+          "description": "all direct members: objects, groups, and nested instances",
+          "type": "integer"
+        },
+        "objects": {
+          "description": "the definition's direct member objects",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "objects",
+        "members"
+      ],
+      "type": "object"
+    },
+    "reused": {
+      "description": "true when an earlier import of the same bytes already made it; nothing changed",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "definition",
+    "reused",
+    "report"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `units_required`
+- `load_failed`
+- `unsupported_format`
+- `unsupported_for_definition`
+- `import_too_large`
+- `empty_group` — Select at least one object to group.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
+
 ### `hew.component.make_unique`
 
 - **Version:** 1

@@ -1,0 +1,176 @@
+{
+  "profile": "core",
+  "frames": [
+    {
+      "note": "the handshake",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "compare": "/result/profile",
+      "response": "core"
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "note": "first import makes the definition",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "hew.component.import_definition",
+        "params": {
+          "bytes_base64": "UEsDBAoAAAAAAAAAIQDBaP2RewEAAHsBAAANAAAAbWFuaWZlc3QuanNvbnsKICAiZm9ybWF0X3ZlcnNpb24iOiAyNiwKICAiZ2VvbWV0cnlfdmVyc2lvbiI6IDksCiAgImFwcCI6ICJoZXciLAogICJhcHBfdmVyc2lvbiI6ICIxLjMuMSIsCiAgIm1hdGVyaWFscyI6IFtdLAogICJvYmplY3RzIjogWwogICAgewogICAgICAiaWQiOiAwLAogICAgICAic2lkIjogMCwKICAgICAgImdlb21ldHJ5IjogImdlb21ldHJ5L29ial8wLmJpbiIsCiAgICAgICJuYW1lIjogImltcG9ydCIKICAgIH0KICBdLAogICJncm91cHMiOiBbXSwKICAiY29tcG9uZW50cyI6IFtdLAogICJpbnN0YW5jZXMiOiBbXSwKICAic2tldGNoZXMiOiBbXSwKICAicm9vdHMiOiBbCiAgICB7CiAgICAgICJraW5kIjogIm9iamVjdCIsCiAgICAgICJpZCI6IDAKICAgIH0KICBdCn1QSwMECgAAAAAAAAAhAEWdaeGuAQAArgEAABIAAABnZW9tZXRyeS9vYmpfMC5iaW5IRVdHCQAAAAH/////AQgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA8D8AAAAAAAAAAAAAAAAAAPA/AAAAAAAA8D8AAAAAAAAAAAAAAAAAAPA/AAAAAAAAAAAAAAAAAADwPwAAAAAAAPA/AAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAAAA8D8AAAAAAADwPwAAAAAAAPA/AAAAAAAA8D8GAAAA/////wAABAAAAAAAAAABAAAAAgAAAAMAAAAAAAAAAAAAAAAA/////wAABAAAAAAAAAADAAAABAAAAAUAAAAAAAAAAAAAAAAA/////wAABAAAAAAAAAAFAAAABgAAAAEAAAAAAAAAAAAAAAAA/////wAABAAAAAEAAAAGAAAABwAAAAIAAAAAAAAAAAAAAAAA/////wAABAAAAAMAAAACAAAABwAAAAQAAAAAAAAAAAAAAAAA/////wAABAAAAAUAAAAEAAAABwAAAAYAAAAAAAAAAAAAAAAAUEsBAgoDCgAAAAAAAAAhAMFo/ZF7AQAAewEAAA0AAAAAAAAAAAAAAKSBAAAAAG1hbmlmZXN0Lmpzb25QSwECCgMKAAAAAAAAACEARZ1p4a4BAACuAQAAEgAAAAAAAAAAAAAApIGmAQAAZ2VvbWV0cnkvb2JqXzAuYmluUEsFBgAAAAACAAIAewAAAIQDAAAAAA==",
+          "format": "hew",
+          "name": "Hinge"
+        }
+      },
+      "compare": "/result/reused",
+      "response": false
+    },
+    {
+      "note": "the same bytes again reuse it",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "hew.component.import_definition",
+        "params": {
+          "bytes_base64": "UEsDBAoAAAAAAAAAIQDBaP2RewEAAHsBAAANAAAAbWFuaWZlc3QuanNvbnsKICAiZm9ybWF0X3ZlcnNpb24iOiAyNiwKICAiZ2VvbWV0cnlfdmVyc2lvbiI6IDksCiAgImFwcCI6ICJoZXciLAogICJhcHBfdmVyc2lvbiI6ICIxLjMuMSIsCiAgIm1hdGVyaWFscyI6IFtdLAogICJvYmplY3RzIjogWwogICAgewogICAgICAiaWQiOiAwLAogICAgICAic2lkIjogMCwKICAgICAgImdlb21ldHJ5IjogImdlb21ldHJ5L29ial8wLmJpbiIsCiAgICAgICJuYW1lIjogImltcG9ydCIKICAgIH0KICBdLAogICJncm91cHMiOiBbXSwKICAiY29tcG9uZW50cyI6IFtdLAogICJpbnN0YW5jZXMiOiBbXSwKICAic2tldGNoZXMiOiBbXSwKICAicm9vdHMiOiBbCiAgICB7CiAgICAgICJraW5kIjogIm9iamVjdCIsCiAgICAgICJpZCI6IDAKICAgIH0KICBdCn1QSwMECgAAAAAAAAAhAEWdaeGuAQAArgEAABIAAABnZW9tZXRyeS9vYmpfMC5iaW5IRVdHCQAAAAH/////AQgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA8D8AAAAAAAAAAAAAAAAAAPA/AAAAAAAA8D8AAAAAAAAAAAAAAAAAAPA/AAAAAAAAAAAAAAAAAADwPwAAAAAAAPA/AAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAAAA8D8AAAAAAADwPwAAAAAAAPA/AAAAAAAA8D8GAAAA/////wAABAAAAAAAAAABAAAAAgAAAAMAAAAAAAAAAAAAAAAA/////wAABAAAAAAAAAADAAAABAAAAAUAAAAAAAAAAAAAAAAA/////wAABAAAAAAAAAAFAAAABgAAAAEAAAAAAAAAAAAAAAAA/////wAABAAAAAEAAAAGAAAABwAAAAIAAAAAAAAAAAAAAAAA/////wAABAAAAAMAAAACAAAABwAAAAQAAAAAAAAAAAAAAAAA/////wAABAAAAAUAAAAEAAAABwAAAAYAAAAAAAAAAAAAAAAAUEsBAgoDCgAAAAAAAAAhAMFo/ZF7AQAAewEAAA0AAAAAAAAAAAAAAKSBAAAAAG1hbmlmZXN0Lmpzb25QSwECCgMKAAAAAAAAACEARZ1p4a4BAACuAQAAEgAAAAAAAAAAAAAApIGmAQAAZ2VvbWV0cnkvb2JqXzAuYmluUEsFBgAAAAACAAIAewAAAIQDAAAAAA==",
+          "format": "hew",
+          "name": "Hinge"
+        }
+      },
+      "compare": "/result/reused",
+      "response": true
+    },
+    {
+      "note": "the reuse names the same definition",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "hew.component.import_definition",
+        "params": {
+          "bytes_base64": "UEsDBAoAAAAAAAAAIQDBaP2RewEAAHsBAAANAAAAbWFuaWZlc3QuanNvbnsKICAiZm9ybWF0X3ZlcnNpb24iOiAyNiwKICAiZ2VvbWV0cnlfdmVyc2lvbiI6IDksCiAgImFwcCI6ICJoZXciLAogICJhcHBfdmVyc2lvbiI6ICIxLjMuMSIsCiAgIm1hdGVyaWFscyI6IFtdLAogICJvYmplY3RzIjogWwogICAgewogICAgICAiaWQiOiAwLAogICAgICAic2lkIjogMCwKICAgICAgImdlb21ldHJ5IjogImdlb21ldHJ5L29ial8wLmJpbiIsCiAgICAgICJuYW1lIjogImltcG9ydCIKICAgIH0KICBdLAogICJncm91cHMiOiBbXSwKICAiY29tcG9uZW50cyI6IFtdLAogICJpbnN0YW5jZXMiOiBbXSwKICAic2tldGNoZXMiOiBbXSwKICAicm9vdHMiOiBbCiAgICB7CiAgICAgICJraW5kIjogIm9iamVjdCIsCiAgICAgICJpZCI6IDAKICAgIH0KICBdCn1QSwMECgAAAAAAAAAhAEWdaeGuAQAArgEAABIAAABnZW9tZXRyeS9vYmpfMC5iaW5IRVdHCQAAAAH/////AQgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA8D8AAAAAAAAAAAAAAAAAAPA/AAAAAAAA8D8AAAAAAAAAAAAAAAAAAPA/AAAAAAAAAAAAAAAAAADwPwAAAAAAAPA/AAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAAAA8D8AAAAAAADwPwAAAAAAAPA/AAAAAAAA8D8GAAAA/////wAABAAAAAAAAAABAAAAAgAAAAMAAAAAAAAAAAAAAAAA/////wAABAAAAAAAAAADAAAABAAAAAUAAAAAAAAAAAAAAAAA/////wAABAAAAAAAAAAFAAAABgAAAAEAAAAAAAAAAAAAAAAA/////wAABAAAAAEAAAAGAAAABwAAAAIAAAAAAAAAAAAAAAAA/////wAABAAAAAMAAAACAAAABwAAAAQAAAAAAAAAAAAAAAAA/////wAABAAAAAUAAAAEAAAABwAAAAYAAAAAAAAAAAAAAAAAUEsBAgoDCgAAAAAAAAAhAMFo/ZF7AQAAewEAAA0AAAAAAAAAAAAAAKSBAAAAAG1hbmlmZXN0Lmpzb25QSwECCgMKAAAAAAAAACEARZ1p4a4BAACuAQAAEgAAAAAAAAAAAAAApIGmAQAAZ2VvbWV0cnkvb2JqXzAuYmluUEsFBgAAAAACAAIAewAAAIQDAAAAAA==",
+          "format": "hew",
+          "name": "Hinge"
+        }
+      },
+      "compare": "/result/definition",
+      "response": "cmp_0"
+    },
+    {
+      "note": "the reuse names the same definition",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "hew.component.import_definition",
+        "params": {
+          "bytes_base64": "UEsDBAoAAAAAAAAAIQDBaP2RewEAAHsBAAANAAAAbWFuaWZlc3QuanNvbnsKICAiZm9ybWF0X3ZlcnNpb24iOiAyNiwKICAiZ2VvbWV0cnlfdmVyc2lvbiI6IDksCiAgImFwcCI6ICJoZXciLAogICJhcHBfdmVyc2lvbiI6ICIxLjMuMSIsCiAgIm1hdGVyaWFscyI6IFtdLAogICJvYmplY3RzIjogWwogICAgewogICAgICAiaWQiOiAwLAogICAgICAic2lkIjogMCwKICAgICAgImdlb21ldHJ5IjogImdlb21ldHJ5L29ial8wLmJpbiIsCiAgICAgICJuYW1lIjogImltcG9ydCIKICAgIH0KICBdLAogICJncm91cHMiOiBbXSwKICAiY29tcG9uZW50cyI6IFtdLAogICJpbnN0YW5jZXMiOiBbXSwKICAic2tldGNoZXMiOiBbXSwKICAicm9vdHMiOiBbCiAgICB7CiAgICAgICJraW5kIjogIm9iamVjdCIsCiAgICAgICJpZCI6IDAKICAgIH0KICBdCn1QSwMECgAAAAAAAAAhAEWdaeGuAQAArgEAABIAAABnZW9tZXRyeS9vYmpfMC5iaW5IRVdHCQAAAAH/////AQgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA8D8AAAAAAAAAAAAAAAAAAPA/AAAAAAAA8D8AAAAAAAAAAAAAAAAAAPA/AAAAAAAAAAAAAAAAAADwPwAAAAAAAPA/AAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAAAA8D8AAAAAAADwPwAAAAAAAPA/AAAAAAAA8D8GAAAA/////wAABAAAAAAAAAABAAAAAgAAAAMAAAAAAAAAAAAAAAAA/////wAABAAAAAAAAAADAAAABAAAAAUAAAAAAAAAAAAAAAAA/////wAABAAAAAAAAAAFAAAABgAAAAEAAAAAAAAAAAAAAAAA/////wAABAAAAAEAAAAGAAAABwAAAAIAAAAAAAAAAAAAAAAA/////wAABAAAAAMAAAACAAAABwAAAAQAAAAAAAAAAAAAAAAA/////wAABAAAAAUAAAAEAAAABwAAAAYAAAAAAAAAAAAAAAAAUEsBAgoDCgAAAAAAAAAhAMFo/ZF7AQAAewEAAA0AAAAAAAAAAAAAAKSBAAAAAG1hbmlmZXN0Lmpzb25QSwECCgMKAAAAAAAAACEARZ1p4a4BAACuAQAAEgAAAAAAAAAAAAAApIGmAQAAZ2VvbWV0cnkvb2JqXzAuYmluUEsFBgAAAAACAAIAewAAAIQDAAAAAA==",
+          "format": "hew",
+          "name": "Hinge"
+        }
+      },
+      "compare": "/result/report",
+      "response": {
+        "objects": 1,
+        "members": 1
+      }
+    },
+    {
+      "note": "place the definition",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "hew.component.place",
+        "params": {
+          "component": "cmp_0"
+        }
+      },
+      "compare": "/result/label",
+      "response": "hew.component.place"
+    },
+    {
+      "note": "place the definition",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "hew.component.place",
+        "params": {
+          "component": "cmp_0"
+        }
+      },
+      "compare": "/result/label",
+      "response": "hew.component.place"
+    },
+    {
+      "note": "import, place, place: the reuse and nothing else added an entry",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "hew.history.status",
+        "params": {}
+      },
+      "compare": "/result/undo_depth",
+      "response": 3
+    },
+    {
+      "note": "a picture is refused",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "hew.component.import_definition",
+        "params": {
+          "bytes_base64": "cG5n",
+          "format": "png"
+        }
+      },
+      "compare": "/error/data/refusal",
+      "response": "unsupported_for_definition"
+    },
+    {
+      "note": "STL needs a host importer, which the conformance host lacks",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "hew.component.import_definition",
+        "params": {
+          "bytes_base64": "c3RsIQ==",
+          "format": "stl",
+          "units": "mm"
+        }
+      },
+      "compare": "/error/data/refusal",
+      "response": "host_capability_missing"
+    },
+    {
+      "note": "there is no path member",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "hew.component.import_definition",
+        "params": {
+          "bytes_base64": "UEsDBAoAAAAAAAAAIQDBaP2RewEAAHsBAAANAAAAbWFuaWZlc3QuanNvbnsKICAiZm9ybWF0X3ZlcnNpb24iOiAyNiwKICAiZ2VvbWV0cnlfdmVyc2lvbiI6IDksCiAgImFwcCI6ICJoZXciLAogICJhcHBfdmVyc2lvbiI6ICIxLjMuMSIsCiAgIm1hdGVyaWFscyI6IFtdLAogICJvYmplY3RzIjogWwogICAgewogICAgICAiaWQiOiAwLAogICAgICAic2lkIjogMCwKICAgICAgImdlb21ldHJ5IjogImdlb21ldHJ5L29ial8wLmJpbiIsCiAgICAgICJuYW1lIjogImltcG9ydCIKICAgIH0KICBdLAogICJncm91cHMiOiBbXSwKICAiY29tcG9uZW50cyI6IFtdLAogICJpbnN0YW5jZXMiOiBbXSwKICAic2tldGNoZXMiOiBbXSwKICAicm9vdHMiOiBbCiAgICB7CiAgICAgICJraW5kIjogIm9iamVjdCIsCiAgICAgICJpZCI6IDAKICAgIH0KICBdCn1QSwMECgAAAAAAAAAhAEWdaeGuAQAArgEAABIAAABnZW9tZXRyeS9vYmpfMC5iaW5IRVdHCQAAAAH/////AQgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA8D8AAAAAAAAAAAAAAAAAAPA/AAAAAAAA8D8AAAAAAAAAAAAAAAAAAPA/AAAAAAAAAAAAAAAAAADwPwAAAAAAAPA/AAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAAAAAAAAAAAAAADwPwAAAAAAAAAAAAAAAAAA8D8AAAAAAADwPwAAAAAAAPA/AAAAAAAA8D8GAAAA/////wAABAAAAAAAAAABAAAAAgAAAAMAAAAAAAAAAAAAAAAA/////wAABAAAAAAAAAADAAAABAAAAAUAAAAAAAAAAAAAAAAA/////wAABAAAAAAAAAAFAAAABgAAAAEAAAAAAAAAAAAAAAAA/////wAABAAAAAEAAAAGAAAABwAAAAIAAAAAAAAAAAAAAAAA/////wAABAAAAAMAAAACAAAABwAAAAQAAAAAAAAAAAAAAAAA/////wAABAAAAAUAAAAEAAAABwAAAAYAAAAAAAAAAAAAAAAAUEsBAgoDCgAAAAAAAAAhAMFo/ZF7AQAAewEAAA0AAAAAAAAAAAAAAKSBAAAAAG1hbmlmZXN0Lmpzb25QSwECCgMKAAAAAAAAACEARZ1p4a4BAACuAQAAEgAAAAAAAAAAAAAApIGmAQAAZ2VvbWV0cnkvb2JqXzAuYmluUEsFBgAAAAACAAIAewAAAIQDAAAAAA==",
+          "format": "hew",
+          "path": "/tmp/x.hew"
+        }
+      },
+      "compare": "/error/code",
+      "response": -32602
+    }
+  ]
+}

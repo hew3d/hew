@@ -286,7 +286,13 @@ same result as headless:
   into the document, additively and as one undo entry. `hew-cli` reads the
   file (and a COLLADA file's textures) for you and sends the bytes; a raw
   client sends `bytes_base64` itself.
-- `hew.view.snapshot`, `hew.view.line_drawing`, and `hew.print.pdf` are
+- `hew.component.import_definition {bytes_base64, format}` turns a file's
+  bytes (`hew`, `skp`, `glb`, `gltf`, `stl`, `dae`) into one unplaced
+  component definition you place with `hew.component.place`. Sending the
+  same bytes again returns the same definition (`reused: true`) instead of
+  making another.
+- `hew.view.snapshot` and `hew.view.line_drawing` with a `path` are written
+  by `hew-cli` from the bytes the app returns, once. `hew.print.pdf` is
   rendered by `hew-cli` from a copy of the document's saved bytes, so you
   can see a background document too. With no camera named, the render
   starts from what the user is looking at (the viewport camera at the

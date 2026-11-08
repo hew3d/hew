@@ -387,6 +387,18 @@ fn measure_transcript_matches_the_golden() {
     ));
 }
 
+/// Import as a definition (docs/agents/HEW_API.md §7, document commands): a `.hew` item
+/// becomes one unplaced definition, the same bytes reuse it with no second
+/// undo entry, and the refusals (a picture, a host-less STL, a stray
+/// `path` member) answer typed.
+#[test]
+fn import_definition_transcript_matches_the_golden() {
+    replay(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/transcripts/import_definition.json"
+    ));
+}
+
 /// The model writes for parts: a rebase that compensates both placements
 /// (each pose takes the frame, the world box stays put), a refused frame,
 /// a flip that mirrors one placement, a 2 × 3 grid copy and the

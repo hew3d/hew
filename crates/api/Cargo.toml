@@ -21,6 +21,10 @@ serde_json.workspace = true
 # (docs/agents/PLUGINS.md "Permissions"). Pure, like this crate; it brings
 # `semver` into the tree.
 plugin-manifest.workspace = true
+# The reuse key of `hew.component.import_definition` is the SHA-256 of the
+# file's bytes, so the headless and live hosts agree on it. Pure Rust, the
+# workspace-pinned crate `library` and `wasm-api` already use.
+sha2.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

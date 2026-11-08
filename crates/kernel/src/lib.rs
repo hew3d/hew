@@ -59,7 +59,7 @@ pub use document::{
     HistoryEntryInfo, HistoryKind, HistoryOrigin, IngestJob, IngestProgress, InsertOptions,
     InsertReport, LINKED_ATTR_KEY, LibraryProvenance, LinkPolicy, LinkedWrap, MAX_COMPONENT_DEPTH,
     MAX_OCCURRENCES, MaterialScope, NodeId, Occurrence, PendingActionKind, PlaneListing,
-    PlaneUnits, PurgeReport, Remap, RenderRoot,
+    PlaneUnits, PurgeReport, Remap, RenderRoot, WRAPPED_DEF_SID,
 };
 pub use error::TopologyError;
 pub use guide::{Guide, GuideSpan};

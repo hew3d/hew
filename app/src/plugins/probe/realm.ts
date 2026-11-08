@@ -71,7 +71,8 @@ export function createRealmFrame(
 
   return new Promise<RealmHandle>((resolve, reject) => {
     const timer = setTimeout(() => {
-      window.removeEventListener('message', onReady)
+      // The timer can outlive the page (a test environment torn down first).
+      globalThis.window?.removeEventListener('message', onReady)
       reject(new Error('handshake_timeout'))
     }, opts.handshakeMs ?? 5000)
 

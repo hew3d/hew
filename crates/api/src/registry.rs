@@ -1008,6 +1008,13 @@ impl Registry {
             "Place an instance of a definition at a pose.",
         );
         add(
+            "hew.component.import_definition",
+            S,
+            Host,
+            Std,
+            "Turn a file's bytes (hew, skp, glb, gltf, stl, dae) into one unplaced component definition, reusing the definition an earlier import of the same bytes made. Place it with hew.component.place.",
+        );
+        add(
             "hew.component.make_unique",
             M,
             Kernel,
@@ -3709,6 +3716,68 @@ impl Registry {
         }
         {
             let cmd = commands
+                .get_mut("hew.component.import_definition")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "bytes_base64": {
+                        "type": "string",
+                        "description": "the file's bytes; at most 64 MiB together with all images"
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["hew", "skp", "glb", "gltf", "stl", "dae"],
+                        "description": "the file's format; a picture format is refused"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "the definition's name when this import creates it (a later import of the same bytes keeps the first name); at most 128 bytes, no control characters; default \"Imported\""
+                    },
+                    "units": {
+                        "type": "string", "enum": ["m", "mm", "cm", "in"],
+                        "description": "meters-per-source-unit hint; STL requires it, other formats ignore it"
+                    },
+                    "images": {
+                        "type": "object",
+                        "description": "COLLADA texture images by the uri the file uses: {bytes_base64, format: png|jpeg}",
+                        "additionalProperties": { "type": "object" }
+                    }
+                },
+                "required": ["bytes_base64", "format"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "definition": { "type": "string", "description": "the definition's cmp_ id, ready for hew.component.place" },
+                    "reused": { "type": "boolean", "description": "true when an earlier import of the same bytes already made it; nothing changed" },
+                    "report": {
+                        "type": "object",
+                        "properties": {
+                            "objects": { "type": "integer", "description": "the definition's direct member objects" },
+                            "members": { "type": "integer", "description": "all direct members: objects, groups, and nested instances" }
+                        },
+                        "required": ["objects", "members"]
+                    }
+                },
+                "required": ["definition", "reused", "report"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "units_required",
+                "load_failed",
+                "unsupported_format",
+                "unsupported_for_definition",
+                "import_too_large",
+                "empty_group",
+                "explode_session_scope",
+                "component_expansion_exceeded",
+            ];
+        }
+        {
+            let cmd = commands
                 .get_mut("hew.component.make_unique")
                 .expect("declared above");
             cmd.implemented = true;
@@ -5605,6 +5674,9 @@ impl Registry {
             // Additive, but a real mutation: it merges a file's objects in
             // (an `Imported` undo entry) — a live host must resync after it.
             "hew.doc.import",
+            // Makes (or finds) an unplaced definition: one undo entry when
+            // it is new, none when an earlier import's definition is reused.
+            "hew.component.import_definition",
             // ReadOnly class (no undo bracket, no `$ref`-blocking transact
             // requirement) but a real mutation: it stamps `hew.library`
             // source provenance on the saved selection's nodes
@@ -6423,6 +6495,7 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.component.explode",
                 "hew.component.make_unique",
                 "hew.component.place",
+                "hew.component.import_definition",
                 "hew.component.rebase",
                 "hew.component.flip_instance",
                 "hew.material.create",

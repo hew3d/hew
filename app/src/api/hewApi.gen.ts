@@ -181,6 +181,32 @@ export interface ComponentFlipInstanceResult {
 }
 
 /**
+ * `hew.component.import_definition` (v1) — Turn a file's bytes (hew, skp, glb, gltf, stl, dae) into one unplaced component definition, reusing the definition an earlier import of the same bytes made. Place it with hew.component.place.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: host_capability_missing, units_required, load_failed, unsupported_format, unsupported_for_definition, import_too_large, empty_group, explode_session_scope, component_expansion_exceeded
+ */
+export interface ComponentImportDefinitionParams {
+  /** the file's bytes; at most 64 MiB together with all images */
+  bytes_base64: string
+  /** the file's format; a picture format is refused */
+  format: "hew" | "skp" | "glb" | "gltf" | "stl" | "dae"
+  /** COLLADA texture images by the uri the file uses: {bytes_base64, format: png|jpeg} */
+  images?: UnspecifiedShape
+  /** the definition's name when this import creates it (a later import of the same bytes keeps the first name); at most 128 bytes, no control characters; default "Imported" */
+  name?: string
+  /** meters-per-source-unit hint; STL requires it, other formats ignore it */
+  units?: "m" | "mm" | "cm" | "in"
+}
+
+export interface ComponentImportDefinitionResult {
+  /** the definition's cmp_ id, ready for hew.component.place */
+  definition: string
+  report: { members: number; objects: number }
+  /** true when an earlier import of the same bytes already made it; nothing changed */
+  reused: boolean
+}
+
+/**
  * `hew.component.make_unique` (v1) — Deep-copy an instance's definition into a private one.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: unknown_entity, unknown_instance, unknown_component
@@ -2452,6 +2478,7 @@ export class HewApiClient {
     create: (params: ComponentCreateParams): Promise<ComponentCreateResult> => this.mutate('hew.component.create', params),
     explode: (params: ComponentExplodeParams): Promise<ComponentExplodeResult> => this.mutate('hew.component.explode', params),
     flipInstance: (params: ComponentFlipInstanceParams): Promise<ComponentFlipInstanceResult> => this.mutate('hew.component.flip_instance', params),
+    importDefinition: (params: ComponentImportDefinitionParams): Promise<ComponentImportDefinitionResult> => this.call('hew.component.import_definition', params),
     makeUnique: (params: ComponentMakeUniqueParams): Promise<ComponentMakeUniqueResult> => this.mutate('hew.component.make_unique', params),
     place: (params: ComponentPlaceParams): Promise<ComponentPlaceResult> => this.mutate('hew.component.place', params),
     rebase: (params: ComponentRebaseParams): Promise<ComponentRebaseResult> => this.mutate('hew.component.rebase', params),

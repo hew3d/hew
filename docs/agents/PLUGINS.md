@@ -594,6 +594,30 @@ the number of slots along an axis counting the original, so `[{ count:
 five slots of a 2 × 3 field. A grid takes no `translation`; `copy.count`
 keeps its own meaning (that many copies at the step and its multiples).
 
+## Part libraries
+
+A hardware or cabinet-module library is a folder of files the plugin
+ships or the user points it at. `hew.component.import_definition
+{ bytes_base64, format, name? }` turns one file's bytes (`hew`, `skp`,
+`glb`, `gltf`, `stl`, or `dae`) into one component definition with no
+placement, and answers `{ definition: "cmp_…", reused, report }`. Place
+it as often as needed with `hew.component.place`: a hundred placements
+are one definition. The plugin needs only `model.write`; the call
+carries the bytes, so no file permission is involved. The plugin supplies
+bytes it already holds: a file bundled with it, or bytes it obtained by
+whatever means it is permitted (the app has no command that reads a file
+for a plugin).
+
+The definition is keyed by a hash of the format, the units, the bytes,
+and any images, so the same file with other units is a different part. Importing
+the same file again, in the same session or a later one, returns the same
+definition with `reused: true` and changes nothing, so a plugin can call
+it every time it needs the part and does not track what it already
+brought in. The first import names the definition; to rename it, use
+`hew.entity.rename`. A new definition is one undo step; a reuse adds
+none. An STL carries no units, so pass `units`; a picture is refused
+(`unsupported_for_definition`).
+
 ## Checking before committing
 
 Two ways to ask "what would this do?" without changing the document:

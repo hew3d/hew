@@ -423,7 +423,7 @@ pub fn resolve_document<'a>(
 /// texture images a COLLADA file refers to — and sends them along, so the
 /// host imports from memory. A host with a filesystem uses `bytes` when
 /// given and otherwise reads `path` (and looks for textures beside it).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ImportOptions {
     /// Meters-per-source-unit hint name (`m`/`mm`/`cm`/`in`); required by
     /// formats that carry no units (STL).
@@ -443,6 +443,27 @@ pub struct ImportOptions {
     /// A picture's width in meters (default 1); its height follows from
     /// its proportions.
     pub width: Option<f64>,
+    /// Whether a host that records its own imports (the live app, for
+    /// replay) records this one. `true` by default; an import into a scratch
+    /// document (`hew.component.import_definition`) passes `false`, because
+    /// replaying it as a world merge would be wrong: the dispatcher records
+    /// the whole command frame instead.
+    pub record: bool,
+}
+
+impl Default for ImportOptions {
+    fn default() -> Self {
+        ImportOptions {
+            units: None,
+            bytes: None,
+            images: std::collections::BTreeMap::new(),
+            origin: None,
+            u: None,
+            v: None,
+            width: None,
+            record: true,
+        }
+    }
 }
 
 /// One texture image of an [`ImportOptions`].
