@@ -11,6 +11,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { useLingui } from '@lingui/react/macro'
+import { useIsRtl } from '../i18n/direction'
 import { InlineIcon } from './InlineIcon'
 import chevronLeftSvg from '@material-symbols/svg-400/outlined/chevron_left.svg?raw'
 import chevronRightSvg from '@material-symbols/svg-400/outlined/chevron_right.svg?raw'
@@ -32,6 +33,7 @@ function useFocusOnMount(focusOnMount: boolean) {
 
 export function TrayHideRow({ onClick, focusOnMount = false }: TrayToggleProps) {
   const { t } = useLingui()
+  const rtl = useIsRtl()
   const [hovered, setHovered] = useState(false)
   const ref = useFocusOnMount(focusOnMount)
   return (
@@ -54,7 +56,9 @@ export function TrayHideRow({ onClick, focusOnMount = false }: TrayToggleProps) 
           background: hovered ? 'var(--surface-hover)' : 'transparent',
         }}
       >
-        <InlineIcon svg={chevronRightSvg} size={18} />
+        {/* Points at the edge the tray leaves toward: right in English, left
+            once the tray is docked on the left. */}
+        <InlineIcon svg={rtl ? chevronLeftSvg : chevronRightSvg} size={18} />
       </button>
     </div>
   )
@@ -62,6 +66,7 @@ export function TrayHideRow({ onClick, focusOnMount = false }: TrayToggleProps) 
 
 export function TrayShowTab({ onClick, focusOnMount = false }: TrayToggleProps) {
   const { t } = useLingui()
+  const rtl = useIsRtl()
   const [hovered, setHovered] = useState(false)
   const ref = useFocusOnMount(focusOnMount)
   return (
@@ -76,15 +81,21 @@ export function TrayShowTab({ onClick, focusOnMount = false }: TrayToggleProps) 
       onMouseLeave={() => setHovered(false)}
       style={{
         position: 'absolute',
-        right: 0,
+        // The tab hangs on the tray's edge, which is the inline end in both
+        // directions (right in English, left in Arabic).
+        insetInlineEnd: 0,
         top: '50%',
         transform: 'translateY(-50%)',
         zIndex: 20,
         display: 'flex',
         padding: '10px 1px',
         border: '1px solid var(--border-hairline)',
-        borderRight: 'none',
-        borderRadius: 'var(--radius-control) 0 0 var(--radius-control)',
+        borderInlineEnd: 'none',
+        // Rounded on the side away from the window edge: the inline start
+        // corners (top-left/bottom-left in English, top-right/bottom-right
+        // in Arabic).
+        borderStartStartRadius: 'var(--radius-control)',
+        borderEndStartRadius: 'var(--radius-control)',
         cursor: 'pointer',
         color: hovered ? 'var(--text-secondary)' : 'var(--text-faint)',
         // Opaque either way: a translucent hover wash would let the canvas
@@ -92,7 +103,8 @@ export function TrayShowTab({ onClick, focusOnMount = false }: TrayToggleProps) 
         background: 'var(--surface-panel)',
       }}
     >
-      <InlineIcon svg={chevronLeftSvg} size={18} />
+      {/* Points inward, toward the tray it brings back. */}
+      <InlineIcon svg={rtl ? chevronRightSvg : chevronLeftSvg} size={18} />
     </button>
   )
 }

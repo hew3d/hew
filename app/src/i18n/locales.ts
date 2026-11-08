@@ -28,10 +28,10 @@ export const PSEUDO_LOCALE = 'pseudo-LOCALE'
 
 /** Locales offered to users. Add a locale here only once its catalog is
  * complete (docs/LOCALIZATION.md "Adding a language"). */
-export const SHIPPED_LOCALES = ['en'] as const
+export const SHIPPED_LOCALES = ['en', 'ar'] as const
 
 /** Every locale with a catalog under `app/src/locales/`. */
-export const ALL_LOCALES = ['en', 'ja', PSEUDO_LOCALE] as const
+export const ALL_LOCALES = ['en', 'ar', 'ja', PSEUDO_LOCALE] as const
 
 export type ShippedLocale = (typeof SHIPPED_LOCALES)[number]
 export type Locale = (typeof ALL_LOCALES)[number]
@@ -44,6 +44,7 @@ export type Locale = (typeof ALL_LOCALES)[number]
 /* oxlint-disable lingui/no-unlocalized-strings -- language names stay in their own script */
 export const LOCALE_NAMES: Record<Locale, string> = {
   en: 'English',
+  ar: 'العربية',
   ja: '日本語',
   [PSEUDO_LOCALE]: 'Pseudo (debug)',
 }

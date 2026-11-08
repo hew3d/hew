@@ -192,9 +192,13 @@ export function ContextualDock({
           alignItems: 'center',
           justifyContent: 'center',
           gap: '4px',
-          padding: '0 var(--space-5, 11px) 0 var(--space-3, 8px)',
-          borderRight: '1px solid var(--border-hairline)',
-          marginRight: '3px',
+          // Asymmetric padding: generous on the inline end (toward the verb
+          // row), tight on the inline start. Written as logical sides so the
+          // chip keeps the same shape when the dock mirrors.
+          paddingBlock: 0,
+          paddingInline: 'var(--space-3, 8px) var(--space-5, 11px)',
+          borderInlineEnd: '1px solid var(--border-hairline)',
+          marginInlineEnd: '3px',
         }}
       >
         <span

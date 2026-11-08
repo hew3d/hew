@@ -20,6 +20,7 @@ import { Trans, useLingui } from '@lingui/react/macro'
 import { TOOL_ICON_SVG } from '../tools/toolIcons'
 import { RAIL_GROUPS, TOOL_GROUP_LABELS, toolsInGroup, shortcutFor, toolLabel, type ToolName } from '../tools/toolRegistry'
 import { isMac } from '../platform'
+import { useIsRtl } from '../i18n/direction'
 import { InlineIcon } from './InlineIcon'
 import libraryBooksSvg from '@material-symbols/svg-400/outlined/library_books.svg?raw'
 import chevronLeftSvg from '@material-symbols/svg-400/outlined/chevron_left.svg?raw'
@@ -87,7 +88,7 @@ function RailSearchField({ onOpen, kbd }: { onOpen: () => void; kbd: string }) {
       }}
     >
       <span aria-hidden="true" style={{ color: 'var(--text-faint, #888)', fontSize: '13px' }}>⌕</span>
-      <span style={{ flex: 1, textAlign: 'left', fontSize: '12.5px', color: 'var(--text-faint, #888)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      <span style={{ flex: 1, textAlign: 'start', fontSize: '12.5px', color: 'var(--text-faint, #888)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         <Trans>Search…</Trans>
       </span>
       <span
@@ -148,6 +149,7 @@ function ToolIcon({ name, size = 16 }: { name: ToolName; size?: number }) {
 
 function RailWidthToggle({ narrow, onToggle }: { narrow: boolean; onToggle: () => void }) {
   const { t } = useLingui()
+  const rtl = useIsRtl()
   const [hovered, setHovered] = useState(false)
   const label = narrow ? t`Expand tool rail` : t`Compact tool rail`
   return (
@@ -177,7 +179,10 @@ function RailWidthToggle({ narrow, onToggle }: { narrow: boolean; onToggle: () =
         marginBottom: 'var(--space-3, 8px)',
       }}
     >
-      <InlineIcon svg={narrow ? chevronRightSvg : chevronLeftSvg} size={18} />
+      {/* The chevron points at the edge the rail will move toward, so it
+          mirrors with the layout: in RTL the rail sits on the right and
+          "compact" points right. */}
+      <InlineIcon svg={narrow === rtl ? chevronRightSvg : chevronLeftSvg} size={18} />
     </button>
   )
 }
@@ -216,6 +221,10 @@ function KbdChip({ shortcut, active }: { shortcut: string; active: boolean }) {
   if (shortcut === '') return null
   return (
     <span
+      // The keys are physical: `⇧L` is pressed shift-then-L whatever the
+      // interface language, so the chip keeps its left-to-right order inside
+      // a mirrored layout (index.css `.hew-ltr`).
+      className="hew-ltr"
       style={{
         fontFamily: 'var(--font-family-mono)',
         fontSize: 'var(--font-size-kbd)',
@@ -246,6 +255,7 @@ function ToolRow({
   onSelect: () => void
 }) {
   const [hovered, setHovered] = useState(false)
+  const rtl = useIsRtl()
   const shortcut = shortcutFor(name, isMac)
   const label = toolLabel(name)
 
@@ -267,14 +277,17 @@ function ToolRow({
         borderRadius: 'var(--radius-control)',
         border: 'none',
         width: '100%',
-        textAlign: 'left',
+        textAlign: 'start',
         cursor: 'pointer',
         fontFamily: 'var(--font-family-ui)',
         fontSize: 'var(--font-size-tool-row)',
         fontWeight: active ? 600 : 400,
         color: active ? 'var(--accent-text-on-tint)' : 'var(--text-secondary)',
         background: active ? 'var(--accent-tint-15)' : hovered ? 'var(--surface-hover)' : 'transparent',
-        boxShadow: active ? 'inset 2px 0 0 var(--accent-base)' : 'none',
+        // The active marker rides the row's leading edge, which is the right
+        // edge in a mirrored layout. A box-shadow cannot be logical, so the
+        // signed offset comes from the current direction.
+        boxShadow: active ? `inset ${rtl ? -2 : 2}px 0 0 var(--accent-base)` : 'none',
       }}
     >
       <ToolIcon name={name} />
@@ -298,6 +311,7 @@ const LIBRARY_KBD = '⇧L'
 
 function LibraryRow({ active, narrow, onSelect }: { active: boolean; narrow: boolean; onSelect: () => void }) {
   const { t } = useLingui()
+  const rtl = useIsRtl()
   const libraryKbd = LIBRARY_KBD
   const [hovered, setHovered] = useState(false)
   return (
@@ -317,14 +331,14 @@ function LibraryRow({ active, narrow, onSelect }: { active: boolean; narrow: boo
         borderRadius: 'var(--radius-control)',
         border: 'none',
         width: '100%',
-        textAlign: 'left',
+        textAlign: 'start',
         cursor: 'pointer',
         fontFamily: 'var(--font-family-ui)',
         fontSize: 'var(--font-size-tool-row)',
         fontWeight: active ? 600 : 400,
         color: active ? 'var(--accent-text-on-tint)' : 'var(--text-secondary)',
         background: active ? 'var(--accent-tint-15)' : hovered ? 'var(--surface-hover)' : 'transparent',
-        boxShadow: active ? 'inset 2px 0 0 var(--accent-base)' : 'none',
+        boxShadow: active ? `inset ${rtl ? -2 : 2}px 0 0 var(--accent-base)` : 'none',
       }}
     >
       <InlineIcon svg={libraryBooksSvg} />
@@ -363,7 +377,10 @@ export function ToolRail({
         width: `${narrow ? RAIL_NARROW_WIDTH : RAIL_WIDE_WIDTH}px`,
         flexShrink: 0,
         background: 'var(--surface-panel)',
-        borderRight: '1px solid var(--border-hairline)',
+        // The rail is the first flex child, so it sits at the inline start:
+        // left in English, right in Arabic. Its hairline border is on the
+        // viewport side, which is the inline end in both.
+        borderInlineEnd: '1px solid var(--border-hairline)',
         display: 'flex',
         flexDirection: 'column',
         gap: '3px',

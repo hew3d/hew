@@ -79,10 +79,12 @@ export function TraySection({ title, collapsed, onToggle, children, headerRight 
           }}
         >
           <span>{title}</span>
-          <span aria-hidden="true" style={{ color: 'var(--text-section)' }}>{collapsed ? '▸' : '▾'}</span>
+          {/* Expand/collapse caret points along the reading direction, so it
+              mirrors with the row (index.css `.hew-flip-icon`). */}
+          <span aria-hidden="true" className="hew-flip-icon" style={{ color: 'var(--text-section)' }}>{collapsed ? '▸' : '▾'}</span>
         </button>
         {headerRight !== undefined && (
-          <span style={{ flexShrink: 0, paddingRight: '11px' }}>{headerRight}</span>
+          <span style={{ flexShrink: 0, paddingInlineEnd: '11px' }}>{headerRight}</span>
         )}
       </div>
       {!collapsed && (
