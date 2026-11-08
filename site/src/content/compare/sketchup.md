@@ -92,7 +92,8 @@ Because the two are so alike, whether Hew works *for you* comes down to whether 
 | Position Camera / Look Around / Walk | Yes, with collision in Walk | Yes; no collision detection. Plus Fly: hold the right mouse button and steer with W, A, S, D |
 | Section planes | Several planes, fills in newer versions | One section plane at a time, no cut fill; saved with the file and captured by Scenes |
 | Styles | Sketchy edges, profiles, watermarks… | No style system — one clean draw style, light and dark themes |
-| Shadows, geolocation, fog | Yes | No |
+| Shadows, fog | Yes | No |
+| Geo-location | Yes | The coordinate system and origin of a SketchUp file are kept, shown at the top of the Outliner, and saved back; there is no map view or terrain import |
 | Match Photo | Yes | No |
 | X-ray / back edges | Yes | No |
 

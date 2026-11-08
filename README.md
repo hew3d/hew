@@ -160,8 +160,8 @@ holds the exhaustive references AI agents work from.
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Note
 the project's licensing wall: nothing derived from the SketchUp SDK may
-enter this repository or its dependency chain. SketchUp import is powered
-by [Skpwright](https://github.com/hew3d/skpwright), a clean-room reader.
+enter this repository or its dependency chain. SketchUp import and export are powered
+by [Skpwright](https://github.com/hew3d/skpwright), a clean-room reader and writer.
 
 ## License
 

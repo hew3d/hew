@@ -23,6 +23,10 @@ The panel contains:
 - **Add color** and **Add texture** are collapsed by default — click either header to expand it. In Add color, name the material and click the swatch button to open the color picker; **+ Add color** stays disabled until you've actually picked a color.
 - **Add texture**: choose a PNG or JPEG image and give it a real-world size (width × height in meters). The image tiles across faces at that physical scale.
 
+## Metallic and roughness
+
+Select a swatch and drag **Metallic** or **Roughness** to give the material a physically based look: metal and a polished or matte surface, each from 0% to 100%. A plain material is not metallic and fully rough. Hew shows an approximation in the viewport (a Phong-shaded stand-in, not a full physically based render). A SketchUp 2021-and-later file's metallic, roughness, normal, and occlusion maps open and draw, and they are written back when you save to that format. Each change is one undo step.
+
 ## Renaming and deleting a material
 
 Double-click a swatch's name (or click the pencil next to it) to rename it in place — type the new name and press `Enter`, or `Esc` to back out.

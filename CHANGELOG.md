@@ -27,13 +27,33 @@ is not guaranteed: releases that change the `.hew` format say so under
 
 - **SketchUp files:** Opening a file that holds things Hew keeps through a save back but cannot show or edit (hatch patterns, environments, snaps, procedures, layer line styles, the current style record, layer page behaviours) now says so in one line of the open report, with a count for each kind.
 
+- **Guides:** Move and Rotate now take a guide like any selection. With nothing selected, click a guide to move it, or set the Rotate pivot on a guide to turn it. Axis locks, typed values, and the copy toggle all work, including `6x` and `6/` for a row or a fan of evenly spaced copies. A guide you click is selected only for that gesture. [#91] [#78] [#94]
+- **Dimensions:** Click a line itself, rather than a point on it, to dimension its whole length: both ends are taken at once and you go straight to placing the dimension. Works on a solid's edge and on a drawn line, inside a component too. [#70]
+- **Snapping:** Hew now snaps where an edge of one object passes through the face of another, such as a panel set into a wall. It reads as an Intersection, and the Tape Measure hint says "where the edge meets the face".
+- **Snapping:** A new On Intersection Line snap follows the line where a face of one object meets a face of another, such as where a slab passes through a wall. Objects never merge, so it is no real edge, but it is a line you can see and slide along. It works in Shaded and X-ray, and its middle and ends are snap points too. [#63]
+- **Components:** While you edit one copy of a component, the other copies stay visible and update with every change, as in SketchUp. A Push/Pull, Offset, Move, Rotate, or Scale drag previews on every copy before you click. Hovering a face of a component you are not editing now says how to get into it.
+- **Selection:** While a component, group, or object is open for editing, clicks reach it through whatever is in front of it, so a component sunk partly into a solid can be edited without turning on X-ray. Everything outside the open item is ignored by picks in Shaded and X-ray.
+- **Help:** Sent Reports follows a bug report you sent. Leave "Let me know what happens with this report" ticked in Report Bug and you can read replies and status, answer, and attach another file from Help ▸ Sent Reports, with no account or email address. A notice appears when something new arrives.
+- **Panels:** Drag the handle at the bottom of a long tray section to give it more or less height, or focus the handle and use the Up and Down arrow keys. Sections keep their automatic height until you resize one. [#42]
+
 ### Changed
 
-- **Format:** The `.hew` format moves from manifest version 23 to 26 (guide dash and section look, geo-location, physically based materials). Hew opens every older file, but a file saved with these features needs this release or later.
+- **Format:** The `.hew` format moves from manifest version 22 to 26 (detached drawing, guide dash and section look, geo-location, physically based materials). Hew opens every older file, but a file saved with these features needs this release or later.
+
+- **Subtract:** A Subtract that would remove nothing, because the cutter misses the target or only touches it, is now refused with "Nothing was cut away" instead of quietly handing back the target and using up the cutter. Both shapes stay where they are, so you can move the cutter and try again. Follow Me still merges a sweep that engulfs its base.
+- **License:** The logo, mark, app icons, and brand sheet are now licensed CC BY 4.0, so app launchers and package catalogs can bundle them with attribution. The license grants no trademark rights.
 
 ### Fixed
 
 - **Push/Pull:** The hint for the Ctrl/⌘ new-object toggle now refreshes the moment you tap the key.
+- **Selection:** A drag that encloses an object no longer sometimes selects nothing. A left-to-right (window) drag now also picks an object that it covers at least 80% of on screen and touches. Window is a solid blue box tagged Window and crossing is a dashed green one tagged Crossing, with the status bar explaining each, and selecting over a large model takes milliseconds instead of seconds.
+- **Selection:** A line lying along a guide or an axis can be selected by clicking it, from any distance the snap holds at. Guides and dimension lines also stay clickable when you are zoomed in on one that runs into the distance. [#67] [#69]
+- **Components:** Copy, Cut and Paste of a component instance now places another instance of the same component, so editing either copy edits both and the Components panel keeps one entry with its count raised. Before, a pasted copy was unlinked from the original.
+- **Undo:** A circle drawn tangent to a face's edge could leave Undo unable to step back past a merge of the regions around it. Undo now unwinds it.
+- **Export:** STL, glTF, and USDZ exports leave out the rare hairline-thin triangle that would flip direction when rounded to the file's precision, which a slicer or viewer read as a facet facing into the solid. The same filter keeps such triangles out of the viewport. Ordinary exports are byte-for-byte what they were.
+- **Open on Phone:** The share relay's route is now declared with the Worker, so a redeploy cannot drop it, and a scheduled check watches the live service. This fixes "could not reach the share server (status 405)".
+- **COLLADA:** `.dae` files from exporters that leave out the created and modified dates now import instead of failing with "expected <created>".
+- **Linux:** The Flatpak install commands and bundle now install Hew and its GNOME runtime in the same scope, with Hew supplying updates and Flathub the runtime, which is meant to fix "runtime not found" on systems where Flathub is configured per user. [#48]
 
 ## [1.3.1] (2026-10-26) - The "Safe to Reopen" Release
 

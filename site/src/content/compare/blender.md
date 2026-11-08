@@ -20,7 +20,7 @@ If Blender already does what you need, Hew offers you little — unless the thin
 | Watertightness | Your responsibility | Guaranteed by construction; violations are refused |
 | Precision | Snapping, numeric transforms; unit workflows take setup | Typed unit-aware lengths mid-gesture, inference snapping, guides, dimensions |
 | Platforms | Windows, macOS, Linux | Windows, macOS, Linux, plus the full app in a browser |
-| Interop | Nearly everything | `.skp`/COLLADA/glTF/STL in; glTF/STL/3MF/USDZ/SVG out — round-trip to Blender is tested |
+| Interop | Nearly everything | `.skp`/COLLADA/glTF/STL in; `.skp`/glTF/STL/3MF/USDZ/SVG out — round-trip to Blender is tested |
 | Rendering, animation, sculpting, nodes, physics | Blender's core | None — export to Blender for that |
 
 The table ends there because the products barely overlap: Blender is a complete 3D content-creation suite, and Hew is a workshop modeler. The honest comparison is scope, not feature-by-feature.

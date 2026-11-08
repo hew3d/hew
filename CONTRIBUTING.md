@@ -57,12 +57,12 @@ makes coordination before large changes essential.
 
 ## The licensing wall
 
-Hew imports SketchUp files via [Skpwright](https://github.com/hew3d/skpwright),
+Hew reads and writes SketchUp files via [Skpwright](https://github.com/hew3d/skpwright),
 a clean-room implementation. To keep that position defensible, **nothing
 derived from the SketchUp SDK — headers, constants, or format knowledge
 obtained under Trimble's license — may enter this repository or its
 dependency chain.** If you have ever accepted the SketchUp SDK license,
-do not contribute to the `.skp` import path. This rule has no exceptions.
+do not contribute to the `.skp` import or export path. This rule has no exceptions.
 
 ## Licensing of contributions
 

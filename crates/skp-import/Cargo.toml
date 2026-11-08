@@ -2,7 +2,7 @@
 #
 # The `skpwright` dependency is a crates.io semver pin on the hosted Skpwright
 # releases (https://github.com/hew3d/skpwright — clean-room reader for the
-# SketchUp 2026 container and the 2017 format; local development clone
+# SketchUp 2021-and-later container and the older stream releases; local development clone
 # lives at ../skpwright). Bump the pin
 # deliberately: import-quality gaps are fixed in Skpwright first, then the pin
 # advances here.
