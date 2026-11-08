@@ -1170,6 +1170,8 @@ struct MeasureParams {
     id: Option<String>,
     #[serde(default)]
     path: Option<Vec<String>>,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 fn measure(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -1178,6 +1180,12 @@ fn measure(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     if usize::from(pair) + usize::from(p.id.is_some()) + usize::from(p.path.is_some()) != 1 {
         return Err(CmdError::Params(
             "hew.query.measure needs exactly one of {from, to}, {id}, or {path}".into(),
+        ));
+    }
+    let scope = crate::scope::Scope::from_name(p.scope.as_deref())?;
+    if pair && p.scope.is_some() {
+        return Err(CmdError::Params(
+            "scope applies to measuring a part ({id} or {path}), not a distance".into(),
         ));
     }
     if pair {
@@ -1199,14 +1207,25 @@ fn measure(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         (None, Some(path)) => locate::resolve_occurrence_path(ctx, path)?,
         _ => unreachable!("exactly one subject form"),
     };
-    measure_result(ctx.doc, occ)
+    measure_result_scoped(ctx.doc, occ, scope)
 }
 
 /// Volume, area, and world-axis bounding box of one placement and
 /// everything under it. A hidden part still measures (a measure is not a
 /// view).
 pub fn measure_result(doc: &kernel::Document, occ: kernel::Occurrence) -> Result<Value, CmdError> {
-    let leaves = doc.render_root_leaves(&locate::RenderRoot::Occurrence(occ), true)?;
+    measure_result_scoped(doc, occ, crate::scope::Scope::All)
+}
+
+/// [`measure_result`] over the leaves `scope` selects: under
+/// [`crate::scope::Scope::Own`] only the container's own Objects count; a
+/// container with none measures as an empty one does.
+pub fn measure_result_scoped(
+    doc: &kernel::Document,
+    occ: kernel::Occurrence,
+    scope: crate::scope::Scope,
+) -> Result<Value, CmdError> {
+    let leaves = crate::scope::scoped_leaves(doc, &locate::RenderRoot::Occurrence(occ), scope)?;
     let mut volume: Option<f64> = None;
     let mut area = 0.0;
     let mut open_leaves = 0usize;
@@ -1298,7 +1317,7 @@ fn resolve(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             ));
         }
         let occ = locate::resolve_occurrence_locator(ctx, &v)?;
-        return Ok(json!({ "occurrence": super::parts::occurrence_json(ctx, &occ)? }));
+        return Ok(json!({ "occurrence": super::parts::occurrence_json(ctx, &occ, None)? }));
     }
     if let Some(v) = p.point {
         let point = locate::resolve_point(ctx, &v)?;

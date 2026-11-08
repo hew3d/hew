@@ -498,15 +498,23 @@
           "definition": null,
           "definition_name": null,
           "depth": 0,
+          "family": null,
+          "family_closed": null,
           "hidden": false,
           "id": "obj_1",
           "kind": "object",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
           "mirrored": false,
           "name": null,
           "parent": null,
           "path": [],
+          "solid": true,
           "tags": [],
           "user_hidden": false,
           "world_pose": [
@@ -528,15 +536,23 @@
           "definition": null,
           "definition_name": null,
           "depth": 0,
+          "family": null,
+          "family_closed": null,
           "hidden": false,
           "id": "obj_8",
           "kind": "object",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
           "mirrored": false,
           "name": null,
           "parent": null,
           "path": [],
+          "solid": true,
           "tags": [],
           "user_hidden": false,
           "world_pose": [
@@ -563,6 +579,14 @@
           "kind": "group",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_3",
+              "obj_5"
+            ]
+          },
           "mirrored": false,
           "name": null,
           "parent": null,
@@ -588,15 +612,23 @@
           "definition": null,
           "definition_name": null,
           "depth": 0,
+          "family": null,
+          "family_closed": null,
           "hidden": false,
           "id": "obj_3",
           "kind": "object",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
           "mirrored": false,
           "name": null,
           "parent": "grp_6",
           "path": [],
+          "solid": true,
           "tags": [],
           "user_hidden": false,
           "world_pose": [
@@ -618,15 +650,23 @@
           "definition": null,
           "definition_name": null,
           "depth": 0,
+          "family": null,
+          "family_closed": null,
           "hidden": false,
           "id": "obj_5",
           "kind": "object",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
           "mirrored": false,
           "name": null,
           "parent": "grp_6",
           "path": [],
+          "solid": true,
           "tags": [],
           "user_hidden": false,
           "world_pose": [
@@ -651,8 +691,18 @@
           "hidden": false,
           "id": "ins_11",
           "kind": "instance",
+          "linked": false,
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [
+              "grp_f"
+            ],
+            "instances": [
+              "ins_c"
+            ],
+            "objects": []
+          },
           "mirrored": false,
           "name": "Left cabinet",
           "parent": null,
@@ -681,8 +731,16 @@
           "hidden": false,
           "id": "ins_c",
           "kind": "instance",
+          "linked": false,
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_a"
+            ]
+          },
           "mirrored": false,
           "name": null,
           "parent": null,
@@ -710,11 +768,18 @@
           "definition": null,
           "definition_name": null,
           "depth": 2,
+          "family": null,
+          "family_closed": null,
           "hidden": false,
           "id": "obj_a",
           "kind": "object",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
           "mirrored": false,
           "name": null,
           "parent": null,
@@ -722,6 +787,7 @@
             "ins_11",
             "ins_c"
           ],
+          "solid": true,
           "tags": [],
           "user_hidden": false,
           "world_pose": [
@@ -748,6 +814,13 @@
           "kind": "group",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_e"
+            ]
+          },
           "mirrored": false,
           "name": null,
           "parent": null,
@@ -775,17 +848,25 @@
           "definition": null,
           "definition_name": null,
           "depth": 1,
+          "family": null,
+          "family_closed": null,
           "hidden": false,
           "id": "obj_e",
           "kind": "object",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
           "mirrored": false,
           "name": null,
           "parent": "grp_f",
           "path": [
             "ins_11"
           ],
+          "solid": true,
           "tags": [],
           "user_hidden": false,
           "world_pose": [
@@ -810,8 +891,18 @@
           "hidden": false,
           "id": "ins_12",
           "kind": "instance",
+          "linked": false,
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [
+              "grp_f"
+            ],
+            "instances": [
+              "ins_c"
+            ],
+            "objects": []
+          },
           "mirrored": true,
           "name": null,
           "parent": null,
@@ -840,8 +931,16 @@
           "hidden": false,
           "id": "ins_c",
           "kind": "instance",
+          "linked": false,
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_a"
+            ]
+          },
           "mirrored": true,
           "name": null,
           "parent": null,
@@ -869,11 +968,18 @@
           "definition": null,
           "definition_name": null,
           "depth": 2,
+          "family": null,
+          "family_closed": null,
           "hidden": false,
           "id": "obj_a",
           "kind": "object",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
           "mirrored": true,
           "name": null,
           "parent": null,
@@ -881,6 +987,7 @@
             "ins_12",
             "ins_c"
           ],
+          "solid": true,
           "tags": [],
           "user_hidden": false,
           "world_pose": [
@@ -907,6 +1014,13 @@
           "kind": "group",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_e"
+            ]
+          },
           "mirrored": true,
           "name": null,
           "parent": null,
@@ -934,17 +1048,25 @@
           "definition": null,
           "definition_name": null,
           "depth": 1,
+          "family": null,
+          "family_closed": null,
           "hidden": false,
           "id": "obj_e",
           "kind": "object",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
           "mirrored": true,
           "name": null,
           "parent": "grp_f",
           "path": [
             "ins_12"
           ],
+          "solid": true,
           "tags": [],
           "user_hidden": false,
           "world_pose": [
@@ -988,6 +1110,14 @@
           "kind": "group",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_3",
+              "obj_5"
+            ]
+          },
           "mirrored": false,
           "name": null,
           "parent": null,
@@ -1013,15 +1143,23 @@
           "definition": null,
           "definition_name": null,
           "depth": 0,
+          "family": null,
+          "family_closed": null,
           "hidden": false,
           "id": "obj_3",
           "kind": "object",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
           "mirrored": false,
           "name": null,
           "parent": "grp_6",
           "path": [],
+          "solid": true,
           "tags": [],
           "user_hidden": false,
           "world_pose": [
@@ -1043,15 +1181,23 @@
           "definition": null,
           "definition_name": null,
           "depth": 0,
+          "family": null,
+          "family_closed": null,
           "hidden": false,
           "id": "obj_5",
           "kind": "object",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
           "mirrored": false,
           "name": null,
           "parent": "grp_6",
           "path": [],
+          "solid": true,
           "tags": [],
           "user_hidden": false,
           "world_pose": [
@@ -1073,15 +1219,23 @@
           "definition": null,
           "definition_name": null,
           "depth": 0,
+          "family": null,
+          "family_closed": null,
           "hidden": false,
           "id": "obj_1",
           "kind": "object",
           "material": null,
           "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
           "mirrored": false,
           "name": null,
           "parent": null,
           "path": [],
+          "solid": true,
           "tags": [],
           "user_hidden": false,
           "world_pose": [

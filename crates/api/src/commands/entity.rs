@@ -25,6 +25,7 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.entity.delete" => delete,
         "hew.entity.move" => move_,
         "hew.entity.rotate" => rotate,
+        "hew.entity.flip" => flip,
         "hew.entity.scale" => scale,
         "hew.entity.set_frame" => set_frame,
         "hew.doc.purge_unused" => purge_unused,
@@ -181,6 +182,75 @@ struct CopySpec {
     /// slots (the original's included) at `step` apart.
     #[serde(default)]
     grid: Option<Vec<GridAxis>>,
+    /// Whether an Object or Group copy links to its source as another
+    /// placement of one shared solid (docs/agents/PLUGINS.md "Linked
+    /// copies"). Defaults to `true` on the bus, whatever the app's
+    /// preference says.
+    #[serde(default)]
+    linked: Option<bool>,
+}
+
+impl CopySpec {
+    fn policy(&self) -> kernel::LinkPolicy {
+        if self.linked.unwrap_or(true) {
+            kernel::LinkPolicy::Linked
+        } else {
+            kernel::LinkPolicy::Independent
+        }
+    }
+}
+
+/// A copy's result: the new placements, and every wrap the copy made
+/// (`{ source, instance, definition }`; empty for an independent copy or
+/// when every root already was a placement).
+fn copy_result(
+    ctx: &Ctx,
+    roots: &[NodeId],
+    wraps: &[kernel::LinkedWrap],
+) -> Result<Value, CmdError> {
+    let resolver = ctx.resolver();
+    let public = |e: EntityRef| -> Result<String, CmdError> {
+        resolver
+            .public_of(ctx.doc, &e)
+            .ok_or_else(|| CmdError::Internal("a copied entity has no public id".into()))
+    };
+    let linked = wraps
+        .iter()
+        .map(|w| {
+            Ok(serde_json::json!({
+                "source": public(node_entity(w.source))?,
+                "instance": public(EntityRef::Instance(w.instance))?,
+                "definition": public(EntityRef::Component(w.definition))?,
+            }))
+        })
+        .collect::<Result<Vec<_>, CmdError>>()?;
+    Ok(serde_json::json!({ "ids": public_ids(ctx, roots), "linked": linked }))
+}
+
+/// Under a linked copy, wraps each member Object or Group the path names
+/// as its own linked set inside the definition (the member keeps its id;
+/// a placement takes its spot), so the copies that follow are placements
+/// of it. Instances are already placements and pass through.
+fn wrap_members(
+    ctx: &mut Ctx,
+    nodes: &[NodeId],
+    policy: kernel::LinkPolicy,
+) -> Result<(Vec<NodeId>, Vec<kernel::LinkedWrap>), CmdError> {
+    if policy == kernel::LinkPolicy::Independent {
+        return Ok((nodes.to_vec(), Vec::new()));
+    }
+    let mut out = Vec::with_capacity(nodes.len());
+    let mut wraps = Vec::new();
+    for &n in nodes {
+        if matches!(n, NodeId::Instance(_)) {
+            out.push(n);
+            continue;
+        }
+        let (_, inst, change) = ctx.doc.wrap_linked(n).map_err(member_error)?;
+        wraps.extend(change.linked);
+        out.push(NodeId::Instance(inst));
+    }
+    Ok((out, wraps))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -451,11 +521,16 @@ fn move_(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 .iter()
                 .map(|t| world_to_definition(&path_pose, t))
                 .collect::<Result<_, _>>()?;
+            let policy = p
+                .copy
+                .as_ref()
+                .map_or(kernel::LinkPolicy::Linked, CopySpec::policy);
+            let (nodes, wraps) = wrap_members(ctx, &nodes, policy)?;
             let (roots, _) = ctx
                 .doc
                 .duplicate_def_members_placements(component, &nodes, &local)
                 .map_err(member_error)?;
-            return Ok(serde_json::json!({ "ids": public_ids(ctx, &roots) }));
+            return copy_result(ctx, &roots, &wraps);
         }
         let (nodes, sketches) = world_targets(ctx, &p.ids)?;
         if !sketches.is_empty() {
@@ -464,12 +539,14 @@ fn move_(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             }
             return Err(sketch_copy_refusal());
         }
-        let (roots, _) = ctx.doc.duplicate_nodes_placements(
-            &nodes,
-            &placements,
-            kernel::LinkPolicy::Independent,
-        )?;
-        return Ok(serde_json::json!({ "ids": public_ids(ctx, &roots) }));
+        let policy = p
+            .copy
+            .as_ref()
+            .map_or(kernel::LinkPolicy::Linked, CopySpec::policy);
+        let (roots, change) = ctx
+            .doc
+            .duplicate_nodes_placements(&nodes, &placements, policy)?;
+        return copy_result(ctx, &roots, &change.linked);
     }
     if has_translation == has_from_to {
         return Err(CmdError::Params(
@@ -532,18 +609,14 @@ fn apply_node_transform(
     }
     let count = NonZeroU32::new(count)
         .ok_or_else(|| CmdError::Params("copy count must be positive".into()))?;
-    let ids = if nodes.len() == 1 && count.get() == 1 {
-        let (root, _) = ctx
-            .doc
-            .duplicate_node(nodes[0], t, kernel::LinkPolicy::Independent)?;
-        vec![root]
+    let policy = copy.policy();
+    let (ids, change) = if nodes.len() == 1 && count.get() == 1 {
+        let (root, change) = ctx.doc.duplicate_node(nodes[0], t, policy)?;
+        (vec![root], change)
     } else {
-        let (roots, _) =
-            ctx.doc
-                .duplicate_nodes_array(nodes, t, count, kernel::LinkPolicy::Independent)?;
-        roots
+        ctx.doc.duplicate_nodes_array(nodes, t, count, policy)?
     };
-    Ok(serde_json::json!({ "ids": public_ids(ctx, &ids) }))
+    copy_result(ctx, &ids, &change.linked)
 }
 
 /// [`apply_node_transform`] for members reached by a path: the world
@@ -581,11 +654,12 @@ fn apply_member_transform(
     }
     let count = NonZeroU32::new(count)
         .ok_or_else(|| CmdError::Params("copy count must be positive".into()))?;
+    let (nodes, wraps) = wrap_members(ctx, &nodes, copy.policy())?;
     let (roots, _) = ctx
         .doc
         .duplicate_def_members_array(component, &nodes, &local, count)
         .map_err(member_error)?;
-    Ok(serde_json::json!({ "ids": public_ids(ctx, &roots) }))
+    copy_result(ctx, &roots, &wraps)
 }
 
 /// The public ids of nodes a copy just created.
@@ -619,6 +693,178 @@ struct RotateParams {
     angle: f64,
     #[serde(default)]
     copy: Option<CopySpec>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FlipPlane {
+    point: Value,
+    normal: [f64; 3],
+}
+
+/// `copy` on a flip: one mirrored copy, linked or not; no count, no grid.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FlipCopy {
+    #[serde(default)]
+    linked: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FlipParams {
+    ids: Vec<Value>,
+    #[serde(default)]
+    axis: Option<String>,
+    #[serde(default)]
+    plane: Option<FlipPlane>,
+    #[serde(default)]
+    about: Option<Value>,
+    #[serde(default)]
+    copy: Option<FlipCopy>,
+}
+
+/// `hew.entity.flip { ids, axis | plane, about?, copy? }`
+/// (docs/agents/HEW_API.md §7): mirrors the selection across a plane, in
+/// place or (with `copy`) as one mirrored copy. `axis` is the mirror
+/// plane's normal ("Flip Along"), through `about`: the selection's world
+/// bounding-box center (the default), the origin, or a point; `plane` is
+/// `{ point, normal }` in world coordinates and takes no `about`. A linked
+/// copy is another placement at a mirrored pose (`mirrored: true` on its
+/// row); members reached by a path flip inside their definition, as `move`
+/// and `rotate` do. One undo entry.
+fn flip(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: FlipParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    if p.ids.is_empty() {
+        return Err(kernel::DocumentError::EmptySelection.into());
+    }
+    let (normal, plane_point) = match (&p.axis, &p.plane) {
+        (Some(a), None) => (
+            match a.as_str() {
+                "x" => Vec3::new(1.0, 0.0, 0.0),
+                "y" => Vec3::new(0.0, 1.0, 0.0),
+                "z" => Vec3::new(0.0, 0.0, 1.0),
+                other => {
+                    return Err(CmdError::Params(format!(
+                        "unknown axis \"{other}\"; expected x, y, or z"
+                    )));
+                }
+            },
+            None,
+        ),
+        (None, Some(plane)) => {
+            if p.about.is_some() {
+                return Err(CmdError::Params(
+                    "a plane carries its own point; \"about\" goes with \"axis\"".into(),
+                ));
+            }
+            if plane.normal.iter().any(|c| !c.is_finite()) {
+                return Err(CmdError::Params("normal components must be finite".into()));
+            }
+            // Scale-invariant: divide by the largest component, as the
+            // kernel's reflection does, so a tiny normal still names its
+            // direction.
+            let big = plane.normal.iter().fold(0.0_f64, |a, c| a.max(c.abs()));
+            if big == 0.0 {
+                return Err(CmdError::Params("normal must be non-zero".into()));
+            }
+            let n = Vec3::new(
+                plane.normal[0] / big,
+                plane.normal[1] / big,
+                plane.normal[2] / big,
+            );
+            (n, Some(locate::resolve_point(ctx, &plane.point)?))
+        }
+        _ => {
+            return Err(CmdError::Params(
+                "flip needs exactly one of \"axis\" or \"plane\"".into(),
+            ));
+        }
+    };
+    let about = match (plane_point, &p.about) {
+        (Some(pt), _) => kernel::FlipAbout::Point(pt),
+        (None, None) => kernel::FlipAbout::Center,
+        (None, Some(Value::String(s))) if s == "center" => kernel::FlipAbout::Center,
+        (None, Some(Value::String(s))) if s == "origin" => kernel::FlipAbout::Origin,
+        (None, Some(v @ Value::Array(_))) => kernel::FlipAbout::Point(locate::parse_xyz(v)?),
+        (None, Some(_)) => {
+            return Err(CmdError::Params(
+                "about is \"center\", \"origin\", or [x, y, z]".into(),
+            ));
+        }
+    };
+    let copy = p.copy.map(|c| CopySpec {
+        count: None,
+        grid: None,
+        linked: c.linked,
+    });
+    match resolve_transform_targets(ctx, &p.ids)? {
+        TransformTargets::World { nodes, sketches } => {
+            let Some(copy) = copy else {
+                ctx.doc.flip_nodes(&nodes, &sketches, normal, about)?;
+                return Ok(serde_json::json!({}));
+            };
+            if !sketches.is_empty() {
+                return Err(sketch_copy_refusal());
+            }
+            let (roots, change) = ctx.doc.flip_copy(&nodes, normal, about, copy.policy())?;
+            copy_result(ctx, &roots, &change.linked)
+        }
+        members => {
+            let TransformTargets::Members {
+                ref path,
+                nodes: ref member_nodes,
+                ..
+            } = members
+            else {
+                unreachable!("not a world target")
+            };
+            let point = match about {
+                kernel::FlipAbout::Point(pt) => pt,
+                kernel::FlipAbout::Origin => kernel::Point3::ORIGIN,
+                kernel::FlipAbout::Center => member_world_center(ctx, path, member_nodes)?,
+            };
+            let t =
+                Transform::reflection(point, normal).map_err(kernel::DocumentError::Transform)?;
+            apply_member_transform(ctx, members, &t, copy)
+        }
+    }
+}
+
+/// The world bounding-box center of definition members placed through
+/// `path`.
+fn member_world_center(
+    ctx: &Ctx,
+    path: &[InstanceId],
+    nodes: &[NodeId],
+) -> Result<kernel::Point3, CmdError> {
+    let mut points = Vec::new();
+    for &n in nodes {
+        let occ = ctx
+            .doc
+            .occurrence_at(path, n)
+            .ok_or_else(locate::unknown_occurrence)?;
+        for (o, pose, _) in ctx
+            .doc
+            .render_root_leaves(&kernel::RenderRoot::Occurrence(occ), true)?
+        {
+            if let Some(obj) = ctx.doc.object(o) {
+                points.extend(
+                    obj.vertices()
+                        .values()
+                        .map(|v| pose.apply_point(v.position)),
+                );
+            }
+        }
+    }
+    let (lo, hi) =
+        crate::geom::bbox(points.into_iter()).ok_or(kernel::DocumentError::EmptySelection)?;
+    Ok(kernel::Point3::new(
+        (lo.x + hi.x) * 0.5,
+        (lo.y + hi.y) * 0.5,
+        (lo.z + hi.z) * 0.5,
+    ))
 }
 
 fn rotate(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {

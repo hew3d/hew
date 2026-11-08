@@ -110,7 +110,7 @@ fn a_grid_copy_fills_every_slot_but_the_original_in_index_order() {
     let r = ok(
         &mut doc,
         "hew.entity.move",
-        json!({ "ids": [id], "copy": { "grid": [
+        json!({ "ids": [id], "copy": { "linked": false, "grid": [
             { "count": 2, "step": [1.0, 0.0, 0.0] },
             { "count": 3, "step": [0.0, 1.0, 0.0] }
         ] } }),
@@ -143,7 +143,7 @@ fn a_grid_copy_runs_placement_major_over_several_ids() {
     let r = ok(
         &mut doc,
         "hew.entity.move",
-        json!({ "ids": ids, "copy": { "grid": [{ "count": 3, "step": [0.0, 0.0, 1.0] }] } }),
+        json!({ "ids": ids, "copy": { "grid": [{ "count": 3, "step": [0.0, 0.0, 1.0] }], "linked": false } }),
     );
     let got: Vec<Point3> = r["ids"]
         .as_array()
@@ -169,6 +169,8 @@ fn a_one_axis_grid_and_copy_count_make_the_same_copies() {
     let positions = |copy: Value, translation: Option<[f64; 3]>| -> Vec<Point3> {
         let mut doc = Document::new();
         let b = extrude_box(&mut doc, 0.0, 0.5, 0.5, 0.5);
+        let mut copy = copy;
+        copy["linked"] = json!(false);
         let mut params = json!({ "ids": [public(&doc, EntityRef::Object(b))], "copy": copy });
         if let Some(t) = translation {
             params["translation"] = json!(t);

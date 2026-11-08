@@ -666,6 +666,10 @@ struct RawSnapshotParams {
     selection: Option<Vec<Value>>,
     #[serde(default)]
     background: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    orient: Option<String>,
 }
 
 /// `hew.view.snapshot`'s default and clamped size bounds
@@ -679,6 +683,102 @@ const SNAPSHOT_MAX_SIZE: u32 = 2048;
 /// The fill of a snapshot's untouched pixels when `background` is absent
 /// (the software rasterizer's own backdrop).
 pub const DEFAULT_SNAPSHOT_BACKGROUND: [u8; 4] = [245, 246, 248, 255];
+
+/// `selection` narrowed by `scope` (docs/agents/PLUGINS.md "Reading a
+/// container's own Objects"): a selection whose roots hold no own Object
+/// renders nothing, which refuses `-32602`.
+pub(crate) fn scoped_selection(
+    ctx: &Ctx,
+    roots: Vec<crate::locate::RenderRoot>,
+    scope: crate::scope::Scope,
+) -> Result<Vec<crate::locate::RenderRoot>, CmdError> {
+    if scope == crate::scope::Scope::Own {
+        for root in &roots {
+            if let crate::locate::RenderRoot::Definition(_) = root
+                && crate::scope::scoped_leaves(ctx.doc, root, scope)?.len()
+                    != crate::scope::scoped_leaves(ctx.doc, root, crate::scope::Scope::All)?.len()
+            {
+                return Err(CmdError::Params(
+                    "scope \"own\" takes a definition id only when it places no nested instance; select one of its placements instead".to_string(),
+                ));
+            }
+        }
+    }
+    let out = crate::scope::scoped_render_roots(ctx.doc, roots, scope)?;
+    if out.is_empty() {
+        return Err(CmdError::Params(
+            "the selection holds no objects of its own to draw (scope \"own\" never reaches into a nested instance)".to_string(),
+        ));
+    }
+    Ok(out)
+}
+
+/// `orient: "part"` (docs/agents/HEW_API.md §7, `hew.view.snapshot`): the
+/// named view (iso when none) taken in the root's part frame instead of
+/// the world's, as an explicit camera every host renders the same way.
+/// `front` looks along the frame's +y, `top` along −z, `right` along −x;
+/// the camera stands off the frame's box as a fitted world view stands
+/// off the scene's.
+fn part_view_camera(
+    ctx: &Ctx,
+    root: &crate::locate::RenderRoot,
+    scope: crate::scope::Scope,
+    view: Option<crate::host::StandardView>,
+) -> Result<crate::host::SnapshotCamera, CmdError> {
+    let frame = match root {
+        crate::locate::RenderRoot::Occurrence(occ) => {
+            crate::part_frame::part_frame(ctx.doc, occ, scope)?
+        }
+        crate::locate::RenderRoot::Definition(_) => {
+            let leaves: Vec<_> = crate::scope::scoped_leaves(ctx.doc, root, scope)?
+                .into_iter()
+                .map(|(o, t, _)| (o, t))
+                .collect();
+            crate::part_frame::face_frame(ctx.doc, &leaves)
+        }
+    }
+    .ok_or_else(|| {
+        CmdError::Refusal(crate::refusal::Refusal::api(
+            "no_part_frame",
+            "That entity has nothing to measure: it holds no faces.",
+        ))
+    })?;
+    // Eye direction and up in the frame's coordinates, as the software
+    // renderer's fitted standard views use them in world coordinates.
+    use crate::host::StandardView;
+    let (dir, up): ([f64; 3], [f64; 3]) = match view.unwrap_or(StandardView::Iso) {
+        StandardView::Iso => ([-1.0, -1.0, 0.75], [0.0, 0.0, 1.0]),
+        StandardView::Front => ([0.0, -1.0, 0.0], [0.0, 0.0, 1.0]),
+        StandardView::Back => ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+        StandardView::Left => ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+        StandardView::Right => ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+        StandardView::Top => ([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+        StandardView::Bottom => ([0.0, 0.0, -1.0], [0.0, 1.0, 0.0]),
+    };
+    let map = |v: [f64; 3]| frame.x * v[0] + frame.y * v[1] + frame.z * v[2];
+    let e = frame.extents;
+    // The true box center: the frame's origin is the minimum corner only
+    // for face frames, not for placements or attribute overrides.
+    let leaves: Vec<_> = crate::scope::scoped_leaves(ctx.doc, root, scope)?
+        .into_iter()
+        .map(|(o, t, _)| (o, t))
+        .collect();
+    let center = crate::part_frame::box_center(ctx.doc, &leaves, &frame)
+        .unwrap_or_else(|| frame.origin + map([e[0] * 0.5, e[1] * 0.5, e[2] * 0.5]));
+    let diag = (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt().max(1e-6);
+    let d = map(dir);
+    let d = d * (1.0 / d.length());
+    let eye = center + d * (diag * 1.8);
+    let up = map(up);
+    Ok(crate::host::SnapshotCamera {
+        eye: [eye.x, eye.y, eye.z],
+        target: [center.x, center.y, center.z],
+        up: Some([up.x, up.y, up.z]),
+        projection: Some(crate::host::SnapshotProjection::Perspective),
+        fov_deg: Some(35.0),
+        parallel_height: None,
+    })
+}
 
 /// The `selection` rule shared by `hew.doc.export`, `hew.view.snapshot`,
 /// and `hew.view.line_drawing`: when present, it names at least one
@@ -735,17 +835,49 @@ fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         None => DEFAULT_SNAPSHOT_BACKGROUND,
         Some(text) => parse_background(text)?,
     };
-    let (camera, view) = parse_camera_or_view(raw.camera, raw.view)?;
+    let orient_part = match raw.orient.as_deref() {
+        None | Some("world") => false,
+        Some("part") => true,
+        Some(other) => {
+            return Err(CmdError::Params(format!(
+                "unknown orient \"{other}\"; expected world or part"
+            )));
+        }
+    };
+    if orient_part && raw.camera.is_some() {
+        return Err(CmdError::Params(
+            "orient applies to a named view, not an explicit camera".to_string(),
+        ));
+    }
+    if orient_part && raw.selection.as_ref().is_none_or(|s| s.len() != 1) {
+        return Err(CmdError::Params(
+            "orient \"part\" takes a selection of exactly one entity".to_string(),
+        ));
+    }
+    let (mut camera, view) = parse_camera_or_view(raw.camera, raw.view)?;
     let scene = raw
         .scene
         .as_deref()
         .map(super::scenes::resolve_scene_id)
         .transpose()?;
-    let selection = raw
+    let scope = crate::scope::Scope::from_name(raw.scope.as_deref())?;
+    let roots = raw
         .selection
         .as_deref()
         .map(|list| crate::locate::resolve_render_roots(ctx, list))
         .transpose()?;
+    if raw.scope.is_some() && roots.is_none() {
+        return Err(CmdError::Params("scope applies to a selection".to_string()));
+    }
+    let mut view = view;
+    // Resolve the scoped selection first so an empty one refuses -32602
+    // before any part-frame refusal.
+    let first_root = roots.as_ref().and_then(|r| r.first()).cloned();
+    let selection = roots.map(|r| scoped_selection(ctx, r, scope)).transpose()?;
+    if orient_part && let Some(root) = first_root.as_ref() {
+        camera = Some(part_view_camera(ctx, root, scope, view)?);
+        view = None;
+    }
     let width = raw
         .width
         .unwrap_or(SNAPSHOT_DEFAULT_SIZE)

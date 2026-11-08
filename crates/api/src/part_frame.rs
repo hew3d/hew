@@ -8,6 +8,7 @@
 //! override turns and moves with the part (up to the part's own
 //! symmetry; see [`canonical_frame`]).
 
+use crate::scope::Scope;
 use kernel::{
     AttrTarget, AttrValue, Document, DocumentError, EntityRef, NodeId, ObjectId, Occurrence,
     Point3, RenderRoot, Transform, Vec3,
@@ -151,6 +152,27 @@ fn extents_in(points: &[Point3], basis: [Vec3; 3]) -> Option<([f64; 3], [f64; 3]
         }
     }
     Some((lo, hi))
+}
+
+/// The world-space center of the leaves' AABB measured along `frame`'s
+/// axes. Independent of where `frame.origin` sits (a placement's pose
+/// translation or an attribute origin need not be the minimum corner).
+/// `None` when the leaves have no vertices.
+pub fn box_center(
+    doc: &Document,
+    leaves: &[(ObjectId, Transform)],
+    frame: &PartFrame,
+) -> Option<Point3> {
+    let points = world_points(leaves, doc);
+    let (lo, hi) = extents_in(&points, [frame.x, frame.y, frame.z])?;
+    Some(origin_at(
+        [frame.x, frame.y, frame.z],
+        [
+            (lo[0] + hi[0]) * 0.5,
+            (lo[1] + hi[1]) * 0.5,
+            (lo[2] + hi[2]) * 0.5,
+        ],
+    ))
 }
 
 fn origin_at(basis: [Vec3; 3], c: [f64; 3]) -> Point3 {
@@ -339,34 +361,36 @@ fn frame_override(doc: &Document, node: NodeId) -> Option<(Vec3, Vec3, Vec3)> {
     Some((o, x, y))
 }
 
-/// The leaf placements under an occurrence, at world poses.
-fn leaves_of(
-    doc: &Document,
-    occ: &Occurrence,
-) -> Result<Vec<(ObjectId, Transform)>, DocumentError> {
-    Ok(doc
-        .render_root_leaves(&RenderRoot::Occurrence(occ.clone()), true)?
-        .into_iter()
-        .map(|(o, p, _)| (o, p))
-        .collect())
-}
-
 /// The frame of one placement (rules in docs/agents/PLUGINS.md "Reading
-/// parts"): an instance's definition axes; else an object's or group's
-/// largest-face frame, extents ordered `[length, width, thickness]`, or
-/// its `hew.part` / `frame` override read in that frame. `Ok(None)` when
-/// the placement has nothing to measure.
+/// parts"): an instance's definition axes, or the `hew.part` / `frame`
+/// override of its definition's one top-level member carried through the
+/// placement; else an object's or group's largest-face frame, extents
+/// ordered `[length, width, thickness]`, or its own override read in that
+/// frame. `scope` picks the leaves measured ([`Scope::Own`]: the
+/// container's own Objects, never a nested instance's). `Ok(None)` when the
+/// placement has nothing to measure.
 ///
 /// # Errors
 /// [`DocumentError::TooManyOccurrences`] — the placement holds more leaf
 /// placements than one walk lists.
-pub fn part_frame(doc: &Document, occ: &Occurrence) -> Result<Option<PartFrame>, DocumentError> {
+pub fn part_frame(
+    doc: &Document,
+    occ: &Occurrence,
+    scope: Scope,
+) -> Result<Option<PartFrame>, DocumentError> {
     match occ.node {
-        NodeId::Instance(_) => {
+        NodeId::Instance(inst) => {
             let Some(def) = occ.definition else {
                 return Ok(None);
             };
-            let Some((lo, hi)) = doc.definition_bounds_checked(def)? else {
+            if let Some(f) = member_override_frame(doc, occ, inst, def, scope)? {
+                return Ok(Some(f));
+            }
+            let bounds = match scope {
+                Scope::All => doc.definition_bounds_checked(def)?,
+                Scope::Own => definition_own_bounds(doc, def)?,
+            };
+            let Some((lo, hi)) = bounds else {
                 return Ok(None);
             };
             let a = occ.pose.to_affine();
@@ -390,17 +414,90 @@ pub fn part_frame(doc: &Document, occ: &Occurrence) -> Result<Option<PartFrame>,
             }))
         }
         NodeId::Object(_) | NodeId::Group(_) => {
-            let leaves = leaves_of(doc, occ)?;
-            let Some(c) = canonical_frame(&leaves, doc) else {
+            let leaves = crate::scope::leaves_for(doc, occ, scope)?;
+            let Some(face) = face_frame(doc, &leaves) else {
                 return Ok(None);
             };
-            let face = ordered(c, &leaves, doc);
             if let Some(f) = override_frame(doc, occ.node, &face, &leaves) {
                 return Ok(Some(f));
             }
             Ok(Some(face))
         }
     }
+}
+
+/// The face frame of a set of world-space leaves: [`canonical_frame`] with
+/// rule 3's `[length, width, thickness]` order, ignoring any override.
+/// `None` when the leaves have no face.
+pub fn face_frame(doc: &Document, leaves: &[(ObjectId, Transform)]) -> Option<PartFrame> {
+    let c = canonical_frame(leaves, doc)?;
+    Some(ordered(c, leaves, doc))
+}
+
+/// The definition-local AABB of `def`'s own Objects (its direct Object
+/// members and those of its direct Groups), or `None` when it holds none.
+fn definition_own_bounds(
+    doc: &Document,
+    def: kernel::ComponentId,
+) -> Result<Option<(Point3, Point3)>, DocumentError> {
+    let leaves = crate::scope::scoped_leaves(doc, &RenderRoot::Definition(def), Scope::Own)?;
+    let mut acc: Option<(Point3, Point3)> = None;
+    for p in world_points(
+        &leaves
+            .into_iter()
+            .map(|(o, t, _)| (o, t))
+            .collect::<Vec<_>>(),
+        doc,
+    ) {
+        acc = Some(match acc {
+            None => (p, p),
+            Some((lo, hi)) => (
+                Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)),
+                Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z)),
+            ),
+        });
+    }
+    Ok(acc)
+}
+
+/// An Instance's frame from a `hew.part` / `frame` override on its
+/// definition's member (the kernel keeps the attribute on the member when
+/// it wraps a linked copy): when the definition holds exactly one live
+/// top-level member and it carries a well-formed override, that member's
+/// frame read through this placement (`source: "attribute"`). `None`
+/// otherwise, or under [`Scope::Own`] when the member is not one of the
+/// container's own (a nested instance).
+fn member_override_frame(
+    doc: &Document,
+    occ: &Occurrence,
+    inst: kernel::InstanceId,
+    def: kernel::ComponentId,
+    scope: Scope,
+) -> Result<Option<PartFrame>, DocumentError> {
+    let Some(members) = doc.def_member_nodes(def) else {
+        return Ok(None);
+    };
+    let live: Vec<NodeId> = members
+        .iter()
+        .copied()
+        .filter(|&m| match m {
+            NodeId::Object(o) => doc.object(o).is_some(),
+            NodeId::Group(g) => doc.group_members(g).is_some(),
+            NodeId::Instance(i) => doc.instance_def(i).is_some(),
+        })
+        .collect();
+    let [member] = live.as_slice() else {
+        return Ok(None);
+    };
+    if matches!(member, NodeId::Instance(_)) || frame_override(doc, *member).is_none() {
+        return Ok(None);
+    }
+    let mut path = occ.path.clone();
+    path.push(inst);
+    let Some(member_occ) = doc.occurrence_at(&path, *member) else {
+        return Ok(None);
+    };
+    part_frame(doc, &member_occ, scope)
 }
 
 /// Rule 2: the override read in the face frame's coordinates — the frame
@@ -501,7 +598,7 @@ mod tests {
     }
 
     fn pf(doc: &Document, o: &Occurrence) -> PartFrame {
-        part_frame(doc, o).unwrap().unwrap()
+        part_frame(doc, o, Scope::All).unwrap().unwrap()
     }
 
     fn occ(doc: &Document, node: NodeId) -> Occurrence {
@@ -670,7 +767,10 @@ mod tests {
         // The origin is the box's minimum corner in the frame: every vertex
         // sits within [0, extent] along each axis from it.
         let o = occ(&doc, NodeId::Group(g));
-        for p in world_points(&leaves_of(&doc, &o).unwrap(), &doc) {
+        for p in world_points(
+            &crate::scope::leaves_for(&doc, &o, Scope::All).unwrap(),
+            &doc,
+        ) {
             let d = p - f.origin;
             for (k, axis) in [f.x, f.y, f.z].into_iter().enumerate() {
                 let c = d.dot(axis);
@@ -696,7 +796,11 @@ mod tests {
                         );
                 doc.transform_object(b, &r).unwrap();
                 let o = occ(&doc, NodeId::Object(b));
-                let c = canonical_frame(&leaves_of(&doc, &o).unwrap(), &doc).unwrap();
+                let c = canonical_frame(
+                    &crate::scope::leaves_for(&doc, &o, Scope::All).unwrap(),
+                    &doc,
+                )
+                .unwrap();
                 let f = pf(&doc, &o);
                 assert_eq!(f, c, "{deg_z}° / {deg_x}°");
             }

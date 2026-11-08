@@ -444,7 +444,7 @@ fn frame_of(ctx: &Ctx, occ: &kernel::Occurrence, spec: &Option<Value>) -> Result
 }
 
 fn part_frame_of(ctx: &Ctx, occ: &kernel::Occurrence) -> Result<Frame, CmdError> {
-    let f = part_frame::part_frame(ctx.doc, occ)?.ok_or_else(|| {
+    let f = part_frame::part_frame(ctx.doc, occ, crate::scope::Scope::All)?.ok_or_else(|| {
         CmdError::Refusal(Refusal::api(
             "no_part_frame",
             "That entity has nothing to measure: it holds no faces.",

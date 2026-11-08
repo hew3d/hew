@@ -386,15 +386,40 @@ fn boolean_op(ctx: &mut Ctx, params: &Value, op: kernel::BooleanOp) -> Result<Va
     struct P {
         a: Value,
         b: Value,
+        #[serde(default)]
+        unlink: Option<bool>,
     }
     let p: P = parse_params(params)?;
+    if p.unlink.is_some() && op == kernel::BooleanOp::Subtract {
+        return Err(CmdError::Params(
+            "unlink applies to hew.solid.union and hew.solid.intersect; a subtract through a placement cuts every copy".into(),
+        ));
+    }
     // A transient cutter (Addendum B6): `b` as a `SolidSpec` prism or box,
     // so a machining through a placement is one call with no temporary
     // object.
     if p.b.get("prism").is_some() || p.b.get("box").is_some() {
         return subtract_transient(ctx, op, &p.a, &p.b);
     }
-    let (a, b) = match (resolve_operand(ctx, &p.a)?, resolve_operand(ctx, &p.b)?) {
+    let (oa, ob) = (resolve_operand(ctx, &p.a)?, resolve_operand(ctx, &p.b)?);
+    if op != kernel::BooleanOp::Subtract && needs_unlink(ctx, &oa, &ob)? {
+        if p.unlink != Some(true) {
+            let operands: Vec<Value> = [(&p.a, &oa), (&p.b, &ob)]
+                .into_iter()
+                .filter(|(_, o)| is_placement_operand(ctx, o).unwrap_or(false))
+                .map(|(v, _)| v.clone())
+                .collect();
+            return Err(CmdError::Refusal(
+                Refusal::api(
+                    "would_unlink",
+                    "An operand is a placement of shared geometry (a linked copy or a component). Joining it splits it from its other copies; pass \"unlink\": true to unlink and explode it first, or edit through its definition.",
+                )
+                .with_detail(json!({ "operands": operands })),
+            ));
+        }
+        return boolean_unlinking(ctx, op, oa, ob);
+    }
+    let (a, b) = match (oa, ob) {
         (Operand::World(a), Operand::World(b)) => (a, b),
         (Operand::World(_), Operand::Member { .. }) => return Err(path_operand_rule()),
         (Operand::Member { path, node, .. }, b) => {
@@ -408,6 +433,211 @@ fn boolean_op(ctx: &mut Ctx, params: &Value, op: kernel::BooleanOp) -> Result<Va
         NodeId::Instance(id) => EntityRef::Instance(id),
     };
     Ok(serde_json::json!({ "result": public_id_of(ctx, entity) }))
+}
+
+/// Whether an operand is a placement: a world instance, a definition member
+/// reached by a path, or a group holding an instance anywhere below it.
+fn is_placement_operand(ctx: &Ctx, o: &Operand) -> Result<bool, CmdError> {
+    Ok(match o {
+        Operand::Member { .. } => true,
+        Operand::World(NodeId::Instance(_)) => true,
+        Operand::World(NodeId::Object(_)) => false,
+        Operand::World(g @ NodeId::Group(_)) => !world_instances_under(ctx, *g)?.is_empty(),
+    })
+}
+
+/// Whether a union or intersect needs the `unlink` path: a placement
+/// operand, except two members of one definition reached by the same path
+/// (that boolean runs inside the definition and every placement follows).
+fn needs_unlink(ctx: &Ctx, a: &Operand, b: &Operand) -> Result<bool, CmdError> {
+    if let (Operand::Member { path: pa, .. }, Operand::Member { path: pb, .. }) = (a, b)
+        && pa == pb
+    {
+        return Ok(false);
+    }
+    Ok(is_placement_operand(ctx, a)? || is_placement_operand(ctx, b)?)
+}
+
+/// Every world instance at or below `node`, outermost first.
+fn world_instances_under(ctx: &Ctx, node: NodeId) -> Result<Vec<kernel::InstanceId>, CmdError> {
+    Ok(ctx
+        .doc
+        .occurrences(Some(&[(Vec::new(), node)]), true)?
+        .into_iter()
+        .filter(|r| r.path.is_empty())
+        .filter_map(|r| match r.node {
+            NodeId::Instance(i) => Some(i),
+            _ => None,
+        })
+        .collect())
+}
+
+/// The live world nodes directly under `parent` (the top level for `None`).
+fn world_children(ctx: &Ctx, parent: Option<kernel::GroupId>) -> Result<Vec<NodeId>, CmdError> {
+    Ok(ctx
+        .doc
+        .occurrences(None, true)?
+        .into_iter()
+        .filter(|r| r.path.is_empty() && r.parent_group == parent && ctx.doc.node_is_live(r.node))
+        .map(|r| r.node)
+        .collect())
+}
+
+/// Explodes every world instance at or below `node` until none is left
+/// (nested instances surface as world instances when their placement
+/// explodes); the instances first named are pushed to `unlinked`.
+fn explode_all_under(
+    ctx: &mut Ctx,
+    node: NodeId,
+    unlinked: &mut Vec<kernel::InstanceId>,
+) -> Result<(), CmdError> {
+    // Each pass explodes at least one instance; the bound only guards a
+    // kernel that stopped doing so.
+    for _ in 0..100_000 {
+        let Some(&i) = world_instances_under(ctx, node)?.first() else {
+            return Ok(());
+        };
+        unlinked.push(i);
+        ctx.doc.explode_instance(i)?;
+    }
+    Err(CmdError::Internal(
+        "exploding placements did not converge".into(),
+    ))
+}
+
+/// One operand made plain for a world boolean: a world instance exploded
+/// (its pieces grouped when there are several), a group's instances
+/// exploded in place, or a definition member's copy after its placement
+/// explodes.
+fn settle_operand(
+    ctx: &mut Ctx,
+    o: Operand,
+    unlinked: &mut Vec<kernel::InstanceId>,
+) -> Result<NodeId, CmdError> {
+    match o {
+        Operand::World(n @ NodeId::Object(_)) => Ok(n),
+        Operand::World(g @ NodeId::Group(_)) => {
+            explode_all_under(ctx, g, unlinked)?;
+            Ok(g)
+        }
+        Operand::World(NodeId::Instance(i)) => {
+            let parent = ctx.doc.node_parent(NodeId::Instance(i));
+            let before = world_children(ctx, parent)?;
+            unlinked.push(i);
+            ctx.doc.explode_instance(i)?;
+            let mut roots: Vec<NodeId> = world_children(ctx, parent)?
+                .into_iter()
+                .filter(|n| !before.contains(n))
+                .collect();
+            // Nested placements surfaced by the explode explode in turn.
+            while let Some(k) = roots.iter().position(|n| matches!(n, NodeId::Instance(_))) {
+                let NodeId::Instance(inner) = roots[k] else {
+                    unreachable!()
+                };
+                ctx.doc.explode_instance(inner)?;
+                roots = world_children(ctx, parent)?
+                    .into_iter()
+                    .filter(|n| !before.contains(n))
+                    .collect();
+            }
+            for &r in &roots {
+                if matches!(r, NodeId::Group(_)) {
+                    explode_all_under(ctx, r, &mut Vec::new())?;
+                }
+            }
+            match roots.as_slice() {
+                [] => Err(DocumentError::BooleanOperandEmpty.into()),
+                [one] => Ok(*one),
+                many => Ok(NodeId::Group(ctx.doc.group_nodes(many)?.0)),
+            }
+        }
+        Operand::Member { path, node } => {
+            let NodeId::Object(member) = node else {
+                return Err(unlink_member_rule());
+            };
+            let [placement] = path.as_slice() else {
+                return Err(unlink_member_rule());
+            };
+            let def = ctx.doc.instance_def(*placement).ok_or_else(|| {
+                CmdError::Internal("a resolved placement has no definition".into())
+            })?;
+            // `explode_instance` returns the copies of the definition's
+            // live direct Object members, in member order.
+            let live_objects: Vec<kernel::ObjectId> = ctx
+                .doc
+                .def_member_nodes(def)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|m| match m {
+                    NodeId::Object(o) if ctx.doc.object(o).is_some() => Some(o),
+                    _ => None,
+                })
+                .collect();
+            let k = live_objects
+                .iter()
+                .position(|&o| o == member)
+                .ok_or_else(unlink_member_rule)?;
+            unlinked.push(*placement);
+            let (created, _) = ctx.doc.explode_instance(*placement)?;
+            created
+                .get(k)
+                .map(|&o| NodeId::Object(o))
+                .ok_or_else(|| CmdError::Internal("an exploded member has no copy".into()))
+        }
+    }
+}
+
+fn unlink_member_rule() -> CmdError {
+    CmdError::Params(
+        "unlink takes a member reached by a path only when it is a direct object member of a world placement ({path: [instance, object]}); otherwise unlink and explode its placement first".into(),
+    )
+}
+
+/// `hew.solid.union` / `intersect` with `unlink: true` over a placement
+/// operand (Addendum D §5): each placement operand is exploded into plain
+/// solids (the other copies keep the shared geometry), then the world
+/// boolean runs. One undo entry with the command. `unlinked` lists the
+/// placements that were split off.
+fn boolean_unlinking(
+    ctx: &mut Ctx,
+    op: kernel::BooleanOp,
+    a: Operand,
+    b: Operand,
+) -> Result<Value, CmdError> {
+    for o in [&a, &b] {
+        if let Operand::Member { path, .. } = o {
+            refuse_path_on_loan(ctx, path)?;
+        }
+    }
+    let mut unlinked = Vec::new();
+    let mut named = Vec::new();
+    for o in [&a, &b] {
+        match o {
+            Operand::World(NodeId::Instance(i)) => named.push(*i),
+            Operand::Member { path, .. } => named.extend(path.first().copied()),
+            _ => {}
+        }
+    }
+    let unlinked_public: Vec<String> = named
+        .iter()
+        .map(|&i| public_id_of(ctx, EntityRef::Instance(i)))
+        .collect();
+    let a = settle_operand(ctx, a, &mut unlinked)?;
+    let b = settle_operand(ctx, b, &mut unlinked)?;
+    let (result, _change) = ctx.doc.boolean_nodes(op, a, b)?;
+    let entity = match result {
+        NodeId::Object(id) => EntityRef::Object(id),
+        NodeId::Group(id) => EntityRef::Group(id),
+        NodeId::Instance(id) => EntityRef::Instance(id),
+    };
+    let mut all: Vec<String> = unlinked_public;
+    for i in unlinked {
+        let id = public_id_of(ctx, EntityRef::Instance(i));
+        if !all.contains(&id) {
+            all.push(id);
+        }
+    }
+    Ok(json!({ "result": public_id_of(ctx, entity), "unlinked": all }))
 }
 
 /// A boolean whose `a` is a definition member reached by `path`

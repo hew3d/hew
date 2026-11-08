@@ -35,7 +35,9 @@ pub mod refusal;
 pub mod registry;
 pub mod rehearsal;
 pub mod schema_check;
+pub mod scope;
 pub mod selection;
+pub mod signature;
 pub mod solid_spec;
 pub mod transact;
 

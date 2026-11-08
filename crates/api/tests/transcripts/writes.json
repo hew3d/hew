@@ -243,7 +243,7 @@
     },
     {
       "compare": "/result/bbox",
-      "note": "…and its world box is where it was",
+      "note": "\u2026and its world box is where it was",
       "request": {
         "id": 9,
         "jsonrpc": "2.0",
@@ -352,7 +352,7 @@
     },
     {
       "compare": "/result/results/0/ids",
-      "note": "a 2 × 3 grid: five copies, every slot but the original's, in index order",
+      "note": "a 2 \u00d7 3 grid: five copies, every slot but the original's, in index order (independent)",
       "request": {
         "id": 13,
         "jsonrpc": "2.0",
@@ -376,7 +376,8 @@
                   0.0
                 ]
               }
-            ]
+            ],
+            "linked": false
           },
           "ids": [
             "obj_6"

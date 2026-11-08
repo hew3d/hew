@@ -1,14 +1,16 @@
 //! Model reads for parts (docs/agents/HEW_API.md §7; docs/agents/PLUGINS.md
 //! "Reading parts"): `hew.query.occurrences`, `hew.query.part_frame`,
-//! `hew.query.mesh`, and `hew.query.topology`.
+//! `hew.query.signature`, `hew.query.mesh`, and `hew.query.topology`.
 
 use super::{CmdError, Ctx, Handler};
 use crate::locate;
 use crate::part_frame;
 use crate::refusal::Refusal;
+use crate::scope::Scope;
 use kernel::{EntityRef, NodeId, ObjectId, Occurrence, Point3, RenderRoot, Transform, Vec3};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 /// The most buffer bytes one `hew.query.mesh` result carries, before
 /// base64.
@@ -36,11 +38,15 @@ pub fn handler(name: &str) -> Option<Handler> {
     fn topo(ctx: &mut Ctx, p: &Value) -> Result<Value, CmdError> {
         clocked(topology, ctx, p)
     }
+    fn sig(ctx: &mut Ctx, p: &Value) -> Result<Value, CmdError> {
+        clocked(signature, ctx, p)
+    }
     Some(match name {
         "hew.query.occurrences" => occ,
         "hew.query.part_frame" => frame,
         "hew.query.mesh" => mesh_c,
         "hew.query.topology" => topo,
+        "hew.query.signature" => sig,
         _ => return None,
     })
 }
@@ -80,9 +86,111 @@ fn vec_json(v: Vec3) -> Value {
     json!([v.x, v.y, v.z])
 }
 
+/// The part-model facts `hew.query.occurrences` adds to its rows
+/// (docs/agents/PLUGINS.md "What a row says about a part"): the health
+/// report, computed once per call and only when an Object row is listed,
+/// and whether hidden members are listed.
+pub(crate) struct RowFacts {
+    include_hidden: bool,
+    /// Object → (solid, family, family_closed), from one health report of
+    /// the whole document, so `family` indexes `hew.doc.health`'s list.
+    health: Option<BTreeMap<ObjectId, Option<usize>>>,
+    /// Whether each family's shared rims are all cappable.
+    family_closed: Vec<bool>,
+}
+
+impl RowFacts {
+    fn new(doc: &kernel::Document, include_hidden: bool, any_object: bool) -> RowFacts {
+        if !any_object {
+            return RowFacts {
+                include_hidden,
+                health: None,
+                family_closed: Vec::new(),
+            };
+        }
+        let report = doc.health_report(None);
+        let mut closed = vec![true; report.families.len()];
+        let mut rows = BTreeMap::new();
+        for row in &report.rows {
+            if let Some(f) = row.seam_family {
+                let cappable = doc.object(row.object).is_some_and(|o| {
+                    row.shared_rims
+                        .iter()
+                        .all(|&i| kernel::repair::rim_is_cappable(o, &row.diagnosis, i))
+                });
+                if let Some(c) = closed.get_mut(f) {
+                    *c &= cappable;
+                }
+            }
+            rows.insert(row.object, row.seam_family);
+        }
+        RowFacts {
+            include_hidden,
+            health: Some(rows),
+            family_closed: closed,
+        }
+    }
+
+    /// `(solid, family, family_closed)` for an Object: solid when the
+    /// health report has no row for it (its verdict is solid).
+    fn object(&self, o: ObjectId) -> (bool, Option<usize>, Option<bool>) {
+        match self.health.as_ref().and_then(|h| h.get(&o)) {
+            None => (true, None, None),
+            Some(family) => (
+                false,
+                *family,
+                family.and_then(|f| self.family_closed.get(f).copied()),
+            ),
+        }
+    }
+}
+
+/// Whether a member node is listed under `members`: live, and shown unless
+/// hidden ones were asked for (user-hidden or on a hidden tag).
+fn member_listed(doc: &kernel::Document, node: NodeId, include_hidden: bool) -> bool {
+    let live = match node {
+        NodeId::Object(o) => doc.object(o).is_some(),
+        NodeId::Group(g) => doc.group_members(g).is_some(),
+        NodeId::Instance(i) => doc.instance_def(i).is_some(),
+    };
+    live && (include_hidden || !doc.node_effectively_hidden(node))
+}
+
+/// `members` for a row: the node's direct members by kind, in member order.
+fn members_json(ctx: &Ctx, o: &Occurrence, include_hidden: bool) -> Result<Value, CmdError> {
+    let nodes = match o.node {
+        NodeId::Object(_) => Vec::new(),
+        NodeId::Group(g) => ctx.doc.group_members(g).unwrap_or_default(),
+        NodeId::Instance(_) => o
+            .definition
+            .and_then(|d| ctx.doc.def_member_nodes(d))
+            .unwrap_or_default(),
+    };
+    let (mut objects, mut groups, mut instances) = (Vec::new(), Vec::new(), Vec::new());
+    for n in nodes {
+        if !member_listed(ctx.doc, n, include_hidden) {
+            continue;
+        }
+        let id = public(ctx, &node_entity(n))?;
+        match n {
+            NodeId::Object(_) => objects.push(id),
+            NodeId::Group(_) => groups.push(id),
+            NodeId::Instance(_) => instances.push(id),
+        }
+    }
+    Ok(json!({ "objects": objects, "groups": groups, "instances": instances }))
+}
+
 /// One row as `OccurrenceJson` (docs/agents/HEW_API.md §7): `path` is the
-/// instances above the node; `{ "path": [...path, id] }` locates it.
-pub(crate) fn occurrence_json(ctx: &Ctx, o: &Occurrence) -> Result<Value, CmdError> {
+/// instances above the node; `{ "path": [...path, id] }` locates it. With
+/// `facts` (the `hew.query.occurrences` rows) it also carries `members`,
+/// an Object's `solid` / `family` / `family_closed`, and an Instance's
+/// `linked`; without (`hew.query.resolve`'s occurrence) it does not.
+pub(crate) fn occurrence_json(
+    ctx: &Ctx,
+    o: &Occurrence,
+    facts: Option<&RowFacts>,
+) -> Result<Value, CmdError> {
     let mut path = Vec::with_capacity(o.path.len());
     for &i in &o.path {
         path.push(public(ctx, &EntityRef::Instance(i))?);
@@ -116,7 +224,7 @@ pub(crate) fn occurrence_json(ctx: &Ctx, o: &Occurrence) -> Result<Value, CmdErr
         .definition
         .and_then(|d| ctx.doc.component_name(d))
         .map(str::to_string);
-    Ok(json!({
+    let mut row = json!({
         "path": path,
         "id": public(ctx, &node_entity(o.node))?,
         "kind": kind_name(o.node),
@@ -132,7 +240,23 @@ pub(crate) fn occurrence_json(ctx: &Ctx, o: &Occurrence) -> Result<Value, CmdErr
         "name": name,
         "definition_name": definition_name,
         "depth": o.depth,
-    }))
+    });
+    if let Some(facts) = facts {
+        row["members"] = members_json(ctx, o, facts.include_hidden)?;
+        match o.node {
+            NodeId::Object(id) => {
+                let (solid, family, closed) = facts.object(id);
+                row["solid"] = json!(solid);
+                row["family"] = json!(family);
+                row["family_closed"] = json!(closed);
+            }
+            NodeId::Instance(_) => {
+                row["linked"] = json!(o.definition.is_some_and(|d| ctx.doc.is_linked_set(d)));
+            }
+            NodeId::Group(_) => {}
+        }
+    }
+    Ok(row)
 }
 
 // ------------------------------------------------------ hew.query.occurrences
@@ -184,11 +308,15 @@ fn occurrences(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         }
     };
     let rows = ctx.doc.occurrences(roots.as_deref(), p.include_hidden)?;
-    let mut out = Vec::new();
-    for r in &rows {
-        if kinds.contains(&kind_name(r.node)) {
-            out.push(occurrence_json(ctx, r)?);
-        }
+    let listed: Vec<&Occurrence> = rows
+        .iter()
+        .filter(|r| kinds.contains(&kind_name(r.node)))
+        .collect();
+    let any_object = listed.iter().any(|r| matches!(r.node, NodeId::Object(_)));
+    let facts = RowFacts::new(ctx.doc, p.include_hidden, any_object);
+    let mut out = Vec::with_capacity(listed.len());
+    for r in listed {
+        out.push(occurrence_json(ctx, r, Some(&facts))?);
     }
     Ok(json!({ "occurrences": out }))
 }
@@ -204,6 +332,8 @@ struct TargetParams {
     path: Option<Vec<String>>,
     #[serde(default)]
     space: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 /// Coordinate space of a mesh or topology result.
@@ -221,6 +351,15 @@ fn target(ctx: &Ctx, p: &TargetParams) -> Result<Occurrence, CmdError> {
             "give exactly one of \"id\" or \"path\"".into(),
         )),
     }
+}
+
+/// `scope` belongs to `hew.query.part_frame` and `hew.query.signature`'s
+/// siblings only; the buffer reads keep their M1 shape.
+fn no_scope(p: &TargetParams, command: &str) -> Result<(), CmdError> {
+    if p.scope.is_some() {
+        return Err(CmdError::Params(format!("{command} takes no \"scope\"")));
+    }
+    Ok(())
 }
 
 fn space(p: &TargetParams) -> Result<Space, CmdError> {
@@ -242,8 +381,9 @@ fn part_frame_cmd(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             "hew.query.part_frame takes no \"space\"".into(),
         ));
     }
+    let scope = Scope::from_name(p.scope.as_deref())?;
     let occ = target(ctx, &p)?;
-    part_frame_result(ctx.doc, &occ)?.ok_or_else(|| {
+    part_frame_result_scoped(ctx.doc, &occ, scope)?.ok_or_else(|| {
         CmdError::Refusal(Refusal::api(
             "no_part_frame",
             "That entity has nothing to measure: it holds no faces.",
@@ -263,7 +403,19 @@ pub fn part_frame_result(
     doc: &kernel::Document,
     occ: &Occurrence,
 ) -> Result<Option<Value>, kernel::DocumentError> {
-    let Some(f) = part_frame::part_frame(doc, occ)? else {
+    part_frame_result_scoped(doc, occ, Scope::All)
+}
+
+/// [`part_frame_result`] over the leaves `scope` selects.
+///
+/// # Errors
+/// As [`part_frame_result`].
+pub fn part_frame_result_scoped(
+    doc: &kernel::Document,
+    occ: &Occurrence,
+    scope: Scope,
+) -> Result<Option<Value>, kernel::DocumentError> {
+    let Some(f) = part_frame::part_frame(doc, occ, scope)? else {
         return Ok(None);
     };
     Ok(Some(json!({
@@ -275,6 +427,44 @@ pub fn part_frame_result(
         "source": f.source.name(),
         "mirrored": occ.pose.determinant() < 0.0,
     })))
+}
+
+// ------------------------------------------------------ hew.query.signature
+
+/// `hew.query.signature { id | path }` (docs/agents/PLUGINS.md "Same part,
+/// mirrored part"): one Object's shape and mirror hashes and its frame. A
+/// group or instance refuses `not_an_object`.
+fn signature(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: TargetParams = parse(params)?;
+    if p.space.is_some() || p.scope.is_some() {
+        return Err(CmdError::Params(
+            "hew.query.signature takes only \"id\" or \"path\"".into(),
+        ));
+    }
+    let occ = target(ctx, &p)?;
+    if !matches!(occ.node, NodeId::Object(_)) {
+        return Err(CmdError::Refusal(Refusal::api(
+            "not_an_object",
+            "hew.query.signature reads one object. List a group's or instance's objects with hew.query.occurrences, then ask for each.",
+        )));
+    }
+    let s = crate::signature::signature(ctx.doc, &occ)?.ok_or_else(|| {
+        CmdError::Refusal(Refusal::api(
+            "no_part_frame",
+            "That entity has nothing to measure: it holds no faces.",
+        ))
+    })?;
+    Ok(json!({
+        "shape": s.shape,
+        "mirror": s.mirror,
+        "symmetric": s.shape == s.mirror,
+        "frame": {
+            "origin": point_json(s.frame.origin),
+            "x": vec_json(s.frame.x),
+            "y": vec_json(s.frame.y),
+            "z": vec_json(s.frame.z),
+        },
+    }))
 }
 
 // ------------------------------------------------------------ leaves
@@ -366,6 +556,7 @@ fn mesh(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 /// is testable without a 64 MiB model.
 fn mesh_limited(ctx: &mut Ctx, params: &Value, limit: usize) -> Result<Value, CmdError> {
     let p: TargetParams = parse(params)?;
+    no_scope(&p, "hew.query.mesh")?;
     let space = space(&p)?;
     let occ = target(ctx, &p)?;
     let leaves = leaves_in(ctx, &occ, space)?;
@@ -486,6 +677,7 @@ pub(crate) fn mesh_block(
 
 fn topology(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: TargetParams = parse(params)?;
+    no_scope(&p, "hew.query.topology")?;
     let space = space(&p)?;
     let occ = target(ctx, &p)?;
     let NodeId::Object(oid) = occ.node else {

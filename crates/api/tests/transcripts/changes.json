@@ -88,11 +88,13 @@
         "added": [
           "skt_0"
         ],
-        "removed": [],
-        "modified": [],
         "attrs": [],
+        "copied_from": [],
         "document": false,
-        "full": false
+        "full": false,
+        "linked": [],
+        "modified": [],
+        "removed": []
       }
     },
     {
@@ -106,20 +108,22 @@
         }
       },
       "response": {
-        "jsonrpc": "2.0",
         "id": 4,
+        "jsonrpc": "2.0",
         "result": {
-          "from": 2,
           "changes": {
             "added": [],
-            "removed": [],
-            "modified": [],
             "attrs": [],
+            "copied_from": [],
             "document": false,
-            "full": false
+            "full": false,
+            "linked": [],
+            "modified": [],
+            "removed": []
           },
-          "generation": 2,
-          "epoch": 2
+          "epoch": 2,
+          "from": 2,
+          "generation": 2
         }
       }
     },
@@ -150,13 +154,15 @@
       "compare": "/result/changes",
       "response": {
         "added": [],
+        "attrs": [],
+        "copied_from": [],
+        "document": false,
+        "full": false,
+        "linked": [],
+        "modified": [],
         "removed": [
           "skt_0"
-        ],
-        "modified": [],
-        "attrs": [],
-        "document": false,
-        "full": false
+        ]
       }
     },
     {
@@ -174,13 +180,15 @@
         "added": [
           "skt_0"
         ],
+        "attrs": [],
+        "copied_from": [],
+        "document": false,
+        "full": false,
+        "linked": [],
+        "modified": [],
         "removed": [
           "skt_0"
-        ],
-        "modified": [],
-        "attrs": [],
-        "document": false,
-        "full": false
+        ]
       }
     },
     {
@@ -196,11 +204,13 @@
       "compare": "/result/changes",
       "response": {
         "added": [],
-        "removed": [],
-        "modified": [],
         "attrs": [],
+        "copied_from": [],
         "document": false,
-        "full": true
+        "full": true,
+        "linked": [],
+        "modified": [],
+        "removed": []
       }
     }
   ]

@@ -330,8 +330,62 @@ pub fn face_rings(ctx: &Ctx, face: FaceRef) -> Result<(Vec<Point3>, Vec<Vec<Poin
     Ok((outer, holes))
 }
 
-/// Resolves a face locator (§5.2): `{object, at}`, `{object, ray}`, or
-/// `{"$face": "label#key"}`.
+/// The Object a face or edge locator addresses: `object` (its public id)
+/// or `path` (an occurrence path ending at it, docs/agents/HEW_API.md
+/// §5.2), exactly one. `at` and `ray` stay in the Object's own frame
+/// either way, as `hew.query.raycast` reports them, so both forms reach the
+/// same face; a path only proves the placement. A path ending at a group
+/// or instance refuses `not_an_object`; a path through a definition open
+/// for editing refuses `explode_session_scope`.
+fn locator_object(
+    ctx: &Ctx,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    what: &str,
+) -> Result<ObjectId, CmdError> {
+    match (obj.get("object"), obj.get("path")) {
+        (Some(public), None) => {
+            let public = public.as_str().ok_or_else(|| {
+                CmdError::Params(format!("a {what} locator's \"object\" is an id"))
+            })?;
+            match ctx.resolver().resolve(public) {
+                Some(EntityRef::Object(id)) if ctx.doc.object(id).is_some() => Ok(id),
+                _ => Err(unknown_entity(public)),
+            }
+        }
+        (None, Some(path)) => {
+            let ids: Vec<String> = serde_json::from_value(path.clone()).map_err(|_| {
+                CmdError::Params(format!("a {what} locator's \"path\" is a list of ids"))
+            })?;
+            let occ = resolve_occurrence_path(ctx, &ids)?;
+            let kernel::NodeId::Object(id) = occ.node else {
+                return Err(not_an_object(what));
+            };
+            if ctx.doc.path_on_loan(&occ.path) {
+                return Err(kernel::DocumentError::ExplodeSessionScope.into());
+            }
+            Ok(id)
+        }
+        (Some(_), Some(_)) => Err(CmdError::Params(format!(
+            "a {what} locator takes \"object\" or \"path\", not both"
+        ))),
+        (None, None) => Err(CmdError::Params(format!(
+            "{what} locator needs \"object\" or \"path\""
+        ))),
+    }
+}
+
+/// `not_an_object`: a locator's path ends at a group or instance.
+fn not_an_object(what: &str) -> CmdError {
+    CmdError::Refusal(Refusal::api(
+        "not_an_object",
+        &format!(
+            "A {what} locator's path must end at an object; hew.query.occurrences lists the objects under a group or instance."
+        ),
+    ))
+}
+
+/// Resolves a face locator (§5.2): `{object | path, at}`, `{object | path,
+/// ray}`, or `{"$face": "label#key"}`.
 pub fn resolve_face(ctx: &Ctx, v: &serde_json::Value) -> Result<FaceRef, CmdError> {
     let obj = v
         .as_object()
@@ -375,17 +429,11 @@ pub fn resolve_face(ctx: &Ctx, v: &serde_json::Value) -> Result<FaceRef, CmdErro
         return Ok(FaceRef { object, face });
     }
 
-    let public = obj
-        .get("object")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| CmdError::Params("face locator needs \"object\"".into()))?;
-    let Some(EntityRef::Object(object_id)) = ctx.resolver().resolve(public) else {
-        return Err(unknown_entity(public));
-    };
+    let object_id = locator_object(ctx, obj, "face")?;
     let object = ctx
         .doc
         .object(object_id)
-        .ok_or_else(|| unknown_entity(public))?;
+        .ok_or_else(|| CmdError::Internal("a located object is not live".into()))?;
 
     if let Some(at) = obj.get("at") {
         let p = parse_xyz(at)?;
@@ -486,17 +534,11 @@ pub fn resolve_edge(ctx: &Ctx, v: &serde_json::Value) -> Result<EdgeRef, CmdErro
     let obj = v
         .as_object()
         .ok_or_else(|| CmdError::Params("expected an edge locator object".into()))?;
-    let public = obj
-        .get("object")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| CmdError::Params("edge locator needs \"object\"".into()))?;
-    let Some(EntityRef::Object(object_id)) = ctx.resolver().resolve(public) else {
-        return Err(unknown_entity(public));
-    };
+    let object_id = locator_object(ctx, obj, "edge")?;
     let object = ctx
         .doc
         .object(object_id)
-        .ok_or_else(|| unknown_entity(public))?;
+        .ok_or_else(|| CmdError::Internal("a located object is not live".into()))?;
     let at = obj
         .get("at")
         .ok_or_else(|| CmdError::Params("edge locator needs \"at\"".into()))?;

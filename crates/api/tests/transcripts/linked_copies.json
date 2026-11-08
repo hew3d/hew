@@ -1,0 +1,641 @@
+{
+  "profile": "app",
+  "frames": [
+    {
+      "compare": "/result/profile",
+      "note": "the handshake",
+      "request": {
+        "id": 0,
+        "jsonrpc": "2.0",
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": "app"
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "compare": "/result/results/1/object_id",
+      "note": "the board",
+      "request": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "label": "board",
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  0.4,
+                  0.2,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.018,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response": "obj_1"
+    },
+    {
+      "note": "the clock before the copy",
+      "request": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "method": "hew.history.status",
+        "params": {}
+      },
+      "response": 3,
+      "compare": "/result/generation"
+    },
+    {
+      "note": "a copy links by default: the board is wrapped and placed twice",
+      "request": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.move",
+        "params": {
+          "ids": [
+            "obj_1"
+          ],
+          "translation": [
+            1.0,
+            0.0,
+            0.0
+          ],
+          "copy": {}
+        }
+      },
+      "response": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.entity.move",
+          "results": [
+            {
+              "ids": [
+                "ins_4"
+              ],
+              "linked": [
+                {
+                  "definition": "cmp_2",
+                  "instance": "ins_3",
+                  "source": "obj_1"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "the change set names the wrap and what each new placement was copied from",
+      "request": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "method": "hew.query.changes_since",
+        "params": {
+          "generation": 3
+        }
+      },
+      "response": {
+        "added": [
+          "cmp_2",
+          "ins_3",
+          "ins_4"
+        ],
+        "attrs": [],
+        "copied_from": [
+          [
+            "ins_4",
+            "ins_3"
+          ]
+        ],
+        "document": false,
+        "full": false,
+        "linked": [
+          {
+            "definition": "cmp_2",
+            "instance": "ins_3",
+            "source": "obj_1"
+          }
+        ],
+        "modified": [
+          "obj_1"
+        ],
+        "removed": []
+      },
+      "compare": "/result/changes"
+    },
+    {
+      "note": "two placements of one linked set",
+      "request": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "method": "hew.query.occurrences",
+        "params": {
+          "kinds": [
+            "instance"
+          ]
+        }
+      },
+      "response": [
+        {
+          "definition": "cmp_2",
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "ins_3",
+          "kind": "instance",
+          "linked": true,
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_1"
+            ]
+          },
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": "cmp_2",
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "ins_4",
+          "kind": "instance",
+          "linked": true,
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_1"
+            ]
+          },
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      ],
+      "compare": "/result/occurrences"
+    },
+    {
+      "note": "copying a placement independently makes another placement (an instance copies as one either way)",
+      "request": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.move",
+        "params": {
+          "ids": [
+            "ins_4"
+          ],
+          "translation": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "copy": {
+            "linked": false
+          }
+        }
+      },
+      "response": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.entity.move",
+          "results": [
+            {
+              "ids": [
+                "ins_5"
+              ],
+              "linked": []
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "unlink one copy: its own definition, with the remap",
+      "request": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "method": "hew.component.make_unique",
+        "params": {
+          "path": [
+            "ins_4"
+          ]
+        }
+      },
+      "response": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.make_unique",
+          "results": [
+            {
+              "component": "cmp_6",
+              "instance": "ins_4",
+              "remap": {
+                "cmp_2": "cmp_6",
+                "obj_1": "obj_7"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "make the unlinked copy a named component",
+      "request": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "method": "hew.component.promote",
+        "params": {
+          "component": "cmp_6",
+          "name": "Shelf"
+        }
+      },
+      "response": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.promote",
+          "results": [
+            {
+              "component": "cmp_6"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "a named component is not a linked set",
+      "request": {
+        "id": 10,
+        "jsonrpc": "2.0",
+        "method": "hew.component.promote",
+        "params": {
+          "component": "cmp_6",
+          "name": "Shelf"
+        }
+      },
+      "response": "not_linked",
+      "compare": "/error/data/refusal"
+    },
+    {
+      "compare": "/result/results/1/object_id",
+      "note": "the cleat",
+      "request": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "label": "cleat",
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.3,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  0.7,
+                  0.2,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.018,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response": "obj_9"
+    },
+    {
+      "note": "joining a linked copy with a world board asks first",
+      "request": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "method": "hew.solid.union",
+        "params": {
+          "a": "ins_3",
+          "b": "obj_9"
+        }
+      },
+      "response": {
+        "detail": {
+          "operands": [
+            "ins_3"
+          ]
+        },
+        "explanation": "An operand is a placement of shared geometry (a linked copy or a component). Joining it splits it from its other copies; pass \"unlink\": true to unlink and explode it first, or edit through its definition.",
+        "failed_index": 0,
+        "failed_method": "hew.solid.union",
+        "refusal": "would_unlink"
+      },
+      "compare": "/error/data"
+    },
+    {
+      "note": "with unlink: true the copy is exploded and joined; its sibling keeps the set",
+      "request": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "method": "hew.solid.union",
+        "params": {
+          "a": "ins_3",
+          "b": "obj_9",
+          "unlink": true
+        }
+      },
+      "response": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.solid.union",
+          "results": [
+            {
+              "result": "obj_b",
+              "unlinked": [
+                "ins_3"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "the set's other placements are untouched",
+      "request": {
+        "id": 14,
+        "jsonrpc": "2.0",
+        "method": "hew.query.occurrences",
+        "params": {
+          "kinds": [
+            "instance"
+          ]
+        }
+      },
+      "response": [
+        {
+          "definition": "cmp_6",
+          "definition_name": "Shelf",
+          "depth": 0,
+          "hidden": false,
+          "id": "ins_4",
+          "kind": "instance",
+          "linked": false,
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_7"
+            ]
+          },
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": "cmp_2",
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "ins_5",
+          "kind": "instance",
+          "linked": true,
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_1"
+            ]
+          },
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      ],
+      "compare": "/result/occurrences"
+    },
+    {
+      "note": "flip with copy: a mirrored linked placement of the joined board",
+      "request": {
+        "id": 15,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.flip",
+        "params": {
+          "ids": [
+            "obj_b"
+          ],
+          "axis": "x",
+          "copy": {}
+        }
+      },
+      "response": {
+        "id": 15,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.entity.flip",
+          "results": [
+            {
+              "ids": [
+                "ins_e"
+              ],
+              "linked": [
+                {
+                  "definition": "cmp_c",
+                  "instance": "ins_d",
+                  "source": "obj_b"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/occurrences",
+      "note": "the flipped copy reads mirrored",
+      "request": {
+        "id": 16,
+        "jsonrpc": "2.0",
+        "method": "hew.query.occurrences",
+        "params": {
+          "kinds": [
+            "instance"
+          ],
+          "roots": [
+            "ins_e"
+          ]
+        }
+      },
+      "response": [
+        {
+          "definition": "cmp_c",
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "ins_e",
+          "kind": "instance",
+          "linked": true,
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_b"
+            ]
+          },
+          "mirrored": true,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            -1.0,
+            0.0,
+            0.0,
+            0.7,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      ]
+    }
+  ]
+}
