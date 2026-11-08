@@ -604,3 +604,44 @@ describe('linked copy menu items parity', () => {
     expect(verbs).toEqual(expect.arrayContaining(['edit-unlink', 'edit-unlink-all']))
   })
 })
+
+/**
+ * Flip: the tool sits in the Tools menu beside Scale (covered by the tool
+ * parity checks above through TOOL_MENU_IDS), and Object ▸ Flip Along ▸
+ * Red / Green / Blue are gated native items in their own submenu, each
+ * dispatching to the action id the web menu and the palette use.
+ */
+describe('Flip Along menu items parity', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+  const ids = ['edit-flip-red', 'edit-flip-green', 'edit-flip-blue']
+
+  it.each(ids)('%s is a gated native item, attached to a submenu, with a dispatch arm', (id) => {
+    const binding = new RegExp(`let\\s+(\\w+)\\s*=\\s*gated_item\\(\\s*handle,\\s*&mut \\w+,\\s*"${id}"`).exec(source)
+    expect(binding, `no gated_item binding found for ${id}`).not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(source.includes(`.item(&${variable})`), `${id} is built but never attached to a submenu`).toBe(true)
+    expect(new RegExp(`"${id}"\\s*=>\\s*"${id}"`).test(source), `${id} has no dispatch arm`).toBe(true)
+    expect(source.includes(`&${variable},`), `${id} is not in the initial disable list`).toBe(true)
+  })
+
+  it('the Flip Along submenu is attached to the Object menu', () => {
+    expect(source).toMatch(/let\s+flip_along_menu\s*=\s*SubmenuBuilder::with_id\(handle,\s*"submenu:flip-along"/)
+    expect(source.includes('.item(&flip_along_menu)')).toBe(true)
+    expect(NATIVE_MENU_LABELS['submenu:flip-along']).toBeDefined()
+  })
+
+  it('the web menu and the palette offer the same actions', () => {
+    for (const id of ids) {
+      expect(menuBarSource.includes(`'${id}'`), `MenuBar lacks ${id}`).toBe(true)
+      expect(paletteEntries().map((e) => e.id)).toContain(id)
+      expect(NATIVE_MENU_LABELS[id], `no native label for ${id}`).toBeDefined()
+    }
+  })
+
+  it('the Flip tool has its native Tools item', () => {
+    expect(TOOL_MENU_IDS['Flip']).toBe('tool-flip')
+    expect(source).toMatch(/let\s+tool_flip\s*=\s*check_item\(/)
+    expect(source.includes('.item(&tool_flip)')).toBe(true)
+  })
+})

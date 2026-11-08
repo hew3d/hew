@@ -386,3 +386,24 @@ export function applyAffineLinear(
     affine[8] * v[0] + affine[9] * v[1] + affine[10] * v[2],
   ]
 }
+
+/**
+ * The reflection across the plane through `point` with normal `normal`
+ * (need not be unit): `p -> p - 2((p - point)·n)n`. The same matrix the
+ * kernel's `Transform::reflection` builds; `null` for a normal too short to
+ * name a direction.
+ */
+export function reflectionAffine(
+  point: readonly [number, number, number],
+  normal: readonly [number, number, number],
+): Affine | null {
+  const len = Math.hypot(normal[0], normal[1], normal[2])
+  if (!Number.isFinite(len) || len < 1e-12) return null
+  const n = [normal[0] / len, normal[1] / len, normal[2] / len]
+  const d = 2 * (point[0] * n[0] + point[1] * n[1] + point[2] * n[2])
+  return [
+    1 - 2 * n[0] * n[0], -2 * n[0] * n[1], -2 * n[0] * n[2], d * n[0],
+    -2 * n[1] * n[0], 1 - 2 * n[1] * n[1], -2 * n[1] * n[2], d * n[1],
+    -2 * n[2] * n[0], -2 * n[2] * n[1], 1 - 2 * n[2] * n[2], d * n[2],
+  ]
+}

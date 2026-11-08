@@ -262,6 +262,7 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   Move: 'tool-move',
   Rotate: 'tool-rotate',
   Scale: 'tool-scale',
+  Flip: 'tool-flip',
   'Tape Measure': 'tool-tape-measure',
   Dimension: 'tool-dimension',
   Protractor: 'tool-protractor',
@@ -2646,6 +2647,11 @@ export default function App() {
       canPlaceCopy: !componentFrameOpen && canPlaceInstance(selectedIds) && !linkedSelection,
       canExplode: canExplodeInstance(selectedIds),
       canMakeUnique: canMakeUnique(selectedIds) && !linkedSelection,
+      // Object ▸ Flip Along: anything that can move can flip (solids,
+      // groups, placements, and drawing).
+      canFlip: selectedIds.some(
+        (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance' || isSketchScopedKind(n.kind),
+      ),
       // Linked copies: Unlink / Unlink all / Make component (promote) on one
       // placement of a linked set, not while a component is open for editing.
       ...linkGates(scene, selectedIds, componentFrameOpen),
@@ -5964,6 +5970,7 @@ export default function App() {
       case 'tool-move':      setActiveTool('Move'); break
       case 'tool-rotate':    setActiveTool('Rotate'); break
       case 'tool-scale':     setActiveTool('Scale'); break
+      case 'tool-flip':      setActiveTool('Flip'); break
       case 'tool-tape-measure': setActiveTool('Tape Measure'); break
       case 'tool-dimension': setActiveTool('Dimension'); break
       case 'tool-protractor': setActiveTool('Protractor'); break
@@ -6086,6 +6093,9 @@ export default function App() {
       case 'edit-unlink': handleUnlink(false); break
       case 'edit-unlink-all': handleUnlink(true); break
       case 'edit-select-all-copies': handleSelectAllCopies(); break
+      case 'edit-flip-red': handleFlipAlong(0); break
+      case 'edit-flip-green': handleFlipAlong(1); break
+      case 'edit-flip-blue': handleFlipAlong(2); break
       case 'edit-union': handleBoolean(0); break
       case 'edit-subtract': handleBoolean(1); break
       case 'edit-intersect': handleBoolean(2); break
@@ -6894,6 +6904,9 @@ export default function App() {
       'edit-unlink': menuGates?.canUnlink ?? false,
       'edit-unlink-all': menuGates?.canUnlinkAll ?? false,
       'edit-select-all-copies': menuGates?.canUnlinkAll ?? false,
+      'edit-flip-red': menuGates?.canFlip ?? false,
+      'edit-flip-green': menuGates?.canFlip ?? false,
+      'edit-flip-blue': menuGates?.canFlip ?? false,
       'edit-paste-independent': menuGates?.clipboardHasContent ?? false,
       'edit-paste-linked': (menuGates?.clipboardHasContent ?? false) && !copiesLinked,
       'edit-union': menuGates?.canBoolean ?? false,
@@ -7598,6 +7611,14 @@ export default function App() {
     }
   }
 
+  /** Object ▸ Flip Along ▸ Red/Green/Blue: mirror the selection in place
+   *  across the plane through its center whose normal is that axis. The
+   *  copy toggle does not apply; the Flip tool makes copies. */
+  const handleFlipAlong = (axis: 0 | 1 | 2) => {
+    if (!(menuGates?.canFlip ?? false)) return
+    if (viewportApi.current?.runFlipAlong?.([...selectedIds], axis) != null) setDocRev((r) => r + 1)
+  }
+
   const handleMakeUnique = () => {
     if (selectedIds.length === 1 && selectedIds[0].kind === 'instance') {
       const kept = viewportApi.current?.runMakeUnique(selectedIds[0].id)
@@ -7758,6 +7779,7 @@ export default function App() {
           canUnlink: menuGates?.canUnlink ?? false,
           canUnlinkAll: menuGates?.canUnlinkAll ?? false,
           canPromote: menuGates?.canPromote ?? false,
+          canFlip: menuGates?.canFlip ?? false,
           canBoolean,
           canSaveSelectionToLibrary: menuGates?.canSaveSelectionToLibrary ?? false,
           canImport: !componentFrameOpen,
@@ -8965,6 +8987,7 @@ export default function App() {
           canUnlink: menuGates?.canUnlink ?? false,
           canUnlinkAll: menuGates?.canUnlinkAll ?? false,
           canPromote: menuGates?.canPromote ?? false,
+          canFlip: menuGates?.canFlip ?? false,
           canPasteLinked: (menuGates?.clipboardHasContent ?? false) && !copiesLinked,
           canBoolean: menuGates?.canBoolean ?? false,
           canSaveSelectionToLibrary: menuGates?.canSaveSelectionToLibrary ?? false,

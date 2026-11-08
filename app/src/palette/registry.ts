@@ -58,6 +58,8 @@ export type PaletteGate =
   | 'canUnlink'
   | 'canUnlinkAll'
   | 'canPromote'
+  /** Something that can be mirrored is selected (Flip Along). */
+  | 'canFlip'
   /** Paste linked is the explicit form only while copies default to independent. */
   | 'canPasteLinked'
   | 'canBoolean'
@@ -108,6 +110,7 @@ const TOOL_ACTION_ID: Record<ToolName, string> = {
   'Move': 'tool-move',
   'Rotate': 'tool-rotate',
   'Scale': 'tool-scale',
+  'Flip': 'tool-flip',
   'Tape Measure': 'tool-tape-measure',
   'Dimension': 'tool-dimension',
   'Protractor': 'tool-protractor',
@@ -140,6 +143,7 @@ const TOOL_DESCRIPTIONS: Record<ToolName, MessageDescriptor> = {
   'Move': msg`Translate the selection, with inference snapping.`,
   'Rotate': msg`Rotate the selection around an inferred axis.`,
   'Scale': msg`Resize the selection uniformly about its center.`,
+  'Flip': msg`Mirror the selection across a plane through its center or across a face, in place or as a copy.`,
   'Tape Measure': msg`Measure a distance, or create a parallel guide line.`,
   'Dimension': msg`Place a linear or radius/diameter dimension between snap points.`,
   'Protractor': msg`Measure an angle, or create an angular guide line.`,
@@ -242,6 +246,9 @@ function actionEntries(): PaletteEntry[] {
     { id: 'edit-unlink', label: t`Unlink`, description: t`Make the selected copy independent. The other copies stay linked.`, group: 'Actions', synonyms: [t`independent`, t`detach copy`], gate: 'canUnlink' },
     { id: 'edit-unlink-all', label: t`Unlink all`, description: t`Make every copy of the selected linked copy independent.`, group: 'Actions', synonyms: [t`independent copies`], gate: 'canUnlinkAll' },
     { id: 'edit-select-all-copies', label: t`Select all copies`, description: t`Select every copy linked to the selected one.`, group: 'Actions', synonyms: [t`linked copies`], gate: 'canUnlinkAll' },
+    { id: 'edit-flip-red', label: t`Flip Along Red`, description: t`Mirror the selection across the plane through its center, across the red axis.`, group: 'Actions', synonyms: [t`mirror`, t`flip x`], gate: 'canFlip' },
+    { id: 'edit-flip-green', label: t`Flip Along Green`, description: t`Mirror the selection across the plane through its center, across the green axis.`, group: 'Actions', synonyms: [t`mirror`, t`flip y`], gate: 'canFlip' },
+    { id: 'edit-flip-blue', label: t`Flip Along Blue`, description: t`Mirror the selection across the plane through its center, across the blue axis.`, group: 'Actions', synonyms: [t`mirror`, t`flip z`], gate: 'canFlip' },
     { id: 'edit-paste-independent', label: t`Paste independent`, description: t`Place a plain copy of the clipboard that is not linked to the original.`, group: 'Actions', synonyms: [t`paste new`, t`paste unlinked`], gate: 'clipboardHasContent' },
     { id: 'edit-paste-linked', label: t`Paste linked`, description: t`Place a copy of the clipboard that stays linked to the original.`, group: 'Actions', synonyms: [t`paste link`], gate: 'canPasteLinked' },
     { id: 'edit-union', label: t`Union`, description: t`Merge two selected solids into one (boolean add).`, group: 'Actions', synonyms: [t`boolean`, t`merge`, t`combine`, t`add`, t`join`], gate: 'canBoolean' },

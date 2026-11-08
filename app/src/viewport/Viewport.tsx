@@ -67,6 +67,7 @@ import { PositionTextureTool } from '../tools/PositionTextureTool'
 import { MoveTool } from '../tools/MoveTool'
 import { RotateTool } from '../tools/RotateTool'
 import { ScaleTool } from '../tools/ScaleTool'
+import { FlipTool, flipAlongAxis } from '../tools/FlipTool'
 import { TapeMeasureTool, type RescaleConfirmInfo, type SessionScopeIds } from '../tools/TapeMeasureTool'
 export type { RescaleConfirmInfo } from '../tools/TapeMeasureTool'
 import { ProtractorTool } from '../tools/ProtractorTool'
@@ -715,6 +716,10 @@ export interface ViewportApi {
   runExplodeInstance: (instanceId: bigint) => bigint[] | null
   /** Detach an instance onto a private copy of its definition. Returns the new component handle. */
   runMakeUnique: (instanceId: bigint) => bigint | null
+  /** Object ▸ Flip Along: mirror `nodes` in place across the plane through
+   *  their bounding box center whose normal is world axis `axis`. Selects
+   *  and returns the flipped nodes, or null on a refusal (toasted). */
+  runFlipAlong?: (nodes: NodeRef[], axis: 0 | 1 | 2) => NodeRef[] | null
   /**
    * Open an explode session on `instanceId` — bakes its definition's
    * members into world-owned geometry so the ordinary, unmodified tool set
@@ -5369,6 +5374,29 @@ export default function Viewport({
       }
     }
 
+    function runFlipAlong(nodes: NodeRef[], axis: 0 | 1 | 2): NodeRef[] | null {
+      const ctx = computeEditContext(wasmScene, activeContextRef.current)
+      const activeInstance = ctx.kind === 'instance' ? ctx.id : null
+      try {
+        const committed = flipAlongAxis(wasmScene, nodes, axis, activeInstance)
+        if (committed === null) {
+          handleToast(t`Nothing to flip`)
+          return null
+        }
+        handleSceneRefresh(touchedForNodes(committed))
+        sceneRenderer.refreshAllSketches()
+        if (committed.length === 1) onSelectRef.current?.(committed[0], 'replace')
+        else onSelectManyRef.current?.(committed, 'replace')
+        scheduleRender()
+        return committed
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        return null
+      }
+    }
+
     function runMakeUnique(instanceId: bigint): bigint | null {
       try {
         const _componentId = wasmScene.make_unique(instanceId)
@@ -7114,7 +7142,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => {
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runFlipAlong, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => {
         const isolation = isolationCtl.state()
         return isolation === null ? null : [...isolation.targets]
       }, collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getInstanceRenderedInherited: (id: bigint) => sceneRenderer.debugInstanceInherited(id), getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
@@ -7449,7 +7477,7 @@ export default function Viewport({
     // own copy state.
     const unsubscribeCopiesLinked = subscribeCopiesLinked(() => {
       const active = toolController.activeTool
-      if (active instanceof MoveTool || active instanceof RotateTool) {
+      if (active instanceof MoveTool || active instanceof RotateTool || active instanceof FlipTool) {
         // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
         renderer.domElement.style.cursor = cursorFor(active.name, copyBadgeText(active.currentCopyState(), getCopiesLinked()))
       }
@@ -7585,6 +7613,32 @@ export default function Viewport({
         handleToast,
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
         (text: string) => { onMeasurementRef.current?.(text) },
+      )
+      tool.setSelectionAcquirer(acquireTransformTargets)
+      applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
+      return tool
+    }
+
+    function makeFlipTool(): FlipTool {
+      const tool = new FlipTool(
+        wasmScene,
+        previewGroup,
+        sceneRenderer.objectsGroup,
+        [...selectedIdsRef.current],
+        (nodes, fullRefresh) => {
+          // A linked copy wraps its loose originals as sets, which removes
+          // world nodes: rebuild everything, not just the flipped nodes.
+          handleSceneRefresh(fullRefresh ? undefined : touchedForNodes(nodes))
+          sceneRenderer.refreshAllSketches()
+          if (nodes.length === 1) onSelectRef.current?.(nodes[0], 'replace')
+          else onSelectManyRef.current?.(nodes, 'replace')
+        },
+        handleToast,
+        (id: bigint) => sceneRenderer.getInstanceGroup(id),
+        (state) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
+          renderer.domElement.style.cursor = cursorFor('Flip', copyBadgeText(state, getCopiesLinked()))
+        },
       )
       tool.setSelectionAcquirer(acquireTransformTargets)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
@@ -8112,6 +8166,11 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeScaleTool())
+          break
+        case 'Flip':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeFlipTool())
           break
         case 'Tape Measure':
           cameraModeRef.current = false

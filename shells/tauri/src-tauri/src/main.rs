@@ -3455,6 +3455,32 @@ fn main() {
                 None,
                 None,
             )?;
+            // Flip Along ▸ Red / Green / Blue: mirror the selection in place
+            // across the plane through its center whose normal is that axis.
+            let edit_flip_red = gated_item(
+                handle,
+                &mut gated,
+                "edit-flip-red",
+                lbl!("edit-flip-red"),
+                None,
+                None,
+            )?;
+            let edit_flip_green = gated_item(
+                handle,
+                &mut gated,
+                "edit-flip-green",
+                lbl!("edit-flip-green"),
+                None,
+                None,
+            )?;
+            let edit_flip_blue = gated_item(
+                handle,
+                &mut gated,
+                "edit-flip-blue",
+                lbl!("edit-flip-blue"),
+                None,
+                None,
+            )?;
             let edit_union = gated_item(
                 handle,
                 &mut gated,
@@ -3490,6 +3516,9 @@ fn main() {
                 &edit_unlink,
                 &edit_unlink_all,
                 &edit_select_all_copies,
+                &edit_flip_red,
+                &edit_flip_green,
+                &edit_flip_blue,
                 &edit_paste_independent,
                 &edit_paste_linked,
                 &edit_union,
@@ -3540,6 +3569,12 @@ fn main() {
             let object_model_health =
                 MenuItemBuilder::with_id("object-model-health", lbl!("object-model-health"))
                     .build(handle)?;
+            let flip_along_menu =
+                SubmenuBuilder::with_id(handle, "submenu:flip-along", lbl!("submenu:flip-along"))
+                    .item(&edit_flip_red)
+                    .item(&edit_flip_green)
+                    .item(&edit_flip_blue)
+                    .build()?;
             let object_menu =
                 SubmenuBuilder::with_id(handle, "submenu:object", lbl!("submenu:object"))
                     .item(&edit_group)
@@ -3550,6 +3585,7 @@ fn main() {
                     .item(&edit_unlink)
                     .item(&edit_unlink_all)
                     .item(&edit_select_all_copies)
+                    .item(&flip_along_menu)
                     .item(&edit_place_copy)
                     .item(&edit_explode)
                     .item(&edit_save_selection_to_library)
@@ -3963,6 +3999,14 @@ fn main() {
                 Some("CmdOrCtrl+9"),
                 Some("S"),
             )?;
+            let tool_flip = check_item(
+                handle,
+                &mut checks,
+                "tool-flip",
+                lbl!("tool-flip"),
+                None,
+                None,
+            )?;
             let tool_pushpull = check_item(
                 handle,
                 &mut checks,
@@ -4064,6 +4108,7 @@ fn main() {
                     .item(&tool_move)
                     .item(&tool_rotate)
                     .item(&tool_scale)
+                    .item(&tool_flip)
                     .separator()
                     .item(&tool_pushpull)
                     .item(&tool_follow_me)
@@ -4677,6 +4722,9 @@ fn main() {
                 "edit-unlink" => "edit-unlink",
                 "edit-unlink-all" => "edit-unlink-all",
                 "edit-select-all-copies" => "edit-select-all-copies",
+                "edit-flip-red" => "edit-flip-red",
+                "edit-flip-green" => "edit-flip-green",
+                "edit-flip-blue" => "edit-flip-blue",
                 "edit-union" => "edit-union",
                 "edit-subtract" => "edit-subtract",
                 "edit-intersect" => "edit-intersect",
@@ -4707,6 +4755,7 @@ fn main() {
                 "tool-move" => "tool-move",
                 "tool-rotate" => "tool-rotate",
                 "tool-scale" => "tool-scale",
+                "tool-flip" => "tool-flip",
                 "tool-pushpull" => "tool-pushpull",
                 "tool-follow-me" => "tool-follow-me",
                 "tool-offset" => "tool-offset",

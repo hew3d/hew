@@ -21,13 +21,14 @@ Tool shortcuts are plain letters, the same on every platform, matching SketchUp'
 | Move | `M` |
 | Rotate | `Q` |
 | Scale | `S` |
+| Flip | — |
 | Tape Measure | `T` |
 | Paint | `B` |
 | Orbit | `O` |
 | Pan | `H` |
 | Zoom | `Z` |
 
-Polygon, Protractor, Slice, Section Plane, and Edit Vertex have no default key, same as in SketchUp — reach them via the Draw/Tools menu or the command palette. On macOS the menus also display `⌘`-combination accelerators beside the tools; those work too, but the letters above are the ones worth learning.
+Polygon, Flip, Protractor, Slice, Section Plane, and Edit Vertex have no default key, same as in SketchUp — reach them via the Draw/Tools menu or the command palette. On macOS the menus also display `⌘`-combination accelerators beside the tools; those work too, but the letters above are the ones worth learning.
 
 ## Commands
 

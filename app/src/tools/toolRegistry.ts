@@ -73,6 +73,9 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Move', label: msg({ context: 'tool', message: 'Move' }), group: 'Modify', macKey: 'M', winKey: 'M' },
   { name: 'Rotate', label: msg({ context: 'tool', message: 'Rotate' }), group: 'Modify', macKey: 'Q', winKey: 'Q' },
   { name: 'Scale', label: msg({ context: 'tool', message: 'Scale' }), group: 'Modify', macKey: 'S', winKey: 'S' },
+  // Flip: SketchUp has no Flip tool key (Flip Along lives on the context
+  // menu), so none here either.
+  { name: 'Flip', label: msg({ context: 'tool', message: 'Flip' }), group: 'Modify', macKey: '', winKey: '' },
   // ---- Inspect ----
   { name: 'Tape Measure', label: msg`Tape Measure`, group: 'Inspect', macKey: 'T', winKey: 'T' },
   // Dimension: SketchUp's own Dimension tool has no default bare-letter key

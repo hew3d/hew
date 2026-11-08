@@ -1545,6 +1545,64 @@ fn linked_result_json(roots: &[NodeId], change: &kernel::DocChange) -> String {
     serde_json::json!({ "nodes": nodes, "linked": linked }).to_string()
 }
 
+/// The flip arguments checked at the trust boundary: parallel node lists,
+/// finite numbers in every slot (the unused `about` too), and an
+/// `about_kind` of 0 (center), 1 (origin), or 2 (the point `about`).
+#[allow(clippy::type_complexity)]
+fn flip_args(
+    kinds: &[u8],
+    ids: &[u64],
+    sketch_ids: &[u64],
+    normal: [f64; 3],
+    about_kind: u8,
+    about: [f64; 3],
+) -> Result<
+    (
+        Vec<NodeId>,
+        Vec<kernel::SketchId>,
+        kernel::Vec3,
+        kernel::FlipAbout,
+    ),
+    ApiError,
+> {
+    if kinds.len() != ids.len() {
+        return Err(ApiError(
+            "BadNodeList: kinds and ids must be the same length".to_string(),
+        ));
+    }
+    let nodes = kinds
+        .iter()
+        .zip(ids)
+        .map(|(&k, &i)| node_id(k, i))
+        .collect::<Result<Vec<_>, _>>()?;
+    let sketches: Vec<_> = sketch_ids.iter().map(|&s| sketch_id(s)).collect();
+    if normal.iter().any(|v| !v.is_finite()) {
+        return Err(ApiError::new("BadFlip", "the plane normal must be finite"));
+    }
+    // Checked whatever `about_kind` says: a recording writes every slot, and
+    // a non-finite number there would not replay.
+    if about.iter().any(|v| !v.is_finite()) {
+        return Err(ApiError::new("BadFlip", "the plane point must be finite"));
+    }
+    let about = match about_kind {
+        0 => kernel::FlipAbout::Center,
+        1 => kernel::FlipAbout::Origin,
+        2 => kernel::FlipAbout::Point(kernel::Point3::new(about[0], about[1], about[2])),
+        _ => {
+            return Err(ApiError::new(
+                "BadFlip",
+                "about_kind must be 0 (center), 1 (origin), or 2 (a point)",
+            ));
+        }
+    };
+    Ok((
+        nodes,
+        sketches,
+        kernel::Vec3::new(normal[0], normal[1], normal[2]),
+        about,
+    ))
+}
+
 fn node_js(node: NodeId) -> NodeJs {
     match node {
         NodeId::Object(id) => NodeJs {
@@ -5951,6 +6009,138 @@ impl Scene {
             linked,
         });
         Ok((roots, change))
+    }
+
+    /// The mirror Flip applies, as 12 floats (row-major 3x4): the
+    /// reflection across the plane with normal `(nx, ny, nz)` through the
+    /// point `about_kind` picks — 0 the center of the selection's world
+    /// bounds (the nodes' leaf geometry with the listed sketches), 1 the
+    /// world origin, 2 the point `(ax, ay, az)` (ignored otherwise). The
+    /// kernel's [`kernel::Document::flip_matrix`]; nothing changes.
+    ///
+    /// # Errors
+    /// - `BadNodeList` — `kinds` and `ids` differ in length or name a bad
+    ///   kind.
+    /// - `BadFlip` — a non-finite value in any slot (the `about` point
+    ///   included when it is unused), or `about_kind` above 2.
+    /// - `EmptySelection` — nothing listed (or, for the center, nothing
+    ///   listed has geometry).
+    /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance`/`UnknownSketch`
+    ///   — a stale, deleted, or non-world handle.
+    /// - `Singular` — the normal is zero.
+    #[allow(clippy::too_many_arguments)]
+    pub fn flip_matrix(
+        &self,
+        kinds: &[u8],
+        ids: &[u64],
+        sketch_ids: &[u64],
+        nx: f64,
+        ny: f64,
+        nz: f64,
+        about_kind: u8,
+        ax: f64,
+        ay: f64,
+        az: f64,
+    ) -> Result<Vec<f64>, ApiError> {
+        let (nodes, sketches, normal, about) = flip_args(
+            kinds,
+            ids,
+            sketch_ids,
+            [nx, ny, nz],
+            about_kind,
+            [ax, ay, az],
+        )?;
+        let m = self
+            .doc
+            .flip_matrix(&nodes, &sketches, normal, about)
+            .map_err(doc_err)?;
+        Ok(m.to_affine().to_vec())
+    }
+
+    /// Flip: mirror the selection across the plane [`Scene::flip_matrix`]
+    /// names, as ONE undoable step. `copy` 0 flips in place (objects and
+    /// sketches bake the reflection, instances take a mirrored pose) and
+    /// returns the listed nodes, same handles. `copy` 1 makes a linked
+    /// mirrored copy (each Object or Group wrapped as its own set, the copy
+    /// a placement at the mirrored pose) and 2 an independent one; both
+    /// return the new nodes and copy only the nodes — listed sketches still
+    /// count toward the center, and the app copies drawing itself with
+    /// [`Scene::flip_matrix`]'s matrix. A linked copy wraps its loose
+    /// sources, so a caller holding their ids refreshes the whole tree.
+    ///
+    /// # Errors
+    /// As [`Scene::flip_matrix`], plus `BadFlip` for `copy` above 2, then
+    /// the kernel's refusals for [`kernel::Document::flip_nodes`] and
+    /// [`kernel::Document::flip_copy`]. On error the document is untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn flip_selection(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        sketch_ids: &[u64],
+        nx: f64,
+        ny: f64,
+        nz: f64,
+        about_kind: u8,
+        ax: f64,
+        ay: f64,
+        az: f64,
+        copy: u8,
+    ) -> Result<Vec<NodeJs>, ApiError> {
+        self.ensure_not_busy()?;
+        let (nodes, sketches, normal, about) = flip_args(
+            kinds,
+            ids,
+            sketch_ids,
+            [nx, ny, nz],
+            about_kind,
+            [ax, ay, az],
+        )?;
+        let (roots, change) = match copy {
+            0 => {
+                let change = self
+                    .doc
+                    .flip_nodes(&nodes, &sketches, normal, about)
+                    .map_err(doc_err)?;
+                (nodes, change)
+            }
+            1 | 2 => {
+                // The sketches count toward the center in both modes; the
+                // copy itself is of the nodes only. Any point of the mirror
+                // plane names it: half the reflection's translation is one.
+                let m = self
+                    .doc
+                    .flip_matrix(&nodes, &sketches, normal, about)
+                    .map_err(doc_err)?;
+                let a = m.to_affine();
+                let on_plane = kernel::Point3::new(a[3] * 0.5, a[7] * 0.5, a[11] * 0.5);
+                let policy = if copy == 1 {
+                    kernel::LinkPolicy::Linked
+                } else {
+                    kernel::LinkPolicy::Independent
+                };
+                self.doc
+                    .flip_copy(&nodes, normal, kernel::FlipAbout::Point(on_plane), policy)
+                    .map_err(doc_err)?
+            }
+            _ => {
+                return Err(ApiError::new(
+                    "BadFlip",
+                    "copy must be 0 (flip), 1 (linked copy), or 2 (independent copy)",
+                ));
+            }
+        };
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FlipSelection {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            sketch_ids: sketch_ids.to_vec(),
+            normal: [nx, ny, nz],
+            about_kind,
+            about: [ax, ay, az],
+            copy,
+        });
+        Ok(roots.into_iter().map(node_js).collect())
     }
 
     /// The ceiling [`Scene::duplicate_selection_array`] enforces on `count`
@@ -12246,6 +12436,29 @@ impl Scene {
                 WrapLinked { kind, id } => {
                     self.wrap_linked(kind, id)?;
                 }
+                FlipSelection {
+                    kinds,
+                    ids,
+                    sketch_ids,
+                    normal,
+                    about_kind,
+                    about,
+                    copy,
+                } => {
+                    self.flip_selection(
+                        &kinds,
+                        &ids,
+                        &sketch_ids,
+                        normal[0],
+                        normal[1],
+                        normal[2],
+                        about_kind,
+                        about[0],
+                        about[1],
+                        about[2],
+                        copy,
+                    )?;
+                }
                 SetLinked { component, linked } => {
                     self.set_linked(component, linked)?;
                 }
@@ -15722,6 +15935,192 @@ mod tests {
         let golden = scene.state_hash();
         let json = scene.take_recording();
         assert!(json.contains("duplicate_selection_placements"));
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        recording::reset();
+    }
+
+    #[test]
+    fn flip_selection_copy_modes_return_the_right_nodes() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square_at(&mut scene, 2.0, 0.0);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        // In place: the same handle back, mirrored across x = 0.
+        let flipped = scene
+            .flip_selection(&[0], &[o], &[], 1.0, 0.0, 0.0, 1, 0.0, 0.0, 0.0, 0)
+            .unwrap();
+        assert_eq!(flipped.len(), 1);
+        assert_eq!((flipped[0].kind.as_str(), flipped[0].id), ("object", o));
+        let b = scene.object_bounds(o, None).unwrap();
+        assert!((b[0] + 3.0).abs() < 1e-12 && (b[3] + 2.0).abs() < 1e-12);
+        // A linked copy: a new placement with a mirrored pose; the board is
+        // wrapped, so it is no longer a world object.
+        let linked = scene
+            .flip_selection(&[0], &[o], &[], 1.0, 0.0, 0.0, 1, 0.0, 0.0, 0.0, 1)
+            .unwrap();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].kind, "instance");
+        let pose = scene.instance_pose(linked[0].id).unwrap();
+        let det = pose[0] * (pose[5] * pose[10] - pose[6] * pose[9])
+            - pose[1] * (pose[4] * pose[10] - pose[6] * pose[8])
+            + pose[2] * (pose[4] * pose[9] - pose[5] * pose[8]);
+        assert!(det < 0.0, "a mirrored placement");
+        assert!(!scene.object_ids().contains(&o));
+        scene.scene_undo().unwrap();
+        assert!(
+            scene.object_ids().contains(&o),
+            "one undo returns the loose board"
+        );
+        // An independent copy: a new object.
+        let indep = scene
+            .flip_selection(&[0], &[o], &[], 0.0, 1.0, 0.0, 0, 0.0, 0.0, 0.0, 2)
+            .unwrap();
+        assert_eq!(indep.len(), 1);
+        assert_eq!(indep[0].kind, "object");
+        assert_ne!(indep[0].id, o);
+        assert_eq!(scene.object_ids().len(), 2);
+        // Refusals at the boundary mutate nothing.
+        let hash = scene.state_hash();
+        for (about_kind, copy, nx) in [(3, 0, 1.0), (0, 3, 1.0), (0, 0, f64::NAN)] {
+            let err = scene
+                .flip_selection(
+                    &[0],
+                    &[o],
+                    &[],
+                    nx,
+                    0.0,
+                    0.0,
+                    about_kind,
+                    0.0,
+                    0.0,
+                    0.0,
+                    copy,
+                )
+                .unwrap_err();
+            assert!(err.0.starts_with("BadFlip"), "got {}", err.0);
+        }
+        let err = scene
+            .flip_selection(&[0, 0], &[o], &[], 1.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
+        let err = scene
+            .flip_selection(&[], &[], &[], 1.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0)
+            .unwrap_err();
+        assert!(err.0.starts_with("EmptySelection"), "got {}", err.0);
+        let err = scene
+            .flip_selection(&[0], &[o], &[], 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0)
+            .unwrap_err();
+        assert!(err.0.starts_with("Singular"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), hash);
+    }
+
+    #[test]
+    fn flip_refuses_a_non_finite_about_point_even_when_unused() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square_at(&mut scene, 2.0, 0.0);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let hash = scene.state_hash();
+        for about_kind in [0u8, 1, 2] {
+            for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let err = scene
+                    .flip_selection(&[0], &[o], &[], 1.0, 0.0, 0.0, about_kind, 0.0, bad, 0.0, 0)
+                    .unwrap_err();
+                assert!(err.0.starts_with("BadFlip"), "got {}", err.0);
+                let err = scene
+                    .flip_matrix(&[0], &[o], &[], 1.0, 0.0, 0.0, about_kind, bad, 0.0, 0.0)
+                    .unwrap_err();
+                assert!(err.0.starts_with("BadFlip"), "got {}", err.0);
+            }
+        }
+        assert_eq!(scene.state_hash(), hash, "refusals mutate nothing");
+        // Only what landed is recorded, so the recording replays.
+        scene
+            .flip_selection(&[0], &[o], &[], 1.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0)
+            .unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(!json.contains("null"), "no unreplayable values: {json}");
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        recording::reset();
+    }
+
+    #[test]
+    fn flip_matrix_matches_the_kernel_matrix() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square_at(&mut scene, 2.0, 1.0);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let id = node_id(0, o).unwrap();
+        for (about_kind, about, normal) in [
+            (0u8, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            (1, [0.0, 0.0, 0.0], [0.0, 2.0, 0.0]),
+            (2, [1.0, 2.0, 3.0], [1.0, 1.0, 1.0]),
+        ] {
+            let got = scene
+                .flip_matrix(
+                    &[0],
+                    &[o],
+                    &[],
+                    normal[0],
+                    normal[1],
+                    normal[2],
+                    about_kind,
+                    about[0],
+                    about[1],
+                    about[2],
+                )
+                .unwrap();
+            let which = match about_kind {
+                0 => kernel::FlipAbout::Center,
+                1 => kernel::FlipAbout::Origin,
+                _ => kernel::FlipAbout::Point(kernel::Point3::new(about[0], about[1], about[2])),
+            };
+            let want = scene
+                .doc
+                .flip_matrix(
+                    &[id],
+                    &[],
+                    kernel::Vec3::new(normal[0], normal[1], normal[2]),
+                    which,
+                )
+                .unwrap()
+                .to_affine();
+            assert_eq!(got, want.to_vec());
+        }
+        // The center of a unit square at (2, 1): the x plane is x = 2.5.
+        let m = scene
+            .flip_matrix(&[0], &[o], &[], 1.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0)
+            .unwrap();
+        assert!((m[0] + 1.0).abs() < 1e-12 && (m[3] - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_flip_recording_replays_to_the_same_state_hash() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let (s3, r3) = ground_unit_square_at(&mut scene, 9.0, 0.0);
+        let q = scene.extrude_region(s3, r3, 1.0).unwrap();
+        scene
+            .flip_selection(&[0], &[o], &[], 0.0, 0.0, 1.0, 0, 0.0, 0.0, 0.0, 0)
+            .unwrap();
+        scene
+            .flip_selection(&[0], &[p], &[], 1.0, 0.0, 0.0, 2, 7.0, 0.0, 0.0, 1)
+            .unwrap();
+        scene
+            .flip_selection(&[0], &[q], &[], 0.0, 1.0, 0.0, 1, 0.0, 0.0, 0.0, 2)
+            .unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("flip_selection"));
         let mut replayed = Scene::new();
         assert_eq!(replayed.replay(&json).unwrap(), golden);
         recording::reset();
