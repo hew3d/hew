@@ -46,13 +46,15 @@ rm -rf "$taproot"
 mkdir -p "$taproot/Casks"
 cp "$here/homebrew/Casks/hew.rb" "$taproot/Casks/hew.rb"
 
+# Homebrew 6 and later load nothing from a tap that has not been trusted
+# (docs.brew.sh/Tap-Trust), and `brew audit` loads the cask just as
+# `brew install` does; trust this one cask, not the tap, before either
+# runs, and take the trust back in cleanup. Older brews have no `trust`
+# command and need none.
+if brew trust --cask "$cask" >/dev/null 2>&1; then trusted=true; fi
+
 brew style --cask "$cask"
 brew audit --cask --strict --online "$cask"
-
-# Homebrew 6 and later load nothing from a tap that has not been trusted
-# (docs.brew.sh/Tap-Trust); trust this one cask, not the tap, and take the
-# trust back in cleanup. Older brews have no `trust` command and need none.
-if brew trust --cask "$cask" >/dev/null 2>&1; then trusted=true; fi
 
 brew install --cask "$cask"
 cli="$(brew --prefix)/bin/hew-cli"
