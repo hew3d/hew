@@ -240,6 +240,18 @@ export const setMeasurementsPosition = measurementsPosition.set
 export const subscribeMeasurementsPosition = measurementsPosition.subscribe
 
 // ---------------------------------------------------------------------------
+// Part axes
+// ---------------------------------------------------------------------------
+
+/** View ▸ Part Axes: draw the frame of the selected or edited component. */
+const showPartAxes = makeSetting<boolean>(
+  'hew.settings.showPartAxes', 'showPartAxes', false, parseBool, String,
+)
+export const getShowPartAxes = showPartAxes.get
+export const setShowPartAxes = showPartAxes.set
+export const subscribeShowPartAxes = showPartAxes.subscribe
+
+// ---------------------------------------------------------------------------
 // Outliner sort
 // ---------------------------------------------------------------------------
 

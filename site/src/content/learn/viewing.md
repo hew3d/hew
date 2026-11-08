@@ -121,3 +121,5 @@ Only one section plane exists at a time — placing a new one replaces whichever
 ## Reading the axes
 
 The world axes use the conventional colors (**X red, Y green, Z blue**), drawn solid in the positive direction and dashed in the negative. Inference cues reuse these colors: when a drawing or move operation locks to an axis, the cue and preview take on that axis's color. Hew is a Z-up application: "up" in your model is the blue axis.
+
+**View ▸ Part Axes** draws the same three colors on the part you have selected, so you can see which way its length runs. Select a component (or step into one) and a small red, green, and blue triad appears at its origin, tilted with it and staying the same size on screen as you zoom. A loose object with no axes of its own shows nothing. The setting is off by default and is remembered between sessions.

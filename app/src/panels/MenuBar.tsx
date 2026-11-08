@@ -172,6 +172,9 @@ export interface MenuBarProps {
   onToggleWireframe?: () => void
   /** Toggle the world axes. */
   onToggleAxes?: () => void
+  /** Whether part axes are drawn for the selected or edited component (View ▸ Part Axes). */
+  showPartAxes?: boolean
+  onTogglePartAxes?: () => void
   /** Reset the movable drawing axes to world identity (View ▸ Reset Drawing Axes). */
   onResetAxes?: () => void
   /** Toggle the ground grid. */
@@ -771,6 +774,8 @@ export function MenuBar({
   showGrid = true,
   showGuides = true,
   onToggleAxes,
+  showPartAxes = false,
+  onTogglePartAxes,
   onResetAxes,
   onToggleGrid,
   xray = false,
@@ -1170,6 +1175,11 @@ export function MenuBar({
               label={t`Axes`}
               checked={showAxes}
               onClick={withClose(() => onToggleAxes?.())}
+            />
+            <CheckMenuItem
+              label={t`Part Axes`}
+              checked={showPartAxes}
+              onClick={withClose(() => onTogglePartAxes?.())}
             />
             <MenuItem
               label={t`Reset Drawing Axes`}

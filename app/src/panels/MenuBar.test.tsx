@@ -528,6 +528,18 @@ describe('MenuBar', () => {
     expect(onToggleAxes).toHaveBeenCalledOnce()
   })
 
+  it('view_menu_has_a_part_axes_check_item', () => {
+    const onTogglePartAxes = vi.fn()
+    const { rerender } = render(<MenuBar {...defaultProps} showPartAxes={false} onTogglePartAxes={onTogglePartAxes} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    expect(screen.getByText('Part Axes').closest('div')?.textContent).not.toContain('✓')
+    fireEvent.mouseDown(screen.getByText('Part Axes'))
+    expect(onTogglePartAxes).toHaveBeenCalledOnce()
+    rerender(<MenuBar {...defaultProps} showPartAxes={true} onTogglePartAxes={onTogglePartAxes} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    expect(screen.getByText('Part Axes').closest('div')?.textContent).toContain('✓')
+  })
+
   it('calls onResetAxes when View > Reset Drawing Axes is mousedown-clicked', () => {
     // Reset Axes shipped as a web-only MenuBar item with no native-menu
     // counterpart, making it unreachable on macOS (finding 1, tool-parity

@@ -3609,6 +3609,15 @@ fn main() {
                 None,
                 None,
             )?;
+            // Part Axes: the frame of the selected or edited component.
+            let view_part_axes = check_item(
+                handle,
+                &mut checks,
+                "view-part-axes",
+                lbl!("view-part-axes"),
+                None,
+                None,
+            )?;
             // Reset the movable drawing axes (tool-parity §4) back to world
             // identity — a plain action, not a checkable toggle like Axes/
             // Grid/Guides above, so it's built with `MenuItemBuilder`
@@ -3842,6 +3851,7 @@ fn main() {
 
             let view_menu = SubmenuBuilder::with_id(handle, "submenu:view", lbl!("submenu:view"))
                 .item(&view_axes)
+                .item(&view_part_axes)
                 .item(&view_reset_axes)
                 .item(&view_grid)
                 .item(&view_guides)
@@ -4731,6 +4741,7 @@ fn main() {
                 "object-make-solid" => "make-solid",
                 "object-model-health" => "model-health",
                 "view-axes" => "toggle-axes",
+                "view-part-axes" => "toggle-part-axes",
                 "view-reset-axes" => "reset-axes",
                 "view-grid" => "toggle-grid",
                 "view-guides" => "toggle-guides",

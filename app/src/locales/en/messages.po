@@ -6002,6 +6002,11 @@ msgstr "Part"
 msgid "PART"
 msgstr "PART"
 
+#: src/i18n/nativeMenu.ts
+#: src/panels/MenuBar.tsx
+msgid "Part Axes"
+msgstr "Part Axes"
+
 #: src/tools/CircleTool.ts
 msgid "Part of the circle is too thin to make a face, so it stays as drawing. Move it a little so it sits clear, or draw it larger."
 msgstr "Part of the circle is too thin to make a face, so it stays as drawing. Move it a little so it sits clear, or draw it larger."
@@ -7621,6 +7626,10 @@ msgid "Show or hide construction guides."
 msgstr "Show or hide construction guides."
 
 #: src/palette/registry.ts
+msgid "Show or hide the axes of the selected components and parts."
+msgstr "Show or hide the axes of the selected components and parts."
+
+#: src/palette/registry.ts
 msgid "Show or hide the Changes panel — this session’s undo/redo entries since the last save."
 msgstr "Show or hide the Changes panel — this session’s undo/redo entries since the last save."
 
@@ -9094,6 +9103,10 @@ msgstr "Toggle Model Info"
 #: src/palette/registry.ts
 msgid "Toggle Object Info"
 msgstr "Toggle Object Info"
+
+#: src/palette/registry.ts
+msgid "Toggle Part Axes"
+msgstr "Toggle Part Axes"
 
 #: src/palette/registry.ts
 msgid "Toggle Scenes"

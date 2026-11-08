@@ -413,6 +413,16 @@ below.
   `Transform::reflection`, `Document::world_bounds`, `flip_matrix`,
   `flip_nodes`, `flip_copy`; wasm `flip_matrix`, `flip_selection`
   (recorded). No shortcut, as in SketchUp
+- Part Axes (C12): View ▸ Part Axes draws the frame of the selected or edited
+  component (an origin mark and red/green/blue arms of constant screen
+  length) and, for a selected Object or group with a `hew.part.frame`
+  override, a triad at that frame; at most 20 at once, hidden from prints.
+  Off by default; an app-wide setting kept in localStorage as
+  `hew.settings.showPartAxes` and synced across windows; menu id
+  `view-part-axes`. A component nested in another draws only when its owner
+  has one placement; hidden nodes draw none. Limit: override frames of
+  Objects inside an entered component are not drawn. App-only
+  (`viewport/partAxes.ts`). No shortcut
 - Delete for objects, groups, instances, and guides
 - Drawing directly on a solid's face splits it and supports bosses/recesses,
   following the same "sticky geometry" rules SketchUp users already know
