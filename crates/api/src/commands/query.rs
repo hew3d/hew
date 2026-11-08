@@ -1199,22 +1199,20 @@ fn measure(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         (None, Some(path)) => locate::resolve_occurrence_path(ctx, path)?,
         _ => unreachable!("exactly one subject form"),
     };
-    measure_solid(ctx, occ)
+    measure_result(ctx.doc, occ)
 }
 
 /// Volume, area, and world-axis bounding box of one placement and
 /// everything under it. A hidden part still measures (a measure is not a
 /// view).
-fn measure_solid(ctx: &Ctx, occ: kernel::Occurrence) -> Result<Value, CmdError> {
-    let leaves = ctx
-        .doc
-        .render_root_leaves(&locate::RenderRoot::Occurrence(occ), true)?;
+pub fn measure_result(doc: &kernel::Document, occ: kernel::Occurrence) -> Result<Value, CmdError> {
+    let leaves = doc.render_root_leaves(&locate::RenderRoot::Occurrence(occ), true)?;
     let mut volume: Option<f64> = None;
     let mut area = 0.0;
     let mut open_leaves = 0usize;
     let mut points: Vec<Point3> = Vec::new();
     for (oid, pose, _path) in &leaves {
-        let Some(obj) = ctx.doc.object(*oid) else {
+        let Some(obj) = doc.object(*oid) else {
             continue;
         };
         match obj.volume() {

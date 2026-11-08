@@ -235,6 +235,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   RebaseDuringSession: msg`Finish editing the component before changing its axes.`,
   NotPlaced: msg`That part is no longer in the model. Pick it again.`,
   NoPartFrame: msg`That part has no faces to measure.`,
+  NoGeometry: msg`There is nothing in that selection to measure.`,
   GroupedOperand:
     msg`This operation can't target an object inside a group. Ungroup it, or leave the group context, first.`,
   BooleanOperandHasInstance:

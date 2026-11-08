@@ -306,6 +306,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "RebaseDuringSession" => "Finish editing the component before changing its axes.",
         "NotPlaced" => "That part is no longer in the model. Pick it again.",
         "NoPartFrame" => "That part has no faces to measure.",
+        "NoGeometry" => "There is nothing in that selection to measure.",
         "GroupedOperand" => {
             "This operation can't target an object inside a group. Ungroup it, or leave the group context, first."
         }

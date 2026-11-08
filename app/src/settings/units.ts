@@ -555,6 +555,68 @@ export function formatLengthIn(
   return feet === 0 ? `${tilde}${sign}${inchesPart}` : `${tilde}${sign}${feetPart} ${inchesPart}`
 }
 
+// ---------------------------------------------------------------------------
+// Area and volume (display only; the kernel is in meters)
+// ---------------------------------------------------------------------------
+
+/** Decimals for an area or volume: the saved precision when it counts
+ * decimals (metric and decimal inches), else 2 — a fraction is never shown
+ * for an area or a volume. */
+function areaVolumeDecimals(format: LengthFormat, precision: Precision | undefined): number {
+  const p = precision !== undefined && isValidPrecision(format, precision) ? precision : getPrecision(format)
+  if (typeof p === 'number' && (LENGTH_SYSTEM_OF[format] === 'metric' || format === 'dec_in')) return p
+  return 2
+}
+
+/** Rounding smaller than this (in the shown unit) is not marked with `~`. */
+const ROUND_TRIP_AREA_VOLUME = 1e-6
+
+/** `value` in the small unit, or in the large unit once the rounded small
+ * value reaches `smallPerLarge` (so 999.999 cm² reads 0.1 m², not 1000 cm²). */
+function pickAreaVolumeUnit(
+  small: number,
+  smallPerLarge: number,
+  decimals: number,
+  smallLabel: string,
+  largeLabel: string,
+): string {
+  const rounded = Math.round(small * 10 ** decimals) / 10 ** decimals
+  const useLarge = rounded >= smallPerLarge
+  const n = useLarge ? small / smallPerLarge : small
+  // Same rule as a length readout: a rounded value is marked with `~`.
+  const shown = Math.round(n * 10 ** decimals) / 10 ** decimals
+  const mark = Math.abs(shown - n) > ROUND_TRIP_AREA_VOLUME ? '~' : ''
+  return `${mark}${formatNumber(n, { maxFractionDigits: decimals, grouping: false })} ${useLarge ? largeLabel : smallLabel}`
+}
+
+/* oxlint-disable lingui/no-unlocalized-strings -- unit symbols */
+/**
+ * An area (square meters) as text in the display system: metric shows cm²
+ * below 1 m² and m² above; imperial shows in² below 1 ft² and ft² above.
+ */
+export function formatAreaIn(m2: number, format: LengthFormat, precision?: Precision): string {
+  if (!Number.isFinite(m2)) return '\u2014'
+  const decimals = areaVolumeDecimals(format, precision)
+  if (LENGTH_SYSTEM_OF[format] === 'metric') {
+    return pickAreaVolumeUnit(m2 * 1e4, 1e4, decimals, 'cm\u00b2', 'm\u00b2')
+  }
+  return pickAreaVolumeUnit(m2 / (METERS_PER_INCH * METERS_PER_INCH), INCHES_PER_FOOT ** 2, decimals, 'in\u00b2', 'ft\u00b2')
+}
+
+/**
+ * A volume (cubic meters) as text in the display system: metric shows cm³
+ * below 1 m³ and m³ above; imperial shows in³ below 1 ft³ and ft³ above.
+ */
+export function formatVolumeIn(m3: number, format: LengthFormat, precision?: Precision): string {
+  if (!Number.isFinite(m3)) return '\u2014'
+  const decimals = areaVolumeDecimals(format, precision)
+  if (LENGTH_SYSTEM_OF[format] === 'metric') {
+    return pickAreaVolumeUnit(m3 * 1e6, 1e6, decimals, 'cm\u00b3', 'm\u00b3')
+  }
+  return pickAreaVolumeUnit(m3 / METERS_PER_INCH ** 3, INCHES_PER_FOOT ** 3, decimals, 'in\u00b3', 'ft\u00b3')
+}
+/* oxlint-enable lingui/no-unlocalized-strings */
+
 /** Format meters using the CURRENT singleton format. */
 export function formatLength(meters: number): string {
   return formatLengthIn(meters, currentFormat)

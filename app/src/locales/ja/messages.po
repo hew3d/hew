@@ -5333,6 +5333,10 @@ msgstr ""
 msgid "Not available in the browser build yet."
 msgstr ""
 
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Not closed"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "note"
 msgstr ""
@@ -7696,7 +7700,20 @@ msgstr ""
 
 #. Library list column header
 #: src/panels/library/LibraryListHead.tsx
+#: src/panels/ObjectInfoPanel.tsx
 msgid "Size"
+msgstr ""
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Size along the part axes (from its largest face)"
+msgstr ""
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Size along the part axes (set on this part)"
+msgstr ""
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Size along the world axes"
 msgstr ""
 
 #: src/panels/ObjectInfoPanel.tsx
@@ -7944,6 +7961,10 @@ msgstr ""
 #: src/panels/MenuBar.tsx
 #: src/viewport/placementBoolean.ts
 msgid "Subtract"
+msgstr ""
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Surface area"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -8679,6 +8700,10 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "There is no drawing step in progress to finish."
+msgstr ""
+
+#: src/kernelErrors.ts
+msgid "There is nothing in that selection to measure."
 msgstr ""
 
 #: src/App.tsx
@@ -9563,6 +9588,10 @@ msgstr ""
 
 #: src/scenes/scenesModel.ts
 msgid "Visible tags"
+msgstr ""
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Volume"
 msgstr ""
 
 #. One-letter label for the width of a part

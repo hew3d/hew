@@ -11,7 +11,7 @@
  * only, erased at runtime — the same convention ComponentsPanel.test.tsx /
  * scenePanels.test.tsx use), so no wasm/loader mock is required.
  */
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { render, screen, fireEvent, within, act } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { ObjectInfoPanel } from './ObjectInfoPanel'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -657,5 +657,107 @@ describe('ObjectInfoPanel — Materials row', () => {
     rerender(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[{ kind: 'object', id: 2n }]} />)
     expect(names()).toHaveLength(12)
     expect(screen.getByText('+3 more')).toBeTruthy()
+  })
+})
+
+describe('ObjectInfoPanel — Volume, Surface area, and Size rows', () => {
+  const measureJson = (volume: number | null, area: number, ext: [number, number, number]) =>
+    JSON.stringify({ volume, area, bbox: { min: [0, 0, 0], max: ext }, extents: ext, leaf_count: 1, open_leaves: volume === null ? 1 : 0 })
+
+  function measureScene(opts: {
+    volume: number | null
+    frame?: { extents: number[]; source: string }
+    received?: Array<[number, bigint]>
+  }) {
+    return makeScene({
+      node_tags: () => [],
+      object_materials: () => [],
+      node_parent: () => undefined,
+      // The dash comes from the measure alone; the Model Health row is separate.
+      object_solid: () => true,
+      object_name: () => 'Board',
+      group_name: () => 'Board',
+      group_members: () => [],
+      history_generation: () => 1,
+      document_epoch: () => 0,
+      measure_json: (kind: number, id: bigint) => {
+        opts.received?.push([kind, id])
+        return measureJson(opts.volume, 1.6, [1, 0.5, 0.2])
+      },
+      part_frame_json: () => {
+        if (opts.frame === undefined) throw new Error('NoPartFrame')
+        return JSON.stringify(opts.frame)
+      },
+    })
+  }
+  const sel = [{ kind: 'object', id: 1n } as NodeRef]
+
+  it('shows_volume_area_and_size_for_a_solid', () => {
+    setLengthUnit('m')
+    render(<ObjectInfoPanel {...baseProps} scene={measureScene({ volume: 0.1 })} selectedIds={sel} />)
+    expect(screen.getByTestId('measure-volume')).toHaveTextContent('100000 cm³')
+    expect(screen.getByTestId('measure-area')).toHaveTextContent('1.6 m²')
+    expect(screen.getByTestId('measure-size')).toHaveTextContent('1 m × 0.5 m × 0.2 m')
+  })
+
+  it('measures_the_selected_node_by_kind_and_id', () => {
+    setLengthUnit('m')
+    const received: Array<[number, bigint]> = []
+    render(
+      <ObjectInfoPanel
+        {...baseProps}
+        scene={measureScene({ volume: 0.1, received })}
+        selectedIds={[{ kind: 'group', id: 7n } as NodeRef]}
+      />,
+    )
+    expect(received).toContainEqual([1, 7n])
+    expect(received.every(([k, i]) => k === 1 && i === 7n)).toBe(true)
+  })
+
+  it('size_uses_the_part_frame_when_it_answers', () => {
+    setLengthUnit('m')
+    const scene = measureScene({ volume: 0.1, frame: { extents: [1, 0.5, 0.2], source: 'attribute' } })
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={sel} />)
+    expect(screen.getByTestId('measure-size')).toHaveAttribute('title', 'Size along the part axes (set on this part)')
+  })
+
+  it('size_falls_back_to_the_world_box', () => {
+    setLengthUnit('m')
+    render(<ObjectInfoPanel {...baseProps} scene={measureScene({ volume: 0.1 })} selectedIds={sel} />)
+    expect(screen.getByTestId('measure-size')).toHaveAttribute('title', 'Size along the world axes')
+  })
+
+  it('open_objects_show_a_dash_and_not_closed', () => {
+    setLengthUnit('m')
+    render(<ObjectInfoPanel {...baseProps} scene={measureScene({ volume: null })} selectedIds={sel} />)
+    expect(screen.getByTestId('measure-volume')).toHaveTextContent('— Not closed')
+    expect(screen.getByTestId('measure-area')).toHaveTextContent('1.6 m²')
+  })
+
+  it('rows_follow_the_unit_setting', () => {
+    setLengthUnit('m')
+    render(<ObjectInfoPanel {...baseProps} scene={measureScene({ volume: 0.1 })} selectedIds={sel} />)
+    expect(screen.getByTestId('measure-volume')).toHaveTextContent('100000 cm³')
+    act(() => setLengthUnit('dec_in'))
+    try {
+      expect(screen.getByTestId('measure-volume')).toHaveTextContent('3.531 ft³')
+      expect(screen.getByTestId('measure-area')).toHaveTextContent('17.222 ft²')
+    } finally {
+      setLengthUnit('m')
+    }
+  })
+
+  it('a multi-selection shows summed rows', () => {
+    setLengthUnit('m')
+    const scene = measureScene({ volume: 0.1 })
+    render(
+      <ObjectInfoPanel
+        {...baseProps}
+        scene={scene}
+        selectedIds={[{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }]}
+      />,
+    )
+    expect(screen.getByTestId('measure-area')).toHaveTextContent('3.2 m²')
+    expect(screen.getByTestId('measure-volume')).toHaveTextContent('200000 cm³')
   })
 })

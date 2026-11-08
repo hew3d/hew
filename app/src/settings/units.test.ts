@@ -1,6 +1,8 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import {
   formatLengthIn,
+  formatAreaIn,
+  formatVolumeIn,
   metersFromUnit,
   getLengthUnitSuffix,
   parseLengthToMeters,
@@ -935,5 +937,63 @@ describe('parse accepts a leading ~', () => {
     const text = formatLengthIn(meters, 'arch', 'exact')
     expect(text).toBe('1\' 2.3333"')
     expect(Math.abs(parseLengthToMeters(text, 'arch')! - meters)).toBeLessThanOrEqual(1e-6)
+  })
+})
+
+describe('formatAreaIn / formatVolumeIn', () => {
+  it('area_and_volume_switch_between_small_and_large_units', () => {
+    // Metric: cm² below 1 m², else m²; cm³ below 1 m³, else m³.
+    expect(formatAreaIn(0.5, 'm')).toBe('5000 cm\u00b2')
+    expect(formatAreaIn(1.6, 'mm')).toBe('1.6 m\u00b2')
+    expect(formatVolumeIn(0.0005, 'cm')).toBe('500 cm\u00b3')
+    expect(formatVolumeIn(0.1, 'm')).toBe('100000 cm\u00b3')
+    expect(formatVolumeIn(2, 'm')).toBe('2 m\u00b3')
+    // Imperial: in² below 1 ft², else ft²; in³ below 1 ft³, else ft³.
+    expect(formatAreaIn(0.0645160, 'dec_in')).toBe('100 in\u00b2')
+    expect(formatAreaIn(0.3, 'arch')).toBe('~3.23 ft\u00b2')
+    expect(formatVolumeIn(0.001, 'frac_in')).toBe('~61.02 in\u00b3')
+    expect(formatVolumeIn(0.1, 'arch')).toBe('~3.53 ft\u00b3')
+  })
+
+  it('non_finite_input_is_a_dash', () => {
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      expect(formatAreaIn(bad, 'm')).toBe('\u2014')
+      expect(formatVolumeIn(bad, 'dec_in')).toBe('\u2014')
+    }
+  })
+
+  it('precision_sets_the_decimals', () => {
+    expect(formatAreaIn(0.123456, 'm', 4)).toBe('1234.56 cm\u00b2')
+    expect(formatAreaIn(0.123456, 'm', 1)).toBe('~1234.6 cm\u00b2')
+    expect(formatVolumeIn(2.34567, 'cm', 3)).toBe('~2.346 m\u00b3')
+    expect(formatAreaIn(1.23456, 'dec_in', 3)).toBe('~13.289 ft\u00b2')
+    expect(formatAreaIn(1.23456, 'm', 0)).toBe('~1 m\u00b2')
+  })
+
+  it('fraction_formats_still_show_decimals_for_area_and_volume', () => {
+    expect(formatVolumeIn(0.001, 'frac_in', 16)).toBe('~61.02 in\u00b3')
+    expect(formatAreaIn(0.3, 'arch', 'foot')).toBe('~3.23 ft\u00b2')
+    expect(formatVolumeIn(2, 'm', 'exact')).toBe('2 m\u00b3')
+    expect(formatVolumeIn(0.123456, 'm', 'exact')).toBe('123456 cm\u00b3')
+    expect(formatVolumeIn(0.00123456, 'cm', 'exact')).toBe('1234.56 cm\u00b3')
+  })
+
+  it('a_rounded_value_carries_the_same_tilde_as_a_length', () => {
+    expect(formatAreaIn(1.4, 'm', 0)).toBe('~1 m\u00b2')
+    expect(formatAreaIn(0.00004, 'm', 0)).toBe('~0 cm\u00b2')
+    expect(formatAreaIn(1.5, 'm', 2)).toBe('1.5 m\u00b2')
+    expect(formatLengthIn(1.4, 'm', 0)).toBe('~1 m')
+  })
+
+  it('zero_reads_zero', () => {
+    expect(formatAreaIn(0, 'm')).toBe('0 cm\u00b2')
+    expect(formatVolumeIn(0, 'm')).toBe('0 cm\u00b3')
+    expect(formatVolumeIn(0, 'arch')).toBe('0 in\u00b3')
+    expect(formatAreaIn(0, 'dec_in')).toBe('0 in\u00b2')
+  })
+
+  it('rounding_at_the_boundary_promotes_to_the_larger_unit', () => {
+    expect(formatAreaIn(0.99999999, 'm')).toBe('1 m\u00b2')
+    expect(formatAreaIn(0.09999, 'm')).toBe('999.9 cm\u00b2')
   })
 })
