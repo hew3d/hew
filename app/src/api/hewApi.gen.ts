@@ -753,6 +753,7 @@ export interface EntityRenameResult {}
  * Refusals: unknown_entity, mixed_selection_unsupported, sketch_copy_unsupported, array_count_too_large, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope, component_expansion_exceeded
  */
 export interface EntityRotateParams {
+  /** radians, right-handed about axis */
   angle: number
   axis: [number, number, number]
   copy?: { count?: number; linked?: boolean }

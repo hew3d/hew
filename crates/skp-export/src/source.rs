@@ -431,8 +431,23 @@ impl Fnv {
 /// recolored material is not a change to the geometry painted with it.
 fn material_hash(doc: &Document, m: Option<kernel::MaterialId>) -> u64 {
     let mut h = Fnv::new();
-    match m.and_then(|id| doc.materials().get(id)) {
-        Some(mat) => h.str(&mat.name),
+    match m.and_then(|id| doc.materials().get(id).map(|mat| (id, mat))) {
+        Some((id, mat)) => {
+            h.str(&mat.name);
+            // Same-named materials are told apart by their order among
+            // those.
+            let ordinal = doc
+                .materials()
+                .iter()
+                .take_while(|(other, _)| *other != id)
+                .filter(|(_, o)| o.name == mat.name)
+                .count();
+            // The first of a name hashes as it always has, so hashes
+            // stored in existing files stay valid.
+            if ordinal > 0 {
+                h.u64(ordinal as u64);
+            }
+        }
         None => h.u64(0),
     }
     h.0
@@ -582,6 +597,11 @@ pub fn node_hash(doc: &Document, node: NodeId) -> u64 {
             if let Some(p) = doc.instance_pose(id) {
                 p.to_affine().iter().for_each(|&c| h.f(c));
             }
+            // The placement's own paint: repainting a placement (its
+            // member faces take it where they have none of their own) is a
+            // change to the node.
+            h.u64(u64::MAX - 1);
+            h.u64(material_hash(doc, doc.instance_material(id).flatten()));
         }
     }
     h.0
@@ -682,6 +702,66 @@ pub fn sketch_hash(doc: &Document, id: SketchId) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A repaint of a placement changes its hash (and so the hash of a
+    /// group holding it); a repaint of a definition changes the members'
+    /// objects, which were already hashed.
+    #[test]
+    fn repainting_a_placement_changes_its_hash() {
+        use kernel::{Material, Plane, Point3, Rgba8};
+        let mut doc = Document::new();
+        let ground = Plane::from_polygon(&[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ])
+        .unwrap();
+        let s = doc.add_sketch(ground);
+        let c = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+        ];
+        for i in 0..4 {
+            doc.sketch_mut(s)
+                .unwrap()
+                .add_segment(c[i], c[(i + 1) % 4])
+                .unwrap();
+        }
+        let region = doc.extrudable_regions(s).unwrap()[0];
+        doc.extrude_region(s, region, 1.0).unwrap();
+        let object = *doc.live_object_ids().last().unwrap();
+        let (_, instance, _) = doc.make_component(&[NodeId::Object(object)]).unwrap();
+        let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 0, 0)));
+        let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(0, 0, 200)));
+        let node = NodeId::Instance(instance);
+
+        let plain = node_hash(&doc, node);
+        doc.set_instance_material(instance, Some(red)).unwrap();
+        let painted_red = node_hash(&doc, node);
+        assert_ne!(plain, painted_red, "painting a placement is a change");
+        doc.set_instance_material(instance, Some(blue)).unwrap();
+        assert_ne!(painted_red, node_hash(&doc, node), "so is repainting it");
+        doc.set_instance_material(instance, None).unwrap();
+        assert_eq!(
+            plain,
+            node_hash(&doc, node),
+            "clearing it restores the hash"
+        );
+    }
+
+    /// Two palette materials with one name are different materials: a
+    /// repaint from one to the other is a change.
+    #[test]
+    fn same_named_materials_hash_apart() {
+        use kernel::{Material, Rgba8};
+        let mut doc = Document::new();
+        let a = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 0, 0)));
+        let b = doc.add_material(Material::solid("Red", Rgba8::rgb(120, 0, 0)));
+        assert_ne!(material_hash(&doc, Some(a)), material_hash(&doc, Some(b)));
+        assert_ne!(material_hash(&doc, Some(a)), material_hash(&doc, None));
+    }
 
     #[test]
     fn a_blob_reads_back() {

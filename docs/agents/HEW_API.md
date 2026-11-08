@@ -25,7 +25,7 @@
 > what the user has open. `hew.view.snapshot` and `hew.view.line_drawing` are
 > rendered by the app itself, through the same `crates/headless-render`
 > code `hew-cli` runs (§7.2), so both hosts return the same bytes for the
-> same inputs; only a `path` write still needs a filesystem. And
+> same inputs; only a `path` write still needs a filesystem, which `hew-cli --live` does client-side: it asks the app for the bytes once, without `path`, writes the file and the companion pass files itself, and prints the headless result shape. And
 > `hew.view.camera`, `hew.view.zoom_extents`, and `hew.view.units` — which
 > need no bytes back, only an effect — ARE wired end to end: `LiveHost`
 > records the requested effect and answers success, `crates/wasm-api`
@@ -1020,7 +1020,7 @@ for, not shipped.
 | `hew.library` | `list`, `describe`, `insert`, `save`, `remove`, `update_meta` — the Hew Library (§8.1) | Standard |
 | `hew.attr` | `get`, `set`, `delete` (§8) | Required |
 | `hew.history` | `undo`, `redo`, `status` (depth; top entry's label and origin; the saved depth; every undo/redo entry's label and origin) | Required |
-| `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format), `line_drawing` (hidden-line SVG or segments, headless or live, §7.2), `hide`, `show`, `show_all`, `hidden`, `isolate`, `clear_isolation`, `zoom_to` (view state, §7.3), `enter`, `exit`, `exit_all` (the person's editing context, §6.3) | Standard (`core` grants `snapshot` and `line_drawing` specifically; the rest stay `app`-only — live-host-only effects) |
+| `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format), `line_drawing` (hidden-line SVG or segments, headless or live, §7.2), `hide`, `show`, `show_all`, `hidden`, `isolate`, `clear_isolation`, `zoom_to` (view state, §7.3), `enter`, `exit`, `exit_all` (the person's editing context, §6.3) | Standard (`core` grants six: `snapshot`, `line_drawing`, `hide`, `show`, `show_all`, and `hidden` — none needs a window, and the last four are kernel-served over the document's user-hidden flags; the rest stay `app`-only — live-host-only effects. `hew.view.hidden` reports `isolated: null` on a host with no isolation) |
 | `hew.selection` | `get`, `set`, `clear`: the app's selection (§7.3) | Standard |
 | `hew.print` | `pdf` (a full print job — paper/scale/tiling/marks — as a PDF, headless or live, §7.2) | Standard |
 | `hew.annotate` | dimensions, leader text | Reserved |
@@ -2008,9 +2008,11 @@ envelopes changed, and the hidden flags with the document; the camera a
 with a viewport and a selection: the desktop app serves them, and
 `hew-cli` headless refuses `host_capability_missing`. The web build and
 Shop Mode have no bus clients yet and do not carry them out. `hide`, `show`, `show_all`, and `hidden` are served by the
-kernel. Like every `hew.view.*` effect, the view commands are inside the
-`app` ceiling only; `hew.selection.*` is inside `core` too and refuses
-there for want of a selection.
+kernel and are inside the `core` ceiling, as are `snapshot` and
+`line_drawing`; the other view commands (`camera`, `zoom_extents`,
+`units`, `isolate`, `clear_isolation`, `zoom_to`, `enter`, `exit`,
+`exit_all`) are inside the `app` ceiling only. `hew.selection.*` is
+inside `core` too and refuses there for want of a selection.
 
 ### 7.4 Parts: occurrences, frames, meshes, topology
 
@@ -2647,10 +2649,12 @@ A grant has a **ceiling** and a set of **permissions**. The ceiling is
 the widest part of the registry the grant can reach:
 
 - **`core`** — everything headless-safe: the full command surface except
-  `hew.view.*` and the window commands `hew.doc.close`/`focus`, with two
+  `hew.view.*` and the window commands `hew.doc.close`/`focus`, with six
   deliberate exceptions — `hew.view.snapshot` and `hew.view.line_drawing`
   have a headless render path (a software rasterizer, no GPU or live
-  viewport required) and are inside it. This is what `hew-cli` grants its
+  viewport required), and `hew.view.hide`, `show`, `show_all`, and
+  `hidden` are served by the kernel over the document's hidden flags; all
+  six are inside it. This is what `hew-cli` grants its
   own embedded kernel.
 - **`app`** — `core` plus the commands that only make sense against a
   live application session: `hew.view.camera`, `hew.view.zoom_extents`,
@@ -3072,10 +3076,15 @@ chunky tools, all generated from the registry:
   learn the exact command schemas at run time.
 - `hew_transact` — the workhorse: a full transaction envelope (§6),
   returning per-command results or the typed refusal.
-- `hew_query` — the read surface: any read-only command (§6.4 —
-  `hew.query.*`, `hew.meta.*`, `hew.attr.get`, and `hew.library.list`/
-  `describe`/`remove`/`update_meta`, §8.1 — none of those touch the
-  document, so they are `ReadOnly` class too) and its params.
+- `hew_query` — the read surface: any `ReadOnly`-class command that does
+  not mutate the document (§6.4 — `hew.query.*`, `hew.meta.*`,
+  `hew.attr.get`, `hew.library.list`/`describe`/`remove`/`update_meta`,
+  §8.1), plus `hew.view.snapshot`, `hew.view.line_drawing`, and
+  `hew.history.status` by name. The view and selection commands in that
+  class (`hew.view.hide`/`show`/`show_all`/`isolate`/`zoom_to`,
+  `hew.selection.set`) change what is hidden, framed, or selected, never
+  the geometry. `hew.library.save` is `ReadOnly` class but mutates the
+  document (it stamps provenance), so `hew_query` refuses it.
 - `hew_describe_scene` — `hew.query.scene` presented as a structured
   summary tuned for reasoning over (names, kinds, bounding boxes,
   watertightness, tree shape).

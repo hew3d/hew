@@ -59,3 +59,6 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 # Plugin command declarations for the MCP provider-labeling tests.
 plugin-manifest = { workspace = true }
+# Inflates a snapshot PNG so the stability pin hashes pixels, not the
+# encoder's compressed bytes. The version softrender already pins.
+miniz_oxide = "0.8.9"

@@ -5384,6 +5384,7 @@ Rotate about a pivot and axis by an angle; ids may be paths to members of one de
   "additionalProperties": false,
   "properties": {
     "angle": {
+      "description": "radians, right-handed about axis",
       "type": "number"
     },
     "axis": {

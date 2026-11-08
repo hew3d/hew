@@ -25,6 +25,15 @@ use std::io::{BufRead, Write};
 /// The MCP protocol revision this server speaks.
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// Commands `hew_query` admits by name although their class is not
+/// read-only: they leave the document's geometry unchanged (see the gate
+/// in `handle_tools_call`).
+const QUERY_BY_NAME: [&str; 3] = [
+    "hew.view.snapshot",
+    "hew.view.line_drawing",
+    "hew.history.status",
+];
+
 /// A JSON-RPC error `{code, message}` — the MCP layer's own errors
 /// (unknown method, bad params), distinct from a `hew.*` refusal (which
 /// travels as a normal tool-call *result*, per §13: refusals are answers).
@@ -136,6 +145,11 @@ what the real call would answer, the ids it would mint included, with
 "dry_run": true beside it, and the document does not change. Commands
 that touch files, the library, the selection, or the screen refuse
 dry_run_host_command in a rehearsal.
+
+WHAT hew_query ADMITS
+hew_query runs every command that does not change the document: the
+read-only commands, plus hew.view.snapshot, hew.view.line_drawing, and
+hew.history.status. Anything else is refused; use hew_transact.
 
 COMPUTE WITHOUT EDITING
 hew_query serves hew.compute.measure, boolean, slice, shells, outline,
@@ -438,7 +452,7 @@ impl McpServer {
         json!({
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "hew-cli", "version": env!("CARGO_PKG_VERSION") },
+            "serverInfo": { "name": "hew-cli", "version": crate::VERSION },
             "instructions": instructions,
         })
     }
@@ -475,14 +489,32 @@ impl McpServer {
                     .get("method")
                     .and_then(Value::as_str)
                     .ok_or_else(|| JsonRpcErr::invalid_params("hew_query needs a \"method\""))?;
-                let read_only = self
+                // The one `hew_query` rule: the registry's read-only class
+                // minus any command that mutates the document
+                // (`hew.library.save` is class read-only but stamps
+                // provenance on the saved nodes), plus three commands
+                // admitted by name because their class is not read-only:
+                // the two renders write no document state, and
+                // `hew.history.status` reports the undo depth. The class
+                // includes view and selection state (`hew.view.hide`,
+                // `show`, `show_all`, `isolate`, `zoom_to`,
+                // `hew.selection.set`): those change what is hidden,
+                // framed, or selected, never the geometry, and are
+                // admitted. The class is a convention, not a security
+                // boundary. Unknown methods (and plugin commands the
+                // registry does not list) refuse; a plugin command keeps
+                // its declared class.
+                let admitted = self
                     .registry
                     .get(method)
-                    .map(|c| c.class == api::CommandClass::ReadOnly)
+                    .map(|c| {
+                        (c.class == api::CommandClass::ReadOnly && !c.mutates_document)
+                            || QUERY_BY_NAME.contains(&method)
+                    })
                     .unwrap_or(false);
-                if !read_only {
+                if !admitted {
                     return Err(JsonRpcErr::invalid_params(format!(
-                        "hew_query only accepts read-only commands; \"{method}\" is not one (use hew_transact)"
+                        "hew_query only accepts read-only commands (and hew.view.snapshot, hew.view.line_drawing, hew.history.status); \"{method}\" is not one (use hew_transact)"
                     )));
                 }
                 let sub_params = arguments
@@ -745,7 +777,7 @@ pub fn generate_tools(registry: &Registry, grant: &Grant) -> Vec<Value> {
         }),
         json!({
             "name": "hew_query",
-            "description": "Run one read-only command (hew.query.*, hew.compute.*, hew.meta.*, hew.attr.get) — measuring, resolving an id, listing faces, raycasting, computing a boolean, cut, outline, or offset without editing — or one of the read-side Library commands (hew.library.list/describe/remove/update_meta): browsing, deleting, or renaming a saved item. None of these change the attached DOCUMENT (remove/update_meta change on-disk library state, not the document itself). Use hew_transact for anything that does. Commands provided by installed plugins are listed by hew_capabilities with a provider; their results carry that provider.",
+            "description": "Run one command that does not change the document's geometry: the read-only commands (hew.query.*, hew.compute.*, hew.meta.*, hew.attr.get), plus hew.view.snapshot, hew.view.line_drawing, and hew.history.status. Uses include measuring, resolving an id, listing faces, raycasting, computing a boolean, cut, outline, or offset without editing — or one of the read-side Library commands (hew.library.list/describe/remove/update_meta): browsing, deleting, or renaming a saved item (remove/update_meta change on-disk library state, not the document). The view and selection commands (hew.view.hide/show/show_all/isolate/zoom_to, hew.selection.set) are admitted too: they change what is hidden, framed, or selected, not the geometry. hew.library.save is not admitted (it writes a library file and stamps provenance on the document); use hew_transact for it and for anything else that edits. Commands provided by installed plugins are listed by hew_capabilities with a provider; their results carry that provider.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1523,6 +1555,143 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["error"]["code"], -32602);
+    }
+
+    /// `tools/call` for `name`, returning the parsed frame.
+    fn tool_frame(server: &mut McpServer, id: u32, name: &str, arguments: Value) -> Value {
+        let frame = json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": name, "arguments": arguments } });
+        let line = server.handle_line(&frame.to_string()).unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    /// A server whose document holds one box, so the renders have something
+    /// to draw.
+    fn server_with_a_box() -> McpServer {
+        let mut server = McpServer::new();
+        let built = tool_frame(
+            &mut server,
+            1,
+            "hew_transact",
+            json!({ "commands": [
+                { "method": "hew.sketch.draw_rect", "as": "r", "params": {
+                    "plane": { "ground": true },
+                    "corner_a": [0, 0, 0], "corner_b": [1, 1, 0] } },
+                { "method": "hew.solid.extrude", "params": {
+                    "region": { "$ref": "r#/region_id" }, "distance": 1.0 } }
+            ] }),
+        );
+        assert!(built.get("error").is_none(), "{built}");
+        server
+    }
+
+    /// The parsed command reply inside a successful tool result.
+    fn tool_result(frame: &Value) -> Value {
+        let text = frame["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{frame}"));
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn hew_query_admits_snapshot_and_history_status() {
+        let mut server = server_with_a_box();
+        let snap = tool_frame(
+            &mut server,
+            2,
+            "hew_query",
+            json!({ "method": "hew.view.snapshot", "params": { "width": 64, "height": 64 } }),
+        );
+        assert!(snap.get("error").is_none(), "{snap}");
+        assert!(tool_result(&snap).to_string().contains("png"), "{snap}");
+        let status = tool_frame(
+            &mut server,
+            3,
+            "hew_query",
+            json!({ "method": "hew.history.status" }),
+        );
+        assert!(status.get("error").is_none(), "{status}");
+        assert!(
+            tool_result(&status)["result"]["undo_depth"]
+                .as_u64()
+                .unwrap()
+                >= 1,
+            "{status}"
+        );
+    }
+
+    #[test]
+    fn hew_query_admits_line_drawing() {
+        let mut server = server_with_a_box();
+        let got = tool_frame(
+            &mut server,
+            2,
+            "hew_query",
+            json!({ "method": "hew.view.line_drawing", "params": {} }),
+        );
+        assert!(got.get("error").is_none(), "{got}");
+    }
+
+    #[test]
+    fn hew_query_admits_a_read_only_class_command_as_before() {
+        let mut server = server_with_a_box();
+        let got = tool_frame(
+            &mut server,
+            2,
+            "hew_query",
+            json!({ "method": "hew.query.scene" }),
+        );
+        assert!(got.get("error").is_none(), "{got}");
+    }
+
+    #[test]
+    fn hew_query_refuses_a_command_that_mutates_the_document() {
+        let mut server = server_with_a_box();
+        for method in ["hew.solid.extrude", "hew.history.undo", "hew.doc.new"] {
+            let got = tool_frame(&mut server, 2, "hew_query", json!({ "method": method }));
+            assert_eq!(got["error"]["code"], -32602, "{method}: {got}");
+            let message = got["error"]["message"].as_str().unwrap();
+            assert!(message.contains("hew_transact"), "{method}: {message}");
+            assert!(message.contains("hew.history.status"), "{message}");
+        }
+    }
+
+    #[test]
+    fn hew_query_refuses_a_read_only_class_command_that_mutates_the_document() {
+        let mut server = server_with_a_box();
+        let got = tool_frame(
+            &mut server,
+            2,
+            "hew_query",
+            json!({ "method": "hew.library.save", "params": {} }),
+        );
+        assert_eq!(got["error"]["code"], -32602, "{got}");
+    }
+
+    #[test]
+    fn hew_query_refuses_file_and_window_commands() {
+        let mut server = server_with_a_box();
+        for method in [
+            "hew.doc.export",
+            "hew.print.pdf",
+            "hew.doc.close",
+            "hew.view.camera",
+        ] {
+            let got = tool_frame(&mut server, 2, "hew_query", json!({ "method": method }));
+            assert_eq!(got["error"]["code"], -32602, "{method}: {got}");
+        }
+    }
+
+    #[test]
+    fn hew_query_refuses_an_unknown_method() {
+        let mut server = McpServer::new();
+        let got = tool_frame(
+            &mut server,
+            2,
+            "hew_query",
+            json!({ "method": "hew.no.such.command" }),
+        );
+        assert_eq!(got["error"]["code"], -32602, "{got}");
     }
 
     /// A dry run and the compute commands are reachable, and said to be:

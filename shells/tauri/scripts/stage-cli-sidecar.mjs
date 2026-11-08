@@ -10,6 +10,10 @@
 // `cargo build` is its own staleness check (fast no-op when hew-cli's
 // sources haven't changed), so unlike build-wasm.mjs this doesn't need a
 // separate mtime comparison.
+//
+// A release build exports HEW_RELEASE_VERSION; spawnSync inherits the
+// environment, so cargo sees it and hew-cli's `--version` reports the tag's
+// version (see crates/hew-cli/src/lib.rs). Unset, it reports the crate's.
 
 import { spawnSync } from "node:child_process";
 import { mkdirSync, copyFileSync } from "node:fs";

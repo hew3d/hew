@@ -219,6 +219,60 @@ fn run_script_draws_and_extrudes_and_out_saves_one_object() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Hiding is kernel-served, so the headless host (a `core` grant, no
+/// window) hides an object, saves the flag with the document, and a
+/// reopened file lists it as hidden.
+#[test]
+fn hew_cli_dispatch_hides_an_object_without_a_window() {
+    let dir = scratch_dir("hide-headless");
+    let script_path = dir.join("script.json");
+    let out_path = dir.join("hidden.hew");
+    let script = serde_json::json!([
+        { "jsonrpc": "2.0", "id": 1, "method": "hew.meta.hello", "params": { "protocol": 1 } },
+        { "jsonrpc": "2.0", "id": 2, "method": "hew.doc.new", "params": {} },
+        { "jsonrpc": "2.0", "id": 3, "method": "hew.doc.transact", "params": { "commands": [
+            { "method": "hew.sketch.draw_rect", "as": "rect", "params": {
+                "plane": { "ground": true },
+                "corner_a": [0.0, 0.0, 0.0], "corner_b": [1.0, 1.0, 0.0] } },
+            { "method": "hew.solid.extrude", "params": {
+                "region": { "$ref": "rect#/region_id" }, "distance": 0.5 } },
+        ] } },
+        { "jsonrpc": "2.0", "id": 4, "method": "hew.query.scene", "params": {} },
+    ]);
+    std::fs::write(&script_path, serde_json::to_vec(&script).unwrap()).unwrap();
+    let outcome = hew_cli::run::run_script(&script_path, None, None);
+    assert_eq!(outcome.exit_code, 0, "{:?}", outcome.responses.last());
+    let id = outcome.responses[3]["result"]["tree"][0]["id"]
+        .as_str()
+        .expect("the box has an object id")
+        .to_string();
+
+    let mut script = script.as_array().unwrap().clone();
+    script.pop();
+    script.push(serde_json::json!(
+        { "jsonrpc": "2.0", "id": 5, "method": "hew.view.hide", "params": { "ids": [id] } }
+    ));
+    std::fs::write(&script_path, serde_json::to_vec(&script).unwrap()).unwrap();
+    let outcome = hew_cli::run::run_script(&script_path, Some(&out_path), None);
+    assert_eq!(
+        outcome.exit_code,
+        0,
+        "hide refused: {:?}",
+        outcome.responses.last()
+    );
+
+    let hidden = hew_cli::run::dispatch_file(&out_path, "hew.view.hidden", serde_json::json!({}));
+    let hidden = hidden.response.expect("hidden reply");
+    assert_eq!(
+        hidden["result"]["hidden"],
+        serde_json::json!([id]),
+        "{hidden}"
+    );
+    assert_eq!(hidden["result"]["isolated"], serde_json::Value::Null);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A script whose first command refuses stops immediately (exit 1) and
 /// never reaches `--out` — proving the "first refusal stops the script"
 /// contract, not just its happy path.
@@ -2171,17 +2225,39 @@ fn stability_snapshot_params() -> api::SnapshotParams {
     }
 }
 
+/// The scanlines (filter byte included) a PNG's IDAT inflates to.
+fn png_scanlines(png: &[u8]) -> Vec<u8> {
+    let mut i = 8;
+    let mut idat = Vec::new();
+    while i < png.len() {
+        let len = u32::from_be_bytes(png[i..i + 4].try_into().unwrap()) as usize;
+        if &png[i + 4..i + 8] == b"IDAT" {
+            idat.extend_from_slice(&png[i + 8..i + 8 + len]);
+        }
+        i += 12 + len;
+    }
+    miniz_oxide::inflate::decompress_to_vec_zlib(&idat).expect("inflates")
+}
+
 /// The renderer's output for a fixed document never changes by accident
-/// (it moved crates once; any byte difference is a defect, not a re-pin).
+/// (it moved crates once; a pixel difference is a defect, not a re-pin).
+/// The pin is the decoded pixels, so a deflate-encoder version change does
+/// not trip it; the size bound only guards that the PNG stays compressed.
 #[test]
 fn snapshot_bytes_are_stable() {
     let (doc, _) = two_boxes();
     let r = CliHost::new()
         .snapshot(&doc, &stability_snapshot_params())
         .unwrap();
+    let raw = png_scanlines(&r.png);
     assert_eq!(
-        (r.width, r.height, r.png.len(), fnv64(&r.png)),
-        PIN_SNAPSHOT
+        (r.width, r.height, raw.len(), fnv64(&raw)),
+        PIN_SNAPSHOT_PIXELS
+    );
+    assert!(
+        r.png.len() < 4096,
+        "a flat-ish 128 x 128 PNG stays compressed: {} bytes",
+        r.png.len()
     );
 }
 
@@ -2204,5 +2280,5 @@ fn line_drawing_segments_are_stable() {
     assert_eq!((r.count, fnv64(text.as_bytes())), PIN_SEGMENTS);
 }
 
-const PIN_SNAPSHOT: (u32, u32, usize, u64) = (128, 128, 65737, 10977346622869604767);
+const PIN_SNAPSHOT_PIXELS: (u32, u32, usize, u64) = (128, 128, 65664, 7410834696598770317);
 const PIN_SEGMENTS: (usize, u64) = (24, 15869532378070628210);

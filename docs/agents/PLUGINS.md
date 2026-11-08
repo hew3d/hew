@@ -247,6 +247,20 @@ being one of its declared refusals; the caller sees `-32000` with the
 refusal named `<plugin-id>.<name>` and the plugin's own explanation, so
 a plugin's refusal can never pass for one of Hew's.
 
+**MCP.** `hew-cli mcp`'s `hew_query` tool admits every command that does
+not change the document: the commands whose class is `read_only` (a
+plugin's `read_only` commands included), plus `hew.view.snapshot`,
+`hew.view.line_drawing`, and `hew.history.status` by name, minus any
+command that mutates the document (`hew.library.save`). View and
+selection state commands in that class (`hew.view.hide`/`show`/
+`show_all`/`isolate`/`zoom_to`, `hew.selection.set`) change what is
+hidden, framed, or selected, not the geometry, and are admitted. Anything else,
+and any unknown method, is refused; `hew_transact` runs the rest. A raw
+socket client that sends `path` with a snapshot or line drawing gets
+`host_capability_missing`; `hew-cli dispatch hew.view.snapshot
+'{"path":…}' --live` strips it, asks the app for the bytes once, and
+writes the file.
+
 ## Compounds
 
 A mutating command runs inside a **compound**: a bracket the host opens

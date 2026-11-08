@@ -255,7 +255,7 @@ pub(crate) fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
-        .user_agent(concat!("Hew/", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("Hew/{}", crate::version::VERSION))
         .build()
         .expect("reqwest client")
 }

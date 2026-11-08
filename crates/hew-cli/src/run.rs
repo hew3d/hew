@@ -768,11 +768,6 @@ pub(crate) fn decode_base64(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Writes the bytes a live `hew.doc.save` or `hew.doc.export` handed back
-/// (see [`dispatch_live`]) to `path` — the `.hew` document for save, the
-/// exported STL/3MF/GLB for export; both shapes carry the same
-/// `bytes_base64` field the live host base64s them into, since it has no
-/// filesystem of its own. This side decodes and writes.
 /// The JSON-RPC reply for a client-side write that failed: the canonical
 /// refusal envelope (`failed_index`, `failed_method`, `detail`,
 /// `explanation`) a filesystem host answers for the same failure, with the
@@ -823,33 +818,56 @@ pub(crate) fn finish_client_write(
         .or_else(|| response.pointer("/result"))
         .cloned()
         .unwrap_or(serde_json::Value::Null);
-    let write = |to: &str, b64: &str| -> Result<(), String> {
-        let bytes =
-            decode_base64(b64).ok_or_else(|| "the render bytes were malformed".to_string())?;
-        write_file(to, &bytes)
+    let decode = |b64: &str| -> Result<Vec<u8>, String> {
+        decode_base64(b64).ok_or_else(|| save_failed(path, "the render bytes were malformed"))
     };
     if let Some(png) = result.get("png_base64").and_then(|v| v.as_str()) {
-        write(path, png)?;
+        // Decode everything before touching the disk, so malformed bytes
+        // leave no partial result.
+        let mut files: Vec<(String, Vec<u8>)> = vec![(path.to_string(), decode(png)?)];
         let mut out = serde_json::json!({
             "path": path,
             "width": result["width"],
             "height": result["height"],
         });
+        let mut stale = Vec::new();
         for (inline, suffix, file_key) in [
             ("id_buffer_base64", ".ids.bin", "id_buffer_path"),
             ("depth_png_base64", ".depth.png", "depth_path"),
             ("normals_png_base64", ".normals.png", "normals_path"),
         ] {
-            if let Some(b64) = result.get(inline).and_then(|v| v.as_str()) {
-                let to = format!("{path}{suffix}");
-                write(&to, b64)?;
-                out[file_key] = serde_json::Value::String(to);
+            let to = format!("{path}{suffix}");
+            match result.get(inline).and_then(|v| v.as_str()) {
+                Some(b64) => {
+                    files.push((to.clone(), decode(b64)?));
+                    out[file_key] = serde_json::Value::String(to);
+                }
+                None => stale.push(to),
             }
         }
         for key in ["id_palette", "depth_near", "depth_far", "depth_bits"] {
             if let Some(v) = result.get(key) {
                 out[key] = v.clone();
             }
+        }
+        // A companion an earlier run left beside this path is not part of
+        // this result.
+        for old in stale {
+            match std::fs::remove_file(&old) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(save_failed(&old, &e.to_string())),
+            }
+        }
+        let mut written: Vec<&str> = Vec::new();
+        for (to, bytes) in &files {
+            if let Err(msg) = write_file(to, bytes) {
+                for done in written {
+                    let _ = std::fs::remove_file(done);
+                }
+                return Err(msg);
+            }
+            written.push(to);
         }
         return Ok(out);
     }
@@ -865,19 +883,27 @@ pub(crate) fn finish_client_write(
     Ok(serde_json::json!({ "saved": path }))
 }
 
+/// The `save_failed` refusal text every client-side write failure answers.
+fn save_failed(path: &str, why: &str) -> String {
+    serde_json::json!({
+        "refusal": "save_failed",
+        "explanation": format!("{path}: {why}"),
+        "detail": { "path": path },
+    })
+    .to_string()
+}
+
 /// `std::fs::write` answering the `save_failed` refusal text
 /// [`write_live_bytes`] does, so every client-side write fails alike.
 fn write_file(path: &str, bytes: &[u8]) -> Result<(), String> {
-    std::fs::write(path, bytes).map_err(|e| {
-        serde_json::json!({
-            "refusal": "save_failed",
-            "explanation": format!("{path}: {e}"),
-            "detail": { "path": path },
-        })
-        .to_string()
-    })
+    std::fs::write(path, bytes).map_err(|e| save_failed(path, &e.to_string()))
 }
 
+/// Writes the bytes a live `hew.doc.save` or `hew.doc.export` handed back
+/// (see [`dispatch_live`]) to `path` — the `.hew` document for save, the
+/// exported STL/3MF/GLB for export; both shapes carry the same
+/// `bytes_base64` field the live host base64s them into, since it has no
+/// filesystem of its own. This side decodes and writes.
 pub(crate) fn write_live_bytes(response: &serde_json::Value, path: &str) -> Result<(), String> {
     // Both shapes are real: a bare `hew.doc.save` answers its own result,
     // while the one-command transaction §6.4 calls canonical (and the
@@ -888,7 +914,7 @@ pub(crate) fn write_live_bytes(response: &serde_json::Value, path: &str) -> Resu
         .and_then(|v| v.as_str())
         .ok_or_else(|| "the host returned no document bytes to write".to_string())?;
     let bytes =
-        decode_base64(b64).ok_or_else(|| "the document bytes were malformed".to_string())?;
+        decode_base64(b64).ok_or_else(|| save_failed(path, "the document bytes were malformed"))?;
     // A write that fails here fails for the same reasons it would on a
     // host that owned the filesystem, so it answers the same refusal
     // that host would (`save_failed`, declared for both commands) rather
@@ -1264,6 +1290,108 @@ mod save_roundtrip_tests {
         );
         assert_eq!(path.as_deref(), Some("/tmp/a.stl"));
         assert_eq!(params["commands"][0]["params"]["format"], "stl");
+    }
+
+    /// A snapshot whose file cannot be written answers the same canonical
+    /// `save_failed` refusal an export does.
+    #[test]
+    fn a_failed_snapshot_write_answers_save_failed() {
+        let reply = json!({"jsonrpc":"2.0","id":3,"result":{
+            "png_base64":"Zm9v","width":2,"height":3}});
+        let message = finish_client_write(&reply, "/no/such/dir/shot.png").unwrap_err();
+        let out = write_failure_reply(&reply, "hew.view.snapshot", &message);
+        assert_eq!(out["id"], 3);
+        assert_eq!(out["error"]["data"]["refusal"], "save_failed");
+        assert_eq!(out["error"]["data"]["failed_method"], "hew.view.snapshot");
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("hew-cli-cw-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The saved shape: the headless keys, the written file paths in place
+    /// of the inline base64, and the passthrough members.
+    #[test]
+    fn a_client_snapshot_write_answers_the_headless_shape() {
+        let dir = scratch("shape");
+        let target = dir.join("shot.png").to_str().unwrap().to_string();
+        let reply = json!({"jsonrpc":"2.0","id":1,"result":{
+            "png_base64":"Zm9v","width":2,"height":3,
+            "id_buffer_base64":"aWRz","id_palette":["a"],
+            "depth_png_base64":"ZGVwdGg=","depth_near":1.0,"depth_far":2.0,"depth_bits":8,
+            "normals_png_base64":"bm9ybQ=="}});
+        let out = finish_client_write(&reply, &target).unwrap();
+        assert_eq!(out["path"], target.as_str());
+        assert_eq!(
+            (out["width"].as_u64(), out["height"].as_u64()),
+            (Some(2), Some(3))
+        );
+        assert_eq!(out["id_buffer_path"], format!("{target}.ids.bin").as_str());
+        assert_eq!(out["depth_path"], format!("{target}.depth.png").as_str());
+        assert_eq!(
+            out["normals_path"],
+            format!("{target}.normals.png").as_str()
+        );
+        assert_eq!(out["id_palette"], json!(["a"]));
+        assert_eq!(out["depth_near"], 1.0);
+        assert_eq!(out["depth_far"], 2.0);
+        assert_eq!(out["depth_bits"], 8);
+        assert_eq!(
+            std::fs::read(format!("{target}.normals.png")).unwrap(),
+            b"norm"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A rewrite without companions removes the ones an earlier run left.
+    #[test]
+    fn a_client_snapshot_write_removes_stale_companions() {
+        let dir = scratch("stale");
+        let target = dir.join("shot.png").to_str().unwrap().to_string();
+        for suffix in [".ids.bin", ".depth.png", ".normals.png"] {
+            std::fs::write(format!("{target}{suffix}"), b"old").unwrap();
+        }
+        let reply = json!({"result":{"png_base64":"Zm9v","width":1,"height":1}});
+        finish_client_write(&reply, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"foo");
+        for suffix in [".ids.bin", ".depth.png", ".normals.png"] {
+            assert!(!std::path::Path::new(&format!("{target}{suffix}")).exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A companion that cannot be written takes the PNG down with it.
+    #[test]
+    fn a_failed_companion_write_leaves_no_partial_result() {
+        let dir = scratch("partial");
+        let target = dir.join("shot.png").to_str().unwrap().to_string();
+        // A directory where the id buffer should go.
+        std::fs::create_dir(format!("{target}.ids.bin")).unwrap();
+        let reply = json!({"result":{
+            "png_base64":"Zm9v","width":1,"height":1,"id_buffer_base64":"aWRz"}});
+        let message = finish_client_write(&reply, &target).unwrap_err();
+        assert!(message.contains("save_failed"), "{message}");
+        assert!(!std::path::Path::new(&target).exists(), "no stray PNG");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Malformed base64 answers the canonical -32000 `save_failed` envelope
+    /// and writes nothing.
+    #[test]
+    fn malformed_render_bytes_answer_the_canonical_refusal() {
+        let dir = scratch("bad64");
+        let target = dir.join("shot.png").to_str().unwrap().to_string();
+        let reply = json!({"jsonrpc":"2.0","id":9,"result":{
+            "png_base64":"Zm9v","width":1,"height":1,"id_buffer_base64":"!!not base64!!"}});
+        let message = finish_client_write(&reply, &target).unwrap_err();
+        let out = write_failure_reply(&reply, "hew.view.snapshot", &message);
+        assert_eq!(out["error"]["code"], -32000, "{out}");
+        assert_eq!(out["error"]["data"]["refusal"], "save_failed");
+        assert!(!std::path::Path::new(&target).exists(), "nothing written");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

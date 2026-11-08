@@ -341,17 +341,25 @@ impl Grant {
     }
 }
 
-/// The ceiling rule (the old `core` profile's, verbatim): `App` reaches
-/// everything; `Core` withholds the window commands and every
-/// `hew.view.*` command but the two with a headless render path.
+/// The ceiling rule: `App` reaches everything; `Core` withholds the window
+/// commands and every `hew.view.*` command except six that need no window:
+/// `snapshot` and `line_drawing` (a headless render path) and `hide`,
+/// `show`, `show_all`, `hidden` (kernel-served over the document's
+/// user-hidden flags).
 pub fn within_ceiling(ceiling: Ceiling, decl: &CommandDecl) -> bool {
     match ceiling {
         Ceiling::App => true,
         Ceiling::Core => {
             !matches!(decl.name.as_str(), "hew.doc.close" | "hew.doc.focus")
-                && (decl.name == "hew.view.snapshot"
-                    || decl.name == "hew.view.line_drawing"
-                    || !decl.name.starts_with("hew.view."))
+                && (matches!(
+                    decl.name.as_str(),
+                    "hew.view.snapshot"
+                        | "hew.view.line_drawing"
+                        | "hew.view.hide"
+                        | "hew.view.show"
+                        | "hew.view.show_all"
+                        | "hew.view.hidden"
+                ) || !decl.name.starts_with("hew.view."))
         }
     }
 }
@@ -385,18 +393,73 @@ mod tests {
     }
 
     #[test]
-    fn core_and_app_match_the_old_profile_rule() {
-        // The deleted `Profile::Core` rule, inlined.
-        fn old_core(name: &str) -> bool {
-            !matches!(name, "hew.doc.close" | "hew.doc.focus")
-                && (name == "hew.view.snapshot"
-                    || name == "hew.view.line_drawing"
-                    || !name.starts_with("hew.view."))
-        }
+    fn core_ceiling_withholds_live_viewport_commands_only() {
+        // Pinned by name, independent of `within_ceiling`: exactly these
+        // `hew.view.*` commands are inside Core, and every other one the
+        // registry declares is withheld.
+        const CORE_VIEW: [&str; 6] = [
+            "hew.view.snapshot",
+            "hew.view.line_drawing",
+            "hew.view.hide",
+            "hew.view.show",
+            "hew.view.show_all",
+            "hew.view.hidden",
+        ];
+        const WITHHELD_VIEW: [&str; 9] = [
+            "hew.view.camera",
+            "hew.view.zoom_extents",
+            "hew.view.units",
+            "hew.view.isolate",
+            "hew.view.clear_isolation",
+            "hew.view.zoom_to",
+            "hew.view.enter",
+            "hew.view.exit",
+            "hew.view.exit_all",
+        ];
         let reg = Registry::protocol_1();
+        for name in CORE_VIEW {
+            assert!(Grant::core().grants(reg.get(name).unwrap()), "{name}");
+        }
+        for name in WITHHELD_VIEW {
+            assert!(!Grant::core().grants(reg.get(name).unwrap()), "{name}");
+        }
         for c in reg.commands() {
-            assert_eq!(Grant::core().grants(c), old_core(&c.name), "{}", c.name);
+            if c.name.starts_with("hew.view.") {
+                assert!(
+                    CORE_VIEW.contains(&c.name.as_str())
+                        || WITHHELD_VIEW.contains(&c.name.as_str()),
+                    "{} is a new view command: classify it for Core",
+                    c.name
+                );
+            }
+            let window = matches!(c.name.as_str(), "hew.doc.close" | "hew.doc.focus");
+            assert_eq!(
+                Grant::core().grants(c),
+                !window && !WITHHELD_VIEW.contains(&c.name.as_str()),
+                "{}",
+                c.name
+            );
             assert!(Grant::app().grants(c), "{}", c.name);
+        }
+    }
+
+    #[test]
+    fn core_grants_hide_show_show_all_and_hidden() {
+        let reg = Registry::protocol_1();
+        for name in [
+            "hew.view.hide",
+            "hew.view.show",
+            "hew.view.show_all",
+            "hew.view.hidden",
+        ] {
+            assert!(Grant::core().grants(reg.get(name).unwrap()), "{name}");
+        }
+        for name in [
+            "hew.view.isolate",
+            "hew.view.camera",
+            "hew.view.zoom_extents",
+        ] {
+            assert!(!Grant::core().grants(reg.get(name).unwrap()), "{name}");
         }
     }
 

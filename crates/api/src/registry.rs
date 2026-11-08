@@ -3672,7 +3672,7 @@ impl Registry {
                     "ids": transform_ids_schema.clone(),
                     "pivot": {},
                     "axis": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
-                    "angle": { "type": "number" },
+                    "angle": { "type": "number", "description": "radians, right-handed about axis" },
                     "copy": {
                         "type": "object",
                         "properties": {
@@ -6902,6 +6902,16 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rotate_angle_says_radians() {
+        let reg = Registry::protocol_1();
+        let rotate = reg.get("hew.entity.rotate").expect("declared");
+        let description = rotate.params_schema["properties"]["angle"]["description"]
+            .as_str()
+            .expect("angle is described");
+        assert!(description.contains("radians"), "{description}");
+    }
 
     /// Two plugin commands under `com.example.lib`: a read-only `sum` and a
     /// mutating `shelf.add`.

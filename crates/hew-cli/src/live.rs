@@ -1456,7 +1456,7 @@ pub fn build_hello_request(client_name: &str) -> Request {
         method: "hew.meta.hello".to_string(),
         params: Some(json!({
             "protocol": 1,
-            "client": { "name": client_name, "version": env!("CARGO_PKG_VERSION") },
+            "client": { "name": client_name, "version": crate::VERSION },
             "encodings": ["json"],
         })),
     }

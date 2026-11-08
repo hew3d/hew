@@ -665,7 +665,7 @@ fn write_discovery_file(dir: &Path, pid: u32, socket: &str, token: &str) -> std:
         socket,
         token,
         pid,
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::version::VERSION,
     };
     let json = serde_json::to_vec(&body).expect("DiscoveryFile serializes");
     std::fs::write(&path, &json)?;
@@ -1324,7 +1324,7 @@ mod windows {
             socket,
             token,
             pid,
-            version: env!("CARGO_PKG_VERSION"),
+            version: crate::version::VERSION,
         };
         let json = serde_json::to_vec(&body).expect("DiscoveryFile serializes");
         std::fs::write(&path, &json)

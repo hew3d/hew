@@ -1519,7 +1519,12 @@ below.
   frame override. `hew.entity.flip` mirrors a selection across a plane
   on the bus, with an optional linked mirrored copy. `hew.solid.rejoin`
   (Model Health's "Rejoin as one solid" in one undo entry) rejoins a seam
-  family. A boolean's
+  family. `hew-cli --version` and `hew-relay --version` report the release
+  tag's version on a tag build; the `core` ceiling grants `hew.view.hide`,
+  `show`, `show_all`, and `hidden` without a window; `hew_query` admits every
+  command that does not change the document; `hew.entity.rotate`'s angle is
+  documented in radians; headless PNGs are deflate-compressed; and `hew-cli
+  --live` writes a snapshot or line drawing client-side from one render. A boolean's
   result keeps its first operand's name, tags, and attributes. A plugin
   checks before it commits: `hew.doc.transact` with `dry_run: true`
   rehearses a whole envelope on a copy of the document and answers what

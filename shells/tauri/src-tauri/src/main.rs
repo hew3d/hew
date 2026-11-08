@@ -29,6 +29,7 @@ use tauri::{
 mod fly_cursor;
 mod fonts;
 mod menu_labels;
+mod version;
 
 // The desktop half of `--live` (docs/agents/HEW_API.md §11.2): the local socket
 // transport, the discovery file, and the token gate. See live.rs's

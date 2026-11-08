@@ -15,10 +15,7 @@ use std::path::PathBuf;
 /// what it reads from the environment, and where to go next. Printed to
 /// stdout on request (a help page is output, not an error) and to stderr
 /// only when it accompanies a usage error.
-const USAGE: &str = concat!(
-    "hew-cli ",
-    env!("CARGO_PKG_VERSION"),
-    r#" — build and edit Hew models from a script, a shell, or an AI client.
+const USAGE_BODY: &str = r#" — build and edit Hew models from a script, a shell, or an AI client.
 
 USAGE
     hew-cli <command> [options]
@@ -77,8 +74,14 @@ LEARN MORE
     hew-cli <command> --help    what each command takes, and an example
     docs/API_GUIDE.md           how to drive Hew, with worked examples
     docs/agents/HEW_API.md             the protocol itself
-"#
-);
+"#;
+
+/// The top-level help page, led by the name and version. The version is
+/// formatted at print time because [`hew_cli::VERSION`] is chosen at
+/// compile time from an environment variable.
+fn usage() -> String {
+    format!("hew-cli {}{USAGE_BODY}", hew_cli::VERSION)
+}
 
 /// `hew-cli run --help`.
 const USAGE_RUN: &str = r#"hew-cli run — run a file of JSON-RPC envelopes in order.
@@ -244,7 +247,7 @@ OPTIONS
 
 fn usage_error(message: &str) -> ! {
     eprintln!("{message}\n");
-    eprint!("{USAGE}");
+    eprint!("{}", usage());
     std::process::exit(2);
 }
 
@@ -383,11 +386,11 @@ fn main() {
         // where it can be piped and paged. Only a usage ERROR prints it
         // to stderr, alongside what went wrong.
         "-h" | "--help" | "help" => {
-            print!("{USAGE}");
+            print!("{}", usage());
             0
         }
         "-V" | "--version" => {
-            println!("hew-cli {}", env!("CARGO_PKG_VERSION"));
+            println!("hew-cli {}", hew_cli::VERSION);
             0
         }
         other => usage_error(&unknown_subcommand(other)),
@@ -564,8 +567,8 @@ fn mcp_subcommand(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        USAGE, USAGE_DISPATCH, USAGE_DOCUMENTS, USAGE_EVENTS, USAGE_MCP, USAGE_RUN, edit_distance,
-        unknown_subcommand,
+        USAGE_DISPATCH, USAGE_DOCUMENTS, USAGE_EVENTS, USAGE_MCP, USAGE_RUN, edit_distance,
+        unknown_subcommand, usage,
     };
 
     /// A mistyped command names the nearest real one. Silently accepting
@@ -596,7 +599,8 @@ mod tests {
     /// what this is, how to start, and where to look next.
     #[test]
     fn the_help_page_says_what_it_is_how_to_start_and_where_to_go_next() {
-        assert!(USAGE.starts_with("hew-cli "), "leads with name and version");
+        let usage = usage();
+        assert!(usage.starts_with("hew-cli "), "leads with name and version");
         for section in [
             "USAGE",
             "COMMANDS",
@@ -605,13 +609,24 @@ mod tests {
             "ENVIRONMENT",
             "LEARN MORE",
         ] {
-            assert!(USAGE.contains(section), "top-level help needs {section}");
+            assert!(usage.contains(section), "top-level help needs {section}");
         }
         // The environment it reads is documented, not folded into prose.
-        assert!(USAGE.contains("HEW_APP") && USAGE.contains("HEW_RUNTIME_DIR"));
+        assert!(usage.contains("HEW_APP") && usage.contains("HEW_RUNTIME_DIR"));
         // And it points at per-command help rather than explaining
         // everything at the top level.
-        assert!(USAGE.contains("hew-cli <command> --help"));
+        assert!(usage.contains("hew-cli <command> --help"));
+    }
+
+    /// The banner line and `--version` print the same stamp.
+    #[test]
+    fn usage_banner_and_version_flag_agree() {
+        let banner = usage();
+        let first = banner.lines().next().unwrap();
+        assert!(
+            first.starts_with(&format!("hew-cli {} ", hew_cli::VERSION)),
+            "banner leads with the stamped version: {first}"
+        );
     }
 
     #[test]

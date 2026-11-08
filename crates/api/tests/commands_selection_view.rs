@@ -963,6 +963,64 @@ fn zoom_to_pads_the_union_box() {
 
 // ---------------------------------------------------------- NoHost pins
 
+/// A `core` grant with no host reaches the four kernel-served visibility
+/// commands; the host-served `hew.view.isolate` stays outside the ceiling.
+#[test]
+fn hide_show_hidden_work_with_a_core_grant_and_no_host() {
+    let mut f = fixture();
+    let mut host = NoHost;
+    let mut conn = Connection::new(Grant::core(), "core");
+    for (method, params) in [
+        ("hew.meta.hello", json!({ "protocol": 1 })),
+        ("hew.doc.attach", json!({})),
+    ] {
+        let r = call(&mut conn, &mut f.doc, &mut host, method, params);
+        assert!(r.error.is_none(), "{method} failed: {:?}", r.error);
+    }
+    let got = ok(
+        &mut conn,
+        &mut f.doc,
+        &mut host,
+        "hew.view.hide",
+        json!({ "ids": [f.b, f.a] }),
+    );
+    assert_eq!(got, json!({ "hidden": [f.a, f.b] }));
+    let got = ok(
+        &mut conn,
+        &mut f.doc,
+        &mut host,
+        "hew.view.hidden",
+        json!({}),
+    );
+    assert_eq!(got["hidden"], json!([f.a, f.b]));
+    assert_eq!(got["isolated"], Value::Null);
+    let got = ok(
+        &mut conn,
+        &mut f.doc,
+        &mut host,
+        "hew.view.show",
+        json!({ "ids": [f.a] }),
+    );
+    assert_eq!(got, json!({ "hidden": [f.b] }));
+    let got = ok(
+        &mut conn,
+        &mut f.doc,
+        &mut host,
+        "hew.view.show_all",
+        json!({}),
+    );
+    assert_eq!(got["hidden"], json!([]));
+    let r = call(
+        &mut conn,
+        &mut f.doc,
+        &mut host,
+        "hew.view.isolate",
+        json!({ "ids": [f.a] }),
+    );
+    let err = r.error.expect("isolate is outside the core ceiling");
+    assert_eq!(err.code, -32001, "{err:?}");
+}
+
 /// The selection commands are host-served, so a headless host has none; the
 /// kernel-served hide and hidden still answer.
 #[test]

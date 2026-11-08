@@ -775,7 +775,7 @@ pub fn record_submitted(
         report: FollowedReport {
             id: id.to_owned(),
             sent_at: now_ms(),
-            app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            app_version: crate::version::VERSION.to_owned(),
             excerpt: truncate_excerpt(&options.excerpt),
             file_name: options.file_name,
             status: Status::Open,

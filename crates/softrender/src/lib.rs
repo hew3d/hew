@@ -1114,7 +1114,7 @@ mod tests {
         assert_eq!(wide_pixels[j], 65_535);
     }
 
-    /// Decodes a gray PNG this crate's encoder wrote (stored deflate,
+    /// Decodes a gray PNG this crate's encoder wrote (deflate,
     /// filter 0) back into samples — enough to test what a viewer would see.
     fn decode_gray(png: &[u8], width: u32, height: u32, bits: u8) -> Vec<u16> {
         let mut i = 8;
@@ -1126,17 +1126,7 @@ mod tests {
             }
             i += 12 + len;
         }
-        let mut raw = Vec::new();
-        let mut z = &idat[2..]; // past the zlib header
-        loop {
-            let last = z[0] & 1 == 1;
-            let n = u16::from_le_bytes([z[1], z[2]]) as usize;
-            raw.extend_from_slice(&z[5..5 + n]);
-            z = &z[5 + n..];
-            if last {
-                break;
-            }
-        }
+        let raw = miniz_oxide::inflate::decompress_to_vec_zlib(&idat).expect("inflates");
         let bytes = if bits == 16 { 2 } else { 1 };
         let stride = width as usize * bytes;
         let mut out = Vec::new();
