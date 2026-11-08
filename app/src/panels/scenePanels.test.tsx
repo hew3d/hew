@@ -132,6 +132,7 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     group_members: (_id: bigint) => [] as { kind: string; id: bigint }[],
     node_parent: (_kind: number, _id: bigint) => undefined as bigint | undefined,
     instance_def: (_id: bigint) => undefined as bigint | undefined,
+    is_linked: () => false,
     component_name: (_id: bigint) => undefined as string | undefined,
     instances_of: (_id: bigint) => new BigUint64Array(),
     set_component_name: vi.fn(),
@@ -354,6 +355,7 @@ describe('ObjectInfoPanel', () => {
           instance_ids: () => new BigUint64Array([4n]),
           instance_name: () => undefined,
           instance_def: () => 9n,
+          is_linked: () => false,
           component_name: () => 'Door',
           node_tags: () => [],
         })}
@@ -375,6 +377,7 @@ describe('ObjectInfoPanel', () => {
           instance_ids: () => new BigUint64Array([4n]),
           instance_name: () => 'Front Door',
           instance_def: () => 9n,
+          is_linked: () => false,
           component_name: () => 'Door',
           instances_of: () => new BigUint64Array([4n]),
           node_tags: () => [],
@@ -398,6 +401,7 @@ describe('ObjectInfoPanel', () => {
       instance_ids: () => new BigUint64Array([4n]),
       instance_name: () => undefined,
       instance_def: () => 9n,
+      is_linked: () => false,
       component_name: () => 'Door',
       instances_of: () => new BigUint64Array([4n]),
       node_tags: () => [],
@@ -429,6 +433,7 @@ describe('ObjectInfoPanel', () => {
           instance_ids: () => new BigUint64Array([4n, 5n, 6n]),
           instance_name: () => undefined,
           instance_def: () => 9n,
+          is_linked: () => false,
           component_name: () => 'Door',
           instances_of: () => new BigUint64Array([4n, 5n, 6n]),
           node_tags: () => [],
@@ -458,6 +463,7 @@ describe('ObjectInfoPanel', () => {
           instance_ids: () => new BigUint64Array([4n]),
           instance_name: () => undefined,
           instance_def: () => 9n,
+          is_linked: () => false,
           component_name: () => 'Door',
           instances_of: () => new BigUint64Array([4n]),
           node_tags: () => [],
@@ -529,6 +535,7 @@ describe('ObjectInfoPanel', () => {
       ],
       instance_name: () => undefined,
       instance_def: (id: bigint) => (id === 4n ? 9n : 10n),
+      is_linked: () => false,
       component_name: () => undefined,
       instances_of: (id: bigint) => new BigUint64Array([id === 9n ? 4n : 5n]),
       node_tags: () => [],
@@ -577,6 +584,7 @@ describe('ObjectInfoPanel', () => {
       ],
       instance_name: () => undefined,
       instance_def: () => 9n,
+      is_linked: () => false,
       component_name: () => undefined,
       instances_of: () => new BigUint64Array([4n, 5n]),
       node_tags: () => [],
@@ -2157,6 +2165,7 @@ describe('DocumentTree', () => {
       },
       instance_name: () => undefined,
       instance_def: () => 9n,
+      is_linked: () => false,
       component_name: () => 'Door',
     })
     render(
@@ -3192,5 +3201,105 @@ describe('TagsPanel', () => {
     // The flash clearing keeps the selection.
     rerender(<TagsPanel {...baseTagProps} scene={scene} revealTag={null} />)
     expect(activeOf('Roof')).toBe('true')
+  })
+})
+
+describe('ObjectInfoPanel — linked copies', () => {
+  const linkedScene = (overrides: Record<string, unknown> = {}) =>
+    makeScene({
+      instance_ids: () => new BigUint64Array([4n, 5n, 6n]),
+      instance_name: () => undefined,
+      instance_def: () => 9n,
+      is_linked: () => true,
+      component_name: () => 'Leg',
+      instances_of: () => new BigUint64Array([4n, 5n, 6n]),
+      component_member_objects: () => new BigUint64Array([30n]),
+      node_tags: () => [],
+      ...overrides,
+    })
+  const panel = (scene: WasmScene, extra: Record<string, unknown> = {}) => (
+    <ObjectInfoPanel
+      scene={scene}
+      docRev={0}
+      selectedIds={[{ kind: 'instance', id: 4n }]}
+      onNameChanged={vi.fn()}
+      onGeometryChanged={vi.fn()}
+      onTagsChanged={vi.fn()}
+      onSelectMany={vi.fn()}
+      {...extra}
+    />
+  )
+
+  it('a_linked_placement_shows_linked_copies_n_with_unlink_and_make_component', () => {
+    const onUnlink = vi.fn()
+    const onMakeComponent = vi.fn()
+    render(panel(linkedScene(), { onUnlink, onMakeComponent }))
+    const row = screen.getByTestId('object-info-copies')
+    expect(within(row).getByText('Linked copies: 3')).toBeInTheDocument()
+    fireEvent.click(within(row).getByRole('button', { name: 'Unlink' }))
+    expect(onUnlink).toHaveBeenCalledWith({ kind: 'instance', id: 4n })
+    fireEvent.click(within(row).getByRole('button', { name: 'Make component' }))
+    expect(onMakeComponent).toHaveBeenCalledWith({ kind: 'instance', id: 4n })
+    // The type reads as a copy, and neither "component" nor "instance" shows.
+    expect(screen.getByText('Linked copy')).toBeInTheDocument()
+    expect(screen.queryByText(/instance/i)).toBeNull()
+    expect(screen.queryByText(/definition/i)).toBeNull()
+  })
+
+  it('two_name_fields_edit_the_definition_and_the_instance', () => {
+    const scene = linkedScene({ instance_name: () => 'Front left' })
+    render(panel(scene))
+    const all = screen.getByLabelText('Name (all copies)') as HTMLInputElement
+    const mine = screen.getByLabelText('This copy') as HTMLInputElement
+    expect(all.value).toBe('Leg')
+    expect(mine.value).toBe('Front left')
+    fireEvent.change(all, { target: { value: 'Table leg' } })
+    fireEvent.blur(all)
+    expect((scene as unknown as { set_component_name: ReturnType<typeof vi.fn> }).set_component_name).toHaveBeenCalledWith(9n, 'Table leg')
+    fireEvent.change(mine, { target: { value: 'Front right' } })
+    fireEvent.blur(mine)
+    expect((scene as unknown as { set_node_name: ReturnType<typeof vi.fn> }).set_node_name).toHaveBeenCalledWith(2, 4n, 'Front right')
+  })
+
+  it('the_all_copies_placeholder_shows_the_shared_name_never_this_copys_own', () => {
+    const scene = linkedScene({
+      instance_name: () => 'Front left',
+      component_name: () => undefined,
+      component_member_objects: () => new BigUint64Array([30n]),
+      object_name: () => 'Leg',
+    })
+    render(panel(scene))
+    expect((screen.getByLabelText('Name (all copies)') as HTMLInputElement).placeholder).toBe('Leg')
+    expect((screen.getByLabelText('This copy') as HTMLInputElement).value).toBe('Front left')
+    // With nothing to show, the placeholder is empty rather than a made-up word.
+    const bare = linkedScene({ instance_name: () => 'Front left', component_name: () => undefined, object_name: () => undefined })
+    render(panel(bare))
+    expect((screen.getAllByLabelText('Name (all copies)')[1] as HTMLInputElement).placeholder).toBe('')
+  })
+
+  it('select_all_copies_selects_every_placement', () => {
+    const onSelectMany = vi.fn()
+    render(panel(linkedScene(), { onSelectMany }))
+    fireEvent.click(screen.getByRole('button', { name: 'Select all copies' }))
+    expect(onSelectMany).toHaveBeenCalledWith([
+      { kind: 'instance', id: 4n },
+      { kind: 'instance', id: 5n },
+      { kind: 'instance', id: 6n },
+    ])
+  })
+
+  it('a set of one has no Select all copies', () => {
+    render(panel(linkedScene({ instances_of: () => new BigUint64Array([4n]) })))
+    expect(screen.queryByRole('button', { name: 'Select all copies' })).toBeNull()
+    expect(screen.getByText('Linked copies: 1')).toBeInTheDocument()
+  })
+
+  it('an_ordinary_component_keeps_definition_name_and_instance_count', () => {
+    render(panel(linkedScene({ is_linked: () => false, component_name: () => 'Door' })))
+    expect(screen.getByLabelText('Definition Name')).toBeInTheDocument()
+    expect(screen.getByLabelText('Instance Name')).toBeInTheDocument()
+    expect(screen.getByText('(3 instances)')).toBeInTheDocument()
+    expect(screen.queryByTestId('object-info-copies')).toBeNull()
+    expect(screen.getByText('Component')).toBeInTheDocument()
   })
 })

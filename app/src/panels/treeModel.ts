@@ -375,6 +375,47 @@ export interface LabelScene {
   instance_def(id: bigint): bigint | undefined
   component_name(def: bigint): string | undefined
   sketch_ids?(): ArrayLike<bigint>
+  /** Whether an instance places a linked set (copies made by Move, Paste, ...). */
+  is_linked?(instance: bigint): boolean
+  component_member_objects?(def: bigint): ArrayLike<bigint>
+}
+
+const namedOrNull = (n: string | undefined): string | null => {
+  if (n === undefined) return null
+  const stripped = stripTagSuffix(n)
+  return stripped.length > 0 ? stripped : null
+}
+
+/** What every copy of a linked set is called when none has a name of its own:
+ *  the set's name, else its single part's name, else null. */
+export function sharedLinkedLabel(scene: LabelScene, def: bigint | undefined): string | null {
+  if (def === undefined) return null
+  const shared = namedOrNull(scene.component_name(def))
+  if (shared !== null) return shared
+  if (scene.component_member_objects !== undefined) {
+    const members = Array.from(scene.component_member_objects(def))
+    if (members.length === 1) return namedOrNull(scene.object_name(members[0]))
+  }
+  return null
+}
+
+/**
+ * The label of an instance row. A placement of a linked set reads as the
+ * thing it is, never as a component: the placement's own name, else the
+ * set's name, else its single part's name, else "Copies". Any other
+ * instance keeps `resolveLabel`'s component wording.
+ */
+export function placementLabel(scene: LabelScene, instance: bigint, index: number | null): string {
+  const def = scene.instance_def(instance)
+  const defName = def !== undefined ? scene.component_name(def) : undefined
+  if (scene.is_linked === undefined || !scene.is_linked(instance)) {
+    return resolveLabel(scene.instance_name(instance), defName, 'instance', index)
+  }
+  const own = namedOrNull(scene.instance_name(instance))
+  if (own !== null) return own
+  const shared = sharedLinkedLabel(scene, def)
+  if (shared !== null) return shared
+  return t({ context: 'unnamed item', comment: 'Row label for a placement of a linked set that has no name at all', message: 'Copies' })
 }
 
 /**
@@ -436,9 +477,7 @@ export function makeLabelFor(
     if (node.kind === 'group') {
       return resolveLabel(scene.group_name(node.id), undefined, 'group', idx)
     } else if (node.kind === 'instance') {
-      const def = scene.instance_def(node.id)
-      const defName = def !== undefined ? scene.component_name(def) : undefined
-      return resolveLabel(scene.instance_name(node.id), defName, 'instance', idx)
+      return placementLabel(scene, node.id, idx)
     }
     return resolveLabel(scene.object_name(node.id), undefined, 'object', idx)
   }

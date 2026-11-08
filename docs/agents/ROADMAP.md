@@ -316,6 +316,27 @@ below.
   (another window, or after File ▸ Open/New in this one) copies the
   definition as before, with repeat pastes of the same copy reusing it by
   clipboard provenance; Make Unique breaks a link on purpose
+- Linked copies in the app: Move, Rotate, array, and Paste copies are
+  linked by default (Settings ▸ Editing ▸ "Copies are linked"); tapping
+  the copy key cycles Move, Copy, the other kind of copy, Move, and the
+  cursor badge, hint, and readout follow (`+`, `+ independent`, `+ linked`).
+  An array repeats the kind of copy it follows. Paste into the same
+  document links to the copied nodes while they are still live (the
+  clipboard records the document and window it came from); Edit ▸ Paste
+  independent and Paste linked force either form. A placement of a linked
+  set reads in the Outliner by its own name, else the shared name, else its
+  part's name, else "Copies", with a link glyph and a ×N count (none for a
+  set of one) and a row "Copies" menu: Unlink, Unlink all, Make component
+  (promote: asks for a name), Select all copies, Rename. The same actions
+  sit in the Object menu, the contextual dock, and Object Info ("Linked
+  copies: N", "Name (all copies)", "This copy"). Subtract on a placement
+  cuts through the shared shape (a strip offers "Cut all N copies" or
+  "Only this one"); Union and Intersect unlink the placement first, as one
+  undo step labeled "(unlinked)", and say so. Slice and Push/Pull on a face
+  reached through a linked placement edit the shared shape with no context
+  to enter. Link identical copies (joining look-alike loose Objects into
+  one set) is not built yet: it waits on the query that fingerprints a
+  shape.
 - Slice: cut a solid along a plane into two independent watertight solids
 - Push/pull on any planar face of a solid, not just faces with
   perpendicular neighbors: it follows classic SketchUp translate-and-build —

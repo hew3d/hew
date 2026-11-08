@@ -55,6 +55,10 @@ msgstr ""
 msgid "{count, plural, one {{count} change undone since last save.} other {{count} changes undone since last save.}}"
 msgstr ""
 
+#: src/linkedCopyCopy.ts
+msgid "{count, plural, one {Cut all # copy} other {Cut all # copies}}"
+msgstr ""
+
 #: src/panels/RecoveryDialog.tsx
 msgid "{count, plural, one {Recover Unsaved Document?} other {Recover # Unsaved Documents?}}"
 msgstr ""
@@ -65,6 +69,10 @@ msgstr ""
 
 #: src/viewport/isolation.ts
 msgid "{count, plural, one {Showing # object} other {Showing # objects}}"
+msgstr ""
+
+#: src/linkedCopyCopy.ts
+msgid "{count, plural, one {Unlinked # copy to join it} other {Unlinked # copies to join them}}"
 msgstr ""
 
 #: src/print/usePrintController.ts
@@ -200,8 +208,28 @@ msgstr ""
 msgid "{kb} KB"
 msgstr ""
 
+#. Measurements box readout while a copy is armed: the kind of copy (Copy, Independent copy, or Linked copy), then the measured value
+#. Measurements box readout while a copy is armed: the kind of copy (Copy, Independent copy, or Linked copy), then the measured value
+#: src/tools/MoveTool.ts
+#: src/tools/RotateTool.ts
+msgid "{kind} · {text}"
+msgstr ""
+
+#: src/tools/MoveTool.ts
+msgid "{kind} is on — click a base point to start the copy. Tap {COPY_MODIFIER_LABEL} to {next}."
+msgstr ""
+
+#: src/tools/RotateTool.ts
+msgid "{kind} is on — click to set the center of rotation. Tap {COPY_MODIFIER_LABEL} to {next}."
+msgstr ""
+
 #: src/panels/PrintDialog.tsx
 msgid "{label} (fit)"
+msgstr ""
+
+#. Undo label suffix; the first word is the action, e.g. "Union (unlinked)"
+#: src/linkedCopyCopy.ts
+msgid "{label} (unlinked)"
 msgstr ""
 
 #: src/panels/ImportReportDialog.tsx
@@ -1272,6 +1300,7 @@ msgstr ""
 #: src/health/healthCopy.ts
 #: src/panels/BusyNotice.tsx
 #: src/panels/ConfirmDialog.tsx
+#: src/panels/CutScopeStrip.tsx
 #: src/panels/ExportDialog.tsx
 #: src/panels/library/LibraryDetailPane.tsx
 #: src/panels/PrintDialog.tsx
@@ -1519,8 +1548,12 @@ msgid "Click a start point for the angle. Shift or → / ← / ↑ lock the rota
 msgstr ""
 
 #: src/tools/RotateTool.ts
-msgid "Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis. Tap {COPY_MODIFIER_LABEL} to rotate instead."
+msgid "Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis. Tap {COPY_MODIFIER_LABEL} to {next}."
 msgstr ""
+
+#: src/tools/RotateTool.ts
+#~ msgid "Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis. Tap {COPY_MODIFIER_LABEL} to rotate instead."
+#~ msgstr ""
 
 #: src/tools/PositionTextureTool.ts
 msgid "Click a textured face to position its texture."
@@ -1699,8 +1732,12 @@ msgid "Click two endpoints, then pull out the bulge. Alt cycles open · pie · s
 msgstr ""
 
 #: src/tools/MoveTool.ts
-msgid "Click where the copy lands — type an exact distance, arrow keys lock an axis, tap {COPY_MODIFIER_LABEL} to move instead."
+msgid "Click where the copy lands — type an exact distance, arrow keys lock an axis, tap {COPY_MODIFIER_LABEL} to {next}."
 msgstr ""
+
+#: src/tools/MoveTool.ts
+#~ msgid "Click where the copy lands — type an exact distance, arrow keys lock an axis, tap {COPY_MODIFIER_LABEL} to move instead."
+#~ msgstr ""
 
 #: src/tools/EditVertexTool.ts
 msgid "Click where the point should go — its lines follow."
@@ -1866,6 +1903,10 @@ msgstr ""
 msgid "Component exploded to solids for the boolean."
 msgstr ""
 
+#: src/App.tsx
+msgid "Component name"
+msgstr ""
+
 #. Command palette entry that jumps to a named component instance
 #: src/App.tsx
 msgid "Component: {label}"
@@ -1909,12 +1950,36 @@ msgstr ""
 msgid "Copied"
 msgstr ""
 
+#: src/App.tsx
+#: src/panels/DocumentTree.tsx
+#: src/panels/ObjectInfoPanel.tsx
+#: src/settings/EditingPane.tsx
+msgid "Copies"
+msgstr ""
+
+#. Row label for a placement of a linked set that has no name at all
+#: src/panels/treeModel.ts
+msgctxt "unnamed item"
+msgid "Copies"
+msgstr ""
+
+#. Short uppercase chip on the contextual dock when one linked copy is selected
+#: src/panels/dockLogic.ts
+msgid "COPIES"
+msgstr ""
+
+#: src/settings/EditingPane.tsx
+msgid "Copies are linked"
+msgstr ""
+
 #: src/i18n/historyLabels.ts
 #: src/i18n/nativeMenu.ts
 #: src/log/LogPanel.tsx
 #: src/palette/registry.ts
 #: src/panels/MenuBar.tsx
 #: src/panels/ReportBugDialog.tsx
+#: src/tools/MoveTool.ts
+#: src/tools/RotateTool.ts
 #: src/tools/transformSelection.ts
 msgid "Copy"
 msgstr ""
@@ -1923,8 +1988,8 @@ msgstr ""
 #. Measurements box readout while the Copy toggle is on, followed by the measured value
 #: src/tools/MoveTool.ts
 #: src/tools/RotateTool.ts
-msgid "Copy · {text}"
-msgstr ""
+#~ msgid "Copy · {text}"
+#~ msgstr ""
 
 #: src/i18n/historyLabels.ts
 msgid "Copy ×{n}"
@@ -1947,12 +2012,12 @@ msgid "Copy details"
 msgstr ""
 
 #: src/tools/MoveTool.ts
-msgid "Copy is on — click a base point to start the copy. Tap {COPY_MODIFIER_LABEL} to move instead."
-msgstr ""
+#~ msgid "Copy is on — click a base point to start the copy. Tap {COPY_MODIFIER_LABEL} to move instead."
+#~ msgstr ""
 
 #: src/tools/RotateTool.ts
-msgid "Copy is on — click to set the center of rotation. Tap {COPY_MODIFIER_LABEL} to rotate instead."
-msgstr ""
+#~ msgid "Copy is on — click to set the center of rotation. Tap {COPY_MODIFIER_LABEL} to rotate instead."
+#~ msgstr ""
 
 #: src/i18n/historyLabels.ts
 msgid "Copy sketch"
@@ -1964,6 +2029,11 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "Copy the selection to the clipboard, then delete it."
+msgstr ""
+
+#. Command palette entry that jumps to a named linked copy
+#: src/App.tsx
+msgid "Copy: {label}"
 msgstr ""
 
 #: src/settings/serverForm.ts
@@ -2231,6 +2301,10 @@ msgstr ""
 msgid "Cut the second selected solid out of the first (boolean difference)."
 msgstr ""
 
+#: src/linkedCopyCopy.ts
+msgid "Cut with one solid at a time"
+msgstr ""
+
 #: src/shop/PartsSheet.tsx
 msgid "Cutlist"
 msgstr ""
@@ -2463,6 +2537,10 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "Deselect everything."
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "detach copy"
 msgstr ""
 
 #: src/tools/detachedMode.ts
@@ -2863,6 +2941,10 @@ msgstr ""
 msgid "editing"
 msgstr ""
 
+#: src/settings/SettingsWindow.tsx
+msgid "Editing"
+msgstr ""
+
 #: src/panels/ReportBugDialog.tsx
 msgid "Email for follow-up (optional)"
 msgstr ""
@@ -3147,6 +3229,10 @@ msgstr ""
 #: src/i18n/historyLabels.ts
 msgid "Finish editing component"
 msgstr ""
+
+#: src/linkedCopyCopy.ts
+#~ msgid "Finish editing first, then try again."
+#~ msgstr ""
 
 #: src/i18n/historyLabels.ts
 msgid "Finish editing group"
@@ -3973,6 +4059,19 @@ msgid "Include"
 msgstr ""
 
 #: src/palette/registry.ts
+msgid "independent"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "independent copies"
+msgstr ""
+
+#: src/tools/MoveTool.ts
+#: src/tools/RotateTool.ts
+msgid "Independent copy"
+msgstr ""
+
+#: src/palette/registry.ts
 msgid "insert"
 msgstr ""
 
@@ -4029,6 +4128,7 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
 #: src/panels/MenuBar.tsx
+#: src/viewport/placementBoolean.ts
 msgid "Intersect"
 msgstr ""
 
@@ -4364,6 +4464,21 @@ msgstr ""
 msgid "lines only"
 msgstr ""
 
+#: src/palette/registry.ts
+msgid "linked copies"
+msgstr ""
+
+#. Object Info row: how many linked copies share this shape
+#: src/linkedCopyCopy.ts
+msgid "Linked copies: {count}"
+msgstr ""
+
+#: src/panels/ObjectInfoPanel.tsx
+#: src/tools/MoveTool.ts
+#: src/tools/RotateTool.ts
+msgid "Linked copy"
+msgstr ""
+
 #: src/health/healthCopy.ts
 msgid "List the objects that are selected now"
 msgstr ""
@@ -4459,15 +4574,33 @@ msgstr ""
 msgid "Look straight up at the model."
 msgstr ""
 
+#: src/tools/MoveTool.ts
+#: src/tools/RotateTool.ts
+msgid "make a linked copy"
+msgstr ""
+
+#: src/tools/MoveTool.ts
+#: src/tools/RotateTool.ts
+msgid "make an independent copy"
+msgstr ""
+
+#: src/App.tsx
 #: src/i18n/historyLabels.ts
+#: src/linkedCopyCopy.ts
+#: src/panels/dockLogic.ts
 msgid "Make component"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
+#: src/linkedCopies.ts
 #: src/palette/registry.ts
 #: src/panels/dockLogic.ts
 #: src/panels/MenuBar.tsx
 msgid "Make Component"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "Make every copy of the selected linked copy independent."
 msgstr ""
 
 #: src/palette/registry.ts
@@ -4495,6 +4628,10 @@ msgstr ""
 msgid "Make Solid…"
 msgstr ""
 
+#: src/palette/registry.ts
+msgid "Make the selected copy independent. The other copies stay linked."
+msgstr ""
+
 #: src/health/healthCopy.ts
 msgid "Make the selection solid"
 msgstr ""
@@ -4506,6 +4643,10 @@ msgstr ""
 #: src/health/healthCopy.ts
 msgid "Make this model solid"
 msgstr ""
+
+#: src/palette/registry.ts
+#~ msgid "make unique"
+#~ msgstr ""
 
 #: src/i18n/historyLabels.ts
 msgid "Make unique"
@@ -4744,6 +4885,10 @@ msgstr ""
 msgid "Move imprint"
 msgstr ""
 
+#: src/tools/MoveTool.ts
+msgid "move instead"
+msgstr ""
+
 #: src/i18n/historyLabels.ts
 msgid "Move into group"
 msgstr ""
@@ -4805,8 +4950,12 @@ msgid "Move to scale, click to commit, or type an exact factor/dimension — Ctr
 msgstr ""
 
 #: src/tools/RotateTool.ts
-msgid "Move to set the angle (snaps to 15°), or type exact degrees, then click to place the copy. Shift or → / ← / ↑ lock the axis. Tap {COPY_MODIFIER_LABEL} to rotate instead."
+msgid "Move to set the angle (snaps to 15°), or type exact degrees, then click to place the copy. Shift or → / ← / ↑ lock the axis. Tap {COPY_MODIFIER_LABEL} to {next}."
 msgstr ""
+
+#: src/tools/RotateTool.ts
+#~ msgid "Move to set the angle (snaps to 15°), or type exact degrees, then click to place the copy. Shift or → / ← / ↑ lock the axis. Tap {COPY_MODIFIER_LABEL} to rotate instead."
+#~ msgstr ""
 
 #: src/tools/RotateTool.ts
 msgid "Move to set the angle (snaps to 15°), or type exact degrees, then click. Shift or → / ← / ↑ lock the axis."
@@ -4846,6 +4995,11 @@ msgstr ""
 #: src/panels/ObjectInfoPanel.tsx
 #: src/settings/view.ts
 msgid "Name"
+msgstr ""
+
+#: src/linkedCopyCopy.ts
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Name (all copies)"
 msgstr ""
 
 #: src/panels/MaterialPalette.tsx
@@ -5373,6 +5527,10 @@ msgstr ""
 msgid "Only the selected parts"
 msgstr ""
 
+#: src/linkedCopyCopy.ts
+msgid "Only this one"
+msgstr ""
+
 #: src/panels/MaterialPalette.tsx
 msgid "Opacity"
 msgstr ""
@@ -5764,6 +5922,7 @@ msgstr ""
 msgid "Parts left out ({parts})"
 msgstr ""
 
+#: src/clipboard/linkedPaste.ts
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
 #: src/panels/MenuBar.tsx
@@ -5778,6 +5937,32 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "paste in-place"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+#: src/linkedCopyCopy.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+msgid "Paste independent"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "paste link"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+#: src/linkedCopyCopy.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+msgid "Paste linked"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "paste new"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "paste unlinked"
 msgstr ""
 
 #: src/App.tsx
@@ -5850,11 +6035,19 @@ msgid "Place a copy of the clipboard at the cursor."
 msgstr ""
 
 #: src/palette/registry.ts
+msgid "Place a copy of the clipboard that stays linked to the original."
+msgstr ""
+
+#: src/palette/registry.ts
 msgid "Place a leader-text annotation from a face, edge, or point."
 msgstr ""
 
 #: src/palette/registry.ts
 msgid "Place a linear or radius/diameter dimension between snap points."
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "Place a plain copy of the clipboard that is not linked to the original."
 msgstr ""
 
 #: src/palette/registry.ts
@@ -6364,6 +6557,8 @@ msgid "Remove tag failed: {errorText}"
 msgstr ""
 
 #: src/i18n/historyLabels.ts
+#: src/linkedCopies.ts
+#: src/panels/DocumentTree.tsx
 #: src/panels/library/LibraryMenu.tsx
 #: src/panels/LibraryDialog.tsx
 msgid "Rename"
@@ -6640,6 +6835,10 @@ msgstr ""
 #: src/i18n/historyLabels.ts
 msgctxt "undo verb"
 msgid "Rotate"
+msgstr ""
+
+#: src/tools/RotateTool.ts
+msgid "rotate instead"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -7022,6 +7221,13 @@ msgstr ""
 msgid "Select All"
 msgstr ""
 
+#: src/i18n/nativeMenu.ts
+#: src/linkedCopyCopy.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+msgid "Select all copies"
+msgstr ""
+
 #: src/panels/library/LibraryDetailPane.tsx
 msgid "Select an item to see its details."
 msgstr ""
@@ -7032,6 +7238,10 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "Select at least one object to turn into a component."
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "Select every copy linked to the selected one."
 msgstr ""
 
 #: src/panels/ObjectInfoPanel.tsx
@@ -7192,6 +7402,10 @@ msgstr ""
 
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Shared by every instance of this component"
+msgstr ""
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Shared by every linked copy"
 msgstr ""
 
 #: src/panels/MenuBar.tsx
@@ -7616,6 +7830,7 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
 #: src/panels/MenuBar.tsx
+#: src/viewport/placementBoolean.ts
 msgid "Subtract"
 msgstr ""
 
@@ -8410,6 +8625,10 @@ msgstr ""
 msgid "This build can’t send reports, so there is nothing to follow."
 msgstr ""
 
+#: src/App.tsx
+msgid "This can't be pasted linked: the original isn't in this model any more, or this copy came from another model. Use Paste independent instead."
+msgstr ""
+
 #: src/panels/PhoneShareDialog.tsx
 msgid "This code expired — reopen to try again."
 msgstr ""
@@ -8426,8 +8645,17 @@ msgstr ""
 msgid "This component is used inside another component's definition. Make that component's instances unique or explode them first, or delete the outer component."
 msgstr ""
 
+#: src/linkedCopyCopy.ts
+#: src/panels/ObjectInfoPanel.tsx
+msgid "This copy"
+msgstr ""
+
 #: src/kernelErrors.ts
 msgid "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
+msgstr ""
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "This copy only — leave empty to show the shared name"
 msgstr ""
 
 #: src/panels/UnsavedChangesDialog.tsx
@@ -8852,6 +9080,10 @@ msgstr ""
 msgid "Turn the selection into a reusable component definition."
 msgstr ""
 
+#: src/settings/EditingPane.tsx
+msgid "Turn this off to make copies independent; you can still choose a linked copy each time."
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "tween"
 msgstr ""
@@ -9006,6 +9238,7 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
 #: src/panels/MenuBar.tsx
+#: src/viewport/placementBoolean.ts
 msgid "Union"
 msgstr ""
 
@@ -9036,6 +9269,28 @@ msgstr ""
 
 #: src/log/reportBundle.ts
 msgid "unknown OS"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+#: src/linkedCopies.ts
+#: src/linkedCopyCopy.ts
+#: src/palette/registry.ts
+#: src/panels/dockLogic.ts
+#: src/panels/MenuBar.tsx
+msgid "Unlink"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+#: src/linkedCopies.ts
+#: src/linkedCopyCopy.ts
+#: src/palette/registry.ts
+#: src/panels/dockLogic.ts
+#: src/panels/MenuBar.tsx
+msgid "Unlink all"
+msgstr ""
+
+#: src/linkedCopyCopy.ts
+msgid "Unlinked this copy and cut it"
 msgstr ""
 
 #: src/panels/SentReportsDialog.tsx

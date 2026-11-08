@@ -202,6 +202,9 @@ export interface MenuBarProps {
    *  id) plus Edit ▸ Select All — same dispatch ids the native macOS menu
    *  and the contextual dock use. */
   onEditAction?: (id: string) => void
+  /** The "Copies are linked" preference. Off, Paste linked joins the Edit
+   *  menu as the explicit linked form. Defaults to on. */
+  copiesLinked?: boolean
   /** Selection-gated availability for the Object-menu commands. */
   editGates?: {
     canGroup: boolean
@@ -210,6 +213,12 @@ export interface MenuBarProps {
     canPlaceCopy: boolean
     canExplode: boolean
     canMakeUnique: boolean
+    /** One placement of a linked set is selected (Unlink, Make component). */
+    canUnlink?: boolean
+    /** More than one placement shares the set (Unlink all, Select all copies). */
+    canUnlinkAll?: boolean
+    /** Make component can promote the selected linked copy. */
+    canPromote?: boolean
     canBoolean: boolean
     /** One object, group, or instance selected, with a library backend —
      *  Object ▸ Save Selection to Library… (also the dock's verb). Defaults
@@ -773,6 +782,7 @@ export function MenuBar({
   onDelete,
   onEditAction,
   editGates,
+  copiesLinked = true,
   onZoomExtents,
   onDrawText,
   onScenesAdd,
@@ -998,6 +1008,18 @@ export function MenuBar({
               disabled={!(editGates?.clipboardHasContent ?? false)}
               onClick={withClose(() => onEditAction?.('edit-paste-in-place'))}
             />
+            <MenuItem
+              label={t`Paste independent`}
+              disabled={!(editGates?.clipboardHasContent ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-paste-independent'))}
+            />
+            {copiesLinked === false && (
+              <MenuItem
+                label={t`Paste linked`}
+                disabled={!(editGates?.clipboardHasContent ?? false)}
+                onClick={withClose(() => onEditAction?.('edit-paste-linked'))}
+              />
+            )}
             <div style={SEPARATOR_STYLE} />
             <MenuItem
               label={t`Delete`}
@@ -1052,13 +1074,28 @@ export function MenuBar({
             <div style={SEPARATOR_STYLE} />
             <MenuItem
               label={t`Make Component`}
-              disabled={!(editGates?.canMakeComponent ?? false)}
+              disabled={!((editGates?.canMakeComponent ?? false) || (editGates?.canPromote ?? false))}
               onClick={withClose(() => onEditAction?.('edit-make-component'))}
             />
             <MenuItem
               label={t`Make Unique`}
               disabled={!(editGates?.canMakeUnique ?? false)}
               onClick={withClose(() => onEditAction?.('edit-make-unique'))}
+            />
+            <MenuItem
+              label={t`Unlink`}
+              disabled={!(editGates?.canUnlink ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-unlink'))}
+            />
+            <MenuItem
+              label={t`Unlink all`}
+              disabled={!(editGates?.canUnlinkAll ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-unlink-all'))}
+            />
+            <MenuItem
+              label={t`Select all copies`}
+              disabled={!(editGates?.canUnlinkAll ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-select-all-copies'))}
             />
             <MenuItem
               label={t`Place Copy`}

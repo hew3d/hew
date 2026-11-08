@@ -75,6 +75,31 @@ export interface ClipboardContent {
    * reproduce the original position in NEITHER case.
    */
   placementAffine: number[] | null
+  /**
+   * Where the copy came from, so a paste back into the same document can
+   * make a linked copy: the document, the window nonce `extract_item` was
+   * given, and the copied nodes. `null` when unknown (a copy reconstructed
+   * from the shared shell state, or one with nothing linkable). A paste
+   * links only while the document, the nonce, and every node still match;
+   * otherwise it is an independent copy.
+   */
+  linkSource: LinkSource | null
+}
+
+export interface LinkSource {
+  /** `Scene.ensure_document_id()` at copy time. */
+  documentId: string
+  /** The window nonce already passed as `extract_item`'s origin. */
+  nonce: string
+  /** The app's document generation at copy time (bumped on every File ▸
+   *  New / Open / Revert), so a copy never links across a reload of the
+   *  same document. */
+  generation: number
+  nodes: { kind: 'object' | 'group' | 'instance'; id: bigint }[]
+  /** The placements that stand for `nodes` after a linked paste wrapped a
+   *  loose source. Kept beside `nodes`, not instead of them: undoing that
+   *  paste unwraps the source, and then `nodes` are the live ones again. */
+  repointed?: { kind: 'object' | 'group' | 'instance'; id: bigint }[]
 }
 
 let current: ClipboardContent | null = null
@@ -95,9 +120,10 @@ async function withProvenance(
   kinds: string[],
   sourceDocId: string,
   placementAffine: number[] | null,
+  linkSource: LinkSource | null,
 ): Promise<ClipboardContent> {
   const contentHash = await sha256Hex(bytes)
-  return { bytes, count, kinds, sourceDocId, contentHash, sourceId: `clipboard:${contentHash}`, placementAffine }
+  return { bytes, count, kinds, sourceDocId, contentHash, sourceId: `clipboard:${contentHash}`, placementAffine, linkSource }
 }
 
 /** Copy: build clipboard content from freshly-extracted bytes and a known
@@ -109,8 +135,9 @@ export async function setClipboardBytes(
   kinds: string[],
   sourceDocId: string,
   placementAffine: number[] | null,
+  linkSource: LinkSource | null = null,
 ): Promise<ClipboardContent> {
-  const content = await withProvenance(bytes, count, kinds, sourceDocId, placementAffine)
+  const content = await withProvenance(bytes, count, kinds, sourceDocId, placementAffine, linkSource)
   current = content
   await pushToShell(bytes)
   return content
@@ -121,6 +148,14 @@ export async function setClipboardBytes(
  *  `refreshFromShell` — see the module doc). */
 export function getClipboard(): ClipboardContent | null {
   return current
+}
+
+/** After a linked paste wrapped a loose source as a set, the copied node is
+ *  also reachable as that set's placement. Recorded on the clipboard the
+ *  paste was armed from (which may no longer be the current one). */
+export function repointLinkSource(content: ClipboardContent, nodes: LinkSource['nodes']): void {
+  if (content.linkSource === null) return
+  content.linkSource = { ...content.linkSource, repointed: nodes }
 }
 
 export function hasClipboardContent(): boolean {
@@ -162,7 +197,7 @@ export async function refreshClipboardFromShell(): Promise<void> {
     }
     const bytes = new Uint8Array(raw)
     if (current !== null && bytesEqual(current.bytes, bytes)) return
-    current = await withProvenance(bytes, -1, [], '', null)
+    current = await withProvenance(bytes, -1, [], '', null, null)
   } catch {
     /* shell without the command — leave whatever's local alone */
   }

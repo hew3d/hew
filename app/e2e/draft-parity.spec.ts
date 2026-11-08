@@ -36,6 +36,10 @@ interface Env {
 }
 
 async function boot(page: Page, surface: Surface): Promise<Env> {
+  // These specs predate linked copies and assert on plain, independent
+  // copies; the preference gives them exactly that. linked-copies.spec.ts
+  // covers the default.
+  await page.addInitScript(() => localStorage.setItem('hew.settings.copiesLinked', 'false'))
   await page.goto('/')
   await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, { timeout: 15_000 })
   const z = surface === 'top' ? TOP_Z : 0

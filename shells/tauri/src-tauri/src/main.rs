@@ -3327,6 +3327,25 @@ fn main() {
                 lbl!("edit-paste-in-place"),
                 "Shift+CmdOrCtrl+V",
             )?;
+            // Linked copies: Paste independent (the explicit unlinked form) and
+            // Paste linked (the explicit linked form while "Copies are linked"
+            // is off). Both gate on the clipboard having content, like Paste.
+            let edit_paste_independent = gated_item(
+                handle,
+                &mut gated,
+                "edit-paste-independent",
+                lbl!("edit-paste-independent"),
+                None,
+                None,
+            )?;
+            let edit_paste_linked = gated_item(
+                handle,
+                &mut gated,
+                "edit-paste-linked",
+                lbl!("edit-paste-linked"),
+                None,
+                None,
+            )?;
             let edit_select_all = accel(
                 MenuItemBuilder::with_id("edit-select-all", lbl!("edit-select-all")),
                 Some("CmdOrCtrl+A"),
@@ -3412,6 +3431,30 @@ fn main() {
                 None,
                 None,
             )?;
+            let edit_unlink = gated_item(
+                handle,
+                &mut gated,
+                "edit-unlink",
+                lbl!("edit-unlink"),
+                None,
+                None,
+            )?;
+            let edit_unlink_all = gated_item(
+                handle,
+                &mut gated,
+                "edit-unlink-all",
+                lbl!("edit-unlink-all"),
+                None,
+                None,
+            )?;
+            let edit_select_all_copies = gated_item(
+                handle,
+                &mut gated,
+                "edit-select-all-copies",
+                lbl!("edit-select-all-copies"),
+                None,
+                None,
+            )?;
             let edit_union = gated_item(
                 handle,
                 &mut gated,
@@ -3444,6 +3487,11 @@ fn main() {
                 &edit_explode,
                 &edit_save_selection_to_library,
                 &edit_make_unique,
+                &edit_unlink,
+                &edit_unlink_all,
+                &edit_select_all_copies,
+                &edit_paste_independent,
+                &edit_paste_linked,
                 &edit_union,
                 &edit_subtract,
                 &edit_intersect,
@@ -3462,6 +3510,8 @@ fn main() {
                 .item(&edit_copy)
                 .item(&edit_paste)
                 .item(&edit_paste_in_place)
+                .item(&edit_paste_independent)
+                .item(&edit_paste_linked)
                 .separator()
                 .item(&edit_delete)
                 .item(&edit_select_all)
@@ -3497,6 +3547,9 @@ fn main() {
                     .separator()
                     .item(&edit_make_component)
                     .item(&edit_make_unique)
+                    .item(&edit_unlink)
+                    .item(&edit_unlink_all)
+                    .item(&edit_select_all_copies)
                     .item(&edit_place_copy)
                     .item(&edit_explode)
                     .item(&edit_save_selection_to_library)
@@ -4607,6 +4660,8 @@ fn main() {
                 "edit-copy" => "edit-copy",
                 "edit-paste" => "edit-paste",
                 "edit-paste-in-place" => "edit-paste-in-place",
+                "edit-paste-independent" => "edit-paste-independent",
+                "edit-paste-linked" => "edit-paste-linked",
                 "edit-delete" => "edit-delete",
                 "edit-delete-guides" => "edit-delete-guides",
                 "edit-select-all" => "edit-select-all",
@@ -4619,6 +4674,9 @@ fn main() {
                 "edit-save-selection-to-library" => "save-to-library",
                 "edit-explode" => "edit-explode",
                 "edit-make-unique" => "edit-make-unique",
+                "edit-unlink" => "edit-unlink",
+                "edit-unlink-all" => "edit-unlink-all",
+                "edit-select-all-copies" => "edit-select-all-copies",
                 "edit-union" => "edit-union",
                 "edit-subtract" => "edit-subtract",
                 "edit-intersect" => "edit-intersect",

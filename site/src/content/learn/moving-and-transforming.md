@@ -45,7 +45,11 @@ Move, Rotate, and Scale also take a drag: press on the first point (Move's base 
 
 **Axis locking:** hold `Shift` to lock to the dominant axis of your drag, or press `→` for X, `←` for Y, `↑` for Z (`↓` clears). The preview line takes the axis color.
 
-**Copy instead of move:** tap `Option` (Mac) / `Ctrl` (Windows, Linux) — copy mode switches on and stays on, with the readout prefixed "Copy ·", a `+` badge on the cursor, and the status bar confirming it. Because it's a toggle rather than a held key, everything else works exactly as in a plain move: type an exact distance and press `Enter` to place a copy at a precise offset. The original stays put, the copy lands at the destination and becomes the new selection, so repeated moves chain copies. Sketch shapes copy too, keeping their curve identity — a copied circle is a true circle, center snap and all. Copy a shape within its plane and the duplicate is redrawn the way hand drawing would be, so if it lands on other lines they split each other exactly as drawn lines would. That holds on a solid's face too: copy a shape across a face, or past its edge, and the copy splits into a part on the face and a part beyond. Copy a shape *off* its plane — lifting a ground profile straight up, say — and the copy arrives on a new sketch on the plane it landed on, with the original untouched (handy for [Follow Me](/learn/follow-me/): copy a profile up instead of moving the only one you have). Tap the same key again to go back to moving.
+**Copy instead of move:** tap `Option` (Mac) / `Ctrl` (Windows, Linux) — copy mode switches on and stays on, with the readout prefixed "Copy ·", a `+` badge on the cursor, and the status bar confirming it. Because it's a toggle rather than a held key, everything else works exactly as in a plain move: type an exact distance and press `Enter` to place a copy at a precise offset. The original stays put, the copy lands at the destination and becomes the new selection, so repeated moves chain copies.
+
+By default a copy is a **linked copy**: it shares its shape with the original, so editing one changes both ([Linked copies](/learn/groups-and-components/#linked-copies)). Tap the copy key again and you get an **independent copy**, the readout reads "Independent copy ·" and the badge reads "+ independent", which is a plain duplicate with no link. One more tap goes back to moving. If you would rather copies start out independent, turn off **Copies are linked** in [Settings](/learn/settings/#editing); the taps then run Copy (independent), Linked copy, Move.
+
+Sketch shapes copy too, keeping their curve identity — a copied circle is a true circle, center snap and all. Copy a shape within its plane and the duplicate is redrawn the way hand drawing would be, so if it lands on other lines they split each other exactly as drawn lines would. That holds on a solid's face too: copy a shape across a face, or past its edge, and the copy splits into a part on the face and a part beyond. Copy a shape *off* its plane — lifting a ground profile straight up, say — and the copy arrives on a new sketch on the plane it landed on, with the original untouched (handy for [Follow Me](/learn/follow-me/): copy a profile up instead of moving the only one you have).
 
 **Retyping after the commit:** once the destination click lands, type a length and press `Enter` again — the move (or copy) you just made redoes at the new distance along the same direction, positive keeping it and negative flipping it — as many times as you like, until you click a new base point, press `Esc`, or switch tools. One `Undo` afterward removes the whole move, no matter how many times you retyped it.
 
@@ -56,7 +60,7 @@ Move, Rotate, and Scale also take a drag: press on the first point (Move's base 
 
 ![A cedar fence with six evenly spaced posts and two rails, one post shown mid-copy down the line](/docs/transform-array.webp)
 
-The gesture stays live until you start something else, so if `5x` turns out wrong, type `8x` or `4/` instead and the array re-resolves. However many copies it made, the whole array is **one undo step**. Copies of a component are new instances of the same component; copies of plain objects and groups are independent duplicates. Arrays work for drawn shapes too: a Move or Rotate copy of a shape takes `3x` and `3/`, on the ground or on a face, and the whole array is still one undo step.
+The gesture stays live until you start something else, so if `5x` turns out wrong, type `8x` or `4/` instead and the array re-resolves. However many copies it made, the whole array is **one undo step**. An array follows the kind of copy it continues: after a linked copy, `5x` makes five linked copies; after an independent copy, five independent ones. Arrays work for drawn shapes too: a Move or Rotate copy of a shape takes `3x` and `3/`, on the ground or on a face, and the whole array is still one undo step.
 
 The retyped-distance window and the array window share one typed buffer: right after a copy commits, a plain length retypes the distance and `3x`/`3/` makes an array — either one applies to that same commit. Once you've typed an array, the gesture stays hot for another array spec (`8x` after `5x`, say), but the plain-distance retype closes; make a fresh copy to retype a distance again.
 
@@ -102,14 +106,16 @@ Drawn geometry transforms at shape granularity, on the ground and on a solid's f
 
 ## Copy and paste
 
-Move+Alt (above) is the fastest way to duplicate something in place, but `⌘C`/`⌘V` work too, and they're the way to carry a selection somewhere the model doesn't reach on its own — a different open document, say.
+Move with copy (above) is the fastest way to duplicate something in place, but `⌘C`/`⌘V` work too, and they're the way to carry a selection somewhere the model doesn't reach on its own — a different open document, say.
 
-- **Copy** (`⌘C` / `Ctrl+C`) copies the selected objects, groups, and components. It needs at least one of those in the selection; a sketch-only selection refuses with a reminder to use Move+Alt instead, which does carry sketch geometry.
+- **Copy** (`⌘C` / `Ctrl+C`) copies the selected objects, groups, and components. It needs at least one of those in the selection; a sketch-only selection refuses with a reminder to use Move with copy instead, which does carry sketch geometry.
 - **Paste** (`⌘V` / `Ctrl+V`) arms a placement ghost that follows the cursor with the same inference snapping as Move — click to drop it, `Esc` to cancel. Paste again for another copy at a new spot.
 - **Paste In Place** (`⇧⌘V` / `Ctrl+Shift+V`) drops the copy back exactly where it was cut or copied from, with no click.
 - **Cut** (`⌘X` / `Ctrl+X`) copies, then deletes the selection — one undo step for the delete.
 
-A copy of a component instance reuses the original's definition (pasting the same clipboard twice doesn't mint two definitions); a copy of a plain object or group stays a plain object or group.
+Paste into the same model and you get a linked copy of what you copied, just as Move with copy makes one: the original and the pasted copy share a shape, so editing one changes both. **Edit ▸ Paste independent** makes a plain copy with no link instead. If you turned off **Copies are linked** in Settings, an ordinary Paste is the independent one and **Edit ▸ Paste linked** is how you ask for a link. Cut and Paste is always independent, since the original is gone; so is pasting into a different model.
+
+Pasting the same clipboard twice doesn't make two shapes; the second paste joins the same set of linked copies.
 
 ## Deleting
 

@@ -20,6 +20,7 @@ import type { MessageDescriptor } from '@lingui/core'
 import { useLingui } from '@lingui/react/macro'
 import { UnitsPane } from './UnitsPane'
 import { ViewPane } from './ViewPane'
+import { EditingPane } from './EditingPane'
 import { ThemePane } from './ThemePane'
 import { LanguagePane } from './LanguagePane'
 import { DebugPane } from './DebugPane'
@@ -27,7 +28,7 @@ import { FoldersPane } from './FoldersPane'
 import { AdvancedPane } from './AdvancedPane'
 import { useTextFieldMenuActions } from '../clipboard/useTextFieldMenuActions'
 
-type Category = 'units' | 'view' | 'theme' | 'language' | 'folders' | 'advanced' | 'debug'
+type Category = 'units' | 'view' | 'editing' | 'theme' | 'language' | 'folders' | 'advanced' | 'debug'
 
 const iconProps = {
   width: 22,
@@ -57,6 +58,16 @@ function ViewIcon() {
     <svg {...iconProps}>
       <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" />
       <circle cx="12" cy="12" r="3" />
+    </svg>
+  )
+}
+
+/** Two overlapping squares (a copy) — Editing. */
+function EditingIcon() {
+  return (
+    <svg {...iconProps}>
+      <rect x="3.5" y="3.5" width="12" height="12" rx="1.5" />
+      <path d="M8.5 20.5h10a2 2 0 0 0 2-2v-10" />
     </svg>
   )
 }
@@ -116,6 +127,7 @@ function AdvancedIcon() {
 const TABS: { id: Category; label: MessageDescriptor; icon: ReactElement }[] = [
   { id: 'units', label: msg`Units`, icon: <UnitsIcon /> },
   { id: 'view', label: msg`View`, icon: <ViewIcon /> },
+  { id: 'editing', label: msg`Editing`, icon: <EditingIcon /> },
   { id: 'theme', label: msg`Theme`, icon: <ThemeIcon /> },
   { id: 'language', label: msg`Language`, icon: <LanguageIcon /> },
   { id: 'folders', label: msg`Folders`, icon: <FoldersIcon /> },
@@ -213,6 +225,7 @@ export function SettingsWindow() {
       >
         {active === 'units' && <UnitsPane />}
         {active === 'view' && <ViewPane />}
+        {active === 'editing' && <EditingPane />}
         {active === 'theme' && <ThemePane />}
         {active === 'language' && <LanguagePane />}
         {active === 'folders' && <FoldersPane />}

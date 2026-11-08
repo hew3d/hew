@@ -113,11 +113,14 @@ import { isSketchScopedKind, nodeKindToNumber, nodeRefFromJs } from '../panels/t
 import { displayedLength, isFreePick } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { isMac, COPY_MODIFIER_LABEL } from '../platform'
+import { nextCopyState, linkedFor, type CopyState, type OnCopyModeChange } from './copyMode'
+import { getCopiesLinked } from '../settings/editing'
+import { parseLinkedResult, type LinkedWrapRef } from '../viewport/linkedWraps'
 
 export type OnMoveCommit = (nodes: NodeRef[]) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
-export type OnCopyModeChange = (on: boolean) => void
+export type { OnCopyModeChange } from './copyMode'
 
 /** Axis guide colours matching the world axis convention */
 const AXIS_COLOR: Record<0 | 1 | 2, number> = {
@@ -154,7 +157,7 @@ type Stage =
 /** What an array resolve placed: node copies, or a guide's (the last one). */
 type ArrayLanding = { nodes: NodeRef[] } | { guide: bigint }
 
-type RetypeSpec = { nodes: NodeRef[]; guide: bigint | null; vector: [number, number, number]; copy: boolean }
+type RetypeSpec = { nodes: NodeRef[]; guide: bigint | null; vector: [number, number, number]; copyState: CopyState; linked: boolean }
 
 export class MoveTool implements Tool {
   readonly name = 'Move'
@@ -175,13 +178,16 @@ export class MoveTool implements Tool {
       if (this.selection.length === 0 && this.guides.selected === null) {
         return t`Click the object you want to move.`
       }
-      return this.copyMode
-        ? t`Copy is on — click a base point to start the copy. Tap ${COPY_MODIFIER_LABEL} to move instead.`
-        : t`Click a base point to start the move.`
+      const kind = this._copyKindLabel()
+      const next = this._cycleNextLabel()
+      return this.copyState === 'off'
+        ? t`Click a base point to start the move.`
+        : t`${kind} is on — click a base point to start the copy. Tap ${COPY_MODIFIER_LABEL} to ${next}.`
     }
-    return this.copyMode
-      ? t`Click where the copy lands — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to move instead.`
-      : t`Click the destination — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to place a copy.`
+    const next = this._cycleNextLabel()
+    return this.copyState === 'off'
+      ? t`Click the destination — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to place a copy.`
+      : t`Click where the copy lands — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to ${next}.`
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -197,7 +203,11 @@ export class MoveTool implements Tool {
   private shiftAxisLock: boolean = false
   /** Durable copy toggle (tap Option on macOS, Ctrl elsewhere — see
    *  `toggleCopyMode`) — while true, commits duplicate. */
-  private copyMode: boolean = false
+  private copyState: CopyState = 'off'
+  /** Whether a copy commits right now (any state but plain Move). */
+  private get copyMode(): boolean {
+    return this.copyState !== 'off'
+  }
   /** VCB buffer — raw string being typed by the user */
   private typed: string = ''
   /**
@@ -221,6 +231,10 @@ export class MoveTool implements Tool {
     guide: bigint | null
     vector: [number, number, number]
     historyGen: string
+    /** Whether the copy this window follows was linked; the array repeats it. */
+    linked: boolean
+    /** The copy state the copy was made under, re-armed on the retype window. */
+    copyState: CopyState
   } | null = null
   /** Array-copy VCB buffer ("x3" / "/3"), live only while `arrayHot` is set. */
   private arrayTyped: string = ''
@@ -329,17 +343,54 @@ export class MoveTool implements Tool {
    * Flip the durable copy toggle. Called from `onKey`'s bare Option/Alt tap
    * on macOS, and — duck-typed by method name — from the Viewport's
    * window-scope Control clean tap on Windows/Linux (see `platform.ts`'s
-   * `COPY_MODIFIER_KEY`). Same effect either way: flips `copyMode`, notifies
+   * `COPY_MODIFIER_KEY`). Same effect either way: advances the copy cycle (Move, Copy, the other kind of copy, Move), notifies
    * the cursor badge, and refreshes the mid-gesture measurement readout so
    * the "Copy · " prefix appears/disappears immediately rather than waiting
    * for the next pointer move.
    */
   toggleCopyMode(): void {
-    this.copyMode = !this.copyMode
-    this.onCopyModeChange(this.copyMode)
+    this.copyState = nextCopyState(this.copyState)
+    this.onCopyModeChange(this.copyState, linkedFor(this.copyState, getCopiesLinked()))
     if (this.stage.kind === 'base') {
       this._reportMeasurement(this.stage.base, this.stage.dest)
     }
+  }
+
+  /** The loose nodes the latest linked copy wrapped as sets; a wrap removes
+   *  a world node, so the host needs a full refresh rather than a targeted one. */
+  private linkedWraps: readonly LinkedWrapRef[] = []
+  /** While a retype redoes a copy: the kind that copy was, whatever the preference says now. */
+  private retypeLinked: boolean | null = null
+  /** The copy state a typed value would redo or apply: the one the open retype window holds, else the current one. */
+  private _shownCopyState(): CopyState {
+    return this.retype.isOpen && this.retype.spec !== null ? this.retype.spec.copyState : this.copyState
+  }
+  /** The current copy state, for the host to badge the cursor when the preference changes mid-gesture. */
+  currentCopyState(): CopyState {
+    return this.copyState
+  }
+  /** Hand over (and forget) the wraps the latest copy made. */
+  takeLinkedWraps(): readonly LinkedWrapRef[] {
+    const w = this.linkedWraps
+    this.linkedWraps = []
+    return w
+  }
+
+  /** What a copy made right now is called: "Copy" for the preferred kind,
+   *  "Linked copy" or "Independent copy" when the tap chose the other one. */
+  private _copyKindLabel(state: CopyState = this.copyState): string {
+    if (state === 'alternate') {
+      return getCopiesLinked() ? t`Independent copy` : t`Linked copy`
+    }
+    return t`Copy`
+  }
+
+  /** What the next tap of the copy key switches to, as an action phrase. */
+  private _cycleNextLabel(): string {
+    if (this.copyState === 'primary') {
+      return getCopiesLinked() ? t`make an independent copy` : t`make a linked copy`
+    }
+    return t`move instead`
   }
 
   // ── Optional Tool interface extensions ─────────────────────────────────────
@@ -805,11 +856,14 @@ export class MoveTool implements Tool {
         // exactly one step. A refusal changes nothing; the finally block only
         // reselects whatever did land.
         const committed: NodeRef[] = []
+        // The preference is read at the moment of the copy, not when the
+        // tool was armed.
+        const linked = this.retypeLinked ?? linkedFor(this.copyState, getCopiesLinked())
         try {
           const sketchSources = nodes.filter((n) => isSketchScopedKind(n.kind))
           committed.push(
             ...copyOwnersAndDrawing(this.wasmScene, copyables, sketchSources, [affineF64], () =>
-              this._duplicateArray(copyables, affineF64, 1),
+              this._duplicateArray(copyables, affineF64, 1, linked),
             ),
           )
           // The copy gesture is now "hot" for an ×N / /N array refinement,
@@ -820,6 +874,8 @@ export class MoveTool implements Tool {
             guide: null,
             vector: [tx, ty, tz],
             historyGen: this.wasmScene.history_generation().toString(),
+            linked,
+            copyState: this.copyState,
           }
           this.arrayTyped = ''
         } finally {
@@ -828,7 +884,7 @@ export class MoveTool implements Tool {
             this.onCommit(committed)
           }
         }
-        this.retype.arm({ nodes, guide: null, vector: [tx, ty, tz], copy: true })
+        this.retype.arm({ nodes, guide: null, vector: [tx, ty, tz], copyState: this.copyState, linked })
       } else {
         // The whole selection: the planner leaves riding shapes to their
         // owner and hands them back re-found where they landed.
@@ -838,7 +894,7 @@ export class MoveTool implements Tool {
         // its apply() undoes the commit first, which restores the drawing
         // with its ORIGINAL unit keys (they are geometry hashes), and an
         // arranging landing's re-resolved refs name the moved geometry.
-        this.retype.arm({ nodes: allNodes, guide: null, vector: [tx, ty, tz], copy: false })
+        this.retype.arm({ nodes: allNodes, guide: null, vector: [tx, ty, tz], copyState: 'off', linked: false })
       }
       return true
     } catch (err) {
@@ -864,14 +920,16 @@ export class MoveTool implements Tool {
           guide,
           vector: [tx, ty, tz],
           historyGen: this.wasmScene.history_generation().toString(),
+          linked: false,
+          copyState: this.copyState,
         }
         this.arrayTyped = ''
         this.guides.landed(copy)
-        this.retype.arm({ nodes: [], guide, vector: [tx, ty, tz], copy: true })
+        this.retype.arm({ nodes: [], guide, vector: [tx, ty, tz], copyState: this.copyState, linked: false })
       } else {
         this.wasmScene.transform_guide(guide, affineF64)
         this.guides.landed(guide)
-        this.retype.arm({ nodes: [], guide, vector: [tx, ty, tz], copy: false })
+        this.retype.arm({ nodes: [], guide, vector: [tx, ty, tz], copyState: 'off', linked: false })
       }
       return true
     } catch (err) {
@@ -947,12 +1005,14 @@ export class MoveTool implements Tool {
 
   /** Lay the hot move down along `v`, under the copy toggle it was committed with. */
   private _commitHot(hot: RetypeSpec, v: [number, number, number]): boolean {
-    const prev = this.copyMode
-    this.copyMode = hot.copy
+    const prev = this.copyState
+    this.copyState = hot.copyState
+    this.retypeLinked = hot.linked
     try {
       return this._commit(hot.nodes, hot.guide, v[0], v[1], v[2])
     } finally {
-      this.copyMode = prev
+      this.copyState = prev
+      this.retypeLinked = null
     }
   }
 
@@ -995,7 +1055,7 @@ export class MoveTool implements Tool {
       this.arrayHot = { ...hot, historyGen: this.wasmScene.history_generation().toString() }
       // The undo + redo moved the generation: re-arm the retype window on
       // the restored entry, or a distance typed next reports 'stale'.
-      this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], guide: hot.guide, vector: hot.vector, copy: true })
+      this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], guide: hot.guide, vector: hot.vector, copyState: hot.copyState, linked: hot.linked })
     } catch {
       this.arrayHot = null
     }
@@ -1025,7 +1085,7 @@ export class MoveTool implements Tool {
         arr.sources,
         arr.sketchSources,
         affines,
-        () => this._duplicateArray(arr.sources, affineToFloat64(translationAffine(step[0], step[1], step[2])), count),
+        () => this._duplicateArray(arr.sources, affineToFloat64(translationAffine(step[0], step[1], step[2])), count, arr.linked),
       ),
     }
   }
@@ -1041,22 +1101,28 @@ export class MoveTool implements Tool {
     }
   }
 
-  /** One `duplicate_selection_array` call over `nodes`, mapped to NodeRefs. */
+  /** One `duplicate_selection_array` call over `nodes`, mapped to NodeRefs.
+   *  A linked copy goes through the call that reports its wraps; the
+   *  returned nodes are then placements. */
   private _duplicateArray(
     nodes: readonly NodeRef[],
     affineF64: Float64Array,
     count: number,
+    linked: boolean,
   ): NodeRef[] {
-    const created = this.wasmScene.duplicate_selection_array(
-      new Uint8Array(nodes.map((n) => nodeKindToNumber(n.kind))),
-      new BigUint64Array(nodes.map((n) => n.id)),
-      affineF64,
-      count,
-      // Independent copies until the linked-copy app stage flips the
-      // default.
-      false,
-    )
-    return created.map(nodeRefFromJs)
+    this.linkedWraps = []
+    const kinds = new Uint8Array(nodes.map((n) => nodeKindToNumber(n.kind)))
+    const ids = new BigUint64Array(nodes.map((n) => n.id))
+    if (linked) {
+      const result = parseLinkedResult(
+        this.wasmScene.duplicate_selection_array_linked(kinds, ids, affineF64, count),
+      )
+      this.linkedWraps = result.linked
+      return result.nodes
+    }
+    return this.wasmScene
+      .duplicate_selection_array(kinds, ids, affineF64, count, false)
+      .map(nodeRefFromJs)
   }
 
   /** The array buffer as a readout, with the display glyph for `x` (the
@@ -1129,7 +1195,7 @@ export class MoveTool implements Tool {
     this.arrayLast = spec
     // A distance typed now re-spaces THIS array (see `_relayArray`); the
     // array is one undo step, so one undo retracts it.
-    this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], guide: hot.guide, vector: hot.vector, copy: true })
+    this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], guide: hot.guide, vector: hot.vector, copyState: hot.copyState, linked: hot.linked })
     this._landArray(created)
   }
 
@@ -1162,7 +1228,10 @@ export class MoveTool implements Tool {
 
   /** Prefix a "Copy" tag onto the readout while the copy toggle is on. */
   private _decorate(text: string): string {
-    return this.copyMode ? t({ comment: 'Measurements box readout while the Copy toggle is on, followed by the measured value', message: `Copy · ${text}` }) : text
+    const shown = this._shownCopyState()
+    if (shown === 'off') return text
+    const kind = this._copyKindLabel(shown)
+    return t({ comment: 'Measurements box readout while a copy is armed: the kind of copy (Copy, Independent copy, or Linked copy), then the measured value', message: `${kind} · ${text}` })
   }
 
   /**

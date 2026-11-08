@@ -1520,6 +1520,31 @@ fn a_session_member_wrapped_mid_session_is_no_longer_session_geometry() {
     doc.close_explode_session().unwrap();
 }
 
+#[test]
+fn a_wrap_or_linked_copy_refuses_while_component_frames_are_stacked() {
+    // Found by the session fuzz: in a drill-down two frames walk the same
+    // geometry, so a fold in the inner one changed what the siblings render.
+    let mut doc = Document::new();
+    let m = board(&mut doc, 0.0);
+    let (_, inner, _) = doc.make_component(&[NodeId::Object(m)]).unwrap();
+    let (_, outer, _) = doc.make_component(&[NodeId::Instance(inner)]).unwrap();
+    doc.open_explode_session(outer).unwrap();
+    doc.open_explode_session(inner).unwrap();
+    let hash = doc.state_hash();
+    assert_eq!(
+        doc.wrap_linked(NodeId::Object(m)).unwrap_err(),
+        DocumentError::ExplodeSessionScope
+    );
+    assert_eq!(
+        doc.duplicate_node(NodeId::Object(m), &shift(2.0), Linked)
+            .unwrap_err(),
+        DocumentError::ExplodeSessionScope
+    );
+    assert_eq!(doc.state_hash(), hash);
+    doc.close_explode_session().unwrap();
+    doc.close_explode_session().unwrap();
+}
+
 // ---------------------------------------------------- attribute, promote
 
 #[test]

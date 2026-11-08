@@ -30,6 +30,13 @@ export interface SaveToLibraryPopoverProps {
   variant?: 'dock' | 'modal'
   onSave: (name: string) => void
   onClose: () => void
+  /** The same prompt asks for other names too (Make component). Each of
+   *  these defaults to the Save to Library wording; `hint` of `null` drops
+   *  the footer that explains the insertion point. */
+  title?: string
+  inputLabel?: string
+  buttonLabel?: string
+  hint?: string | null
 }
 
 /** The placement tool's origin-marker yellow (`LibraryPlaceTool.ts`'s
@@ -44,6 +51,10 @@ export function SaveToLibraryPopover({
   variant = 'dock',
   onSave,
   onClose,
+  title,
+  inputLabel,
+  buttonLabel,
+  hint,
 }: SaveToLibraryPopoverProps) {
   const { t } = useLingui()
   const [name, setName] = useState(defaultName)
@@ -94,7 +105,7 @@ export function SaveToLibraryPopover({
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label={t`Save to Library`}
+        aria-label={title ?? t`Save to Library`}
         style={{
           width: '280px',
           display: 'flex',
@@ -118,7 +129,7 @@ export function SaveToLibraryPopover({
             color: 'var(--text-section)',
           }}
         >
-          <Trans>Save to Library</Trans>
+          {title ?? <Trans>Save to Library</Trans>}
         </div>
         <input
           ref={inputRef}
@@ -132,7 +143,7 @@ export function SaveToLibraryPopover({
               commit()
             }
           }}
-          aria-label={t`Item name`}
+          aria-label={inputLabel ?? t`Item name`}
           style={{
             padding: '6px 8px',
             background: 'var(--surface-input)',
@@ -159,15 +170,19 @@ export function SaveToLibraryPopover({
             cursor: 'pointer',
           }}
         >
-          <Trans>Save</Trans>
+          {buttonLabel ?? <Trans>Save</Trans>}
         </button>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '10px', color: 'var(--text-faint)' }}>
-          <span
-            aria-hidden="true"
-            style={{ width: '6px', height: '6px', borderRadius: '50%', background: ORIGIN_DOT_COLOR, flexShrink: 0 }}
-          />
-          <Trans>Inserts by its bottom center — or by the drawing axes origin, if you've placed axes</Trans>
-        </div>
+        {hint !== null && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '10px', color: 'var(--text-faint)' }}>
+            {hint === undefined && (
+              <span
+                aria-hidden="true"
+                style={{ width: '6px', height: '6px', borderRadius: '50%', background: ORIGIN_DOT_COLOR, flexShrink: 0 }}
+              />
+            )}
+            {hint ?? <Trans>Inserts by its bottom center — or by the drawing axes origin, if you've placed axes</Trans>}
+          </div>
+        )}
       </div>
     </div>
   )

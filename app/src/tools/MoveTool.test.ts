@@ -16,10 +16,11 @@
  * unaffected by that reset.
  */
 
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest'
 import * as THREE from 'three'
 import { setLengthUnit, getLengthUnit, setPrecision, DEFAULT_PRECISION } from '../settings/units'
 import { MoveTool } from './MoveTool'
+import { setCopiesLinked } from '../settings/editing'
 import { CleanModifierTap } from '../viewport/cleanModifierTap'
 import { DragCommitGate } from '../viewport/dragCommit'
 import type { Snap } from './types'
@@ -29,6 +30,11 @@ import { ctxGround, ctxOfPlane, draftRef } from './planeUnits'
 import { applyAffineToPoint } from './transformMath'
 import { SiblingPreviewMirror } from '../viewport/siblingPreview'
 import { isSessionGhost } from './transformPreview'
+
+// The tool tests below were written when every copy was independent; with
+// "Copies are linked" off the primary copy is that same independent copy.
+// The linked-copy tests turn the preference back on for themselves.
+beforeEach(() => setCopiesLinked(false))
 
 const CTX = ctxGround()
 /** Kernel keys are 16-hex strings. */
@@ -200,7 +206,7 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
     transform_sketch_island: vi.fn(() => { state.hash++; state.gen++ }),
     transform_sketch_islands: vi.fn(() => { state.hash++; state.gen++ }),
     duplicate_selection_array: vi.fn(
-      (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
+      (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number, _linked?: boolean) => {
         const out: { kind: string; id: bigint }[] = []
         for (let k = 0; k < count; k++) {
           for (let i = 0; i < ids.length; i++) {
@@ -211,6 +217,23 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
         state.hash++
         state.gen++
         return out
+      },
+    ),
+    // A linked copy: every loose source is wrapped as its own set, and each
+    // copy is a placement (an instance) of it.
+    duplicate_selection_array_linked: vi.fn(
+      (kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
+        const nodes: { kind: string; id: string }[] = []
+        for (let k = 0; k < count; k++) {
+          for (let i = 0; i < ids.length; i++) nodes.push({ kind: 'instance', id: String(nextId++) })
+        }
+        const linked = Array.from(ids).map((id, i) => ({
+          source: { kind: kinds[i] === 1 ? 'group' : kinds[i] === 2 ? 'instance' : 'object', id: String(id) },
+          instance: String(nextId++),
+          definition: String(nextId++),
+        })).filter((w) => w.source.kind !== 'instance')
+        state.gen++
+        return JSON.stringify({ nodes, linked })
       },
     ),
     transform_selection: vi.fn(
@@ -346,17 +369,34 @@ describe('MoveTool — locked typed-entry direction (signed by the cursor\'s sid
 })
 
 describe('MoveTool — durable Alt copy toggle', () => {
-  it('tapping Alt toggles copy mode on and off (not hold-to-copy)', () => {
+  it('tapping_the_modifier_cycles_move_copy_independent_copy', () => {
+    // With "Copies are linked" on: Move, then Copy (linked), then
+    // Independent copy, then Move again — a durable cycle, not hold-to-copy.
+    setCopiesLinked(true)
     const { tool, onCopyModeChange } = makeTool()
     expect(tool.statusHint()).toContain('start the move')
 
     tool.onKey(makeKeyEvent('Alt'))
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', true)
     expect(tool.statusHint()).toContain('Copy is on')
 
     tool.onKey(makeKeyEvent('Alt'))
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(false)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('alternate', false)
+    expect(tool.statusHint()).toContain('Independent copy is on')
+
+    tool.onKey(makeKeyEvent('Alt'))
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('off', false)
     expect(tool.statusHint()).toContain('start the move')
+  })
+
+  it('with_the_preference_off_the_default_copy_is_independent_and_the_alternate_is_linked', () => {
+    setCopiesLinked(false)
+    const { tool, onCopyModeChange } = makeTool()
+    tool.onKey(makeKeyEvent('Alt'))
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
+    tool.onKey(makeKeyEvent('Alt'))
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('alternate', true)
+    expect(tool.statusHint()).toContain('Linked copy is on')
   })
 
   it('ignores Alt autorepeat (a held Alt toggles exactly once)', () => {
@@ -365,7 +405,7 @@ describe('MoveTool — durable Alt copy toggle', () => {
     tool.onKey(makeKeyEvent('Alt', { repeat: true }))
     tool.onKey(makeKeyEvent('Alt', { repeat: true }))
     expect(onCopyModeChange).toHaveBeenCalledTimes(1)
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
   })
 
   it('typed exact distance commits a COPY while toggled on — Alt long released', () => {
@@ -389,7 +429,8 @@ describe('MoveTool — durable Alt copy toggle', () => {
   it('typed exact distance commits a plain MOVE after toggling back off', () => {
     const { tool, scene } = makeTool()
     tool.onKey(makeKeyEvent('Alt'))
-    tool.onKey(makeKeyEvent('Alt')) // back off
+    tool.onKey(makeKeyEvent('Alt')) // the other kind of copy
+    tool.onKey(makeKeyEvent('Alt')) // back to plain Move
     beginGestureLockedX(tool)
     typeKeys(tool, '2')
     tool.onKey(makeKeyEvent('Enter'))
@@ -411,10 +452,11 @@ describe('MoveTool — copy modifier is platform-specific (Option on macOS, Ctrl
   it('toggleCopyMode() flips copy mode directly — the method a Windows/Linux Control clean tap calls', () => {
     const { tool, onCopyModeChange } = makeTool()
     tool.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
     expect(tool.statusHint()).toContain('Copy is on')
     tool.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(false)
+    tool.toggleCopyMode()
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('off', false)
   })
 
   it('a bare Control keydown does NOT toggle copy mode on macOS — Option owns it here', () => {
@@ -436,7 +478,7 @@ describe('MoveTool — copy modifier is platform-specific (Option on macOS, Ctrl
     const armed = tap.onKeyUp({ key: 'Control' }, tool)
     expect(armed).not.toBeNull()
     armed!.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
   })
 
   it('a Ctrl+Z chord does NOT toggle copy mode (the clean-tap combo guard)', () => {
@@ -496,7 +538,7 @@ describe('MoveTool — on Windows/Linux, Alt is NOT the copy modifier (Ctrl is)'
 
     // The Viewport's Control clean tap calls this directly on this platform.
     tool.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
     expect(tool.statusHint()).toContain('Copy is on')
     expect(tool.statusHint()).toContain('Ctrl')
   })
@@ -612,6 +654,107 @@ describe('MoveTool — drawn-shape copy (playtest: "you can\'t Copy a Sketch")',
     expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(2)
     expect(t.scene.duplicate_selection_array.mock.calls[1][3]).toBe(3)
     expect(t.scene.draft_copy_edges.mock.calls.slice(1)).toHaveLength(3)
+  })
+})
+
+describe('MoveTool — linked copies', () => {
+  function copyThenArray(t: ReturnType<typeof makeTool>, taps: number, spec: string): void {
+    for (let i = 0; i < taps; i += 1) t.tool.onKey(makeKeyEvent('Alt'))
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    if (spec !== '') {
+      typeKeys(t.tool, spec)
+      t.tool.onKey(makeKeyEvent('Enter'))
+    }
+  }
+
+  it('a_linked_copy_passes_linked_true_to_duplicate_selection_array', () => {
+    setCopiesLinked(true)
+    const t = makeTool()
+    copyThenArray(t, 1, '')
+    // The linked call is the one that reports the wraps; the independent
+    // call is never made.
+    expect(t.scene.duplicate_selection_array_linked).toHaveBeenCalledTimes(1)
+    expect(t.scene.duplicate_selection_array).not.toHaveBeenCalled()
+    const [kinds, ids, , count] = t.scene.duplicate_selection_array_linked.mock.calls[0]
+    expect(Array.from(kinds as Uint8Array)).toEqual([0])
+    expect(Array.from(ids as BigUint64Array)).toEqual([1n])
+    expect(count).toBe(1)
+    // The copies are placements: that is what the host selects.
+    expect(t.onCommit.mock.calls.at(-1)![0][0].kind).toBe('instance')
+    // The host learns a loose node was wrapped (it needs a full refresh).
+    expect(t.tool.takeLinkedWraps()).toHaveLength(1)
+    expect(t.tool.takeLinkedWraps()).toHaveLength(0)
+  })
+
+  it('retyping_a_linked_copy_stays_linked_after_the_preference_flips_and_the_readout_says_so', () => {
+    setCopiesLinked(true)
+    const t = makeTool()
+    copyThenArray(t, 1, '')
+    expect(t.scene.duplicate_selection_array_linked).toHaveBeenCalledTimes(1)
+    t.tool.takeLinkedWraps()
+    // The preference flips while the retype window is open.
+    setCopiesLinked(false)
+    typeKeys(t.tool, '3')
+    // The readout names the kind the redo will make, not what a new copy would be.
+    expect(t.onMeasurement.mock.calls.at(-1)![0]).toMatch(/^Copy · /)
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.duplicate_selection_array_linked).toHaveBeenCalledTimes(2)
+    expect(t.scene.duplicate_selection_array).not.toHaveBeenCalled()
+  })
+
+  it('a_redo_that_makes_no_wraps_does_not_report_the_previous_ones', () => {
+    setCopiesLinked(true)
+    const t = makeTool()
+    // A linked copy of an instance wraps nothing; an earlier wrap must not linger.
+    copyThenArray(t, 1, '')
+    expect(t.tool.takeLinkedWraps()).toHaveLength(1)
+    t.scene.duplicate_selection_array_linked.mockImplementationOnce(() =>
+      JSON.stringify({ nodes: [{ kind: 'instance', id: '900' }], linked: [] }),
+    )
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.tool.takeLinkedWraps()).toHaveLength(0)
+  })
+
+  it('reports_its_copy_state_for_the_cursor_badge', () => {
+    setCopiesLinked(true)
+    const t = makeTool()
+    expect(t.tool.currentCopyState()).toBe('off')
+    t.tool.onKey(makeKeyEvent('Alt'))
+    expect(t.tool.currentCopyState()).toBe('primary')
+  })
+
+  it('an_array_inherits_the_mode_of_the_copy_it_follows', () => {
+    setCopiesLinked(true)
+    const linked = makeTool()
+    copyThenArray(linked, 1, 'x3')
+    expect(linked.scene.duplicate_selection_array_linked).toHaveBeenCalledTimes(2)
+    expect(linked.scene.duplicate_selection_array_linked.mock.calls[1][3]).toBe(3)
+    expect(linked.scene.duplicate_selection_array).not.toHaveBeenCalled()
+
+    // The alternate (independent) copy stays independent through its array.
+    const independent = makeTool()
+    copyThenArray(independent, 2, 'x3')
+    expect(independent.scene.duplicate_selection_array).toHaveBeenCalledTimes(2)
+    expect(independent.scene.duplicate_selection_array.mock.calls[1][4]).toBe(false)
+    expect(independent.scene.duplicate_selection_array_linked).not.toHaveBeenCalled()
+  })
+
+  it('x4_after_a_linked_copy_undoes_the_wrap_and_rewraps_to_one_set_of_five', () => {
+    setCopiesLinked(true)
+    const t = makeTool()
+    copyThenArray(t, 1, 'x4')
+    // One undo retracts the first copy together with its wrap (one history
+    // entry), then the re-resolve copies the ORIGINAL loose source again.
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.scene.duplicate_selection_array_linked).toHaveBeenCalledTimes(2)
+    const [, ids, , count] = t.scene.duplicate_selection_array_linked.mock.calls[1]
+    expect(Array.from(ids as BigUint64Array)).toEqual([1n])
+    expect(count).toBe(4)
+    // Four copies plus the wrapped original are the five placements.
+    expect((t.onArrayCommit.mock.calls.at(-1)![0] as NodeRef[]).length).toBe(4)
   })
 })
 

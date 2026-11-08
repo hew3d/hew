@@ -6418,6 +6418,13 @@ impl Scene {
             .is_some_and(|c| self.doc.is_linked_set(c))
     }
 
+    /// Whether a node handle (`kind` 0 object, 1 group, 2 instance) is a
+    /// live, visible world node. False for a stale, hidden, or
+    /// definition-owned handle, or a bad kind. Read-only.
+    pub fn node_is_live(&self, kind: u8, id: u64) -> bool {
+        node_id(kind, id).is_ok_and(|node| self.doc.node_is_live(node))
+    }
+
     /// `linked = false` removes `hew` / `linked` from `component` (the
     /// attribute half of "Make component"; the name is
     /// [`Scene::set_component_name`]'s). One undo step. `linked = true` is
@@ -15339,6 +15346,25 @@ mod tests {
         let err = scene.wrap_linked(2, ins).unwrap_err();
         assert!(err.0.starts_with("NotWrappable"), "got {}", err.0);
         assert!(!scene.is_linked(u64::MAX), "a stale handle is not linked");
+    }
+
+    #[test]
+    fn node_is_live_follows_the_wrap_and_its_undo() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        assert!(scene.node_is_live(0, o));
+        let ins = scene.wrap_linked(0, o).unwrap();
+        assert!(
+            !scene.node_is_live(0, o),
+            "the wrapped object is now a member"
+        );
+        assert!(scene.node_is_live(2, ins));
+        scene.scene_undo().unwrap();
+        assert!(scene.node_is_live(0, o));
+        assert!(!scene.node_is_live(2, ins));
+        assert!(!scene.node_is_live(9, o), "a bad kind is not live");
+        assert!(!scene.node_is_live(0, u64::MAX));
     }
 
     #[test]

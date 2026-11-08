@@ -29,6 +29,8 @@ import groupWorkSvg from '@material-symbols/svg-400/outlined/group_work.svg?raw'
 import deployedCodeSvg from '@material-symbols/svg-400/outlined/deployed_code.svg?raw'
 import contentCopySvg from '@material-symbols/svg-400/outlined/content_copy.svg?raw'
 import callSplitSvg from '@material-symbols/svg-400/outlined/call_split.svg?raw'
+import linkOffSvg from '@material-symbols/svg-400/outlined/link_off.svg?raw'
+import layersClearSvg from '@material-symbols/svg-400/outlined/layers_clear.svg?raw'
 import textFieldsSvg from '@material-symbols/svg-400/outlined/text_fields.svg?raw'
 import bookmarkAddSvg from '@material-symbols/svg-400/outlined/bookmark_add.svg?raw'
 import { deriveDockContext, dockVerbsFor, dockChipLabel, dockVerbLabel, isDockVerbEnabled, type DockContext, type DockGates, type DockVerb } from './dockLogic'
@@ -41,6 +43,8 @@ const NON_TOOL_ICON_SVG: Record<string, string> = {
   'edit-group': groupWorkSvg,
   'edit-make-component': deployedCodeSvg,
   'make-unique': contentCopySvg,
+  'edit-unlink': linkOffSvg,
+  'edit-unlink-all': layersClearSvg,
   'explode-instance': callSplitSvg,
   'draw-3d-text': textFieldsSvg,
   'save-to-library': bookmarkAddSvg,
@@ -210,7 +214,7 @@ export function ContextualDock({
             whiteSpace: 'nowrap',
           }}
         >
-          {dockChipLabel(context)}
+          {dockChipLabel(context, gates?.canUnlink === true)}
         </span>
       </div>
 

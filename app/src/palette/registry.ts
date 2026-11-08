@@ -54,6 +54,12 @@ export type PaletteGate =
   | 'canPlaceCopy'
   | 'canExplode'
   | 'canMakeUnique'
+  /** One placement of a linked set selected (Unlink). */
+  | 'canUnlink'
+  | 'canUnlinkAll'
+  | 'canPromote'
+  /** Paste linked is the explicit form only while copies default to independent. */
+  | 'canPasteLinked'
   | 'canBoolean'
   /** One object, group, or instance selected, with a library backend. */
   | 'canSaveSelectionToLibrary'
@@ -233,6 +239,11 @@ function actionEntries(): PaletteEntry[] {
     { id: 'edit-place-copy', label: t`Place Copy`, description: t`Place another instance of the selected component.`, group: 'Actions', synonyms: [t`duplicate`, t`instance`, t`copy component`], gate: 'canPlaceCopy' },
     { id: 'edit-explode', label: t`Explode`, description: t`Break the selected component instance into plain objects.`, group: 'Actions', synonyms: [t`explode instance`, t`break component`], gate: 'canExplode' },
     { id: 'edit-make-unique', label: t`Make Unique`, description: t`Give the selected instance its own definition, detached from its siblings.`, group: 'Actions', synonyms: [t`unique component`], gate: 'canMakeUnique' },
+    { id: 'edit-unlink', label: t`Unlink`, description: t`Make the selected copy independent. The other copies stay linked.`, group: 'Actions', synonyms: [t`independent`, t`detach copy`], gate: 'canUnlink' },
+    { id: 'edit-unlink-all', label: t`Unlink all`, description: t`Make every copy of the selected linked copy independent.`, group: 'Actions', synonyms: [t`independent copies`], gate: 'canUnlinkAll' },
+    { id: 'edit-select-all-copies', label: t`Select all copies`, description: t`Select every copy linked to the selected one.`, group: 'Actions', synonyms: [t`linked copies`], gate: 'canUnlinkAll' },
+    { id: 'edit-paste-independent', label: t`Paste independent`, description: t`Place a plain copy of the clipboard that is not linked to the original.`, group: 'Actions', synonyms: [t`paste new`, t`paste unlinked`], gate: 'clipboardHasContent' },
+    { id: 'edit-paste-linked', label: t`Paste linked`, description: t`Place a copy of the clipboard that stays linked to the original.`, group: 'Actions', synonyms: [t`paste link`], gate: 'canPasteLinked' },
     { id: 'edit-union', label: t`Union`, description: t`Merge two selected solids into one (boolean add).`, group: 'Actions', synonyms: [t`boolean`, t`merge`, t`combine`, t`add`, t`join`], gate: 'canBoolean' },
     { id: 'edit-subtract', label: t`Subtract`, description: t`Cut the second selected solid out of the first (boolean difference).`, group: 'Actions', synonyms: [t`boolean`, t`difference`, t`cut`, t`carve`], gate: 'canBoolean' },
     { id: 'edit-intersect', label: t`Intersect`, description: t`Keep only the volume the two selected solids share (boolean intersection).`, group: 'Actions', synonyms: [t`boolean`, t`common`, t`overlap`], gate: 'canBoolean' },

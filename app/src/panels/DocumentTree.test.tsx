@@ -32,6 +32,7 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     group_name: () => undefined,
     instance_name: () => undefined,
     instance_def: () => undefined,
+    is_linked: () => false,
     component_name: () => undefined,
     object_drawing_planes: () => new Float64Array(0),
     ...overrides,
@@ -358,6 +359,7 @@ describe('DocumentTree — sort control', () => {
     group_name: (id: bigint) => (id === 3n ? 'beta' : undefined),
     instance_name: () => undefined,
     instance_def: (id: bigint) => (id === 4n ? 40n : undefined),
+    is_linked: () => false,
     component_name: (id: bigint) => (id === 40n ? 'Door' : undefined),
   })
   const renderTree = () => render(<DocumentTree {...baseProps} scene={scene} onSelect={vi.fn()} />)
@@ -464,6 +466,7 @@ describe('DocumentTree — sort covers free sketches, session members, and impri
         top_level_nodes: () => [o(1), i(4)],
         object_name: (id: bigint) => (id === 1n ? 'Zebra' : undefined),
         instance_def: (id: bigint) => (id === 4n ? 40n : undefined),
+        is_linked: () => false,
         component_name: (id: bigint) => (id === 40n ? 'Door' : undefined),
       },
     })
@@ -506,6 +509,7 @@ describe('DocumentTree — sort covers free sketches, session members, and impri
       top_level_nodes: () => [o(1), g(2), i(4), o(5)],
       object_name: (id: bigint) => ({ 1: 'Zed', 5: 'apple' } as Record<number, string>)[Number(id)],
       instance_def: (id: bigint) => (id === 4n ? 40n : undefined),
+      is_linked: () => false,
       component_name: (id: bigint) => (id === 40n ? 'Door' : undefined),
     })
     const props = {
@@ -539,5 +543,139 @@ describe('DocumentTree — sort covers free sketches, session members, and impri
     expect(names()).toEqual(['Panel', 'Circle', 'Rectangle'])
     sortTo('kind')
     expect(names()).toEqual(['Panel', 'Circle', 'Rectangle'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Linked copies: placements of a linked set read as copies, not components.
+// ---------------------------------------------------------------------------
+
+describe('DocumentTree — linked copies', () => {
+  /** Two placements (ids 4 and 5) of the linked set `def`; with `solo`, only one. */
+  function linkedScene(opts: { solo?: boolean; instanceNames?: Record<string, string> } = {}) {
+    const ids = opts.solo === true ? [4n] : [4n, 5n]
+    return makeScene({
+      top_level_nodes: () => ids.map((id) => ({ kind: 'instance', id })),
+      instance_def: () => 40n,
+      is_linked: () => true,
+      definition_usage: () => ids.length,
+      instances_of: () => ids,
+      component_name: () => 'Leg',
+      instance_name: (id: bigint) => opts.instanceNames?.[String(id)],
+      component_member_objects: () => [9n],
+      object_name: () => 'Leg',
+    })
+  }
+  const actions = () => ({
+    onUnlink: vi.fn(),
+    onUnlinkAll: vi.fn(),
+    onMakeComponent: vi.fn(),
+    onSelectCopies: vi.fn(),
+    onRename: vi.fn(),
+  })
+
+  it('a_linked_placement_shows_the_link_glyph_and_the_count_badge', () => {
+    const { container } = render(<DocumentTree scene={linkedScene()} {...baseProps} onSelect={vi.fn()} />)
+    expect(container.querySelectorAll('[data-node-icon="linked"]').length).toBe(2)
+    expect(container.querySelector('[data-node-icon="instance"]')).toBeNull()
+    const badges = screen.getAllByTestId('outliner-copies-badge')
+    expect(badges.map((b) => b.textContent)).toEqual(['×2', '×2'])
+    // Rows read as the board, never as a component.
+    expect(screen.getAllByTestId('outliner-row-label').map((l) => l.textContent)).toEqual(['Leg', 'Leg'])
+  })
+
+  it('a_set_of_one_shows_no_badge', () => {
+    const { container } = render(<DocumentTree scene={linkedScene({ solo: true })} {...baseProps} onSelect={vi.fn()} />)
+    expect(screen.queryByTestId('outliner-copies-badge')).toBeNull()
+    // Still the glyph, and still a board by name.
+    expect(container.querySelectorAll('[data-node-icon="linked"]').length).toBe(1)
+    expect(screen.getByTestId('outliner-row-label').textContent).toBe('Leg')
+  })
+
+  it('hovering_the_badge_highlights_the_other_placements', () => {
+    const { container } = render(<DocumentTree scene={linkedScene()} {...baseProps} onSelect={vi.fn()} />)
+    const [first] = screen.getAllByTestId('outliner-copies-badge')
+    fireEvent.mouseEnter(first)
+    const rows = container.querySelectorAll('[data-copies-highlighted="true"]')
+    expect(rows.length).toBe(2)
+    fireEvent.mouseLeave(first)
+    expect(container.querySelectorAll('[data-copies-highlighted="true"]').length).toBe(0)
+  })
+
+  it('an ordinary component keeps its glyph and name, with no badge or copies menu', () => {
+    const scene = makeScene({
+      top_level_nodes: () => [{ kind: 'instance', id: 4n }],
+      instance_def: () => 40n,
+      is_linked: () => false,
+      definition_usage: () => 3,
+      component_name: () => 'Chair',
+    })
+    const { container } = render(<DocumentTree scene={scene} {...baseProps} onSelect={vi.fn()} linkedActions={actions()} />)
+    expect(container.querySelector('[data-node-icon="instance"]')).not.toBeNull()
+    expect(screen.queryByTestId('outliner-copies-badge')).toBeNull()
+    expect(screen.queryByTestId('outliner-copies-button')).toBeNull()
+    expect(screen.getByTestId('outliner-row-label').textContent).toBe('Chair')
+  })
+
+  it('the Copies menu offers Unlink, Unlink all, Make component, and Select all copies', () => {
+    const a = actions()
+    render(<DocumentTree scene={linkedScene()} {...baseProps} onSelect={vi.fn()} linkedActions={a} />)
+    fireEvent.click(screen.getAllByTestId('outliner-copies-button')[0])
+    const items = screen.getAllByRole('menuitem').map((i) => i.textContent)
+    expect(items).toEqual(['Unlink', 'Unlink all', 'Make component', 'Select all copies', 'Rename'])
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Unlink' }))
+    expect(a.onUnlink).toHaveBeenCalledWith({ kind: 'instance', id: 4n })
+    fireEvent.click(screen.getAllByTestId('outliner-copies-button')[0])
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Select all copies' }))
+    expect(a.onSelectCopies).toHaveBeenCalledWith({ kind: 'instance', id: 4n })
+  })
+
+  it('a set of one offers no Unlink all or Select all copies', () => {
+    render(<DocumentTree scene={linkedScene({ solo: true })} {...baseProps} onSelect={vi.fn()} linkedActions={actions()} />)
+    fireEvent.click(screen.getByTestId('outliner-copies-button'))
+    expect(screen.getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Unlink', 'Make component', 'Rename'])
+  })
+
+  it('renaming from the row reports the typed name for the row\'s node', () => {
+    const a = actions()
+    render(<DocumentTree scene={linkedScene()} {...baseProps} onSelect={vi.fn()} linkedActions={a} />)
+    fireEvent.click(screen.getAllByTestId('outliner-copies-button')[1])
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    const input = screen.getByTestId('outliner-row-rename') as HTMLInputElement
+    expect(input.value).toBe('Leg')
+    fireEvent.change(input, { target: { value: 'Back leg' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(a.onRename).toHaveBeenCalledWith({ kind: 'instance', id: 5n }, 'Back leg')
+    expect(screen.queryByTestId('outliner-row-rename')).toBeNull()
+  })
+
+  it('rename_that_types_back_the_shown_label_is_not_a_rename', () => {
+    const a = actions()
+    render(<DocumentTree scene={linkedScene()} {...baseProps} onSelect={vi.fn()} linkedActions={a} />)
+    fireEvent.click(screen.getAllByTestId('outliner-copies-button')[0])
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    // Enter with the label untouched ("Leg" is a fallback here, not a stored name).
+    fireEvent.keyDown(screen.getByTestId('outliner-row-rename'), { key: 'Enter' })
+    expect(a.onRename).not.toHaveBeenCalled()
+  })
+
+  it('the_copies_button_closes_an_open_menu_instead_of_reopening_it', () => {
+    render(<DocumentTree scene={linkedScene()} {...baseProps} onSelect={vi.fn()} linkedActions={actions()} />)
+    const button = screen.getAllByTestId('outliner-copies-button')[0]
+    fireEvent.click(button)
+    expect(screen.getByRole('menu')).toBeInTheDocument()
+    // A real press is pointerdown, then click.
+    fireEvent.pointerDown(button)
+    fireEvent.click(button)
+    expect(screen.queryByRole('menu')).toBeNull()
+  })
+
+  it('Escape leaves the name alone', () => {
+    const a = actions()
+    render(<DocumentTree scene={linkedScene()} {...baseProps} onSelect={vi.fn()} linkedActions={a} />)
+    fireEvent.click(screen.getAllByTestId('outliner-copies-button')[0])
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename' }))
+    fireEvent.keyDown(screen.getByTestId('outliner-row-rename'), { key: 'Escape' })
+    expect(a.onRename).not.toHaveBeenCalled()
   })
 })

@@ -390,6 +390,12 @@ a named component stays available with no placements. Removing the
 attribute (`promote_linked`) turns a set into a named component; the
 reverse does not exist.
 
+The app presents a linked set as copies, never as a definition: Move,
+Rotate, arrays, and Paste link by default (a preference), the Outliner and
+Object Info label a placement by its own name, the set's name, or its
+part's name, and the app's own booleans route Subtract through the shared
+shape while Union and Intersect unlink the placement first and announce it.
+
 Editing a definition's members is covered separately in 2.11: because a
 definition's members are already ordinary Objects (just owned by a
 `ComponentId` rather than the world), editing one in place is a matter of

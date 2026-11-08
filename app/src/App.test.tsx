@@ -104,6 +104,7 @@ const mockScene = {
   view_style_json: () => undefined,
   set_view_style_axes: vi.fn(),
   node_parent: (_kind: number, _id: bigint) => undefined as bigint | undefined,
+  is_linked: (_id: bigint) => false,
   material_ids: () => new BigUint64Array(),
   material_info: () => undefined,
   material_texture_bytes: () => undefined,

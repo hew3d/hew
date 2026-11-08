@@ -58,6 +58,14 @@ export interface LibraryPlacement {
   /** Item-space bounds (origin-marker scale + status). */
   bboxMin: V3
   bboxMax: V3
+  /**
+   * A linked paste: given the item→world affine the click resolved, place
+   * linked copies and report them (the tool then skips `insert_item`).
+   * Returns `null` when the copy can no longer link (a source was deleted
+   * while the ghost was up), and the tool places an independent copy as
+   * usual. Throws like the kernel on a refusal.
+   */
+  linkedCommit?: (affine: Float64Array) => LibraryInsertResult | null
 }
 
 export type OnPlaced = (result: LibraryInsertResult) => void
@@ -184,15 +192,22 @@ export class LibraryPlaceTool implements Tool {
       0, 1, 0, point[1],
       0, 0, 1, point[2],
     ])
-    let raw: unknown
+    let result: LibraryInsertResult
     try {
-      raw = this.wasmScene.insert_item(
-        this.placement.bytes,
-        affine,
-        this.placement.sourceId ?? undefined,
-        this.placement.contentHash ?? undefined,
-        this.placement.origin ?? undefined,
-      )
+      const linked = this.placement.linkedCommit?.(affine) ?? null
+      if (linked !== null) {
+        result = linked
+      } else {
+        result = parseInsertResult(
+          this.wasmScene.insert_item(
+            this.placement.bytes,
+            affine,
+            this.placement.sourceId ?? undefined,
+            this.placement.contentHash ?? undefined,
+            this.placement.origin ?? undefined,
+          ),
+        )
+      }
     } catch (err) {
       // A refusal (open component session, unloadable item) leaves the
       // document untouched; report it and stay armed so the user can Esc
@@ -202,7 +217,6 @@ export class LibraryPlaceTool implements Tool {
       this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
       return
     }
-    const result = parseInsertResult(raw)
     this._teardown()
     this.finished = true
     this.onPlaced(result)

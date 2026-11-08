@@ -12407,7 +12407,7 @@ impl Document {
     /// Whether a node handle is live and visible (not stale, not hidden). A
     /// definition member is *not* a tree node, so an `Object` handle pointing at
     /// one is not a live node (it fails `is_world`).
-    fn node_is_live(&self, node: NodeId) -> bool {
+    pub fn node_is_live(&self, node: NodeId) -> bool {
         match node {
             NodeId::Object(id) => self
                 .objects
@@ -17232,6 +17232,7 @@ impl Document {
         node: NodeId,
     ) -> Result<(ComponentId, InstanceId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "wrap_linked", node = ?node);
+        self.refuse_wrap_in_nested_frames()?;
         self.check_wrappable(node)?;
         self.refuse_wrap_growth(&[node], 0)?;
         let (action, wrap, change) = self.wrap_linked_core(node)?;
@@ -17239,6 +17240,22 @@ impl Document {
         self.commit_new_action();
         self.debug_validate();
         Ok((wrap.definition, wrap.instance, change))
+    }
+
+    /// A wrap or linked copy is refused while component frames are stacked
+    /// (a drill-down inside an open component): each frame lists the
+    /// geometry it owns by an undo-stack walk, and a fold in the inner frame
+    /// re-owns members the outer frame also walks, so what the live
+    /// siblings render would change under the edit. One open frame is fine.
+    ///
+    /// # Errors
+    /// - [`DocumentError::ExplodeSessionScope`] — two or more component
+    ///   frames are open.
+    fn refuse_wrap_in_nested_frames(&self) -> Result<(), DocumentError> {
+        if self.defs_on_loan().len() > 1 {
+            return Err(DocumentError::ExplodeSessionScope);
+        }
+        Ok(())
     }
 
     /// The mutating half of [`Document::wrap_linked`], for a node
@@ -21524,6 +21541,7 @@ impl Document {
         if placements.is_empty() || nodes.is_empty() {
             return Err(DocumentError::EmptySelection);
         }
+        self.refuse_wrap_in_nested_frames()?;
         for &n in nodes {
             self.explode_scope_node(n)?;
         }

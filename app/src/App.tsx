@@ -19,7 +19,7 @@ import { AnnotationEditor } from './viewport/AnnotationEditor'
 import { SnapDot } from './viewport/SnapDot'
 import { MeasurementBox } from './viewport/MeasurementBox'
 import { ViewportHUD } from './viewport/ViewportHUD'
-import { DocumentTree } from './panels/DocumentTree'
+import { DocumentTree, type LinkedCopyActions } from './panels/DocumentTree'
 import { MaterialPalette } from './panels/MaterialPalette'
 import { MenuBar } from './panels/MenuBar'
 import { CAMERA_HANDOFF_TOOL_NAMES } from './panels/cameraHandoffTools'
@@ -65,7 +65,7 @@ import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
 import { TrayHideRow, TrayShowTab } from './panels/TrayToggle'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, isSketchScopedKind, makeLabelFor, stripTagSuffix, type NodeRef } from './panels/treeModel'
+import { nextSelection, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, isSketchScopedKind, makeLabelFor, placementLabel, stripTagSuffix, type NodeRef } from './panels/treeModel'
 import { SelectionPathStrip } from './panels/SelectionPathStrip'
 import { buildSelectionPath, frameClickAction, hoverLine, type HitLeaf } from './panels/selectionPath'
 import { tagPathKey } from './panels/tagModel'
@@ -155,7 +155,14 @@ import {
   hasClipboardContent,
   setClipboardBytes,
   refreshClipboardFromShell,
+  repointLinkSource,
+  type LinkSource,
 } from './clipboard/modelClipboard'
+import { resolveLinkSource, pasteLinked, planPaste } from './clipboard/linkedPaste'
+import { getCopiesLinked, subscribeCopiesLinked } from './settings/editing'
+import { routeBoolean } from './viewport/placementBoolean'
+import { CutScopeStrip } from './panels/CutScopeStrip'
+import { blockedWhileEditing, promoteForSave, undoPromotionIfUnmoved, linkGates, linkedPlacementOf, unlinkCopy, unlinkAllCopies, promoteToComponent, renameLinkedCopy } from './linkedCopies'
 import { SettingsWindow } from './settings/SettingsWindow'
 import { FluentSettingsPage } from './settings/FluentSettingsPage'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
@@ -622,6 +629,9 @@ export default function App() {
   // so material #1 of document B collides with the cached handle of material
   // #1 of document A (audit q-web-robustness).
   const [docGeneration, setDocGeneration] = useState(0)
+  // The clipboard's link check reads the generation of the moment, not the closure's.
+  const docGenerationRef = useRef(0)
+  docGenerationRef.current = docGeneration
   /** Currently selected material id for the Paint tool. */
   const [currentMaterialId, setCurrentMaterialId] = useState<bigint>(MATERIAL_SENTINEL)
   // Picking a material makes it current AND activates the Paint tool, so the
@@ -1109,6 +1119,7 @@ export default function App() {
   // above). `useScenesController` reads the singleton directly for the tween
   // duration; this is only the menu/palette checkmark's own render cache.
   const measurementsPosition = useViewSetting(getMeasurementsPosition, subscribeMeasurementsPosition)
+  const copiesLinked = useViewSetting(getCopiesLinked, subscribeCopiesLinked)
   const [sceneTransitionsOn, setSceneTransitionsOn] = useState(() => getSceneTransitions())
   useEffect(() => subscribeSceneTransitions(setSceneTransitionsOn), [])
 
@@ -2611,6 +2622,7 @@ export default function App() {
     // while a component frame is open. `componentFrameOpen` itself is the
     // top-level derived const (shared with the import/3D-Text gates and the
     // native menu sync below).
+    const linkedSelection = linkedPlacementOf(scene, selectedIds) !== null
     return {
       booleanOperands,
       // Same top-level rule the kernel enforces (GroupedOperand): a nested
@@ -2630,9 +2642,13 @@ export default function App() {
       canUngroup: !hasSketch && canUngroupHelper(selectedIds),
       canMakeComponent:
         !componentFrameOpen && activeContext.length === 0 && canMakeComponent(selectedIds, parentOf),
-      canPlaceCopy: !componentFrameOpen && canPlaceInstance(selectedIds),
+      // A linked copy has its own copy actions; Make Unique and Place Copy speak of components.
+      canPlaceCopy: !componentFrameOpen && canPlaceInstance(selectedIds) && !linkedSelection,
       canExplode: canExplodeInstance(selectedIds),
-      canMakeUnique: canMakeUnique(selectedIds),
+      canMakeUnique: canMakeUnique(selectedIds) && !linkedSelection,
+      // Linked copies: Unlink / Unlink all / Make component (promote) on one
+      // placement of a linked set, not while a component is open for editing.
+      ...linkGates(scene, selectedIds, componentFrameOpen),
       // Object ▸ Save Selection to Library… — the dock's Save to Library
       // verb's gate (one object, group, or instance, on a platform with a
       // library backend), so the command survives the dock being hidden.
@@ -2682,7 +2698,7 @@ export default function App() {
     const indexOf = (kind: NodeRef['kind'], id: bigint) =>
       treeIndex.get(nodeKey({ kind, id })) ?? 0
 
-    const pushNode = (kind: NodeRef['kind'], id: bigint, label: string) => {
+    const pushNode = (kind: NodeRef['kind'], id: bigint, label: string, linkedCopy = false) => {
       entries.push({
         id: `jump-node:${kind}:${id}`,
         label:
@@ -2690,7 +2706,9 @@ export default function App() {
             ? t({ comment: 'Command palette entry that jumps to a named object', message: `Object: ${label}` })
             : kind === 'group'
               ? t({ comment: 'Command palette entry that jumps to a named group', message: `Group: ${label}` })
-              : t({ comment: 'Command palette entry that jumps to a named component instance', message: `Component: ${label}` }),
+              : linkedCopy
+                ? t({ comment: 'Command palette entry that jumps to a named linked copy', message: `Copy: ${label}` })
+                : t({ comment: 'Command palette entry that jumps to a named component instance', message: `Component: ${label}` }),
         description: t`Select it and reveal it in the Outliner.`,
         // oxlint-disable-next-line lingui/no-unlocalized-strings -- palette group ID
         group: 'Model',
@@ -2704,9 +2722,7 @@ export default function App() {
       pushNode('group', id, resolveLabel(scene.group_name(id), undefined, 'group', indexOf('group', id)))
     })
     Array.from(scene.instance_ids()).forEach((id) => {
-      const def = scene.instance_def(id)
-      const defName = def !== undefined ? scene.component_name(def) : undefined
-      pushNode('instance', id, resolveLabel(scene.instance_name(id), defName, 'instance', indexOf('instance', id)))
+      pushNode('instance', id, placementLabel(scene, id, indexOf('instance', id)), scene.is_linked(id))
     })
 
     // Unique tag paths across all nodes (same walk the Tags panel does).
@@ -4624,6 +4640,19 @@ export default function App() {
     | null
   >(null)
 
+  /** The linked copy being promoted to a component (Make component), awaiting
+   * its name. `null` = prompt closed. */
+  /** A Subtract waiting for the scope strip's answer ("Cut all N copies" or "Only this one"). */
+  const [cutScope, setCutScope] = useState<{ op: number; a: NodeRef; b: NodeRef; copies: number } | null>(null)
+  // The strip belongs to the selection it was opened for.
+  // It also goes when the document changes under it (undo, redo, any edit),
+  // since the copy count it quotes may no longer be true.
+  useEffect(() => {
+    setCutScope(null)
+  }, [selectedIds, docRev])
+
+  const [promoteTarget, setPromoteTarget] = useState<{ instance: bigint; defaultName: string } | null>(null)
+
   /** Lightweight per-item summary for the command palette's dynamic 'Library'
    * group (frame 1e) — NOT the full `LibraryItem` the dialog builds (no
    * thumbnail, no content hash): the palette only ever needs a label, a
@@ -4753,11 +4782,7 @@ export default function App() {
       const index = sharedTreeIndex?.get(nodeKey(node)) ?? 0
       if (node.kind === 'object') return resolveLabel(scene.object_name(node.id), undefined, 'object', index)
       if (node.kind === 'group') return resolveLabel(scene.group_name(node.id), undefined, 'group', index)
-      if (node.kind === 'instance') {
-        const def = scene.instance_def(node.id)
-        const defName = def !== undefined ? scene.component_name(def) : undefined
-        return resolveLabel(scene.instance_name(node.id), defName, 'instance', index)
-      }
+      if (node.kind === 'instance') return placementLabel(scene, node.id, index)
       return t`Item`
     },
     [state, sharedTreeIndex, t],
@@ -4802,11 +4827,31 @@ export default function App() {
         sourceDoc: documentName(docSessionRef.current),
       }
       let bytes: Uint8Array
+      let promotedAt: bigint | null = null
       try {
-        bytes =
+        const extract = (): Uint8Array =>
           target.kind === 'document'
             ? scene.extract_document_item(JSON.stringify(meta))
             : scene.extract_item(target.nodeKinds, target.nodeIds, true, name, JSON.stringify(meta))
+        // A linked set has no name of its own and a Library item needs one,
+        // so saving it makes it a named component, but only if the save
+        // goes through: a failed extract takes the promotion back.
+        const linked =
+          target.kind === 'selection' && target.nodeIds.length === 1 && target.nodeKinds[0] === 2
+            ? linkedPlacementOf(scene, [{ kind: 'instance', id: target.nodeIds[0] }])
+            : null
+        if (linked !== null) {
+          try {
+            const saved = promoteForSave(scene, linked.instance, name, extract)
+            bytes = saved.value
+            promotedAt = saved.promotedAt
+          } finally {
+            viewportApi.current?.refreshScene()
+            setDocRev((r) => r + 1)
+          }
+        } else {
+          bytes = extract()
+        }
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)
@@ -4825,6 +4870,11 @@ export default function App() {
         try {
           await libraryStore().write(fileName, bytes)
         } catch (err) {
+          // The item never landed, so the set should not stay promoted.
+          if (promotedAt !== null && undoPromotionIfUnmoved(scene, promotedAt)) {
+            viewportApi.current?.refreshScene()
+            setDocRev((r) => r + 1)
+          }
           handleToast(t`Save to Library failed: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
           return
         }
@@ -4837,8 +4887,10 @@ export default function App() {
         if (target.kind !== 'document' && docSessionRef.current === sessionAtSave) {
           let stamped = false
           try {
-            // Capture cleanliness BEFORE the stamp dirties the session.
-            const wasClean = !docSessionRef.current.dirty
+            // Capture cleanliness BEFORE the stamp dirties the session. A
+            // save that promoted a linked set made a real, undoable edit,
+            // so the stamp is not the only change: take the ordinary path.
+            const wasClean = promotedAt === null && !docSessionRef.current.dirty
             const ref = docSessionRef.current.currentRef
             const hash = await sha256Hex(bytes)
             const summary = await readItemSummary(bytes)
@@ -5526,7 +5578,15 @@ export default function App() {
     const placement = scene.extract_item_placement(sel.kinds, sel.ids)
     const placementAffine = placement === undefined ? null : Array.from(placement)
     const copiedCount = structural.length
-    void setClipboardBytes(bytes, structural.length, kinds, clipboardSourceIdRef.current, placementAffine).then(() => {
+    // Where the copy came from, so a paste back into this document can link
+    // (see clipboard/linkedPaste.ts).
+    const linkSource: LinkSource = {
+      documentId: scene.ensure_document_id(),
+      nonce: clipboardSourceIdRef.current,
+      generation: docGenerationRef.current,
+      nodes: structural.map((n) => ({ kind: n.kind as 'object' | 'group' | 'instance', id: n.id })),
+    }
+    void setClipboardBytes(bytes, structural.length, kinds, clipboardSourceIdRef.current, placementAffine, linkSource).then(() => {
       setClipboardAvailable(true)
       handleToast(plural(copiedCount, { one: 'Copied # object', other: 'Copied # objects' }))
     })
@@ -5549,7 +5609,7 @@ export default function App() {
    *  gesture). Both resolve the clipboard the same way: this window's own
    *  cache first, else a fresh pull from the shared Tauri shell state (a
    *  cross-window paste with nothing copied locally yet). */
-  const handlePaste = (inPlace: boolean) => {
+  const handlePaste = (inPlace: boolean, mode: 'default' | 'independent' | 'linked' = 'default') => {
     void (async () => {
       // ALWAYS await a fresh pull before reading — never trust the local
       // cache outright. Under Tauri, the focus-triggered refresh effect
@@ -5566,7 +5626,41 @@ export default function App() {
       const scene = sceneRef.current
       if (scene === null) return
 
+      // A linked paste: same document, same window, every copied node still
+      // live. The preference picks the default; the menu can force either.
+      const plan = planPaste(
+        mode,
+        getCopiesLinked(),
+        resolveLinkSource(scene, content.linkSource, clipboardSourceIdRef.current, docGenerationRef.current),
+        clipboardSourceIdRef.current,
+      )
+      if (plan.kind === 'refuse') {
+        // Asked for a link and none is possible: say so instead of quietly
+        // pasting something else.
+        handleToast(t`This can't be pasted linked: the original isn't in this model any more, or this copy came from another model. Use Paste independent instead.`)
+        return
+      }
+      const linkNodes = plan.kind === 'linked' ? plan.nodes : null
+      // An independent paste must not link back to the originals either:
+      // without the window's origin the kernel makes its own definitions.
+      const pasteOrigin = plan.kind === 'plain' ? plan.origin : clipboardSourceIdRef.current
+
       if (inPlace) {
+        if (linkNodes !== null) {
+          try {
+            const { result, sources } = pasteLinked(scene, linkNodes, content.placementAffine, new Float64Array(content.placementAffine ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]))
+            repointLinkSource(content, sources)
+            viewportApi.current?.refreshScene()
+            setSelectedGuide(null)
+            setSelectedAnnotation(null)
+            setSelectedIds(result.rootIds.map((id) => ({ kind: 'instance' as const, id })))
+          } catch (err) {
+            const code = parseKernelErrorCode(err)
+            const rawMsg = err instanceof Error ? err.message : String(err)
+            handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+          }
+          return
+        }
         // The kernel-computed reconstruction affine — see
         // `ClipboardContent.placementAffine`'s doc comment for why a bare
         // identity affine would NOT overlap the original in EITHER axes
@@ -5582,7 +5676,7 @@ export default function App() {
             affine,
             content.sourceId,
             content.contentHash,
-            clipboardSourceIdRef.current,
+            pasteOrigin,
           )
         } catch (err) {
           const code = parseKernelErrorCode(err)
@@ -5615,7 +5709,7 @@ export default function App() {
       // means the copy-time bytes already are the paste.
       let previewBytes = content.bytes
       try {
-        const live = scene.clipboard_paste_preview(content.bytes, clipboardSourceIdRef.current)
+        const live = pasteOrigin === undefined ? undefined : scene.clipboard_paste_preview(content.bytes, pasteOrigin)
         if (live !== undefined) previewBytes = live
       } catch {
         // Fall back to the copy-time bytes; the placement itself decides.
@@ -5634,11 +5728,24 @@ export default function App() {
         // The paste half of the clipboard link (see doCopy): the same
         // window nonce, so an instance copied from THIS document places
         // its original definition rather than an unlinked copy.
-        origin: clipboardSourceIdRef.current,
+        origin: pasteOrigin,
         displayName: t`Pasted objects`,
         ghost: ghost.group,
         bboxMin: ghost.bboxMin,
         bboxMax: ghost.bboxMax,
+        linkedCommit:
+          linkNodes === null
+            ? undefined
+            : (affine) => {
+                // The source may have gone while the ghost was up.
+                const nodes = resolveLinkSource(scene, content.linkSource, clipboardSourceIdRef.current, docGenerationRef.current)
+                if (nodes === null) return null
+                const { result, sources } = pasteLinked(scene, nodes, content.placementAffine, affine)
+                // Recorded on the clipboard this ghost came from, which may
+                // no longer be the current one.
+                repointLinkSource(content, sources)
+                return result
+              },
       })
     })()
   }
@@ -5826,6 +5933,14 @@ export default function App() {
         if (isTextFieldFocused()) break
         handlePaste(true)
         break
+      case 'edit-paste-independent':
+        if (isTextFieldFocused()) break
+        handlePaste(false, 'independent')
+        break
+      case 'edit-paste-linked':
+        if (isTextFieldFocused()) break
+        handlePaste(false, 'linked')
+        break
       case 'close':
         // Trigger the beforeunload / close-guard path by emitting the
         // Tauri window close request — handled by the close guard effect.
@@ -5968,6 +6083,9 @@ export default function App() {
       case 'edit-place-copy': handlePlaceInstance(); break
       case 'edit-explode': handleExplodeInstance(); break
       case 'edit-make-unique': handleMakeUnique(); break
+      case 'edit-unlink': handleUnlink(false); break
+      case 'edit-unlink-all': handleUnlink(true); break
+      case 'edit-select-all-copies': handleSelectAllCopies(); break
       case 'edit-union': handleBoolean(0); break
       case 'edit-subtract': handleBoolean(1); break
       case 'edit-intersect': handleBoolean(2); break
@@ -6768,11 +6886,16 @@ export default function App() {
       'edit-delete': selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
       'edit-group': menuGates?.canGroup ?? false,
       'edit-ungroup': menuGates?.canUngroup ?? false,
-      'edit-make-component': menuGates?.canMakeComponent ?? false,
+      'edit-make-component': (menuGates?.canMakeComponent ?? false) || (menuGates?.canPromote ?? false),
       'edit-place-copy': menuGates?.canPlaceCopy ?? false,
       'edit-save-selection-to-library': menuGates?.canSaveSelectionToLibrary ?? false,
       'edit-explode': menuGates?.canExplode ?? false,
       'edit-make-unique': menuGates?.canMakeUnique ?? false,
+      'edit-unlink': menuGates?.canUnlink ?? false,
+      'edit-unlink-all': menuGates?.canUnlinkAll ?? false,
+      'edit-select-all-copies': menuGates?.canUnlinkAll ?? false,
+      'edit-paste-independent': menuGates?.clipboardHasContent ?? false,
+      'edit-paste-linked': (menuGates?.clipboardHasContent ?? false) && !copiesLinked,
       'edit-union': menuGates?.canBoolean ?? false,
       'edit-subtract': menuGates?.canBoolean ?? false,
       'edit-intersect': menuGates?.canBoolean ?? false,
@@ -7296,12 +7419,8 @@ export default function App() {
   const canPlace = menuGates?.canPlaceCopy ?? false
   const canExplode = menuGates?.canExplode ?? false
   const canUnique = menuGates?.canMakeUnique ?? false
-  const handleBoolean = (op: number) => {
-    // Re-check the full gate (the accelerator path dispatches here
-    // unconditionally, like handleGroup): exactly two operands, each a plain
-    // solid or a group, at the top level.
-    if (!(menuGates?.canBoolean ?? false)) return
-    const result = viewportApi.current?.runBoolean(op, booleanOperands[0], booleanOperands[1])
+  const runBooleanScoped = (op: number, a: NodeRef, b: NodeRef, scope: 'all' | 'one') => {
+    const result = viewportApi.current?.runBoolean(op, a, b, scope)
     if (result === 'mutated-failed') {
       // The retried boolean failed AFTER auto-explode already committed
       // real mutations (make_unique/explode_instance/group_nodes) —
@@ -7314,6 +7433,27 @@ export default function App() {
       setSelectedIds([result])
       setDocRev((r) => r + 1)
     }
+  }
+
+  const handleBoolean = (op: number) => {
+    // Re-check the full gate (the accelerator path dispatches here
+    // unconditionally, like handleGroup): exactly two operands, each a plain
+    // solid or a group, at the top level.
+    if (!(menuGates?.canBoolean ?? false)) return
+    const [a, b] = booleanOperands
+    const scene0 = sceneRef.current
+    // Cutting a part that has other linked copies: ask how far the cut
+    // reaches first (the strip above the status bar). Everything else runs.
+    if (scene0 !== null && routeBoolean(op, a, b, (id) => scene0.is_linked(id)) === 'through-placement') {
+      const scene = sceneRef.current
+      const def = scene?.instance_def(a.id)
+      const copies = scene != null && def !== undefined ? scene.definition_usage(def) : 1
+      if (copies > 1) {
+        setCutScope({ op, a, b, copies })
+        return
+      }
+    }
+    runBooleanScoped(op, a, b, 'all')
   }
 
   const handleGroup = () => {
@@ -7356,6 +7496,14 @@ export default function App() {
   }
 
   const handleMakeComponent = () => {
+    // One placement of a linked set: Make component is the promote — the
+    // set becomes a named component. Ask for the name first.
+    const scene = sceneRef.current
+    const linked = scene !== null && !componentFrameOpen ? linkedPlacementOf(scene, selectedIds) : null
+    if (linked !== null) {
+      setPromoteTarget({ instance: linked.instance, defaultName: linkedLabelOf(linked.instance) })
+      return
+    }
     // Same re-check handleGroup does: dispatchers without a disabled state
     // (dock verbs are hidden, but keyboard/palette paths aren't) must not
     // hand the kernel an ineligible selection.
@@ -7365,6 +7513,66 @@ export default function App() {
       setSelectedIds([{ kind: 'instance', id: instanceId }])
       setDocRev((r) => r + 1)
     }
+  }
+
+  /** Runs a linked-copy scene operation: a typed refusal is a toast, never a silent no-op. */
+  const runLinkedOp = (op: (scene: NonNullable<typeof sceneRef.current>) => void): boolean => {
+    const scene = sceneRef.current
+    if (scene === null) return false
+    try {
+      op(scene)
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      return false
+    }
+    viewportApi.current?.refreshScene()
+    setDocRev((r) => r + 1)
+    return true
+  }
+
+  /** Unlink this copy (or every copy). The selection stays on the same copy.
+   *  `node` is the Outliner row the action came from; the Edit menu and dock
+   *  act on the selection. */
+  const handleUnlink = (all: boolean, node?: NodeRef) => {
+    if (blockedWhileEditing(componentFrameOpen, handleToast)) return
+    const scene = sceneRef.current
+    const linked = scene !== null ? linkedPlacementOf(scene, node !== undefined ? [node] : selectedIds) : null
+    if (linked === null || (all && linked.copies < 2)) return
+    runLinkedOp((s) => {
+      if (all) unlinkAllCopies(s, linked.instance)
+      else unlinkCopy(s, linked.instance)
+    })
+  }
+
+  const handleSelectAllCopies = (node?: NodeRef) => {
+    const scene = sceneRef.current
+    const linked = scene !== null ? linkedPlacementOf(scene, node !== undefined ? [node] : selectedIds) : null
+    if (scene === null || linked === null) return
+    setSelectedIds(Array.from(scene.instances_of(linked.definition)).map((id) => ({ kind: 'instance' as const, id })))
+  }
+
+  /** Outliner row actions for a linked copy (the row's "Copies" menu). */
+  const linkedRowActions: LinkedCopyActions = {
+    onUnlink: (node) => handleUnlink(false, node),
+    onUnlinkAll: (node) => handleUnlink(true, node),
+    onSelectCopies: (node) => handleSelectAllCopies(node),
+    onMakeComponent: (node) => {
+      if (blockedWhileEditing(componentFrameOpen, handleToast)) return
+      if (node.kind === 'instance') setPromoteTarget({ instance: node.id, defaultName: linkedLabelOf(node.id) })
+    },
+    onRename: (node, name) => {
+      if (blockedWhileEditing(componentFrameOpen, handleToast)) return
+      if (node.kind === 'instance' && name.trim() !== linkedLabelOf(node.id)) runLinkedOp((s) => renameLinkedCopy(s, node.id, name))
+    },
+  }
+
+  /** The label a linked copy shows in the Outliner (also the default name for Make component). */
+  const linkedLabelOf = (instance: bigint): string => {
+    const scene = sceneRef.current
+    if (scene === null) return t`Copies`
+    return placementLabel(scene, instance, sharedTreeIndex?.get(nodeKey({ kind: 'instance', id: instance })) ?? 0)
   }
 
   const handlePlaceInstance = () => {
@@ -7547,6 +7755,9 @@ export default function App() {
           canPlaceCopy: canPlace,
           canExplode: canExplode,
           canMakeUnique: canUnique,
+          canUnlink: menuGates?.canUnlink ?? false,
+          canUnlinkAll: menuGates?.canUnlinkAll ?? false,
+          canPromote: menuGates?.canPromote ?? false,
           canBoolean,
           canSaveSelectionToLibrary: menuGates?.canSaveSelectionToLibrary ?? false,
           canImport: !componentFrameOpen,
@@ -7554,6 +7765,7 @@ export default function App() {
           hasStructuralSelection: menuGates?.hasStructuralSelection ?? false,
           clipboardHasContent: menuGates?.clipboardHasContent ?? false,
         }}
+        copiesLinked={copiesLinked}
         onZoomExtents={handleZoomExtents}
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
         parallelProjectionChecked={parallelProjection}
@@ -7907,7 +8119,7 @@ export default function App() {
               hidden={cameraDragging}
               activeToolId={toolActionId(activeTool)}
               hoveringSketchRegion={hoveringSketchRegion}
-              gates={{ canGroup: canGroupNow, canMakeComponent: canMakeComp, canSaveToLibrary: libraryStore().available() }}
+              gates={{ canGroup: canGroupNow, canMakeComponent: canMakeComp || (menuGates?.canPromote ?? false), canSaveToLibrary: libraryStore().available(), canUnlink: menuGates?.canUnlink ?? false, canUnlinkAll: menuGates?.canUnlinkAll ?? false }}
               onRun={(id) => menuActionRef.current(id)}
             />
           </div>
@@ -8106,6 +8318,8 @@ export default function App() {
               sessionMembers={sessionMembers}
               onShowHealth={handleShowObjectHealth}
               onToast={handleToast}
+              onUnlink={(node) => linkedRowActions.onUnlink(node)}
+              onMakeComponent={(node) => linkedRowActions.onMakeComponent(node)}
             />
           </TraySection>
           <TraySection title={trayTitle.outliner} collapsed={!showModelInfo} onToggle={() => setShowModelInfo((v) => !v)}>
@@ -8128,6 +8342,7 @@ export default function App() {
               onSetHiddenMany={handleSetHiddenMany}
               onReparent={handleReparent}
               onDropRefused={(reason) => handleToast(reason)}
+              linkedActions={linkedRowActions}
             />
           </TraySection>
           <TraySection title={trayTitle.materials} collapsed={!showMaterials} onToggle={() => setShowMaterials((v) => !v)}>
@@ -8197,6 +8412,17 @@ export default function App() {
           unreadable on the light theme's light bar (the dark/light divergence
           the user flagged). Extra bottom padding avoids descender clipping
           under macOS Tahoe's rounded window corners. */}
+      {cutScope !== null && (
+        <CutScopeStrip
+          copies={cutScope.copies}
+          onCancel={() => setCutScope(null)}
+          onChoose={(scope) => {
+            const pending = cutScope
+            setCutScope(null)
+            runBooleanScoped(pending.op, pending.a, pending.b, scope)
+          }}
+        />
+      )}
       <div
         style={{
           height: 30,
@@ -8732,10 +8958,14 @@ export default function App() {
           selection: selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
           canGroup: menuGates?.canGroup ?? false,
           canUngroup: menuGates?.canUngroup ?? false,
-          canMakeComponent: menuGates?.canMakeComponent ?? false,
+          canMakeComponent: (menuGates?.canMakeComponent ?? false) || (menuGates?.canPromote ?? false),
           canPlaceCopy: menuGates?.canPlaceCopy ?? false,
           canExplode: menuGates?.canExplode ?? false,
           canMakeUnique: menuGates?.canMakeUnique ?? false,
+          canUnlink: menuGates?.canUnlink ?? false,
+          canUnlinkAll: menuGates?.canUnlinkAll ?? false,
+          canPromote: menuGates?.canPromote ?? false,
+          canPasteLinked: (menuGates?.clipboardHasContent ?? false) && !copiesLinked,
           canBoolean: menuGates?.canBoolean ?? false,
           canSaveSelectionToLibrary: menuGates?.canSaveSelectionToLibrary ?? false,
           canImport: !componentFrameOpen,
@@ -8828,6 +9058,23 @@ export default function App() {
       {/* Save to Library name prompt (frame 1d) — the ContextualDock's
           save-to-library verb (dock-anchored) and File ▸ Save to Library…
           (centered, whole document) share this one popover. */}
+      {promoteTarget !== null && (
+        <SaveToLibraryPopover
+          defaultName={promoteTarget.defaultName}
+          variant="dock"
+          title={t`Make component`}
+          inputLabel={t`Component name`}
+          buttonLabel={t`Make component`}
+          hint={null}
+          onSave={(name) => {
+            const target = promoteTarget
+            setPromoteTarget(null)
+            runLinkedOp((s) => promoteToComponent(s, target.instance, name))
+          }}
+          onClose={() => setPromoteTarget(null)}
+        />
+      )}
+
       {saveToLibraryTarget !== null && (
         <SaveToLibraryPopover
           defaultName={saveToLibraryTarget.defaultName}

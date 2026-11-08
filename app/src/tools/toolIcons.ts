@@ -173,7 +173,9 @@ function innerMarkup(svg: string): string {
  * the same hotspot as Paint's own cursor (a point-and-click tip, matching
  * the eyedropper's real "pick point").
  */
-export function cursorFor(toolName: string, copyBadge = false, eyedropper = false): string {
+export type CopyCursorBadge = boolean | '' | '+' | '+ independent' | '+ linked'
+
+export function cursorFor(toolName: string, copyBadge: CopyCursorBadge = false, eyedropper = false): string {
   const icon = eyedropper ? colorizeSvg : (TOOL_ICON_SVG[toolName as ToolName] ?? TOOL_ICON_SVG['Select'])
   const hotspot = eyedropper ? CURSOR_HOTSPOT['Paint'] : (CURSOR_HOTSPOT[toolName as ToolName] ?? CURSOR_HOTSPOT['Select'])
   const glyph = innerMarkup(icon)
@@ -187,12 +189,32 @@ export function cursorFor(toolName: string, copyBadge = false, eyedropper = fals
 
   // The badge is stroke-drawn (a plus is two strokes), so it carries its own
   // white halo underneath instead of the glyph's paint-order trick.
-  const badge = copyBadge
-    ? `<g stroke-linecap="round" fill="none">` +
-      `<path d="M26 3v8M21.5 8.5h9" stroke="#fff" stroke-width="5"/>` +
-      `<path d="M26 3v8M21.5 8.5h9" stroke="#111" stroke-width="2.5"/>` +
-      `</g>`
-    : ''
+  // `+` is a plain copy; the two spelled-out kinds add a small mark under
+  // the plus: two touching rings for linked, two separated dots for independent.
+  const plus =
+    `<g stroke-linecap="round" fill="none">` +
+    `<path d="M26 3v8M21.5 8.5h9" stroke="#fff" stroke-width="5"/>` +
+    `<path d="M26 3v8M21.5 8.5h9" stroke="#111" stroke-width="2.5"/>` +
+    `</g>`
+  const linkMark =
+    `<g fill="none" stroke-linecap="round">` +
+    `<path d="M22.5 18h7" stroke="#fff" stroke-width="5"/>` +
+    `<circle cx="23.5" cy="18" r="2.2" stroke="#111" stroke-width="1.6"/>` +
+    `<circle cx="28.5" cy="18" r="2.2" stroke="#111" stroke-width="1.6"/>` +
+    `</g>`
+  const apartMark =
+    `<g stroke-linecap="round">` +
+    `<circle cx="22.5" cy="18" r="2.2" fill="#111" stroke="#fff" stroke-width="1.5"/>` +
+    `<circle cx="29.5" cy="18" r="2.2" fill="#111" stroke="#fff" stroke-width="1.5"/>` +
+    `</g>`
+  const badge =
+    copyBadge === false || copyBadge === ''
+      ? ''
+      : copyBadge === '+ linked'
+        ? plus + linkMark
+        : copyBadge === '+ independent'
+          ? plus + apartMark
+          : plus
 
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${CURSOR_SIZE}" height="${CURSOR_SIZE}" viewBox="0 0 ${CURSOR_SIZE} ${CURSOR_SIZE}">` +

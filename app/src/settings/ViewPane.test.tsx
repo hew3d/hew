@@ -17,9 +17,9 @@ beforeEach(() => {
 })
 
 describe('ViewPane', () => {
-  it('sits between Units and Theme in the Settings window', () => {
+  it('sits right after Units in the Settings window', () => {
     render(<SettingsWindow />)
-    expect(screen.getAllByRole('tab').map((t) => t.textContent).slice(0, 3)).toEqual(['Units', 'View', 'Theme'])
+    expect(screen.getAllByRole('tab').map((t) => t.textContent).slice(0, 4)).toEqual(['Units', 'View', 'Editing', 'Theme'])
     fireEvent.click(screen.getByRole('tab', { name: 'View' }))
     expect(screen.getByText('Zoom wheel speed')).toBeInTheDocument()
   })

@@ -146,6 +146,19 @@ const INSTANCE_VERBS: DockVerb[] = [
   { id: 'save-to-library', label: msg`Save to Library` },
 ]
 
+/** A placement of a linked set (copies made by Move, Paste, ...): the copy
+ * actions replace Make Unique, and Make component is the one way out. */
+const LINKED_COPY_VERBS: DockVerb[] = [
+  { id: 'enter-context', label: msg`Edit` },
+  toolVerb('tool-move'),
+  toolVerb('tool-scale'),
+  { id: 'edit-unlink', label: msg`Unlink` },
+  { id: 'edit-unlink-all', label: msg`Unlink all` },
+  { id: 'edit-make-component', label: msg`Make component` },
+  { id: 'explode-instance', label: msg`Explode` },
+  { id: 'save-to-library', label: msg`Save to Library` },
+]
+
 /** Group (gated by `DockGates.canGroup`) is the natural next step after
  * sweeping up several things — the same `edit-group` action as Object ▸ Group. */
 const MULTI_VERBS: DockVerb[] = [
@@ -199,6 +212,11 @@ export interface DockGates {
    * Library effort keep compiling unchanged; omitted is treated as false
    * (hidden), matching the dock's "an inapplicable verb is noise" rule. */
   canSaveToLibrary?: boolean
+  /** The selection is one placement of a linked set: the dock offers the
+   * copy actions in place of Make Unique. Optional like `canSaveToLibrary`. */
+  canUnlink?: boolean
+  /** More than one placement shares the set (Unlink all makes sense). */
+  canUnlinkAll?: boolean
 }
 
 /** The curated, ordered verb list for a context — first item is primary.
@@ -210,7 +228,7 @@ export function dockVerbsFor(context: DockContext, gates?: DockGates): DockVerb[
       case 'empty': return EMPTY_VERBS
       case 'object': return OBJECT_VERBS
       case 'group': return GROUP_VERBS
-      case 'instance': return INSTANCE_VERBS
+      case 'instance': return gates?.canUnlink === true ? LINKED_COPY_VERBS : INSTANCE_VERBS
       case 'multi': return MULTI_VERBS
       case 'sketch': return SKETCH_VERBS
     }
@@ -220,13 +238,17 @@ export function dockVerbsFor(context: DockContext, gates?: DockGates): DockVerb[
     if (v.id === 'edit-group') return gates.canGroup
     if (v.id === 'edit-make-component') return gates.canMakeComponent
     if (v.id === 'save-to-library') return gates.canSaveToLibrary ?? false
+    if (v.id === 'edit-unlink-all') return gates.canUnlinkAll ?? false
     return true
   })
 }
 
 /** Display label for the context chip (`FACE`/`EDGE`/`COMPNT` in the spec's
  * literal terms — Hew's rescoped equivalents below). */
-export function dockChipLabel(context: DockContext): string {
+export function dockChipLabel(context: DockContext, linkedCopy = false): string {
+  if (context === 'instance' && linkedCopy) {
+    return t({ comment: 'Short uppercase chip on the contextual dock when one linked copy is selected', message: 'COPIES' })
+  }
   switch (context) {
     case 'empty': return t({ comment: 'Short uppercase chip on the contextual dock naming what is selected', message: 'DRAW' })
     case 'object': return t({ comment: 'Short uppercase chip on the contextual dock naming what is selected', message: 'OBJECT' })

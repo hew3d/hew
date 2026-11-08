@@ -171,6 +171,7 @@ describe('SliceTool — commit routing', () => {
       pick_face: vi.fn(() => makeFacePick(3n, 4n, 99n)),
       slice_object: vi.fn(),
       slice_def_member: vi.fn(),
+      is_linked: vi.fn(() => false),
     } as unknown as WasmScene
     const tool = new SliceTool(wasmScene, preview, onSliceCommitted, onToast)
 
@@ -180,6 +181,45 @@ describe('SliceTool — commit routing', () => {
     expect(wasmScene.slice_def_member).not.toHaveBeenCalled()
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(onSliceCommitted).not.toHaveBeenCalled()
+  })
+
+  it('slicing_a_placement_slices_the_definition (a linked copy, no context to enter)', () => {
+    const preview = new THREE.Group()
+    const onSliceCommitted = vi.fn()
+    const onToast = vi.fn()
+    const wasmScene = {
+      face_plane: vi.fn(() => { throw new Error('not a face') }),
+      pick_face: vi.fn(() => makeFacePick(3n, 4n, 99n)),
+      slice_object: vi.fn(),
+      slice_def_member: vi.fn(() => new BigUint64Array([55n, 56n])),
+      is_linked: vi.fn(() => true),
+      session_stack: vi.fn(() => []),
+    } as unknown as WasmScene
+    const tool = new SliceTool(wasmScene, preview, onSliceCommitted, onToast)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(wasmScene.slice_object).not.toHaveBeenCalled()
+    expect(wasmScene.slice_def_member).toHaveBeenCalledTimes(1)
+    expect((wasmScene.slice_def_member as ReturnType<typeof vi.fn>).mock.calls[0].slice(0, 2)).toEqual([99n, 3n])
+    // The copy that was picked is what gets selected, not the shared part.
+    expect(onSliceCommitted).toHaveBeenCalledWith(55n, 99n)
+  })
+
+  it('a linked copy is out of scope while a group or component is open for editing', () => {
+    const wasmScene = {
+      face_plane: vi.fn(() => { throw new Error('not a face') }),
+      pick_face: vi.fn(() => makeFacePick(3n, 4n, 99n)),
+      slice_object: vi.fn(),
+      slice_def_member: vi.fn(),
+      is_linked: vi.fn(() => true),
+      session_stack: vi.fn(() => [1n]),
+    } as unknown as WasmScene
+    const onToast = vi.fn()
+    const tool = new SliceTool(wasmScene, new THREE.Group(), vi.fn(), onToast)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    expect(wasmScene.slice_def_member).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
   })
 
   // component-edit-parity.md phase A2.
