@@ -52,6 +52,8 @@ function makeWasmScene(opts: {
   expanded?: { members: bigint[]; inherited: bigint[] }
   /** What `set_instance_material` reports as redrawn; omitted, `[]`. */
   touched?: bigint[]
+  /** The placement's linked set definition; omitted, not a linked copy. */
+  linkedDef?: bigint
 } = {}): WasmScene {
   return {
     pick_face: vi.fn(() => opts.facePick),
@@ -61,6 +63,8 @@ function makeWasmScene(opts: {
     }),
     set_object_material: vi.fn(),
     set_instance_material: vi.fn(() => BigUint64Array.from(opts.touched ?? [])),
+    is_linked: vi.fn(() => opts.linkedDef !== undefined),
+    instance_def: vi.fn(() => opts.linkedDef),
     instance_expanded_members: vi.fn(() => BigUint64Array.from(opts.expanded?.members ?? [])),
     instance_expanded_inherited: vi.fn(() => BigUint64Array.from(opts.expanded?.inherited ?? [])),
     replace_material: vi.fn(() => {
@@ -339,9 +343,31 @@ describe('PaintTool — component placements', () => {
     tool.onPointerDown(makeSnap(), RAY)
     expect(scene.set_instance_material).toHaveBeenCalledWith(9n, 7n)
     expect(scene.paint_face).not.toHaveBeenCalled()
-    expect(onInstanceCommit).toHaveBeenCalledWith([9n])
+    expect(onInstanceCommit).toHaveBeenCalledWith([9n], [])
+    expect(onToast).toHaveBeenCalledWith(
+      'Painting a component colors this placement. Edit the component to paint its faces.',
+    )
     // The first one explains itself, once per session.
     expect(onToast).toHaveBeenCalledTimes(1)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(onToast).toHaveBeenCalledTimes(1)
+  })
+
+  it('painting a linked copy refreshes its set and explains it as a copy', () => {
+    // The kernel may move the shared solid's base onto the other copies
+    // before the paint, so every copy re-draws and the set's member
+    // geometry is re-pulled.
+    resetInstancePaintExplained()
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 9n), touched: [9n, 10n, 11n], linkedDef: 5n })
+    const { tool, onInstanceCommit, onToast } = makeInstanceTool(scene)
+    tool.setCurrentMaterial(7n)
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(scene.set_instance_material).toHaveBeenCalledWith(9n, 7n)
+    expect(onInstanceCommit).toHaveBeenCalledWith([9n, 10n, 11n], [5n])
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast).toHaveBeenCalledWith(
+      'Painting a linked copy colors just that copy. Edit the copy to paint faces on every copy.',
+    )
     tool.onPointerDown(makeSnap(), RAY)
     expect(onToast).toHaveBeenCalledTimes(1)
   })
@@ -374,7 +400,7 @@ describe('PaintTool — component placements', () => {
     const { tool, onInstanceCommit } = makeInstanceTool(scene, [{ kind: 'instance', id: 5n }])
     tool.setCurrentMaterial(7n)
     tool.onPointerDown(makeSnap(), RAY)
-    expect(onInstanceCommit).toHaveBeenCalledWith([20n, 21n])
+    expect(onInstanceCommit).toHaveBeenCalledWith([20n, 21n], [])
   })
 
   it('the eyedropper samples the nearest painted placement on the member path', () => {
@@ -402,6 +428,42 @@ describe('PaintTool — component placements', () => {
     tool.setEyedropper(true)
     tool.onPointerDown(makeSnap(), RAY)
     expect(onSample).toHaveBeenCalledWith(6n)
+  })
+
+  it('Shift-replace on a placement whose member shows its color uses that color as `from`', () => {
+    // A linked copy: the member has no face paint and no base, so the face
+    // shows the placement's own material (12n), and that is what replaces.
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, 9n),
+      expanded: { members: [3n], inherited: [12n] },
+      faceMaterial: makeFaceMaterial(MATERIAL_SENTINEL, MATERIAL_SENTINEL),
+    })
+    const { tool } = makeInstanceTool(scene)
+    tool.setCurrentMaterial(7n)
+    tool.setReplaceScope('document')
+    tool.onPointerDown(makeSnap(), RAY)
+    expect(scene.replace_material).toHaveBeenCalledWith(true, 3n, 12n, 7n)
+    expect(scene.set_instance_material).not.toHaveBeenCalled()
+  })
+
+  it('Shift-replace on a placement keeps the face or base it shows over the placement', () => {
+    // The render rule: a face's own paint, else its Object's base, and only
+    // then the placement's material.
+    for (const [face, base, from] of [
+      [5n, 6n, 5n],
+      [MATERIAL_SENTINEL, 6n, 6n],
+    ] as const) {
+      const scene = makeWasmScene({
+        facePick: makeFacePick(3n, 4n, 9n),
+        expanded: { members: [3n], inherited: [12n] },
+        faceMaterial: makeFaceMaterial(face, base),
+      })
+      const { tool } = makeInstanceTool(scene)
+      tool.setCurrentMaterial(7n)
+      tool.setReplaceScope('document')
+      tool.onPointerDown(makeSnap(), RAY)
+      expect(scene.replace_material).toHaveBeenCalledWith(true, 3n, from, 7n)
+    }
   })
 
   it('hovering reports the placement a click would paint, and clears on cancel', () => {

@@ -220,6 +220,8 @@ export interface MenuBarProps {
     canUnlink?: boolean
     /** More than one placement shares the set (Unlink all, Select all copies). */
     canUnlinkAll?: boolean
+    /** Two or more loose Objects are the same shape (Link identical copies). */
+    canLinkSimilar?: boolean
     /** Make component can promote the selected linked copy. */
     canPromote?: boolean
     /** Something that can be mirrored is selected (Flip Along). */
@@ -1099,6 +1101,11 @@ export function MenuBar({
               label={t`Unlink all`}
               disabled={!(editGates?.canUnlinkAll ?? false)}
               onClick={withClose(() => onEditAction?.('edit-unlink-all'))}
+            />
+            <MenuItem
+              label={t`Link identical copies`}
+              disabled={!(editGates?.canLinkSimilar ?? false)}
+              onClick={withClose(() => onEditAction?.('edit-link-identical-copies'))}
             />
             <MenuItem
               label={t`Select all copies`}

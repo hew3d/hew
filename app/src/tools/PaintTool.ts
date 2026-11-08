@@ -62,23 +62,48 @@ export type OnReplaceCommit = (scope: 'document' | 'object', objectId: bigint) =
 
 /** Fired after a placement is painted with the world instances whose
  *  drawing changed (the painted one, or every world placement drawing a
- *  nested one) — the caller refreshes them. */
-export type OnInstancePaintCommit = (instanceIds: bigint[]) => void
+ *  nested one) — the caller refreshes them. `componentIds` names a linked
+ *  set's definition when a linked copy was painted: the kernel may have
+ *  moved the shared solid's base onto the copies first, so the set's
+ *  member geometry is stale too. */
+export type OnInstancePaintCommit = (instanceIds: bigint[], componentIds: bigint[]) => void
 
 /** Fired when the hovered placement changes (`null`: no placement under the
  *  pointer, or the tool went idle) — the caller outlines it. */
 export type OnHoverInstance = (instanceId: bigint | null) => void
 
-/** The first instance paint of a session explains itself once. */
+/** The first instance paint of a session explains itself once (a
+ *  component placement and a linked copy each have their own wording). */
 let instancePaintExplained = false
+let linkedPaintExplained = false
 
-/** Test hook: forget that the explanation was shown. */
+/** Test hook: forget that the explanations were shown. */
 export function resetInstancePaintExplained(): void {
   instancePaintExplained = false
+  linkedPaintExplained = false
 }
 
 /** `u64::MAX` as a BigInt — sentinel for "default / unpaint". */
 export const MATERIAL_SENTINEL: bigint = BigInt('18446744073709551615')
+
+/** The material `member` inherits as drawn by `instance`: the nearest
+ *  painted placement on its path (`instance_expanded_inherited`, parallel
+ *  to `instance_expanded_members`; a member placed more than once reads
+ *  its first placement, as a pick names the member, not the placement),
+ *  or the sentinel. A face shows it only when it has no paint of its own
+ *  and its Object no base. */
+export function inheritedMaterialAt(
+  scene: Pick<WasmScene, 'instance_expanded_members' | 'instance_expanded_inherited'>,
+  instance: bigint,
+  member: bigint,
+): bigint {
+  const members = scene.instance_expanded_members(instance)
+  const inherited = scene.instance_expanded_inherited(instance)
+  for (let i = 0; i < members.length; i++) {
+    if (members[i] === member) return inherited[i] ?? MATERIAL_SENTINEL
+  }
+  return MATERIAL_SENTINEL
+}
 
 export class PaintTool implements Tool {
   readonly name = 'Paint'
@@ -157,18 +182,9 @@ export class PaintTool implements Tool {
     return inFrame ? undefined : instance
   }
 
-  /** The material `member` inherits as drawn by `instance`: the nearest
-   *  painted placement on its path (`instance_expanded_inherited`, parallel
-   *  to `instance_expanded_members`; a member placed more than once reads
-   *  its first placement, as a pick names the member, not the placement),
-   *  or the sentinel. */
+  /** See `inheritedMaterialAt`. */
   private _inheritedAt(instance: bigint, member: bigint): bigint {
-    const members = this.wasmScene.instance_expanded_members(instance)
-    const inherited = this.wasmScene.instance_expanded_inherited(instance)
-    for (let i = 0; i < members.length; i++) {
-      if (members[i] === member) return inherited[i] ?? MATERIAL_SENTINEL
-    }
-    return MATERIAL_SENTINEL
+    return inheritedMaterialAt(this.wasmScene, instance, member)
   }
 
   private _setHoveredInstance(id: bigint | null): void {
@@ -270,7 +286,7 @@ export class PaintTool implements Tool {
           this._sample(objectHandle, faceHandle)
         }
       } else if (replaceScope !== null) {
-        this._commitReplace(objectHandle, faceHandle, replaceScope)
+        this._commitReplace(objectHandle, faceHandle, replaceScope, pick.instance())
       } else if (instance !== undefined) {
         // Plain click and ⌘/Ctrl-click alike: a placement has one knob.
         this._commitInstance(instance)
@@ -298,12 +314,24 @@ export class PaintTool implements Tool {
   }
 
   /** Paint one placement (its own material), explaining the first time per
-   *  session that its faces are the component's to paint inside it. */
+   *  session that its faces are the component's to paint inside it. A
+   *  linked copy shows the new color even when the set's shared solid had
+   *  a base: the kernel moves that base onto the other copies first, in
+   *  the same undo step. */
   private _commitInstance(instance: bigint): void {
     try {
+      const linked = this.wasmScene.is_linked(instance)
       const touched = this.wasmScene.set_instance_material(instance, this.currentMaterialId)
-      this.onInstanceCommit(touched.length > 0 ? [...touched] : [instance])
-      if (!instancePaintExplained) {
+      const def = linked ? this.wasmScene.instance_def(instance) : undefined
+      this.onInstanceCommit(touched.length > 0 ? [...touched] : [instance], def !== undefined ? [def] : [])
+      if (linked) {
+        if (!linkedPaintExplained) {
+          linkedPaintExplained = true
+          this.onToast(
+            t`Painting a linked copy colors just that copy. Edit the copy to paint faces on every copy.`,
+          )
+        }
+      } else if (!instancePaintExplained) {
         instancePaintExplained = true
         this.onToast(
           t`Painting a component colors this placement. Edit the component to paint its faces.`,
@@ -352,8 +380,15 @@ export class PaintTool implements Tool {
 
   /** Shift/Ctrl+Shift-click: replace every assignment (in `scope`) equal to
    *  the clicked face's effective material with the current material, in
-   *  one atomic kernel op. */
-  private _commitReplace(objectHandle: bigint, faceHandle: bigint, scope: 'document' | 'object'): void {
+   *  one atomic kernel op. Through a placement (`instance`), a face with no
+   *  paint and no base shows the material its placements give it, so that
+   *  is the `from` (a linked copy's color lives on its placement). */
+  private _commitReplace(
+    objectHandle: bigint,
+    faceHandle: bigint,
+    scope: 'document' | 'object',
+    instance: bigint | undefined,
+  ): void {
     const info = this.wasmScene.face_material(objectHandle, faceHandle)
     if (info === undefined) return
     let from: bigint
@@ -362,6 +397,7 @@ export class PaintTool implements Tool {
     } finally {
       info.free()
     }
+    if (from === MATERIAL_SENTINEL && instance !== undefined) from = this._inheritedAt(instance, objectHandle)
     try {
       this.wasmScene.replace_material(scope === 'document', objectHandle, from, this.currentMaterialId)
       this.onReplace(scope, objectHandle)

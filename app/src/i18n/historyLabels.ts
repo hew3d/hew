@@ -75,6 +75,7 @@ const SIMPLE: Record<string, MessageDescriptor> = {
   'delete-sketch': msg`Delete sketch`,
   explode: msg`Explode`,
   'make-unique': msg`Make unique`,
+  'link-identical-copies': msg`Link identical copies`,
   'edit-group': msg`Edit group`,
   'finish-editing-group': msg`Finish editing group`,
   'paint-face': msg`Paint face`,

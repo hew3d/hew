@@ -57,6 +57,7 @@ export type PaletteGate =
   /** One placement of a linked set selected (Unlink). */
   | 'canUnlink'
   | 'canUnlinkAll'
+  | 'canLinkSimilar'
   | 'canPromote'
   /** Something that can be mirrored is selected (Flip Along). */
   | 'canFlip'
@@ -245,6 +246,7 @@ function actionEntries(): PaletteEntry[] {
     { id: 'edit-make-unique', label: t`Make Unique`, description: t`Give the selected instance its own definition, detached from its siblings.`, group: 'Actions', synonyms: [t`unique component`], gate: 'canMakeUnique' },
     { id: 'edit-unlink', label: t`Unlink`, description: t`Make the selected copy independent. The other copies stay linked.`, group: 'Actions', synonyms: [t`independent`, t`detach copy`], gate: 'canUnlink' },
     { id: 'edit-unlink-all', label: t`Unlink all`, description: t`Make every copy of the selected linked copy independent.`, group: 'Actions', synonyms: [t`independent copies`], gate: 'canUnlinkAll' },
+    { id: 'edit-link-identical-copies', label: t`Link identical copies`, description: t`Turn objects that are the same shape into linked copies, so editing one changes them all.`, group: 'Actions', synonyms: [t`link similar`, t`same shape`, t`look-alike`], gate: 'canLinkSimilar' },
     { id: 'edit-select-all-copies', label: t`Select all copies`, description: t`Select every copy linked to the selected one.`, group: 'Actions', synonyms: [t`linked copies`], gate: 'canUnlinkAll' },
     { id: 'edit-flip-red', label: t`Flip Along Red`, description: t`Mirror the selection across the plane through its center, across the red axis.`, group: 'Actions', synonyms: [t`mirror`, t`flip x`], gate: 'canFlip' },
     { id: 'edit-flip-green', label: t`Flip Along Green`, description: t`Mirror the selection across the plane through its center, across the green axis.`, group: 'Actions', synonyms: [t`mirror`, t`flip y`], gate: 'canFlip' },

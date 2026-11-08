@@ -20,6 +20,18 @@ pub const PLANE_DIST: f64 = 1e-9;
 /// Import-only: native ops and booleans keep [`PLANE_DIST`].
 pub const IMPORT_PLANE_DIST: f64 = 1e-3;
 
+/// The grid `hew.query.signature` rounds vertex coordinates to (meters):
+/// 1 µm, in the part's own frame.
+pub const SIGNATURE_QUANTUM: f64 = 1e-6;
+
+/// How far apart, on each world axis, a posed vertex of a linked set and
+/// the joiner's matching vertex may be for `Document::join_linked` to
+/// accept the pose (meters). Two vertices the signature rounds into the
+/// same 1 µm cell of a rotated frame can sit up to √3 µm apart along a
+/// world axis, so the check allows two quanta: anything the signature
+/// calls identical passes, and a pose off by a visible amount does not.
+pub const LINK_POSE_MATCH: f64 = 2.0 * SIGNATURE_QUANTUM;
+
 /// Vectors shorter than this cannot be meaningfully normalized (meters).
 pub const NORMALIZE_MIN_LENGTH: f64 = 1e-12;
 

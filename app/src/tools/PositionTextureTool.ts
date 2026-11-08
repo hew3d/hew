@@ -110,6 +110,7 @@ import { rayPlaneIntersect, invertAffine3x4, applyAffine3x4, applyAffine3x4Linea
 import { DRAG_MOVE_THRESHOLD_PX } from '../viewport/dragMove'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import type { FaceEligible } from './faceDraw'
+import { inheritedMaterialAt } from './PaintTool'
 import {
   frameToLocal2D,
   local2DToFrame,
@@ -616,7 +617,7 @@ export class PositionTextureTool implements Tool {
         instancePoseInv = inv
       }
 
-      const texture = this._effectiveTexture(object, face)
+      const texture = this._effectiveTexture(object, face, instance)
       if (texture === null) {
         this.onToast(t`Select a textured face to position its texture`)
         return
@@ -688,8 +689,14 @@ export class PositionTextureTool implements Tool {
   }
 
   /** The effective material's texture world-size, or `null` if the face's
-   *  effective material (own, else object base) is unpainted or untextured. */
-  private _effectiveTexture(object: bigint, face: bigint): { worldW: number; worldH: number } | null {
+   *  effective material (own, else object base, else through `instance` the
+   *  material its placements give it, as a linked copy's color is) is
+   *  unpainted or untextured. */
+  private _effectiveTexture(
+    object: bigint,
+    face: bigint,
+    instance: bigint | undefined,
+  ): { worldW: number; worldH: number } | null {
     const info = this.wasmScene.face_material(object, face)
     if (info === undefined) return null
     let effective: bigint
@@ -698,6 +705,9 @@ export class PositionTextureTool implements Tool {
       effective = own !== MATERIAL_SENTINEL ? own : info.object_default()
     } finally {
       info.free()
+    }
+    if (effective === MATERIAL_SENTINEL && instance !== undefined) {
+      effective = inheritedMaterialAt(this.wasmScene, instance, object)
     }
     if (effective === MATERIAL_SENTINEL) return null
     const mat = this.wasmScene.material_info(effective)

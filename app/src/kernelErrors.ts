@@ -246,6 +246,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`Only an object or a group can start a set of linked copies. This is already a component, so copy it as it is.`,
   NotLinkable: msg`A component can't be turned back into linked copies. Copy one of its parts to start a new set.`,
   NotLinked: msg`This is already a component, not a set of linked copies, so there's nothing to change.`,
+  NotIdentical: msg`These aren't the same shape.`,
   BooleanOperandNotSolid:
     msg`Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…`,
   BooleanOperandEmpty:

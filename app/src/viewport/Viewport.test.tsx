@@ -21,6 +21,7 @@ import {
   keyboardBelongsToFieldOrDialog,
   cursorFor,
   createIsolationController,
+  instancePaintRefresh,
 } from './Viewport'
 import type { IsolationScene } from './isolation'
 import { setShowToolPointer } from '../settings/view'
@@ -432,5 +433,15 @@ describe('createIsolationController', () => {
     ctl.rebase()
     expect(onTargetsChange).toHaveBeenCalledTimes(2)
     expect(onTargetsChange).toHaveBeenLastCalledWith([{ kind: 'object', id: 2n }])
+  })
+})
+
+describe('instancePaintRefresh', () => {
+  it('a painted linked copy refreshes its set as well as the redrawn placements', () => {
+    // The kernel may have moved the shared solid's base onto the copies, so
+    // the set's member geometry is stale too: dropping componentIds would
+    // leave the other copies drawn with the old base.
+    expect(instancePaintRefresh([4n, 5n], [9n])).toEqual({ instanceIds: [4n, 5n], componentIds: [9n] })
+    expect(instancePaintRefresh([4n], [])).toEqual({ instanceIds: [4n], componentIds: [] })
   })
 })

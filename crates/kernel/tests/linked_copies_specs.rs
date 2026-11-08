@@ -10,8 +10,8 @@ use std::num::NonZeroU32;
 
 use kernel::{
     Anchor, AttrTarget, AttrValue, ChangeRecord, ChangeRef, ComponentId, Document, DocumentError,
-    EntityRef, GroupId, InstanceId, KernelOp, LinkPolicy, LinkedWrap, Material, NodeId, ObjectId,
-    Plane, Point3, Rgba8, Transform, Vec3,
+    EntityRef, GroupId, InstanceId, KernelOp, LinkPolicy, LinkedJoin, LinkedWrap, Material, NodeId,
+    ObjectId, Plane, Point3, Rgba8, Transform, Vec3,
 };
 use proptest::prelude::*;
 
@@ -268,7 +268,7 @@ fn wrap_linked_splices_the_instance_into_the_old_parent_at_the_old_position() {
 }
 
 #[test]
-fn wrap_linked_instance_takes_the_nodes_tags_and_no_name_or_material() {
+fn wrap_linked_instance_takes_the_nodes_tags_and_base_material_but_no_name() {
     let mut doc = Document::new();
     let m = doc.add_material(Material::solid("Oak", Rgba8::rgb(150, 100, 50)));
     let o = named_board(&mut doc, 0.0, "Leg", &[&["Legs"], &["Oak"]], &[]);
@@ -279,7 +279,16 @@ fn wrap_linked_instance_takes_the_nodes_tags_and_no_name_or_material() {
         [tag(&["Legs"]), tag(&["Oak"])]
     );
     assert_eq!(doc.instance_name(instance), None);
-    assert_eq!(doc.instance_material(instance), Some(None));
+    assert_eq!(
+        doc.instance_material(instance),
+        Some(Some(m)),
+        "the Object's base material moves to its placement"
+    );
+    assert_eq!(
+        doc.object(o).unwrap().default_material(),
+        None,
+        "and leaves the shared member"
+    );
     assert_eq!(
         entity_dict(&doc, EntityRef::Instance(instance)),
         None,
@@ -2189,4 +2198,1466 @@ fn group_ids_are_unchanged_by_a_wrap() {
     doc.wrap_linked(NodeId::Group(g)).unwrap();
     assert!(doc.group_ids().is_empty());
     assert_eq!(doc.group_members(g).unwrap(), vec![NodeId::Object(a)]);
+}
+
+// ------------------------------------------- join_linked (Link identical copies)
+
+/// A prism over the polygon `pts` (counterclockwise on the ground) of
+/// height `h`.
+fn prism(doc: &mut Document, pts: &[(f64, f64)], h: f64) -> ObjectId {
+    let s = doc.add_sketch(ground());
+    let sk = doc.sketch_mut(s).expect("sketch is live");
+    for k in 0..pts.len() {
+        let (a, b) = (pts[k], pts[(k + 1) % pts.len()]);
+        sk.add_segment(Point3::new(a.0, a.1, 0.0), Point3::new(b.0, b.1, 0.0))
+            .expect("segment");
+    }
+    let regions = doc.extrudable_regions(s).expect("sketch is live");
+    doc.extrude_region(s, regions[0], h).expect("extrude").0
+}
+
+/// An L-shaped footprint at `x`, mirrored across the plane x = `x` when
+/// `mirrored` (so the two are mirror images, not rotations of each other).
+fn l_board(doc: &mut Document, x: f64, mirrored: bool) -> ObjectId {
+    let base = L_FOOTPRINT;
+    let pts: Vec<(f64, f64)> = if mirrored {
+        // Reflecting reverses the winding; walk it backward to keep the
+        // footprint counterclockwise.
+        base.iter().rev().map(|&(px, py)| (x - px, py)).collect()
+    } else {
+        base.iter().map(|&(px, py)| (x + px, py)).collect()
+    };
+    prism(doc, &pts, 0.25)
+}
+
+/// The L footprint [`l_board`] draws, counterclockwise on the ground.
+const L_FOOTPRINT: [(f64, f64); 6] = [
+    (0.0, 0.0),
+    (2.0, 0.0),
+    (2.0, 0.5),
+    (0.5, 0.5),
+    (0.5, 1.0),
+    (0.0, 1.0),
+];
+
+/// The L board at the origin as `pose` (a map of the ground onto itself)
+/// places it, drawn as its own prism: the solid `pose` takes the first
+/// board onto.
+fn posed_l_board(doc: &mut Document, pose: &Transform) -> ObjectId {
+    let mut pts: Vec<(f64, f64)> = L_FOOTPRINT
+        .iter()
+        .map(|&(x, y)| {
+            let p = pose.apply_point(Point3::new(x, y, 0.0));
+            (p.x, p.y)
+        })
+        .collect();
+    if pose.determinant() < 0.0 {
+        pts.reverse();
+    }
+    prism(doc, &pts, 0.25)
+}
+
+/// Every vertex `points` names, quantized, as a set: two solids with the
+/// same set occupy the same place.
+fn point_set(points: impl IntoIterator<Item = Point3>) -> BTreeSet<(i64, i64, i64)> {
+    let q = |v: f64| (v * 1e6).round() as i64;
+    points
+        .into_iter()
+        .map(|p| (q(p.x), q(p.y), q(p.z)))
+        .collect()
+}
+
+/// The world vertices of `member` as `instance` places it.
+fn placed_points(
+    doc: &Document,
+    member: ObjectId,
+    instance: InstanceId,
+) -> BTreeSet<(i64, i64, i64)> {
+    let pose = doc.instance_pose(instance).expect("a live placement");
+    point_set(polys(doc, member).into_iter().map(|p| pose.apply_point(p)))
+}
+
+#[test]
+fn join_linked_replaces_the_object_with_a_placement_at_the_pose() {
+    let mut doc = Document::new();
+    let first = board(&mut doc, 0.0);
+    let joiner = board(&mut doc, 3.0);
+    let joiner_points = point_set(polys(&doc, joiner));
+    let (def, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+    let solids = doc.live_object_ids().len();
+    let shown = rendered(&doc);
+
+    let (
+        LinkedJoin {
+            instance: placed, ..
+        },
+        change,
+    ) = doc.join_linked(set, joiner, shift(3.0)).unwrap();
+
+    assert_eq!(
+        doc.instance_def(placed),
+        Some(def),
+        "a placement of the set"
+    );
+    assert_eq!(doc.instance_pose(placed), Some(shift(3.0)));
+    assert!(doc.node_is_live(NodeId::Instance(placed)));
+    assert!(
+        !doc.node_is_live(NodeId::Object(joiner)),
+        "the joiner is hidden"
+    );
+    assert!(
+        doc.object(joiner).is_none(),
+        "hidden, not deleted: no longer a live object"
+    );
+    assert_eq!(
+        doc.def_members(def).unwrap(),
+        vec![first],
+        "the member is the first"
+    );
+    assert_eq!(
+        placed_points(&doc, first, placed),
+        joiner_points,
+        "same place"
+    );
+    assert_eq!(placed_min_x(&doc, first), vec![0.0, 3.0]);
+    assert_eq!(doc.live_object_ids().len(), solids - 1, "one solid fewer");
+    assert_eq!(rendered(&doc), shown, "the same boards show");
+    assert!(doc.is_linked_set(def));
+    assert!(change.instances_touched.contains(&placed));
+    assert!(change.objects_touched.contains(&joiner));
+    assert!(change.components_touched.contains(&def));
+
+    // The change record: the placement added, the joiner removed, and the
+    // placement copied from the set's placement.
+    let r = last_record(&doc);
+    let new = cref(&doc, EntityRef::Instance(placed));
+    assert!(r.changes.added.contains(&new));
+    assert!(
+        r.changes
+            .removed
+            .contains(&cref(&doc, EntityRef::Object(joiner)))
+    );
+    assert_eq!(
+        r.changes.copied_from,
+        vec![(new, cref(&doc, EntityRef::Instance(set)))]
+    );
+}
+
+#[test]
+fn join_linked_moves_name_tags_and_attributes_to_the_placement() {
+    let mut doc = Document::new();
+    let first = named_board(
+        &mut doc,
+        0.0,
+        "Leg A",
+        &[&["Legs", "Front"]],
+        &[("uuid", "a")],
+    );
+    let joiner = named_board(
+        &mut doc,
+        3.0,
+        "Leg B",
+        &[&["Legs", "Back"], &["Oak"]],
+        &[("uuid", "b"), ("grain", "long")],
+    );
+    let first_attrs = entity_dict(&doc, EntityRef::Object(first));
+    let joiner_attrs = entity_dict(&doc, EntityRef::Object(joiner));
+    assert!(joiner_attrs.is_some());
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+
+    let (
+        LinkedJoin {
+            instance: placed, ..
+        },
+        _,
+    ) = doc.join_linked(set, joiner, shift(3.0)).unwrap();
+
+    assert_eq!(doc.instance_name(placed), Some("Leg B"));
+    assert_eq!(
+        doc.node_tags(NodeId::Instance(placed)),
+        [tag(&["Legs", "Back"]), tag(&["Oak"])]
+    );
+    assert_eq!(entity_dict(&doc, EntityRef::Instance(placed)), joiner_attrs);
+    // The first Object's own name, tags, and attributes stay on the shared
+    // member; its placement keeps what the wrap gave it.
+    assert_eq!(doc.object_name(first), Some("Leg A"));
+    assert_eq!(
+        doc.node_tags(NodeId::Object(first)),
+        [tag(&["Legs", "Front"])]
+    );
+    assert_eq!(entity_dict(&doc, EntityRef::Object(first)), first_attrs);
+    assert_eq!(doc.instance_name(set), None);
+    assert_eq!(entity_dict(&doc, EntityRef::Instance(set)), None);
+    // The joiner's own dictionary is gone with it.
+    assert_eq!(
+        doc.attr_get(&AttrTarget::Entity(EntityRef::Object(joiner))),
+        Err(DocumentError::UnknownObject)
+    );
+}
+
+#[test]
+fn join_linked_with_a_reflecting_pose_makes_a_mirrored_placement() {
+    let mut doc = Document::new();
+    let first = l_board(&mut doc, 0.0, false);
+    // The mirror image across x = 5: the reflection x -> 10 - x maps the
+    // first onto it.
+    let joiner = l_board(&mut doc, 10.0, true);
+    let joiner_points = point_set(polys(&doc, joiner));
+    let (def, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+    let first_points = point_set(polys(&doc, first));
+    let pose = Transform::scale(Vec3::new(-1.0, 1.0, 1.0)).then(&shift(10.0));
+    let solids = doc.live_object_ids().len();
+
+    let (
+        LinkedJoin {
+            instance: placed, ..
+        },
+        _,
+    ) = doc.join_linked(set, joiner, pose).unwrap();
+
+    assert_eq!(doc.instance_def(placed), Some(def));
+    let got = doc.instance_pose(placed).unwrap();
+    assert!(got.determinant() < 0.0, "a mirrored placement");
+    assert_eq!(placed_points(&doc, first, placed), joiner_points);
+    assert_eq!(
+        point_set(polys(&doc, first)),
+        first_points,
+        "nothing is baked into the member"
+    );
+    assert_eq!(
+        doc.live_object_ids().len(),
+        solids - 1,
+        "no mirrored solid is made"
+    );
+}
+
+#[test]
+fn join_linked_is_one_undo_entry_and_exact() {
+    let mut doc = Document::new();
+    let first = named_board(&mut doc, 0.0, "Leg A", &[], &[("uuid", "a")]);
+    let joiner = named_board(&mut doc, 3.0, "Leg B", &[&["Legs"]], &[("uuid", "b")]);
+    let note = doc
+        .add_leader_text(
+            Anchor {
+                node: Some(NodeId::Object(joiner)),
+                point: Point3::new(3.5, 0.5, 1.0),
+            },
+            Vec3::new(0.0, 0.0, 1.0),
+            "Back leg".into(),
+        )
+        .unwrap();
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+    let joiner_attrs = entity_dict(&doc, EntityRef::Object(joiner));
+    let undo_len = doc.history_entries().undo.len();
+    let before = doc.state_hash();
+
+    let (
+        LinkedJoin {
+            instance: placed, ..
+        },
+        _,
+    ) = doc.join_linked(set, joiner, shift(3.0)).unwrap();
+    let post = doc.state_hash();
+    assert_eq!(doc.history_entries().undo.len(), undo_len + 1, "one entry");
+    assert_eq!(last_label(&doc), "Link identical copies");
+    assert_eq!(
+        doc.annotation_detached(note),
+        Some(true),
+        "its anchor is gone"
+    );
+
+    let undone = doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    assert!(doc.node_is_live(NodeId::Object(joiner)));
+    assert_eq!(doc.object_name(joiner), Some("Leg B"));
+    assert_eq!(doc.node_tags(NodeId::Object(joiner)), [tag(&["Legs"])]);
+    assert_eq!(entity_dict(&doc, EntityRef::Object(joiner)), joiner_attrs);
+    assert!(
+        !doc.node_is_live(NodeId::Instance(placed)),
+        "the placement is gone"
+    );
+    assert_eq!(doc.annotation_detached(note), Some(false));
+    assert!(undone.instances_touched.contains(&placed));
+    assert!(undone.objects_touched.contains(&joiner));
+
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post);
+    assert_eq!(doc.instance_name(placed), Some("Leg B"));
+    assert_eq!(entity_dict(&doc, EntityRef::Instance(placed)), joiner_attrs);
+    doc.undo().unwrap();
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post, "stable across cycles");
+}
+
+#[test]
+fn join_linked_refuses_a_grouped_or_member_object() {
+    let mut doc = Document::new();
+    let first = board(&mut doc, 0.0);
+    let grouped = board(&mut doc, 3.0);
+    let other = board(&mut doc, 6.0);
+    let member = board(&mut doc, 9.0);
+    doc.group_nodes(&[NodeId::Object(grouped), NodeId::Object(other)])
+        .unwrap();
+    doc.make_component(&[NodeId::Object(member)]).unwrap();
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+    let before = doc.state_hash();
+    let undo_len = doc.history_entries().undo.len();
+
+    assert_eq!(
+        doc.join_linked(set, grouped, shift(3.0)).unwrap_err(),
+        DocumentError::GroupedOperand,
+        "a grouped Object is not loose"
+    );
+    assert_eq!(
+        doc.join_linked(set, member, shift(9.0)).unwrap_err(),
+        DocumentError::UnknownObject,
+        "a member of another definition is not a world node"
+    );
+    assert_eq!(
+        doc.join_linked(set, first, Transform::IDENTITY)
+            .unwrap_err(),
+        DocumentError::UnknownObject,
+        "the set's own member is not a world node"
+    );
+    assert_eq!(doc.state_hash(), before, "untouched");
+    assert_eq!(doc.history_entries().undo.len(), undo_len);
+}
+
+#[test]
+fn join_linked_refuses_a_set_that_is_not_linked_a_stale_set_and_a_singular_pose() {
+    let mut doc = Document::new();
+    let first = board(&mut doc, 0.0);
+    let joiner = board(&mut doc, 3.0);
+    let plain = board(&mut doc, 6.0);
+    let (_, plain_placement, _) = doc.make_component(&[NodeId::Object(plain)]).unwrap();
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+    let (gone, _) = doc
+        .duplicate_node(NodeId::Instance(set), &shift(12.0), Linked)
+        .unwrap();
+    doc.delete_node(gone).unwrap();
+    let before = doc.state_hash();
+
+    assert_eq!(
+        doc.join_linked(plain_placement, joiner, shift(3.0))
+            .unwrap_err(),
+        DocumentError::UnknownAttr,
+        "a placement of a named component is not a linked set"
+    );
+    assert_eq!(
+        doc.join_linked(ins(gone), joiner, shift(3.0)).unwrap_err(),
+        DocumentError::UnknownInstance
+    );
+    assert!(matches!(
+        doc.join_linked(set, joiner, Transform::scale(Vec3::new(1.0, 0.0, 1.0))),
+        Err(DocumentError::Transform(_))
+    ));
+    assert_eq!(doc.state_hash(), before, "untouched");
+}
+
+#[test]
+fn join_linked_refuses_while_a_session_is_open() {
+    let mut doc = Document::new();
+    let first = board(&mut doc, 0.0);
+    let joiner = board(&mut doc, 3.0);
+    let other = board(&mut doc, 6.0);
+    let (_, ci, _) = doc.make_component(&[NodeId::Object(other)]).unwrap();
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+    doc.open_explode_session(ci).unwrap();
+    assert_eq!(
+        doc.join_linked(set, joiner, shift(3.0)).unwrap_err(),
+        DocumentError::ExplodeSessionScope
+    );
+}
+
+#[test]
+fn join_linked_refuses_a_pose_that_does_not_place_the_same_shape() {
+    let mut doc = Document::new();
+    let first = board(&mut doc, 0.0);
+    let joiner = board(&mut doc, 3.0);
+    let wide = extrude_box(&mut doc, 6.0, 0.0, 7.5, 1.0, 1.0);
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+    let before = doc.state_hash();
+    let undo_len = doc.history_entries().undo.len();
+
+    assert_eq!(
+        doc.join_linked(set, joiner, shift(4.0)).unwrap_err(),
+        DocumentError::NotIdentical,
+        "the pose misses the joiner by a meter"
+    );
+    assert_eq!(
+        doc.join_linked(set, joiner, shift(3.0 + 1e-4)).unwrap_err(),
+        DocumentError::NotIdentical,
+        "a tenth of a millimeter is past the quantum"
+    );
+    assert_eq!(
+        doc.join_linked(set, wide, shift(6.0)).unwrap_err(),
+        DocumentError::NotIdentical,
+        "a wider board is another shape"
+    );
+    assert_eq!(
+        DocumentError::NotIdentical.to_string(),
+        "these aren't the same shape"
+    );
+    assert_eq!(doc.state_hash(), before, "untouched");
+    assert_eq!(doc.history_entries().undo.len(), undo_len);
+    // Within the quantum it links.
+    assert!(doc.join_linked(set, joiner, shift(3.0 + 1e-7)).is_ok());
+}
+
+#[test]
+fn join_linked_refuses_a_set_holding_more_than_one_solid() {
+    let mut doc = Document::new();
+    let a = board(&mut doc, 0.0);
+    let b = board(&mut doc, 1.5);
+    let joiner = board(&mut doc, 6.0);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .unwrap();
+    let (_, set, _) = doc.wrap_linked(NodeId::Group(g)).unwrap();
+    let before = doc.state_hash();
+    assert_eq!(
+        doc.join_linked(set, joiner, shift(6.0)).unwrap_err(),
+        DocumentError::NotIdentical
+    );
+    assert_eq!(doc.state_hash(), before);
+}
+
+#[test]
+fn join_linked_refuses_a_non_finite_pose() {
+    let mut doc = Document::new();
+    let first = board(&mut doc, 0.0);
+    let joiner = board(&mut doc, 3.0);
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+    let before = doc.state_hash();
+    let undo_len = doc.history_entries().undo.len();
+    let mut nan = shift(3.0).to_affine();
+    nan[3] = f64::NAN;
+    let mut inf = shift(3.0).to_affine();
+    inf[0] = f64::INFINITY;
+    for rows in [nan, inf] {
+        assert!(matches!(
+            doc.join_linked(set, joiner, Transform::from_affine(&rows)),
+            Err(DocumentError::Transform(_))
+        ));
+    }
+    assert_eq!(doc.state_hash(), before, "untouched");
+    assert_eq!(doc.history_entries().undo.len(), undo_len);
+}
+
+#[test]
+fn join_linked_refuses_a_deleted_joiner() {
+    let mut doc = Document::new();
+    let first = board(&mut doc, 0.0);
+    let joiner = board(&mut doc, 3.0);
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+    doc.delete_node(NodeId::Object(joiner)).unwrap();
+    let before = doc.state_hash();
+    assert_eq!(
+        doc.join_linked(set, joiner, shift(3.0)).unwrap_err(),
+        DocumentError::UnknownObject
+    );
+    assert_eq!(doc.state_hash(), before);
+    // A joiner already joined is hidden too.
+    doc.undo().unwrap();
+    doc.join_linked(set, joiner, shift(3.0)).unwrap();
+    assert_eq!(
+        doc.join_linked(set, joiner, shift(3.0)).unwrap_err(),
+        DocumentError::UnknownObject
+    );
+}
+
+#[test]
+fn join_linked_refuses_past_the_placement_bound() {
+    let mut doc = Document::new();
+    let ladder = half_full(&mut doc);
+    let keeper = board(&mut doc, 50.0);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Instance(ladder), NodeId::Object(keeper)])
+        .unwrap();
+    let (_, set, _) = doc.wrap_linked(NodeId::Group(g)).unwrap();
+    let joiner = board(&mut doc, 60.0);
+    let before = doc.state_hash();
+    let generation = doc.history_generation();
+    assert_eq!(
+        doc.join_linked(set, joiner, shift(10.0)).unwrap_err(),
+        DocumentError::ComponentExpansionExceeded
+    );
+    assert_eq!(doc.state_hash(), before);
+    assert_eq!(doc.history_generation(), generation);
+}
+
+#[test]
+fn join_linked_carries_the_user_hidden_flag_and_undo_is_exact() {
+    let mut doc = Document::new();
+    let first = board(&mut doc, 0.0);
+    let joiner = board(&mut doc, 3.0);
+    let shown = board(&mut doc, 6.0);
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+    doc.set_node_user_hidden(NodeId::Object(joiner), true);
+    let before = doc.state_hash();
+
+    let (
+        LinkedJoin {
+            instance: placed, ..
+        },
+        _,
+    ) = doc.join_linked(set, joiner, shift(3.0)).unwrap();
+    assert!(
+        doc.node_user_hidden(NodeId::Instance(placed)),
+        "a hidden board stays hidden"
+    );
+    let post = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    assert!(doc.node_user_hidden(NodeId::Object(joiner)));
+    doc.redo().unwrap();
+    assert!(doc.node_user_hidden(NodeId::Instance(placed)));
+    assert_eq!(doc.state_hash(), post);
+
+    // A shown joiner makes a shown placement.
+    let (
+        LinkedJoin {
+            instance: other, ..
+        },
+        _,
+    ) = doc.join_linked(set, shown, shift(6.0)).unwrap();
+    assert!(!doc.node_user_hidden(NodeId::Instance(other)));
+}
+
+#[test]
+fn join_linked_moves_the_object_material_to_the_placement_and_drops_face_paint() {
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 200)));
+    let first = board(&mut doc, 0.0);
+    let painted = board(&mut doc, 3.0);
+    let plain = board(&mut doc, 6.0);
+    doc.set_object_material(painted, Some(blue)).unwrap();
+    let top = top_face(&doc, painted);
+    doc.paint_face(painted, top, Some(red)).unwrap();
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+    let before = doc.state_hash();
+
+    let (join, _) = doc.join_linked(set, painted, shift(3.0)).unwrap();
+    assert_eq!(doc.instance_material(join.instance), Some(Some(blue)));
+    assert!(join.dropped_face_paint, "the red top cannot survive");
+    assert!(!join.frame_differed);
+    let post = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before, "undo is exact, paint included");
+    assert_eq!(doc.face_material(painted, top), Some(red));
+    assert_eq!(doc.object(painted).unwrap().default_material(), Some(blue));
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post);
+    assert_eq!(doc.instance_material(join.instance), Some(Some(blue)));
+
+    let (join, _) = doc.join_linked(set, plain, shift(6.0)).unwrap();
+    assert_eq!(
+        doc.instance_material(join.instance),
+        Some(None),
+        "an unpainted board stays unpainted"
+    );
+    assert!(!join.dropped_face_paint);
+}
+
+/// The material a world placement `p` of a one-solid set shows on a face
+/// with no paint: the member's base, else the placement's own.
+fn shown_material(doc: &Document, p: InstanceId) -> Option<kernel::MaterialId> {
+    let def = doc.instance_def(p).unwrap();
+    let member = doc.def_members(def).unwrap()[0];
+    doc.object(member)
+        .unwrap()
+        .default_material()
+        .or(doc.instance_material(p).unwrap())
+}
+
+#[test]
+fn join_linked_keeps_a_red_keeper_red_and_a_blue_joiner_blue() {
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 200)));
+    let keeper = board(&mut doc, 0.0);
+    let joiner = board(&mut doc, 3.0);
+    doc.set_object_material(keeper, Some(red)).unwrap();
+    doc.set_object_material(joiner, Some(blue)).unwrap();
+    let (def, set, _) = doc.wrap_linked(NodeId::Object(keeper)).unwrap();
+    let (join, _) = doc.join_linked(set, joiner, shift(3.0)).unwrap();
+    assert_eq!(doc.object(keeper).unwrap().default_material(), None);
+    assert_eq!(doc.instance_material(set), Some(Some(red)));
+    assert_eq!(doc.instance_material(join.instance), Some(Some(blue)));
+    assert_eq!(shown_material(&doc, set), Some(red));
+    assert_eq!(shown_material(&doc, join.instance), Some(blue));
+    assert_eq!(doc.instances_of(def).len(), 2);
+}
+
+#[test]
+fn join_linked_moves_a_painted_members_base_onto_every_placement_in_one_undo_entry() {
+    // A set whose shared member carries a base (painted "all copies", or
+    // a file from before the move): the join moves it onto every existing
+    // placement, overriding an instance material the base used to hide,
+    // and clears it on the member, so nothing visible changes.
+    let mut doc = Document::new();
+    let green = doc.add_material(Material::solid("Green", Rgba8::rgb(30, 200, 30)));
+    let yellow = doc.add_material(Material::solid("Yellow", Rgba8::rgb(200, 200, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 200)));
+    let keeper = board(&mut doc, 0.0);
+    let joiner = board(&mut doc, 6.0);
+    doc.set_object_material(joiner, Some(blue)).unwrap();
+    let (copy, _) = doc
+        .duplicate_node(NodeId::Object(keeper), &shift(3.0), Linked)
+        .unwrap();
+    let copy = ins(copy);
+    let def = doc.instance_def(copy).unwrap();
+    let set = doc
+        .instances_of(def)
+        .into_iter()
+        .find(|&i| i != copy)
+        .unwrap();
+    doc.set_instance_material(copy, Some(yellow)).unwrap();
+    doc.set_definition_material(def, Some(green)).unwrap();
+    assert_eq!(shown_material(&doc, set), Some(green));
+    assert_eq!(
+        shown_material(&doc, copy),
+        Some(green),
+        "the base hides yellow"
+    );
+    let before = doc.state_hash();
+    let undo_len = doc.history_entries().undo.len();
+
+    let (join, change) = doc.join_linked(set, joiner, shift(6.0)).unwrap();
+    assert_eq!(doc.history_entries().undo.len(), undo_len + 1, "one entry");
+    assert_eq!(doc.object(keeper).unwrap().default_material(), None);
+    assert_eq!(doc.instance_material(set), Some(Some(green)));
+    assert_eq!(doc.instance_material(copy), Some(Some(green)));
+    assert_eq!(doc.instance_material(join.instance), Some(Some(blue)));
+    for p in [set, copy] {
+        assert!(change.instances_touched.contains(&p), "{p:?} repaints");
+    }
+    assert!(change.objects_touched.contains(&keeper));
+    let post = doc.state_hash();
+
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before, "undo is exact");
+    assert_eq!(doc.object(keeper).unwrap().default_material(), Some(green));
+    assert_eq!(doc.instance_material(set), Some(None));
+    assert_eq!(doc.instance_material(copy), Some(Some(yellow)));
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post, "redo is exact");
+    assert_eq!(doc.object(keeper).unwrap().default_material(), None);
+    assert_eq!(doc.instance_material(copy), Some(Some(green)));
+}
+
+#[test]
+fn join_linked_leaves_the_keepers_face_paint_on_the_shared_faces() {
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let oak = doc.add_material(Material::solid("Oak", Rgba8::rgb(150, 100, 50)));
+    let keeper = board(&mut doc, 0.0);
+    let joiner = board(&mut doc, 3.0);
+    doc.set_object_material(keeper, Some(red)).unwrap();
+    let top = top_face(&doc, keeper);
+    doc.paint_face(keeper, top, Some(oak)).unwrap();
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(keeper)).unwrap();
+    let before = doc.state_hash();
+    let (join, _) = doc.join_linked(set, joiner, shift(3.0)).unwrap();
+    assert!(!join.dropped_face_paint, "the joiner had none");
+    assert_eq!(
+        doc.face_material(keeper, top),
+        Some(oak),
+        "the top stays oak"
+    );
+    assert_eq!(doc.instance_material(set), Some(Some(red)));
+    assert_eq!(doc.instance_material(join.instance), Some(None));
+    let post = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post);
+    assert_eq!(doc.face_material(keeper, top), Some(oak));
+}
+
+#[test]
+fn unlink_after_a_join_gives_each_board_its_color_back_as_its_base() {
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 200)));
+    let keeper = board(&mut doc, 0.0);
+    let joiner = board(&mut doc, 3.0);
+    doc.set_object_material(keeper, Some(red)).unwrap();
+    doc.set_object_material(joiner, Some(blue)).unwrap();
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(keeper)).unwrap();
+    let (join, _) = doc.join_linked(set, joiner, shift(3.0)).unwrap();
+    let joined = doc.state_hash();
+
+    // Unlink the joiner's placement: its private copy takes blue as its
+    // base, and the placement's own material moves back onto it.
+    let (new_def, leaf, remap, _) = doc
+        .make_unique_by_path(&[join.instance], true, false)
+        .unwrap();
+    assert_eq!(leaf, join.instance);
+    let copy = remap.objects[&keeper];
+    assert_eq!(doc.def_members(new_def).unwrap(), vec![copy]);
+    assert_eq!(doc.object(copy).unwrap().default_material(), Some(blue));
+    assert_eq!(doc.instance_material(join.instance), Some(None));
+    assert_eq!(shown_material(&doc, join.instance), Some(blue));
+    assert_eq!(shown_material(&doc, set), Some(red), "the other keeps red");
+    assert_eq!(doc.instance_material(set), Some(Some(red)));
+    let unlinked = doc.state_hash();
+
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), joined, "undo of unlink is exact");
+    assert_eq!(doc.instance_material(join.instance), Some(Some(blue)));
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), unlinked, "redo of unlink is exact");
+
+    // Unlink the last one too: red comes back as the keeper copy's base.
+    let (_, _, remap, _) = doc.make_unique_by_path(&[set], true, false).unwrap();
+    let red_copy = remap.objects[&keeper];
+    assert_eq!(doc.object(red_copy).unwrap().default_material(), Some(red));
+    assert_eq!(doc.instance_material(set), Some(None));
+    assert_eq!(
+        doc.object(copy).unwrap().default_material(),
+        Some(blue),
+        "both colors survive"
+    );
+}
+
+#[test]
+fn explode_after_a_join_gives_each_board_its_color_back_as_its_base() {
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 200)));
+    let keeper = board(&mut doc, 0.0);
+    let joiner = board(&mut doc, 3.0);
+    doc.set_object_material(keeper, Some(red)).unwrap();
+    doc.set_object_material(joiner, Some(blue)).unwrap();
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(keeper)).unwrap();
+    let (join, _) = doc.join_linked(set, joiner, shift(3.0)).unwrap();
+    let (blue_out, _) = doc.explode_instance(join.instance).unwrap();
+    let (red_out, _) = doc.explode_instance(set).unwrap();
+    assert_eq!(
+        doc.object(blue_out[0]).unwrap().default_material(),
+        Some(blue)
+    );
+    assert_eq!(
+        doc.object(red_out[0]).unwrap().default_material(),
+        Some(red)
+    );
+}
+
+#[test]
+fn make_unique_of_a_named_component_leaves_the_instance_material_alone() {
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let o = board(&mut doc, 0.0);
+    let (_, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    doc.set_instance_material(inst, Some(red)).unwrap();
+    let (new_def, _, _, _) = doc.make_unique_by_path(&[inst], true, false).unwrap();
+    let member = doc.def_members(new_def).unwrap()[0];
+    assert_eq!(doc.object(member).unwrap().default_material(), None);
+    assert_eq!(doc.instance_material(inst), Some(Some(red)));
+}
+
+#[test]
+fn wrap_linked_undo_and_redo_restore_the_moved_base_exactly() {
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let o = board(&mut doc, 0.0);
+    doc.set_object_material(o, Some(red)).unwrap();
+    let before = doc.state_hash();
+    let (copy, _) = doc
+        .duplicate_node(NodeId::Object(o), &shift(3.0), Linked)
+        .unwrap();
+    let copy = ins(copy);
+    assert_eq!(
+        doc.instance_material(copy),
+        Some(Some(red)),
+        "the copy is red"
+    );
+    assert_eq!(doc.object(o).unwrap().default_material(), None);
+    let post = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    assert_eq!(doc.object(o).unwrap().default_material(), Some(red));
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post);
+    assert_eq!(doc.instance_material(copy), Some(Some(red)));
+}
+
+/// Sets `hew.part` / `frame` on `o` to `value`.
+fn set_part_frame(doc: &mut Document, o: ObjectId, value: &str) {
+    doc.attr_set(
+        AttrTarget::Entity(EntityRef::Object(o)),
+        "hew.part",
+        "frame",
+        AttrValue::Text(value.into()),
+    )
+    .unwrap();
+}
+
+#[test]
+fn join_linked_leaves_the_joiners_part_frame_and_reports_a_difference() {
+    let mut doc = Document::new();
+    let first = board(&mut doc, 0.0);
+    let same = named_board(&mut doc, 3.0, "Same", &[], &[("uuid", "s")]);
+    let other = named_board(&mut doc, 6.0, "Other", &[], &[("uuid", "o")]);
+    let bare = board(&mut doc, 9.0);
+    set_part_frame(&mut doc, first, "a");
+    set_part_frame(&mut doc, same, "a");
+    set_part_frame(&mut doc, other, "b");
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+
+    let (join, _) = doc.join_linked(set, same, shift(3.0)).unwrap();
+    assert!(!join.frame_differed, "the same frame");
+    let dict = entity_dict(&doc, EntityRef::Instance(join.instance)).unwrap();
+    assert!(!dict.contains_key("hew.part"), "the frame is not copied");
+    assert_eq!(
+        dict.get("com.example").and_then(|ns| ns.get("uuid")),
+        Some(&AttrValue::Text("s".into())),
+        "the rest moves"
+    );
+
+    let (join, _) = doc.join_linked(set, other, shift(6.0)).unwrap();
+    assert!(join.frame_differed, "a different frame");
+    let dict = entity_dict(&doc, EntityRef::Instance(join.instance)).unwrap();
+    assert!(!dict.contains_key("hew.part"));
+
+    let (join, _) = doc.join_linked(set, bare, shift(9.0)).unwrap();
+    assert!(join.frame_differed, "the keeper's frame replaces none");
+    assert_eq!(entity_dict(&doc, EntityRef::Instance(join.instance)), None);
+    // The keeper's frame stays on the member.
+    let member = entity_dict(&doc, EntityRef::Object(first)).unwrap();
+    assert_eq!(
+        member.get("hew.part").and_then(|ns| ns.get("frame")),
+        Some(&AttrValue::Text("a".into()))
+    );
+
+    // Undo and redo keep the frame off the placement.
+    let undo_hash = {
+        doc.undo().unwrap();
+        doc.state_hash()
+    };
+    doc.redo().unwrap();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), undo_hash);
+}
+
+#[test]
+fn join_linked_leaves_library_provenance_behind() {
+    let mut doc = Document::new();
+    let first = board(&mut doc, 0.0);
+    let joiner = named_board(&mut doc, 3.0, "Leg", &[], &[("uuid", "j")]);
+    doc.attr_set(
+        AttrTarget::Entity(EntityRef::Object(joiner)),
+        "hew.library",
+        "source_id",
+        AttrValue::Text("item".into()),
+    )
+    .unwrap();
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+    let (join, _) = doc.join_linked(set, joiner, shift(3.0)).unwrap();
+    let dict = entity_dict(&doc, EntityRef::Instance(join.instance)).unwrap();
+    assert!(!dict.contains_key("hew.library"));
+    assert!(dict.contains_key("com.example"));
+    doc.undo().unwrap();
+    doc.redo().unwrap();
+    let dict = entity_dict(&doc, EntityRef::Instance(join.instance)).unwrap();
+    assert!(!dict.contains_key("hew.library"), "nor on redo");
+}
+
+proptest! {
+    #[test]
+    fn join_linked_then_undo_is_the_identity_and_redo_reproduces(
+        dx in -2.0f64..2.0,
+        dy in -2.0f64..2.0,
+        angle in 0.0f64..std::f64::consts::TAU,
+        mirrored in any::<bool>(),
+        joiners in 1usize..4,
+    ) {
+        let mut doc = Document::new();
+        let first = l_board(&mut doc, 0.0, false);
+        let spin = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), angle).unwrap();
+        let poses: Vec<Transform> = (0..joiners)
+            .map(|k| {
+                let step = Transform::translation(Vec3::new(dx + 8.0 * (k + 1) as f64, dy, 0.0));
+                if mirrored {
+                    Transform::scale(Vec3::new(-1.0, 1.0, 1.0)).then(&spin).then(&step)
+                } else {
+                    spin.then(&step)
+                }
+            })
+            .collect();
+        let mut loose = Vec::new();
+        let mut notes = Vec::new();
+        for (k, pose) in poses.iter().enumerate() {
+            let o = posed_l_board(&mut doc, pose);
+            doc.attr_set(
+                AttrTarget::Entity(EntityRef::Object(o)),
+                "com.example",
+                "uuid",
+                AttrValue::Text(format!("j{k}")),
+            )
+            .unwrap();
+            let note = doc
+                .add_leader_text(
+                    Anchor {
+                        node: Some(NodeId::Object(o)),
+                        point: pose.apply_point(Point3::new(0.25, 0.25, 0.25)),
+                    },
+                    Vec3::new(0.0, 0.0, 1.0),
+                    "Joiner".into(),
+                )
+                .unwrap();
+            loose.push(o);
+            notes.push(note);
+        }
+        let (def, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+        let before = doc.state_hash();
+        let shown = rendered(&doc);
+        let dicts: Vec<_> = loose
+            .iter()
+            .map(|&o| entity_dict(&doc, EntityRef::Object(o)))
+            .collect();
+        for (k, (&j, pose)) in loose.iter().zip(&poses).enumerate() {
+            let (LinkedJoin { instance: i, .. }, _) = doc.join_linked(set, j, *pose).unwrap();
+            prop_assert_eq!(doc.instance_pose(i), Some(*pose));
+            prop_assert_eq!(&entity_dict(&doc, EntityRef::Instance(i)), &dicts[k]);
+            prop_assert_eq!(doc.annotation_detached(notes[k]), Some(true));
+            let r = last_record(&doc);
+            let new = cref(&doc, EntityRef::Instance(i));
+            prop_assert!(r.changes.added.contains(&new));
+            prop_assert!(r.changes.removed.contains(&cref(&doc, EntityRef::Object(j))));
+            prop_assert_eq!(
+                &r.changes.copied_from,
+                &vec![(new, cref(&doc, EntityRef::Instance(set)))]
+            );
+        }
+        prop_assert_eq!(doc.placing_instances(def).len(), joiners + 1);
+        prop_assert_eq!(rendered(&doc), shown, "one placement for each solid hidden");
+        let post = doc.state_hash();
+        for _ in 0..joiners {
+            doc.undo().unwrap();
+        }
+        prop_assert_eq!(doc.state_hash(), before);
+        for (&j, &note) in loose.iter().zip(&notes) {
+            prop_assert!(doc.node_is_live(NodeId::Object(j)));
+            prop_assert_eq!(doc.annotation_detached(note), Some(false));
+        }
+        for _ in 0..joiners {
+            doc.redo().unwrap();
+        }
+        prop_assert_eq!(doc.state_hash(), post);
+    }
+}
+
+#[test]
+fn join_linked_refuses_a_pose_that_places_the_set_absurdly_far_away() {
+    // The match buckets points in cubes of the pose quantum; a pose far
+    // past any modeled distance must refuse as another shape, not
+    // overflow the bucket arithmetic.
+    let mut doc = Document::new();
+    let first = board(&mut doc, 0.0);
+    let joiner = board(&mut doc, 3.0);
+    let (_, set, _) = doc.wrap_linked(NodeId::Object(first)).unwrap();
+    let before = doc.state_hash();
+    let undo_len = doc.history_entries().undo.len();
+    for far in [1e14, -1e14, 1e300, -1e300] {
+        for offset in [
+            Vec3::new(far, 0.0, 0.0),
+            Vec3::new(0.0, far, 0.0),
+            Vec3::new(0.0, 0.0, far),
+        ] {
+            assert_eq!(
+                doc.join_linked(set, joiner, Transform::translation(offset))
+                    .unwrap_err(),
+                DocumentError::NotIdentical,
+                "{offset:?} places the set nowhere near the joiner"
+            );
+        }
+    }
+    assert_eq!(doc.state_hash(), before, "untouched");
+    assert_eq!(doc.history_entries().undo.len(), undo_len);
+    assert!(doc.join_linked(set, joiner, shift(3.0)).is_ok());
+}
+
+#[test]
+fn a_deep_unlink_of_a_painted_linked_placement_gives_the_copy_its_color() {
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let o = board(&mut doc, 0.0);
+    doc.set_object_material(o, Some(red)).unwrap();
+    let (copy, _) = doc
+        .duplicate_node(NodeId::Object(o), &shift(3.0), Linked)
+        .unwrap();
+    let copy = ins(copy);
+    let def = doc.instance_def(copy).unwrap();
+    let set = doc
+        .instances_of(def)
+        .into_iter()
+        .find(|&i| i != copy)
+        .unwrap();
+    assert_eq!(doc.instance_material(copy), Some(Some(red)));
+    let before = doc.state_hash();
+
+    let (new_def, leaf, remap, _) = doc.make_unique_by_path(&[copy], true, true).unwrap();
+    assert_eq!(leaf, copy);
+    let member = remap.objects[&o];
+    assert_eq!(doc.def_members(new_def).unwrap(), vec![member]);
+    assert_eq!(doc.object(member).unwrap().default_material(), Some(red));
+    assert_eq!(doc.instance_material(copy), Some(None));
+    assert_eq!(shown_material(&doc, copy), Some(red));
+    assert_eq!(shown_material(&doc, set), Some(red), "the other keeps red");
+    let post = doc.state_hash();
+
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before, "undo is exact");
+    assert_eq!(doc.instance_material(copy), Some(Some(red)));
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post, "redo is exact");
+    assert_eq!(doc.instance_material(copy), Some(None));
+}
+
+#[test]
+fn a_deep_unlink_of_a_painted_outer_placement_keeps_every_inner_color() {
+    // The outer set's placement is red, one inner placement is blue and
+    // the other unpainted (it shows the outer red). A deep unlink moves
+    // red onto the copied inner placement that had none; the nested
+    // forks move nothing, so both inner boards look as they did.
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 200)));
+    let n = outer_holding_two_inner(&mut doc);
+    doc.set_instance_material(n.p, Some(red)).unwrap();
+    doc.set_instance_material(n.a[1], Some(blue)).unwrap();
+    assert_eq!(doc.inherited_material(&[n.p, n.a[0]]), Some(red));
+    assert_eq!(doc.inherited_material(&[n.p, n.a[1]]), Some(blue));
+    let before = doc.state_hash();
+
+    let (_, leaf, remap, _) = doc.make_unique_by_path(&[n.p], true, true).unwrap();
+    assert_eq!(leaf, n.p);
+    let (a0, a1) = (remap.instances[&n.a[0]], remap.instances[&n.a[1]]);
+    assert_eq!(doc.instance_material(n.p), Some(None));
+    assert_eq!(doc.instance_material(a0), Some(Some(red)));
+    assert_eq!(doc.instance_material(a1), Some(Some(blue)));
+    assert_eq!(doc.inherited_material(&[n.p, a0]), Some(red));
+    assert_eq!(doc.inherited_material(&[n.p, a1]), Some(blue));
+    let inner = doc.instance_def(a0).unwrap();
+    assert_eq!(doc.instance_def(a1), Some(inner), "one shared inner fork");
+    let member = doc.def_members(inner).unwrap()[0];
+    assert_eq!(
+        doc.object(member).unwrap().default_material(),
+        None,
+        "a nested fork moves no color onto the shared inner solid"
+    );
+    assert_no_orphaned_linked_set(&doc);
+    let post = doc.state_hash();
+
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before, "undo is exact");
+    assert_eq!(doc.instance_material(n.p), Some(Some(red)));
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post, "redo is exact");
+}
+
+#[test]
+fn join_linked_with_a_legacy_member_base_and_a_deleted_placement_stays_consistent() {
+    // A member base from "paint all copies" (or an older file), one
+    // placement deleted before the join: the join restamps the live
+    // placements only, and undoing back past the delete brings the deleted
+    // placement back green, as it was.
+    let mut doc = Document::new();
+    let green = doc.add_material(Material::solid("Green", Rgba8::rgb(30, 200, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 200)));
+    let (keeper, def, set, rest) = linked_set(&mut doc, 2);
+    let (gone, kept) = (rest[0], rest[1]);
+    let joiner = board(&mut doc, 9.0);
+    doc.set_object_material(joiner, Some(blue)).unwrap();
+    doc.set_definition_material(def, Some(green)).unwrap();
+    doc.delete_node(NodeId::Instance(gone)).unwrap();
+    let deleted = doc.state_hash();
+
+    let (join, _) = doc.join_linked(set, joiner, shift(9.0)).unwrap();
+    let joined = doc.state_hash();
+    assert_eq!(doc.object(keeper).unwrap().default_material(), None);
+    for p in [set, kept] {
+        assert_eq!(shown_material(&doc, p), Some(green), "{p:?} stays green");
+    }
+    assert_eq!(shown_material(&doc, join.instance), Some(blue));
+
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), deleted, "undo of the join is exact");
+    doc.undo().unwrap();
+    assert!(doc.node_is_live(NodeId::Instance(gone)));
+    assert_eq!(doc.object(keeper).unwrap().default_material(), Some(green));
+    for p in [set, kept, gone] {
+        assert_eq!(shown_material(&doc, p), Some(green), "{p:?} is green again");
+    }
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), deleted);
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), joined, "redo of the join is exact");
+    assert_eq!(shown_material(&doc, join.instance), Some(blue));
+    assert_eq!(shown_material(&doc, kept), Some(green));
+}
+
+#[test]
+fn join_linked_with_a_legacy_member_base_restamps_a_user_hidden_placement() {
+    // User-hidden is view state, off the undo stack: the hidden placement
+    // takes the base like any other, so showing it again shows green.
+    let mut doc = Document::new();
+    let green = doc.add_material(Material::solid("Green", Rgba8::rgb(30, 200, 30)));
+    let (keeper, def, set, rest) = linked_set(&mut doc, 1);
+    let hidden = rest[0];
+    let joiner = board(&mut doc, 9.0);
+    doc.set_definition_material(def, Some(green)).unwrap();
+    doc.set_node_user_hidden(NodeId::Instance(hidden), true);
+    let before = doc.state_hash();
+
+    let (join, _) = doc.join_linked(set, joiner, shift(9.0)).unwrap();
+    let post = doc.state_hash();
+    doc.set_node_user_hidden(NodeId::Instance(hidden), false);
+    assert_eq!(doc.object(keeper).unwrap().default_material(), None);
+    assert_eq!(shown_material(&doc, hidden), Some(green));
+    assert_eq!(shown_material(&doc, set), Some(green));
+    assert_eq!(shown_material(&doc, join.instance), None);
+
+    doc.set_node_user_hidden(NodeId::Instance(hidden), true);
+    assert_eq!(doc.state_hash(), post);
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before, "undo is exact");
+    doc.set_node_user_hidden(NodeId::Instance(hidden), false);
+    assert_eq!(shown_material(&doc, hidden), Some(green));
+    doc.set_node_user_hidden(NodeId::Instance(hidden), true);
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post, "redo is exact");
+}
+
+// ------------------------------- painting one copy of a set (member base)
+
+/// A set of three copies whose shared member carries red as its base —
+/// what Ctrl-click inside the open set, a Shift-click replace on
+/// unpainted faces, or an older file leaves behind.
+fn red_member_set(
+    doc: &mut Document,
+) -> (
+    kernel::MaterialId,
+    kernel::MaterialId,
+    ObjectId,
+    ComponentId,
+    Vec<InstanceId>,
+) {
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 200)));
+    let (member, def, first, rest) = linked_set(doc, 2);
+    doc.set_object_material(member, Some(red)).unwrap();
+    let mut copies = vec![first];
+    copies.extend(rest);
+    for &c in &copies {
+        assert_eq!(shown_material(doc, c), Some(red));
+    }
+    (red, blue, member, def, copies)
+}
+
+#[test]
+fn painting_one_copy_moves_the_members_base_onto_the_others_first() {
+    let mut doc = Document::new();
+    let (red, blue, member, def, copies) = red_member_set(&mut doc);
+    let painted = copies[1];
+    let before = doc.state_hash();
+    let undo_len = doc.history_entries().undo.len();
+
+    let change = doc.set_instance_material(painted, Some(blue)).unwrap();
+    assert_eq!(doc.history_entries().undo.len(), undo_len + 1, "one entry");
+    assert_eq!(doc.object(member).unwrap().default_material(), None);
+    assert_eq!(shown_material(&doc, painted), Some(blue), "the paint shows");
+    for &c in copies.iter().filter(|&&c| c != painted) {
+        assert_eq!(doc.instance_material(c), Some(Some(red)));
+        assert_eq!(shown_material(&doc, c), Some(red), "the others stay red");
+    }
+    assert!(change.objects_touched.contains(&member));
+    for &c in &copies {
+        assert!(change.instances_touched.contains(&c), "{c:?} repaints");
+    }
+    let r = last_record(&doc);
+    assert!(
+        r.changes
+            .modified
+            .contains(&cref(&doc, EntityRef::Object(member)))
+    );
+    for &c in &copies {
+        assert!(
+            r.changes
+                .modified
+                .contains(&cref(&doc, EntityRef::Instance(c))),
+            "{c:?} is listed as modified"
+        );
+    }
+    let post = doc.state_hash();
+    let label = last_label(&doc);
+
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before, "one undo restores everything");
+    assert_eq!(doc.object(member).unwrap().default_material(), Some(red));
+    for &c in &copies {
+        assert_eq!(doc.instance_material(c), Some(None));
+    }
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post, "redo reproduces");
+    assert_eq!(last_label(&doc), label);
+    assert_eq!(shown_material(&doc, painted), Some(blue));
+    assert_eq!(doc.instances_of(def).len(), 3);
+}
+
+#[test]
+fn painting_a_copy_is_labeled_like_any_placement_paint() {
+    let mut doc = Document::new();
+    let (_, blue, _, _, copies) = red_member_set(&mut doc);
+    doc.set_instance_material(copies[0], Some(blue)).unwrap();
+    let moved = last_label(&doc);
+    // The second paint finds no base and is a plain one.
+    doc.set_instance_material(copies[1], Some(blue)).unwrap();
+    assert_eq!(last_label(&doc), moved);
+}
+
+#[test]
+fn painting_a_copy_whose_member_has_no_base_changes_only_that_copy() {
+    let mut doc = Document::new();
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 200)));
+    let yellow = doc.add_material(Material::solid("Yellow", Rgba8::rgb(200, 200, 30)));
+    let (member, _, first, rest) = linked_set(&mut doc, 2);
+    doc.set_instance_material(rest[1], Some(yellow)).unwrap();
+    let before = doc.state_hash();
+
+    let change = doc.set_instance_material(rest[0], Some(blue)).unwrap();
+    assert_eq!(change.instances_touched, vec![rest[0]]);
+    assert!(change.objects_touched.is_empty());
+    assert_eq!(doc.instance_material(first), Some(None));
+    assert_eq!(doc.instance_material(rest[1]), Some(Some(yellow)));
+    assert_eq!(doc.object(member).unwrap().default_material(), None);
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+}
+
+#[test]
+fn painting_a_placement_of_a_named_component_leaves_its_base_alone() {
+    // A named component's base means "every copy": painting one placement
+    // keeps it, so the base still shows.
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(30, 30, 200)));
+    let o = board(&mut doc, 0.0);
+    let (def, first, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    let (second, _) = doc.place_instance(def, shift(3.0)).unwrap();
+    doc.set_object_material(o, Some(red)).unwrap();
+    let before = doc.state_hash();
+
+    let change = doc.set_instance_material(second, Some(blue)).unwrap();
+    assert_eq!(doc.object(o).unwrap().default_material(), Some(red));
+    assert_eq!(doc.instance_material(first), Some(None));
+    assert_eq!(doc.instance_material(second), Some(Some(blue)));
+    assert_eq!(shown_material(&doc, second), Some(red));
+    assert!(change.objects_touched.is_empty());
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+}
+
+#[test]
+fn painting_one_copy_restamps_a_user_hidden_copy_too() {
+    let mut doc = Document::new();
+    let (red, blue, member, _, copies) = red_member_set(&mut doc);
+    let hidden = copies[2];
+    doc.set_node_user_hidden(NodeId::Instance(hidden), true);
+    let before = doc.state_hash();
+
+    doc.set_instance_material(copies[0], Some(blue)).unwrap();
+    let post = doc.state_hash();
+    assert_eq!(doc.instance_material(hidden), Some(Some(red)));
+    doc.set_node_user_hidden(NodeId::Instance(hidden), false);
+    assert_eq!(shown_material(&doc, hidden), Some(red), "shown again: red");
+    doc.set_node_user_hidden(NodeId::Instance(hidden), true);
+    assert_eq!(doc.state_hash(), post);
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+    assert_eq!(doc.object(member).unwrap().default_material(), Some(red));
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post);
+}
+
+#[test]
+fn painting_a_sibling_copy_inside_an_open_set_restamps_the_entered_copy() {
+    // With one copy entered (hidden for the session), painting another
+    // copy still moves the base onto it, and the close keeps the cleared
+    // base: the member counts as touched.
+    let mut doc = Document::new();
+    let (red, blue, member, _, copies) = red_member_set(&mut doc);
+    let entered = copies[0];
+    let painted = copies[1];
+    doc.open_explode_session(entered).unwrap();
+    let opened = doc.state_hash();
+
+    doc.set_instance_material(painted, Some(blue)).unwrap();
+    assert_eq!(doc.object(member).unwrap().default_material(), None);
+    let post = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), opened, "undo inside the session is exact");
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post);
+
+    doc.close_explode_session().unwrap();
+    assert_eq!(doc.object(member).unwrap().default_material(), None);
+    assert_eq!(shown_material(&doc, entered), Some(red));
+    assert_eq!(shown_material(&doc, painted), Some(blue));
+    assert_eq!(shown_material(&doc, copies[2]), Some(red));
+}
+
+#[test]
+fn clearing_one_copys_paint_also_moves_the_base_so_that_copy_shows_unpainted() {
+    let mut doc = Document::new();
+    let (red, _, member, _, copies) = red_member_set(&mut doc);
+    let before = doc.state_hash();
+    doc.set_instance_material(copies[0], None).unwrap();
+    assert_eq!(doc.object(member).unwrap().default_material(), None);
+    assert_eq!(shown_material(&doc, copies[0]), None);
+    assert_eq!(shown_material(&doc, copies[1]), Some(red));
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before);
+}
+
+#[test]
+fn replacing_unpainted_model_wide_paints_unpainted_copies_not_the_linked_member() {
+    // Shift-click replace on unpainted faces: a linked member's empty base
+    // stays empty and each unpainted copy takes the color, so a copy with
+    // its own color keeps it. A loose Object and a named component's
+    // member still take it as their base.
+    let mut doc = Document::new();
+    let green = doc.add_material(Material::solid("Green", Rgba8::rgb(30, 200, 30)));
+    let yellow = doc.add_material(Material::solid("Yellow", Rgba8::rgb(200, 200, 30)));
+    let (member, _, first, rest) = linked_set(&mut doc, 2);
+    doc.set_instance_material(first, Some(yellow)).unwrap();
+    let loose = board(&mut doc, 20.0);
+    let named = board(&mut doc, 30.0);
+    let (_, named_ins, _) = doc.make_component(&[NodeId::Object(named)]).unwrap();
+    let before = doc.state_hash();
+
+    let change = doc
+        .replace_material(kernel::MaterialScope::Document, None, Some(green))
+        .unwrap();
+    assert_eq!(doc.object(member).unwrap().default_material(), None);
+    assert_eq!(shown_material(&doc, first), Some(yellow), "yellow stays");
+    for &c in &rest {
+        assert_eq!(doc.instance_material(c), Some(Some(green)));
+        assert!(change.instances_touched.contains(&c));
+    }
+    assert_eq!(doc.object(loose).unwrap().default_material(), Some(green));
+    assert_eq!(doc.object(named).unwrap().default_material(), Some(green));
+    assert_eq!(doc.instance_material(named_ins), Some(None));
+    let post = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before, "undo is exact");
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post, "redo is exact");
+}
+
+#[test]
+fn a_copy_painted_under_a_member_base_lends_a_new_placement_no_material() {
+    // A copy carries its own green, but the shared member's red base covers
+    // it: the copy looks red, so a new placement made to look like it (a
+    // linked paste) needs no material of its own, and placing it moves
+    // nothing.
+    let mut doc = Document::new();
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let green = doc.add_material(Material::solid("Green", Rgba8::rgb(30, 200, 30)));
+    let (member, def, first, rest) = linked_set(&mut doc, 1);
+    let source = rest[0];
+    doc.set_instance_material(source, Some(green)).unwrap();
+    doc.set_object_material(member, Some(red)).unwrap();
+    assert_eq!(shown_material(&doc, source), Some(red));
+    assert_eq!(doc.instance_appearance_material(source), Some(None));
+
+    let (pasted, _) = doc.place_instance(def, shift(9.0)).unwrap();
+    if let Some(Some(m)) = doc.instance_appearance_material(source) {
+        doc.set_instance_material(pasted, Some(m)).unwrap();
+    }
+    assert_eq!(doc.object(member).unwrap().default_material(), Some(red));
+    for c in [first, source, pasted] {
+        assert_eq!(shown_material(&doc, c), Some(red), "{c:?} looks red");
+    }
+    assert_eq!(doc.instance_material(source), Some(Some(green)));
+}
+
+#[test]
+fn an_ordinarily_painted_copy_lends_a_new_placement_its_own_material() {
+    let mut doc = Document::new();
+    let green = doc.add_material(Material::solid("Green", Rgba8::rgb(30, 200, 30)));
+    let (_, def, first, rest) = linked_set(&mut doc, 1);
+    doc.set_instance_material(rest[0], Some(green)).unwrap();
+    assert_eq!(doc.instance_appearance_material(rest[0]), Some(Some(green)));
+    assert_eq!(doc.instance_appearance_material(first), Some(None));
+    let (pasted, _) = doc.place_instance(def, shift(9.0)).unwrap();
+    doc.set_instance_material(pasted, Some(green)).unwrap();
+    assert_eq!(shown_material(&doc, pasted), Some(green));
+    assert_eq!(shown_material(&doc, first), None);
+    // A named component's placement lends its own material as before: its
+    // base stays put whatever a placement carries.
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(200, 30, 30)));
+    let o = board(&mut doc, 30.0);
+    let (_, named_ins, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
+    doc.set_instance_material(named_ins, Some(green)).unwrap();
+    doc.set_object_material(o, Some(red)).unwrap();
+    assert_eq!(
+        doc.instance_appearance_material(named_ins),
+        Some(Some(green))
+    );
+    assert_eq!(
+        doc.instance_appearance_material(InstanceId::default()),
+        None
+    );
+}
+
+#[test]
+fn replacing_unpainted_model_wide_paints_the_copy_entered_in_an_open_set_too() {
+    // The entered copy is hidden for the session; a model-wide replace of
+    // unpainted still gives it the color, so after the close it matches
+    // the others (as if the replace ran before the session opened).
+    let mut doc = Document::new();
+    let green = doc.add_material(Material::solid("Green", Rgba8::rgb(30, 200, 30)));
+    let (member, _, first, rest) = linked_set(&mut doc, 2);
+    doc.open_explode_session(first).unwrap();
+    let opened = doc.state_hash();
+
+    doc.replace_material(kernel::MaterialScope::Document, None, Some(green))
+        .unwrap();
+    let post = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), opened, "undo inside the session is exact");
+    doc.redo().unwrap();
+    assert_eq!(doc.state_hash(), post, "redo is exact");
+
+    doc.close_explode_session().unwrap();
+    assert_eq!(doc.object(member).unwrap().default_material(), None);
+    for c in [first, rest[0], rest[1]] {
+        assert_eq!(shown_material(&doc, c), Some(green), "{c:?} took green");
+    }
+}
+
+#[test]
+fn replacing_unpainted_model_wide_leaves_copies_under_a_member_base_alone() {
+    // An older file's red member base covers every copy: no face shows
+    // unpainted, so the replace changes nothing on the set and stamps no
+    // copy (what changed is what shows).
+    let mut doc = Document::new();
+    let (red, _, member, _, copies) = red_member_set(&mut doc);
+    let green = doc.add_material(Material::solid("Green", Rgba8::rgb(30, 200, 30)));
+    let loose = board(&mut doc, 20.0);
+
+    let change = doc
+        .replace_material(kernel::MaterialScope::Document, None, Some(green))
+        .unwrap();
+    assert_eq!(doc.object(loose).unwrap().default_material(), Some(green));
+    assert_eq!(doc.object(member).unwrap().default_material(), Some(red));
+    for &c in &copies {
+        assert_eq!(doc.instance_material(c), Some(None), "{c:?} not stamped");
+        assert!(!change.instances_touched.contains(&c));
+        assert_eq!(shown_material(&doc, c), Some(red));
+    }
 }

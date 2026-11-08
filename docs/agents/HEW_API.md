@@ -462,8 +462,9 @@ and `instance` is the placement that took its spot, so a client holding
 `source` selects `instance`. `copied_from` lists `[new, source]` pairs for
 every entity the change copied: an independent copy's nodes, a linked
 copy's new placement and the placement it was copied from (the wrap's
-own placement for a node the same change wrapped), and every id an
-unlink (`hew.component.make_unique`) minted. Both describe the forward
+own placement for a node the same change wrapped), every placement a
+Link identical copies join made, paired with the set's placement it
+joined, and every id an unlink (`hew.component.make_unique`) minted. Both describe the forward
 change only: an undo's lists are empty (what it took away is in
 `removed`), and a `full` set keeps them empty.
 
@@ -2277,6 +2278,32 @@ axes are `rebase`'s). This command is the one first-party writer of the
 `hew.part` namespace; `hew.attr.set` on it stays subject to the
 attribute namespace rule (§10.1).
 
+The app's Link identical copies (not a bus command) leaves a joined
+Object's `hew.part` / `frame` behind: its new placement has none, and
+the shared member's override serves every placement through the pose.
+The joined Object's default material becomes the placement's own
+material, its face paint is dropped, and the kernel refuses a pose that
+does not place the set's shape onto the Object (`NotIdentical`, "These
+aren't the same shape.") or that holds a non-finite number. A linked
+set's shared member carries no default material: wrapping an Object
+moves its default material onto its placement, and a join moves any
+default material the member still has onto every placement the set
+already has, so each copy keeps its own color and a node's `material`
+reads from the placement. `hew.component.make_unique` on a placement
+of a linked set moves the placement's own material back onto its
+private copy (the default material of each copied Object without one),
+so unlinking a joined or wrapped board returns its color as its
+default material; `explode` already keeps it. If the member has a
+default material anyway (set inside the open set, or from an older
+file), painting one copy (`hew.material.paint` on its instance id) first
+moves that material onto every other copy of the set and clears it on
+the member, in the same undo entry, so the painted copy shows its new
+color and the others keep theirs. `hew.material.replace` with
+`from: null` and no `object` leaves a linked member's empty default
+material empty and paints each copy that has no material of its own
+(the copy entered in an open set included); a set whose member has a
+default material shows it on every copy, so that set is left alone.
+
 **Tree and entity members.** `hew.query.scene`'s nodes carry `user_hidden`,
 `hidden` (effective, within the node's own tree), `material` (an object's
 default material, an instance's own material, else `null`), and `parent`
@@ -2311,7 +2338,14 @@ rule).
   `unknown_component` for a stale target, `unknown_material`.
 - `hew.material.replace` without `object` also switches every instance
   whose own material is `from` (a material only: `from: null` never
-  matches an instance, whose `null` means "no material of its own").
+  matches an instance, whose `null` means "no material of its own"),
+  with one exception: for `from: null`, a linked set's shared member
+  keeps its empty default material and each copy of the set with no
+  material of its own takes `to` instead; a set whose member has a
+  default material is left alone (§7.4).
+- Painting one copy of a linked set whose shared member has a default
+  material moves that material onto the set's other copies first, in
+  the same undo entry; a named component's default material stays put.
 - `hew.query.faces {object | path}`: with `path` (an occurrence path
   ending at an object, §5.2) each face also reports `material_effective`
   through that path. Every face reports `attrs`, its attribute dictionary
