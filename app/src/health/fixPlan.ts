@@ -22,6 +22,7 @@ import { classifyRow, openReason, rowClass, rowDisplayName, rowPlacements, split
 import {
   capOp,
   deleteFacesOp,
+  rejoinSolidOp,
   thickenOp,
   type BatchOp,
   type BatchOptions,
@@ -119,7 +120,7 @@ export function pagesWithItems(plan: FixPlan): KindKey[] {
 /** The person's choice on every page. */
 export interface FixChoices {
   openings: 'close' | 'leave'
-  split: 'rejoin' | 'keepWalls' | 'leave'
+  split: 'rejoin' | 'rejoinSolid' | 'keepWalls' | 'leave'
   flatPanels: 'keep' | 'thicken'
   thickness: { text: string; side: ThickenSide }
   /**
@@ -239,6 +240,12 @@ export function planCommands(plan: FixPlan, choices: FixChoices): FixCommands {
   const keepWalls = choices.split === 'keepWalls'
   const walls: BatchOp[] = []
   for (const item of acting(plan, choices, 'split')) {
+    // One solid: a single command carries the whole family; the kernel caps
+    // the seams, removes the walls, and unions in one step.
+    if (choices.split === 'rejoinSolid') {
+      ops.push(rejoinSolidOp(item.rows))
+      continue
+    }
     // A split shape's pieces are every member that is not a flat wall; each
     // closes only where it meets another piece, so openings the shape was
     // drawn with stay open.
@@ -259,6 +266,10 @@ export function planCommands(plan: FixPlan, choices: FixChoices): FixCommands {
       }
     }
   }
+  // Rejoins are addressed by family index, and one that runs may shift the
+  // indices after it: run the highest index first so the rest still point at
+  // their own shapes.
+  if (choices.split === 'rejoinSolid') ops.sort((a, b) => (b.params?.family as number) - (a.params?.family as number))
   ops.push(...walls)
 
   for (const item of acting(plan, choices, 'openings')) ops.push(capOp(item.rows[0]))
@@ -293,7 +304,13 @@ export function readySentences(plan: FixPlan, choices: FixChoices): string[] {
   const openings = acting(plan, choices, 'openings')
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- KindKey identifiers, not copy
   const panels = acting(plan, choices, 'flatPanels')
-  if (split.length > 0) out.push(WIZARD.ready.rejoin(split.length, choices.split === 'keepWalls'))
+  if (split.length > 0) {
+    out.push(
+      choices.split === 'rejoinSolid'
+        ? WIZARD.ready.rejoinSolid(split.length)
+        : WIZARD.ready.rejoin(split.length, choices.split === 'keepWalls'),
+    )
+  }
   if (openings.length > 0) out.push(WIZARD.ready.close(openings.length))
   if (panels.length > 0) out.push(WIZARD.ready.thicken(panels.length, choices.thickness.text.trim()))
   if (out.length === 0) return [WIZARD.ready.nothing]

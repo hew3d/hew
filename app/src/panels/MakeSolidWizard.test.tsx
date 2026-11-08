@@ -420,8 +420,9 @@ describe('MakeSolidWizard — split shapes', () => {
     expect(screen.getByText('1 shape was split into pieces: rejoin them.')).toBeInTheDocument()
     fireEvent.click(btn('Go step by step'))
     expect(screen.getByRole('heading', { name: 'Rejoin split shapes' })).toBeInTheDocument()
-    expect(screen.getAllByRole('radio')).toHaveLength(3)
+    expect(screen.getAllByRole('radio')).toHaveLength(4)
     expect(screen.getByRole('radio', { name: /Rejoin the pieces and remove the inside walls/ })).toBeChecked()
+    expect(screen.getByRole('radio', { name: /Rejoin as one solid/ })).not.toBeChecked()
     fireEvent.click(screen.getByRole('radio', { name: 'Rejoin the pieces and keep the inside walls' }))
     fireEvent.click(btn('Accept'))
     expect(screen.getByText('Rejoin 1 split shape and keep the inside walls.')).toBeInTheDocument()
@@ -430,6 +431,21 @@ describe('MakeSolidWizard — split shapes', () => {
     expect(made.transacts()[0].params.commands).toEqual([
       { method: 'hew.solid.cap', params: { object: 'obj_1', rims: [0] } },
       { method: 'hew.solid.cap', params: { object: 'obj_2', rims: [0] } },
+    ])
+  })
+
+  it('Rejoin as one solid sends one rejoin command carrying the whole family, and the Ready page says so', async () => {
+    const made = makeScene(rows, { families })
+    setup({ scene: made.scene })
+    fireEvent.click(btn('Go step by step'))
+    fireEvent.click(screen.getByRole('radio', { name: /Rejoin as one solid/ }))
+    fireEvent.click(btn('Accept'))
+    expect(screen.getByText('Rejoin 1 split shape as one solid.')).toBeInTheDocument()
+    fireEvent.click(btn('Make Solid'))
+    await waitFor(() => expect(page()).toBe('done'))
+    expect(made.transacts()).toHaveLength(1)
+    expect(made.transacts()[0].params.commands).toEqual([
+      { method: 'hew.solid.rejoin', params: { family: 0, as: 'one_solid' } },
     ])
   })
 

@@ -54,6 +54,7 @@ import {
   closableRows,
   failureLine,
   familyCascade,
+  familyRejoinSolidOps,
   familyRepairOps,
   groupBatchButtons,
   markOp,
@@ -633,6 +634,7 @@ export function ModelHealthPanel({
     const keep = keepSheets[family] === true
     const ops = familyRepairOps(rows, keep)
     if (ops.length === 0) return null
+    const solidOps = familyRejoinSolidOps(rows)
     return (
       <>
         <label
@@ -652,6 +654,14 @@ export function ModelHealthPanel({
           () => execute('repair', ops, `repair:${family}`, { cascade: familyCascade }),
           previewProps(rows.filter((r) => r.verdict.kind === 'cappable')),
         )}
+        {solidOps.length > 0 &&
+          batchButton(
+            `solid:${family}`,
+            ACTION.rejoinSolid,
+            TOOLTIP.rejoinSolid,
+            () => execute('rejoinSolid', solidOps, `solid:${family}`),
+            previewProps(rows.filter((r) => r.verdict.kind === 'cappable')),
+          )}
       </>
     )
   }

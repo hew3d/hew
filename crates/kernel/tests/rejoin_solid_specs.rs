@@ -273,6 +273,30 @@ fn the_result_keeps_the_cells_group_parent() {
 }
 
 #[test]
+fn a_grouped_rejoin_reports_the_group_as_changed() {
+    let mut doc = ingest(vec![ImportNode::Group {
+        name: "Board".into(),
+        children: vec![
+            ImportNode::Mesh(half("Left", 0.0, 1.0, &[3])),
+            ImportNode::Mesh(half("Right", 1.0, 2.0, &[5])),
+            ImportNode::Mesh(wall(1.0)),
+        ],
+        tags: Vec::new(),
+        hidden: false,
+        key: None,
+    }]);
+    let group = doc
+        .node_parent(NodeId::Object(by_name(&doc, "Left")))
+        .expect("grouped");
+    let (result, change) = doc.rejoin_as_one_solid(&family(&doc)).unwrap();
+    assert!(
+        change.groups_touched.contains(&group),
+        "the group is in the change set so the Outliner and renderer refresh it"
+    );
+    assert!(change.objects_touched.contains(&result));
+}
+
+#[test]
 fn one_undo_entry_restores_every_piece_and_the_wall_exactly() {
     let mut doc = split_box();
     let members = family(&doc);

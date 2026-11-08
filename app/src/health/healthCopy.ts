@@ -157,6 +157,9 @@ export const ACTION = {
   get rejoin() {
     return t`Rejoin`
   },
+  get rejoinSolid() {
+    return t`Rejoin as one solid`
+  },
   get keepInsideWalls() {
     return t`Keep the inside walls`
   },
@@ -225,6 +228,9 @@ export const TOOLTIP = {
   },
   get rejoin() {
     return t`Close the pieces where they meet and remove the inside walls between them`
+  },
+  get rejoinSolid() {
+    return t`Close the pieces where they meet, remove the inside walls, and join the pieces into one solid`
   },
   get rejoinKeepingWalls() {
     return t`Close the pieces where they meet and keep the inside walls`
@@ -308,7 +314,7 @@ export const LOOK_ALIKE = {
 }
 
 /** The line under a row an action refused. */
-export function rowWarning(action: 'close' | 'thicken' | 'keep', reason: string): string {
+export function rowWarning(action: 'close' | 'thicken' | 'keep' | 'rejoin', reason: string): string {
   switch (action) {
     case 'close':
       return t`Couldn't close: ${reason}`
@@ -316,6 +322,8 @@ export function rowWarning(action: 'close' | 'thicken' | 'keep', reason: string)
       return t`Couldn't add thickness: ${reason}`
     case 'keep':
       return t`Couldn't keep: ${reason}`
+    case 'rejoin':
+      return t`Couldn't rejoin: ${reason}`
   }
 }
 
@@ -330,13 +338,16 @@ export const UNDO_LABEL = {
   keep: (objects: number) => plural(objects, { one: 'Keep # object as is', other: 'Keep # objects as is' }),
   thicken: (panels: number) => plural(panels, { one: 'Add thickness to # panel', other: 'Add thickness to # panels' }),
   rejoin: (shapes: number) => plural(shapes, { one: 'Rejoin # split shape', other: 'Rejoin # split shapes' }),
+  get rejoinSolid() {
+    return t`Rejoin as one solid`
+  },
   get makeSolid() {
     return t`Make Solid`
   },
 }
 
 /** What a batch did, for its toast. */
-export type ToastKind = 'close' | 'mark' | 'thicken' | 'repair'
+export type ToastKind = 'close' | 'mark' | 'thicken' | 'repair' | 'rejoinSolid'
 
 /**
  * A batch's toast: "Closed 11 objects." / "Closed 11 objects. 1 couldn't be
@@ -368,6 +379,10 @@ export function batchToast(kind: ToastKind, ok: number, failed: number): string 
         one: "# couldn't be given a thickness; see the list.",
         other: "# couldn't be given a thickness; see the list.",
       })
+      break
+    case 'rejoinSolid':
+      head = ok > 0 ? t`Rejoined as one solid.` : t`Nothing was rejoined.`
+      tail = plural(failed, { one: "# couldn't be rejoined; see the list.", other: "# couldn't be rejoined; see the list." })
       break
     case 'repair':
       head =
@@ -656,6 +671,12 @@ export const WIZARD = {
   get splitRejoin() {
     return t`Rejoin the pieces and remove the inside walls`
   },
+  get splitRejoinSolid() {
+    return t`Rejoin as one solid`
+  },
+  get splitRejoinSolidDetail() {
+    return t`Close the pieces where they meet, remove the inside walls, and join the pieces into one solid`
+  },
   get splitKeepWalls() {
     return t`Rejoin the pieces and keep the inside walls`
   },
@@ -711,6 +732,8 @@ export const WIZARD = {
             other: 'Rejoin # split shapes and keep the inside walls.',
           })
         : plural(shapes, { one: 'Rejoin # split shape.', other: 'Rejoin # split shapes.' }),
+    rejoinSolid: (shapes: number) =>
+      plural(shapes, { one: 'Rejoin # split shape as one solid.', other: 'Rejoin # split shapes as one solid.' }),
     thicken: (panels: number, thickness: string) =>
       plural(panels, {
         one: `Give # flat panel a thickness of ${thickness}.`,

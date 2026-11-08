@@ -372,7 +372,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "Two faces in this panel meet without sharing an edge, so a thickness would leave a crack inside. Draw a line where they meet, then try again."
         }
         "RejoinNotPossible" => {
-            "These pieces can't be joined into one solid. The shape has an opening, the pieces sit in different groups, or they aren't one whole split shape. Use Rejoin to close each piece instead."
+            "These pieces can't be joined into one solid. An opening may keep the result open, there may be only one piece, the pieces may sit in different groups, they may not fit together into one solid, or they may be in a group inside a component, which Hew can't rejoin yet. Use Rejoin to close each piece instead."
         }
         "ExplodeSessionOpen" => {
             "This component is already open for editing further out. Step back out to it (Escape) instead of opening it again — and close the editor before saving."

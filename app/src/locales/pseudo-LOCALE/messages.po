@@ -606,6 +606,10 @@ msgid "{shapes, plural, one {Rejoin # split shape and keep the inside walls.} ot
 msgstr ""
 
 #: src/health/healthCopy.ts
+msgid "{shapes, plural, one {Rejoin # split shape as one solid.} other {Rejoin # split shapes as one solid.}}"
+msgstr ""
+
+#: src/health/healthCopy.ts
 msgid "{shapes, plural, one {Rejoin # split shape.} other {Rejoin # split shapes.}}"
 msgstr ""
 
@@ -1851,6 +1855,10 @@ msgid "Close the pieces where they meet and remove the inside walls between them
 msgstr ""
 
 #: src/health/healthCopy.ts
+msgid "Close the pieces where they meet, remove the inside walls, and join the pieces into one solid"
+msgstr ""
+
+#: src/health/healthCopy.ts
 msgid "Close this opening"
 msgstr ""
 
@@ -2235,6 +2243,10 @@ msgstr ""
 
 #: src/panels/LibraryDialog.tsx
 msgid "Couldn’t read the library: {loadError}"
+msgstr ""
+
+#: src/health/healthCopy.ts
+msgid "Couldn't rejoin: {reason}"
 msgstr ""
 
 #: src/tools/TapeMeasureTool.ts
@@ -6665,6 +6677,10 @@ msgid "Rejoin"
 msgstr ""
 
 #: src/health/healthCopy.ts
+msgid "Rejoin as one solid"
+msgstr ""
+
+#: src/health/healthCopy.ts
 msgid "Rejoin split shapes"
 msgstr ""
 
@@ -6674,6 +6690,10 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Rejoin the pieces and remove the inside walls"
+msgstr ""
+
+#: src/health/healthCopy.ts
+msgid "Rejoined as one solid."
 msgstr ""
 
 #: src/palette/registry.ts
@@ -8802,7 +8822,7 @@ msgid "These objects aren't solid, so the {format} may not print cleanly:"
 msgstr ""
 
 #: src/kernelErrors.ts
-msgid "These pieces can't be joined into one solid. The shape has an opening, the pieces sit in different groups, or they aren't one whole split shape. Use Rejoin to close each piece instead."
+msgid "These pieces can't be joined into one solid. An opening may keep the result open, there may be only one piece, the pieces may sit in different groups, they may not fit together into one solid, or they may be in a group inside a component, which Hew can't rejoin yet. Use Rejoin to close each piece instead."
 msgstr ""
 
 #: src/health/healthCopy.ts

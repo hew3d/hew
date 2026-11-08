@@ -13355,7 +13355,7 @@ Rejoin one seam family of split pieces as a single solid (Model Health's Rejoin 
 
 - `unknown_family`
 - `not_cappable`
-- `rejoin_not_possible` — These pieces can't be joined into one solid. The shape has an opening, the pieces sit in different groups, or they aren't one whole split shape. Use Rejoin to close each piece instead.
+- `rejoin_not_possible` — These pieces can't be joined into one solid. An opening may keep the result open, there may be only one piece, the pieces may sit in different groups, they may not fit together into one solid, or they may be in a group inside a component, which Hew can't rejoin yet. Use Rejoin to close each piece instead.
 - `rim_not_planar` — This opening isn't flat, so one face can't close it. Draw faces across it by hand.
 - `rim_self_intersecting` — The edge of this opening crosses itself, so one face can't close it. Draw faces across it by hand.
 - `cap_would_be_coplanar` — This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid.

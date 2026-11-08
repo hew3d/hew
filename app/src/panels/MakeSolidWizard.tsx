@@ -547,11 +547,12 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
 
   // ---------------------------------------------------------------- pieces
 
-  const radio = (name: string, label: string, checked: boolean, onChange: () => void, recommended: boolean, disabled = false): React.ReactNode => (
+  const radio = (name: string, label: string, checked: boolean, onChange: () => void, recommended: boolean, disabled = false, detail?: string): React.ReactNode => (
     <label key={label} style={{ display: 'flex', alignItems: 'baseline', gap: '8px', padding: '3px 0' }}>
       <input type="radio" name={name} checked={checked} disabled={disabled} onChange={onChange} />
       <span style={{ color: 'var(--text-primary)' }}>{label}</span>
       {recommended && <span style={{ color: 'var(--text-faint)', fontSize: '12px' }}>({WIZARD.recommended})</span>}
+      {detail !== undefined && <span style={{ color: 'var(--text-faint)', fontSize: '12px' }}>{detail}</span>}
     </label>
   )
 
@@ -681,6 +682,8 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
           <>
             <p>{WIZARD.splitBody}</p>
             {radio('wz-split', WIZARD.splitRejoin, choices.split === 'rejoin', () => setPageChoice('split', 'rejoin'), true)}
+            {/* oxlint-disable-next-line lingui/no-unlocalized-strings -- wizard choice id, not copy */}
+            {radio('wz-split', WIZARD.splitRejoinSolid, choices.split === 'rejoinSolid', () => setPageChoice('split', 'rejoinSolid'), false, false, WIZARD.splitRejoinSolidDetail)}
             {/* oxlint-disable-next-line lingui/no-unlocalized-strings -- wizard choice id, not copy */}
             {radio('wz-split', WIZARD.splitKeepWalls, choices.split === 'keepWalls', () => setPageChoice('split', 'keepWalls'), false)}
             {radio('wz-split', WIZARD.splitLeave, choices.split === 'leave', () => setPageChoice('split', 'leave'), false)}

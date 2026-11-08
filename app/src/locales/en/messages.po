@@ -606,6 +606,10 @@ msgid "{shapes, plural, one {Rejoin # split shape and keep the inside walls.} ot
 msgstr "{shapes, plural, one {Rejoin # split shape and keep the inside walls.} other {Rejoin # split shapes and keep the inside walls.}}"
 
 #: src/health/healthCopy.ts
+msgid "{shapes, plural, one {Rejoin # split shape as one solid.} other {Rejoin # split shapes as one solid.}}"
+msgstr "{shapes, plural, one {Rejoin # split shape as one solid.} other {Rejoin # split shapes as one solid.}}"
+
+#: src/health/healthCopy.ts
 msgid "{shapes, plural, one {Rejoin # split shape.} other {Rejoin # split shapes.}}"
 msgstr "{shapes, plural, one {Rejoin # split shape.} other {Rejoin # split shapes.}}"
 
@@ -1851,6 +1855,10 @@ msgid "Close the pieces where they meet and remove the inside walls between them
 msgstr "Close the pieces where they meet and remove the inside walls between them"
 
 #: src/health/healthCopy.ts
+msgid "Close the pieces where they meet, remove the inside walls, and join the pieces into one solid"
+msgstr "Close the pieces where they meet, remove the inside walls, and join the pieces into one solid"
+
+#: src/health/healthCopy.ts
 msgid "Close this opening"
 msgstr "Close this opening"
 
@@ -2236,6 +2244,10 @@ msgstr "Couldn't read that picture. Check that the file is still there, then pic
 #: src/panels/LibraryDialog.tsx
 msgid "Couldn’t read the library: {loadError}"
 msgstr "Couldn’t read the library: {loadError}"
+
+#: src/health/healthCopy.ts
+msgid "Couldn't rejoin: {reason}"
+msgstr "Couldn't rejoin: {reason}"
 
 #: src/tools/TapeMeasureTool.ts
 msgid "Couldn't resize {scopeLabel}: {raw}"
@@ -6667,6 +6679,10 @@ msgid "Rejoin"
 msgstr "Rejoin"
 
 #: src/health/healthCopy.ts
+msgid "Rejoin as one solid"
+msgstr "Rejoin as one solid"
+
+#: src/health/healthCopy.ts
 msgid "Rejoin split shapes"
 msgstr "Rejoin split shapes"
 
@@ -6677,6 +6693,10 @@ msgstr "Rejoin the pieces and keep the inside walls"
 #: src/health/healthCopy.ts
 msgid "Rejoin the pieces and remove the inside walls"
 msgstr "Rejoin the pieces and remove the inside walls"
+
+#: src/health/healthCopy.ts
+msgid "Rejoined as one solid."
+msgstr "Rejoined as one solid."
 
 #: src/palette/registry.ts
 msgid "reload"
@@ -8806,8 +8826,8 @@ msgid "These objects aren't solid, so the {format} may not print cleanly:"
 msgstr "These objects aren't solid, so the {format} may not print cleanly:"
 
 #: src/kernelErrors.ts
-msgid "These pieces can't be joined into one solid. The shape has an opening, the pieces sit in different groups, or they aren't one whole split shape. Use Rejoin to close each piece instead."
-msgstr "These pieces can't be joined into one solid. The shape has an opening, the pieces sit in different groups, or they aren't one whole split shape. Use Rejoin to close each piece instead."
+msgid "These pieces can't be joined into one solid. An opening may keep the result open, there may be only one piece, the pieces may sit in different groups, they may not fit together into one solid, or they may be in a group inside a component, which Hew can't rejoin yet. Use Rejoin to close each piece instead."
+msgstr "These pieces can't be joined into one solid. An opening may keep the result open, there may be only one piece, the pieces may sit in different groups, they may not fit together into one solid, or they may be in a group inside a component, which Hew can't rejoin yet. Use Rejoin to close each piece instead."
 
 #: src/health/healthCopy.ts
 msgid "These shapes have open sides or gaps. Most are open on purpose, like a duct, a pipe, or a box without a lid. Closing one adds a flat face across each opening, which makes it solid."

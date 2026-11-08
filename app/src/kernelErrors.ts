@@ -281,7 +281,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   UnjoinedSeam:
     msg`Two faces in this panel meet without sharing an edge, so a thickness would leave a crack inside. Draw a line where they meet, then try again.`,
   RejoinNotPossible:
-    msg`These pieces can't be joined into one solid. The shape has an opening, the pieces sit in different groups, or they aren't one whole split shape. Use Rejoin to close each piece instead.`,
+    msg`These pieces can't be joined into one solid. An opening may keep the result open, there may be only one piece, the pieces may sit in different groups, they may not fit together into one solid, or they may be in a group inside a component, which Hew can't rejoin yet. Use Rejoin to close each piece instead.`,
 
   // ---------------------------------------------------------- explode session
   ExplodeSessionOpen:

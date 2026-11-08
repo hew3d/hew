@@ -1059,12 +1059,14 @@ below.
   a family, a shape drawn with an opening, pieces or walls under
   different parents, pieces that meet only through a wall, or a seam that
   cannot take a cap refuses typed (`RejoinNotPossible`, or the cap's own
-  refusal) and leaves the model as it was. The `hew.solid.rejoin` bus
-  command (`{family, as: "one_solid"}`, family resolved from the current
-  whole-model health report) exists; the Model Health button and the
-  Make Solid choice for it still repair through `hew.solid.cap` and
-  `hew.solid.delete_faces`, and moving them onto the command is still to
-  come
+  refusal) and leaves the model as it was. Pieces in a group inside a
+  component refuse for now. The `hew.solid.rejoin` bus command
+  (`{family, as: "one_solid"}`, family resolved from the current
+  whole-model health report) exists; Model Health carries a "Rejoin as
+  one solid" button beside "Rejoin", and the Make Solid wizard's split
+  page a fourth radio. Both send one `hew.solid.rejoin` command (a
+  `BatchOp` addressed by family index), inside the same transaction as
+  the other repairs
 - Binary STL export, scaled for 3D printing; export is gated on every
   object being a solid, so an exported file is guaranteed manifold
 - STL curve resolution: cylinder walls re-facet from their analytic

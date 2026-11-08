@@ -21,10 +21,18 @@ import { parseDispatch } from '../api/dispatchResult'
 /** One repair: an API command on one object. */
 export interface BatchOp {
   object: bigint
-  /** `hew.solid.cap` | `hew.solid.thicken` | `hew.solid.mark_surface` | `hew.solid.delete_faces`. */
+  /** `hew.solid.cap` | `hew.solid.thicken` | `hew.solid.mark_surface` | `hew.solid.delete_faces` | `hew.solid.rejoin`. */
   method: string
   /** The command's params besides `object`. */
   params?: Record<string, unknown>
+  /**
+   * `hew.solid.rejoin` only: every Object of the split shape (pieces and
+   * inside walls). The command is addressed by family index (`params.family`)
+   * and carries no `object`, so `runBatch` uses these handles only to fail
+   * the op as stale when a member is gone; `object` is then just the family's
+   * first row, for failure reporting.
+   */
+  members?: bigint[]
 }
 
 export interface BatchFailure {
@@ -111,7 +119,8 @@ export function runBatch(
       const idOf = new Map<BatchOp, string>()
       const live: BatchOp[] = []
       remaining.forEach((op, i) => {
-        if (ids[i]) {
+        const members = op.members === undefined ? null : Array.from(scene.object_public_ids(BigUint64Array.from(op.members)))
+        if (ids[i] && (members === null || members.every((m) => m))) {
           live.push(op)
           idOf.set(op, ids[i])
         } else {
@@ -124,7 +133,8 @@ export function runBatch(
         label: label(remaining.length),
         commands: remaining.map((op) => ({
           method: op.method,
-          params: { object: idOf.get(op), ...(op.params ?? {}) },
+          // A family-addressed op (rejoin) names no object.
+          params: op.members === undefined ? { object: idOf.get(op), ...(op.params ?? {}) } : { ...(op.params ?? {}) },
         })),
       })
       if (reply.error === undefined) {
@@ -161,7 +171,7 @@ export function runBatch(
 // Plans: which ops a header button runs
 // ---------------------------------------------------------------------------
 
-export type BatchKind = 'close' | 'mark' | 'thicken' | 'repair'
+export type BatchKind = 'close' | 'mark' | 'thicken' | 'repair' | 'rejoinSolid'
 
 /** Undo-entry label for each batch kind. */
 export function batchLabel(kind: BatchKind, n: number): string {
@@ -174,14 +184,17 @@ export function batchLabel(kind: BatchKind, n: number): string {
       return UNDO_LABEL.thicken(n)
     case 'repair':
       return UNDO_LABEL.rejoin(n)
+    case 'rejoinSolid':
+      return UNDO_LABEL.rejoinSolid
   }
 }
 
-const ACTION_ROW: Record<BatchKind, 'close' | 'thicken' | 'keep'> = {
+const ACTION_ROW: Record<BatchKind, 'close' | 'thicken' | 'keep' | 'rejoin'> = {
   close: 'close',
   mark: 'keep',
   thicken: 'thicken',
   repair: 'close',
+  rejoinSolid: 'rejoin',
 }
 
 /** The warning line under a row a batch refused. */
@@ -206,6 +219,20 @@ export const thickenOp = (row: HealthRow, distance: number, centered: boolean): 
   method: 'hew.solid.thicken',
   params: centered ? { distance, centered: true } : { distance },
 })
+/**
+ * Rejoin a whole split shape as one solid: one command addressed by the
+ * family index the rows carry (`{ family, as: 'one_solid' }`, no object).
+ */
+export const rejoinSolidOp = (rows: readonly HealthRow[]): BatchOp => {
+  const family = rows[0].family
+  if (family === null) throw new Error('rejoinSolidOp needs rows of a split shape')
+  return {
+    object: rows[0].object,
+    method: 'hew.solid.rejoin',
+    params: { family, as: 'one_solid' },
+    members: rows.map((r) => r.object),
+  }
+}
 export const deleteFacesOp = (row: HealthRow): BatchOp => ({ object: row.object, method: 'hew.solid.delete_faces' })
 
 /** Rows a group's **Close all** caps: those with a flat opening to fill. */
@@ -245,6 +272,13 @@ export function familyRepairOps(rows: readonly HealthRow[], keepSheets: boolean)
     .map((r) => (keepSheets ? markOp(r) : deleteFacesOp(r)))
   return [...caps, ...sheets]
 }
+
+/**
+ * The Model Health "Rejoin as one solid" button: one rejoin op for the shape,
+ * offered only with at least two pieces (members that are not flat walls).
+ */
+export const familyRejoinSolidOps = (rows: readonly HealthRow[]): BatchOp[] =>
+  rows.filter((r) => r.verdict.kind !== 'flat_sheet').length < 2 ? [] : [rejoinSolidOp(rows)]
 
 /** An inside wall must not go when a piece it depends on couldn't be closed. */
 export const familyCascade: NonNullable<BatchOptions['cascade']> = (failed, remaining) => {

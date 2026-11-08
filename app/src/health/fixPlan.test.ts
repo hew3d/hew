@@ -207,6 +207,56 @@ describe('commands', () => {
     expect(methods(planCommands(plan, choices({ perItem: ticks([['family-0', false]]) })))).toEqual([])
   })
 
+  it('rejoinSolid emits one rejoin op with the family and no cap ops', () => {
+    const cmds = planCommands(plan, choices({ split: 'rejoinSolid' }))
+    if (!cmds.ok) throw new Error(cmds.error)
+    expect(cmds.ops).toEqual([
+      { object: 5n, method: 'hew.solid.rejoin', params: { family: 0, as: 'one_solid' }, members: [5n, 6n, 7n] },
+    ])
+    // A real cascade lookup: a refused rejoin takes nothing else with it.
+    expect(cmds.options.cascade!(cmds.ops[0], cmds.ops)).toBeNull()
+    // And the cascade does fire for a refused cap in the default plan.
+    const dflt = planCommands(plan, defaultChoices('model'))
+    if (!dflt.ok) throw new Error(dflt.error)
+    expect(dflt.options.cascade!(dflt.ops[0], dflt.ops)?.ops).toEqual([dflt.ops[2]])
+  })
+
+  it('several rejoins run by descending family index, so earlier ones do not shift later indices', () => {
+    const two = buildPlan(
+      report(
+        [
+          row({ object: '1', family: 0, rims: [SEAM] }),
+          row({ object: '2', family: 0, rims: [SEAM] }),
+          row({ object: '3', family: 1, rims: [SEAM] }),
+          row({ object: '4', family: 1, rims: [SEAM] }),
+        ],
+        [{ members: ['1', '2'], shared_rims: 1 }, { members: ['3', '4'], shared_rims: 1 }],
+      ),
+    )
+    const cmds = planCommands(two, choices({ split: 'rejoinSolid' }))
+    if (!cmds.ok) throw new Error(cmds.error)
+    expect(cmds.ops.map((o) => o.params)).toEqual([
+      { family: 1, as: 'one_solid' },
+      { family: 0, as: 'one_solid' },
+    ])
+  })
+
+  it('rejoin and keepWalls plans are unchanged', () => {
+    expect(methods(planCommands(plan, choices({ split: 'rejoin' })))).toEqual([
+      ['hew.solid.cap', 5n, { rims: [0] }],
+      ['hew.solid.cap', 6n, { rims: [0] }],
+      ['hew.solid.delete_faces', 7n, null],
+    ])
+    expect(methods(planCommands(plan, choices({ split: 'keepWalls' })))).toEqual([
+      ['hew.solid.cap', 5n, { rims: [0] }],
+      ['hew.solid.cap', 6n, { rims: [0] }],
+    ])
+  })
+
+  it('per-item unticking removes the rejoin op', () => {
+    expect(methods(planCommands(plan, choices({ split: 'rejoinSolid', perItem: ticks([['family-0', false]]) })))).toEqual([])
+  })
+
   it('a refused piece only keeps the wall of its own split shape', () => {
     const two = buildPlan(
       report(
@@ -254,6 +304,28 @@ describe('Ready sentences', () => {
       'Close the openings in 2 shapes.',
       'Leave 3 objects as they are.',
     ])
+  })
+
+  it('rejoinSolid ready sentence names one solid', () => {
+    expect(readySentences(plan, choices({ split: 'rejoinSolid' }))).toEqual([
+      'Rejoin 1 split shape as one solid.',
+      'Leave 5 objects as they are.',
+    ])
+  })
+
+  it('rejoinSolid ready sentence is plural for several shapes', () => {
+    const two = buildPlan(
+      report(
+        [
+          row({ object: '1', family: 0, rims: [SEAM] }),
+          row({ object: '2', family: 0, rims: [SEAM] }),
+          row({ object: '3', family: 1, rims: [SEAM] }),
+          row({ object: '4', family: 1, rims: [SEAM] }),
+        ],
+        [{ members: ['1', '2'], shared_rims: 1 }, { members: ['3', '4'], shared_rims: 1 }],
+      ),
+    )
+    expect(readySentences(two, choices({ split: 'rejoinSolid' }))[0]).toBe('Rejoin 2 split shapes as one solid.')
   })
 
   it('reflects non-default choices', () => {
