@@ -8580,6 +8580,13 @@ Distances between points, edges, and faces; or the volume, area, and bounding bo
     {
       "additionalProperties": false,
       "properties": {
+        "exclude": {
+          "description": "Object ids, each one of the target's own members, left out of the frame and the measures (needs scope \"own\"); an id that is not an own member is -32602",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "id": {
           "description": "a world object, group, or instance; a definition member needs path",
           "type": "string"
@@ -8602,6 +8609,13 @@ Distances between points, edges, and faces; or the volume, area, and bounding bo
     {
       "additionalProperties": false,
       "properties": {
+        "exclude": {
+          "description": "Object ids, each one of the target's own members, left out of the frame and the measures (needs scope \"own\"); an id that is not an own member is -32602",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "path": {
           "description": "an occurrence path [...instances, node]",
           "items": {
@@ -9141,6 +9155,13 @@ A part measured along its own axes: origin, axes, and extents of one placement.
 {
   "additionalProperties": false,
   "properties": {
+    "exclude": {
+      "description": "Object ids, each one of the target's own members, left out of the frame and the measures (needs scope \"own\"); an id that is not an own member is -32602",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "id": {
       "description": "a world node's public id",
       "type": "string"

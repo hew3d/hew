@@ -1172,6 +1172,8 @@ struct MeasureParams {
     path: Option<Vec<String>>,
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    exclude: Option<Vec<String>>,
 }
 
 fn measure(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -1183,9 +1185,9 @@ fn measure(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         ));
     }
     let scope = crate::scope::Scope::from_name(p.scope.as_deref())?;
-    if pair && p.scope.is_some() {
+    if pair && (p.scope.is_some() || p.exclude.is_some()) {
         return Err(CmdError::Params(
-            "scope applies to measuring a part ({id} or {path}), not a distance".into(),
+            "scope and exclude apply to measuring a part ({id} or {path}), not a distance".into(),
         ));
     }
     if pair {
@@ -1207,7 +1209,8 @@ fn measure(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         (None, Some(path)) => locate::resolve_occurrence_path(ctx, path)?,
         _ => unreachable!("exactly one subject form"),
     };
-    measure_result_scoped(ctx.doc, occ, scope)
+    let exclude = locate::resolve_excluded(ctx, &occ, scope, p.exclude.as_deref())?;
+    measure_result_excluding(ctx.doc, occ, scope, &exclude)
 }
 
 /// Volume, area, and world-axis bounding box of one placement and
@@ -1225,7 +1228,20 @@ pub fn measure_result_scoped(
     occ: kernel::Occurrence,
     scope: crate::scope::Scope,
 ) -> Result<Value, CmdError> {
-    let leaves = crate::scope::scoped_leaves(doc, &locate::RenderRoot::Occurrence(occ), scope)?;
+    measure_result_excluding(doc, occ, scope, &[])
+}
+
+/// [`measure_result_scoped`] with the Objects in `exclude` left out of the
+/// volume, area, box and counts. Excluding every own Object measures as a
+/// container with none.
+pub fn measure_result_excluding(
+    doc: &kernel::Document,
+    occ: kernel::Occurrence,
+    scope: crate::scope::Scope,
+    exclude: &[kernel::ObjectId],
+) -> Result<Value, CmdError> {
+    let mut leaves = crate::scope::scoped_leaves(doc, &locate::RenderRoot::Occurrence(occ), scope)?;
+    leaves.retain(|(o, _, _)| !exclude.contains(o));
     let mut volume: Option<f64> = None;
     let mut area = 0.0;
     let mut open_leaves = 0usize;

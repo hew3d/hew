@@ -893,6 +893,48 @@ pub fn resolve_world_node(ctx: &Ctx, id: &str) -> Result<kernel::Occurrence, Cmd
     }
 }
 
+/// The `exclude` list of `hew.query.part_frame` / `hew.query.measure`:
+/// public Object ids, each an own member of `occ` (`scope: "own"`). An empty
+/// or absent list is no exclusion.
+///
+/// # Errors
+/// `-32602` — `exclude` without `scope: "own"`, an id that is not an Object,
+/// or an Object that is not one of the container's own members.
+pub fn resolve_excluded(
+    ctx: &Ctx,
+    occ: &kernel::Occurrence,
+    scope: crate::scope::Scope,
+    ids: Option<&[String]>,
+) -> Result<Vec<kernel::ObjectId>, CmdError> {
+    let Some(ids) = ids.filter(|ids| !ids.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    if scope != crate::scope::Scope::Own {
+        return Err(CmdError::Params(
+            "\"exclude\" needs \"scope\": \"own\"".into(),
+        ));
+    }
+    let own: Vec<kernel::ObjectId> = crate::scope::leaves_for(ctx.doc, occ, scope)?
+        .into_iter()
+        .map(|(o, _)| o)
+        .collect();
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(EntityRef::Object(o)) = ctx.resolver().resolve(id) else {
+            return Err(CmdError::Params(format!(
+                "\"exclude\" lists Object ids; \"{id}\" is not one"
+            )));
+        };
+        if !own.contains(&o) {
+            return Err(CmdError::Params(format!(
+                "\"{id}\" is not one of this container's own Objects"
+            )));
+        }
+        out.push(o);
+    }
+    Ok(out)
+}
+
 /// An occurrence path, `[instance, …, leaf]` (docs/agents/HEW_API.md §5.2):
 /// every element but the last an instance, the last any node.
 pub fn resolve_occurrence_path(ctx: &Ctx, ids: &[String]) -> Result<kernel::Occurrence, CmdError> {

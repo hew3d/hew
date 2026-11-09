@@ -1401,7 +1401,7 @@ export interface QueryFacesResult {
  * Tier: Required · Class: read-only · Served: kernel
  * Refusals: unknown_entity, unknown_occurrence, locator_missed, ambiguous_locator, no_such_point, too_many_occurrences
  */
-export type QueryMeasureParams = { from: UnspecifiedShape; to: UnspecifiedShape } | { id: string; scope?: "own" | "all" } | { path: string[]; scope?: "own" | "all" }
+export type QueryMeasureParams = { from: UnspecifiedShape; to: UnspecifiedShape } | { exclude?: string[]; id: string; scope?: "own" | "all" } | { exclude?: string[]; path: string[]; scope?: "own" | "all" }
 
 export type QueryMeasureResult = { delta: unknown[]; distance: number; epoch: number; generation: number } | { area: number; bbox: { max: unknown[]; min: unknown[] }; epoch: number; extents: unknown[]; generation: number; leaf_count: number; open_leaves: number; volume: number | null }
 
@@ -1461,6 +1461,8 @@ export interface QueryOccurrencesResult {
  * Refusals: unknown_entity, unknown_occurrence, no_part_frame, too_many_occurrences
  */
 export interface QueryPartFrameParams {
+  /** Object ids, each one of the target's own members, left out of the frame and the measures (needs scope "own"); an id that is not an own member is -32602 */
+  exclude?: string[]
   /** a world node's public id */
   id?: string
   /** an occurrence path, instances first and the node last */

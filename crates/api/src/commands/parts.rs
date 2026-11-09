@@ -334,6 +334,8 @@ struct TargetParams {
     space: Option<String>,
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    exclude: Option<Vec<String>>,
 }
 
 /// Coordinate space of a mesh or topology result.
@@ -356,8 +358,10 @@ fn target(ctx: &Ctx, p: &TargetParams) -> Result<Occurrence, CmdError> {
 /// `scope` belongs to `hew.query.part_frame` and `hew.query.signature`'s
 /// siblings only; the buffer reads keep their M1 shape.
 fn no_scope(p: &TargetParams, command: &str) -> Result<(), CmdError> {
-    if p.scope.is_some() {
-        return Err(CmdError::Params(format!("{command} takes no \"scope\"")));
+    if p.scope.is_some() || p.exclude.is_some() {
+        return Err(CmdError::Params(format!(
+            "{command} takes no \"scope\" or \"exclude\""
+        )));
     }
     Ok(())
 }
@@ -383,7 +387,8 @@ fn part_frame_cmd(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     }
     let scope = Scope::from_name(p.scope.as_deref())?;
     let occ = target(ctx, &p)?;
-    part_frame_result_scoped(ctx.doc, &occ, scope)?.ok_or_else(|| {
+    let exclude = locate::resolve_excluded(ctx, &occ, scope, p.exclude.as_deref())?;
+    part_frame_result_excluding(ctx.doc, &occ, scope, &exclude)?.ok_or_else(|| {
         CmdError::Refusal(Refusal::api(
             "no_part_frame",
             "That entity has nothing to measure: it holds no faces.",
@@ -415,7 +420,20 @@ pub fn part_frame_result_scoped(
     occ: &Occurrence,
     scope: Scope,
 ) -> Result<Option<Value>, kernel::DocumentError> {
-    let Some(f) = part_frame::part_frame(doc, occ, scope)? else {
+    part_frame_result_excluding(doc, occ, scope, &[])
+}
+
+/// [`part_frame_result_scoped`] with the Objects in `exclude` left out.
+///
+/// # Errors
+/// As [`part_frame_result`].
+pub fn part_frame_result_excluding(
+    doc: &kernel::Document,
+    occ: &Occurrence,
+    scope: Scope,
+    exclude: &[kernel::ObjectId],
+) -> Result<Option<Value>, kernel::DocumentError> {
+    let Some(f) = part_frame::part_frame_excluding(doc, occ, scope, exclude)? else {
         return Ok(None);
     };
     Ok(Some(json!({
@@ -436,7 +454,7 @@ pub fn part_frame_result_scoped(
 /// group or instance refuses `not_an_object`.
 fn signature(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: TargetParams = parse(params)?;
-    if p.space.is_some() || p.scope.is_some() {
+    if p.space.is_some() || p.scope.is_some() || p.exclude.is_some() {
         return Err(CmdError::Params(
             "hew.query.signature takes only \"id\" or \"path\"".into(),
         ));

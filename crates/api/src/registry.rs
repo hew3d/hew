@@ -322,6 +322,15 @@ fn occurrence_target_schema(with_space: bool) -> serde_json::Value {
     })
 }
 
+/// `exclude` on the part reads (HEW_API.md "exclude").
+fn exclude_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Object ids, each one of the target's own members, left out of the frame and the measures (needs scope \"own\"); an id that is not an own member is -32602"
+    })
+}
+
 /// `scope` on the part reads and the render commands (docs/agents/PLUGINS.md
 /// "Reading a container's own Objects").
 fn scope_schema() -> serde_json::Value {
@@ -1959,13 +1968,13 @@ impl Registry {
                     },
                     {
                         "type": "object",
-                        "properties": { "id": { "type": "string", "description": "a world object, group, or instance; a definition member needs path" }, "scope": scope_schema() },
+                        "properties": { "id": { "type": "string", "description": "a world object, group, or instance; a definition member needs path" }, "scope": scope_schema(), "exclude": exclude_schema() },
                         "required": ["id"],
                         "additionalProperties": false
                     },
                     {
                         "type": "object",
-                        "properties": { "path": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "an occurrence path [...instances, node]" }, "scope": scope_schema() },
+                        "properties": { "path": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "an occurrence path [...instances, node]" }, "scope": scope_schema(), "exclude": exclude_schema() },
                         "required": ["path"],
                         "additionalProperties": false
                     }
@@ -2120,6 +2129,7 @@ impl Registry {
             cmd.implemented = true;
             let mut params = occurrence_target_schema(false);
             params["properties"]["scope"] = scope_schema();
+            params["properties"]["exclude"] = exclude_schema();
             cmd.params_schema = params;
             let vec3 = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
             cmd.result_schema = serde_json::json!({

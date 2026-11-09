@@ -2193,6 +2193,17 @@ placement instead). A container with no own objects refuses as an
 empty one does: `no_part_frame`, `-32602` for `measure` and the render
 commands. `hew.query.mesh` and `hew.query.topology` take no `scope`.
 
+**`exclude: ["obj_…"]`** on `hew.query.part_frame` and `hew.query.measure`
+(with `scope: "own"` only): those own Objects are left out of the frame and
+of the measures (`volume`, `area`, `bbox`, `extents`, `leaf_count`, `open_leaves`), so a
+part is sized without its machining bodies (a bore, a groove). Each id must
+be an Object that is one of the target's own members; an id that is not an
+Object, is not an own member, or is given without `scope: "own"` is
+`-32602`; an empty list excludes nothing. Excluding every own Object leaves nothing to measure and refuses
+as a container with no own Objects does (`no_part_frame`; `-32602` for
+`measure`). `hew.query.mesh`, `hew.query.topology`, and
+`hew.query.signature` take no `exclude`.
+
 **`hew.query.signature`** `{id | path}` tells whether two objects are the
 same part or mirrored twins: `{shape, mirror, symmetric, frame: {origin,
 x, y, z}}`. `frame` is the object's face frame (`l ≥ w ≥ t`,

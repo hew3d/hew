@@ -378,17 +378,32 @@ pub fn part_frame(
     occ: &Occurrence,
     scope: Scope,
 ) -> Result<Option<PartFrame>, DocumentError> {
+    part_frame_excluding(doc, occ, scope, &[])
+}
+
+/// [`part_frame`] with the Objects in `exclude` left out of the leaves
+/// measured (the caller has checked they are own members, so `scope` is
+/// [`Scope::Own`]). `Ok(None)` when nothing is left to measure.
+///
+/// # Errors
+/// As [`part_frame`].
+pub fn part_frame_excluding(
+    doc: &Document,
+    occ: &Occurrence,
+    scope: Scope,
+    exclude: &[ObjectId],
+) -> Result<Option<PartFrame>, DocumentError> {
     match occ.node {
         NodeId::Instance(inst) => {
             let Some(def) = occ.definition else {
                 return Ok(None);
             };
-            if let Some(f) = member_override_frame(doc, occ, inst, def, scope)? {
+            if let Some(f) = member_override_frame(doc, occ, inst, def, scope, exclude)? {
                 return Ok(Some(f));
             }
             let bounds = match scope {
                 Scope::All => doc.definition_bounds_checked(def)?,
-                Scope::Own => definition_own_bounds(doc, def)?,
+                Scope::Own => definition_own_bounds(doc, def, exclude)?,
             };
             let Some((lo, hi)) = bounds else {
                 return Ok(None);
@@ -414,7 +429,8 @@ pub fn part_frame(
             }))
         }
         NodeId::Object(_) | NodeId::Group(_) => {
-            let leaves = crate::scope::leaves_for(doc, occ, scope)?;
+            let mut leaves = crate::scope::leaves_for(doc, occ, scope)?;
+            leaves.retain(|(o, _)| !exclude.contains(o));
             let Some(face) = face_frame(doc, &leaves) else {
                 return Ok(None);
             };
@@ -439,12 +455,14 @@ pub fn face_frame(doc: &Document, leaves: &[(ObjectId, Transform)]) -> Option<Pa
 fn definition_own_bounds(
     doc: &Document,
     def: kernel::ComponentId,
+    exclude: &[ObjectId],
 ) -> Result<Option<(Point3, Point3)>, DocumentError> {
     let leaves = crate::scope::scoped_leaves(doc, &RenderRoot::Definition(def), Scope::Own)?;
     let mut acc: Option<(Point3, Point3)> = None;
     for p in world_points(
         &leaves
             .into_iter()
+            .filter(|(o, _, _)| !exclude.contains(o))
             .map(|(o, t, _)| (o, t))
             .collect::<Vec<_>>(),
         doc,
@@ -473,6 +491,7 @@ fn member_override_frame(
     inst: kernel::InstanceId,
     def: kernel::ComponentId,
     scope: Scope,
+    exclude: &[ObjectId],
 ) -> Result<Option<PartFrame>, DocumentError> {
     let Some(members) = doc.def_member_nodes(def) else {
         return Ok(None);
@@ -497,7 +516,7 @@ fn member_override_frame(
     let Some(member_occ) = doc.occurrence_at(&path, *member) else {
         return Ok(None);
     };
-    part_frame(doc, &member_occ, scope)
+    part_frame_excluding(doc, &member_occ, scope, exclude)
 }
 
 /// Rule 2: the override read in the face frame's coordinates — the frame

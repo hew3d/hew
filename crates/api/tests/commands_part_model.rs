@@ -1226,3 +1226,193 @@ fn rejoin_label_and_class_match_union() {
     );
     assert_eq!(r["label"], "hew.solid.rejoin");
 }
+
+/// A group of a 0.7 x 0.45 x 0.018 board and a 0.3 x 0.02 x 0.036 machining
+/// body that sticks out of it; the group's public id, the board's, the
+/// machining body's.
+fn machined_board() -> (Document, String, String, String) {
+    let mut doc = Document::new();
+    let board = cuboid(&mut doc, [0.0, 0.0, 0.0], [0.7, 0.45, 0.018]);
+    let cut = cuboid(&mut doc, [0.2, 0.2, -0.009], [0.3, 0.02, 0.036]);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(board), NodeId::Object(cut)])
+        .unwrap();
+    let ids = (
+        public(&doc, EntityRef::Group(g)),
+        public(&doc, EntityRef::Object(board)),
+        public(&doc, EntityRef::Object(cut)),
+    );
+    (doc, ids.0, ids.1, ids.2)
+}
+
+#[test]
+fn part_frame_exclude_leaves_the_named_own_objects_out() {
+    let (mut doc, g, board, cut) = machined_board();
+    let with = ok(
+        &mut doc,
+        "hew.query.part_frame",
+        json!({ "id": g, "scope": "own" }),
+    );
+    assert!((with["extents"][2].as_f64().unwrap() - 0.018).abs() > 1e-6);
+    let without = ok(
+        &mut doc,
+        "hew.query.part_frame",
+        json!({ "id": g, "scope": "own", "exclude": [cut] }),
+    );
+    close(&without["extents"], [0.7, 0.45, 0.018], 1e-9);
+    // An empty list is no exclusion.
+    let empty = ok(
+        &mut doc,
+        "hew.query.part_frame",
+        json!({ "id": g, "scope": "own", "exclude": [] }),
+    );
+    assert_eq!(empty, with);
+    // Excluding every own Object leaves nothing to measure.
+    assert_eq!(
+        refusal(
+            &mut doc,
+            "hew.query.part_frame",
+            json!({ "id": g, "scope": "own", "exclude": [board, cut] })
+        ),
+        "no_part_frame"
+    );
+}
+
+#[test]
+fn part_frame_exclude_is_invalid_without_own_or_for_a_stranger() {
+    let (mut doc, g, board, cut) = machined_board();
+    for params in [
+        json!({ "id": g, "exclude": [cut.clone()] }),
+        json!({ "id": g, "scope": "all", "exclude": [cut.clone()] }),
+        json!({ "id": g, "scope": "own", "exclude": [g.clone()] }),
+        json!({ "id": g, "scope": "own", "exclude": ["obj_nope"] }),
+        json!({ "id": board, "scope": "own", "exclude": [cut.clone()] }),
+    ] {
+        for cmd in ["hew.query.part_frame", "hew.query.measure"] {
+            let r = call(&mut doc, &mut NoHost, cmd, params.clone());
+            assert_eq!(r["error"]["code"], -32602, "{cmd} {params}");
+        }
+    }
+    // The buffer reads and the signature take no exclude.
+    for cmd in [
+        "hew.query.mesh",
+        "hew.query.topology",
+        "hew.query.signature",
+    ] {
+        let r = call(
+            &mut doc,
+            &mut NoHost,
+            cmd,
+            json!({ "id": board, "exclude": [cut.clone()] }),
+        );
+        assert_eq!(r["error"]["code"], -32602, "{cmd}");
+    }
+}
+
+#[test]
+fn measure_exclude_leaves_the_named_own_objects_out() {
+    let (mut doc, g, board, cut) = machined_board();
+    let with = ok(
+        &mut doc,
+        "hew.query.measure",
+        json!({ "id": g, "scope": "own" }),
+    );
+    assert_eq!(with["leaf_count"], 2);
+    let without = ok(
+        &mut doc,
+        "hew.query.measure",
+        json!({ "id": g, "scope": "own", "exclude": [cut.clone()] }),
+    );
+    assert_eq!(without["leaf_count"], 1);
+    assert!((without["volume"].as_f64().unwrap() - 0.7 * 0.45 * 0.018).abs() < 1e-9);
+    close(&without["extents"], [0.7, 0.45, 0.018], 1e-9);
+    let r = call(
+        &mut doc,
+        &mut NoHost,
+        "hew.query.measure",
+        json!({ "id": g, "scope": "own", "exclude": [board, cut] }),
+    );
+    assert_eq!(r["error"]["code"], -32602);
+}
+
+#[test]
+fn exclude_on_an_instance_leaves_a_definition_member_out() {
+    let mut doc = Document::new();
+    let board = cuboid(&mut doc, [0.0, 0.0, 0.0], [0.7, 0.45, 0.018]);
+    let cut = cuboid(&mut doc, [0.2, 0.2, -0.009], [0.3, 0.02, 0.036]);
+    let (_, inst, _) = doc
+        .make_component(&[NodeId::Object(board), NodeId::Object(cut)])
+        .unwrap();
+    let i = public(&doc, EntityRef::Instance(inst));
+    let cut_id = public(&doc, EntityRef::Object(cut));
+    let frame = ok(
+        &mut doc,
+        "hew.query.part_frame",
+        json!({ "id": i, "scope": "own", "exclude": [cut_id.clone()] }),
+    );
+    close(&frame["extents"], [0.7, 0.45, 0.018], 1e-9);
+    let m = ok(
+        &mut doc,
+        "hew.query.measure",
+        json!({ "id": i, "scope": "own", "exclude": [cut_id] }),
+    );
+    assert_eq!(m["leaf_count"], 1);
+}
+
+#[test]
+fn exclude_by_path_ignores_duplicates_and_an_empty_list_needs_no_scope() {
+    let mut doc = Document::new();
+    let board = cuboid(&mut doc, [0.0, 0.0, 0.0], [0.7, 0.45, 0.018]);
+    let cut = cuboid(&mut doc, [0.2, 0.2, -0.009], [0.3, 0.02, 0.036]);
+    let (_, inst, _) = doc
+        .make_component(&[NodeId::Object(board), NodeId::Object(cut)])
+        .unwrap();
+    let i = public(&doc, EntityRef::Instance(inst));
+    let cut_id = public(&doc, EntityRef::Object(cut));
+    let f = ok(
+        &mut doc,
+        "hew.query.part_frame",
+        json!({ "path": [i.clone()], "scope": "own", "exclude": [cut_id.clone(), cut_id] }),
+    );
+    close(&f["extents"], [0.7, 0.45, 0.018], 1e-9);
+    let plain = ok(
+        &mut doc,
+        "hew.query.measure",
+        json!({ "id": i, "exclude": [] }),
+    );
+    assert_eq!(plain["leaf_count"], 2);
+}
+
+#[test]
+fn exclude_with_a_member_override_on_a_group_and_an_instance() {
+    let mut doc = Document::new();
+    let board = cuboid(&mut doc, [0.0, 0.0, 0.0], [0.7, 0.45, 0.018]);
+    let cut = cuboid(&mut doc, [0.2, 0.2, -0.009], [0.3, 0.02, 0.036]);
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Object(board), NodeId::Object(cut)])
+        .unwrap();
+    set_frame(&mut doc, NodeId::Group(g));
+    let gid = public(&doc, EntityRef::Group(g));
+    let cut_id = public(&doc, EntityRef::Object(cut));
+    let f = ok(
+        &mut doc,
+        "hew.query.part_frame",
+        json!({ "id": gid, "scope": "own", "exclude": [cut_id.clone()] }),
+    );
+    assert_eq!(f["source"], "attribute");
+    let all = ok(
+        &mut doc,
+        "hew.query.part_frame",
+        json!({ "id": gid, "scope": "own" }),
+    );
+    assert_ne!(f["extents"], all["extents"]);
+    // The same group as the sole member of a definition.
+    let (_, inst, _) = doc.make_component(&[NodeId::Group(g)]).unwrap();
+    let i = public(&doc, EntityRef::Instance(inst));
+    let fi = ok(
+        &mut doc,
+        "hew.query.part_frame",
+        json!({ "id": i, "scope": "own", "exclude": [cut_id] }),
+    );
+    assert_eq!(fi["extents"], f["extents"]);
+}
