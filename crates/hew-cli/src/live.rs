@@ -538,8 +538,8 @@ mod transport {
             line.push('\n');
             self.stream
                 .write_all(line.as_bytes())
-                .map_err(LiveError::io)?;
-            self.stream.flush().map_err(LiveError::io)?;
+                .and_then(|()| self.stream.flush())
+                .map_err(write_error)?;
 
             let deadline = Instant::now() + REPLY_TIMEOUT;
             loop {
@@ -606,6 +606,19 @@ mod transport {
         }
     }
 
+    /// A failed request write, mapped as the Windows transport maps it: a
+    /// write that hit the socket's write timeout is a [`LiveError::Timeout`],
+    /// the peer's close is [`LiveError::Closed`], anything else is I/O.
+    fn write_error(e: std::io::Error) -> LiveError {
+        match e.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => LiveError::Timeout(
+                format!("writing a request timed out after {REPLY_TIMEOUT:?}"),
+            ),
+            std::io::ErrorKind::BrokenPipe => LiveError::Closed,
+            _ => LiveError::io(e),
+        }
+    }
+
     /// A local Unix domain socket connect is normally instantaneous — no
     /// network handshake — but `std::os::unix::net::UnixStream` has no
     /// `connect_timeout`, so a background thread plus a bounded channel
@@ -632,19 +645,20 @@ mod transport {
     use super::*;
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::AsRawHandle;
     use std::ptr;
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, ERROR_BROKEN_PIPE, ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, GetLastError,
-        HANDLE, INVALID_HANDLE_VALUE,
+        CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_OPERATION_ABORTED,
+        ERROR_PIPE_BUSY, ERROR_PIPE_NOT_CONNECTED, FALSE, GENERIC_READ, GENERIC_WRITE,
+        GetLastError, HANDLE, INVALID_HANDLE_VALUE, TRUE, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING, ReadFile, SECURITY_IDENTIFICATION,
-        SECURITY_SQOS_PRESENT, WriteFile,
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, OPEN_EXISTING, ReadFile,
+        SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
     };
-    use windows_sys::Win32::System::IO::CancelSynchronousIo;
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
     use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
     fn wide(s: &str) -> Vec<u16> {
         OsStr::new(s)
@@ -653,22 +667,33 @@ mod transport {
             .collect()
     }
 
-    /// A raw pipe `HANDLE`. `windows_sys::Win32::Foundation::HANDLE` is
-    /// `*mut c_void`, which does not auto-implement `Send` — but
-    /// `ReadFile`/`WriteFile`/`CloseHandle` are documented thread-agnostic
-    /// (the handle names a process-wide kernel object, not a thread-local
-    /// one), so it is sound to hand a copy to the short-lived reader thread
-    /// [`RawConn::read_chunk_with_timeout`] spawns for each read.
-    #[derive(Clone, Copy)]
-    struct RawHandle(HANDLE);
-    unsafe impl Send for RawHandle {}
+    /// How one overlapped operation ended without transferring bytes.
+    enum IoEnd {
+        /// Its bound ran out; it was cancelled and waited for.
+        TimedOut,
+        /// The far end closed (`ERROR_BROKEN_PIPE`).
+        Closed,
+        /// Any other Win32 error.
+        Failed(u32),
+    }
 
+    /// The pipe, opened overlapped (`FILE_FLAG_OVERLAPPED`), and the one
+    /// manual-reset event its operations wait on. Overlapped so that a
+    /// read has a real bound: a timed-out read is cancelled with
+    /// `CancelIoEx` and waited for, which leaves the handle clean for the
+    /// next write, so [`RawConn::poll_events`] can read between requests
+    /// the way the unix transport does. The connection is used from one
+    /// thread, one operation at a time, and every operation is finished
+    /// (or cancelled and finished) before the call that started it
+    /// returns, so nothing is ever pending at drop.
     pub struct RawConn {
-        handle: RawHandle,
+        handle: HANDLE,
+        event: HANDLE,
         /// Bytes already pulled off the pipe but not yet consumed as a
         /// complete line — a named pipe `HANDLE` has no built-in line
         /// buffering the way `BufReader<UnixStream>` gets for free on the
         /// unix transport, so this module provides the same thing by hand.
+        /// A timed-out read leaves a partial frame here for the next read.
         leftover: Vec<u8>,
         /// Notifications read while waiting for a reply, oldest first.
         events: Vec<Value>,
@@ -677,7 +702,8 @@ mod transport {
     impl Drop for RawConn {
         fn drop(&mut self) {
             unsafe {
-                CloseHandle(self.handle.0);
+                CloseHandle(self.event);
+                CloseHandle(self.handle);
             }
         }
     }
@@ -721,13 +747,25 @@ mod transport {
                         0,
                         ptr::null_mut(),
                         OPEN_EXISTING,
-                        FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+                        FILE_ATTRIBUTE_NORMAL
+                            | FILE_FLAG_OVERLAPPED
+                            | SECURITY_SQOS_PRESENT
+                            | SECURITY_IDENTIFICATION,
                         ptr::null_mut(),
                     )
                 };
                 if handle != INVALID_HANDLE_VALUE {
+                    // Manual reset: `GetOverlappedResult` waits on it, and
+                    // each `ReadFile`/`WriteFile` resets it as it starts.
+                    let event = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };
+                    if event.is_null() {
+                        let err = std::io::Error::last_os_error();
+                        unsafe { CloseHandle(handle) };
+                        return Err(LiveError::io(err));
+                    }
                     return Ok(RawConn {
-                        handle: RawHandle(handle),
+                        handle,
+                        event,
                         leftover: Vec::new(),
                         events: Vec::new(),
                     });
@@ -751,6 +789,21 @@ mod transport {
                 // vanished instance is not retried here.
                 return Err(LiveError::io(std::io::Error::from_raw_os_error(err as i32)));
             }
+        }
+
+        /// Takes every notification already readable without waiting
+        /// (beyond a millisecond per frame), with those `send_receive` set
+        /// aside. Only between requests: any frame read here is a
+        /// notification, and one carrying an id (a stray late reply) is
+        /// dropped. The same as the unix transport's.
+        pub fn poll_events(&mut self) -> Vec<Value> {
+            let mut events = self.take_events();
+            while let Ok(frame) = self.read_frame(Some(Duration::from_millis(1))) {
+                if frame.as_object().is_some_and(|o| !o.contains_key("id")) {
+                    events.push(frame);
+                }
+            }
+            events
         }
 
         /// Writes one newline-delimited JSON-RPC frame and blocks for its
@@ -777,8 +830,7 @@ mod transport {
         }
 
         /// Reads one line, any frame, waiting at most `timeout` (`None`
-        /// waits forever: the read blocks on this thread, with no helper
-        /// thread to cancel).
+        /// waits forever).
         pub fn read_frame(&mut self, timeout: Option<Duration>) -> Result<Value, LiveError> {
             let line = self.read_line(timeout.map(|t| Instant::now() + t))?;
             parse_frame(&line)
@@ -789,193 +841,144 @@ mod transport {
             std::mem::take(&mut self.events)
         }
 
-        /// [`RawConn::take_events`] only: the Windows pipe delivers no
-        /// events yet (HEW_API.md §4.5), and a read that polls would leave a
-        /// cancelled `ReadFile` on a synchronous handle in the way of the
-        /// next write.
-        pub fn poll_events(&mut self) -> Vec<Value> {
-            self.take_events()
-        }
-
+        /// Writes all of `buf` in chunks of at most 64 KiB, each bounded by
+        /// [`REPLY_TIMEOUT`] (the unix transport's per-write timeout). A
+        /// pipe write finishes only once the app has taken its bytes, so
+        /// the bound is per chunk: a large request the app is still reading
+        /// never trips it.
         fn write_all(&mut self, mut buf: &[u8]) -> Result<(), LiveError> {
             while !buf.is_empty() {
-                let mut n: u32 = 0;
-                let ok = unsafe {
-                    WriteFile(
-                        self.handle.0,
-                        buf.as_ptr(),
-                        buf.len().min(u32::MAX as usize) as u32,
-                        &mut n,
-                        ptr::null_mut(),
-                    )
-                };
-                if ok == 0 {
-                    let err = unsafe { GetLastError() };
-                    return Err(LiveError::io(std::io::Error::from_raw_os_error(err as i32)));
-                }
+                let len = buf.len().min(64 * 1024) as u32;
+                let ptr = buf.as_ptr();
+                let n = self
+                    .run(Some(REPLY_TIMEOUT), |handle, ov| unsafe {
+                        WriteFile(handle, ptr, len, ptr::null_mut(), ov)
+                    })
+                    .map_err(|end| match end {
+                        IoEnd::TimedOut => LiveError::Timeout(format!(
+                            "writing a request timed out after {REPLY_TIMEOUT:?}"
+                        )),
+                        IoEnd::Closed => LiveError::Closed,
+                        IoEnd::Failed(err) => {
+                            LiveError::io(std::io::Error::from_raw_os_error(err as i32))
+                        }
+                    })?;
                 buf = &buf[n as usize..];
             }
             Ok(())
         }
 
         /// Reads one newline-delimited frame, bounded by `deadline`
-        /// (`REPLY_TIMEOUT` past the request write). A synchronous
-        /// (non-overlapped) `ReadFile` has no timeout parameter of its
-        /// own, so each chunk is read on a throwaway background thread —
-        /// [`Self::read_chunk_with_timeout`] — that this call waits on
-        /// with a bounded `recv_timeout`, exactly the "background thread +
-        /// bounded channel receive" shape the unix transport's
-        /// `connect_with_timeout` already uses for its own bound.
+        /// (`None` waits forever). Bytes read before a timeout stay in
+        /// `leftover` for the next call. A deadline already past still
+        /// takes what the pipe holds right now (a zero wait), as unix's
+        /// shortest socket timeout does.
         fn read_line(&mut self, deadline: Option<Instant>) -> Result<String, LiveError> {
             loop {
                 if let Some(pos) = self.leftover.iter().position(|&b| b == b'\n') {
                     let mut line: Vec<u8> = self.leftover.drain(..=pos).collect();
                     line.pop(); // the newline itself
                     return String::from_utf8(line).map_err(|e| {
-                        LiveError::Protocol(format!("reply was not valid UTF-8: {e}"))
+                        LiveError::Protocol(format!("a frame was not valid UTF-8: {e}"))
                     });
                 }
-                let chunk = match deadline {
-                    // No bound: block right here, as unix does with no read
-                    // timeout. Nothing needs cancelling.
-                    None => self.read_chunk_blocking()?,
-                    Some(deadline) => {
-                        let remaining = deadline.saturating_duration_since(Instant::now());
-                        if remaining.is_zero() {
-                            return Err(LiveError::Timeout(format!(
-                                "waiting for a reply timed out after {REPLY_TIMEOUT:?}"
-                            )));
-                        }
-                        self.read_chunk_with_timeout(remaining)?
+                let timeout = deadline.map(|d| d.saturating_duration_since(Instant::now()));
+                let mut buf = [0u8; 4096];
+                let len = buf.len() as u32;
+                let ptr = buf.as_mut_ptr();
+                match self.run(timeout, |handle, ov| unsafe {
+                    ReadFile(handle, ptr, len, ptr::null_mut(), ov)
+                }) {
+                    Ok(0) | Err(IoEnd::Closed) => return Err(LiveError::Closed),
+                    Ok(n) => self.leftover.extend_from_slice(&buf[..n as usize]),
+                    Err(IoEnd::TimedOut) => {
+                        return Err(LiveError::Timeout(format!(
+                            "waiting for a reply timed out after {REPLY_TIMEOUT:?}"
+                        )));
                     }
-                };
-                if chunk.is_empty() {
-                    return Err(LiveError::Closed);
+                    Err(IoEnd::Failed(err)) => {
+                        return Err(LiveError::io(std::io::Error::from_raw_os_error(err as i32)));
+                    }
                 }
-                self.leftover.extend_from_slice(&chunk);
             }
         }
 
-        /// One unbounded `ReadFile` of up to 4 KiB on this thread; empty at
-        /// the far end's close.
-        fn read_chunk_blocking(&mut self) -> Result<Vec<u8>, LiveError> {
-            let mut buf = [0u8; 4096];
-            let mut n: u32 = 0;
-            let ok = unsafe {
-                ReadFile(
-                    self.handle.0,
-                    buf.as_mut_ptr(),
-                    buf.len() as u32,
-                    &mut n,
-                    ptr::null_mut(),
-                )
+        /// Starts one overlapped operation through `start` and waits for it,
+        /// at most `timeout` (`None` waits as long as it takes): the bytes
+        /// it transferred, or how it ended. A timed-out operation is
+        /// cancelled and then waited for, so when this returns the kernel
+        /// no longer touches the `OVERLAPPED` (on this frame) or the
+        /// caller's buffer; bytes that arrived before the cancel landed
+        /// are kept, not lost.
+        fn run(
+            &mut self,
+            timeout: Option<Duration>,
+            start: impl FnOnce(HANDLE, *mut OVERLAPPED) -> i32,
+        ) -> Result<u32, IoEnd> {
+            // SAFETY: OVERLAPPED is plain data; all-zero is its documented
+            // initial state.
+            let mut ov: OVERLAPPED = unsafe { std::mem::zeroed() };
+            ov.hEvent = self.event;
+            // TRUE: the operation already finished, nothing to wait for or
+            // cancel. Only a pending operation waits on the event, so
+            // correctness never rests on how a synchronous completion
+            // signals it; `GetOverlappedResult` below then reads the
+            // finished status straight from `ov`.
+            let pending = if start(self.handle, &mut ov) == 0 {
+                let err = unsafe { GetLastError() };
+                if err != ERROR_IO_PENDING {
+                    return Err(end_of(err));
+                }
+                true
+            } else {
+                false
             };
-            if ok != 0 {
-                return Ok(buf[..n as usize].to_vec());
+            let mut timed_out = false;
+            if let (Some(timeout), true) = (timeout, pending) {
+                // Rounded up, so a sub-millisecond remainder still waits.
+                let ms = timeout
+                    .as_nanos()
+                    .div_ceil(1_000_000)
+                    .min(u128::from(u32::MAX - 1)) as u32;
+                if unsafe { WaitForSingleObject(self.event, ms) } != WAIT_OBJECT_0 {
+                    unsafe { CancelIoEx(self.handle, &ov) };
+                    timed_out = true;
+                }
+            }
+            let mut n: u32 = 0;
+            if unsafe { GetOverlappedResult(self.handle, &ov, &mut n, TRUE) } != 0 {
+                return Ok(n);
             }
             let err = unsafe { GetLastError() };
-            if err == ERROR_BROKEN_PIPE {
-                return Ok(Vec::new());
+            if timed_out && err == ERROR_OPERATION_ABORTED {
+                return Err(IoEnd::TimedOut);
             }
-            Err(LiveError::io(std::io::Error::from_raw_os_error(err as i32)))
+            Err(end_of(err))
         }
+    }
 
-        /// One bounded `ReadFile` of up to 4 KiB. Unlike the unix
-        /// transport (a real socket read timeout via `set_read_timeout`),
-        /// a plain `HANDLE` has no such option; instead a background
-        /// thread performs the blocking read while this thread waits on a
-        /// channel with `recv_timeout`, and — the piece that keeps a
-        /// wedged/silent peer from leaking a blocked thread for the rest
-        /// of a long-running `mcp --live` session — `CancelSynchronousIo`,
-        /// aimed at the READER THREAD's own native handle (not the pipe),
-        /// forces its in-flight synchronous `ReadFile` to return early on
-        /// timeout so the thread can exit instead of blocking forever.
-        fn read_chunk_with_timeout(&mut self, timeout: Duration) -> Result<Vec<u8>, LiveError> {
-            let handle = self.handle;
-            let (tx, rx) = std::sync::mpsc::channel();
-            let reader = std::thread::spawn(move || {
-                // Rebinding forces this closure to capture the whole
-                // `RawHandle` newtype (and so use its `unsafe impl Send`)
-                // rather than Rust 2021's disjoint-capture rule reaching
-                // straight through to the bare `HANDLE` field below, which
-                // is a raw pointer and does not implement `Send` itself.
-                let handle = handle;
-                let mut buf = [0u8; 4096];
-                let mut n: u32 = 0;
-                let ok = unsafe {
-                    ReadFile(
-                        handle.0,
-                        buf.as_mut_ptr(),
-                        buf.len() as u32,
-                        &mut n,
-                        ptr::null_mut(),
-                    )
-                };
-                let result = if ok != 0 {
-                    Ok(buf[..n as usize].to_vec())
-                } else {
-                    let err = unsafe { GetLastError() };
-                    if err == ERROR_BROKEN_PIPE {
-                        // The far end closed — the same signal a 0-byte
-                        // unix `read` carries.
-                        Ok(Vec::new())
-                    } else {
-                        Err(err)
-                    }
-                };
-                let _ = tx.send(result);
-            });
-            let native = reader.as_raw_handle() as HANDLE;
-            match rx.recv_timeout(timeout) {
-                Ok(Ok(bytes)) => {
-                    let _ = reader.join();
-                    Ok(bytes)
-                }
-                Ok(Err(err)) => {
-                    let _ = reader.join();
-                    Err(LiveError::io(std::io::Error::from_raw_os_error(err as i32)))
-                }
-                Err(_) => {
-                    // `CancelSynchronousIo` itself has a documented failure
-                    // mode — `ERROR_NOT_FOUND` when it races the reader
-                    // thread's own `ReadFile` call (this thread has
-                    // started but not yet entered its blocking read) —
-                    // that is not a real error so much as a benign timing
-                    // window; its BOOL result is checked so that window is
-                    // told apart from a genuine failure, but either way
-                    // this function must not then fall back to an
-                    // unconditional `join()`. That was the exact bug: if
-                    // the cancel lands before `ReadFile` is entered, the
-                    // reader thread just starts its (now uncancelled)
-                    // blocking read and `join()` waits for it forever —
-                    // reintroducing the hang this timeout exists to
-                    // prevent. Instead, this gives the reader thread one
-                    // short bounded grace period to actually finish
-                    // (cancelled, or it simply completed/broke naturally)
-                    // and, failing that, DETACHES it: dropping `reader`'s
-                    // `JoinHandle` without joining leaves that OS thread
-                    // running independently, still holding this same pipe
-                    // `HANDLE` value inside its blocking `ReadFile` call,
-                    // until that read eventually completes or errors —
-                    // which happens once `RawConn::drop` closes the
-                    // handle (or the process exits), not by anything here
-                    // waiting on it.
-                    let cancel_ok = unsafe { CancelSynchronousIo(native) } != 0;
-                    let grace = if cancel_ok {
-                        Duration::from_millis(500)
-                    } else {
-                        Duration::from_millis(50)
-                    };
-                    if rx.recv_timeout(grace).is_ok() {
-                        let _ = reader.join();
-                    } else {
-                        drop(reader);
-                    }
-                    Err(LiveError::Timeout(format!(
-                        "waiting for a reply timed out after {REPLY_TIMEOUT:?}"
-                    )))
-                }
-            }
+    /// The app ending the connection, however it surfaces: its handle
+    /// closed (`ERROR_BROKEN_PIPE`), its `DisconnectNamedPipe` (which a
+    /// read or write after it meets as `ERROR_PIPE_NOT_CONNECTED`), or a
+    /// write into a pipe that is closing (`ERROR_NO_DATA`). Each is the end
+    /// of the stream, as unix's EOF and EPIPE are, not an I/O failure.
+    fn end_of(err: u32) -> IoEnd {
+        match err {
+            ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED | ERROR_NO_DATA => IoEnd::Closed,
+            _ => IoEnd::Failed(err),
+        }
+    }
+
+    /// A connection over an already-open overlapped pipe handle (tests).
+    #[cfg(test)]
+    pub(crate) fn from_handle(handle: HANDLE) -> RawConn {
+        let event = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };
+        assert!(!event.is_null(), "CreateEventW");
+        RawConn {
+            handle,
+            event,
+            leftover: Vec::new(),
+            events: Vec::new(),
         }
     }
 }
@@ -2307,9 +2310,9 @@ mod tests {
         let server_handle = SendHandle(handle);
 
         let server = std::thread::spawn(move || {
-            // Force whole-value capture of `server_handle` (see the
-            // matching comment on `RawConn::read_chunk_with_timeout`
-            // above) before projecting into its raw `HANDLE` field.
+            // Force whole-value capture of `server_handle` (and so its
+            // `Send` impl; Rust 2021 closures otherwise capture the bare
+            // `HANDLE` field, a raw pointer) before projecting into it.
             let server_handle = server_handle;
             let handle = server_handle.0;
             let connected = unsafe { ConnectNamedPipe(handle, ptr::null_mut()) };
@@ -2376,6 +2379,164 @@ mod tests {
         server
             .join()
             .expect("fake instance thread completes cleanly");
+    }
+
+    /// The Windows twin of `a_timed_out_read_keeps_its_partial_frame`, plus
+    /// what a synchronous handle could not do: after reads that timed out
+    /// (and were cancelled), a request still goes out and its reply, with
+    /// the event the server sent ahead of it, comes back; events sent while
+    /// the client is idle are picked up by `poll_events`.
+    #[cfg(windows)]
+    #[test]
+    fn windows_timed_out_reads_keep_partial_frames_and_leave_the_pipe_usable() {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr;
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_OVERLAPPED, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile,
+            WriteFile,
+        };
+        use windows_sys::Win32::System::Pipes::{
+            ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+            PIPE_TYPE_BYTE, PIPE_WAIT,
+        };
+
+        struct SendHandle(HANDLE);
+        unsafe impl Send for SendHandle {}
+
+        let name: Vec<u16> = OsStr::new(&format!(
+            r"\\.\pipe\hew-cli-test-overlapped-{}",
+            std::process::id()
+        ))
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+        // The fake server stays synchronous: only the client's handle
+        // mode is under test.
+        let server = unsafe {
+            CreateNamedPipeW(
+                name.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                1,
+                4096,
+                4096,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        assert_ne!(server, INVALID_HANDLE_VALUE, "CreateNamedPipeW failed");
+        let server = SendHandle(server);
+        let (step_tx, step_rx) = std::sync::mpsc::channel::<&'static [u8]>();
+        let server_thread = std::thread::spawn(move || {
+            let server = server;
+            unsafe { ConnectNamedPipe(server.0, ptr::null_mut()) };
+            for bytes in step_rx {
+                if bytes.is_empty() {
+                    // Answer one request: read it, then send an event and
+                    // the reply to its id.
+                    let mut buf = [0u8; 4096];
+                    let mut n = 0u32;
+                    let ok = unsafe {
+                        ReadFile(server.0, buf.as_mut_ptr(), 4096, &mut n, ptr::null_mut())
+                    };
+                    assert_ne!(ok, 0, "server ReadFile");
+                    let request: Value =
+                        serde_json::from_slice(&buf[..n as usize]).expect("one whole request");
+                    let reply = format!(
+                        "{{\"jsonrpc\":\"2.0\",\"method\":\"hew.event.units_changed\",\"params\":{{}}}}\n{}\n",
+                        json!({"jsonrpc": "2.0", "id": request["id"], "result": {}})
+                    );
+                    let mut n = 0u32;
+                    unsafe {
+                        WriteFile(
+                            server.0,
+                            reply.as_ptr(),
+                            reply.len() as u32,
+                            &mut n,
+                            ptr::null_mut(),
+                        )
+                    };
+                    continue;
+                }
+                let mut n = 0u32;
+                let ok = unsafe {
+                    WriteFile(
+                        server.0,
+                        bytes.as_ptr(),
+                        bytes.len() as u32,
+                        &mut n,
+                        ptr::null_mut(),
+                    )
+                };
+                assert_ne!(ok, 0, "server WriteFile");
+            }
+            unsafe { CloseHandle(server.0) };
+        });
+        let client = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                0,
+                ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                ptr::null_mut(),
+            )
+        };
+        assert_ne!(client, INVALID_HANDLE_VALUE, "the client end opens");
+        let mut conn = transport::from_handle(client);
+
+        assert!(matches!(
+            conn.read_frame(Some(Duration::ZERO)),
+            Err(LiveError::Timeout(_))
+        ));
+        step_tx
+            .send(br#"{"jsonrpc":"2.0","method":"hew.ev"#)
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(matches!(
+            conn.read_frame(Some(Duration::from_millis(20))),
+            Err(LiveError::Timeout(_))
+        ));
+        step_tx
+            .send(b"ent.units_changed\",\"params\":{}}\n")
+            .unwrap();
+        let frame = conn.read_frame(Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(frame["method"], "hew.event.units_changed");
+
+        // An idle client's events, a stray reply dropped.
+        step_tx
+            .send(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}\n{\"jsonrpc\":\"2.0\",\"method\":\"hew.event.plugin_state\",\"params\":{}}\n")
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        let polled = conn.poll_events();
+        assert_eq!(polled.len(), 1);
+        assert_eq!(polled[0]["method"], "hew.event.plugin_state");
+
+        // After all those cancelled reads, a request still round-trips,
+        // and the event ahead of its reply is set aside.
+        step_tx.send(b"").unwrap();
+        let reply = conn
+            .send_receive(&Request {
+                document: None,
+                jsonrpc: "2.0".to_string(),
+                id: Some(RequestId::Number(7)),
+                method: "hew.meta.ping".to_string(),
+                params: None,
+            })
+            .expect("the request round-trips");
+        assert_eq!(reply.id, Some(RequestId::Number(7)));
+        let events = conn.take_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["method"], "hew.event.units_changed");
+
+        drop(step_tx);
+        server_thread.join().unwrap();
+        assert!(matches!(conn.read_frame(None), Err(LiveError::Closed)));
     }
 
     #[test]

@@ -1425,8 +1425,9 @@ below.
   between its replies: `document_changed` with a change set by public id
   after every entry, undo, redo, abort, and replacement, plus context,
   Scene, units, and document lifecycle events; `hew.query.changes_since`
-  catches a reader up, the desktop socket writes events between replies,
-  `hew-cli events --live` prints them, and MCP follows `plugin_state`
+  catches a reader up, the desktop socket and the Windows named pipe
+  write events between replies, `hew-cli events --live` prints them,
+  and MCP follows `plugin_state`
   (HEW_API.md §4.5). A connection holding `view` reads and sets the
   app's selection (replace, add, subtract, toggle), hides and shows
   nodes, isolates, and frames entities, all view state that rides a

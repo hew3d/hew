@@ -480,12 +480,14 @@ host keeps the last 256 changes), or never had, answers `full: true`. An
 abort rewinds the generation, so after one a generation can name two
 states; a client that saw the abort's `document_changed` re-reads.
 
-**Transports.** On the desktop's Unix socket (macOS, Linux) each
-connection has one writer that sends replies and events alike, whole
-lines in order. The Windows named pipe does not deliver events yet: a
-subscription succeeds, but no notification reaches the client; replies
-are unchanged. `hew-cli` keeps the events it reads while waiting for a
-reply (§12). An in-page plugin receives its frames on its port.
+**Transports.** On the desktop's Unix socket (macOS, Linux) and its
+named pipe (Windows) each connection has one writer that sends replies
+and events alike, whole lines in order; the pipe is overlapped, so a
+read waiting on the client's next frame never holds up a reply or an
+event. A client that stops reading, so that a write to it waits 10
+seconds, has its connection closed on either transport. `hew-cli` keeps
+the events it reads while waiting for a reply (§12). An in-page plugin
+receives its frames on its port.
 
 ## 5. Identity and addressing
 
