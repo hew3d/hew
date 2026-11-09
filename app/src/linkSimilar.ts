@@ -31,7 +31,8 @@ export interface PartSignature {
   shape: string
   mirror: string
   symmetric: boolean
-  frame: { origin: Vec3; x: Vec3; y: Vec3; z: Vec3 }
+  /** The part's face frame: `origin` is its minimum corner, `extents` its size along x, y, z. */
+  frame: { origin: Vec3; x: Vec3; y: Vec3; z: Vec3; extents: Vec3 }
 }
 
 /** One Object and what the signature said about it. */
@@ -79,7 +80,8 @@ function isSignature(v: unknown): v is PartSignature {
     vec(s.frame.origin) &&
     vec(s.frame.x) &&
     vec(s.frame.y) &&
-    vec(s.frame.z)
+    vec(s.frame.z) &&
+    vec(s.frame.extents)
   )
 }
 
@@ -201,19 +203,36 @@ function diagonal(sx: number, sy: number, sz: number): Affine12 {
 const PROPER = [diagonal(1, 1, 1), diagonal(1, -1, -1), diagonal(-1, 1, -1), diagonal(-1, -1, 1)]
 const REFLECTING = [diagonal(-1, 1, 1), diagonal(1, -1, 1), diagonal(1, 1, -1), diagonal(-1, -1, -1)]
 
+/** Translation by `v`. */
+function translation(v: Vec3): Affine12 {
+  return [1, 0, 0, v[0], 0, 1, 0, v[1], 0, 0, 1, v[2]]
+}
+
 /**
  * The poses to try for `joiner` against `first`, best guess first:
- * `frame_joiner ∘ R ∘ frame_first⁻¹` for each symmetry `R`. A twin (the
- * joiner's shape is the first's mirror and not its own) needs a reflection.
+ * `frame_joiner ∘ C ∘ R ∘ C⁻¹ ∘ frame_first⁻¹` for each diagonal sign
+ * symmetry `R` of the frame box, `C` the shift to the frame's center. A
+ * twin (the joiner's shape is the first's mirror and not its own) needs a
+ * reflection. The symmetries act about the frame's center, not its
+ * origin: the origin is the part's minimum corner, so a reflection or a
+ * half turn about it would put the body on the far side of the frame, off
+ * by its own size. Only sign patterns are tried: two frames whose axis
+ * labels differ by a permutation (possible when two extents tie and the
+ * frame's tie-breaks fall differently on the twin) find no pose here and
+ * the joiner is counted as skipped.
  */
 export function candidatePoses(first: PartSignature, joiner: PartSignature): Affine12[] {
   const back = invertAffine3x4(frameMatrix(first.frame))
   if (back === null) return []
   const twin = joiner.shape !== first.shape
   const sign = twin ? REFLECTING : PROPER
+  const half: Vec3 = [first.frame.extents[0] / 2, first.frame.extents[1] / 2, first.frame.extents[2] / 2]
+  const toCenter = translation([-half[0], -half[1], -half[2]])
+  const fromCenter = translation(half)
   const out: Affine12[] = []
   for (const r of sign) {
-    const toFrame = composeAffine(back as Affine12, r)
+    const aboutCenter = composeAffine(composeAffine(toCenter, r), fromCenter) as Affine12
+    const toFrame = composeAffine(back as Affine12, aboutCenter)
     out.push(composeAffine(toFrame, frameMatrix(joiner.frame)) as Affine12)
   }
   return out

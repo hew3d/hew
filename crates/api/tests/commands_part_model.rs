@@ -924,7 +924,7 @@ fn signature_frame_equals_part_frame() {
     let id = obj(&doc, a);
     let s = sig_of(&mut doc, a);
     let f = ok(&mut doc, "hew.query.part_frame", json!({ "id": id }));
-    for k in ["origin", "x", "y", "z"] {
+    for k in ["origin", "x", "y", "z", "extents"] {
         assert_eq!(s["frame"][k], f[k], "{k}");
     }
 }

@@ -25982,7 +25982,7 @@ mod tests {
     /// and X-ray reach its face through the box in front and pass over a
     /// sibling copy; the member's object id alone names no placement.
     #[test]
-    fn a_legacy_context_on_a_mirrored_placement_picks_that_instance_only() {
+    fn a_legacy_context_on_a_squashed_placement_picks_that_instance_only() {
         let mut scene = Scene::new();
         let member = scene_box(&mut scene, 0.0, 0.0, 1.0, 1.0, 1.0);
         let first = scene.make_component(&[0], &[member]).unwrap();
@@ -25990,13 +25990,13 @@ mod tests {
         scene.delete_node(2, first).unwrap();
         // Squashed in z (non-uniform), inside the enclosing box (x 1..2,
         // y -1.5..-0.5).
-        let mirrored = scene
+        let squashed = scene
             .place_instance(
                 component,
                 &[1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, -1.5, 0.0, 0.0, 0.5, 0.0],
             )
             .unwrap();
-        assert!(scene.open_explode_session(mirrored).is_err(), "pose gate");
+        assert!(scene.open_explode_session(squashed).is_err(), "pose gate");
         let enclosing = scene_box(&mut scene, 0.0, -2.0, 4.0, 0.0, 2.0);
         let sibling = scene
             .place_instance(
@@ -26014,13 +26014,13 @@ mod tests {
             Some(sibling),
             "the member's object id names no placement"
         );
-        scene.set_pick_scope(vec![], vec![mirrored], false);
+        scene.set_pick_scope(vec![], vec![squashed], false);
         for mode in ["xray", "shaded"] {
             scene.set_render_mode(mode).unwrap();
-            let face = pick_face_x(&scene, y, z).expect("the mirrored copy");
+            let face = pick_face_x(&scene, y, z).expect("the squashed copy");
             assert_eq!(
                 (face.object(), face.instance()),
-                (member, Some(mirrored)),
+                (member, Some(squashed)),
                 "{mode}"
             );
             assert!((face.depth() - 8.0).abs() < 1e-9);

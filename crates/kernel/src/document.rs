@@ -14705,6 +14705,19 @@ impl Document {
                 tags: Vec::new(),
             })
         });
+        // A single-piece result carries operand `a`'s identity when `a` is
+        // an Object (a board cut by a tool is still that board), the same
+        // rule as `boolean`; `b`'s identity is consumed with it. A group
+        // operand's identity stays with the hidden group, and a multi-piece
+        // result is named by the group above instead.
+        let a_identity = match (a, pieces.len()) {
+            (NodeId::Object(o), 1) => Some(o),
+            _ => None,
+        };
+        let (a_name, a_tags) = match a_identity {
+            Some(o) => (self.objects[o].name.clone(), self.objects[o].tags.clone()),
+            None => (None, Vec::new()),
+        };
         let mut result_objects: Vec<ObjectId> = Vec::with_capacity(pieces.len());
         for piece in pieces {
             let id = self.insert_object_record(ObjectRecord {
@@ -14714,10 +14727,13 @@ impl Document {
                 owner: ObjectOwner::World {
                     parent: result_group,
                 },
-                name: None,
-                tags: Vec::new(),
+                name: a_name.clone(),
+                tags: a_tags.clone(),
             });
             result_objects.push(id);
+        }
+        if let Some(o) = a_identity {
+            self.copy_identity_attrs(&EntityRef::Object(o), EntityRef::Object(result_objects[0]));
         }
         if let Some(g) = result_group {
             self.groups[g].members = result_objects.iter().map(|&o| NodeId::Object(o)).collect();

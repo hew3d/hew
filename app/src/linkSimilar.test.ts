@@ -9,7 +9,9 @@ import type { Scene as WasmScene } from './wasm/loader'
 import { canLinkSimilar, candidatePoses, linkSimilar, linkSimilarMessage, linkSimilarScope, findLookAlikes, type PartSignature } from './linkSimilar'
 import { tagged } from './test/taggedDispatch'
 
-const frameAt = (x: number): PartSignature['frame'] => ({ origin: [x, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] })
+/** A 2 by 1 by 0.5 part whose frame origin (its minimum corner) sits at `x`. */
+const EXTENTS: [number, number, number] = [2, 1, 0.5]
+const frameAt = (x: number): PartSignature['frame'] => ({ origin: [x, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1], extents: EXTENTS })
 const sig = (shape: string, mirror: string, at: number): PartSignature => ({ shape, mirror, symmetric: shape === mirror, frame: frameAt(at) })
 
 interface Mock {
@@ -91,7 +93,39 @@ describe('linkSimilar', () => {
     linkSimilar(m.scene, findLookAlikes(m.scene, null))
     const pose = m.joins[0].pose
     expect(pose[0] * pose[5] * pose[10]).toBeLessThan(0)
-    expect(pose[3]).toBe(10)
+    // Reflected about the frame's center, so the body stays inside the
+    // joiner's frame: x -> -(x - 1) + 1 + 10.
+    expect(pose[3]).toBe(EXTENTS[0] + 10)
+  })
+
+  it('every_candidate_pose_maps_the_firsts_center_onto_the_joiners', () => {
+    const apply = (m: number[], p: [number, number, number]) => [
+      m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3],
+      m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7],
+      m[8] * p[0] + m[9] * p[1] + m[10] * p[2] + m[11],
+    ]
+    const center = (x: number): [number, number, number] => [x + EXTENTS[0] / 2, EXTENTS[1] / 2, EXTENTS[2] / 2]
+    const corner = (x: number): [number, number, number] => [x, 0, 0]
+    for (const [first, joiner] of [
+      [sig('A', 'B', 0), sig('A', 'B', 10)],
+      [sig('A', 'B', 0), sig('B', 'A', 10)],
+    ] as const) {
+      const poses = candidatePoses(first, joiner)
+      expect(poses).toHaveLength(4)
+      for (const pose of poses) {
+        // The center is fixed by every symmetry; the minimum corner lands on
+        // one of the joiner frame's eight corners, never outside the frame.
+        expect(apply(pose, center(0)).map((v) => +v.toFixed(12))).toEqual(center(10))
+        const c = apply(pose, corner(0))
+        expect([10, 10 + EXTENTS[0]]).toContain(+c[0].toFixed(12))
+        expect([0, EXTENTS[1]]).toContain(+c[1].toFixed(12))
+        expect([0, EXTENTS[2]]).toContain(+c[2].toFixed(12))
+      }
+      // The identity (or the plain reflection) comes first.
+      const p0 = poses[0]
+      expect(Math.abs(p0[5])).toBe(1)
+      expect(Math.abs(p0[10])).toBe(1)
+    }
   })
 
   it('a_pose_a_symmetry_off_is_retried_after_NotIdentical', () => {

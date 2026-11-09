@@ -481,6 +481,7 @@ fn signature(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             "x": vec_json(s.frame.x),
             "y": vec_json(s.frame.y),
             "z": vec_json(s.frame.z),
+            "extents": s.frame.extents,
         },
     }))
 }

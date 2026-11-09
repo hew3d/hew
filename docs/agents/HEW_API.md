@@ -842,11 +842,12 @@ return, and the frame they open is the person's, visible in the
 breadcrumb and closed the way the person closes frames. `hew.view.enter`
 takes an `id` (an object, group, or instance in the world) or a `path` (an
 occurrence path of instances outermost first; the last element is the
-node to enter and may be a member object inside the last instance), opens group and
-component sessions level by level, falls back to the in-context entry for
-an instance a session cannot take (mirrored, unevenly scaled, or placed in
-a group elsewhere), and selects the target. `hew.view.exit` pops the
-innermost entry, a fallback entry or a session frame; `hew.view.exit_all`
+node to enter and may be a member object inside the last instance), opens
+group and component sessions level by level, falls back to the in-context
+entry for an instance a session cannot take (unevenly scaled, or placed in
+a group elsewhere; a mirrored instance opens a session like any other),
+and selects the target. `hew.view.exit` pops the innermost entry, a
+fallback entry or a session frame; `hew.view.exit_all`
 goes back to the top level. Each answers `{}`: the outcome is the
 `context_changed` event, which carries the new `stack` and the `fallback`
 entries (`{kind: "object" | "instance", id}`, outermost first, inside the
@@ -2206,11 +2207,15 @@ as a container with no own Objects does (`no_part_frame`; `-32602` for
 
 **`hew.query.signature`** `{id | path}` tells whether two objects are the
 same part or mirrored twins: `{shape, mirror, symmetric, frame: {origin,
-x, y, z}}`. `frame` is the object's face frame (`l ≥ w ≥ t`,
+x, y, z, extents}}`. `frame` is the object's face frame (`l ≥ w ≥ t`,
 right-handed), what `hew.query.part_frame` reports without a `hew.part`
-/ `frame` override. Every rotation that maps the frame's axes onto
-themselves and keeps the extent order is a candidate (four with
-distinct extents, more when they tie); under each, every vertex about
+/ `frame` override: `origin` is the part's minimum corner in that frame
+and `extents` its size along `x`, `y`, `z`, so a pose that maps one
+part onto its twin reflects about the frame's center, `origin +
+extents / 2` along the axes, not about `origin`. Every rotation that
+maps the frame's axes onto themselves and keeps the extent order is a
+candidate (four with distinct extents, more when they tie); under each,
+every vertex about
 the frame box's center is quantized to 1 µm, each face listed as its
 loops (outer first, each started at its smallest vertex, holes sorted)
 with its surface kind and parameters (plane; cylinder axis line and

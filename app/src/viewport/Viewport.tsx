@@ -5634,7 +5634,7 @@ export default function Viewport({
     /**
      * The double-click gesture's own open attempt: a plain double-click on a
      * component instance opens an explode session; if the kernel gates it —
-     * `ExplodeSessionPoseUnsupported` (non-uniform scale or a mirror) or
+     * `ExplodeSessionPoseUnsupported` (non-uniform scale or shear; a mirror opens a session) or
      * `ExplodeSessionGroupedInstance` (the entered instance itself is
      * nested in a group, which a session's bake to top-level world objects
      * cannot honor; a grouped SIBLING is fine — siblings stay live,

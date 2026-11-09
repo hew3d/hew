@@ -400,8 +400,8 @@ double click in Hew's own Outliner does: `hew.view.enter {id}` for a
 world object, group, or instance, or `hew.view.enter {path}` for a node
 reached through instances (HEW_API.md §6.3). The window opens group and
 component sessions level by level, falls back to the in-context entry for
-an instance a session cannot take (mirrored, unevenly scaled, or placed in
-a group elsewhere), and selects the target. `hew.view.exit` steps out one
+an instance a session cannot take (unevenly scaled, or placed in a group
+elsewhere; a mirrored instance opens a session like any other), and selects the target. `hew.view.exit` steps out one
 level and `hew.view.exit_all` all the way. This is not `hew.context.enter`,
 which stays balanced inside a transaction and scopes a plugin's own
 edits; the frame `hew.view.enter` opens is the person's.
@@ -551,12 +551,17 @@ the same way however it sits in the model.
 ### Same part, mirrored part
 
 `hew.query.signature { id | path }` answers `{ shape, mirror, symmetric,
-frame }` for one object. Two objects with equal `shape` are the same
+frame: { origin, x, y, z, extents } }` for one object. Two objects with equal `shape` are the same
 part in any position; `a.shape == b.mirror` means `b` is `a`'s mirror
 image (a left and a right side); `symmetric` means the part is its own
 mirror image. The hashes survive a save and reload and any move or turn,
-to 1 µm. `frame` is the part's face frame; the pose that carries one
-matching part onto another is `frame_b ∘ frame_a⁻¹`. A group or instance
+to 1 µm. `frame` is the part's face frame, `origin` its minimum corner
+and `extents` its size along the axes; the pose that carries one
+matching part onto another is `frame_b ∘ frame_a⁻¹`, and onto its
+mirror twin `frame_b ∘ C ∘ R ∘ C⁻¹ ∘ frame_a⁻¹` with `R` a reflection
+and `C` the shift to the frame's center, `origin + extents / 2` (a
+reflection about `origin` would land the part off by its own size). A
+group or instance
 refuses `not_an_object`: ask per solid, from the rows' `members`.
 
 ### Probing with rays

@@ -1117,8 +1117,9 @@ pub trait Host {
 
     /// The app's in-context entries sitting logically inside the innermost
     /// open session frame, outermost first: the editing model the app falls
-    /// back on for an instance a session cannot take (mirrored, unevenly
-    /// scaled, or placed in a group elsewhere). Empty headless.
+    /// back on for an instance a session cannot take (unevenly scaled, or
+    /// placed in a group elsewhere; a mirrored one opens a session). Empty
+    /// headless.
     fn fallback_context(&self) -> Vec<ContextEntry> {
         Vec::new()
     }

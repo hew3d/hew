@@ -9704,8 +9704,16 @@ Whether two objects are the same part or mirrored twins: one object's shape and 
     },
     "frame": {
       "additionalProperties": false,
-      "description": "the part's face frame (l ≥ w ≥ t, right-handed), as hew.query.part_frame reports it without a hew.part / frame override",
+      "description": "the part's face frame (l ≥ w ≥ t, right-handed), as hew.query.part_frame reports it without a hew.part / frame override; origin is the part's minimum corner in that frame and extents its size along x, y, z, so the frame's center is origin + extents / 2 along the axes",
       "properties": {
+        "extents": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
         "origin": {
           "items": {
             "type": "number"
@@ -9743,7 +9751,8 @@ Whether two objects are the same part or mirrored twins: one object's shape and 
         "origin",
         "x",
         "y",
-        "z"
+        "z",
+        "extents"
       ],
       "type": "object"
     },
@@ -14732,7 +14741,7 @@ End the live viewport's isolation; a no-op when nothing is isolated.
 - **Served:** host
 - **Permission:** view
 
-Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (mirrored, unevenly scaled, or placed in a group elsewhere), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The result is empty; the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward. Acts on the user's window, so it is refused inside a transaction; distinct from hew.context.enter, which scopes a plugin's own edits.
+Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (unevenly scaled, or placed in a group elsewhere; a mirrored instance opens a session like any other), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The result is empty; the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward. Acts on the user's window, so it is refused inside a transaction; distinct from hew.context.enter, which scopes a plugin's own edits.
 
 **Params schema:**
 

@@ -2169,9 +2169,9 @@ impl Registry {
                     "symmetric": { "type": "boolean", "description": "shape == mirror: the part is its own mirror image" },
                     "frame": {
                         "type": "object",
-                        "description": "the part's face frame (l ≥ w ≥ t, right-handed), as hew.query.part_frame reports it without a hew.part / frame override",
-                        "properties": { "origin": vec3.clone(), "x": vec3.clone(), "y": vec3.clone(), "z": vec3 },
-                        "required": ["origin", "x", "y", "z"],
+                        "description": "the part's face frame (l ≥ w ≥ t, right-handed), as hew.query.part_frame reports it without a hew.part / frame override; origin is the part's minimum corner in that frame and extents its size along x, y, z, so the frame's center is origin + extents / 2 along the axes",
+                        "properties": { "origin": vec3.clone(), "x": vec3.clone(), "y": vec3.clone(), "z": vec3.clone(), "extents": vec3 },
+                        "required": ["origin", "x", "y", "z", "extents"],
                         "additionalProperties": false
                     }
                 },
@@ -3553,7 +3553,7 @@ impl Registry {
                 ),
                 (
                     "hew.view.enter",
-                    "Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (mirrored, unevenly scaled, or placed in a group elsewhere), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The result is empty; the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward. Acts on the user's window, so it is refused inside a transaction; distinct from hew.context.enter, which scopes a plugin's own edits.",
+                    "Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (unevenly scaled, or placed in a group elsewhere; a mirrored instance opens a session like any other), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The result is empty; the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward. Acts on the user's window, so it is refused inside a transaction; distinct from hew.context.enter, which scopes a plugin's own edits.",
                     serde_json::json!({
                         "type": "object",
                         "properties": {

@@ -10,7 +10,7 @@ import type { Scene as WasmScene } from './wasm/loader'
 import { LOOK_ALIKE_MAX_OBJECTS, useLookAlikeGroups } from './useLookAlikeGroups'
 import { tagged } from './test/taggedDispatch'
 
-const frame = (x: number) => ({ origin: [x, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] })
+const frame = (x: number) => ({ origin: [x, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1], extents: [1, 1, 1] })
 
 function mockScene(count: number) {
   let ids = Array.from({ length: count }, (_, i) => BigInt(i + 1))

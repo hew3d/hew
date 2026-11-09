@@ -4389,8 +4389,9 @@ describe('App — the bus enters and leaves the user context (hew.view.enter / e
       report()
       return true
     })
-    // A mirrored instance cannot take a session: the fallback pushes it as
-    // an in-context entry through the viewport's own callback.
+    // An instance a session cannot take (unevenly scaled, or placed in a
+    // group elsewhere): the fallback pushes it as an in-context entry through
+    // the viewport's own callback.
     const runOpenExplodeSessionOrFallback = vi.fn((_id: bigint, frame: { kind: string; id: bigint }) => {
       latestViewportProps().onEnterContext?.(frame)
     })
