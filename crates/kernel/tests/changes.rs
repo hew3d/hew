@@ -225,6 +225,7 @@ fn every_action_variant_is_classified() {
 
     // import: full, lists empty.
     let scene = ImportScene {
+        geo: None,
         materials: vec![],
         defs: vec![DefRecipe::from_meshes(None, vec![box_recipe("d")])],
         roots: vec![ImportNode::Mesh(box_recipe("b"))],

@@ -19,6 +19,7 @@ import { AnnotationEditor } from './viewport/AnnotationEditor'
 import { SnapDot } from './viewport/SnapDot'
 import { MeasurementBox } from './viewport/MeasurementBox'
 import { ViewportHUD } from './viewport/ViewportHUD'
+import { GeoReferenceInfo } from './panels/GeoReferenceInfo'
 import { DocumentTree, type LinkedCopyActions } from './panels/DocumentTree'
 import { MaterialPalette } from './panels/MaterialPalette'
 import { MenuBar } from './panels/MenuBar'
@@ -81,15 +82,20 @@ import { EDIT_CONTEXT_HINT_CODE } from './tools/faceDraw'
 import { outlinerDrawing, resolveDraft, setKernelHidden, type OutlinerDrawing, type PlaneUnitsScene } from './tools/planeUnits'
 import { makeFileHost, isTauri, FileReadError, type DocFormat, type ExportFileType, type FileHost, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
 import {
-  SAVE_PANEL_FORMATS,
+  panelIdFor,
+  exportPanelIdFor,
+  savePanelFormats,
+  saveCompatFrom,
   exportChoiceFrom,
   exportPanelFormats,
   hasNativeSavePanel,
   pickSaveTarget,
+  isSkpExportFormat,
   saveFormatFrom,
   type ExportFormat as PanelExportFormat,
+  type SkpExportFormat,
 } from './io/savePanel'
-import { isSkpFormat, nameForFormat, normalizeDocFormat, saveFormatForPath, skpTarget } from './io/docFormat'
+import { isSkpFormat, nameForFormat, normalizeDocFormat, saveFormatForPath, skpTarget, takesCompat } from './io/docFormat'
 import {
   INITIAL_SESSION,
   deriveTitle,
@@ -112,7 +118,7 @@ import { loadHewBytes, isPanicError, isSceneEmpty, seedHiddenKeysFromRegistry, s
 import { writeShellModeOverride } from './shop/shellMode'
 import { listRecents, recordRecent, type RecentEntry } from './io/recents'
 import { ImportReportDialog } from './panels/ImportReportDialog'
-import { SaveFormatDialog } from './panels/SaveFormatDialog'
+import { SaveFormatDialog, type SaveFormatAnswer } from './panels/SaveFormatDialog'
 import { SkpLossNotice, type SkpLossNoticeData } from './panels/SkpLossNotice'
 import { ImportingOverlay, type OpenProgress, ensureSpinnerKeyframes } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
@@ -774,7 +780,7 @@ export default function App() {
   const [skpNotice, setSkpNotice] = useState<SkpLossNoticeData | null>(null)
   /** Save As format dialog: the format pre-selected, plus the resolver of
    * the promise `promptSaveFormat` hands the Save As flow; null = closed. */
-  const [saveFormatPrompt, setSaveFormatPrompt] = useState<{ initial: DocFormat } | null>(null)
+  const [saveFormatPrompt, setSaveFormatPrompt] = useState<{ initial: DocFormat; compat: boolean } | null>(null)
   /** True while import_dae is running (blocks main thread). */
   const [isImporting, setIsImporting] = useState(false)
   /** How far a `.skp` open has come (the overlay's bar); null while an
@@ -980,8 +986,12 @@ export default function App() {
   // The one-time `.skp` loss notice has been shown for the current document
   // (reset on every document load — Open / New — never on save).
   const skpNoticeShownRef = useRef(false)
+  // The document's file is revision 17 of the 2021-and-later container (or was
+  // last saved with "avoid features older SketchUp versions cannot open"): a
+  // save keeps to it. Set by an open and by Save As; false for anything else.
+  const skpCompatRef = useRef(false)
   // Resolver for the Save As format dialog's promise (see promptSaveFormat).
-  const saveFormatResolveRef = useRef<((format: DocFormat | null) => void) | null>(null)
+  const saveFormatResolveRef = useRef<((answer: SaveFormatAnswer | null) => void) | null>(null)
   // `.skp` source persistence for crash recovery: the source (100+ MB) is
   // written to the recovery store only when it changes, tracked by a
   // generation counter bumped wherever `Scene` replaces it (a load clears it,
@@ -2918,6 +2928,7 @@ export default function App() {
     // the one-time `.skp` loss notice is due again (never reset on save).
     skpSourceGenRef.current += 1
     skpNoticeShownRef.current = false
+    skpCompatRef.current = false
     setSkpNotice(null)
     setDocGeneration((g) => g + 1)
     // A new document starts in normal rendering. Revert keeps the window as
@@ -3414,7 +3425,7 @@ export default function App() {
       return false
     }
 
-    let report: ImportReport & { container: string }
+    let report: ImportReport & { container: string; compat?: boolean }
     try {
       const discardsUnsaved = docSessionRef.current.dirty
       if (!applyLoadedBytes(blank, undefined, { keepCamera: opts?.keepCamera, announce: false })) {
@@ -3430,7 +3441,7 @@ export default function App() {
         await nextPaint()
         step = scene.open_skp_step(OPEN_STEP_BUDGET_MS) as OpenStepProgress
       }
-      report = step.report as ImportReport & { container: string }
+      report = step.report as ImportReport & { container: string; compat?: boolean }
       flushSync(() => setOpenProgress({ phase: 'view', done: 0, total: 1 }))
       await nextPaint()
       // The file IS this state: its import actions are on the undo stack, but
@@ -3465,6 +3476,7 @@ export default function App() {
     reseedHiddenStateFromScene(scene)
 
     const format = normalizeDocFormat(report.container)
+    skpCompatRef.current = report.compat === true
     setDocSession(afterOpen({ name: pick.name, format, handle: pick.handle ?? null }, Date.now()))
     // The import is done: announce the real document, not the blank.
     noteDocumentEvent('opened', pick.name, { name: pick.name, format, handle: pick.handle ?? null })
@@ -3741,10 +3753,10 @@ export default function App() {
   /** Show the non-blocking "the SketchUp file can't hold everything exactly"
    * notice for a Save / Save As — at most once per document (the flag resets
    * on every document load, never on save; later saves are silent). */
-  const noteSkpSimplified = useCallback((simplified: string[]) => {
-    if (simplified.length === 0 || skpNoticeShownRef.current) return
+  const noteSkpSimplified = useCallback((simplified: string[], writerNotes: string[] = [], always = false) => {
+    if ((simplified.length === 0 && writerNotes.length === 0) || (skpNoticeShownRef.current && !always)) return
     skpNoticeShownRef.current = true
-    setSkpNotice({ simplified, offerHewCopy: true })
+    setSkpNotice({ simplified, writerNotes, offerHewCopy: true })
   }, [])
 
   // Both return a promise resolving `true` iff the write actually landed —
@@ -3766,7 +3778,7 @@ export default function App() {
    * file's own (the API's `units`); absent, a save back keeps the file's
    * units and a new file takes the app's. */
   const saveToRef = useCallback(
-    async (ref: FileRef | null, units?: string): Promise<boolean> => {
+    async (ref: FileRef | null, units?: string, compatArg?: boolean): Promise<boolean> => {
       const scene = sceneRef.current
       if (scene === null) return false
       if (ref === null) return saveAsDocumentRef.current()
@@ -3787,16 +3799,23 @@ export default function App() {
         // next save only once it is on disk (`commit_skp_save` below).
         let bytes: Uint8Array
         let simplified: string[] = []
+        let writerNotes: string[] = []
+        // Recorded in `skpCompatRef` only once the write lands.
+        let savedCompat: boolean | null = null
         const skp = isSkpFormat(ref.format)
         if (skp) {
-          const out = scene.save_skp(skpTarget(ref.format), units ?? getLengthUnit(), units !== undefined) as SkpWrite
+          const compat = takesCompat(ref.format) && (compatArg ?? skpCompatRef.current)
+          const out = scene.save_skp(skpTarget(ref.format), units ?? getLengthUnit(), units !== undefined, compat) as SkpWrite
+          savedCompat = compat
           bytes = out.bytes
           simplified = out.simplified
+          writerNotes = out.writer_notes
         } else {
           bytes = new Uint8Array(scene.save())
         }
         const newRef = await fileHostRef.current.save(bytes, ref)
         if (newRef === null) return false // user cancelled
+        if (savedCompat !== null) skpCompatRef.current = savedCompat
         // The document is now bound to `newRef`: a `.skp` takes the written
         // file as the source of its next save; a `.hew` has none.
         if (skp) scene.commit_skp_save()
@@ -3819,7 +3838,7 @@ export default function App() {
           ).catch(() => { /* ignore */ })
         }
         if (newRef.format === 'hew') persistSceneThumbnails(bytes)
-        noteSkpSimplified(simplified)
+        noteSkpSimplified(simplified, writerNotes)
         return true
       } catch (err: unknown) {
         lastSaveErrorRef.current = friendlyErrorText(err)
@@ -3837,20 +3856,20 @@ export default function App() {
 
   // Save As's in-app format choice (the native picker follows it). Resolves
   // with the chosen format, or null when the dialog is canceled.
-  const promptSaveFormat = useCallback((initial: DocFormat): Promise<DocFormat | null> => {
+  const promptSaveFormat = useCallback((initial: DocFormat, initialCompat: boolean): Promise<SaveFormatAnswer | null> => {
     return new Promise((resolve) => {
       // Defense in depth: fail a still-open prompt cleanly before taking
       // over the resolver slot.
       if (saveFormatResolveRef.current !== null) saveFormatResolveRef.current(null)
       saveFormatResolveRef.current = resolve
-      setSaveFormatPrompt({ initial })
+      setSaveFormatPrompt({ initial, compat: initialCompat })
     })
   }, [])
-  const settleSaveFormat = useCallback((format: DocFormat | null) => {
+  const settleSaveFormat = useCallback((answer: SaveFormatAnswer | null) => {
     const resolve = saveFormatResolveRef.current
     saveFormatResolveRef.current = null
     setSaveFormatPrompt(null)
-    resolve?.(format)
+    resolve?.(answer)
   }, [])
 
   const saveAsDocument = useCallback(async (): Promise<boolean> => {
@@ -3860,22 +3879,25 @@ export default function App() {
     // format list, with the path), from the in-app step in the browser.
     const initial = docSession.currentRef?.format ?? 'hew'
     let format: DocFormat
+    let compat = false
     let target: string | null = null
     if (hasNativeSavePanel() && fileHostRef.current.writeTo !== undefined) {
       try {
         const name = nameForFormat(documentName(docSessionRef.current), initial)
-        const pick = await pickSaveTarget(t`Save As`, name, SAVE_PANEL_FORMATS, initial)
+        const pick = await pickSaveTarget(t`Save As`, name, savePanelFormats(initial, skpCompatRef.current), panelIdFor(initial))
         if (pick === null) return false // panel canceled
         format = saveFormatFrom(pick)
+        compat = saveCompatFrom(pick)
         target = pick.path
       } catch (err: unknown) {
         handleToast(t`Save As failed: ${ph({ reason: friendlyErrorText(err) })}`)
         return false
       }
     } else {
-      const chosen = await promptSaveFormat(initial)
+      const chosen = await promptSaveFormat(initial, skpCompatRef.current)
       if (chosen === null) return false // dialog canceled
-      format = chosen
+      format = chosen.format
+      compat = takesCompat(chosen.format) && chosen.compat
     }
     pushCameraStateToScene(scene)
     scene.ensure_document_id()
@@ -3893,10 +3915,12 @@ export default function App() {
       // never commits it, so the source moves only once the write landed.
       let bytes: Uint8Array
       let simplified: string[] = []
+      let writerNotes: string[] = []
       if (isSkpFormat(format)) {
-        const out = scene.save_skp(skpTarget(format), getLengthUnit()) as SkpWrite
+        const out = scene.save_skp(skpTarget(format), getLengthUnit(), undefined, compat) as SkpWrite
         bytes = out.bytes
         simplified = out.simplified
+        writerNotes = out.writer_notes
       } else {
         bytes = new Uint8Array(scene.save())
       }
@@ -3910,6 +3934,7 @@ export default function App() {
       // file as the source of its next save; a `.hew` has none.
       if (isSkpFormat(format)) scene.commit_skp_save()
       else scene.set_skp_source(undefined)
+      skpCompatRef.current = compat
       skpSourceGenRef.current += 1
       const atSavedMark = markSavedIfUnmoved(scene, undoDepthAtSave)
       setDocSession(afterSave(newRef, Date.now(), atSavedMark))
@@ -3925,7 +3950,8 @@ export default function App() {
         ).catch(() => { /* ignore */ })
       }
       if (format === 'hew') persistSceneThumbnails(bytes)
-      noteSkpSimplified(simplified)
+      // A deliberate choice of format: what it drops is listed every time.
+      noteSkpSimplified(simplified, writerNotes, true)
       return true
     } catch (err: unknown) {
       handleToast(t`Save As failed: ${ph({ reason: friendlyErrorText(err) })}`)
@@ -4283,6 +4309,13 @@ export default function App() {
     // original file; bumping the generation re-writes it under this window's
     // own slot on the next autosave.
     scene.set_skp_source(snapshot.source ?? undefined)
+    // `applyLoadedBytes` reset the revision-17 choice; it is recomputed from
+    // the recovered source, whose revision is the file's own.
+    const SceneClass = scene.constructor as unknown as { skp_container_compat(b: Uint8Array): boolean }
+    skpCompatRef.current =
+      snapshot.source !== null &&
+      takesCompat(normalizeDocFormat(meta.format)) &&
+      SceneClass.skp_container_compat(snapshot.source)
     skpSourceGenRef.current += 1
     setDocSession(afterRecovery(
       meta.path !== null ? { name: meta.name, format: normalizeDocFormat(meta.format), handle: meta.path } : null,
@@ -5245,12 +5278,12 @@ export default function App() {
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
-  // SketchUp export (`.skp`, the 2026 container or the 2017 format): a copy
+  // SketchUp export (`.skp`, the 2026 container or a 2017 to 2020 release): a copy
   // written out through `Scene.export_skp`, which leaves the document's own
   // `.skp` source alone. Whatever the file could not hold exactly is listed
   // in the same notice a `.skp` Save shows — every time (an export is a
   // deliberate act, not a recurring save), and with no "Save a .hew copy".
-  const exportSkp = useCallback(async (format: 'skp' | 'skp2017') => {
+  const exportSkp = useCallback(async (format: SkpExportFormat, compat = false) => {
     const scene = sceneRef.current
     if (scene === null) {
       handleToast(t`Export failed: viewport not ready.`)
@@ -5260,7 +5293,7 @@ export default function App() {
     try {
       pushCameraStateToScene(scene)
       // The dialog's `skp` is the 2026 container (the wasm target's name).
-      out = scene.export_skp(format === 'skp2017' ? 'skp2017' : 'skp2026', getLengthUnit()) as SkpWrite
+      out = scene.export_skp(format === 'skp' ? 'skp2026' : format, getLengthUnit(), format === 'skp' && compat) as SkpWrite
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
@@ -5275,17 +5308,19 @@ export default function App() {
       if (exportedTo !== null) {
         handleToast(t`Exported SketchUp file.`)
         LogStore.log.info('app', `Exported ${format} (${out.bytes.length} bytes)`)
-        if (out.simplified.length > 0) setSkpNotice({ simplified: out.simplified, offerHewCopy: false })
+        if (out.simplified.length > 0 || out.writer_notes.length > 0) {
+          setSkpNotice({ simplified: out.simplified, writerNotes: out.writer_notes, offerHewCopy: false })
+        }
       }
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
   }, [handleToast, pushCameraStateToScene])
 
-  const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number, svg?: SvgExportOptions) => {
+  const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number, svg?: SvgExportOptions, skpCompat = false) => {
     setExportDialogOpen(false)
-    if (format === 'skp' || format === 'skp2017') {
-      void exportSkp(format)
+    if (isSkpExportFormat(format)) {
+      void exportSkp(format, skpCompat)
     } else if (format === 'glb') {
       void exportGltf()
     } else if (format === 'usdz') {
@@ -5308,16 +5343,16 @@ export default function App() {
     exportTargetRef.current = null
     const unit = getLengthUnit()
     const initial = lastExportFormatRef.current
-    const extension = initial === 'skp2017' ? 'skp' : initial
+    const extension = isSkpExportFormat(initial) ? 'skp' : initial
     const name = `${documentBaseName(docSessionRef.current)}.${extension}`
     try {
-      const pick = await pickSaveTarget(t`Export`, name, exportPanelFormats(unit), initial)
+      const pick = await pickSaveTarget(t`Export`, name, exportPanelFormats(unit, initial, skpCompatRef.current), exportPanelIdFor(initial))
       if (pick === null) return
       const choice = exportChoiceFrom(pick, unit)
       if (choice === null) return
       lastExportFormatRef.current = choice.format
       exportTargetRef.current = pick.path
-      handleExportFormat(choice.format, choice.stlSegmentsPerTurn, choice.svg)
+      handleExportFormat(choice.format, choice.stlSegmentsPerTurn, choice.svg, choice.skpCompat)
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
@@ -5419,6 +5454,15 @@ export default function App() {
         if (ref === null) {
           return { ok: false, refusal: 'save_failed', message: 'the document has no file to save to' }
         }
+        // `compat` is for the 2021-and-later container only; an explicit
+        // `compat:false` is the same as absent (a revision-17 file stays so).
+        if (args.compat === true && ref !== null && !takesCompat(ref.format)) {
+          return {
+            ok: false,
+            refusal: 'format_mismatch',
+            message: '`compat` applies to the 2021-and-later container (format "skp")',
+          }
+        }
         if (args.copy === true) {
           // Save a copy: write the bytes, change nothing about this document
           // (no rebinding to the file, no clean mark, no new SketchUp source:
@@ -5431,7 +5475,7 @@ export default function App() {
             // first write; `save_skp` mints its own).
             if (!isSkpFormat(ref.format)) scene.ensure_document_id()
             const bytes = isSkpFormat(ref.format)
-              ? (scene.save_skp(skpTarget(ref.format), units ?? getLengthUnit(), units !== undefined) as SkpWrite).bytes
+              ? (scene.save_skp(skpTarget(ref.format), units ?? getLengthUnit(), units !== undefined, takesCompat(ref.format) && (args.compat === true || (args.format === undefined && skpCompatRef.current))) as SkpWrite).bytes
               : new Uint8Array(scene.save())
             void reportDocumentId()
             await fileHostRef.current.save(bytes, ref)
@@ -5445,7 +5489,7 @@ export default function App() {
           }
         }
         lastSaveErrorRef.current = 'the document could not be saved'
-        const saved = await saveToRef(ref, units)
+        const saved = await saveToRef(ref, units, args.compat === true ? true : args.format !== undefined ? false : undefined)
         return saved
           ? { ok: true }
           : { ok: false, refusal: 'save_failed', message: lastSaveErrorRef.current }
@@ -8382,6 +8426,7 @@ export default function App() {
             />
           </TraySection>
           <TraySection title={trayTitle.outliner} collapsed={!showModelInfo} onToggle={() => setShowModelInfo((v) => !v)}>
+            <GeoReferenceInfo scene={state.scene} docRev={docRev} />
             <DocumentTree
               scene={state.scene}
               docRev={docRev}
@@ -8782,6 +8827,7 @@ export default function App() {
       {saveFormatPrompt !== null && (
         <SaveFormatDialog
           initial={saveFormatPrompt.initial}
+          initialCompat={saveFormatPrompt.compat}
           onChoose={settleSaveFormat}
           onCancel={() => settleSaveFormat(null)}
         />
@@ -8805,6 +8851,7 @@ export default function App() {
       {exportDialogOpen && (
         <ExportDialog
           onExport={handleExportFormat}
+          initialCompat={skpCompatRef.current}
           onCancel={() => setExportDialogOpen(false)}
         />
       )}

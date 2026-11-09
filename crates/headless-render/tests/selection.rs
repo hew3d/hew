@@ -87,6 +87,8 @@ fn a_selection_without_a_camera_ignores_the_saved_working_camera() {
         projection: kernel::CameraProjection::Perspective,
         fov_deg: 35.0,
         parallel_height: 2.0,
+        image_width: None,
+        aspect_ratio: None,
     });
     let r = headless_render::snapshot(&doc, &params(Some(vec![occurrence(&doc, a)]))).unwrap();
     assert!(ids(&r).contains(&1));
@@ -326,6 +328,8 @@ fn a_line_drawing_of_a_selection_ignores_the_saved_camera() {
         projection: kernel::CameraProjection::Perspective,
         fov_deg: 35.0,
         parallel_height: 2.0,
+        image_width: None,
+        aspect_ratio: None,
     });
     let mut p = LineDrawingParams {
         camera: None,

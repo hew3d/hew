@@ -71,6 +71,10 @@ export interface SceneEntry {
   description: string
   /** Capture bitmask — see `PROP_*`. */
   props: number
+  /** The Scene's own transition time in seconds; `null`/absent = the document's own. */
+  transitionS?: number | null
+  /** The Scene's own delay in seconds; `null`/absent = the document's own. */
+  delayS?: number | null
   camera?: CameraStateJson
   display?: DisplayStateJson
   /** The look the Scene restores with its display property (`.skp` scene styles). */
@@ -117,6 +121,15 @@ export interface ViewStyleJson {
   sky: [number, number, number] | null
   ground: [number, number, number] | null
   axes: boolean
+  /** The style's own section cut outline (color, pixels) and the settings
+   *  carried without being drawn; each present only when the document sets it. */
+  sectionCutColor?: [number, number, number]
+  sectionCutWidth?: number
+  sectionFill?: boolean
+  sectionFillColor?: [number, number, number]
+  activeSectionColor?: [number, number, number]
+  guidesColor?: [number, number, number]
+  guidesHidden?: boolean
 }
 
 export function parseViewStyleJson(v: unknown): ViewStyleJson | null {
@@ -126,7 +139,17 @@ export function parseViewStyleJson(v: unknown): ViewStyleJson | null {
     Array.isArray(x) && x.length === 3 && x.every((c) => typeof c === 'number' && Number.isInteger(c) && c >= 0 && c <= 255)
   if (!rgb(o.background) || typeof o.axes !== 'boolean') return null
   if (!(o.sky === null || rgb(o.sky)) || !(o.ground === null || rgb(o.ground))) return null
-  return { background: o.background, sky: o.sky, ground: o.ground, axes: o.axes }
+  const style: ViewStyleJson = { background: o.background, sky: o.sky, ground: o.ground, axes: o.axes }
+  if (rgb(o.sectionCutColor)) style.sectionCutColor = o.sectionCutColor
+  if (typeof o.sectionCutWidth === 'number' && Number.isFinite(o.sectionCutWidth) && o.sectionCutWidth >= 0) {
+    style.sectionCutWidth = o.sectionCutWidth
+  }
+  if (typeof o.sectionFill === 'boolean') style.sectionFill = o.sectionFill
+  if (rgb(o.sectionFillColor)) style.sectionFillColor = o.sectionFillColor
+  if (rgb(o.activeSectionColor)) style.activeSectionColor = o.activeSectionColor
+  if (rgb(o.guidesColor)) style.guidesColor = o.guidesColor
+  if (typeof o.guidesHidden === 'boolean') style.guidesHidden = o.guidesHidden
+  return style
 }
 
 export function parseDisplayJson(v: unknown): DisplayStateJson | undefined {
@@ -148,6 +171,23 @@ export function parseSectionJson(v: unknown): SectionPlaneJson | undefined {
  * thrown on — the kernel wrote this JSON, so a shape mismatch is a version
  * skew we would rather degrade on than crash the tray for.
  */
+/** A timing in seconds: a finite, non-negative number, else `null` (the document's own). */
+function parseSeconds(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null
+}
+
+/**
+ * Text typed into a timing field -> seconds. Blank = `null` (the document's
+ * own); a finite non-negative number = that many seconds; anything else is
+ * `undefined` (invalid: the field reverts).
+ */
+export function parseSecondsInput(text: string): number | null | undefined {
+  const trimmed = text.trim()
+  if (trimmed === '') return null
+  const n = Number(trimmed)
+  return Number.isFinite(n) && n >= 0 ? n : undefined
+}
+
 export function parseScenesJson(json: string): SceneEntry[] {
   let raw: unknown
   try {
@@ -167,6 +207,8 @@ export function parseScenesJson(json: string): SceneEntry[] {
       description: typeof o.description === 'string' ? o.description : '',
       props: o.props,
     }
+    entry.transitionS = parseSeconds(o.transitionS)
+    entry.delayS = parseSeconds(o.delayS)
     const camera = parseCameraJson(o.camera)
     if (camera !== undefined) entry.camera = camera
     const display = parseDisplayJson(o.display)

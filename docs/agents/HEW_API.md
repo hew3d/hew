@@ -1015,8 +1015,9 @@ for, not shipped.
 | `hew.context` | `enter`, `exit` | Required |
 | `hew.group` | `create`, `explode`, `reparent` | Required (`reparent` Standard) |
 | `hew.component` | `create`, `place`, `make_unique` (one placement, through a path at any depth), `promote` (a linked set becomes a named component), `explode`, `rebase` (new definition axes, nothing moves), `flip_instance` (mirror one placement) (§7.4) | Standard |
-| `hew.material` | `create` (color or texture), `paint`, `set_default`, `set_opacity`, `position_texture`, `replace` | Standard |
+| `hew.material` | `create` (color or texture), `paint`, `set_default`, `set_opacity`, `set_pbr` (metallic and roughness, 0 to 1; maps are kept), `position_texture`, `replace` | Standard |
 | `hew.tag` | `create`, `assign`, `set_visible`, `delete`, `rename` | Standard |
+| `hew.geo` | `get`, `set` (the document's geo-reference / coordinate reference system; `set` is one undo step) | Standard |
 | `hew.guide` | `line`, `point`, `angular`, `clear` | Standard |
 | `hew.scenes` | `list`, `add`, `update`, `rename`, `describe`, `remove`, `reorder`, `apply` (§7.1) | Standard |
 | `hew.library` | `list`, `describe`, `insert`, `save`, `remove`, `update_meta` — the Hew Library (§8.1) | Standard |
@@ -1173,33 +1174,37 @@ Semantics notes, normative:
   creates or opens documents and clients `attach`; whether a live host
   additionally honors `new`/`open` (opening a fresh window, say) is
   host-defined and advertised via capabilities.
-- `hew.doc.open` takes a `.hew` or a SketchUp `.skp` (either container,
-  chosen by the `.skp` extension). Opening a `.skp` is not an edit: it
+- `hew.doc.open` takes a `.hew` or a SketchUp `.skp` (the 2021-and-later container or a stream release, 3 to 8 or 2013 to 2020;
+  read by content, chosen by the `.skp` extension). Opening a `.skp` is not an edit: it
   leaves no undo step. A headless host keeps the opened file as the
   source of the document's next `.skp` save; opening a `.hew` or
   `hew.doc.new` drops it. A file the reader cannot decode refuses
   `load_failed`.
+- `hew.doc.save` and `hew.doc.export` take an optional `compat` boolean with format `"skp"`: it writes revision 17 of the 2021-and-later container (without layer folders, hatch patterns, PBR materials, environments, snaps, procedures, page extras and the coordinate system) so older SketchUp versions can open it; by default the lowest revision (17 or 18) that holds the content is written. `compat` with any other target refuses `format_mismatch`. SketchUp 2021 to 2025 are supported: revision 17 is the one to hand them.
 - `hew.doc.save` takes an optional `format`: `"hew"`, `"skp"` (the 2026
-  container, what current SketchUp saves) or `"skp2017"` (opens in
-  SketchUp Make 2017 and later). Without it the path's extension decides:
+  container, what current SketchUp saves), or a stream release by its
+  name: `"skp3"` to `"skp8"` and `"skp2013"` to `"skp2020"` (SketchUp 3 to
+  8 and 2013 to 2020, each in its own release's format; a file opened from
+  one of them is remembered as that release, and a file of a release
+  Skpwright does not list as the nearest one it writes). Without it the path's extension decides:
   a `.skp` path keeps the working document's own `.skp` container when it
   came from a `.skp` (the 2026 one otherwise), anything else writes
   `.hew`; with no path, the working file's own format is used. An
   explicit `format` that contradicts the path's extension (a `.skp` path
-  with `"hew"`, or a non-`.skp` path with `"skp"` / `"skp2017"`) refuses
+  with `"hew"`, or a non-`.skp` path with `"skp"`, `"skp3"` to `"skp8"` or `"skp2013"` to `"skp2020"`) refuses
   `format_mismatch` and writes nothing, so one format's bytes never land
   in the other's file. A `.skp` save builds on the file the document came
   from (or was last saved as), so unchanged content stays as SketchUp
   wrote it, and the written file becomes the new source; a `.hew` save
   drops it. The result carries `format` (what was written) and, for a
   `.skp`, `simplified` (what the file could not hold exactly) and
-  `writer_notes` (what the 2017 writer dropped), both arrays of strings.
+  `writer_notes` (what a stream-release writer dropped), both arrays of strings.
   In the desktop app a live save runs the app's own Save (Save As with a
   `path`, a saved copy with `copy`), so a `.skp` path or format writes
   exactly what File ▸ Save would. A live host that would only hand the
   bytes back (no `path`, nothing for the app to write) refuses a `.skp`
   format with `host_capability_missing`; `hew.doc.export` with `"skp"` /
-  `"skp2017"` hands back a SketchUp file instead.
+  `"skp3"` to `"skp2020"` hands back a SketchUp file instead.
 - `hew.doc.revert {document?}` is File ▸ Revert to Saved: it re-reads the
   document's saved file in place, discarding every change since the last
   save. The undo and redo history is cleared and the document reads clean;
@@ -1213,7 +1218,7 @@ Semantics notes, normative:
   the history cannot see, such as scene edits, does not count; the live
   app asks its dirty flag, which does count them. The desktop app routes
   it to the window like `hew.doc.save`.
-- `hew.doc.export` also writes `"skp"` and `"skp2017"`, as `save` does
+- `hew.doc.export` also writes `"skp"`, `"skp3"` to `"skp8"` and `"skp2013"` to `"skp2020"`, as `save` does
   but never changing the document's own file or source.
 - A SketchUp file carries display units (SketchUp's Model Info > Units).
   `hew.doc.save` and `hew.doc.export` take an optional `units`, one of

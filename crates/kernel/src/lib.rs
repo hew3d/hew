@@ -26,6 +26,7 @@ pub mod camera;
 pub mod changes;
 pub mod document;
 pub mod error;
+pub mod geo;
 pub mod guide;
 pub mod health;
 pub mod history;
@@ -62,7 +63,8 @@ pub use document::{
     PendingActionKind, PlaneListing, PlaneUnits, PurgeReport, Remap, RenderRoot, WRAPPED_DEF_SID,
 };
 pub use error::TopologyError;
-pub use guide::{Guide, GuideSpan};
+pub use geo::{GeoReference, GeoReferenceError};
+pub use guide::{Guide, GuideDash, GuideSpan};
 pub use history::{History, HistoryEntry, HistoryError, KernelOp, KernelOpError, KernelOpReport};
 pub use ids::{
     AnnotationId, ComponentId, EdgeId, FaceId, GroupId, GuideId, HalfEdgeId, InstanceId, LoopId,
@@ -74,7 +76,7 @@ pub use import::{
     SkippedMesh,
 };
 pub use material::{
-    FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture, UvFrame,
+    FaceMaterial, ImageFormat, Material, MaterialPalette, Pbr, PbrMap, Rgba8, Texture, UvFrame,
     material_content_hash,
 };
 pub use math::{MathError, Plane, Point3, Vec3};
@@ -101,7 +103,7 @@ pub use sketch::{
     SketchIsland, SketchIslandId, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
     VertexMoved,
 };
-pub use style::ViewStyle;
+pub use style::{SectionLook, ViewStyle};
 pub use topo::{AnalyticRim, AttrSlot, FaceAttrs, Object, SurfaceRef, WatertightState};
 pub use transform::{Transform, TransformError};
 pub use unit_key::{SketchUnitKeys, chain_key, curve_key, edge_key, region_key};

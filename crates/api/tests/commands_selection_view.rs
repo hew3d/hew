@@ -396,6 +396,7 @@ fn set_refuses_unknown_mixed_and_hidden_targets_and_changes_nothing() {
             a: 255,
         },
         texture: None,
+        pbr: None,
     });
     let mat = public(&f.doc, EntityRef::Material(mat));
     let data = refused(
@@ -485,6 +486,7 @@ fn set_refuses_what_a_tag_or_a_group_hides() {
     // A sketch on a hidden tag refuses too (sketch tags arrive with an
     // import, a `.skp` edge's layer).
     let scene = kernel::ImportScene {
+        geo: None,
         materials: Vec::new(),
         defs: Vec::new(),
         roots: Vec::new(),

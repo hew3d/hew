@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "api"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "kernel",
  "mesh-export",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "dae-import"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "dae-parser",
  "kernel",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "gltf-import"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "gltf",
  "kernel",
@@ -542,7 +542,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "headless-render"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "api",
  "hlr",
@@ -559,7 +559,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hew-cli"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "api",
  "dae-import",
@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "hew-relay"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "axum",
  "clap",
@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "hlr"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "image-import"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "kernel",
 ]
@@ -736,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "inference"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "kernel"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "proptest",
  "serde",
@@ -805,7 +805,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "library"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "kernel",
  "serde_json",
@@ -848,7 +848,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mesh-export"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "kernel",
  "serde_json",
@@ -858,7 +858,7 @@ dependencies = [
 
 [[package]]
 name = "mesh-heal"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -951,17 +951,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "openskp"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d6da61e6de92133750297de27a9d9e3f31b21e6b11e0075bcc81dd22cda8214"
-dependencies = [
- "miniz_oxide 0.9.1",
-]
-
-[[package]]
 name = "pdfwrite"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "miniz_oxide 0.8.9",
 ]
@@ -980,7 +971,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "plugin-manifest"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "semver",
  "serde",
@@ -1276,29 +1267,38 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "skp-export"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "jpeg-decoder",
  "kernel",
- "openskp",
  "png",
  "serde_json",
  "skp-import",
+ "skpwright",
  "slotmap",
  "tessellate",
 ]
 
 [[package]]
 name = "skp-import"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "dae-import",
  "kernel",
  "mesh-heal",
- "openskp",
  "proptest",
  "serde_json",
+ "skpwright",
  "tessellate",
+]
+
+[[package]]
+name = "skpwright"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7bc4bf681b4039e70134a32ba837ed7a67f315b1ad4d3b6715c82f822ecdfbc"
+dependencies = [
+ "miniz_oxide 0.9.1",
 ]
 
 [[package]]
@@ -1334,7 +1334,7 @@ dependencies = [
 
 [[package]]
 name = "softrender"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "kernel",
  "miniz_oxide 0.8.9",
@@ -1343,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "stl-import"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "kernel",
  "mesh-heal",
@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "tessellate"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "kernel",
  "proptest",
@@ -1620,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "wasm-api"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "api",
  "dae-import",

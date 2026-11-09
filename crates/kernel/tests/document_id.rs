@@ -1,5 +1,5 @@
 //! Specs for the persistent document id (docs/dev/HEW_FILE_FORMAT.md §2,
-//! manifest v26+): a UUID minted from host-supplied randomness on the
+//! manifest v29+): a UUID minted from host-supplied randomness on the
 //! first save, carried in the manifest, kept across save, load, and copy,
 //! and invisible to `state_hash`.
 
@@ -157,26 +157,26 @@ fn id_is_not_undoable() {
 }
 
 #[test]
-fn pre_v26_file_with_document_id_is_rejected() {
+fn pre_v29_file_with_document_id_is_rejected() {
     let mut doc = Document::new();
     a_box(&mut doc);
     doc.ensure_document_id(RANDOM);
     let bytes = doc.save();
-    let smuggled = patch_manifest(&bytes, |m| m["format_version"] = 25.into());
+    let smuggled = patch_manifest(&bytes, |m| m["format_version"] = 28.into());
     assert!(
         matches!(
             Document::load(&smuggled),
             Err(LoadError::MalformedManifest { .. })
         ),
-        "a document_id below v26 is a smuggled field"
+        "a document_id below v29 is a smuggled field"
     );
 
-    // The same file without the member still loads at v25, with no id.
+    // The same file without the member still loads at v28, with no id.
     let clean = patch_manifest(&bytes, |m| {
-        m["format_version"] = 25.into();
+        m["format_version"] = 28.into();
         m.as_object_mut().unwrap().remove("document_id");
     });
-    let old = Document::load(&clean).expect("a v25 file loads");
+    let old = Document::load(&clean).expect("a v28 file loads");
     assert_eq!(old.document_id(), None);
 }
 
@@ -221,7 +221,7 @@ fn encode_omits_the_member_when_absent() {
         manifest.as_object().unwrap().get("document_id").is_none(),
         "no key without an id"
     );
-    assert_eq!(manifest["format_version"], 26);
+    assert_eq!(manifest["format_version"], 29);
 }
 
 #[test]

@@ -92,6 +92,7 @@ fn seam_half(name: &str, x0: f64, x1: f64, open_side: usize) -> kernel::MeshReci
 
 fn ingest_roots(doc: &mut kernel::Document, meshes: Vec<kernel::MeshRecipe>) {
     let scene = kernel::ImportScene {
+        geo: None,
         materials: Vec::new(),
         defs: Vec::new(),
         roots: meshes.into_iter().map(kernel::ImportNode::Mesh).collect(),
@@ -110,6 +111,7 @@ fn apply_fixture(name: &str, doc: &mut kernel::Document) {
     match name {
         "seam_halves" => {
             let scene = kernel::ImportScene {
+                geo: None,
                 materials: Vec::new(),
                 defs: Vec::new(),
                 roots: vec![

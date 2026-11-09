@@ -10,6 +10,7 @@
 //! are refined in the change that lands its conformance tests; until it
 //! is implemented, dispatch answers it with the `unimplemented` refusal.
 
+use crate::host::DocFormat;
 use std::collections::BTreeMap;
 
 use crate::grant::Permission;
@@ -590,7 +591,7 @@ impl Registry {
             S,
             Host,
             Req,
-            "Export the attached document (STL/3MF/glTF/USDZ, or SketchUp skp/skp2017); bytes base64, or a path on hosts with filesystem access.",
+            "Export the attached document (STL/3MF/glTF/USDZ, or SketchUp skp, skp3 to skp8, skp2013 to skp2020); bytes base64, or a path on hosts with filesystem access.",
         );
         add(
             "hew.doc.import",
@@ -1126,6 +1127,13 @@ impl Registry {
             "Set a material's opacity.",
         );
         add(
+            "hew.material.set_pbr",
+            M,
+            Kernel,
+            Std,
+            "Set a material's metallic and roughness factors (0 to 1); its maps and strengths are kept.",
+        );
+        add(
             "hew.material.position_texture",
             M,
             Kernel,
@@ -1216,7 +1224,7 @@ impl Registry {
             M,
             Kernel,
             Std,
-            "Re-capture a Scene's properties from the document's current state. Records no undo entry (§6.4).",
+            "Re-capture a Scene's properties from the document's current state, and/or set its own transition and delay times. Records no undo entry (§6.4).",
         );
         add(
             "hew.scenes.rename",
@@ -1268,6 +1276,21 @@ impl Registry {
             Kernel,
             Req,
             "Delete one attribute key or a whole namespace.",
+        );
+        // hew.geo — the document's coordinate reference system.
+        add(
+            "hew.geo.get",
+            R,
+            Kernel,
+            Std,
+            "The document's geo-reference (coordinate reference system), or null when it has none.",
+        );
+        add(
+            "hew.geo.set",
+            M,
+            Kernel,
+            Std,
+            "Set the document's geo-reference to the given record, or clear it with null. One undo step.",
         );
         // hew.history — the shared undo history (§7 semantics notes).
         add(
@@ -2324,8 +2347,12 @@ impl Registry {
                     },
                     "format": {
                         "type": "string",
-                        "enum": ["hew", "skp", "skp2017"],
-                        "description": "\"skp\" is the 2026 container (what current SketchUp saves), \"skp2017\" the 2017 format (opens in SketchUp Make 2017 and later). Absent: a .skp path keeps the working file's own .skp container (the 2026 one for a document that did not come from a .skp), any other path writes .hew, and no path uses the working file's own format. A format that contradicts the path's extension is refused (format_mismatch)."
+                        "enum": DocFormat::wire_names(),
+                        "description": "\"skp\" is the SketchUp 2021-and-later container (what current SketchUp saves); \"skp3\" to \"skp8\" and \"skp2013\" to \"skp2020\" are those releases' own formats (SketchUp opens a file of its own release or later). Absent: a .skp path keeps the working file's own .skp container (the 2026 one for a document that did not come from a .skp), any other path writes .hew, and no path uses the working file's own format. A format that contradicts the path's extension is refused (format_mismatch)."
+                    },
+                    "compat": {
+                        "type": "boolean",
+                        "description": "For the 2021-and-later container (\"skp\") only: write its revision 17, which every SketchUp since 2021 opens, leaving out what only newer versions hold (layer folders, hatch patterns, PBR materials, environments, snaps, procedures, page extras, CRS), each kind itemised in `writer_notes`. Absent or false: the lowest revision that holds the content. A save back over a revision-17 file keeps revision 17 either way. Refused for any other format."
                     },
                     "units": {
                         "type": "string",
@@ -2339,9 +2366,9 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "bytes_base64": { "type": "string" },
-                    "format": { "type": "string", "enum": ["hew", "skp", "skp2017"], "description": "the format the document was saved in" },
+                    "format": { "type": "string", "enum": DocFormat::wire_names(), "description": "the format the document was saved in" },
                     "simplified": { "type": "array", "items": { "type": "string" }, "description": "present for a .skp: what the file could not hold exactly" },
-                    "writer_notes": { "type": "array", "items": { "type": "string" }, "description": "present for a .skp: what the 2017 writer dropped" }
+                    "writer_notes": { "type": "array", "items": { "type": "string" }, "description": "present for a .skp: what a stream release or revision-17 (`compat`) save dropped, one entry per kind" }
                 },
                 "additionalProperties": false
             });
@@ -2379,14 +2406,19 @@ impl Registry {
         {
             let cmd = commands.get_mut("hew.doc.export").expect("declared above");
             cmd.implemented = true;
-            cmd.summary = "Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp (\"skp\", 2026 container; \"skp2017\") — bytes base64, or a path on hosts with filesystem access.";
+            let export_formats: Vec<String> = ["stl", "3mf", "glb", "gltf", "usdz"]
+                .into_iter()
+                .map(String::from)
+                .chain(DocFormat::skp_wire_names())
+                .collect();
+            cmd.summary = "Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp (\"skp\", the 2021-and-later container; \"skp3\" to \"skp8\", \"skp2013\" to \"skp2020\") — bytes base64, or a path on hosts with filesystem access.";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
                     "format": {
                         "type": "string",
-                        "enum": ["stl", "3mf", "glb", "gltf", "usdz", "skp", "skp2017"],
-                        "description": "\"gltf\" is an alias for \"glb\" — every host that implements one implements both. \"skp\" is the SketchUp 2026 container, \"skp2017\" the 2017 format; exporting never changes the document's own file"
+                        "enum": export_formats,
+                        "description": "\"gltf\" is an alias for \"glb\" — every host that implements one implements both. \"skp\" is the SketchUp 2021-and-later container, \"skp3\" to \"skp8\" and \"skp2013\" to \"skp2020\" those releases' formats; exporting never changes the document's own file"
                     },
                     "path": { "type": "string" },
                     "segments_per_turn": { "type": "integer", "minimum": 8, "maximum": 512 },
@@ -2395,7 +2427,11 @@ impl Registry {
                         "enum": ["m", "cm", "mm", "arch", "frac_in", "dec_in"],
                         "description": "SketchUp formats only: the display units the file opens in (hew.view.units's formats). Absent: the host's display units (the app's preference live; meters headless)."
                     },
-                    "selection": render_selection_schema()
+                    "selection": render_selection_schema(),
+                    "compat": {
+                        "type": "boolean",
+                        "description": "Format \"skp\" only: write revision 17 of the container, leaving out what only newer SketchUp versions hold (see hew.doc.save). Absent or false: the lowest revision that holds the content."
+                    }
                 },
                 "required": ["format"],
                 "additionalProperties": false
@@ -2708,6 +2744,65 @@ impl Registry {
                 "required": ["object_id", "object_ids"]
             });
             cmd.refusals = repair_refusals(&["not_a_flat_sheet", "thickness_too_small"]);
+        }
+        {
+            let geo_schema = serde_json::json!({
+                "type": ["object", "null"],
+                "description": "the coordinate reference system, or null when the document has none; positions are in the system's own map unit",
+                "properties": {
+                    "name": { "type": "string" },
+                    "description": { "type": "string" },
+                    "easting": { "type": "number", "description": "model origin easting, in the map unit" },
+                    "northing": { "type": "number", "description": "model origin northing, in the map unit" },
+                    "height": { "type": "number", "description": "model origin height, in the map unit" },
+                    "x_axis": {
+                        "type": "array",
+                        "items": { "type": "number" },
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "description": "the model's x axis in the map plane, a 2D vector (not an angle)"
+                    },
+                    "scale": { "type": "number", "description": "map scale factor" },
+                    "geodetic_datum": { "type": "string" },
+                    "vertical_datum": { "type": "string" },
+                    "map_projection": { "type": "string" },
+                    "map_zone": { "type": "string" },
+                    "map_unit": { "type": "string", "description": "the unit's name as the file holds it, e.g. METRE" },
+                    "map_unit_metres": { "type": "number", "exclusiveMinimum": 0, "description": "meters per map unit, when known" },
+                    "tgl_id": { "type": "string" },
+                    "calibration_file_name": { "type": "string" }
+                },
+                "additionalProperties": false
+            });
+            let cmd = commands.get_mut("hew.geo.get").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "geo": geo_schema.clone() },
+                "required": ["geo"],
+                "additionalProperties": false
+            });
+            cmd.refusals = vec![];
+
+            let cmd = commands.get_mut("hew.geo.set").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "geo": geo_schema },
+                "required": ["geo"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["invalid_geo_reference"];
         }
         {
             let cmd = commands
@@ -4319,6 +4414,28 @@ impl Registry {
         }
         {
             let cmd = commands
+                .get_mut("hew.material.set_pbr")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "material": { "type": "string" },
+                    "metallic": { "type": "number", "minimum": 0, "maximum": 1, "description": "0 dielectric to 1 metal" },
+                    "roughness": { "type": "number", "minimum": 0, "maximum": 1, "description": "0 mirror to 1 fully diffuse" }
+                },
+                "required": ["material", "metallic", "roughness"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["unknown_entity", "unknown_material"];
+        }
+        {
+            let cmd = commands
                 .get_mut("hew.material.position_texture")
                 .expect("declared above");
             cmd.implemented = true;
@@ -4650,6 +4767,8 @@ impl Registry {
                     "sid": { "type": "integer" },
                     "name": { "type": "string" },
                     "description": { "type": "string" },
+                    "transition_s": { "type": ["number", "null"], "description": "the Scene's own transition time in seconds; null is the document's own" },
+                    "delay_s": { "type": ["number", "null"], "description": "the Scene's own delay in seconds; null is the document's own" },
                     "props": {
                         "type": "object",
                         "properties": {
@@ -4729,11 +4848,13 @@ impl Registry {
                     "id": { "type": "string" },
                     "properties": properties_schema.clone(),
                     "camera": camera_schema,
-                    "display": display_schema.clone()
+                    "display": display_schema.clone(),
+                    "transition_s": { "type": ["number", "null"], "minimum": 0, "description": "the Scene's own transition time in seconds; null returns it to the document's own" },
+                    "delay_s": { "type": ["number", "null"], "minimum": 0, "description": "the Scene's own delay in seconds; null returns it to the document's own" }
                 },
                 "required": ["id"],
                 "additionalProperties": false,
-                "description": "properties defaults to the Scene's currently captured set (re-capture, never widen) when omitted"
+                "description": "properties defaults to the Scene's currently captured set (re-capture, never widen) when omitted; with only transition_s/delay_s given, nothing is re-captured"
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
@@ -6744,6 +6865,7 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.query.changes_since",
                 "hew.query.context",
                 "hew.query.entity",
+                "hew.geo.get",
                 "hew.query.faces",
                 "hew.query.measure",
                 "hew.query.mesh",
@@ -6833,6 +6955,8 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.material.replace",
                 "hew.material.set_default",
                 "hew.material.set_opacity",
+                "hew.material.set_pbr",
+                "hew.geo.set",
                 "hew.tag.assign",
                 "hew.tag.create",
                 "hew.tag.delete",

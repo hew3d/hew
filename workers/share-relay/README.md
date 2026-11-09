@@ -26,7 +26,9 @@ This is **the relay contract** — the same one the self-hostable Rust binary
 under an optional `/relay` prefix (`/relay/drop`, `/relay/drop/<token>`,
 `/relay/`), stripped exactly once: self-hosting serves the relay from the
 same origin as the web app under `/relay/`, and the public deployment
-routes `app.hew3d.com/relay/*` here alongside the legacy `share.hew3d.com/*`.
+routes `app.hew3d.com/relay/*` here alongside the legacy `share.hew3d.com/*`,
+and the beta host gets the same pair (`beta.hew3d.com/relay/*` and
+`beta.hew3d.com/relay`).
 
 | Route | Method | Body | Response |
 |---|---|---|---|
@@ -63,9 +65,9 @@ is the bound, and its free-tier limits fail closed).
   past the TTL" test but only reads the `meta` row, never wipes storage.
   This is what lets the desktop dialog poll for pickup (has the phone
   fetched it yet?) without racing — or losing to — the phone's own `GET`.
-- **CORS**: only `https://app.hew3d.com`, `tauri://localhost`, and
-  `https://tauri.localhost` are allowed (the three origins the hosted app
-  and the two Tauri webview flavors run under), plus anything in the
+- **CORS**: only `https://app.hew3d.com`, `https://beta.hew3d.com`,
+  `tauri://localhost`, and `https://tauri.localhost` are allowed (the hosted
+  app and its beta host, plus the two Tauri webview flavors), plus anything in the
   `EXTRA_ALLOWED_ORIGINS` var. No wildcard, ever. A same-origin
   self-hosted phone never needs CORS at all, and the desktop's Rust relay
   client sends no `Origin`.
@@ -342,14 +344,17 @@ knob; do not set it on the production Worker.)
    `app.hew3d.com/relay/*` **and** the bare `app.hew3d.com/relay` to this
    Worker (dashboard → the Worker → Settings → Domains & Routes, zone
    `hew3d.com`; the wildcard pattern does not cover the slash-less identity
-   URL, which the contract requires) — new desktops and the
-   phone app reach the relay as `<origin>/relay/…` (`DASHBOARD-SETUP.md`
-   has the checklist, including the rate-limit rule re-key). Both hostnames
-   reach the same Worker and the same Durable Object namespace — the DO id
-   derives from the token, not the hostname — so old and new clients
-   interoperate. Verify on the first request that the Workers route wins
-   over the Pages custom domain on the same hostname (Cloudflare documents
-   that precedence; confirm rather than trust).
+   URL, which the contract requires). New desktops and the phone app reach the
+   relay as `<origin>/relay/…` (`DASHBOARD-SETUP.md` has the checklist,
+   including the rate-limit rule re-key). Add the same pair for the beta host:
+   `beta.hew3d.com/relay/*` and `beta.hew3d.com/relay`. After any change to
+   the routes in `wrangler.toml`, run `npx wrangler deploy` again from this
+   directory, so the beta routes exist on the Worker. Both hostnames reach the
+   same Worker and the same Durable Object namespace — the DO id derives from
+   the token, not the hostname — so old and new clients interoperate. Verify
+   on the first request that the Workers route wins over the Pages custom
+   domain on the same hostname (Cloudflare documents that precedence; confirm
+   rather than trust).
 
 ### Cleaning up a prior R2 deploy
 

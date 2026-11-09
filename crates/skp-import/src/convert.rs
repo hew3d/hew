@@ -1,7 +1,7 @@
-//! `openskp::Model` -> `kernel::ImportScene`.
+//! `skpwright::Model` -> `kernel::ImportScene`.
 //!
 //! Mapping:
-//! - a node's [`openskp::Node::is_group`] tells apart SketchUp's two
+//! - a node's [`skpwright::Node::is_group`] tells apart SketchUp's two
 //!   placement classes, which Hew maps very differently:
 //!   - `Some(false)` (a `CComponentInstance`) OR `None` (the legacy
 //!     byte-scan path, which cannot tell them apart — treated as a
@@ -59,16 +59,16 @@
 //!   one under a hidden container, or in a definition placed more than
 //!   once, stays out (the file keeps it).
 //!
-//! Both containers OpenSKP reads (the 2026 ZIP container every current
+//! Both containers Skpwright reads (the 2026 ZIP container every current
 //! SketchUp saves, and the 2017 `CArchive` stream) come out as the same
-//! `Model`, so nothing here is container-specific. Everything OpenSKP hands
+//! `Model`, so nothing here is container-specific. Everything Skpwright hands
 //! us is already metres; poses come from the composed row-major world
 //! matrices, whose first 12 entries are exactly `Transform::from_affine`'s
 //! layout.
 //!
 //! Importer keys: scene hidden sets and active section cuts name entities
 //! by SketchUp **persistent id**, the one identity both containers carry.
-//! The composed [`openskp::Node`] tree does not carry pids itself, but it is
+//! The composed [`skpwright::Node`] tree does not carry pids itself, but it is
 //! built in the exact order of the reader's instance lists — top-level
 //! nodes from `Model::instances` outside every geometry run, children from
 //! the placing run's `GeometryRun::placed` — so the converter walks those
@@ -86,7 +86,7 @@ use kernel::{
 };
 use mesh_heal::uv::fit_uv_frame;
 use mesh_heal::{heal_mesh_as_written, heal_mesh_keeping_faces};
-use openskp::{Owner, Value};
+use skpwright::{Owner, Value};
 
 use crate::extras::{self, Dicts, HewModel, Mapped};
 use crate::material::MatTable;
@@ -96,6 +96,52 @@ use crate::{AnnotationOrigin, Origin, Provenance};
 /// names (a definition's own geometry, the model's loose geometry, a
 /// group's own geometry beside its children).
 const SYNTHETIC_KEYS: u64 = 1 << 40;
+
+/// One informational line naming the features the file holds that Hew
+/// keeps through a save back but cannot show or edit, one count per kind
+/// present; `None` when the file has none.
+pub(crate) fn kept_unshown_note(f: &skpwright::Features) -> Option<String> {
+    // (A material's or an instance's hatch names a pattern in
+    // `hatch_patterns`, so those are counted with the patterns.)
+    let kinds: [(usize, &str, &str); 10] = [
+        (f.hatch_patterns.len(), "hatch pattern", "hatch patterns"),
+        (f.environments.len(), "environment", "environments"),
+        (f.snaps.len(), "snap", "snaps"),
+        (f.procedures.len(), "procedure", "procedures"),
+        (
+            f.layer_line_styles.len(),
+            "layer line style",
+            "layer line styles",
+        ),
+        (
+            usize::from(f.current_style.is_some()),
+            "current style record",
+            "current style records",
+        ),
+        (
+            f.layer_page_behaviour.len(),
+            "layer page behaviour",
+            "layer page behaviours",
+        ),
+        (
+            usize::from(f.render_hatch.is_some()),
+            "hatch rendering setting",
+            "hatch rendering settings",
+        ),
+        (
+            f.scene_environment.len(),
+            "scene environment setting",
+            "scene environment settings",
+        ),
+        (f.procedure_kinds.len(), "procedure kind", "procedure kinds"),
+    ];
+    let items: Vec<String> = kinds
+        .iter()
+        .filter(|(n, _, _)| *n > 0)
+        .map(|&(n, one, many)| format!("{n} {}", if n == 1 { one } else { many }))
+        .collect();
+    (!items.is_empty()).then(|| format!("Kept but not shown or editable: {}", items.join(", ")))
+}
 
 /// What the `hew` dictionary says about one placement.
 #[derive(Default, Clone)]
@@ -112,7 +158,7 @@ pub(crate) struct Output {
 }
 
 #[cfg(test)]
-pub(crate) fn convert(model: Rc<openskp::Model>) -> Output {
+pub(crate) fn convert(model: Rc<skpwright::Model>) -> Output {
     let mut job = ConvertJob::begin(model);
     job.step(usize::MAX);
     job.finish()
@@ -127,7 +173,7 @@ pub(crate) struct ConvertJob {
     cv: Converter,
     def_indexes: BTreeSet<usize>,
     roots: Vec<ImportNode>,
-    tree: Vec<openskp::Node>,
+    tree: Vec<skpwright::Node>,
     top_level: Vec<(Option<String>, u32)>,
     /// Runs of loose world geometry, in file order.
     loose: Vec<usize>,
@@ -136,7 +182,7 @@ pub(crate) struct ConvertJob {
 }
 
 impl ConvertJob {
-    pub(crate) fn begin(model: Rc<openskp::Model>) -> ConvertJob {
+    pub(crate) fn begin(model: Rc<skpwright::Model>) -> ConvertJob {
         let mats = MatTable::build(&model);
 
         // Declared archive-map indexes that belong to component/group definitions;
@@ -164,6 +210,8 @@ impl ConvertJob {
             .iter()
             .filter_map(|i| Some((i.pid, i.name.clone().filter(|n| !n.is_empty())?)))
             .collect();
+        let mut folders = Box::<Folders>::default();
+        folders.walk(&model, &model.features.layer_folders, &[]);
         let mut placement_hew: BTreeMap<u32, PlacementHew> = BTreeMap::new();
         if hew.written_by_hew {
             for (ri, run) in model.geometry.iter().enumerate() {
@@ -202,7 +250,8 @@ impl ConvertJob {
             defs: Vec::new(),
             warnings: Vec::new(),
             dicts,
-            hew,
+            hew: Box::new(hew),
+            folders,
             names,
             placement_hew,
             next_key: SYNTHETIC_KEYS,
@@ -349,7 +398,7 @@ impl ConvertJob {
             ..
         } = self;
         let model = cv.model.clone();
-        let model: &openskp::Model = &model;
+        let model: &skpwright::Model = &model;
 
         // ── Placed images ──────────────────────────────────────────────────────
         // An image among the model's own entities is a placement of its image
@@ -393,7 +442,7 @@ impl ConvertJob {
 
         // ── Parse anomalies -> user-visible warnings ───────────────────────────
         // Clean files parse with zero desync diagnostics on either container (an
-        // OpenSKP regression guarantee); anything else means content may be
+        // Skpwright regression guarantee); anything else means content may be
         // missing and is said out loud, never papered over (rule 4 spirit; fixes
         // go upstream). Converter-emitted warnings (non-manifold splits) come
         // first — they are per-object and actionable. Reader notes AGGREGATE
@@ -402,12 +451,12 @@ impl ConvertJob {
         // produced 32k).
         const DESYNC_DETAIL_CAP: usize = 8;
         let mut warnings = std::mem::take(&mut cv.warnings);
-        let desyncs: Vec<&openskp::Diagnostic> =
+        let desyncs: Vec<&skpwright::Diagnostic> =
             model.diagnostics.iter().filter(|d| d.is_desync()).collect();
         warnings.extend(desyncs.iter().take(DESYNC_DETAIL_CAP).map(|d| match d {
             // A 2026 record the reader skipped: damaged, or a tag it does not
             // know (what a newer release's addition looks like).
-            openskp::Diagnostic::Skipped { class, at, bytes } => format!(
+            skpwright::Diagnostic::Skipped { class, at, bytes } => format!(
                 "reader skipped a record it could not decode ({class}, {bytes} \
              bytes at 0x{at:x}); content from it may be missing"
             ),
@@ -424,18 +473,31 @@ impl ConvertJob {
         // ── The declared tag list: every named non-default layer ──────────────
         // Hidden layers become hidden-by-default tags; empty layers survive too
         // (the document keeps the full source layer list).
-        let tags: Vec<ImportTag> = model
-            .layers
-            .iter()
-            .enumerate()
-            // The list-first layer is the default (Layer0) — it maps to
-            // "untagged", exactly as `layer_tags` treats slot 0.
-            .filter(|(i, l)| *i > 0 && !l.name.is_empty())
-            .map(|(_, l)| ImportTag {
-                path: cv.tag_path(&l.name),
-                hidden: !l.visible,
-            })
-            .collect();
+        let mut tags: Vec<ImportTag> = cv.folder_tags();
+        tags.extend(
+            model
+                .layers
+                .iter()
+                .enumerate()
+                // The list-first layer is the default (Layer0) — it maps to
+                // "untagged", exactly as `layer_tags` treats slot 0.
+                .filter(|(i, l)| *i > 0 && !l.name.is_empty())
+                .map(|(_, l)| ImportTag {
+                    path: cv.tag_path(&l.name),
+                    hidden: !l.visible,
+                }),
+        );
+        // A folder and a layer can name one tag path (a root layer of a
+        // folder's name, or a layer of that name beside a folder in a
+        // folder): the tag is hidden when either is.
+        let mut merged: Vec<ImportTag> = Vec::with_capacity(tags.len());
+        for t in tags {
+            match merged.iter_mut().find(|m| m.path == t.path) {
+                Some(m) => m.hidden |= t.hidden,
+                None => merged.push(t),
+            }
+        }
+        let tags = merged;
         for l in model.layers.iter().skip(1).filter(|l| !l.name.is_empty()) {
             cv.provenance
                 .tags
@@ -458,34 +520,81 @@ impl ConvertJob {
         // planes). A plane inside a multiply placed definition is ambiguous in
         // SketchUp too; the first placement is the documented choice.
         let section_world = section_planes_world(model, &tree);
-        let saves_section = |s: &openskp::Scene| -> bool {
-            s.saved.has(openskp::SceneProperties::ACTIVE_SECTION_PLANES)
+        let saves_section = |s: &skpwright::Scene| -> bool {
+            s.saved
+                .has(skpwright::SceneProperties::ACTIVE_SECTION_PLANES)
         };
-        let scene_section = |s: &openskp::Scene| -> Option<SectionPlaneState> {
+        let saves_hidden_geometry = |s: &skpwright::Scene| -> bool {
+            s.saved.has(
+                skpwright::SceneProperties::HIDDEN_GEOMETRY
+                    | skpwright::SceneProperties::HIDDEN_GEOMETRY_2
+                    | skpwright::SceneProperties::HIDDEN_OBJECTS,
+            )
+        };
+        let saves_visible_layers = |s: &skpwright::Scene| -> bool {
+            s.saved.has(skpwright::SceneProperties::VISIBLE_LAYERS)
+        };
+        let scene_section = |s: &skpwright::Scene| -> Option<SectionPlaneState> {
             s.active_section_planes
                 .iter()
                 .find_map(|pid| section_world.get(pid).copied())
         };
+        let page_of = |si: usize| {
+            model
+                .features
+                .scene_pages
+                .iter()
+                .find(|(i, _)| *i == si)
+                .map(|(_, e)| e)
+        };
         let scenes: Vec<ImportSceneRecipe> = model
             .scenes
             .iter()
-            .map(|s| ImportSceneRecipe {
+            .enumerate()
+            .map(|(si, s)| ImportSceneRecipe {
                 name: s.name.clone(),
+                transition_s: page_of(si).and_then(|e| e.transition_s),
+                delay_s: page_of(si).and_then(|e| e.delay_s),
                 description: s.description.clone(),
                 camera: s
                     .camera
                     .as_ref()
                     .map(|c| camera_state(c, cv.hew.written_by_hew)),
-                hidden_keys: Some(s.hidden_entities.iter().map(|&k| k as u64).collect()),
-                hidden_tags: Some(
+                // A hidden set is captured only when the page saved it; a
+                // page that did not leaves visibility alone (`None`).
+                hidden_keys: saves_hidden_geometry(s)
+                    .then(|| s.hidden_entities.iter().map(|&k| k as u64).collect()),
+                hidden_tags: saves_visible_layers(s).then(|| {
                     s.hidden_layers
                         .iter()
                         .filter(|&&i| i != 0)
                         .filter_map(|&i| model.layers.get(i))
                         .map(|l| cv.tag_path(&l.name))
+                        .chain(
+                            // The folders the page hides hide their
+                            // whole subtree.
+                            page_of(si)
+                                .into_iter()
+                                .flat_map(|e| e.hidden_layer_folders.iter())
+                                .filter_map(|&f| cv.folders.preorder.get(f))
+                                // A folder that is no tag of its own (its
+                                // layers' paths imply it) hides each tag
+                                // under it.
+                                .flat_map(|p| {
+                                    if tag_paths.contains(p) {
+                                        vec![p.clone()]
+                                    } else {
+                                        tag_paths
+                                            .iter()
+                                            .filter(|q| q.starts_with(p))
+                                            .map(|q| (*q).clone())
+                                            .collect()
+                                    }
+                                }),
+                        )
                         .filter(|p| tag_paths.contains(p))
-                        .collect(),
-                ),
+                        .collect()
+                }),
                 // A scene captures its cut only when it saved the section-planes
                 // property; a scene that did not leaves the cut alone (`None`),
                 // and one that did with nothing active captures "no cut".
@@ -495,10 +604,11 @@ impl ConvertJob {
                 view_style: s
                     .rendering
                     .as_ref()
-                    .filter(|_| s.saved.has(openskp::SceneProperties::STYLE_AND_FOG))
+                    .filter(|_| s.saved.has(skpwright::SceneProperties::STYLE_AND_FOG))
                     .map(view_style_of),
             })
             .collect();
+        cv.provenance.scenes = (0..scenes.len()).map(|i| (i, i)).collect();
         // The scene active at save time is the one whose camera the saved view
         // repeats exactly; its section cut is what SketchUp showed, so the
         // document adopts it (the hidden state already lives in the entities'
@@ -558,6 +668,9 @@ impl ConvertJob {
              place yet and were left out; a save back over the file keeps them"
             ));
         }
+        if let Some(note) = kept_unshown_note(&model.features) {
+            warnings.push(note);
+        }
         let Converter {
             mats,
             defs,
@@ -576,6 +689,7 @@ impl ConvertJob {
                 scenes,
                 section,
                 view_style,
+                geo: model.features.crs.as_ref().map(geo_of),
                 extra: ImportSceneExtra {
                     sketches,
                     attrs,
@@ -590,8 +704,62 @@ impl ConvertJob {
     }
 }
 
+/// The layer folders of a file as tag paths: a layer in folders takes the
+/// path of their names followed by its own.
+#[derive(Default)]
+struct Folders {
+    /// Layer name -> its tag path, for the layers in a folder.
+    layer_paths: BTreeMap<String, Vec<String>>,
+    /// Every folder's path in pre-order (each folder before its
+    /// subfolders), the order a page's hidden folders index.
+    preorder: Vec<Vec<String>>,
+    /// Per folder (same order): hidden, and the layer names in it or any
+    /// folder below it.
+    info: Vec<(bool, Vec<String>)>,
+}
+
+impl Folders {
+    fn walk(
+        &mut self,
+        model: &skpwright::Model,
+        list: &[skpwright::LayerFolder],
+        prefix: &[String],
+    ) {
+        let segments =
+            crate::folder_segments(&list.iter().map(|f| f.name.as_str()).collect::<Vec<_>>());
+        for (f, segment) in list.iter().zip(segments) {
+            let mut path = prefix.to_vec();
+            path.push(segment);
+            let at = self.preorder.len();
+            self.preorder.push(path.clone());
+            self.info.push((f.hidden, Vec::new()));
+            for &i in &f.layers {
+                let Some(l) = model.layers.get(i).filter(|_| i > 0) else {
+                    continue;
+                };
+                if l.name.is_empty() {
+                    continue;
+                }
+                let mut lp = path.clone();
+                lp.push(l.name.clone());
+                self.layer_paths.entry(l.name.clone()).or_insert(lp);
+                self.info[at].1.push(l.name.clone());
+            }
+            self.walk(model, &f.folders, &path);
+            // The subtree's layers belong to every folder above them.
+            let below: Vec<String> = self.info[at + 1..]
+                .iter()
+                .zip(&self.preorder[at + 1..])
+                .filter(|(_, p)| p.starts_with(&path))
+                .flat_map(|((_, ls), _)| ls.iter().cloned())
+                .collect();
+            self.info[at].1.extend(below);
+        }
+    }
+}
+
 struct Converter {
-    model: Rc<openskp::Model>,
+    model: Rc<skpwright::Model>,
     mats: MatTable,
     /// Persistent ids named by any scene's hidden-entity list.
     scene_hidden: BTreeSet<u32>,
@@ -626,7 +794,9 @@ struct Converter {
     /// decomposition happens loudly, never silently).
     warnings: Vec<String>,
     dicts: Dicts,
-    hew: HewModel,
+    hew: Box<HewModel>,
+    /// The layer folders of a 2026 file, as tag paths.
+    folders: Box<Folders>,
     /// Every placement's own name, by persistent id.
     names: BTreeMap<u32, String>,
     /// What a Hew-written file says about each placement, by pid.
@@ -654,8 +824,8 @@ impl Converter {
     /// no children.
     fn children_with_pids<'n>(
         &self,
-        node: &'n openskp::Node,
-    ) -> impl Iterator<Item = (&'n openskp::Node, u32)> + use<'_, 'n> {
+        node: &'n skpwright::Node,
+    ) -> impl Iterator<Item = (&'n skpwright::Node, u32)> + use<'_, 'n> {
         let pids = node
             .run
             .map(|ri| self.model.geometry[ri].placed.as_slice())
@@ -665,8 +835,8 @@ impl Converter {
     }
 
     /// Every child of `node` converted (pruned children drop out).
-    fn convert_children(&mut self, node: &openskp::Node) -> Vec<ImportNode> {
-        let pairs: Vec<(&openskp::Node, u32)> = self.children_with_pids(node).collect();
+    fn convert_children(&mut self, node: &skpwright::Node) -> Vec<ImportNode> {
+        let pairs: Vec<(&skpwright::Node, u32)> = self.children_with_pids(node).collect();
         pairs
             .into_iter()
             .filter_map(|(c, pid)| {
@@ -681,7 +851,7 @@ impl Converter {
     /// `pid` is the placing object's persistent id (0 = unknown).
     fn convert_node(
         &mut self,
-        node: &openskp::Node,
+        node: &skpwright::Node,
         own_name: Option<String>,
         pid: u32,
     ) -> Option<ImportNode> {
@@ -772,7 +942,7 @@ impl Converter {
     fn group_node(
         &mut self,
         run_idx: usize,
-        node: &openskp::Node,
+        node: &skpwright::Node,
         own_name: Option<String>,
         tags: Vec<Vec<String>>,
         hidden: bool,
@@ -1101,7 +1271,7 @@ impl Converter {
         &mut self,
         run_idx: usize,
         eff_slot: u16,
-        node: &openskp::Node,
+        node: &skpwright::Node,
     ) -> Option<usize> {
         if let Some(&cached) = self.def_variants.get(&(run_idx, eff_slot)) {
             // A degraded recipe (children dropped — singular first
@@ -1486,9 +1656,9 @@ impl Converter {
             let healed: Vec<Point3> = ring.iter().map(|&i| positions[i]).collect();
             let turned = (newell(&healed).dot(newell(&source)) < 0.0) != mirrored;
             let (front, back, side) = if turned {
-                (f.back_material, f.front_material, openskp::Side::Back)
+                (f.back_material, f.front_material, skpwright::Side::Back)
             } else {
-                (f.front_material, f.back_material, openskp::Side::Front)
+                (f.front_material, f.back_material, skpwright::Side::Front)
             };
             let slot = |s: Option<u16>| s.filter(|&s| s != 0);
             let (front, back) = (slot(front), slot(back));
@@ -1583,7 +1753,7 @@ impl Converter {
         };
         // A free anchor is in its list's frame; an anchored one resolves
         // through its entity's own placement.
-        let anchor_in = |frame: &Transform, a: &openskp::Anchor| -> Option<Point3> {
+        let anchor_in = |frame: &Transform, a: &skpwright::Anchor| -> Option<Point3> {
             match (a.kind, a.entity) {
                 (0 | 1, None) => Some(frame.apply_point(p3(a.point_m))),
                 _ => places.anchor(a),
@@ -1698,12 +1868,12 @@ impl Converter {
                         radius,
                         plane: Plane::from_point_normal(c, n).ok()?,
                     },
-                    // Negative is outward (§10.12).
-                    leader_dir: if r.leader[1] < 0.0 {
-                        radial
-                    } else {
-                        radial * -1.0
-                    },
+                    // The leader runs from the rim to its end, which lies at
+                    // `radius - leader[1]` from the center (§10.12): outward
+                    // when negative, inward otherwise, its length in inches
+                    // as stored. Hew places the label at `anchor + leader_dir`,
+                    // so the vector carries the length too.
+                    leader_dir: radial * (-r.leader[1] / skpwright::INCH),
                     text_override: dimension_override(&r.text_override),
                 };
                 Some((a, tags_through(r.layer, chain)))
@@ -1728,7 +1898,7 @@ impl Converter {
     /// placement the run is reached through (a group's children are world
     /// nodes). Each keyed by its persistent id and tagged by its layer.
     fn image_children(&mut self, run_idx: usize, to_world: Option<&Transform>) -> Vec<ImportNode> {
-        let images: Vec<openskp::ImagePlacement> = self.model.geometry[run_idx].images.clone();
+        let images: Vec<skpwright::ImagePlacement> = self.model.geometry[run_idx].images.clone();
         let mut out = Vec::new();
         for im in images {
             let Some(def) = self.image_def(im.defref) else {
@@ -1840,13 +2010,53 @@ impl Converter {
     }
 
     /// The tag path a layer stands for: the path a Hew-written file
-    /// recorded for it, else the layer name as one segment.
+    /// recorded for it, else its folders' names followed by the layer name
+    /// (the layer name alone when it is in no folder).
     fn tag_path(&self, layer: &str) -> Vec<String> {
-        self.hew
-            .tag_paths
-            .get(layer)
+        // A file Hew wrote with folders keeps the hierarchy in them: a
+        // layer SketchUp moved between folders, or out of them, is where
+        // it is now, whatever path was recorded. The recorded last
+        // segment still names the tag (a layer's own name may carry a
+        // suffix that kept it unique).
+        let recorded = self.hew.tag_paths.get(layer);
+        let in_folders = self.folders.layer_paths.get(layer);
+        if self.hew.folders {
+            let last = recorded
+                .and_then(|p| p.last())
+                .map_or_else(|| layer.to_string(), Clone::clone);
+            let mut path = in_folders
+                .map(|p| p[..p.len() - 1].to_vec())
+                .unwrap_or_default();
+            path.push(last);
+            return path;
+        }
+        recorded
+            .or(in_folders)
             .cloned()
             .unwrap_or_else(|| vec![layer.to_string()])
+    }
+
+    /// The tags the file's folders stand for. A folder is a tag when it
+    /// hides (a hidden tag hides its subtree), holds no layer, or holds a
+    /// layer a Hew-written file has no path for; a folder whose layers all
+    /// came from Hew's own paths, or from the folders of a file Hew wrote
+    /// with them, is already implied by those layers' paths.
+    fn folder_tags(&self) -> Vec<ImportTag> {
+        self.folders
+            .preorder
+            .iter()
+            .zip(&self.folders.info)
+            .filter(|(_, (hidden, layers))| {
+                *hidden
+                    || layers.is_empty()
+                    || (!self.hew.folders
+                        && layers.iter().any(|l| !self.hew.tag_paths.contains_key(l)))
+            })
+            .map(|(path, (hidden, _))| ImportTag {
+                path: path.clone(),
+                hidden: *hidden,
+            })
+            .collect()
     }
 
     /// The owner of the definition behind a geometry run.
@@ -2274,7 +2484,7 @@ fn bake_sketch(s: &mut ImportSketch, t: &Transform) -> bool {
     true
 }
 
-fn flat_joins(mesh: &openskp::Mesh) -> BTreeSet<(u32, u32)> {
+fn flat_joins(mesh: &skpwright::Mesh) -> BTreeSet<(u32, u32)> {
     let mut users: BTreeMap<(u32, u32), Vec<usize>> = BTreeMap::new();
     for (fi, f) in mesh.faces.iter().enumerate() {
         for ring in std::iter::once(&f.outer).chain(f.holes.iter()) {
@@ -2300,7 +2510,7 @@ fn flat_joins(mesh: &openskp::Mesh) -> BTreeSet<(u32, u32)> {
 /// ids of the placing instances from the model down), each geometry run's
 /// placements, and each vertex's and edge's run by persistent id.
 struct Placements<'a> {
-    model: &'a openskp::Model,
+    model: &'a skpwright::Model,
     by_path: BTreeMap<Vec<u32>, (usize, Transform)>,
     of_run: BTreeMap<usize, Vec<Transform>>,
     /// Per placement of a run, in `of_run` order: the layers of every
@@ -2315,7 +2525,7 @@ struct Placements<'a> {
 }
 
 impl<'a> Placements<'a> {
-    fn of(cv: &Converter, tree: &[openskp::Node], model: &'a openskp::Model) -> Placements<'a> {
+    fn of(cv: &Converter, tree: &[skpwright::Node], model: &'a skpwright::Model) -> Placements<'a> {
         let mut p = Placements {
             model,
             by_path: BTreeMap::new(),
@@ -2338,7 +2548,7 @@ impl<'a> Placements<'a> {
             .collect();
         fn visit(
             cv: &Converter,
-            node: &openskp::Node,
+            node: &skpwright::Node,
             pid: u32,
             path: &mut Vec<u32>,
             layers: &mut Vec<u16>,
@@ -2357,7 +2567,7 @@ impl<'a> Placements<'a> {
                     .or_default()
                     .push((layers.clone(), hidden));
             }
-            let kids: Vec<(&openskp::Node, u32)> = cv.children_with_pids(node).collect();
+            let kids: Vec<(&skpwright::Node, u32)> = cv.children_with_pids(node).collect();
             for (c, cpid) in kids {
                 visit(cv, c, cpid, path, layers, hidden, p);
             }
@@ -2455,7 +2665,7 @@ impl<'a> Placements<'a> {
     /// model's own entities), a vertex (kind 2), an edge's midpoint (kind
     /// 4), a point along an edge at its parameter (kind 5), where the lines
     /// of two edges meet (kind 9), or an arc's center (kind 10).
-    fn anchor(&self, a: &openskp::Anchor) -> Option<Point3> {
+    fn anchor(&self, a: &skpwright::Anchor) -> Option<Point3> {
         let p3 = |v: [f64; 3]| Point3::new(v[0], v[1], v[2]);
         match (a.kind, a.entity) {
             (0 | 1, None) => Some(p3(a.point_m)),
@@ -2685,7 +2895,7 @@ struct LoosePart<'a> {
 /// layers — and whether every one of its faces is hidden. `None` when the
 /// whole mesh is one visible kind, and is read whole.
 #[allow(clippy::type_complexity)]
-fn loose_pieces(mesh: &openskp::Mesh) -> Option<BTreeMap<(Option<u16>, bool), BTreeSet<usize>>> {
+fn loose_pieces(mesh: &skpwright::Mesh) -> Option<BTreeMap<(Option<u16>, bool), BTreeSet<usize>>> {
     // Union-find over vertices, joined through each face's rings.
     let mut parent: Vec<usize> = (0..mesh.vertices.len()).collect();
     fn find(p: &mut [usize], mut x: usize) -> usize {
@@ -2792,15 +3002,15 @@ fn matrix_of(t: &[f64; 13]) -> [f64; 16] {
         t[0],
         t[1],
         t[2],
-        t[9] / openskp::INCH,
+        t[9] / skpwright::INCH,
         t[3],
         t[4],
         t[5],
-        t[10] / openskp::INCH,
+        t[10] / skpwright::INCH,
         t[6],
         t[7],
         t[8],
-        t[11] / openskp::INCH,
+        t[11] / skpwright::INCH,
         0.0,
         0.0,
         0.0,
@@ -2842,13 +3052,47 @@ fn key_of(pid: u32) -> Option<u64> {
 
 /// The part of a style Hew shows (`kernel::ViewStyle`): the backdrop
 /// and whether the model axes are drawn.
-fn view_style_of(r: &openskp::RenderingOptions) -> kernel::ViewStyle {
+/// The model's coordinate reference system, field for field. The file's
+/// unknown trailing records are not carried: a save back keeps them from
+/// the file itself.
+fn geo_of(c: &skpwright::Crs) -> kernel::GeoReference {
+    kernel::GeoReference {
+        name: c.name.clone(),
+        description: c.description.clone(),
+        easting: c.eastings,
+        northing: c.northings,
+        height: c.height,
+        x_axis: c.x_axis,
+        scale: c.scale,
+        geodetic_datum: c.geodetic_datum.clone(),
+        vertical_datum: c.vertical_datum.clone(),
+        map_projection: c.map_projection.clone(),
+        map_zone: c.map_zone.clone(),
+        map_unit: c.map_unit.clone(),
+        map_unit_metres: c.map_unit_metres,
+        tgl_id: c.tgl_id.clone(),
+        calibration_file_name: c.calibration_file_name.clone(),
+    }
+}
+
+fn view_style_of(r: &skpwright::RenderingOptions) -> kernel::ViewStyle {
     let rgb = |c: [u8; 4]| [c[0], c[1], c[2]];
     kernel::ViewStyle {
         background: rgb(r.background),
         sky: r.sky.then(|| rgb(r.sky_color)),
         ground: r.ground.then(|| rgb(r.ground_color)),
         axes: r.model_axes,
+        section: kernel::SectionLook {
+            cut_color: Some(rgb(r.section_cut_color)),
+            cut_width: Some(r.section_cut_width),
+            // (A release that stores no fill has it off, black: what every
+            // writer that does store it writes for a style that says none.)
+            fill: Some(r.section_fill.unwrap_or(false)),
+            fill_color: Some(rgb(r.section_fill_color.unwrap_or([0, 0, 0, 255]))),
+            active_color: Some(rgb(r.active_section_color)),
+        },
+        guides_color: Some(rgb(r.guides_color)),
+        guides_hidden: Some(r.guides_hidden),
     }
 }
 
@@ -2858,7 +3102,7 @@ fn view_style_of(r: &openskp::RenderingOptions) -> kernel::ViewStyle {
 /// stale under perspective — SketchUp writes its default there), unless
 /// Hew wrote the file, whose perspective cameras store the height they
 /// mean.
-fn camera_state(c: &openskp::Camera, hew_written: bool) -> CameraState {
+fn camera_state(c: &skpwright::Camera, hew_written: bool) -> CameraState {
     let m = |v: [f64; 3]| Point3::new(v[0], v[1], v[2]);
     let (eye, target) = (m(c.eye_m), m(c.target_m));
     let h = c.parallel_height_m;
@@ -2878,14 +3122,18 @@ fn camera_state(c: &openskp::Camera, hew_written: bool) -> CameraState {
         eye,
         target,
         up: Vec3::new(c.up[0], c.up[1], c.up[2]),
+        // Match Photo's image width (stored in inches) and ratio; zero is
+        // what a file stores for unset.
+        image_width: Some(c.image_width / skpwright::INCH).filter(|w| w.is_finite() && *w > 0.0),
+        aspect_ratio: Some(c.aspect_ratio).filter(|r| r.is_finite() && *r > 0.0),
     }
 }
 
 /// The world pose of every geometry run's FIRST placement in the composed
 /// tree, by run index (the root run is not placed and is absent).
-fn first_placements(tree: &[openskp::Node]) -> BTreeMap<usize, Transform> {
+fn first_placements(tree: &[skpwright::Node]) -> BTreeMap<usize, Transform> {
     let mut first_pose: BTreeMap<usize, Transform> = BTreeMap::new();
-    fn visit(nodes: &[openskp::Node], out: &mut BTreeMap<usize, Transform>) {
+    fn visit(nodes: &[skpwright::Node], out: &mut BTreeMap<usize, Transform>) {
         for n in nodes {
             if let Some(ri) = n.run {
                 out.entry(ri).or_insert_with(|| pose_of(&n.world));
@@ -2915,7 +3163,7 @@ fn first_placements(tree: &[openskp::Node]) -> BTreeMap<usize, Transform> {
 /// finite bound is scaled by how long the direction is once posed.
 fn guide_span(bounds: [f64; 2], direction_length: f64) -> kernel::GuideSpan {
     const OPEN: f64 = 1.0e29;
-    let end = |b: f64| (b.abs() < OPEN).then_some(b / openskp::INCH * direction_length);
+    let end = |b: f64| (b.abs() < OPEN).then_some(b / skpwright::INCH * direction_length);
     kernel::GuideSpan {
         from: end(bounds[0]),
         to: end(bounds[1]),
@@ -2923,8 +3171,8 @@ fn guide_span(bounds: [f64; 2], direction_length: f64) -> kernel::GuideSpan {
 }
 
 fn world_guides(
-    model: &openskp::Model,
-    tree: &[openskp::Node],
+    model: &skpwright::Model,
+    tree: &[skpwright::Node],
     layer_tags: &dyn Fn(u16) -> Vec<Vec<String>>,
 ) -> Vec<ImportGuide> {
     // definition map index -> every placement of it not hidden with Edit >
@@ -2932,8 +3180,8 @@ fn world_guides(
     // of containers down to it, outermost first.
     let mut placements: BTreeMap<usize, Vec<(Transform, Vec<u16>)>> = BTreeMap::new();
     fn visit(
-        nodes: &[openskp::Node],
-        model: &openskp::Model,
+        nodes: &[skpwright::Node],
+        model: &skpwright::Model,
         chain: &mut Vec<u16>,
         out: &mut BTreeMap<usize, Vec<(Transform, Vec<u16>)>>,
     ) {
@@ -2980,6 +3228,7 @@ fn world_guides(
                 origin,
                 direction,
                 span: guide_span(g.bounds, direction.length()),
+                dash: kernel::GuideDash(g.stipple),
                 tags: tags_through(g.layer, &[]),
             }),
             Some(di) => {
@@ -2989,6 +3238,7 @@ fn world_guides(
                         origin: pose.apply_point(origin),
                         direction: posed,
                         span: guide_span(g.bounds, posed.length()),
+                        dash: kernel::GuideDash(g.stipple),
                         tags: tags_through(g.layer, chain),
                     });
                 }
@@ -3031,8 +3281,8 @@ fn world_guides(
 /// own scene thumbnails show that side drawn); a Hew cut's normal points
 /// at the side it removes, so the normal turns over.
 fn section_planes_world(
-    model: &openskp::Model,
-    tree: &[openskp::Node],
+    model: &skpwright::Model,
+    tree: &[skpwright::Node],
 ) -> BTreeMap<u32, SectionPlaneState> {
     let first_pose = first_placements(tree);
 
@@ -3052,9 +3302,9 @@ fn section_planes_world(
             let n_local = Vec3::new(a, b, c);
             // A point on the plane: -D · n (inches -> metres).
             let p_local = Point3::new(
-                -d * a / openskp::INCH,
-                -d * b / openskp::INCH,
-                -d * c / openskp::INCH,
+                -d * a / skpwright::INCH,
+                -d * b / skpwright::INCH,
+                -d * c / skpwright::INCH,
             );
             // The normal goes through the plane transform (inverse
             // transpose), not the vector one: a non-uniformly scaled
@@ -3213,6 +3463,23 @@ mod tests {
     }
 
     #[test]
+    fn kept_unshown_note_counts_the_lone_kept_kinds() {
+        let mut f = skpwright::Features::default();
+        assert_eq!(kept_unshown_note(&f), None);
+        f.procedure_kinds.push(skpwright::ProcedureKind::default());
+        assert_eq!(
+            kept_unshown_note(&f).as_deref(),
+            Some("Kept but not shown or editable: 1 procedure kind")
+        );
+        f.scene_environment.push((0, Default::default()));
+        assert!(
+            kept_unshown_note(&f)
+                .unwrap()
+                .contains("1 scene environment setting")
+        );
+    }
+
+    #[test]
     fn dimension_override_drops_a_leading_tilde() {
         assert_eq!(dimension_override(""), None);
         assert_eq!(dimension_override("~"), None);
@@ -3224,8 +3491,8 @@ mod tests {
 
     use super::*;
 
-    fn parallel(eye: [f64; 3], height: f64) -> openskp::Camera {
-        openskp::Camera {
+    fn parallel(eye: [f64; 3], height: f64) -> skpwright::Camera {
+        skpwright::Camera {
             eye_m: eye,
             target_m: [0.0, 0.0, 0.0],
             up: [0.0, 1.0, 0.0],
@@ -3238,6 +3505,7 @@ mod tests {
             aspect_ratio: 0.0,
             scale_2d: 1.0,
             offset_2d: [0.0, 0.0],
+            image_width: 0.0,
         }
     }
 
@@ -3266,14 +3534,14 @@ mod tests {
         let y = n.cross(x);
         let r = 0.5;
         let sides = 8usize;
-        let mut mesh = openskp::Mesh::default();
+        let mut mesh = skpwright::Mesh::default();
         for i in 0..sides {
             let t = i as f64 / sides as f64 * std::f64::consts::TAU;
             let p = Point3::ORIGIN + x * (r * t.cos()) + y * (r * t.sin());
             mesh.vertices.push([p.x, p.y, p.z]);
         }
         for i in 0..sides as u32 {
-            mesh.edges.push(openskp::MeshEdge {
+            mesh.edges.push(skpwright::MeshEdge {
                 pid: 10 + i,
                 v0: i,
                 v1: (i + 1) % sides as u32,
@@ -3281,12 +3549,12 @@ mod tests {
                 ..Default::default()
             });
         }
-        let run = openskp::GeometryRun {
+        let run = skpwright::GeometryRun {
             mesh,
-            curves: vec![openskp::Curve {
+            curves: vec![skpwright::Curve {
                 pid: 1,
                 members: sides as u32,
-                arc: Some(openskp::Arc {
+                arc: Some(skpwright::Arc {
                     center_m: [0.0, 0.0, 0.0],
                     normal: [n.x, n.y, n.z],
                     x_axis_m: [r, 0.0, 0.0],
@@ -3298,7 +3566,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let mut model = openskp::Model::default();
+        let mut model = skpwright::Model::default();
         model.geometry.push(run);
         let out = convert(Rc::new(model.clone()));
         let sketches = &out.scene.extra.sketches;
@@ -3327,8 +3595,8 @@ mod tests {
     /// thousands of pieces, and the whole list on each cost gigabytes.
     #[test]
     fn each_piece_of_a_loose_run_carries_only_its_own_soft_edges() {
-        let mut mesh = openskp::Mesh::default();
-        let add_box = |mesh: &mut openskp::Mesh, x0: f64, soft: usize, hidden: bool| {
+        let mut mesh = skpwright::Mesh::default();
+        let add_box = |mesh: &mut skpwright::Mesh, x0: f64, soft: usize, hidden: bool| {
             let base = mesh.vertices.len() as u32;
             let corners = [
                 [0.0, 0.0, 0.0],
@@ -3352,7 +3620,7 @@ mod tests {
                 [3, 0, 4, 7],
             ];
             for (k, q) in quads.iter().enumerate() {
-                mesh.faces.push(openskp::MeshFace {
+                mesh.faces.push(skpwright::MeshFace {
                     pid: base + 100 + k as u32,
                     outer: q.iter().map(|&i| base + i).collect(),
                     hidden,
@@ -3374,7 +3642,7 @@ mod tests {
                 [3, 7],
             ];
             for (k, e) in edges.iter().enumerate() {
-                mesh.edges.push(openskp::MeshEdge {
+                mesh.edges.push(skpwright::MeshEdge {
                     pid: base + 200 + k as u32,
                     v0: base + e[0],
                     v1: base + e[1],
@@ -3385,8 +3653,8 @@ mod tests {
         };
         add_box(&mut mesh, 0.0, 4, false);
         add_box(&mut mesh, 5.0, 2, true);
-        let mut model = openskp::Model::default();
-        model.geometry.push(openskp::GeometryRun {
+        let mut model = skpwright::Model::default();
+        model.geometry.push(skpwright::GeometryRun {
             mesh,
             ..Default::default()
         });
@@ -3410,7 +3678,7 @@ mod tests {
     #[test]
     fn an_edge_with_a_coordinate_that_is_not_a_number_is_left_out() {
         let bytes = include_bytes!("../tests/fixtures/lines-group.skp");
-        let mut model = openskp::Model::parse(bytes).unwrap();
+        let mut model = skpwright::Model::parse(bytes).unwrap();
         let plain = convert(Rc::new(model.clone()));
         let lines: usize = plain
             .scene
@@ -3466,7 +3734,7 @@ mod tests {
     #[test]
     fn a_component_of_lines_alone_opens_as_a_definition_of_its_drawing() {
         let bytes = include_bytes!("../tests/fixtures/lines-group.skp");
-        let mut model = openskp::Model::parse(bytes).unwrap();
+        let mut model = skpwright::Model::parse(bytes).unwrap();
         let plain = convert(Rc::new(model.clone()));
         assert!(
             plain.scene.defs.is_empty(),
@@ -3526,12 +3794,12 @@ mod tests {
     #[test]
     fn a_guides_bounds_open_as_its_stretch_in_meters() {
         let bytes = include_bytes!("../tests/fixtures/guide.skp");
-        let mut model = openskp::Model::parse(bytes).unwrap();
-        let span_of = |model: &openskp::Model| match convert(Rc::new(model.clone())).scene.guides[0]
-        {
-            ImportGuide::Line { span, .. } => span,
-            ImportGuide::Point { .. } => panic!("a line"),
-        };
+        let mut model = skpwright::Model::parse(bytes).unwrap();
+        let span_of =
+            |model: &skpwright::Model| match convert(Rc::new(model.clone())).scene.guides[0] {
+                ImportGuide::Line { span, .. } => span,
+                ImportGuide::Point { .. } => panic!("a line"),
+            };
         assert!(
             span_of(&model).is_infinite(),
             "the fixture's guide is a whole line"
@@ -3546,13 +3814,29 @@ mod tests {
         assert_eq!(s.to, None);
     }
 
+    /// A guide line opens with the dash pattern its file stores, any mask.
+    #[test]
+    fn a_guides_stipple_opens_as_its_dash() {
+        let bytes = include_bytes!("../tests/fixtures/guide.skp");
+        let mut model = skpwright::Model::parse(bytes).unwrap();
+        let dash_of =
+            |model: &skpwright::Model| match convert(Rc::new(model.clone())).scene.guides[0] {
+                ImportGuide::Line { dash, .. } => dash,
+                ImportGuide::Point { .. } => panic!("a line"),
+            };
+        for mask in [0xFFFF, 0x3333, 0x8888, 0xF0F0, 0x1C47, 0x0F0F] {
+            model.guides[0].stipple = mask;
+            assert_eq!(dash_of(&model), kernel::GuideDash(mask));
+        }
+    }
+
     /// A guide shows and hides with its layer the way SketchUp shows it
     /// scene by scene: it opens tagged with the layer, hidden or not. One
     /// hidden with Edit > Hide stays out (a Hew guide has no hidden state).
     #[test]
     fn a_guide_opens_tagged_with_its_layer_and_a_hidden_one_stays_out() {
         let bytes = include_bytes!("../tests/fixtures/guide.skp");
-        let mut model = openskp::Model::parse(bytes).unwrap();
+        let mut model = skpwright::Model::parse(bytes).unwrap();
         let tags_of = |g: &ImportGuide| match g {
             ImportGuide::Line { tags, .. } | ImportGuide::Point { tags, .. } => tags.clone(),
         };
@@ -3567,7 +3851,7 @@ mod tests {
         assert_eq!(convert(Rc::new(model.clone())).scene.guides.len(), 0);
         model.guides[0].hidden = false;
         // On a hidden layer: in, carrying the layer's tag, which is hidden.
-        model.layers.push(openskp::Layer {
+        model.layers.push(skpwright::Layer {
             name: "Rig".to_string(),
             visible: false,
             rgba: [0, 0, 0, 255],
@@ -3600,7 +3884,7 @@ mod tests {
     #[test]
     fn a_groups_annotations_hide_with_the_group() {
         let bytes = include_bytes!("../tests/fixtures/lines-group.skp");
-        let mut model = openskp::Model::parse(bytes).unwrap();
+        let mut model = skpwright::Model::parse(bytes).unwrap();
         let labels = |out: &Output| -> Vec<(String, Vec<Vec<String>>)> {
             out.scene
                 .extra
@@ -3624,7 +3908,7 @@ mod tests {
             "the fixture's group is on the default layer"
         );
         // The group moves to a hidden layer "Notes".
-        model.layers.push(openskp::Layer {
+        model.layers.push(skpwright::Layer {
             name: "Notes".to_string(),
             visible: false,
             rgba: [0, 0, 0, 255],
@@ -3671,5 +3955,59 @@ mod tests {
         // A file Hew wrote stores the height its perspective camera means.
         let s = camera_state(&c, true);
         assert_eq!(s.parallel_height, 20.0);
+    }
+
+    #[test]
+    fn a_styles_section_and_guide_settings_open_in_the_view_style() {
+        let mut r = skpwright::RenderingOptions::sketchup_default();
+        r.section_cut_color = [10, 20, 30, 255];
+        r.section_cut_width = 4;
+        r.section_fill = Some(true);
+        r.section_fill_color = Some([40, 50, 60, 128]);
+        r.active_section_color = [70, 80, 90, 255];
+        r.guides_color = [1, 2, 3, 255];
+        r.guides_hidden = true;
+        let v = view_style_of(&r);
+        assert_eq!(v.section.cut_color, Some([10, 20, 30]));
+        assert_eq!(v.section.cut_width, Some(4));
+        assert_eq!(v.section.fill, Some(true));
+        assert_eq!(v.section.fill_color, Some([40, 50, 60]));
+        assert_eq!(v.section.active_color, Some([70, 80, 90]));
+        assert_eq!(v.guides_color, Some([1, 2, 3]));
+        assert_eq!(v.guides_hidden, Some(true));
+        // A file that stores no fill has it off, black.
+        r.section_fill = None;
+        r.section_fill_color = None;
+        let v = view_style_of(&r);
+        assert_eq!(
+            (v.section.fill, v.section.fill_color),
+            (Some(false), Some([0, 0, 0]))
+        );
+    }
+
+    #[test]
+    fn a_match_photo_cameras_image_width_and_ratio_open_in_meters() {
+        let mut c = parallel([0.0, 0.0, 155.0], 20.0);
+        let s = camera_state(&c, false);
+        assert_eq!(
+            (s.image_width, s.aspect_ratio),
+            (None, None),
+            "zero is unset"
+        );
+        // The file stores the width in inches.
+        c.image_width = 1000.0;
+        c.aspect_ratio = 1.5;
+        let s = camera_state(&c, false);
+        assert!(
+            (s.image_width.unwrap() - 25.4).abs() < 1e-9,
+            "{:?}",
+            s.image_width
+        );
+        assert_eq!(s.aspect_ratio, Some(1.5));
+        // Garbage is unset, not carried.
+        c.image_width = f64::NAN;
+        c.aspect_ratio = -1.0;
+        let s = camera_state(&c, false);
+        assert_eq!((s.image_width, s.aspect_ratio), (None, None));
     }
 }

@@ -57,7 +57,7 @@ If you'd rather not have it, turn it off with **View ▸ Contextual Dock**. It s
 
 ## The panels tray
 
-The right-hand tray holds a set of collapsible panels. Click a panel's header to expand or collapse it; drag the tray's left edge to resize it.
+The right-hand tray holds a set of collapsible panels. Click a panel's header to expand or collapse it; drag the tray's left edge to resize it. A long panel can also be given more or less height: drag the handle at the bottom of its section, or focus the handle and press the Up or Down arrow key. A section keeps its automatic height until you resize it.
 
 When you want the whole window for the model, hide the tray: click the chevron at its top-left, or choose **View ▸ Tray**. A small tab on the viewport's right edge brings it back at the width you left it. Asking for any one panel while the tray is hidden (from the View menu, or with that panel's shortcut) brings the tray back with that panel open. Hew remembers both the compact rail and the hidden tray: each open window keeps its own layout, and a new window, or the next launch, starts the way you last left them.
 

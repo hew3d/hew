@@ -126,6 +126,7 @@ fn doc_with(roots: Vec<ImportNode>, defs: Vec<DefRecipe>) -> Document {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         },
         Vec::new(),
     )

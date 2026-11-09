@@ -80,6 +80,7 @@ fn build_representative_doc() -> Document {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, Vec::new()).expect("ingest a plain box");
 
@@ -102,6 +103,7 @@ fn build_representative_doc() -> Document {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, Vec::new()).expect("ingest a painted box");
 
@@ -119,6 +121,7 @@ fn build_representative_doc() -> Document {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, Vec::new())
         .expect("ingest the component source box");

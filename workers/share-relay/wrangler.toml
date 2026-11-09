@@ -39,3 +39,13 @@ zone_name = "hew3d.com"
 [[routes]]
 pattern = "app.hew3d.com/relay"
 zone_name = "hew3d.com"
+
+# The beta host (beta.hew3d.com, a second Pages project) gets the same two
+# same-origin routes, for the same reason as the app ones above.
+[[routes]]
+pattern = "beta.hew3d.com/relay/*"
+zone_name = "hew3d.com"
+
+[[routes]]
+pattern = "beta.hew3d.com/relay"
+zone_name = "hew3d.com"

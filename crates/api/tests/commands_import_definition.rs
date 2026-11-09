@@ -51,6 +51,7 @@ fn cube_scene() -> ImportScene {
         extra: Default::default(),
     };
     ImportScene {
+        geo: None,
         materials: Vec::new(),
         defs: Vec::new(),
         roots: vec![ImportNode::Mesh(recipe)],

@@ -226,6 +226,7 @@ mod tests {
                 section: None,
                 view_style: None,
                 extra: Default::default(),
+                geo: None,
             },
             Vec::new(),
         )

@@ -379,7 +379,7 @@ impl Document {
                 b.instances(Modified, nested.iter().map(|(i, ..)| *i));
                 b.instances(Modified, placing.iter().map(|(i, ..)| *i));
             }
-            DocAction::SetAxes { .. } => b.set.document = true,
+            DocAction::SetAxes { .. } | DocAction::SetGeoReference { .. } => b.set.document = true,
             DocAction::SketchGesture {
                 sketch, created, ..
             } => b.sketch(if *created { Added } else { Modified }, *sketch),
@@ -700,6 +700,7 @@ impl Document {
                 }
             }
             DocAction::SetMaterialAlpha { material, .. }
+            | DocAction::SetMaterialPbr { material, .. }
             | DocAction::MaterialRenamed { material, .. } => b.material(Modified, *material),
             DocAction::MaterialDeleted {
                 material,

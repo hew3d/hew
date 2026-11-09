@@ -33,6 +33,7 @@ import { t } from '@lingui/core/macro'
 import type { FileRef } from './fileHost'
 import { formatRelativeTime } from './relativeTime'
 import { stripKnownExtension } from './docFormat'
+import { isBetaBuild } from '../buildInfo'
 
 /** Snapshot of document session state. */
 export interface DocSessionState {
@@ -128,10 +129,12 @@ export function documentBaseName(state: DocSessionState): string {
 /**
  * Derive the window/document title for the current session state.
  *
- * Format: `[• ]<filename | importedName | 'Untitled'> — Hew`
+ * Format: `[• ]<filename | importedName | 'Untitled'> — Hew`, with the app
+ * name "Hew Beta" in the beta web build.
  */
 export function deriveTitle(state: DocSessionState): string {
   const name = documentName(state)
+  if (isBetaBuild()) return state.dirty ? t`• ${name} — Hew Beta` : t`${name} — Hew Beta`
   return state.dirty ? t`• ${name} — Hew` : t`${name} — Hew`
 }
 

@@ -51,9 +51,9 @@ pub use host::{
     ContextEntry, ContextKind, DepthPass, DocFormat, Host, ImportImage, ImportOptions,
     IsolationEntry, LENGTH_FORMATS, LibraryItemEntry, LibraryListing, LibraryReadResult,
     LibraryWriteResult, LibraryWriteTarget, LineDrawingFormat, LineDrawingParams,
-    LineDrawingResult, NoHost, PrintPdfParams, PrintPdfResult, SaveOutcome, SelectMode,
-    SelectionEntry, SelectionState, SnapshotCamera, SnapshotParams, SnapshotProjection,
-    SnapshotResult, StandardView, ViewCameraSpec, resolve_document,
+    LineDrawingResult, NoHost, PrintPdfParams, PrintPdfResult, SKP_STREAM_RELEASES, SaveOutcome,
+    SelectMode, SelectionEntry, SelectionState, SnapshotCamera, SnapshotParams, SnapshotProjection,
+    SnapshotResult, StandardView, ViewCameraSpec, resolve_document, skp_stream_year,
 };
 pub use ids::IdResolver;
 pub use refusal::Refusal;

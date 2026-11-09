@@ -32,6 +32,7 @@ import * as THREE from 'three'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import type { Scene as WasmScene } from '../wasm/loader'
+import type { MaterialJs } from '../wasm/pkg/wasm_api.js'
 import { makeFatSegments, disposeFatSegments } from './fatLine'
 import {
   ctxOfObjectPlane,
@@ -52,7 +53,9 @@ import type { SectionPlane } from './sectionManager'
 import { getResolvedTheme } from '../settings/theme'
 import { prefersReducedMotion } from '../platform'
 import { inlineTextQuaternion, TextBillboard } from './TextBillboard'
+import { applyGuideStipple, GUIDE_DEFAULT_STIPPLE } from './guideStipple'
 import { GUIDE_COLOR } from './guideColors'
+import { phongLook } from './pbrLook'
 import { windowFor, guideReach, guideSpanOf, stretchToUse, guideOverlayPositions, GUIDE_POINT_MARKER_HALF_SIZE, type GuideWindow } from './guideWindow'
 
 /** What `updateGuideExtents` needs to know about the live camera. */
@@ -120,6 +123,8 @@ const SKETCH_LINE_WIDTH_PX = 2.2
  * it stands on. */
 const SECTION_CUT_COLOR = 0x000000
 const SECTION_CUT_WIDTH_PX = 2.5
+/** The widest cut outline a document style may ask for. */
+const SECTION_CUT_WIDTH_MAX_PX = 12
 /** Selected-sketch highlight width — deliberately bolder than the base
  * sketch-line width above so the orange overlay reads as clearly on top of
  * it rather than disappearing into (or under) it, worst case in light mode. */
@@ -769,7 +774,7 @@ export class SceneRenderer {
   private guideLines: THREE.LineSegments | null = null
   /** Per line guide, in `guideLines` segment order: its origin, unit
    *  direction, and the stretch of it currently drawn. */
-  private guideDefs: { o: [number, number, number]; d: [number, number, number]; lo: number; hi: number; win: GuideWindow | null }[] = []
+  private guideDefs: { o: [number, number, number]; d: [number, number, number]; lo: number; hi: number; stipple: number; win: GuideWindow | null }[] = []
   /** Last dash size applied to `guideLines` (screen-constant); -1 = none yet. */
   private lastGuideDashSize = -1
   /** Merged LineSegments for every point guide's cross marker. */
@@ -909,6 +914,9 @@ export class SceneRenderer {
    * work is done once, in `tickFades` — the per-frame hook the render loop
    * already calls before drawing. */
   private sectionCutDirty = false
+  /** The cut outline's color and width (a document style's own, else Hew's). */
+  private sectionCutColor = SECTION_CUT_COLOR
+  private sectionCutWidthPx = SECTION_CUT_WIDTH_PX
 
   constructor(threeScene: THREE.Scene, wasmScene: WasmScene) {
     this.scene = threeScene
@@ -2153,7 +2161,9 @@ export class SceneRenderer {
           polygonOffsetUnits: DEPTH_BIAS.FACE,
         })
         m.userData.baseOpacity = baseOpacity
+        m.userData.baseColor = m.color.clone()
         this._applyFaceMat(m, 1)
+        if (info !== undefined) this._applyPbrLook(m, midStr, info, tex !== undefined)
         // Which palette entry this material renders — the hook that lets
         // `syncPaletteOpacity` re-read live palette state (alpha) in place
         // instead of re-tessellating anything.
@@ -2203,6 +2213,58 @@ export class SceneRenderer {
     }
 
     return materials
+  }
+
+  /**
+   * Shade a face material with its palette entry's metallic and roughness
+   * factors (`pbrLook`), and its normal map when the material is textured
+   * (the only face material that carries UVs). A material with no
+   * physically based properties keeps Phong's defaults. Safe to re-run: it
+   * rebuilds the look from the material's remembered base colour.
+   */
+  private _applyPbrLook(
+    m: THREE.MeshPhongMaterial,
+    midStr: string,
+    info: MaterialJs,
+    textured: boolean,
+  ): void {
+    const base = (m.userData.baseColor as THREE.Color | undefined) ?? new THREE.Color(1, 1, 1)
+    if (!info.has_pbr()) {
+      m.color.copy(base)
+      m.shininess = 30
+      m.specular.setRGB(0x11 / 255, 0x11 / 255, 0x11 / 255)
+      return
+    }
+    // The tint the palette colour gives a textured face, or the colour the
+    // per-vertex colours carry: either way the palette entry's own colour.
+    const look = phongLook(
+      [info.r() / 255, info.g() / 255, info.b() / 255].map((c) =>
+        new THREE.Color().setRGB(c, c, c, THREE.SRGBColorSpace).r,
+      ) as [number, number, number],
+      info.metallic(),
+      info.roughness(),
+    )
+    m.color.copy(base).multiplyScalar(look.diffuseScale)
+    m.shininess = look.shininess
+    m.specular.setRGB(look.specular[0], look.specular[1], look.specular[2])
+    if (textured && info.has_normal_map() && m.normalMap === null) {
+      const key = `${midStr}:normal`
+      if (!this.textureCache.has(key)) {
+        const bytes = this.wasmScene.material_normal_map_bytes(BigInt(midStr))
+        if (bytes !== undefined) {
+          const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'image/png' }))
+          const t = new THREE.TextureLoader().load(url, () => URL.revokeObjectURL(url))
+          t.wrapS = THREE.RepeatWrapping
+          t.wrapT = THREE.RepeatWrapping
+          this.textureCache.set(key, t)
+        }
+      }
+      const t = this.textureCache.get(key)
+      if (t !== undefined) {
+        m.normalMap = t
+        m.needsUpdate = true
+      }
+    }
   }
 
   private _refreshObject(objectId: bigint): void {
@@ -2830,7 +2892,8 @@ export class SceneRenderer {
    * `refreshAllSketches`'s "clear and rebuild from scratch" approach since
    * guide counts are small and this is cheap.
    *
-   * Line guides render as a dashed segment through `origin` along
+   * Line guides render as a stippled segment (the guide's own dash
+   * pattern; short dashes by default) through `origin` along
    * `direction`, sized to the view each frame (`updateGuideExtents` — a
    * fixed long segment breaks depth ordering on the face a guide lies on);
    * point guides render as a small
@@ -2842,6 +2905,7 @@ export class SceneRenderer {
 
     const linePositions: number[] = []
     const lineDistances: number[] = []
+    const lineStipples: number[] = []
     const markerPositions: number[] = []
 
     for (const guideId of this.wasmScene.guide_ids()) {
@@ -2876,7 +2940,9 @@ export class SceneRenderer {
           ox + ux * s1, oy + uy * s1, oz + uz * s1,
         )
         lineDistances.push(s0, s1)
-        this.guideDefs.push({ o: [ox, oy, oz], d: [ux, uy, uz], lo, hi, win: null })
+        const stipple = this.wasmScene.guide_dash(guideId) ?? GUIDE_DEFAULT_STIPPLE
+        lineStipples.push(stipple, stipple)
+        this.guideDefs.push({ o: [ox, oy, oz], d: [ux, uy, uz], lo, hi, stipple, win: null })
       } else if (kind === 'point') {
         // [x, y, z] — a small 3-axis cross marker.
         const [x, y, z] = geometry
@@ -2895,7 +2961,10 @@ export class SceneRenderer {
       // dashSize/gapSize are placeholders — updateGuideDashScale() sets the
       // screen-constant values every frame from the camera distance.
       const mat = new THREE.LineDashedMaterial({ color: GUIDE_COLOR, dashSize: 0.05, gapSize: 0.05 })
+      applyGuideStipple(mat)
       geo.setAttribute('lineDistance', new THREE.BufferAttribute(new Float32Array(lineDistances), 1))
+      // Each guide's own dash pattern (its 16-bit stipple mask), per vertex.
+      geo.setAttribute('stipple', new THREE.BufferAttribute(new Float32Array(lineStipples), 1))
       this.guideLines = new THREE.LineSegments(geo, mat)
       // The segment is rewritten as the view moves; its bounding sphere would
       // go stale, and a guide is always at least partly in view when drawn.
@@ -4277,7 +4346,7 @@ export class SceneRenderer {
 
   /** World-space guide line segments and point-marker segments (may be
    * empty) for a print pass that includes guides. */
-  collectGuideSegments(): { lines: Float32Array; markers: Float32Array } {
+  collectGuideSegments(): { lines: Float32Array; markers: Float32Array; solid: Float32Array } {
     const grab = (obj: THREE.LineSegments | null): Float32Array => {
       if (obj === null) return new Float32Array(0)
       const attr = obj.geometry.getAttribute('position') as THREE.BufferAttribute | undefined
@@ -4296,13 +4365,16 @@ export class SceneRenderer {
     }
     // Lines are rebuilt at a fixed long reach, not copied from the live
     // window: a page is rendered from its own camera and zoom.
-    const lines = new Float32Array(this.guideDefs.length * 6)
-    this.guideDefs.forEach(({ o, d, lo, hi }, i) => {
+    // A fat line carries one dash pattern, so a print draws a guide either
+    // dashed or, when its stipple is solid (0xFFFF), unbroken.
+    const dashed: number[] = []
+    const solid: number[] = []
+    this.guideDefs.forEach(({ o, d, lo, hi, stipple }) => {
       const h = GUIDE_PRINT_HALF_LENGTH
       const [s0, s1] = stretchToUse(-h, h, lo, hi) ?? [0, 0]
-      lines.set([o[0] + d[0] * s0, o[1] + d[1] * s0, o[2] + d[2] * s0, o[0] + d[0] * s1, o[1] + d[1] * s1, o[2] + d[2] * s1], i * 6)
+      ;(stipple === 0xffff ? solid : dashed).push(o[0] + d[0] * s0, o[1] + d[1] * s0, o[2] + d[2] * s0, o[0] + d[0] * s1, o[1] + d[1] * s1, o[2] + d[2] * s1)
     })
-    return { lines, markers: grab(this.guideMarkers) }
+    return { lines: new Float32Array(dashed), markers: grab(this.guideMarkers), solid: new Float32Array(solid) }
   }
 
   /**
@@ -4580,21 +4652,21 @@ export class SceneRenderer {
    * owns the transparent/depthWrite flags.
    */
   syncPaletteOpacity(): void {
-    const alphaCache = new Map<string, number>()
-    const alphaOf = (midStr: string): number => {
-      let a = alphaCache.get(midStr)
-      if (a === undefined) {
-        const info = this.wasmScene.material_info(BigInt(midStr))
-        a = info !== undefined ? info.a() / 255 : 1
-        info?.free?.()
-        alphaCache.set(midStr, a)
-      }
-      return a
+    const infoCache = new Map<string, MaterialJs | undefined>()
+    const infoOf = (midStr: string): MaterialJs | undefined => {
+      if (!infoCache.has(midStr)) infoCache.set(midStr, this.wasmScene.material_info(BigInt(midStr)))
+      return infoCache.get(midStr)
     }
     const touch = (mat: THREE.Material | THREE.Material[]) => {
       for (const m of Array.isArray(mat) ? mat : [mat]) {
         const midStr = m.userData.materialId as string | undefined
-        if (midStr !== undefined) m.userData.baseOpacity = alphaOf(midStr)
+        if (midStr === undefined) continue
+        const info = infoOf(midStr)
+        m.userData.baseOpacity = info !== undefined ? info.a() / 255 : 1
+        // The surface factors are palette state too (`set_material_pbr`).
+        if (info !== undefined) {
+          this._applyPbrLook(m as THREE.MeshPhongMaterial, midStr, info, (m as THREE.MeshPhongMaterial).map !== null)
+        }
       }
     }
     for (const g of this.objectGroups.values()) touch(g.facesMesh.material)
@@ -4602,6 +4674,7 @@ export class SceneRenderer {
     for (const g of this.instanceGroups.values()) {
       for (const mesh of g.facesMeshes) touch(mesh.material)
     }
+    for (const info of infoCache.values()) info?.free?.()
     this._applyIsolation()
   }
 
@@ -4736,8 +4809,8 @@ export class SceneRenderer {
     }
     if (out.length === 0) return
     this.sectionCutLines = makeFatSegments(new Float32Array(out), {
-      color: SECTION_CUT_COLOR,
-      widthPx: SECTION_CUT_WIDTH_PX,
+      color: this.sectionCutColor,
+      widthPx: this.sectionCutWidthPx,
       // A face lying in the plane on the kept side is coincident with its
       // neighbors' cut lines; the bias settles that tie for the line.
       depthBias: DEPTH_BIAS.SKETCH_LINE,
@@ -4782,6 +4855,16 @@ export class SceneRenderer {
    * material at all (DESIGN §3: "update the plane in place on offset ...
    * do not rebuild materials").
    */
+  setSectionCutStyle(color: [number, number, number] | null, widthPx: number | null): void {
+    const hex = color === null ? SECTION_CUT_COLOR : (color[0] << 16) | (color[1] << 8) | color[2]
+    // A stored width is in pixels; keep it where a line still reads as a line.
+    const width = widthPx === null ? SECTION_CUT_WIDTH_PX : Math.min(Math.max(widthPx, 1), SECTION_CUT_WIDTH_MAX_PX)
+    if (hex === this.sectionCutColor && width === this.sectionCutWidthPx) return
+    this.sectionCutColor = hex
+    this.sectionCutWidthPx = width
+    this._markSectionCutDirty()
+  }
+
   setSectionPlane(plane: SectionPlane | null): void {
     this.currentSectionPlane = plane
     this._rebuildSectionWidget(plane)

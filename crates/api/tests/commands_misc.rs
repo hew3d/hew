@@ -735,6 +735,52 @@ fn material_set_opacity_sets_alpha_and_refuses_an_unknown_material() {
     assert_eq!(data["refusal"], "unknown_entity");
 }
 
+#[test]
+fn material_set_pbr_sets_the_factors_refuses_bad_values_and_undoes() {
+    let mut doc = Document::new();
+    let material = doc.add_material(Material::solid("Brass", Rgba8::rgb(200, 170, 60)));
+    let material_pub = public_of(&doc, &EntityRef::Material(material));
+    let mut conn = Connection::new(Grant::core(), "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+    let bytes_before = doc.save();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.material.set_pbr",
+        json!({ "material": material_pub, "metallic": 0.9, "roughness": 0.25 }),
+    );
+    let pbr = doc.material(material).unwrap().pbr.clone().unwrap();
+    assert_eq!((pbr.metallic, pbr.roughness), (0.9, 0.25));
+    // The factors survive a save and load.
+    let loaded = Document::load(&doc.save()).unwrap();
+    let id = loaded.material_ids()[0];
+    assert_eq!(loaded.material(id).unwrap().pbr.as_ref(), Some(&pbr));
+
+    assert_one_undo_and_clean_undo(&mut doc, depth_before, &bytes_before);
+    assert!(doc.material(material).unwrap().pbr.is_none());
+
+    let r = call(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.material.set_pbr",
+        json!({ "material": material_pub, "metallic": 1.5, "roughness": 0.5 }),
+    );
+    assert!(r.error.is_some(), "an out-of-range factor is refused");
+    assert!(doc.material(material).unwrap().pbr.is_none());
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.material.set_pbr",
+        json!({ "material": "mat_ffffff", "metallic": 0.5, "roughness": 0.5 }),
+    );
+    assert_eq!(data["refusal"], "unknown_entity");
+}
+
 /// A 1x1 PNG (signature onward) — the kernel never decodes an image, but a
 /// real one keeps the fixture honest.
 const PNG_1X1: &[u8] = &[

@@ -3,14 +3,23 @@ import react from '@vitejs/plugin-react'
 import { lingui } from '@lingui/vite-plugin'
 import { VitePWA } from 'vite-plugin-pwa'
 import { readFileSync } from 'node:fs'
+import { resolveBuildStamp } from './src/buildVersion'
 
 // The app version's single source of truth is package.json; inject it at build
 // time so exports (STL/3MF) and bug-report bundles carry the real version. The
 // consumers declare `__HEW_VERSION__` and fall back to '0.0.0' when this define
 // is absent (a bare `tsc`/vitest run without the config's define step).
-const appVersion = JSON.parse(
+const pkgVersion = JSON.parse(
   readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
 ).version as string
+
+// Only the CI job that deploys the beta web app sets HEW_BETA_SHA. It stamps
+// the version as `<version>+beta.<sha>` and flips `__HEW_BETA__`, which the
+// UI reads for its beta cue (src/buildVersion.ts). Every other build is plain.
+const { version: appVersion, beta: isBeta } = resolveBuildStamp(
+  pkgVersion,
+  process.env.HEW_BETA_SHA,
+)
 
 // Help ▸ Report Bug's web path posts same-origin to `/report/` (docs/design/
 // report-bug.md §8), which only a production `app.hew3d.com` deploy actually
@@ -32,6 +41,7 @@ const reportProxyTarget = process.env.HEW_REPORT_PROXY
 export default defineConfig(({ command }) => ({
   define: {
     __HEW_VERSION__: JSON.stringify(appVersion),
+    __HEW_BETA__: JSON.stringify(isBeta),
     __HEW_REPORT_DEV_PROXY__: JSON.stringify(command === 'serve' && Boolean(reportProxyTarget)),
   },
   server: {
@@ -63,8 +73,8 @@ export default defineConfig(({ command }) => ({
       injectRegister: null,
 
       manifest: {
-        name: 'Hew',
-        short_name: 'Hew',
+        name: isBeta ? 'Hew Beta' : 'Hew',
+        short_name: isBeta ? 'Hew Beta' : 'Hew',
         description: 'A solids-first 3D modeler',
         // Brand "Charcoal" (Hew Brand Sheet v1) — the PWA splash / OS chrome color.
         theme_color: '#1b1a17',

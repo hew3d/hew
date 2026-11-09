@@ -171,6 +171,7 @@ function makeScene(opts: {
     session_placements: () => BigUint64Array.from(sessionPlacements),
     sketch_ids: () => new BigUint64Array(),
     guide_ids: () => new BigUint64Array(),
+    guide_dash: () => undefined,
   } as unknown as WasmScene
 }
 
@@ -1783,6 +1784,27 @@ function edgesMaterial(root: THREE.Group, name: string): THREE.LineBasicMaterial
 describe('SceneRenderer — section plane (DESIGN §3/§4)', () => {
   const PLANE = { origin: [0, 0, 0] as [number, number, number], normal: [0, 0, 1] as [number, number, number], active: true }
 
+  it('draws the cut profile in the document style\'s color and width, Hew\'s own without one', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSectionPlane({ origin: [0.5, 0, 0], normal: [1, 0, 0], active: true })
+    const cut = () => {
+      renderer.debugSectionCutSegments()
+      const line = renderer.sectionCutGroup.children[0] as unknown as { material: { color: THREE.Color; linewidth: number } }
+      return { hex: line.material.color.getHex(), width: line.material.linewidth }
+    }
+    expect(cut()).toEqual({ hex: 0x000000, width: 2.5 })
+    renderer.setSectionCutStyle([200, 0, 10], 5)
+    expect(cut()).toEqual({ hex: 0xc8000a, width: 5 })
+    // A width past what reads as a line is held to the widest.
+    renderer.setSectionCutStyle([200, 0, 10], 400)
+    expect(cut().width).toBe(12)
+    // No style: back to Hew's own.
+    renderer.setSectionCutStyle(null, null)
+    expect(cut()).toEqual({ hex: 0x000000, width: 2.5 })
+  })
+
   it('draws the cut profile where the active section passes through drawn solids, and only there', () => {
     const scene = makeScene({ objects: { '1': true } })
     const renderer = new SceneRenderer(new THREE.Scene(), scene)
@@ -2491,6 +2513,10 @@ describe('SceneRenderer — untextured painted materials', () => {
         g: () => 100,
         b: () => 50,
         a: () => 255,
+        has_pbr: () => false,
+        metallic: () => 0,
+        roughness: () => 1,
+        has_normal_map: () => false,
         free: vi.fn(),
       }
       const scene = {
@@ -2727,6 +2753,22 @@ describe('SceneRenderer — guide spans (segments and rays)', () => {
     renderer.refreshGuides()
     return renderer
   }
+  it('draws each line guide with its own stipple mask, short dashes when it has none', () => {
+    const scene = makeScene({ objects: {} })
+    ;(scene as unknown as { guide_kind: (id: bigint) => string }).guide_kind = () => 'line'
+    ;(scene as unknown as { guide_geometry: (id: bigint) => Float64Array }).guide_geometry = () =>
+      new Float64Array([0, 0, 0, 1, 0, 0])
+    ;(scene as unknown as { guide_ids: () => BigUint64Array }).guide_ids = () => new BigUint64Array([1n, 2n])
+    ;(scene as unknown as { guide_dash: (id: bigint) => number | undefined }).guide_dash = (id) =>
+      id === 1n ? 0x1c47 : undefined
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.refreshGuides()
+    const line = renderer.guidesGroup.children.find((c) => c instanceof THREE.LineSegments) as THREE.LineSegments
+    const stipple = Array.from(line.geometry.getAttribute('stipple').array)
+    expect(stipple).toEqual([0x1c47, 0x1c47, 0x3333, 0x3333])
+  })
+
   function drawn(renderer: SceneRenderer): { pos: number[]; dist: number[] } {
     const line = renderer.guidesGroup.children.find((c) => c instanceof THREE.LineSegments) as THREE.LineSegments
     return {

@@ -480,30 +480,105 @@ pub struct ImportImage {
 /// `hew.doc.save`/`hew.doc.export` write a SketchUp file in one.
 pub const LENGTH_FORMATS: &[&str] = &["m", "cm", "mm", "arch", "frac_in", "dec_in"];
 
+/// The stream releases a SketchUp file is saved in, newest first: the
+/// major number of each release's version string (3 to 8 and 13 to 20 for
+/// SketchUp 2013 to 2020). The one table every surface reads; adding a
+/// release is one number here (and its writer in Skpwright).
+pub const SKP_STREAM_RELEASES: &[u8] = &[20, 19, 18, 17, 16, 15, 14, 13, 8, 7, 6, 5, 4, 3];
+
+/// The marketing name of a stream release: its year for 13 to 20 (SketchUp
+/// 2017), its number below that (SketchUp 8).
+pub fn skp_stream_year(release: u8) -> u32 {
+    if release >= 13 {
+        2000 + u32::from(release)
+    } else {
+        u32::from(release)
+    }
+}
+
 /// The file format of a document (`hew.doc.save`'s `format`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DocFormat {
     /// The native `.hew` format.
     #[default]
-    #[serde(rename = "hew")]
     Hew,
-    /// A SketchUp file in the 2026 container, what current SketchUp saves.
-    #[serde(rename = "skp")]
+    /// A SketchUp file in the 2026 container, what current SketchUp saves
+    /// (wire name `"skp"`).
     Skp,
-    /// A SketchUp file in the 2017 format, which opens in SketchUp Make
-    /// 2017 and every later release.
-    #[serde(rename = "skp2017")]
-    Skp2017,
+    /// A SketchUp file in the stream container in one release of
+    /// [`SKP_STREAM_RELEASES`], by the major number of its version string
+    /// (wire names `"skp3"` to `"skp8"`, `"skp2013"` to `"skp2020"`).
+    SkpStream(u8),
+}
+
+impl<'de> serde::Deserialize<'de> for DocFormat {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(d)?;
+        DocFormat::from_name(&name).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "unknown variant `{name}`, expected one of {}",
+                DocFormat::wire_names()
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })
+    }
 }
 
 impl DocFormat {
-    /// The wire name: `"hew"`, `"skp"` or `"skp2017"`.
-    pub fn as_str(self) -> &'static str {
+    /// The wire name: `"hew"`, `"skp"`, `"skp3"` to `"skp8"` or
+    /// `"skp2013"` to `"skp2020"`.
+    pub fn as_str(self) -> String {
         match self {
-            DocFormat::Hew => "hew",
-            DocFormat::Skp => "skp",
-            DocFormat::Skp2017 => "skp2017",
+            DocFormat::Hew => "hew".into(),
+            DocFormat::Skp => "skp".into(),
+            DocFormat::SkpStream(r) => format!("skp{}", skp_stream_year(r)),
         }
+    }
+
+    /// The wire names of the SketchUp formats, the 2026 container first
+    /// and the stream releases newest to oldest.
+    pub fn skp_wire_names() -> Vec<String> {
+        std::iter::once("skp".to_string())
+            .chain(
+                SKP_STREAM_RELEASES
+                    .iter()
+                    .map(|&r| DocFormat::SkpStream(r).as_str()),
+            )
+            .collect()
+    }
+
+    /// Every wire name a format takes (`"hew"` first, then
+    /// [`DocFormat::skp_wire_names`]).
+    pub fn wire_names() -> Vec<String> {
+        std::iter::once("hew".to_string())
+            .chain(DocFormat::skp_wire_names())
+            .collect()
+    }
+
+    /// The format a wire name stands for; `None` for any other name.
+    pub fn from_name(name: &str) -> Option<DocFormat> {
+        if name == "hew" {
+            Some(DocFormat::Hew)
+        } else {
+            DocFormat::skp_from_name(name)
+        }
+    }
+
+    /// The SketchUp format a wire name stands for (`"skp"`, `"skp3"` to
+    /// `"skp2020"`); `None` for any other name.
+    pub fn skp_from_name(name: &str) -> Option<DocFormat> {
+        if name == "skp" {
+            return Some(DocFormat::Skp);
+        }
+        let n: u32 = name.strip_prefix("skp")?.parse().ok()?;
+        SKP_STREAM_RELEASES
+            .iter()
+            .copied()
+            .find(|&r| skp_stream_year(r) == n && name == format!("skp{n}"))
+            .map(DocFormat::SkpStream)
     }
 
     /// Whether this is one of the SketchUp containers.
@@ -649,14 +724,20 @@ pub trait Host {
     /// the choice to the host, as the app's File > Save does: a save back
     /// keeps the file's own units, a new file takes the display units. A
     /// `.hew` has no display units and ignores it.
+    ///
+    /// `compat` writes the 2021-and-later container at revision 17 (leaving
+    /// out what only newer SketchUp versions open, with a note for each
+    /// kind); it is meaningless for a `.hew` or a stream release. A save
+    /// back over a revision-17 file keeps to revision 17 without it.
     fn save_document(
         &mut self,
         doc: &kernel::Document,
         path: Option<&str>,
         format: Option<DocFormat>,
         units: Option<&str>,
+        compat: bool,
     ) -> Result<SaveOutcome, Refusal> {
-        let _ = (doc, path, format, units);
+        let _ = (doc, path, format, units, compat);
         Err(unsupported("save files"))
     }
 
@@ -675,8 +756,9 @@ pub trait Host {
         path: &str,
         format: Option<DocFormat>,
         units: Option<&str>,
+        compat: bool,
     ) -> Result<SaveOutcome, Refusal> {
-        let _ = (doc, path, format, units);
+        let _ = (doc, path, format, units, compat);
         Err(unsupported("save a copy of a document"))
     }
 
@@ -687,7 +769,10 @@ pub trait Host {
     /// own convention); hosts exporting formats with no curve resolution
     /// concept ignore it. `units` (one of [`LENGTH_FORMATS`], SketchUp
     /// formats only) is the display units a `.skp` opens in; `None` means
-    /// the host's display units.
+    /// the host's display units. `compat` (the 2021-and-later `skp`
+    /// container only) writes revision 17, leaving out what only newer
+    /// SketchUp versions open; a stream release and every other format
+    /// ignore it.
     #[allow(clippy::too_many_arguments)]
     fn export_document(
         &mut self,
@@ -697,8 +782,17 @@ pub trait Host {
         segments_per_turn: u32,
         units: Option<&str>,
         selection: Option<&[crate::locate::RenderRoot]>,
+        compat: bool,
     ) -> Result<Option<Vec<u8>>, Refusal> {
-        let _ = (doc, format, path, segments_per_turn, units, selection);
+        let _ = (
+            doc,
+            format,
+            path,
+            segments_per_turn,
+            units,
+            selection,
+            compat,
+        );
         Err(unsupported("export"))
     }
 

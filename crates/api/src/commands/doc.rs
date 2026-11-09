@@ -160,7 +160,7 @@ struct SaveParams {
     /// own (hew-cli's live render fallback). Always `.hew` bytes.
     #[serde(default)]
     return_bytes: bool,
-    /// `"hew"`, `"skp"` or `"skp2017"`; absent means the path's extension
+    /// `"hew"`, `"skp"` (the 2026 container), `"skp3"` to `"skp8"` or `"skp2013"` to `"skp2020"`; absent means the path's extension
     /// (or, with no path, the working file's own format) decides.
     #[serde(default)]
     format: Option<DocFormat>,
@@ -168,6 +168,12 @@ struct SaveParams {
     /// host decides as the app's File > Save does.
     #[serde(default)]
     units: Option<String>,
+    /// For the 2021-and-later container (`skp`): write revision 17, which
+    /// every SketchUp since 2021 opens, leaving out what only newer versions
+    /// hold (itemised in `writer_notes`). Absent, the lowest revision that
+    /// holds the content.
+    #[serde(default)]
+    compat: bool,
 }
 
 /// `app/src/settings/units.ts`'s `LengthFormat` union
@@ -188,7 +194,7 @@ pub(crate) fn check_length_format(format: &str) -> Result<(), CmdError> {
 fn outcome_fields(outcome: &SaveOutcome) -> Value {
     let mut out = serde_json::json!({});
     if let Some(f) = outcome.format {
-        out["format"] = Value::String(f.as_str().to_string());
+        out["format"] = Value::String(f.as_str());
         if f.is_skp() {
             out["simplified"] = serde_json::json!(outcome.simplified);
             out["writer_notes"] = serde_json::json!(outcome.writer_notes);
@@ -204,15 +210,25 @@ fn save_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         return_bytes,
         format,
         units,
+        compat,
     } = parse(params)?;
     if let Some(u) = &units {
         check_length_format(u)?;
     }
+    if compat && !matches!(format, None | Some(DocFormat::Skp)) {
+        return Err(CmdError::Params(
+            "`compat` applies to the 2021-and-later SketchUp container (format \"skp\")".into(),
+        ));
+    }
     if return_bytes
-        && (path.is_some() || copy || format.is_some_and(DocFormat::is_skp) || units.is_some())
+        && (path.is_some()
+            || copy
+            || format.is_some_and(DocFormat::is_skp)
+            || units.is_some()
+            || compat)
     {
         return Err(CmdError::Params(
-            "`return_bytes` hands back .hew bytes and takes no `path`, `copy`, SketchUp `format` or `units`".into(),
+            "`return_bytes` hands back .hew bytes and takes no `path`, `copy`, SketchUp `format`, `units` or `compat`".into(),
         ));
     }
     // Every save mints the document id first, if the document has none
@@ -238,7 +254,7 @@ fn save_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         let outcome = ctx
             .doc
             .with_document_id_for_save(random, |doc| {
-                host.save_copy(doc, &path, format, units.as_deref())
+                host.save_copy(doc, &path, format, units.as_deref(), compat)
             })
             .map_err(CmdError::Refusal)?;
         return Ok(outcome_fields(&outcome));
@@ -247,7 +263,7 @@ fn save_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let outcome = ctx
         .doc
         .with_document_id_for_save(random, |doc| {
-            host.save_document(doc, path.as_deref(), format, units.as_deref())
+            host.save_document(doc, path.as_deref(), format, units.as_deref(), compat)
         })
         .map_err(CmdError::Refusal)?;
     let mut out = outcome_fields(&outcome);
@@ -316,6 +332,10 @@ struct ExportParams {
     /// Export only these placements (or definitions at identity).
     #[serde(default)]
     selection: Option<Vec<Value>>,
+    /// For `format: "skp"`: write revision 17 of the container (see
+    /// `hew.doc.save`).
+    #[serde(default)]
+    compat: bool,
 }
 
 fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -325,19 +345,25 @@ fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         segments_per_turn,
         units,
         selection,
+        compat,
     } = parse(params)?;
+    if compat && format != "skp" {
+        return Err(CmdError::Params(
+            "`compat` applies to format \"skp\", the 2021-and-later container".into(),
+        ));
+    }
     if let Some(u) = &units {
         check_length_format(u)?;
-        if !matches!(format.as_str(), "skp" | "skp2017") {
+        if DocFormat::skp_from_name(&format).is_none() {
             return Err(CmdError::Params(format!(
-                "units applies to SketchUp files (\"skp\", \"skp2017\"); \"{format}\" has none to set"
+                "units applies to SketchUp files (\"skp\", \"skp3\" to \"skp8\", \"skp2013\" to \"skp2020\"); \"{format}\" has none to set"
             )));
         }
     }
     validate_selection(&selection)?;
     let selection = match &selection {
         Some(list) => {
-            if matches!(format.as_str(), "skp" | "skp2017") {
+            if DocFormat::skp_from_name(&format).is_some() {
                 return Err(CmdError::Params(
                     "selection applies to the mesh formats (stl, 3mf, glb, gltf, usdz); a SketchUp export writes the whole document".into(),
                 ));
@@ -355,6 +381,7 @@ fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             segments_per_turn.unwrap_or(0),
             units.as_deref(),
             selection.as_deref(),
+            compat,
         )
         .map_err(CmdError::Refusal)?;
     Ok(match bytes {

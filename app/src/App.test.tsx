@@ -94,6 +94,7 @@ const mockScene = {
   undo_depth: () => 0,
   redo_depth: () => 0,
   history_entries_json: () => JSON.stringify({ undo: [], redo: [], savedDepth: null }),
+  geo_reference_json: () => 'null',
   // save() is called once to snapshot the blank scene for "New" resets.
   save: () => new Uint8Array(),
   load: vi.fn(),
@@ -4020,7 +4021,7 @@ describe('App — v1.1 assets lane: viewport resync + current-material reset aft
   })
 
   it('deleting an unused material calls refreshScene and, if it was the current material, resets currentMaterialId to the sentinel', async () => {
-    const redInfo = { name: () => 'Red', r: () => 220, g: () => 30, b: () => 30, a: () => 255, has_texture: () => false }
+    const redInfo = { name: () => 'Red', r: () => 220, g: () => 30, b: () => 30, a: () => 255, has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }
     stub('material_ids', () => BigUint64Array.from([7n]))
     stub('material_info', ((id: bigint) => (id === 7n ? redInfo : undefined)) as typeof mockScene.material_info)
     stub('material_usage', (() => 0) as typeof mockScene.material_usage)
@@ -4071,7 +4072,7 @@ describe('App — v1.1 assets lane: viewport resync + current-material reset aft
   })
 
   it('Purge Unused calls refreshScene and clears currentMaterialId when the current material was purged', async () => {
-    const staleInfo = { name: () => 'Stray', r: () => 5, g: () => 5, b: () => 5, a: () => 255, has_texture: () => false }
+    const staleInfo = { name: () => 'Stray', r: () => 5, g: () => 5, b: () => 5, a: () => 255, has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }
     let purged = false
     stub('material_ids', () => (purged ? new BigUint64Array() : BigUint64Array.from([11n])))
     stub('material_info', ((id: bigint) => (id === 11n && !purged ? staleInfo : undefined)) as typeof mockScene.material_info)
@@ -4148,13 +4149,13 @@ describe('App — the native save panel chooses the format', () => {
   }
 
   it('Save As writes the format picked in the panel to the path it picked', async () => {
-    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/m.skp', format: 'skp2017', options: {} })
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/m.skp', format: 'skp-older', options: { release: 'skp2017' } })
     await renderAndLoad()
     fileMenu('Save As…')
 
     await waitFor(() => expect(fakeFileHost.writeTo).toHaveBeenCalledOnce())
-    expect(savePanel.pickSaveTarget).toHaveBeenCalledWith('Save As', expect.any(String), savePanel.SAVE_PANEL_FORMATS, 'hew')
-    expect((mockScene as Record<string, unknown>).save_skp).toHaveBeenCalledWith('skp2017', expect.any(String))
+    expect(savePanel.pickSaveTarget).toHaveBeenCalledWith('Save As', expect.any(String), savePanel.savePanelFormats('hew', false), 'hew')
+    expect((mockScene as Record<string, unknown>).save_skp).toHaveBeenCalledWith('skp2017', expect.any(String), undefined, false)
     expect(fakeFileHost.writeTo).toHaveBeenCalledWith('/tmp/m.skp', written, 'skp2017')
     // A save mints the document's persistent id before writing.
     expect(mockScene.ensure_document_id).toHaveBeenCalled()
@@ -4167,18 +4168,36 @@ describe('App — the native save panel chooses the format', () => {
   })
 
   it('Export writes the format picked in the panel to the path it picked', async () => {
-    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/e.skp', format: 'skp2017', options: {} })
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/e.skp', format: 'skp-older', options: { release: 'skp2017' } })
     await renderAndLoad()
     fileMenu('Export…')
 
     await waitFor(() => expect(fakeFileHost.writeTo).toHaveBeenCalledOnce())
     const [title, , formats, initial] = vi.mocked(savePanel.pickSaveTarget).mock.calls[0]
     expect([title, initial]).toEqual(['Export', 'glb'])
-    expect(formats.map((f) => f.id)).toEqual(savePanel.EXPORT_FORMATS.map((f) => f.format))
-    expect((mockScene as Record<string, unknown>).export_skp).toHaveBeenCalledWith('skp2017', expect.any(String))
+    expect(formats.map((f) => f.id)).toEqual(['glb', 'stl', '3mf', 'usdz', 'svg', 'skp', 'skp-older'])
+    expect((mockScene as Record<string, unknown>).export_skp).toHaveBeenCalledWith('skp2017', expect.any(String), false)
     expect(fakeFileHost.writeTo).toHaveBeenCalledWith('/tmp/e.skp', written)
     expect(screen.queryByRole('dialog', { name: /^export$/i })).not.toBeInTheDocument()
     expect(fakeFileHost.exportBinary).not.toHaveBeenCalled()
+  })
+
+  it('Save As passes the compat box of the 2021-and-later container to the writer', async () => {
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/m.skp', format: 'skp2026', options: { compat: true } })
+    await renderAndLoad()
+    fileMenu('Save As…')
+
+    await waitFor(() => expect(fakeFileHost.writeTo).toHaveBeenCalledOnce())
+    expect((mockScene as Record<string, unknown>).save_skp).toHaveBeenCalledWith('skp2026', expect.any(String), undefined, true)
+  })
+
+  it('Export passes the compat box only for the 2021-and-later container', async () => {
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/e.skp', format: 'skp', options: { compat: true } })
+    await renderAndLoad()
+    fileMenu('Export…')
+
+    await waitFor(() => expect(fakeFileHost.writeTo).toHaveBeenCalledOnce())
+    expect((mockScene as Record<string, unknown>).export_skp).toHaveBeenCalledWith('skp2026', expect.any(String), true)
   })
 
   it('a panel that could not be shown says so rather than passing for a cancel', async () => {
@@ -4190,6 +4209,39 @@ describe('App — the native save panel chooses the format', () => {
     expect(await screen.findByText(/Export failed: .*main thread/)).toBeInTheDocument()
     expect(fakeFileHost.writeTo).not.toHaveBeenCalled()
   })
+
+  it('Export to a stream release lists what the older format left out', async () => {
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/e.skp', format: 'skp-older', options: { release: 'skp2018' } })
+    ;(mockScene as Record<string, unknown>).export_skp = vi.fn(() => ({
+      bytes: written,
+      simplified: [],
+      writer_notes: ['a text is anchored to an entity the file does not hold and is left out'],
+    }))
+    await renderAndLoad()
+    fileMenu('Export…')
+
+    const notice = await screen.findByTestId('skp-loss-notice')
+    expect(notice).toHaveTextContent('left out')
+    expect(notice).toHaveTextContent('a text is anchored to an entity')
+    expect((mockScene as Record<string, unknown>).export_skp).toHaveBeenCalledWith('skp2018', expect.any(String), false)
+  })
+
+  it.each(['skp8', 'skp3', 'skp2013'] as const)(
+    'Export to release %s passes the release through as its own target',
+    async (format) => {
+      vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/e.skp', format: 'skp-older', options: { release: format } })
+      ;(mockScene as Record<string, unknown>).export_skp = vi.fn(() => ({
+        bytes: written,
+        simplified: [],
+        writer_notes: [],
+      }))
+      await renderAndLoad()
+      fileMenu('Export…')
+      await waitFor(() =>
+        expect((mockScene as Record<string, unknown>).export_skp).toHaveBeenCalledWith(format, expect.any(String), false),
+      )
+    },
+  )
 
   it('a canceled panel writes nothing', async () => {
     vi.mocked(savePanel.pickSaveTarget).mockResolvedValue(null)
@@ -4233,7 +4285,7 @@ describe('App — revealInTray (Object Info tag chips and Materials row)', () =>
     mockScene.material_ids = () => new BigUint64Array([10n])
     mockScene.material_info = ((id: bigint) =>
       id === 10n
-        ? { name: () => 'Oak', r: () => 200, g: () => 150, b: () => 100, a: () => 255, has_texture: () => false, world_w: () => 1, world_h: () => 1 }
+        ? { name: () => 'Oak', r: () => 200, g: () => 150, b: () => 100, a: () => 255, has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1, world_w: () => 1, world_h: () => 1 }
         : undefined) as unknown as typeof mockScene.material_info
     mockScene.object_materials = () => new BigUint64Array([10n])
   })

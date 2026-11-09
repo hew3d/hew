@@ -32,6 +32,9 @@ pub struct CliHost {
     /// SketchUp wrote it. `None` for a document that did not come from a
     /// `.skp` (a `.hew`, or a new one).
     skp_source: Option<skp_export::SkpSource>,
+    /// The working document came from, or was last saved as, revision 17 of
+    /// the 2021-and-later container: a save with no `format` keeps to it.
+    working_compat: bool,
 }
 
 impl CliHost {
@@ -63,6 +66,7 @@ impl Host for CliHost {
         self.working_path = None;
         self.working_format = DocFormat::Hew;
         self.skp_source = None;
+        self.working_compat = false;
         Ok(())
     }
 
@@ -73,6 +77,8 @@ impl Host for CliHost {
             let (loaded, format, source) = open_skp(&bytes, path)?;
             *doc = loaded;
             self.working_format = format;
+            self.working_compat =
+                skp_export::target_of(&bytes) == skp_export::Target::Skp2026Compat;
             self.skp_source = Some(source);
         } else {
             let loaded = Document::load(&bytes)
@@ -80,6 +86,7 @@ impl Host for CliHost {
             *doc = loaded;
             self.working_format = DocFormat::Hew;
             self.skp_source = None;
+            self.working_compat = false;
         }
         self.working_path = Some(PathBuf::from(path));
         Ok(())
@@ -91,6 +98,7 @@ impl Host for CliHost {
         path: Option<&str>,
         format: Option<DocFormat>,
         units: Option<&str>,
+        compat: bool,
     ) -> Result<SaveOutcome, Refusal> {
         let target = match path {
             Some(p) => PathBuf::from(p),
@@ -101,7 +109,10 @@ impl Host for CliHost {
                 )
             })?,
         };
+        let explicit_compat = compat;
+        let compat = compat || (format.is_none() && self.working_compat);
         let format = resolve_save_format(&target, format, self.working_format)?;
+        refuse_compat_off_container(explicit_compat, format)?;
         let mut outcome = SaveOutcome {
             format: Some(format),
             ..SaveOutcome::default()
@@ -114,7 +125,7 @@ impl Host for CliHost {
                 write_file(&target, &doc.save_for_persistence())?;
                 None
             }
-            DocFormat::Skp | DocFormat::Skp2017 => {
+            DocFormat::Skp | DocFormat::SkpStream(_) => {
                 // Asked for by name, the units go over the file's own too;
                 // otherwise a save back keeps them and a new file takes
                 // this host's display units, as the app's File > Save does.
@@ -124,7 +135,7 @@ impl Host for CliHost {
                 };
                 let saved = skp_export::save_in(
                     doc,
-                    skp_target(format),
+                    skp_target(format, compat),
                     skp_export::WriteEnv::system(),
                     self.skp_source.as_ref(),
                     units,
@@ -137,6 +148,7 @@ impl Host for CliHost {
             }
         };
         self.skp_source = new_source;
+        self.working_compat = compat && format == DocFormat::Skp;
         self.working_format = format;
         self.working_path = Some(target);
         // This host has a filesystem and used it, so there are no bytes to
@@ -150,16 +162,20 @@ impl Host for CliHost {
         path: &str,
         format: Option<DocFormat>,
         units: Option<&str>,
+        compat: bool,
     ) -> Result<SaveOutcome, Refusal> {
         let target = Path::new(path);
+        let explicit_compat = compat;
+        let compat = compat || (format.is_none() && self.working_compat);
         let format = resolve_save_format(target, format, self.working_format)?;
+        refuse_compat_off_container(explicit_compat, format)?;
         let mut outcome = SaveOutcome {
             format: Some(format),
             ..SaveOutcome::default()
         };
         match format {
             DocFormat::Hew => write_file(target, &doc.save_for_persistence())?,
-            DocFormat::Skp | DocFormat::Skp2017 => {
+            DocFormat::Skp | DocFormat::SkpStream(_) => {
                 // Built on the working document's source, as a save is, so
                 // unchanged content keeps SketchUp's records; a copy never
                 // becomes the source itself.
@@ -169,7 +185,7 @@ impl Host for CliHost {
                 };
                 let saved = skp_export::save_in(
                     doc,
-                    skp_target(format),
+                    skp_target(format, compat),
                     skp_export::WriteEnv::system(),
                     self.skp_source.as_ref(),
                     units,
@@ -191,18 +207,16 @@ impl Host for CliHost {
         segments_per_turn: u32,
         units: Option<&str>,
         selection: Option<&[api::locate::RenderRoot]>,
+        compat: bool,
     ) -> Result<Option<Vec<u8>>, Refusal> {
         // `true`: a headless dispatch has no dialog of its own to warn about
         // non-solid objects first, so a leaky object is dropped rather than
         // silently handed back in a file no human reviewed
         // (crates/mesh-export's module doc, "Non-solid inclusion").
         let bytes = match format {
-            "skp" | "skp2017" => {
-                let target = skp_target(if format == "skp" {
-                    DocFormat::Skp
-                } else {
-                    DocFormat::Skp2017
-                });
+            _ if DocFormat::skp_from_name(format).is_some() => {
+                let target =
+                    skp_target(DocFormat::skp_from_name(format).unwrap_or_default(), compat);
                 skp_export::export_in(
                     doc,
                     target,
@@ -490,11 +504,19 @@ fn display_units(name: Option<&str>) -> skp_export::DisplayUnits {
         .unwrap_or(skp_export::DisplayUnits::Meters)
 }
 
-fn skp_target(format: DocFormat) -> skp_export::Target {
+fn skp_target(format: DocFormat, compat: bool) -> skp_export::Target {
     match format {
-        DocFormat::Skp2017 => skp_export::Target::Skp2017,
+        DocFormat::SkpStream(n) => skpwright_release(n)
+            .map(skp_export::Target::Stream)
+            .unwrap_or(skp_export::Target::Skp2026),
         _ => skp_export::Target::Skp2026,
     }
+    .with_compat(compat)
+}
+
+/// The Skpwright release a stream format's number names.
+fn skpwright_release(number: u8) -> Option<skp_import::skpwright::Release> {
+    skp_import::skpwright::Release::of_name(u32::from(number))
 }
 
 fn write_file(target: &Path, bytes: &[u8]) -> Result<(), Refusal> {
@@ -519,9 +541,9 @@ fn open_skp(
     doc.forget_history().map_err(|e| load_failed(&e))?;
     let source =
         skp_export::SkpSource::after_open(bytes.to_vec(), &doc, &parsed.provenance, &report);
-    let format = match skp_import::openskp::detect_container(bytes) {
-        skp_import::openskp::Container::Carchive2017 => DocFormat::Skp2017,
-        _ => DocFormat::Skp,
+    let format = match skp_export::target_of(bytes) {
+        skp_export::Target::Skp2026 | skp_export::Target::Skp2026Compat => DocFormat::Skp,
+        skp_export::Target::Stream(r) => DocFormat::SkpStream(r.number()),
     };
     Ok((doc, format, source))
 }
@@ -532,6 +554,20 @@ fn open_skp(
 /// other's file. Without one, a `.skp` path keeps the working document's
 /// own `.skp` container (the 2026 one when it did not come from a `.skp`)
 /// and any other path writes `.hew`.
+/// `compat` asks for revision 17 of the 2021-and-later container; asked for
+/// any other resolved format (a `.hew` path, a stream release) it would be
+/// silently dropped, so it is refused. An explicit `false` is the same as
+/// absent, as in the app.
+fn refuse_compat_off_container(compat: bool, format: DocFormat) -> Result<(), Refusal> {
+    if compat && format != DocFormat::Skp {
+        return Err(Refusal::api(
+            "format_mismatch",
+            "`compat` applies to the 2021-and-later container (format \"skp\"); this save resolves to another format.",
+        ));
+    }
+    Ok(())
+}
+
 fn resolve_save_format(
     target: &Path,
     explicit: Option<DocFormat>,
@@ -542,7 +578,7 @@ fn resolve_save_format(
         Some(f) if f.is_skp() != skp_path => Err(Refusal::api(
             "format_mismatch",
             &format!(
-                "format \"{}\" contradicts the path \"{}\": a .skp path takes format \"skp\" or \"skp2017\", \
+                "format \"{}\" contradicts the path \"{}\": a .skp path takes format \"skp\", \"skp3\" to \"skp8\" or \"skp2013\" to \"skp2020\", \
                  any other path takes \"hew\". Change the extension or drop the format.",
                 f.as_str(),
                 target.display()
@@ -1153,7 +1189,7 @@ mod tests {
         let mut host = CliHost::new();
         let doc = Document::new();
         let target = dir.join("copy.hew");
-        host.save_copy(&doc, target.to_str().unwrap(), None, None)
+        host.save_copy(&doc, target.to_str().unwrap(), None, None, false)
             .unwrap();
         assert!(target.exists());
         assert_eq!(

@@ -22,6 +22,7 @@
 //! the demo path.
 
 mod draft_api;
+mod geo_api;
 mod health;
 mod live;
 mod log;
@@ -648,11 +649,28 @@ fn skp_units(name: Option<&str>) -> Option<skp_export::DisplayUnits> {
     name.and_then(skp_export::DisplayUnits::from_name)
 }
 
-fn skp_target(target: &str) -> Result<skp_export::Target, JsError> {
+/// The target a wire name and the `compat` choice stand for: `compat`
+/// (revision 17 of the 2021-and-later container) only applies to `"skp2026"`
+/// or `"skp"`; a stream release ignores it.
+fn skp_target(target: &str, compat: bool) -> Result<skp_export::Target, JsError> {
+    if target == "skp2026" || target == "skp" {
+        return Ok(skp_export::Target::Skp2026.with_compat(compat));
+    }
+    match api::DocFormat::skp_from_name(target) {
+        Some(api::DocFormat::SkpStream(n)) => {
+            skp_import::skpwright::Release::of_name(u32::from(n)).map(skp_export::Target::Stream)
+        }
+        _ => None,
+    }
+    .ok_or_else(|| JsError::new(&format!("SKP: unknown target '{target}'")))
+}
+
+/// The name of a target as the app holds it: `"skp2026"` for the 2026
+/// container, else the release's wire name (`"skp8"`, `"skp2017"`).
+fn skp_target_name(target: skp_export::Target) -> String {
     match target {
-        "skp2026" => Ok(skp_export::Target::Skp2026),
-        "skp2017" => Ok(skp_export::Target::Skp2017),
-        other => Err(JsError::new(&format!("SKP: unknown target '{other}'"))),
+        skp_export::Target::Skp2026 | skp_export::Target::Skp2026Compat => "skp2026".to_string(),
+        skp_export::Target::Stream(r) => api::DocFormat::SkpStream(r.number()).as_str(),
     }
 }
 
@@ -1720,10 +1738,34 @@ pub struct MaterialJs {
     has_texture: bool,
     world_w: f64,
     world_h: f64,
+    /// Metallic and roughness factors; the plain surface's (0 and 1) when
+    /// the material has no physically based properties.
+    metallic: f32,
+    roughness: f32,
+    has_pbr: bool,
+    /// Which maps it carries: metallic, roughness, normal, occlusion.
+    has_maps: [bool; 4],
 }
 
 #[wasm_bindgen]
 impl MaterialJs {
+    /// Whether the material has physically based properties beyond the
+    /// plain surface.
+    pub fn has_pbr(&self) -> bool {
+        self.has_pbr
+    }
+    /// Metalness, 0 to 1 (0 for a plain material).
+    pub fn metallic(&self) -> f32 {
+        self.metallic
+    }
+    /// Roughness, 0 to 1 (1 for a plain material).
+    pub fn roughness(&self) -> f32 {
+        self.roughness
+    }
+    /// Whether the material carries a normal map.
+    pub fn has_normal_map(&self) -> bool {
+        self.has_maps[2]
+    }
     /// Human-facing name.
     pub fn name(&self) -> String {
         self.name.clone()
@@ -9005,6 +9047,11 @@ impl Scene {
             eye: Point3::new(eye3[0], eye3[1], eye3[2]),
             target: Point3::new(target3[0], target3[1], target3[2]),
             up: kernel::Vec3::new(up3[0], up3[1], up3[2]),
+            // Unset: the document keeps a held Match Photo image width and
+            // ratio for a view that has not moved, and drops them for one
+            // that has (`Document::set_camera_state`).
+            image_width: None,
+            aspect_ratio: None,
         });
         recording::record(recording::RecordedCall::SetCameraState {
             projection: projection.to_string(),
@@ -9788,6 +9835,35 @@ impl Scene {
         Ok(())
     }
 
+    /// Set a palette material's metallic and roughness factors (each 0 to
+    /// 1). Undoable; like opacity it is live render state, resolved from the
+    /// palette when the viewport refreshes its materials, so no mesh cache is
+    /// invalidated.
+    ///
+    /// # Errors
+    /// - `UnknownMaterial` — material handle is not in the palette.
+    /// - `InvalidMaterialPbr` — a factor is not a number from 0 to 1.
+    pub fn set_material_pbr(
+        &mut self,
+        material: u64,
+        metallic: f32,
+        roughness: f32,
+    ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        let mid = MaterialId::from(KeyData::from_ffi(material));
+        let change = self
+            .doc
+            .set_material_pbr(mid, metallic, roughness)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetMaterialPbr {
+            material,
+            metallic,
+            roughness,
+        });
+        Ok(())
+    }
+
     /// Handles of all palette materials, in unspecified but stable order.
     /// Excludes deleted (tombstoned) materials.
     pub fn material_ids(&self) -> Vec<u64> {
@@ -9859,6 +9935,8 @@ impl Scene {
             .as_ref()
             .map(|t| (t.world_size[0], t.world_size[1]))
             .unwrap_or((1.0, 1.0));
+        let plain = kernel::Pbr::PLAIN;
+        let pbr = mat.pbr.as_ref().unwrap_or(&plain);
         Some(MaterialJs {
             name: mat.name.clone(),
             r: mat.color.r,
@@ -9868,7 +9946,28 @@ impl Scene {
             has_texture: mat.has_texture(),
             world_w,
             world_h,
+            metallic: pbr.metallic,
+            roughness: pbr.roughness,
+            has_pbr: mat.pbr.is_some(),
+            has_maps: [
+                pbr.metallic_map.is_some(),
+                pbr.roughness_map.is_some(),
+                pbr.normal_map.is_some(),
+                pbr.occlusion_map.is_some(),
+            ],
         })
+    }
+
+    /// The raw encoded bytes of a material's normal map, or `undefined` if
+    /// the handle is stale or the material has none.
+    pub fn material_normal_map_bytes(&self, id: u64) -> Option<Vec<u8>> {
+        let mid = MaterialId::from(KeyData::from_ffi(id));
+        let mat = self.doc.material(mid)?;
+        mat.pbr
+            .as_ref()?
+            .normal_map
+            .as_ref()
+            .map(|m| m.image.clone())
     }
 
     /// The raw encoded image bytes of a textured material, or `undefined` if
@@ -10531,6 +10630,20 @@ impl Scene {
         }
     }
 
+    /// A line guide's dash as its 16-bit stipple mask, bit 0 first along the
+    /// line (`0x3333`, short dashes, for a guide Hew draws; `0xFFFF` is
+    /// solid), or `undefined` if `guide` is stale, hidden or not a line.
+    pub fn guide_dash(&self, guide: u64) -> Option<u16> {
+        let id = guide_id(guide);
+        if !self.doc.guide_shown(id) {
+            return None;
+        }
+        match self.doc.guide(id)? {
+            Guide::Line { .. } => Some(self.doc.guide_dash(id).mask()),
+            Guide::Point { .. } => None,
+        }
+    }
+
     // -------------------------------------------------------- annotations
     //
     // Dimension / leader-text annotations (docs/design/dimensions-text.md).
@@ -11190,7 +11303,7 @@ impl Scene {
 
     /// Import SketchUp `.skp` bytes into the current document — the 2026
     /// container every current SketchUp saves, or the 2017 format — through
-    /// the clean-room OpenSKP reader. Additive: existing geometry is
+    /// the clean-room Skpwright reader. Additive: existing geometry is
     /// untouched. Returns the same `ImportReport` JS shape as
     /// [`Scene::import_dae`], plus `warnings: [string]` — reader recovery
     /// notes (non-empty means a damaged or unknown record was skipped, or
@@ -11202,10 +11315,9 @@ impl Scene {
     ///
     /// # Errors
     /// Throws a `"SKP: <message>"` `JsError` on parse failure. A file in a
-    /// layout the reader has not decoded (a 2013–2016 or 2018–2025 stream)
-    /// throws with the file's own version and re-save guidance (a current
-    /// SketchUp, or "Save As ▸ SketchUp Version 2017") baked into the
-    /// message.
+    /// layout the reader has not decoded (a stream of a release outside 3 to
+    /// 8 and 2013 to 2020) throws with the file's own version and re-save
+    /// guidance (a current SketchUp) baked into the message.
     pub fn import_skp(&mut self, skp_bytes: &[u8]) -> Result<JsValue, JsError> {
         self.ensure_not_busy()?;
         let (report, warnings) = self
@@ -11217,9 +11329,10 @@ impl Scene {
     /// Open a `.skp` file as this document's own file: [`Scene::import_skp`]
     /// into the (blank) document, keeping the file's bytes as the source a
     /// later [`Scene::save_skp`] builds on. The report is
-    /// [`Scene::import_skp`]'s plus `container`: `"skp2026"` or
-    /// `"skp2017"`, the format the file is in (and that a plain Save
-    /// writes back).
+    /// [`Scene::import_skp`]'s plus `container`: `"skp2026"`,
+    /// `"skp3"` to `"skp8"` or `"skp2013"` to `"skp2020"`, the format the file is in (and that a plain Save
+    /// writes back), and `compat`: the file is revision 17 of the
+    /// 2021-and-later container, which a plain Save keeps to.
     ///
     /// # Errors
     /// As [`Scene::import_skp`].
@@ -11415,6 +11528,7 @@ impl Scene {
         self.doc
             .forget_history()
             .map_err(|e| JsError::new(&format!("SKP: {e}")))?;
+        let compat = skp_export::target_of(&skp_bytes) == skp_export::Target::Skp2026Compat;
         self.skp_source = Some(skp_export::SkpSource::after_open(
             skp_bytes, &self.doc, provenance, &report,
         ));
@@ -11426,32 +11540,52 @@ impl Scene {
             &JsValue::from_str(container),
         )
         .unwrap();
+        Reflect::set(
+            &report,
+            &JsValue::from_str("compat"),
+            &JsValue::from_bool(compat),
+        )
+        .unwrap();
         Ok(report)
     }
 
     /// Which `.skp` container `bytes` are: `"skp2026"` (the ZIP container
-    /// current SketchUp saves), `"skp2017"` (the 2017 format), or `""` for
+    /// current SketchUp saves), the stream release the header names
+    /// (`"skp3"` to `"skp8"`, `"skp2013"` to `"skp2020"`; a release Skpwright
+    /// does not list takes the nearest one it writes), or `""` for
     /// anything else.
     pub fn skp_container(bytes: &[u8]) -> String {
-        match skp_import::openskp::detect_container(bytes) {
-            skp_import::openskp::Container::Zip => "skp2026",
-            skp_import::openskp::Container::Carchive2017 => "skp2017",
-            skp_import::openskp::Container::Unknown => "",
+        match skp_import::skpwright::detect_container(bytes) {
+            skp_import::skpwright::Container::Zip | skp_import::skpwright::Container::Stream => {
+                skp_target_name(skp_export::target_of(bytes))
+            }
+            skp_import::skpwright::Container::Unknown => String::new(),
         }
-        .to_string()
     }
 
-    /// Save the document as a `.skp` file in `target` (`"skp2026"` or
-    /// `"skp2017"`): built on the document's source file when it has one
+    /// Whether `bytes` are a revision-17 file of the 2021-and-later
+    /// container: a save back keeps to revision 17 (the app's "avoid
+    /// features older SketchUp versions cannot open" choice) unless the
+    /// user turns that off. `false` for anything else.
+    pub fn skp_container_compat(bytes: &[u8]) -> bool {
+        skp_export::target_of(bytes) == skp_export::Target::Skp2026Compat
+    }
+
+    /// Save the document as a `.skp` file in `target` (`"skp2026"`, or
+    /// `"skp3"` to `"skp8"`, `"skp2013"` to `"skp2020"`): built on the document's source file when it has one
     /// (unchanged content and everything the document does not model kept
     /// as the file has it), written whole otherwise. Returns `{ bytes:
     /// Uint8Array, simplified: string[], writer_notes: string[] }`:
     /// `simplified` lists what the file could not hold exactly (the app's
-    /// one-time notice), `writer_notes` what a 2017 file dropped. The
+    /// one-time notice), `writer_notes` what a stream-release file dropped. The
     /// written file becomes the source of the next save once the app calls
     /// [`Scene::commit_skp_save`] after writing it — a canceled or failed
     /// write leaves the source as it was. While a session is open the file
     /// is written as if it were closed, as [`Scene::save`] does.
+    ///
+    /// `compat` (the 2021-and-later container only) writes revision 17,
+    /// leaving out what only newer SketchUp versions open, each kind itemised
+    /// in `writer_notes`; absent, the lowest revision that holds the content.
     ///
     /// `units` is a length format (`m`, `cm`, `mm`, `arch`, `frac_in`,
     /// `dec_in`): the app's display units, which a file written whole opens
@@ -11466,6 +11600,7 @@ impl Scene {
         target: &str,
         units: Option<String>,
         units_named: Option<bool>,
+        compat: Option<bool>,
     ) -> Result<JsValue, JsError> {
         self.ensure_not_busy()?;
         // A SketchUp file has no slot for the document id, but the save
@@ -11478,7 +11613,7 @@ impl Scene {
         };
         let saved = skp_export::save_in(
             &self.doc,
-            skp_target(target)?,
+            skp_target(target, compat == Some(true))?,
             write_env(),
             self.skp_source.as_ref(),
             units,
@@ -11502,8 +11637,17 @@ impl Scene {
     ///
     /// # Errors
     /// As [`Scene::save_skp`].
-    pub fn export_skp(&self, target: &str, units: Option<String>) -> Result<JsValue, JsError> {
-        Ok(skp_export_to_js(&self.write_skp(target, units.as_deref())?))
+    pub fn export_skp(
+        &self,
+        target: &str,
+        units: Option<String>,
+        compat: Option<bool>,
+    ) -> Result<JsValue, JsError> {
+        Ok(skp_export_to_js(&self.write_skp(
+            target,
+            units.as_deref(),
+            compat == Some(true),
+        )?))
     }
 
     /// The `.skp` source kept for the next save (see the field), as an
@@ -11523,10 +11667,15 @@ impl Scene {
         self.pending_skp_source = None;
     }
 
-    fn write_skp(&self, target: &str, units: Option<&str>) -> Result<skp_export::Export, JsError> {
+    fn write_skp(
+        &self,
+        target: &str,
+        units: Option<&str>,
+        compat: bool,
+    ) -> Result<skp_export::Export, JsError> {
         skp_export::export_in(
             &self.doc,
-            skp_target(target)?,
+            skp_target(target, compat)?,
             write_env(),
             skp_units(units),
         )
@@ -12905,6 +13054,12 @@ impl Scene {
                 SetSceneDescription { sid, text } => {
                     self.set_scene_description(sid, text)?;
                 }
+                SetSceneTransition { sid, seconds } => {
+                    self.set_scene_transition(sid, seconds)?;
+                }
+                SetSceneDelay { sid, seconds } => {
+                    self.set_scene_delay(sid, seconds)?;
+                }
                 MoveScene { sid, index } => {
                     self.move_scene(sid, index)?;
                 }
@@ -12932,6 +13087,13 @@ impl Scene {
                 }
                 SetMaterialAlpha { material, alpha } => {
                     self.set_material_alpha(material, alpha)?;
+                }
+                SetMaterialPbr {
+                    material,
+                    metallic,
+                    roughness,
+                } => {
+                    self.set_material_pbr(material, metallic, roughness)?;
                 }
                 SetMaterialName { material, name } => {
                     self.set_material_name(material, name)?;
@@ -15168,6 +15330,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: ImportSceneExtra::default(),
+            geo: None,
         };
 
         log::reset();
@@ -15332,6 +15495,42 @@ mod tests {
         );
         // Replaying must not itself record.
         assert!(!replayed.is_recording());
+    }
+
+    /// A scene's own transition and delay are set through the wasm
+    /// surface, listed in `scenes_json`, recorded, and replayed.
+    #[test]
+    fn scene_timings_set_list_record_and_replay() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let sid = scene.add_scene(None, 0, None, None, None).unwrap();
+        let listed = |s: &Scene| -> serde_json::Value {
+            serde_json::from_str::<serde_json::Value>(&s.scenes_json()).unwrap()[0].clone()
+        };
+        assert!(listed(&scene)["transitionS"].is_null());
+        scene.set_scene_transition(sid, Some(1.5)).unwrap();
+        scene.set_scene_delay(sid, Some(0.25)).unwrap();
+        assert_eq!(listed(&scene)["transitionS"], 1.5);
+        assert_eq!(listed(&scene)["delayS"], 0.25);
+        // A negative or non-finite time is refused and leaves it alone.
+        assert!(scene.set_scene_transition(sid, Some(-1.0)).is_err());
+        assert!(scene.set_scene_delay(sid, Some(f64::NAN)).is_err());
+        assert_eq!(listed(&scene)["transitionS"], 1.5);
+        scene.set_scene_delay(sid, None).unwrap();
+        assert!(listed(&scene)["delayS"].is_null());
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        let again = listed(&replayed);
+        assert_eq!(again["transitionS"], 1.5);
+        assert!(again["delayS"].is_null());
+        // Saved in the document too.
+        let reloaded = kernel::Document::load(&scene.save()).unwrap();
+        assert_eq!(reloaded.scenes()[0].transition_s, Some(1.5));
     }
 
     /// A library insert is a committed document mutation: it must be
@@ -17505,6 +17704,10 @@ mod tests {
             .unwrap();
         scene.set_object_material(a, m).unwrap();
         scene.set_material_alpha(m, 128).unwrap();
+        scene.set_material_pbr(m, 0.6, 0.3).unwrap();
+        assert!(scene.set_material_pbr(m, 2.0, 0.3).is_err());
+        let info = scene.material_info(m).unwrap();
+        assert!(info.has_pbr() && info.metallic() == 0.6 && info.roughness() == 0.3);
         let pick = scene.pick_face(1.0, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
         assert_eq!(pick.object(), a, "picked object `a`'s top face as expected");
         scene.paint_face(pick.object(), pick.face(), m2).unwrap();
@@ -17631,6 +17834,7 @@ mod tests {
             scenes: Vec::new(),
             section: None,
             view_style: None,
+            geo: None,
             extra: ImportSceneExtra::default(),
         };
         let mut scene = Scene::new();
@@ -18320,7 +18524,7 @@ mod tests {
                 .expect("a reply");
             let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
             let b64 = v["result"]["bytes_base64"].as_str().expect(&reply);
-            skp_import::openskp::Model::parse(&unbase64(b64))
+            skp_import::skpwright::Model::parse(&unbase64(b64))
                 .unwrap()
                 .units
                 .length_unit
@@ -24919,6 +25123,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new()).unwrap();
         let mut scene = Scene::new();
@@ -24937,6 +25142,49 @@ mod tests {
         );
         scene.set_tag_hidden("Rig".to_string(), false).unwrap();
         assert_eq!(scene.guide_ids(), ids);
+    }
+
+    /// A line guide's dash reaches the viewport as its stipple mask: the
+    /// imported mask for a line, the default for one Hew draws, none for a
+    /// point.
+    #[test]
+    fn a_guide_lines_dash_is_listed_as_its_stipple_mask() {
+        use kernel::{GuideDash, GuideSpan, ImportGuide, ImportScene, Point3, Vec3};
+        let mut doc = kernel::Document::new();
+        let scene = ImportScene {
+            materials: Vec::new(),
+            defs: Vec::new(),
+            roots: Vec::new(),
+            guides: vec![
+                ImportGuide::Line {
+                    dash: GuideDash(0x1C47),
+                    origin: Point3::ORIGIN,
+                    direction: Vec3::new(1.0, 0.0, 0.0),
+                    span: GuideSpan::INFINITE,
+                    tags: Vec::new(),
+                },
+                ImportGuide::Point {
+                    position: Point3::new(1.0, 2.0, 0.0),
+                    tags: Vec::new(),
+                },
+            ],
+            tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
+            view_style: None,
+            extra: Default::default(),
+            geo: None,
+        };
+        doc.ingest(scene, Vec::new()).unwrap();
+        let mut scene = Scene::new();
+        scene.load(&doc.save()).unwrap();
+        let drawn = scene.add_guide_line(0.0, 1.0, 0.0, 1.0, 0.0, 0.0).unwrap();
+        let ids = scene.guide_ids();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(scene.guide_dash(ids[0]), Some(0x1C47));
+        assert_eq!(scene.guide_dash(ids[1]), None, "a point has no dash");
+        assert_eq!(scene.guide_dash(drawn), Some(0x3333));
     }
 
     /// One placed picture's shape, in world space, for comparing a placed

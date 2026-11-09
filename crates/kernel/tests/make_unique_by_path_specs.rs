@@ -713,6 +713,7 @@ fn copied_definition_sketches_and_their_tags_follow_the_forked_definition() {
     let layer = tag(&["Drafting"]);
     let mut doc = Document::new();
     let scene = ImportScene {
+        geo: None,
         materials: Vec::new(),
         defs: vec![DefRecipe::from_meshes(
             Some("Panel".into()),

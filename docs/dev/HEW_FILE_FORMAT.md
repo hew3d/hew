@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `26`**, and **geometry buffer format version `9`**. Both are covered
+version `29`**, and **geometry buffer format version `9`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,11 +59,11 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 26,
+  "format_version": 29,
   "geometry_version": 9,
   "app": "hew",
   "app_version": "1.2.1",
-  "document_id": "3f2c9107-5ed4-40a8-806b-1ec297405d83", // v26+, optional;
+  "document_id": "3f2c9107-5ed4-40a8-806b-1ec297405d83", // v29+, optional;
                                     // omitted = the document has no id yet
 
   "materials": [
@@ -72,6 +72,9 @@ ascending dense-id order (the array index equals the entry's own `id` field).
         "asset": "textures/tex_0.png",
         "format": "png",            // "png" | "jpg"
         "world_size": [1.0, 1.0]    // meters per image tile [width, height], both > 0
+      },
+      "pbr": {                      // v26+; omitted for a plain material (§4.5)
+        "metallic": 0.9, "roughness": 0.25, "normal_scale": 1.0, "occlusion_strength": 1.0
       } }
   ],
   "objects": [
@@ -98,7 +101,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "pose": [1,0,0,0, 0,1,0,0, 0,0,1,0],
       "name": "Chair_1",
       "tags": [["Furniture"]],
-      "material": 0 }  // v24+, optional; dense `materials[]` id. Omitted =
+      "material": 0 }  // v27+, optional; dense `materials[]` id. Omitted =
                        // the placement has no material of its own
   ],
   "sketches": [
@@ -133,6 +136,8 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "tags": [["Rig"]] }, // v21+, optional; omitted = untagged
     { "id": 2, "sid": 10, "kind": "line", "p": [0.0, 1.0, 0.0], "dir": [0.0, 0.0, 1.0],
       "from": 0.0, "to": 0.0127 }, // v22+, optional; omitted = runs on forever
+    { "id": 3, "sid": 11, "kind": "line", "p": [0.0, 2.0, 0.0], "dir": [1.0, 0.0, 0.0],
+      "dash": 7239 }, // v24+, optional; omitted = 0x3333 (short dashes)
     { "id": 1, "sid": 9, "kind": "point", "p": [2.0, 3.0, 0.0] }
   ],
   "annotations": [
@@ -162,6 +167,9 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   },
   "axes": { "origin": [1.0, 2.0, 0.0],           // v13+; omitted entirely at world identity
             "x": [0.0, 1.0, 0.0], "y": [-1.0, 0.0, 0.0] },
+  "geo": { "name": "NAD83 / Oregon North", "easting": 2500000.5, "northing": 250000.25,
+           "height": 12.75, "x_axis": [0.0, 1.0], "scale": 0.9999,
+           "map_unit": "foot", "map_unit_metres": 0.3048 }, // v25+; omitted when the model has no place on a map (§4.16)
   "section_plane": {                 // v16+; omitted entirely when no plane is placed
     "origin": [0.0, 0.3, 0.0],
     "normal": [0.0, 1.0, 0.0],       // unit; points at the side the cut REMOVES
@@ -184,7 +192,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `26`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `29`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `9`.
   Redundant with the per-buffer version in each buffer's own header (),
@@ -193,15 +201,15 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   identification, no semantic meaning. A reader MUST NOT branch on these.
   Hew writes the release that saved the file (e.g. `"1.2.1"`). Releases up
   to and including 1.2.0 wrote `"0.1.0"` whatever their own version.
-- **`document_id`** (`string`, v26+, optional) — a UUID that identifies the
+- **`document_id`** (`string`, v29+, optional) — a UUID that identifies the
   document across saves, so data kept outside the file (a plugin's
   per-document storage, provenance) can key on it. Format: exactly 36
   characters, lowercase hexadecimal in the hyphenated `8-4-4-4-12` form
   (`3f2c9107-5ed4-40a8-806b-1ec297405d83`); Hew mints a version 4 UUID
   (RFC 9562), but a reader checks only the textual form. Any other value,
   including uppercase hex, braces, or `null`, is a fatal, typed error. Absent means
-  the document has no id yet: every pre-v26 file, and any document never
-  saved by a v26 writer. A writer mints the id once, from real randomness,
+  the document has no id yet: every pre-v29 file, and any document never
+  saved by a v29 writer. A writer mints the id once, from real randomness,
   the first time it saves the document as `.hew` (a `.skp` save mints it
   too, on the document in memory, though a SketchUp file has no slot for
   it), and never changes it after: a save, a Save As to a new name, and a
@@ -266,6 +274,8 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   manifest is byte-identical to what it would write with no axes concept at
   all. A reader MUST reject rather than repair a present-but-non-orthonormal
   frame (rule 4: no silent geometry repair).
+- **`geo`** (optional object, v25+) — the document's coordinate reference
+  system (§4.16). Omitted when the model has none.
 
 ### `NodeRef`
 
@@ -334,16 +344,21 @@ of the manifest:
 | `guides[].tags` | 21 | empty list (the guide carries no tag) |
 | `guides[].from`, `guides[].to` | 22 | absent: the line runs on forever both ways, the only possibility before v22 |
 | `sketches[].detached` | 23 | `false` (every sketch joins its plane's arrangement, the only possibility before v23) |
-| `instances[].material` | 24 | absent: the placement has no material of its own, the only possibility before v24 |
-| `document_id` (top-level string) | 26 | absent: the document has no id yet; the next save mints one |
+| `camera.image_width`, `camera.aspect_ratio` (top-level and in `scenes[].camera`) | 24 | absent: unset, the only possibility before v24 |
+| `view_style.section_cut_color`, `section_cut_width`, `section_fill`, `section_fill_color`, `active_section_color`, `guides_color`, `guides_hidden` (top-level and in `scenes[].view_style`) | 24 | absent: unset, Hew's own look |
+| `guides[].dash` | 24 | `0x3333` (short dashes, how every guide was drawn before v24) |
+| `geo` (top-level object) | 25 | absent: the model has no geo-reference, the only possibility before v25 |
+| `materials[].pbr` | 26 | absent: a plain material (no metal, fully rough, no maps), the only possibility before v26 |
+| `instances[].material` | 27 | absent: the placement has no material of its own, the only possibility before v27 |
+| `document_id` (top-level string) | 29 | absent: the document has no id yet; the next save mints one |
 
-Manifest v25 adds no manifest field: it marks geometry buffer v9 (face
-and edge attribute dictionaries, §3), so a v25 manifest names
+Manifest v28 adds no manifest field: it marks geometry buffer v9 (face
+and edge attribute dictionaries, §3), so a v28 manifest names
 `geometry_version` 9.
 
-`document_id` (v26) is version-gated the usual single direction: a file
-declaring a version older than 26 that carries it is malformed for its own
-declared version and MUST be rejected. At v26+ it is optional, but a
+`document_id` (v29) is version-gated the usual single direction: a file
+declaring a version older than 29 that carries it is malformed for its own
+declared version and MUST be rejected. At v29+ it is optional, but a
 present one must have the exact textual form the field reference gives.
 
 Four fields land in the same v13 bump (four efforts in flight at once) and
@@ -815,7 +830,7 @@ from winding alone (). A mirrored placement may also exist as a component
   over, since poses are not baked into the definition's geometry. Each instance carries its own optional name
   (falling back to the definition's name if absent) and optional tags.
 
-  An instance may carry its own `material` (v24+, optional): a dense
+  An instance may carry its own `material` (v27+, optional): a dense
   `materials[]` id that MUST name an entry of this file (an out-of-range
   id is a fatal, typed error). Definition-owned instances carry one too.
   It colors only what nobody painted. A face of a definition member
@@ -825,7 +840,7 @@ from winding alone (). A mirrored placement may also exist as a component
   `material`; else the renderer's default. A painted face or a painted
   object base therefore keeps its color in every placement, and a nested
   instance's material wins over its outer instance's. A file declaring
-  `format_version < 24` that carries an instance `material` is malformed
+  `format_version < 27` that carries an instance `material` is malformed
   for its declared version and MUST be rejected, never honored.
 
 ### 4.5 Materials and textures
@@ -840,6 +855,19 @@ height]` meters per image tile). A textured face with no per-face
 that does carry a `uv_frame` ignores `world_size` and uses the frame's
 affine mapping instead. A material with no `texture` renders as a flat
 `color` fill.
+
+A material may also carry `pbr` (v26+, optional, omitted when plain): its
+physically based surface. `metallic` and `roughness` (f32, 0 to 1) and
+`occlusion_strength` (f32, 0 to 1) and `normal_scale` (f32, 0 and up) are
+required inside it; `metallic_map`, `roughness_map`, `normal_map` and
+`occlusion_map` are each optional `{ "asset", "format" }` objects naming a
+zip path (`textures/pbr_<material id>_<slot>.png`) of verbatim image bytes
+and their codec (`"png"` or `"jpg"`). A map uses the same planar projection
+and tile size as the material's base `texture`. The plain surface is
+`metallic` 0, `roughness` 1, both strengths 1 and no maps; a writer MUST
+omit `pbr` for it. A reader MUST reject, never repair, a value outside the
+ranges above, an unknown codec, a key not listed here, and a manifest
+declaring `format_version < 26` that carries `pbr` at all.
 
 A material the user deletes from the palette is tombstoned in-session
 (its id stays valid for undo) but never written out: `save()` simply
@@ -1015,6 +1043,17 @@ neither. A manifest declaring `format_version < 22` that carries either
 on a guide, a `"point"` that carries either, a non-number, or `to` not
 past `from` by more than the merge tolerance, MUST be rejected.
 
+`dash` (v24+, optional, `"line"` only) is how the line is drawn: a 16-bit
+on/off mask (`0..=65535`), least-significant bit first, one bit per fixed
+length along the line, so `0xFFFF` (65535) is solid, `0x3333` (13107)
+short dashes, `0x8888` (34952) dotted, `0xF0F0` (61680) long dashes and
+`0x1C47` (7239) dash, dot, dash. Any mask is valid and round-trips. It is
+omitted at the default `0x3333`, which is also what a guide Hew draws and
+what a pre-v24 file's guides have. A `.skp` guide opens with its stipple
+and a save back writes the guide's dash (a fresh write likewise). A
+manifest declaring `format_version < 24` that carries `dash`, or a
+`"point"` that carries it, MUST be rejected.
+
 ### 4.8 Annotations
 
 An **annotation** (`annotations[]`, v13+) is a dimension or leader-text
@@ -1154,7 +1193,9 @@ in world space.
   "parallel_height": 5.96,       // v19+: what the view spans at target, meters
   "eye": [4.0, -6.0, 3.0],
   "target": [0.0, 0.0, 0.0],
-  "up": [0.0, 0.0, 1.0]
+  "up": [0.0, 0.0, 1.0],
+  "image_width": 25.4,           // v24+, optional: Match Photo image width, meters
+  "aspect_ratio": 1.5            // v24+, optional: the held width-to-height ratio
 }
 ```
 
@@ -1175,6 +1216,17 @@ in world space.
   `2 · |eye − target| · tan(fov_deg / 2)`, which is how such a file was
   shown; a value that is not finite and positive, or one present in a
   manifest declaring `format_version < 19`, is a fatal, typed error.
+- **`image_width`**, **`aspect_ratio`** (v24+, optional, omitted when
+  unset) — a `.skp` camera set to an image (Match Photo) holds the width
+  the view spans in meters and the width-to-height ratio the view is held
+  to. They are carried and saved, never read by navigation. A `.skp` opens
+  with them (a file's zero is unset), and a save back or fresh write
+  writes them, zero for unset. Setting the camera to a view that looks the
+  way the held one does keeps them; setting it to a view that moved
+  replaces them with unset (a save back then also writes the file
+  camera's two-point perspective and 2D zoom and pan only while the view
+  is the file's own). Each is finite and positive; one in a manifest
+  declaring `format_version < 24` is malformed and MUST be rejected.
 - **`eye`**, **`target`**, **`up`** — world-space xyz triples: the camera
   position, the point it looks toward, and its up direction. A non-finite
   coordinate (in `fov_deg` or any of the three triples) is a fatal, typed
@@ -1284,6 +1336,9 @@ entirely when empty. Each entry:
     (backdrop and axes) opens here, and a Scene captured in Hew takes the
     document's own `view_style` when it has one. Absent when the Scene
     captures no look (a document shown Hew's way).
+  - `transition_s`, `delay_s` — the Scene's own transition time and delay
+    in seconds (finite, not negative), absent when the document's own
+    applies. Optional on any manifest version; not captured view state.
 
 **References.** Every `sid` in `hidden_nodes` / `hidden_tags` MUST name a
 live entity of the file (an object, group, or instance for the former; a
@@ -1321,9 +1376,28 @@ grid, the axes) — the only state every pre-v19 file is in.
   "background": [255, 255, 255],   // sRGB, behind everything
   "sky": [189, 209, 208],          // optional: the sky's color above the horizon; absent = no sky
   "ground": [210, 208, 185],       // optional: the ground plane's color; absent = no ground
-  "axes": false                    // whether the model axes are shown
+  "axes": false,                   // whether the model axes are shown
+  "section_cut_color": [0, 0, 0],  // v24+, optional: the cut outline's color
+  "section_cut_width": 3,          // v24+, optional: its width in pixels
+  "section_fill": false,           // v24+, optional: whether a cut face is filled
+  "section_fill_color": [0, 0, 0], // v24+, optional: the fill's color
+  "active_section_color": [255, 135, 0], // v24+, optional: the cutting plane's color
+  "guides_color": [0, 0, 0],       // v24+, optional: the guides' color
+  "guides_hidden": false           // v24+, optional: the style hides guides
 }
 ```
+
+The section and guide settings (v24+, each optional and omitted when
+unset) come from a `.skp` style and are written back to one, colors
+keeping the file's alpha. The viewport draws the cut outline in
+`section_cut_color` at `section_cut_width`; the rest are carried without
+being drawn (the fill, the cutting plane's color and the guides' color
+and visibility have no Hew rendering yet). Settings with no Hew
+counterpart at all (a style's hidden geometry and hidden objects, the
+section display bits, a section plane's name and symbol) are not in the
+manifest: a save back leaves them as the file has them. A manifest
+declaring `format_version < 24` that carries any of these keys MUST be
+rejected.
 
 With `sky` absent the background shows above the horizon; with `ground`
 absent no ground plane is drawn (Hew's grid lines, a drawing aid the
@@ -1335,6 +1409,52 @@ outside the document's undo/redo history, persisted with the document
 and applied on load. A file declaring `format_version < 19` that carries
 a `view_style` key is malformed for its own declared version and MUST be
 rejected (reject-not-repair, as every version-gated field).
+
+### 4.16 Geo-reference
+
+`geo` (manifest v25+, optional) is the coordinate reference system the
+model is placed in: where the model origin sits on a map. It is data a
+document carries (a `.skp` keeps it through a save back); it moves no
+geometry and nothing reads it as a transform.
+
+```jsonc
+"geo": {
+  "name": "NAD83 / Oregon North",       // optional text, omitted when empty
+  "description": "survey grid",         // optional text
+  "easting": 2500000.5,                 // f64, model origin, in the system's own map unit
+  "northing": 250000.25,                // f64
+  "height": 12.75,                      // f64
+  "x_axis": [0.0, 1.0],                 // [f64;2], the model x axis in the map plane (a vector, not an angle)
+  "scale": 0.9999,                      // f64, map scale factor
+  "geodetic_datum": "NAD83",            // optional text, kept as the file names it
+  "vertical_datum": "NAVD88",
+  "map_projection": "Lambert Conformal Conic",
+  "map_zone": "3601",
+  "map_unit": "foot",                   // the unit's name as the file holds it (METRE, foot, US survey foot)
+  "map_unit_metres": 0.3048,            // optional f64 > 0, meters per map unit when recorded
+  "tgl_id": "EPSG:2913",                // optional text
+  "calibration_file_name": "site.cal"   // optional text
+}
+```
+
+`easting`, `northing`, `x_axis` and `scale` are required; every text key and
+`map_unit_metres` is omitted when empty or unrecorded. Names are not
+interpreted: Hew keeps the datum, projection, zone and unit as the file
+spells them and keeps no registry of them. The angle of `x_axis` from map
+east is `atan2(x_axis[1], x_axis[0])`, undefined for a zero vector (no
+orientation recorded). A reader MUST reject, never repair, a record with a
+non-finite number, a `map_unit_metres` that is not greater than zero, or a
+key not listed here, and a manifest declaring `format_version < 25` that
+carries `geo` at all.
+
+**Undoable.** Setting or clearing the record is one undo step, restoring
+the recorded previous record verbatim; setting the record the document
+already holds records nothing. A `.skp` opened into an empty document
+brings its record in without history (as it does the camera and the view
+style); an import into a document that has work keeps the document's own.
+A `.skp` save writes the record in the 2026 container, keeping the file's
+own trailing records Hew does not read; the releases 3 to 2020 stream
+containers have no such record and omit it.
 
 ## 5. Versioning policy
 

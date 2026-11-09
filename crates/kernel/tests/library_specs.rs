@@ -305,11 +305,13 @@ fn extract_group_copies_structure_and_slices_materials() {
         name: "Oak".into(),
         color: Rgba8::rgb(180, 140, 90),
         texture: None,
+        pbr: None,
     });
     let _unused = doc.add_material(Material {
         name: "Unused".into(),
         color: Rgba8::rgb(1, 2, 3),
         texture: None,
+        pbr: None,
     });
     let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 1.0);
     let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 1.0);
@@ -505,6 +507,7 @@ fn insert_dedupes_materials_by_content() {
         name: "Oak".into(),
         color: Rgba8::rgb(180, 140, 90),
         texture: None,
+        pbr: None,
     });
     let a = extrude_box(&mut src, 0.0, 0.0, 1.0, 1.0, 1.0);
     src.set_object_material(a, Some(oak)).unwrap();
@@ -516,6 +519,7 @@ fn insert_dedupes_materials_by_content() {
         name: "Oak".into(),
         color: Rgba8::rgb(180, 140, 90),
         texture: None,
+        pbr: None,
     });
     let (first, _) = dst
         .insert_document(&item, &insert_at_identity(None))
@@ -691,6 +695,7 @@ fn inserted_document_saves_and_loads() {
         name: "Oak".into(),
         color: Rgba8::rgb(180, 140, 90),
         texture: None,
+        pbr: None,
     });
     let a = extrude_box(&mut src, 0.0, 0.0, 1.0, 1.0, 1.0);
     src.set_object_material(a, Some(oak)).unwrap();
@@ -754,11 +759,13 @@ fn insert_palette_dedupes_and_returns_resolved_ids() {
         name: "Oak".into(),
         color: Rgba8::rgb(180, 140, 90),
         texture: None,
+        pbr: None,
     });
     item.add_material(Material {
         name: "Glass".into(),
         color: Rgba8::rgba(200, 220, 255, 100),
         texture: None,
+        pbr: None,
     });
 
     let mut dst = Document::new();
@@ -766,6 +773,7 @@ fn insert_palette_dedupes_and_returns_resolved_ids() {
         name: "Oak".into(),
         color: Rgba8::rgb(180, 140, 90),
         texture: None,
+        pbr: None,
     });
 
     let resolved = dst.insert_palette(&item);
@@ -789,6 +797,7 @@ fn read_item_summary_reports_counts_and_attrs() {
         name: "Oak".into(),
         color: Rgba8::rgb(180, 140, 90),
         texture: None,
+        pbr: None,
     });
     let oid = extrude_box(&mut src, 0.0, 0.0, 1.0, 1.0, 1.0);
     src.set_object_material(oid, Some(oak)).unwrap();
@@ -940,6 +949,7 @@ fn insert_palette_carries_material_attrs() {
         name: "Oak".into(),
         color: Rgba8::rgb(180, 140, 90),
         texture: None,
+        pbr: None,
     });
     item.attr_set(
         kernel::AttrTarget::Entity(kernel::EntityRef::Material(mid)),
@@ -1044,6 +1054,7 @@ fn material_content_hash_agrees_between_palette_and_summary() {
         name: "Oak".into(),
         color: Rgba8::rgb(180, 140, 90),
         texture: None,
+        pbr: None,
     });
     let live_hash = kernel::material_content_hash(item.material(mid).unwrap());
     let summary = kernel::read_item_summary(&item.save()).unwrap();

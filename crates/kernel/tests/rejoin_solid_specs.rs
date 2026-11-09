@@ -17,6 +17,7 @@ use proptest::prelude::*;
 
 fn scene(roots: Vec<ImportNode>) -> ImportScene {
     ImportScene {
+        geo: None,
         materials: Vec::new(),
         defs: Vec::new(),
         roots,

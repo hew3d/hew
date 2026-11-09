@@ -43,7 +43,10 @@ fn main() {
         unix_time: 1_800_000_000,
         seed: 11,
     };
-    let both = [(Target::Skp2017, "17"), (Target::Skp2026, "26")];
+    let both = [
+        (Target::Stream(skpwright::Release::R2017), "17"),
+        (Target::Skp2026, "26"),
+    ];
     let mut n = 0;
 
     // Documents drawn in Hew.
@@ -144,7 +147,7 @@ fn main() {
         let mut model = skp_export::author(&zoo).model;
         let tree = model.scene();
         let mut placed = std::collections::BTreeSet::new();
-        let mut stack: Vec<&openskp::Node> = tree.iter().collect();
+        let mut stack: Vec<&skpwright::Node> = tree.iter().collect();
         while let Some(nd) = stack.pop() {
             if let Some(di) = nd.run.and_then(|ri| model.geometry[ri].def_index) {
                 placed.insert(di);
@@ -158,18 +161,22 @@ fn main() {
             .iter()
             .position(|r| r.def_index.is_some_and(|d| placed.contains(&d)))
             .unwrap();
-        model.geometry[run].guide_points.push(openskp::GuidePoint {
-            pid: 900_001,
-            point_m: [0.01, 0.02, 0.03],
-            anchor_m: [0.01, 0.02, 0.03],
-            ..Default::default()
-        });
+        model.geometry[run]
+            .guide_points
+            .push(skpwright::GuidePoint {
+                pid: 900_001,
+                point_m: [0.01, 0.02, 0.03],
+                anchor_m: [0.01, 0.02, 0.03],
+                ..Default::default()
+            });
         let bytes = match t {
-            Target::Skp2017 => openskp::Document17::from_model(&model).unwrap().write(),
-            Target::Skp2026 => openskp::Document::from_model(&model)
+            Target::Skp2026 => skpwright::Document::from_model(&model)
                 .unwrap()
                 .write()
                 .unwrap(),
+            stream => skpwright::StreamDocument::from_model(&model, stream.release().unwrap())
+                .unwrap()
+                .write(),
         };
         let (doc, mut src) = open(&bytes).unwrap();
         let mut last = Vec::new();
@@ -225,11 +232,14 @@ fn open(bytes: &[u8]) -> Option<(Document, SkpSource)> {
     Some((doc, src))
 }
 
-fn container(bytes: &[u8]) -> (Target, &'static str) {
-    match openskp::detect_container(bytes) {
-        openskp::Container::Carchive2017 => (Target::Skp2017, "17"),
-        _ => (Target::Skp2026, "26"),
-    }
+fn container(bytes: &[u8]) -> (Target, String) {
+    let target = skp_export::target_of(bytes);
+    let label = match target {
+        Target::Skp2026 => "26".to_string(),
+        Target::Skp2026Compat => "26c".to_string(),
+        Target::Stream(r) => r.number().to_string(),
+    };
+    (target, label)
 }
 
 fn write_case(out: &Path, name: &str, bytes: &[u8], doc: &Document) {

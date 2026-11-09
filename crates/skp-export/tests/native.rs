@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use kernel::Document;
-use openskp::{DefinitionKind, Model};
+use skpwright::{DefinitionKind, Model};
 mod common;
 
 use skp_export::{Target, WriteEnv, export};
@@ -58,7 +58,7 @@ fn arcs(m: &Model) -> Vec<(f64, f64, u32)> {
 
 #[test]
 fn circles_become_arc_curves() {
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         let (m, _) = written(target);
         let arcs = arcs(&m);
         let full = |r: f64, n: u32| {
@@ -106,7 +106,7 @@ fn circles_become_arc_curves() {
 
 #[test]
 fn curved_walls_are_soft_and_smooth() {
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         let (m, _) = written(target);
         let soft: usize = m
             .geometry
@@ -121,13 +121,31 @@ fn curved_walls_are_soft_and_smooth() {
 
 #[test]
 fn structure_layers_and_scenes_survive() {
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         let (m, _) = written(target);
         let layer = |n: &str| m.layers.iter().find(|l| l.name == n);
-        assert!(
-            layer("Structure/Posts").is_some_and(|l| l.visible),
-            "{target:?}"
-        );
+        // The 2026 container has folders: the tag path Structure/Posts is
+        // the folder Structure holding the layer Posts; a stream release
+        // has one flat layer named by the joined path.
+        if target == Target::Skp2026 {
+            assert!(layer("Posts").is_some_and(|l| l.visible), "{target:?}");
+            let folder = &m.features.layer_folders[0];
+            assert_eq!(folder.name, "Structure", "{target:?}");
+            assert_eq!(
+                folder
+                    .layers
+                    .iter()
+                    .map(|&i| m.layers[i].name.as_str())
+                    .collect::<Vec<_>>(),
+                ["Posts"],
+                "{target:?}"
+            );
+        } else {
+            assert!(
+                layer("Structure/Posts").is_some_and(|l| l.visible),
+                "{target:?}"
+            );
+        }
         assert!(
             layer("Hidden Stuff").is_some_and(|l| !l.visible),
             "{target:?}"
@@ -169,7 +187,7 @@ fn structure_layers_and_scenes_survive() {
 
 #[test]
 fn the_same_environment_writes_the_same_bytes() {
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         let env = WriteEnv {
             unix_time: 1_800_000_000,
             seed: 3,
@@ -183,7 +201,11 @@ fn the_same_environment_writes_the_same_bytes() {
     }
 }
 
-fn dict<'m>(m: &'m Model, owner: openskp::Owner, name: &str) -> Option<&'m openskp::Dictionary> {
+fn dict<'m>(
+    m: &'m Model,
+    owner: skpwright::Owner,
+    name: &str,
+) -> Option<&'m skpwright::Dictionary> {
     m.dictionaries
         .iter()
         .filter(|a| a.owner == owner)
@@ -191,14 +213,14 @@ fn dict<'m>(m: &'m Model, owner: openskp::Owner, name: &str) -> Option<&'m opens
         .find(|d| d.name == name)
 }
 
-fn entry<'d>(d: &'d openskp::Dictionary, key: &str) -> Option<&'d openskp::Value> {
+fn entry<'d>(d: &'d skpwright::Dictionary, key: &str) -> Option<&'d skpwright::Value> {
     d.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
 
 #[test]
 fn attributes_and_the_hew_dictionary_are_written() {
-    use openskp::{Owner, Value};
-    for target in [Target::Skp2026, Target::Skp2017] {
+    use skpwright::{Owner, Value};
+    for target in common::all_targets() {
         let (m, _) = written(target);
         // The document's own attributes and Hew's model dictionary.
         let project = dict(&m, Owner::Model, "project").expect("document attributes");
@@ -215,8 +237,14 @@ fn attributes_and_the_hew_dictionary_are_written() {
             "{target:?}"
         );
         let paths = format!("{:?}", entry(hew, "tag_paths"));
+        let layer = if target == Target::Skp2026 {
+            "Posts"
+        } else {
+            "Structure/Posts"
+        };
         assert!(
-            paths.contains("Structure/Posts") && paths.contains("\"Posts\""),
+            paths.contains(&format!("Text(\"{layer}\"), Array([Text(\"Structure\")"))
+                && paths.contains("\"Posts\""),
             "{target:?}: {paths}"
         );
         // The block's placement: its attributes, a map as JSON.
@@ -298,7 +326,7 @@ fn dimensions_and_leader_text_are_written() {
         "Glass top".into(),
     )
     .unwrap();
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         let out = export(
             &doc,
             target,
@@ -311,7 +339,7 @@ fn dimensions_and_leader_text_are_written() {
         let m = Model::parse(&out.bytes).unwrap();
         assert_eq!(m.dimensions.len(), 1, "{target:?}");
         let d = &m.dimensions[0];
-        let p = |a: &openskp::Anchor| a.point_m.map(|v| (v * 1e6).round() as i64);
+        let p = |a: &skpwright::Anchor| a.point_m.map(|v| (v * 1e6).round() as i64);
         assert_eq!(
             (p(&d.start), p(&d.end)),
             ([0, 0, 0], [1_000_000, 0, 0]),
@@ -387,7 +415,7 @@ fn annotated() -> Document {
 #[test]
 fn annotations_survive_hew_to_skp_to_hew() {
     let doc = annotated();
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         let out = export(
             &doc,
             target,
@@ -429,7 +457,7 @@ fn a_hidden_object_comes_back_a_hidden_object() {
         .find(|&o| doc.object_name(o) == Some("Drilled Block"))
         .unwrap();
     doc.set_node_user_hidden(NodeId::Object(block), true);
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         let out = export(
             &doc,
             target,
@@ -452,7 +480,7 @@ fn a_hidden_object_comes_back_a_hidden_object() {
     }
 }
 
-/// OpenSKP's rings all run counter-clockwise about the face normal, holes
+/// Skpwright's rings all run counter-clockwise about the face normal, holes
 /// included — its 2026 writer turns holes back to SketchUp's clockwise
 /// storage. (A reader normalizes every ring, so this is checked on the
 /// model before it is written.)
@@ -498,7 +526,7 @@ fn a_written_file_opens_in_the_display_units() {
     for (name, want, step_m) in cases {
         let units = DisplayUnits::from_name(name);
         assert!(units.is_some(), "{name}");
-        for target in [Target::Skp2026, Target::Skp2017] {
+        for target in common::all_targets() {
             let out = export_in(&native(), target, WriteEnv::system(), units).unwrap();
             let u = Model::parse(&out.bytes).unwrap().units;
             assert_eq!(
@@ -522,14 +550,14 @@ fn every_definition_hew_wrote_says_so_in_one_dictionary() {
     // A reader takes a definition marked `built` as written (no repair);
     // the mark sits in the definition's one `hew` dictionary, beside any
     // other entry (an unnamed lone solid's `unnamed`).
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         let (m, _) = written(target);
         assert!(!m.definitions.is_empty());
         for di in 0..m.definitions.len() {
             let hew: Vec<_> = m
                 .dictionaries
                 .iter()
-                .filter(|a| a.owner == openskp::Owner::Definition(di))
+                .filter(|a| a.owner == skpwright::Owner::Definition(di))
                 .flat_map(|a| a.dictionaries.iter())
                 .filter(|d| d.name == "hew")
                 .collect();
@@ -538,7 +566,7 @@ fn every_definition_hew_wrote_says_so_in_one_dictionary() {
                 hew[0]
                     .entries
                     .iter()
-                    .any(|(k, v)| k == "built" && *v == openskp::Value::Bool(true)),
+                    .any(|(k, v)| k == "built" && *v == skpwright::Value::Bool(true)),
                 "{target:?} definition {di}: {:?}",
                 hew[0].entries
             );
@@ -567,4 +595,99 @@ fn a_repainted_placement_writes_its_own_material() {
     doc.set_instance_material(instance, None).unwrap();
     let cleared = export(&doc, Target::Skp2026, env).unwrap().bytes;
     assert_eq!(plain, cleared, "clearing it restores the file");
+}
+
+/// Each stream target writes its own release, and `target_of` names it
+/// back from the written bytes, for every release `skpwright` lists.
+#[test]
+fn each_stream_target_writes_its_own_release() {
+    for release in skpwright::Release::ALL {
+        let target = Target::Stream(release);
+        let (m, out) = written(target);
+        assert_eq!(m.release(), Some(release), "{target:?}");
+        assert_eq!(skp_export::target_of(&out.bytes), target);
+        let (version, _) = skpwright::header_info(&out.bytes).unwrap();
+        assert_eq!(skpwright::Release::of_version(&version), Some(release));
+    }
+    let (_, out) = written(Target::Skp2026);
+    assert_eq!(skp_export::target_of(&out.bytes), Target::Skp2026);
+}
+
+/// A stream file of a release Skpwright does not list saves back as the
+/// nearest release it writes, and the writer's notes say so; a listed
+/// release raises no such note.
+#[test]
+fn an_unlisted_release_saves_as_the_nearest_written_one() {
+    let (_, out) = written(Target::Stream(skpwright::Release::R2017));
+    let stamp = |major: &str| {
+        let mut b = out.bytes.clone();
+        // The header's UTF-16 version record: "{17." at 36.
+        assert_eq!(b[36..44], [0x7b, 0, 0x31, 0, 0x37, 0, 0x2e, 0]);
+        b[38] = major.as_bytes()[0];
+        b[40] = major.as_bytes()[1];
+        b
+    };
+    for (major, nearest) in [("21", 20u8), ("25", 20), ("10", 8), ("12", 13), ("99", 20)] {
+        let b = stamp(major);
+        let t = skp_export::target_of(&b);
+        assert_eq!(
+            t.release().map(|r| r.number()),
+            Some(nearest),
+            "{major} -> {t:?}"
+        );
+        let note = skp_export::unlisted_note(&b, t.release().unwrap()).expect("a note");
+        assert!(
+            note.contains(&format!("{{{major}.")) && note.contains(&format!("release {nearest}")),
+            "{note}"
+        );
+    }
+    assert_eq!(
+        skp_export::unlisted_note(&stamp("17"), skpwright::Release::R2017),
+        None
+    );
+    assert_eq!(
+        skp_export::unlisted_note(&stamp("20"), skpwright::Release::R2020),
+        None
+    );
+}
+
+/// A Hew document writes in every release `skpwright` lists and reopens as
+/// the same shapes: the container and the release number are the
+/// target's, the Object count survives, and the file imports whole. (The
+/// oldest releases hold less than the newer ones; the notes say what.)
+#[test]
+fn every_release_writes_and_reopens() {
+    let doc = native();
+    let objects = doc.live_object_ids().len();
+    assert!(objects > 0);
+    for release in skpwright::Release::ALL {
+        let target = Target::Stream(release);
+        let (model, out) = written(target);
+        assert_eq!(
+            skpwright::detect_container(&out.bytes),
+            skpwright::Container::Stream,
+            "{target:?}"
+        );
+        assert_eq!(model.release(), Some(release), "{target:?}");
+        assert_eq!(skp_export::target_of(&out.bytes), target);
+        let scene = skp_import::import(&out.bytes)
+            .unwrap_or_else(|e| panic!("release {}: {e}", release.number()));
+        assert!(
+            scene.warnings.is_empty(),
+            "release {}: {:?}",
+            release.number(),
+            scene.warnings
+        );
+        let mut back = Document::new();
+        back.ingest(scene.scene, scene.textures_missing).unwrap();
+        // Release 3 holds no hidden state: the fixture's one hidden Object
+        // comes back visible.
+        let expected = objects + usize::from(release == skpwright::Release::R3);
+        assert_eq!(
+            back.live_object_ids().len(),
+            expected,
+            "release {}: Object count",
+            release.number()
+        );
+    }
 }

@@ -10,7 +10,8 @@
  * wrappers that touch those runtime modules, wired in only by `index.ts`.
  *
  * Every response carries `Cache-Control: no-store` (§8) and no CORS headers
- * — the web build posts same-origin under `app.hew3d.com`, and the desktop
+ * — the web build posts same-origin under `app.hew3d.com` (and under
+ * `beta.hew3d.com`, the pre-release host), and the desktop
  * client isn't a browser, so there is nothing here for CORS to gate.
  *
  * The upload is chunked (§4 "Chunked upload"): the Workers Free plan caps
@@ -43,7 +44,9 @@ import { isThreadStatus } from './threadStore.ts'
 import type { BugIntakeEnv } from './types.ts'
 
 /** The only origin admin mutation forms are ever legitimately submitted
- *  from — the admin pages themselves are served under this same origin. */
+ *  from — the admin pages themselves are served under this same origin.
+ *  Admin pages are only ever served from app.hew3d.com, never from the beta
+ *  host, so beta reports are administered there too. */
 const ADMIN_ORIGIN = 'https://app.hew3d.com'
 
 function jsonResponse(status: number, body: unknown, extraHeaders?: Record<string, string>): Response {

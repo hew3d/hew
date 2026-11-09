@@ -490,13 +490,15 @@ export interface DocCloseResult {
 }
 
 /**
- * `hew.doc.export` (v1) — Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp ("skp", 2026 container; "skp2017") — bytes base64, or a path on hosts with filesystem access.
+ * `hew.doc.export` (v1) — Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp ("skp", the 2021-and-later container; "skp3" to "skp8", "skp2013" to "skp2020") — bytes base64, or a path on hosts with filesystem access.
  * Tier: Required · Class: solitary · Served: host
  * Refusals: export_failed, host_capability_missing, nothing_to_export, save_failed, unknown_entity, unknown_occurrence, too_many_occurrences
  */
 export interface DocExportParams {
-  /** "gltf" is an alias for "glb" — every host that implements one implements both. "skp" is the SketchUp 2026 container, "skp2017" the 2017 format; exporting never changes the document's own file */
-  format: "stl" | "3mf" | "glb" | "gltf" | "usdz" | "skp" | "skp2017"
+  /** Format "skp" only: write revision 17 of the container, leaving out what only newer SketchUp versions hold (see hew.doc.save). Absent or false: the lowest revision that holds the content. */
+  compat?: boolean
+  /** "gltf" is an alias for "glb" — every host that implements one implements both. "skp" is the SketchUp 2021-and-later container, "skp3" to "skp8" and "skp2013" to "skp2020" those releases' formats; exporting never changes the document's own file */
+  format: "stl" | "3mf" | "glb" | "gltf" | "usdz" | "skp" | "skp2020" | "skp2019" | "skp2018" | "skp2017" | "skp2016" | "skp2015" | "skp2014" | "skp2013" | "skp8" | "skp7" | "skp6" | "skp5" | "skp4" | "skp3"
   path?: string
   segments_per_turn?: number
   /** draw only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its leaves at the identity pose) */
@@ -633,10 +635,12 @@ export interface DocRevertResult {}
  * Refusals: file_open_elsewhere, format_mismatch, host_capability_missing, path_required, save_failed
  */
 export interface DocSaveParams {
+  /** For the 2021-and-later container ("skp") only: write its revision 17, which every SketchUp since 2021 opens, leaving out what only newer versions hold (layer folders, hatch patterns, PBR materials, environments, snaps, procedures, page extras, CRS), each kind itemised in `writer_notes`. Absent or false: the lowest revision that holds the content. A save back over a revision-17 file keeps revision 17 either way. Refused for any other format. */
+  compat?: boolean
   /** write a copy to `path` — the document is not rebound to it and keeps its unsaved mark; requires `path` */
   copy?: boolean
-  /** "skp" is the 2026 container (what current SketchUp saves), "skp2017" the 2017 format (opens in SketchUp Make 2017 and later). Absent: a .skp path keeps the working file's own .skp container (the 2026 one for a document that did not come from a .skp), any other path writes .hew, and no path uses the working file's own format. A format that contradicts the path's extension is refused (format_mismatch). */
-  format?: "hew" | "skp" | "skp2017"
+  /** "skp" is the SketchUp 2021-and-later container (what current SketchUp saves); "skp3" to "skp8" and "skp2013" to "skp2020" are those releases' own formats (SketchUp opens a file of its own release or later). Absent: a .skp path keeps the working file's own .skp container (the 2026 one for a document that did not come from a .skp), any other path writes .hew, and no path uses the working file's own format. A format that contradicts the path's extension is refused (format_mismatch). */
+  format?: "hew" | "skp" | "skp2020" | "skp2019" | "skp2018" | "skp2017" | "skp2016" | "skp2015" | "skp2014" | "skp2013" | "skp8" | "skp7" | "skp6" | "skp5" | "skp4" | "skp3"
   path?: string
   /** hand the document's bytes back and write nothing: no file, no binding, no saved mark; takes no `path` */
   return_bytes?: boolean
@@ -647,10 +651,10 @@ export interface DocSaveParams {
 export interface DocSaveResult {
   bytes_base64?: string
   /** the format the document was saved in */
-  format?: "hew" | "skp" | "skp2017"
+  format?: "hew" | "skp" | "skp2020" | "skp2019" | "skp2018" | "skp2017" | "skp2016" | "skp2015" | "skp2014" | "skp2013" | "skp8" | "skp7" | "skp6" | "skp5" | "skp4" | "skp3"
   /** present for a .skp: what the file could not hold exactly */
   simplified?: string[]
-  /** present for a .skp: what the 2017 writer dropped */
+  /** present for a .skp: what a stream release or revision-17 (`compat`) save dropped, one entry per kind */
   writer_notes?: string[]
 }
 
@@ -830,6 +834,30 @@ export interface EventUnsubscribeResult {
   denied: string[]
   subscribed: string[]
 }
+
+/**
+ * `hew.geo.get` (v1) — The document's geo-reference (coordinate reference system), or null when it has none.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: none.
+ */
+export interface GeoGetParams {}
+
+export interface GeoGetResult {
+  /** the coordinate reference system, or null when the document has none; positions are in the system's own map unit */
+  geo: unknown | null
+}
+
+/**
+ * `hew.geo.set` (v1) — Set the document's geo-reference to the given record, or clear it with null. One undo step.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: invalid_geo_reference
+ */
+export interface GeoSetParams {
+  /** the coordinate reference system, or null when the document has none; positions are in the system's own map unit */
+  geo: unknown | null
+}
+
+export interface GeoSetResult {}
 
 /**
  * `hew.group.create` (v1) — Group sibling nodes non-destructively.
@@ -1187,6 +1215,21 @@ export interface MaterialSetOpacityParams {
 }
 
 export interface MaterialSetOpacityResult {}
+
+/**
+ * `hew.material.set_pbr` (v1) — Set a material's metallic and roughness factors (0 to 1); its maps and strengths are kept.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_entity, unknown_material
+ */
+export interface MaterialSetPbrParams {
+  material: string
+  /** 0 dielectric to 1 metal */
+  metallic: number
+  /** 0 mirror to 1 fully diffuse */
+  roughness: number
+}
+
+export interface MaterialSetPbrResult {}
 
 /**
  * `hew.meta.capabilities` (v1) — The registry as data: every granted command's schemas, summary, and refusal inventory.
@@ -1608,7 +1651,7 @@ export interface ScenesDescribeResult {}
 export interface ScenesListParams {}
 
 export interface ScenesListResult {
-  scenes: ({ camera?: { eye: [number, number, number]; fov_deg: number; parallel_height: number; projection: "perspective" | "parallel"; target: [number, number, number]; up: [number, number, number] }; description: string; display?: { axes: boolean; grid: boolean; guides: boolean }; id: string; name: string; props: { camera: boolean; display: boolean; hidden_nodes: boolean; hidden_tags: boolean; section: boolean }; section?: null | { active: boolean; normal: [number, number, number]; origin: [number, number, number] }; sid: number; view_style?: { axes: boolean; background: [number, number, number]; ground: [number, number, number] | null; sky: [number, number, number] | null } })[]
+  scenes: ({ camera?: { eye: [number, number, number]; fov_deg: number; parallel_height: number; projection: "perspective" | "parallel"; target: [number, number, number]; up: [number, number, number] }; delay_s?: number | null; description: string; display?: { axes: boolean; grid: boolean; guides: boolean }; id: string; name: string; props: { camera: boolean; display: boolean; hidden_nodes: boolean; hidden_tags: boolean; section: boolean }; section?: null | { active: boolean; normal: [number, number, number]; origin: [number, number, number] }; sid: number; transition_s?: number | null; view_style?: { axes: boolean; background: [number, number, number]; ground: [number, number, number] | null; sky: [number, number, number] | null } })[]
 }
 
 /**
@@ -1648,18 +1691,22 @@ export interface ScenesReorderParams {
 export interface ScenesReorderResult {}
 
 /**
- * `hew.scenes.update` (v1) — Re-capture a Scene's properties from the document's current state. Records no undo entry (§6.4).
+ * `hew.scenes.update` (v1) — Re-capture a Scene's properties from the document's current state, and/or set its own transition and delay times. Records no undo entry (§6.4).
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: unknown_scene
  */
 export interface ScenesUpdateParams {
   /** an explicit camera to capture — no named-view shorthand, a Scene captures a concrete eye/target, not a fitted view; when omitted and the camera property is captured, falls back to the document's own saved working camera */
   camera?: { eye: [number, number, number]; fov_deg?: number; parallel_height?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
+  /** the Scene's own delay in seconds; null returns it to the document's own */
+  delay_s?: number | null
   /** opaque editor display toggles: stored and returned, never interpreted by the kernel */
   display?: { axes: boolean; grid: boolean; guides: boolean }
   id: string
   /** which of the five capturable properties to (re-)capture; each defaults to true */
   properties?: { camera?: boolean; display?: boolean; hidden_nodes?: boolean; hidden_tags?: boolean; section?: boolean }
+  /** the Scene's own transition time in seconds; null returns it to the document's own */
+  transition_s?: number | null
 }
 
 export interface ScenesUpdateResult {}
@@ -2647,6 +2694,11 @@ export class HewApiClient {
     unsubscribe: (params: EventUnsubscribeParams): Promise<EventUnsubscribeResult> => this.call('hew.event.unsubscribe', params),
   }
 
+  readonly geo = {
+    get: (params: GeoGetParams): Promise<GeoGetResult> => this.call('hew.geo.get', params),
+    set: (params: GeoSetParams): Promise<GeoSetResult> => this.mutate('hew.geo.set', params),
+  }
+
   readonly group = {
     create: (params: GroupCreateParams): Promise<GroupCreateResult> => this.mutate('hew.group.create', params),
     explode: (params: GroupExplodeParams): Promise<GroupExplodeResult> => this.mutate('hew.group.explode', params),
@@ -2682,6 +2734,7 @@ export class HewApiClient {
     replace: (params: MaterialReplaceParams): Promise<MaterialReplaceResult> => this.mutate('hew.material.replace', params),
     setDefault: (params: MaterialSetDefaultParams): Promise<MaterialSetDefaultResult> => this.mutate('hew.material.set_default', params),
     setOpacity: (params: MaterialSetOpacityParams): Promise<MaterialSetOpacityResult> => this.mutate('hew.material.set_opacity', params),
+    setPbr: (params: MaterialSetPbrParams): Promise<MaterialSetPbrResult> => this.mutate('hew.material.set_pbr', params),
   }
 
   readonly meta = {

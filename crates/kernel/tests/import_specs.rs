@@ -80,6 +80,7 @@ fn empty_scene(roots: Vec<ImportNode>) -> ImportScene {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     }
 }
 
@@ -191,6 +192,7 @@ fn ingest_is_atomic_undo_hides_all() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.objects_created, 2);
@@ -285,6 +287,7 @@ fn ingest_instance_shares_one_def() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (report, _) = doc.ingest(scene, vec![]).unwrap();
 
@@ -350,6 +353,7 @@ fn ingest_then_save_load_preserves_names() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, vec![]).unwrap();
 
@@ -403,6 +407,7 @@ fn ingest_guides_are_atomic_with_the_import() {
         roots: vec![ImportNode::Mesh(box_recipe("m1"))],
         guides: vec![
             ImportGuide::Line {
+                dash: kernel::GuideDash::default(),
                 origin: Point3::ORIGIN,
                 direction: Vec3::new(0.0, 0.0, 3.0), // non-unit: ingest normalizes
                 tags: Vec::new(),
@@ -413,6 +418,7 @@ fn ingest_guides_are_atomic_with_the_import() {
                 tags: Vec::new(),
             },
             ImportGuide::Line {
+                dash: kernel::GuideDash::default(),
                 origin: Point3::ORIGIN,
                 direction: Vec3::new(0.0, 0.0, 0.0), // degenerate: skipped + reported
                 tags: Vec::new(),
@@ -425,6 +431,7 @@ fn ingest_guides_are_atomic_with_the_import() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (report, change) = doc.ingest(scene, vec![]).unwrap();
 
@@ -489,6 +496,7 @@ fn ingest_instance_own_name_wins_over_def_name() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, vec![]).unwrap();
 
@@ -551,6 +559,7 @@ fn ingest_builds_nested_definitions() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.objects_created, 2);
@@ -611,6 +620,7 @@ fn ingest_refuses_cyclic_definition_recipes() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     assert!(matches!(
         doc.ingest(scene, vec![]),
@@ -661,6 +671,7 @@ fn ingest_skips_nested_instances_of_failed_defs() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.skipped.len(), 1);
@@ -702,6 +713,7 @@ fn ingest_refuses_over_wide_definition_recipes() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let mut doc = Document::new();
     assert!(matches!(
@@ -755,6 +767,8 @@ fn ingest_creates_scenes_from_recipes_keyed_to_the_nodes_it_makes() {
         scenes: vec![
             ImportSceneRecipe {
                 view_style: None,
+                transition_s: None,
+                delay_s: None,
                 name: "Plan".into(),
                 description: "cut".into(),
                 camera: Some(camera(1.0)),
@@ -766,6 +780,8 @@ fn ingest_creates_scenes_from_recipes_keyed_to_the_nodes_it_makes() {
             },
             ImportSceneRecipe {
                 view_style: None,
+                transition_s: None,
+                delay_s: None,
                 name: "Plan".into(),
                 description: String::new(),
                 camera: None,
@@ -778,6 +794,7 @@ fn ingest_creates_scenes_from_recipes_keyed_to_the_nodes_it_makes() {
         section: Some(section),
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
 
     let mut doc = Document::new();
@@ -854,6 +871,8 @@ fn ingest_puts_a_file_cameras_target_on_the_model() {
     );
     let recipe = |cam: CameraState, name: &str| ImportSceneRecipe {
         view_style: None,
+        transition_s: None,
+        delay_s: None,
         name: name.into(),
         description: String::new(),
         camera: Some(cam),
@@ -891,6 +910,7 @@ fn ingest_puts_a_file_cameras_target_on_the_model() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let mut doc = Document::new();
     doc.ingest(scene, vec![]).unwrap();
@@ -945,6 +965,7 @@ fn ingest_puts_a_file_cameras_target_on_the_model() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let mut doc = Document::new();
     doc.ingest(empty, vec![]).unwrap();
@@ -1020,6 +1041,7 @@ fn an_import_built_in_steps_is_the_import_built_at_once() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let mut at_once = Document::new();
     let (report_once, _) = at_once.ingest(scene(), vec![]).unwrap();
@@ -1078,6 +1100,7 @@ fn finishing_an_unstepped_import_builds_it_whole() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let mut doc = Document::new();
     let job = doc.ingest_begin(scene, vec![]).unwrap();

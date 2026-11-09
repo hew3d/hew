@@ -52,6 +52,7 @@ impl Host for ExportHost {
         segments_per_turn: u32,
         _units: Option<&str>,
         selection: Option<&[api::locate::RenderRoot]>,
+        _compat: bool,
     ) -> Result<Option<Vec<u8>>, Refusal> {
         let bytes = match selection {
             Some(roots) => {

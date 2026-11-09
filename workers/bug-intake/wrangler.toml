@@ -54,3 +54,8 @@ name = "NOTIFY"
 [[routes]]
 pattern = "app.hew3d.com/report/*"
 zone_name = "hew3d.com"
+
+# The beta host (beta.hew3d.com) posts to the same Worker the same way.
+[[routes]]
+pattern = "beta.hew3d.com/report/*"
+zone_name = "hew3d.com"

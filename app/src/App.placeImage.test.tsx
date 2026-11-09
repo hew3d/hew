@@ -67,6 +67,7 @@ const mockScene = {
   undo_depth: () => 0,
   redo_depth: () => 0,
   history_entries_json: () => JSON.stringify({ undo: [], redo: [], savedDepth: null }),
+  geo_reference_json: () => 'null',
   // save() is called once to snapshot the blank scene for "New" resets.
   save: () => new Uint8Array(),
   load: vi.fn(),

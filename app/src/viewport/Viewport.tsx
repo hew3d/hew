@@ -204,6 +204,9 @@ export interface ViewStyleColors {
   background: [number, number, number]
   sky: [number, number, number] | null
   ground: [number, number, number] | null
+  /** The section cut outline's color and width in pixels (`null`/absent: Hew's own). */
+  sectionCutColor?: [number, number, number] | null
+  sectionCutWidth?: number | null
 }
 import { SketchHoverGate } from './sketchHoverGate'
 import { isRenderStatsActive, recordRender } from './renderStats'
@@ -6859,6 +6862,7 @@ export default function Viewport({
 
     function setViewStyle(style: ViewStyleColors | null): void {
       viewStyle = style
+      sceneRenderer.setSectionCutStyle(style?.sectionCutColor ?? null, style?.sectionCutWidth ?? null)
       applyBackdrop()
       applyGridColors()
       scheduleRender()

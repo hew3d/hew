@@ -3928,7 +3928,7 @@ Close an open document window (the attached one, or the named `document`). Refus
 - **Served:** host
 - **Permission:** documents.save
 
-Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp ("skp", 2026 container; "skp2017") — bytes base64, or a path on hosts with filesystem access.
+Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp ("skp", the 2021-and-later container; "skp3" to "skp8", "skp2013" to "skp2020") — bytes base64, or a path on hosts with filesystem access.
 
 **Params schema:**
 
@@ -3936,8 +3936,12 @@ Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a Sk
 {
   "additionalProperties": false,
   "properties": {
+    "compat": {
+      "description": "Format \"skp\" only: write revision 17 of the container, leaving out what only newer SketchUp versions hold (see hew.doc.save). Absent or false: the lowest revision that holds the content.",
+      "type": "boolean"
+    },
     "format": {
-      "description": "\"gltf\" is an alias for \"glb\" — every host that implements one implements both. \"skp\" is the SketchUp 2026 container, \"skp2017\" the 2017 format; exporting never changes the document's own file",
+      "description": "\"gltf\" is an alias for \"glb\" — every host that implements one implements both. \"skp\" is the SketchUp 2021-and-later container, \"skp3\" to \"skp8\" and \"skp2013\" to \"skp2020\" those releases' formats; exporting never changes the document's own file",
       "enum": [
         "stl",
         "3mf",
@@ -3945,7 +3949,20 @@ Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a Sk
         "gltf",
         "usdz",
         "skp",
-        "skp2017"
+        "skp2020",
+        "skp2019",
+        "skp2018",
+        "skp2017",
+        "skp2016",
+        "skp2015",
+        "skp2014",
+        "skp2013",
+        "skp8",
+        "skp7",
+        "skp6",
+        "skp5",
+        "skp4",
+        "skp3"
       ],
       "type": "string"
     },
@@ -4744,16 +4761,33 @@ Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file i
 {
   "additionalProperties": false,
   "properties": {
+    "compat": {
+      "description": "For the 2021-and-later container (\"skp\") only: write its revision 17, which every SketchUp since 2021 opens, leaving out what only newer versions hold (layer folders, hatch patterns, PBR materials, environments, snaps, procedures, page extras, CRS), each kind itemised in `writer_notes`. Absent or false: the lowest revision that holds the content. A save back over a revision-17 file keeps revision 17 either way. Refused for any other format.",
+      "type": "boolean"
+    },
     "copy": {
       "description": "write a copy to `path` — the document is not rebound to it and keeps its unsaved mark; requires `path`",
       "type": "boolean"
     },
     "format": {
-      "description": "\"skp\" is the 2026 container (what current SketchUp saves), \"skp2017\" the 2017 format (opens in SketchUp Make 2017 and later). Absent: a .skp path keeps the working file's own .skp container (the 2026 one for a document that did not come from a .skp), any other path writes .hew, and no path uses the working file's own format. A format that contradicts the path's extension is refused (format_mismatch).",
+      "description": "\"skp\" is the SketchUp 2021-and-later container (what current SketchUp saves); \"skp3\" to \"skp8\" and \"skp2013\" to \"skp2020\" are those releases' own formats (SketchUp opens a file of its own release or later). Absent: a .skp path keeps the working file's own .skp container (the 2026 one for a document that did not come from a .skp), any other path writes .hew, and no path uses the working file's own format. A format that contradicts the path's extension is refused (format_mismatch).",
       "enum": [
         "hew",
         "skp",
-        "skp2017"
+        "skp2020",
+        "skp2019",
+        "skp2018",
+        "skp2017",
+        "skp2016",
+        "skp2015",
+        "skp2014",
+        "skp2013",
+        "skp8",
+        "skp7",
+        "skp6",
+        "skp5",
+        "skp4",
+        "skp3"
       ],
       "type": "string"
     },
@@ -4795,7 +4829,20 @@ Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file i
       "enum": [
         "hew",
         "skp",
-        "skp2017"
+        "skp2020",
+        "skp2019",
+        "skp2018",
+        "skp2017",
+        "skp2016",
+        "skp2015",
+        "skp2014",
+        "skp2013",
+        "skp8",
+        "skp7",
+        "skp6",
+        "skp5",
+        "skp4",
+        "skp3"
       ],
       "type": "string"
     },
@@ -4807,7 +4854,7 @@ Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file i
       "type": "array"
     },
     "writer_notes": {
-      "description": "present for a .skp: what the 2017 writer dropped",
+      "description": "present for a .skp: what a stream release or revision-17 (`compat`) save dropped, one entry per kind",
       "items": {
         "type": "string"
       },
@@ -5842,6 +5889,218 @@ Stop receiving the named events on this connection.
 ```
 
 **Refusals:** none.
+
+## hew.geo
+
+### `hew.geo.get`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+The document's geo-reference (coordinate reference system), or null when it has none.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "geo": {
+      "additionalProperties": false,
+      "description": "the coordinate reference system, or null when the document has none; positions are in the system's own map unit",
+      "properties": {
+        "calibration_file_name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "easting": {
+          "description": "model origin easting, in the map unit",
+          "type": "number"
+        },
+        "geodetic_datum": {
+          "type": "string"
+        },
+        "height": {
+          "description": "model origin height, in the map unit",
+          "type": "number"
+        },
+        "map_projection": {
+          "type": "string"
+        },
+        "map_unit": {
+          "description": "the unit's name as the file holds it, e.g. METRE",
+          "type": "string"
+        },
+        "map_unit_metres": {
+          "description": "meters per map unit, when known",
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "map_zone": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "northing": {
+          "description": "model origin northing, in the map unit",
+          "type": "number"
+        },
+        "scale": {
+          "description": "map scale factor",
+          "type": "number"
+        },
+        "tgl_id": {
+          "type": "string"
+        },
+        "vertical_datum": {
+          "type": "string"
+        },
+        "x_axis": {
+          "description": "the model's x axis in the map plane, a 2D vector (not an angle)",
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "geo"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
+
+### `hew.geo.set`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Set the document's geo-reference to the given record, or clear it with null. One undo step.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "geo": {
+      "additionalProperties": false,
+      "description": "the coordinate reference system, or null when the document has none; positions are in the system's own map unit",
+      "properties": {
+        "calibration_file_name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "easting": {
+          "description": "model origin easting, in the map unit",
+          "type": "number"
+        },
+        "geodetic_datum": {
+          "type": "string"
+        },
+        "height": {
+          "description": "model origin height, in the map unit",
+          "type": "number"
+        },
+        "map_projection": {
+          "type": "string"
+        },
+        "map_unit": {
+          "description": "the unit's name as the file holds it, e.g. METRE",
+          "type": "string"
+        },
+        "map_unit_metres": {
+          "description": "meters per map unit, when known",
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "map_zone": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "northing": {
+          "description": "model origin northing, in the map unit",
+          "type": "number"
+        },
+        "scale": {
+          "description": "map scale factor",
+          "type": "number"
+        },
+        "tgl_id": {
+          "type": "string"
+        },
+        "vertical_datum": {
+          "type": "string"
+        },
+        "x_axis": {
+          "description": "the model's x axis in the map plane, a 2D vector (not an angle)",
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "geo"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `invalid_geo_reference` — That geo-location has a number that isn't finite or a unit size that isn't above zero, so it wasn't set. Fix the value and try again.
 
 ## hew.group
 
@@ -7346,6 +7605,62 @@ Set a material's opacity.
   "required": [
     "material",
     "alpha"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_material` — That material is no longer in the palette. Pick another swatch.
+
+### `hew.material.set_pbr`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Set a material's metallic and roughness factors (0 to 1); its maps and strengths are kept.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "material": {
+      "type": "string"
+    },
+    "metallic": {
+      "description": "0 dielectric to 1 metal",
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+    },
+    "roughness": {
+      "description": "0 mirror to 1 fully diffuse",
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+    }
+  },
+  "required": [
+    "material",
+    "metallic",
+    "roughness"
   ],
   "type": "object"
 }
@@ -9976,6 +10291,13 @@ Every Scene, in tab order.
             ],
             "type": "object"
           },
+          "delay_s": {
+            "description": "the Scene's own delay in seconds; null is the document's own",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "description": {
             "type": "string"
           },
@@ -10072,6 +10394,13 @@ Every Scene, in tab order.
           },
           "sid": {
             "type": "integer"
+          },
+          "transition_s": {
+            "description": "the Scene's own transition time in seconds; null is the document's own",
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "view_style": {
             "description": "the look the Scene restores with its display property: backdrop (sRGB background, sky and ground or null) and whether the model axes are drawn; captured from the document's own view style, so absent for a document shown Hew's way",
@@ -10291,14 +10620,14 @@ Move a Scene to a new position in tab order. Records no undo entry (§6.4).
 - **Served:** kernel
 - **Permission:** model.write
 
-Re-capture a Scene's properties from the document's current state. Records no undo entry (§6.4).
+Re-capture a Scene's properties from the document's current state, and/or set its own transition and delay times. Records no undo entry (§6.4).
 
 **Params schema:**
 
 ```json
 {
   "additionalProperties": false,
-  "description": "properties defaults to the Scene's currently captured set (re-capture, never widen) when omitted",
+  "description": "properties defaults to the Scene's currently captured set (re-capture, never widen) when omitted; with only transition_s/delay_s given, nothing is re-captured",
   "properties": {
     "camera": {
       "additionalProperties": false,
@@ -10350,6 +10679,14 @@ Re-capture a Scene's properties from the document's current state. Records no un
       ],
       "type": "object"
     },
+    "delay_s": {
+      "description": "the Scene's own delay in seconds; null returns it to the document's own",
+      "minimum": 0,
+      "type": [
+        "number",
+        "null"
+      ]
+    },
     "display": {
       "additionalProperties": false,
       "description": "opaque editor display toggles: stored and returned, never interpreted by the kernel",
@@ -10395,6 +10732,14 @@ Re-capture a Scene's properties from the document's current state. Records no un
         }
       },
       "type": "object"
+    },
+    "transition_s": {
+      "description": "the Scene's own transition time in seconds; null returns it to the document's own",
+      "minimum": 0,
+      "type": [
+        "number",
+        "null"
+      ]
     }
   },
   "required": [

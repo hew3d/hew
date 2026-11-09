@@ -198,6 +198,8 @@ fn scene_to_json(scene: &kernel::Scene) -> Value {
         "name": scene.name,
         "description": scene.description,
         "props": props_to_json(scene.props()),
+        "transition_s": scene.transition_s,
+        "delay_s": scene.delay_s,
     });
     if let Some(cam) = &scene.camera {
         out["camera"] = camera_to_json(cam);
@@ -309,11 +311,51 @@ struct UpdateParams {
     camera: Option<RawCamera>,
     #[serde(default)]
     display: Option<DisplayParams>,
+    /// The Scene's own transition time in seconds; `null` returns it to
+    /// the document's own. Absent leaves it alone.
+    #[serde(default, deserialize_with = "present")]
+    transition_s: Option<Option<f64>>,
+    /// The Scene's own delay in seconds; as `transition_s`.
+    #[serde(default, deserialize_with = "present")]
+    delay_s: Option<Option<f64>>,
+}
+
+/// A field that is there (even as `null`) is `Some`: absent and `null`
+/// differ for the timings (leave alone vs clear).
+fn present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<f64>>, D::Error> {
+    Option::<f64>::deserialize(d).map(Some)
+}
+
+/// A timing in seconds the kernel would take: finite and not negative.
+fn check_seconds(name: &str, v: Option<Option<f64>>) -> Result<(), CmdError> {
+    match v {
+        Some(Some(s)) if !s.is_finite() || s < 0.0 => Err(CmdError::Params(format!(
+            "{name} must be a finite number of seconds, not negative, or null"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 fn update(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: UpdateParams = parse(params)?;
     let sid = resolve_scene_id(&p.id)?;
+    check_seconds("transition_s", p.transition_s)?;
+    check_seconds("delay_s", p.delay_s)?;
+    ctx.doc.scene(sid)?;
+    // Timings alone change only the timings: nothing is re-captured.
+    let timing_only = (p.transition_s.is_some() || p.delay_s.is_some())
+        && p.properties.is_none()
+        && p.camera.is_none()
+        && p.display.is_none();
+    if let Some(t) = p.transition_s {
+        ctx.doc.set_scene_transition(sid, t)?;
+    }
+    if let Some(d) = p.delay_s {
+        ctx.doc.set_scene_delay(sid, d)?;
+    }
+    if timing_only {
+        return Ok(json!({}));
+    }
     // No `properties` given: re-capture exactly what this Scene already
     // captures (docs/agents/HEW_API.md's Scenes section) rather than defaulting
     // to ALL — `update` re-snapshots the current set, it does not widen
@@ -679,6 +721,116 @@ mod tests {
         assert_eq!(scene["props"]["hidden_nodes"], false);
         assert_eq!(scene["props"]["section"], false);
         assert!(scene.get("section").is_none());
+    }
+
+    #[test]
+    fn update_sets_and_clears_a_scenes_own_timings_without_recapturing() {
+        let mut doc = kernel::Document::new();
+        let mut host = NoHost;
+        let mut tokens = FaceTokens::new();
+        let mut c = ctx(&mut doc, &mut host, &mut tokens);
+        let added = call(
+            &mut c,
+            "hew.scenes.add",
+            json!({
+                "properties": {
+                    "camera": true, "hidden_nodes": false, "hidden_tags": false,
+                    "section": false, "display": false
+                },
+                "camera": {"eye": [1.0, 0.0, 0.0], "target": [0.0, 0.0, 0.0]},
+            }),
+        )
+        .unwrap();
+        let id = added["id"].as_str().unwrap().to_string();
+        let listed = call(&mut c, "hew.scenes.list", json!({})).unwrap();
+        assert!(listed["scenes"][0]["transition_s"].is_null());
+        assert!(listed["scenes"][0]["delay_s"].is_null());
+
+        call(
+            &mut c,
+            "hew.scenes.update",
+            json!({"id": id, "transition_s": 1.5, "delay_s": 0.0}),
+        )
+        .expect("timings set");
+        let listed = call(&mut c, "hew.scenes.list", json!({})).unwrap();
+        let scene = &listed["scenes"][0];
+        assert_eq!(scene["transition_s"], 1.5);
+        assert_eq!(scene["delay_s"], 0.0);
+        // Nothing was re-captured: the camera is still the one added.
+        assert_eq!(scene["camera"]["eye"], json!([1.0, 0.0, 0.0]));
+
+        // Absent leaves a timing alone; null clears it.
+        call(
+            &mut c,
+            "hew.scenes.update",
+            json!({"id": id, "delay_s": null}),
+        )
+        .unwrap();
+        let listed = call(&mut c, "hew.scenes.list", json!({})).unwrap();
+        assert_eq!(listed["scenes"][0]["transition_s"], 1.5);
+        assert!(listed["scenes"][0]["delay_s"].is_null());
+
+        // With a re-capture the timings ride along.
+        call(
+            &mut c,
+            "hew.scenes.update",
+            json!({
+                "id": id,
+                "camera": {"eye": [3.0, 0.0, 0.0], "target": [0.0, 0.0, 0.0]},
+                "transition_s": 2.0,
+            }),
+        )
+        .unwrap();
+        let listed = call(&mut c, "hew.scenes.list", json!({})).unwrap();
+        assert_eq!(listed["scenes"][0]["camera"]["eye"], json!([3.0, 0.0, 0.0]));
+        assert_eq!(listed["scenes"][0]["transition_s"], 2.0);
+    }
+
+    #[test]
+    fn update_refuses_a_bad_timing_and_changes_nothing() {
+        let mut doc = kernel::Document::new();
+        let mut host = NoHost;
+        let mut tokens = FaceTokens::new();
+        let mut c = ctx(&mut doc, &mut host, &mut tokens);
+        let added = call(&mut c, "hew.scenes.add", json!({})).unwrap();
+        let id = added["id"].as_str().unwrap().to_string();
+        call(
+            &mut c,
+            "hew.scenes.update",
+            json!({"id": id, "transition_s": 1.0}),
+        )
+        .unwrap();
+        for bad in [json!({"transition_s": -1.0}), json!({"delay_s": "soon"})] {
+            let mut params = bad;
+            params["id"] = json!(id);
+            assert!(call(&mut c, "hew.scenes.update", params).is_err());
+        }
+        // A bad one beside a good one leaves the good one unwritten.
+        assert!(
+            call(
+                &mut c,
+                "hew.scenes.update",
+                json!({"id": id, "transition_s": 9.0, "delay_s": -2.0})
+            )
+            .is_err()
+        );
+        let listed = call(&mut c, "hew.scenes.list", json!({})).unwrap();
+        assert_eq!(listed["scenes"][0]["transition_s"], 1.0);
+    }
+
+    #[test]
+    fn update_timings_on_an_unknown_scene_refuse() {
+        let mut doc = kernel::Document::new();
+        let mut host = NoHost;
+        let mut tokens = FaceTokens::new();
+        let mut c = ctx(&mut doc, &mut host, &mut tokens);
+        let err = call(
+            &mut c,
+            "hew.scenes.update",
+            json!({"id": "scene_ff", "transition_s": 1.0}),
+        )
+        .unwrap_err();
+        assert!(matches!(err, CmdError::Refusal(_)), "{err:?}");
     }
 
     #[test]

@@ -165,6 +165,7 @@ fn half(name: &str, x0: f64, x1: f64, drops: &[usize], bend: f64) -> MeshRecipe 
 
 fn ingest(doc: &mut Document, meshes: Vec<MeshRecipe>) {
     let scene = ImportScene {
+        geo: None,
         materials: Vec::new(),
         defs: Vec::new(),
         roots: meshes.into_iter().map(ImportNode::Mesh).collect(),
