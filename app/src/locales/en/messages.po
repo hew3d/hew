@@ -3069,6 +3069,27 @@ msgstr "Extrusion depth ({unit})"
 msgid "eye height"
 msgstr "eye height"
 
+#: src/tools/CircleTool.ts
+#: src/tools/PolygonTool.ts
+msgid "Facing the {axis} plane — click the center to draw on it; ↑ for the ground, Shift pins it."
+msgstr "Facing the {axis} plane — click the center to draw on it; ↑ for the ground, Shift pins it."
+
+#: src/tools/PlaceImageTool.ts
+msgid "Facing the {axis} plane — click the first corner of \"{name}\" to place it there; ↑ for the ground. Esc cancels."
+msgstr "Facing the {axis} plane — click the first corner of \"{name}\" to place it there; ↑ for the ground. Esc cancels."
+
+#: src/tools/RectangleTool.ts
+msgid "Facing the {axis} plane — click the first corner to draw on it; ↑ for the ground, Shift pins it."
+msgstr "Facing the {axis} plane — click the first corner to draw on it; ↑ for the ground, Shift pins it."
+
+#: src/tools/ArcTool.ts
+msgid "Facing the {axis} plane — click the first endpoint to draw on it; ↑ for the ground, Shift pins it."
+msgstr "Facing the {axis} plane — click the first endpoint to draw on it; ↑ for the ground, Shift pins it."
+
+#: src/tools/LineTool.ts
+msgid "Facing the {axis} plane — click to start a line on it; ↑ for the ground, Shift pins it."
+msgstr "Facing the {axis} plane — click to start a line on it; ↑ for the ground, Shift pins it."
+
 #: src/viewport/MeasurementBox.tsx
 msgid "Factor"
 msgstr "Factor"

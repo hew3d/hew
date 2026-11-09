@@ -323,6 +323,17 @@ describe('LineTool — review fixes on the face-chain round', () => {
     expect(tool.onDoubleClick(onFace(0.3, 0.3), rayThrough(0.3, 0.3))).toBe(false)
   })
 
+  it('a hover replayed at the closing press\'s own ray (the Viewport\'s replay after the commit) keeps the dblclick owed', () => {
+    const scene = makeScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(onFace(0.2, 0.2), rayThrough(0.2, 0.2))
+    tool.onPointerDown(onFace(0.8, 0.2), rayThrough(0.8, 0.2))
+    tool.onPointerDown(onFace(0.5, 0.8), rayThrough(0.5, 0.8))
+    tool.onPointerDown(onFace(0.2, 0.2), rayThrough(0.2, 0.2)) // closes the loop
+    tool.onPointerMove(onFace(0.2, 0.2), rayThrough(0.2, 0.2)) // replayed where it rests
+    expect(tool.onDoubleClick(onFace(0.2, 0.2), rayThrough(0.2, 0.2))).toBe(true)
+  })
+
   it('retyping a face segment\'s length undoes and re-commits it at the typed length', () => {
     const scene = makeScene()
     const { tool } = makeTool(scene)

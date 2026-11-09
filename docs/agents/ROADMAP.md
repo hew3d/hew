@@ -31,8 +31,15 @@ below.
   hovered face's plane, a sketch's, or the ground) that holds the cursor
   to that plane wherever it goes until Shift or Escape releases it.
   Starting a shape on a solid's edge or corner draws on the face that
-  edge belongs to — the most camera-facing one when two share it — never
-  on the ground beneath; in face mode the shape's later points honour the
+  edge belongs to — the one the cursor is leaning toward within the snap
+  radius, the cursor's previous hover face at zero offset, else the most
+  camera-facing one — never on the ground beneath. Over empty space the
+  first click lands on the axis plane that faces the camera: the ground
+  unless a vertical plane of the drawing axes faces the view clearly more
+  (about 20 degrees above level, square-on to a wall), through the axes'
+  origin, with a tinted plane patch and a status-bar line naming it; Shift
+  pins the inferred plane and the arrow keys still override it (Place
+  Image takes the same inference). In face mode the shape's later points honour the
   snap the inference chip names (an endpoint IS the corner, not the ray's
   own plane hit a pixel off it). A Line chain on a face commits one cut per
   edge-to-edge stretch (a chain touching the boundary partway is not

@@ -8,6 +8,13 @@ A newer Hew always opens documents saved by an older one. The reverse
 is not guaranteed: releases that change the `.hew` format say so under
 **Changed**.
 
+## [Unreleased]
+
+### Changed
+
+- **Drawing:** Shapes drawn in empty space land on the axis plane facing the camera, as in SketchUp. From a low view that squarely faces a wall (a Front or Side standard view, for one) Line, Rectangle, Circle, Polygon, Arc, and Place Image start on that wall's plane, shown by a tinted patch and a status-bar line before you click; from above or a three-quarter view they still start on the ground. The tinted patch shows the plane under the cursor, including a sketch or face you hover. The arrow keys and Shift still override it. With the drawing axes moved, empty-space drawing follows the moved axes' ground.
+- **Drawing:** At a corner or edge shared by two faces, a shape starts on the face the cursor is leaning toward, not always the one facing the camera most squarely. Off the solid to one side, it takes that side's plane.
+
 ## [1.4.0] (2026-11-08) - The "All In" Release
 
 Hew now opens and saves every SketchUp file there is, from SketchUp 3

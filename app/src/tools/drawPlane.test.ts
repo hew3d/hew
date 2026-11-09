@@ -7,12 +7,22 @@ import {
   planeKey,
   isGroundPlane,
   drawPlaneCue,
+  drawPlaneThrough,
+  idleHoverCue,
+  PATCH_OVER_FACES,
   SketchPickCache,
   rayLandsOnSketch,
   resolveIdleDrawTarget,
   resolveClickDrawTarget,
+  inferredAxis,
+  inferredAxisPlane,
+  GROUND_PREFERENCE,
+  groundNaturalTarget,
+  nextGestureLockPlane,
   type DrawPlane,
+  type CameraView,
 } from './drawPlane'
+import { WORLD_DRAWING_AXES } from './drawingAxes'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { setPickRenderMode } from './pickPolicy'
 import type { Ray } from '../viewport/math'
@@ -148,6 +158,23 @@ describe('planeFromSketch', () => {
     it('returns null (never falls back to the raw local plane) for a stale/unknown instance', () => {
       const scene = instanceScene(new Float64Array([0, 0, 0, 0, -1, 0]), undefined)
       expect(planeFromSketch(scene, 7n, 999n)).toBeNull()
+    })
+
+    it('a non-uniformly scaled pose keeps the posed plane on the posed sketch (normal through the inverse-transpose)', () => {
+      // Local plane through the origin with normal (1, 0, 1)/√2, instance
+      // stretched 2× along X. The local in-plane tangent (1, 0, -1) maps to
+      // (2, 0, -1) in world: the posed plane must hold it. The plain linear
+      // part would give (2, 0, 1)/√5, tilted off the sketch.
+      const h = Math.SQRT1_2
+      const pose = new Float64Array([2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])
+      const scene = instanceScene(new Float64Array([0, 0, 0, h, 0, h]), pose)
+      const plane = planeFromSketch(scene, 7n, 42n)
+      expect(plane).not.toBeNull()
+      const n = plane!.normal
+      expect(Math.hypot(...n)).toBeCloseTo(1, 12)
+      expect(n[0] * 2 + n[1] * 0 + n[2] * -1).toBeCloseTo(0, 12)
+      // The untouched in-plane direction (0, 1, 0) stays in the plane too.
+      expect(n[1]).toBeCloseTo(0, 12)
     })
   })
 })
@@ -626,6 +653,8 @@ describe('resolveIdleDrawTarget', () => {
     return {
       sketch_plane: vi.fn(() => plane),
       pick_sketch: vi.fn(() => pick ?? undefined),
+      pick_sketch_region: vi.fn(() => undefined),
+      pick_sketch_region_in_instance: vi.fn(() => undefined),
       sketch_lines: vi.fn(() => SQUARE),
     } as unknown as WasmScene
   }
@@ -666,7 +695,7 @@ describe('resolveIdleDrawTarget', () => {
     expect(resolved.target).toEqual({ kind: 'plane', plane: groundDrawPlane(), instance: null })
   })
 
-  it('never adopts a sketch that is itself on the ground plane', () => {
+  it('a sketch on the ground plane gives the ground plane-mode target, never sketch mode', () => {
     const groundArr = new Float64Array([0, 0, 0, 0, 0, 1])
     const resolved = resolveIdleDrawTarget(scene(groundArr), new SketchPickCache(), rayThrough([0, 0, 0]), TOP)
     expect(resolved.target).toEqual({ kind: 'plane', plane: groundDrawPlane(), instance: null })
@@ -688,6 +717,8 @@ describe('resolveIdleDrawTarget', () => {
       return {
         sketch_plane: vi.fn(() => plane),
         pick_sketch: vi.fn(() => pick ?? undefined),
+        pick_sketch_region: vi.fn(() => undefined),
+        pick_sketch_region_in_instance: vi.fn(() => undefined),
         sketch_lines: vi.fn(() => SQUARE),
         component_member_sketches: vi.fn(() => new BigUint64Array(memberSketches)),
         instance_pose: vi.fn(() => pose),
@@ -779,6 +810,8 @@ describe('resolveClickDrawTarget', () => {
   const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
   const scene = {
     pick_sketch: vi.fn(() => undefined),
+    pick_sketch_region: vi.fn(() => undefined),
+    pick_sketch_region_in_instance: vi.fn(() => undefined),
     axes: vi.fn(() => new Float64Array(WORLD_FRAME_FLAT)),
   } as unknown as WasmScene
 
@@ -812,6 +845,8 @@ describe('resolveClickDrawTarget', () => {
   it('an idle lock reads the CURRENT drawing-axes frame from the scene, not literal world axes', () => {
     const rotatedScene = {
       pick_sketch: vi.fn(() => undefined),
+      pick_sketch_region: vi.fn(() => undefined),
+      pick_sketch_region_in_instance: vi.fn(() => undefined),
       axes: vi.fn(() => new Float64Array([5, 0, 0, 0, 1, 0, -1, 0, 0, 0, 0, 1])),
     } as unknown as WasmScene
     const resolved = resolveClickDrawTarget(
@@ -820,5 +855,569 @@ describe('resolveClickDrawTarget', () => {
     // Axis 0 (red) of the moved frame is world [0,1,0], not world [1,0,0].
     expect(resolved?.plane.normal).toEqual([0, 1, 0])
     expect(resolved?.plane.ground).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The drawing plane follows the view (view-plane design §3, picker step 7).
+// ---------------------------------------------------------------------------
+
+const DEG = Math.PI / 180
+
+/** The camera at `eye` looking at the origin. */
+function lookAtOrigin(eye: V3): CameraView {
+  const l = Math.hypot(eye[0], eye[1], eye[2])
+  return { dir: [-eye[0] / l, -eye[1] / l, -eye[2] / l], eye }
+}
+
+/** A camera looking along `dir` from 10 units back along it, so every axis
+ *  plane through the origin it faces lies in front of the eye. */
+function fwd(dir: V3): CameraView {
+  return { dir, eye: [-10 * dir[0], -10 * dir[1], -10 * dir[2]] }
+}
+
+/** A camera `elevDeg` above level (negative: below, looking up), turned
+ *  `azDeg` off square to the green (y) wall toward red, looking at the
+ *  origin from 10 units away. */
+function viewAt(elevDeg: number, azDeg: number): CameraView {
+  const e = elevDeg * DEG
+  const a = azDeg * DEG
+  return fwd([Math.cos(e) * Math.sin(a), Math.cos(e) * Math.cos(a), -Math.sin(e)])
+}
+
+// The Viewport's own view poses (math.ts HOME_EYE_OFFSET, Viewport.tsx
+// STANDARD_VIEWS, POLE_TILT = 0.001).
+const HOME_VIEW = lookAtOrigin([3.5, -3.0, 2.5])
+const FRONT_VIEW = lookAtOrigin([0, -1, 0])
+const BACK_VIEW = lookAtOrigin([0, 1, 0])
+const RIGHT_VIEW = lookAtOrigin([1, 0, 0])
+const LEFT_VIEW = lookAtOrigin([-1, 0, 0])
+const TOP_VIEW = lookAtOrigin([0, -0.001, 1])
+const BOTTOM_VIEW = lookAtOrigin([0, -0.001, -1])
+const ISO_VIEW = lookAtOrigin([1, -1, 1])
+
+function rotatedAboutZ(deg: number, origin: V3 = [0, 0, 0]): DrawingAxes {
+  const c = Math.cos(deg * DEG)
+  const s = Math.sin(deg * DEG)
+  return { origin, x: [c, s, 0], y: [-s, c, 0], z: [0, 0, 1] }
+}
+
+describe('inferredAxisPlane (view-plane §3)', () => {
+  it('GROUND_PREFERENCE is cot(20°)', () => {
+    expect(GROUND_PREFERENCE).toBeCloseTo(2.7475, 4)
+    expect(Math.atan(1 / GROUND_PREFERENCE) / DEG).toBeCloseTo(20, 12)
+  })
+
+  it('the home view stays on the ground — the EXACT groundDrawPlane(), bit for bit', () => {
+    // The pure "most facing" rule would stand the first rectangle up here
+    // (|d·x| ≈ 0.66 beats |d·z| ≈ 0.47); the weight keeps the ground.
+    expect(Math.abs(HOME_VIEW.dir[0])).toBeGreaterThan(Math.abs(HOME_VIEW.dir[2]))
+    const plane = inferredAxisPlane(WORLD_DRAWING_AXES, HOME_VIEW)
+    expect(plane).toEqual(groundDrawPlane())
+    expect(plane.ground).toBe(true)
+    for (const k of ['origin', 'normal', 'u', 'v'] as const) {
+      plane[k].forEach((c, i) => expect(Object.is(c, groundDrawPlane()[k][i]), `${k}[${i}]`).toBe(true))
+    }
+  })
+
+  it('Front and Back give green, Right and Left give red, through the origin', () => {
+    for (const view of [FRONT_VIEW, BACK_VIEW]) {
+      const plane = inferredAxisPlane(WORLD_DRAWING_AXES, view)
+      expect(inferredAxis(WORLD_DRAWING_AXES, view)).toBe(1)
+      expect(plane).toEqual(axisDrawPlane(1, [0, 0, 0]))
+      expect(plane.normal).toEqual([0, 1, 0])
+      expect(plane.ground).toBe(false)
+    }
+    for (const view of [RIGHT_VIEW, LEFT_VIEW]) {
+      expect(inferredAxis(WORLD_DRAWING_AXES, view)).toBe(0)
+      expect(inferredAxisPlane(WORLD_DRAWING_AXES, view)).toEqual(axisDrawPlane(0, [0, 0, 0]))
+    }
+  })
+
+  it('Top, Bottom and Iso give the ground (Iso is a three-way tie, and the ground wins ties)', () => {
+    for (const view of [TOP_VIEW, BOTTOM_VIEW, ISO_VIEW]) {
+      expect(inferredAxis(WORLD_DRAWING_AXES, view)).toBe(2)
+      expect(inferredAxisPlane(WORLD_DRAWING_AXES, view)).toEqual(groundDrawPlane())
+    }
+  })
+
+  it('square-on to a wall the switch sits at 20°: 19° gives green, 21° the ground', () => {
+    expect(inferredAxis(WORLD_DRAWING_AXES, viewAt(19, 0))).toBe(1)
+    expect(inferredAxis(WORLD_DRAWING_AXES, viewAt(21, 0))).toBe(2)
+    expect(inferredAxis(WORLD_DRAWING_AXES, viewAt(19.9, 0))).toBe(1)
+    expect(inferredAxis(WORLD_DRAWING_AXES, viewAt(20.1, 0))).toBe(2)
+  })
+
+  it('at the home view\'s azimuth (40.6°) the switch sits at 15.4°', () => {
+    // Analytically: tan(elevation) = cos(40.6°) · tan(20°).
+    const sw = Math.atan(Math.cos(40.6 * DEG) * Math.tan(20 * DEG)) / DEG
+    expect(sw).toBeCloseTo(15.4, 1)
+    expect(inferredAxis(WORLD_DRAWING_AXES, viewAt(sw - 0.5, 40.6))).toBe(1)
+    expect(inferredAxis(WORLD_DRAWING_AXES, viewAt(sw + 0.5, 40.6))).toBe(2)
+    // Turned the other way, past 45°, red faces more than green.
+    expect(inferredAxis(WORLD_DRAWING_AXES, viewAt(sw - 0.5, 90 - 40.6))).toBe(0)
+    // Corner-on (45°): 14.4°.
+    expect(inferredAxis(WORLD_DRAWING_AXES, viewAt(13.9, 45))).not.toBe(2)
+    expect(inferredAxis(WORLD_DRAWING_AXES, viewAt(14.9, 45))).toBe(2)
+  })
+
+  it('below the ground mirrors above it', () => {
+    expect(inferredAxis(WORLD_DRAWING_AXES, viewAt(-19, 0))).toBe(1)
+    expect(inferredAxis(WORLD_DRAWING_AXES, viewAt(-21, 0))).toBe(2)
+    expect(inferredAxisPlane(WORLD_DRAWING_AXES, viewAt(-21, 0))).toEqual(groundDrawPlane())
+  })
+
+  it('reads the frame: rotated 30° about Z, Front gives the frame\'s own green, not world Y', () => {
+    const frame = rotatedAboutZ(30)
+    const plane = inferredAxisPlane(frame, FRONT_VIEW)
+    expect(inferredAxis(frame, FRONT_VIEW)).toBe(1)
+    expect(plane.normal).toEqual(frame.y)
+    expect(plane.ground).toBe(false)
+    // Rotated a full 90°, the frame's red axis is world +Y, so Front faces red.
+    const quarter = rotatedAboutZ(90)
+    expect(inferredAxis(quarter, FRONT_VIEW)).toBe(0)
+    expect(inferredAxis(quarter, RIGHT_VIEW)).toBe(1)
+    expect(inferredAxisPlane(quarter, RIGHT_VIEW).normal).toEqual(quarter.y)
+  })
+
+  it('D1: a frame origin at z = 0.75 moves the blue plane with it', () => {
+    const frame: DrawingAxes = { ...WORLD_DRAWING_AXES, origin: [0, 0, 0.75] }
+    const plane = inferredAxisPlane(frame, HOME_VIEW)
+    expect(inferredAxis(frame, HOME_VIEW)).toBe(2)
+    expect(plane.ground).toBe(false)
+    expect(plane.normal).toEqual([0, 0, 1])
+    expect(plane.origin).toEqual([0, 0, 0.75])
+    // A vertical choice passes through the frame's origin too.
+    const raised: DrawingAxes = { ...WORLD_DRAWING_AXES, origin: [2, 3, 0.75] }
+    expect(inferredAxisPlane(raised, FRONT_VIEW).origin).toEqual([2, 3, 0.75])
+  })
+
+  it('a zero or non-finite view direction answers the ground', () => {
+    expect(inferredAxis(WORLD_DRAWING_AXES, fwd([0, 0, 0]))).toBe(2)
+    expect(inferredAxis(WORLD_DRAWING_AXES, fwd([Number.NaN, 1, 0]))).toBe(2)
+    expect(inferredAxis(WORLD_DRAWING_AXES, fwd([Number.POSITIVE_INFINITY, 0, 0]))).toBe(2)
+  })
+
+  it('behind the eye (§3.3): Front\'s direction from y = −2 gives green, from y = +2 or exactly on y = 0 the ground', () => {
+    const dir: V3 = [0, 1, 0] // Front: looking along +Y
+    expect(inferredAxis(WORLD_DRAWING_AXES, { dir, eye: [0, -2, 0] })).toBe(1)
+    // Past the green plane, still looking along +Y: it is behind the eye.
+    expect(inferredAxis(WORLD_DRAWING_AXES, { dir, eye: [0, 2, 0] })).toBe(2)
+    expect(inferredAxisPlane(WORLD_DRAWING_AXES, { dir, eye: [0, 2, 0] })).toEqual(groundDrawPlane())
+    // Standing in the plane counts as behind.
+    expect(inferredAxis(WORLD_DRAWING_AXES, { dir, eye: [0.5, 0, 0.5] })).toBe(2)
+    // Looking the other way (Back) from y = +2, the plane is in front again.
+    expect(inferredAxis(WORLD_DRAWING_AXES, { dir: [0, -1, 0], eye: [0, 2, 0] })).toBe(1)
+    // Red behaves the same way.
+    expect(inferredAxis(WORLD_DRAWING_AXES, { dir: [-1, 0, 0], eye: [3, 0, 0] })).toBe(0)
+    expect(inferredAxis(WORLD_DRAWING_AXES, { dir: [-1, 0, 0], eye: [-3, 0, 0] })).toBe(2)
+  })
+
+  it('behind the eye is measured from the frame\'s origin, and blue stays blue even when behind', () => {
+    const frame: DrawingAxes = { ...WORLD_DRAWING_AXES, origin: [0, 5, 0] }
+    // Eye at y = 2 is in front of the frame's green plane at y = 5.
+    expect(inferredAxis(frame, { dir: [0, 1, 0], eye: [0, 2, 0] })).toBe(1)
+    expect(inferredAxis(frame, { dir: [0, 1, 0], eye: [0, 6, 0] })).toBe(2)
+    // Top view from BELOW the ground, still looking down: blue regardless.
+    expect(inferredAxis(WORLD_DRAWING_AXES, { dir: [0, 0, -1], eye: [0, 0, -3] })).toBe(2)
+    const raised: DrawingAxes = { ...WORLD_DRAWING_AXES, origin: [0, 0, 0.75] }
+    expect(inferredAxisPlane(raised, { dir: [0, 0, -1], eye: [0, 0, 0.2] }).origin).toEqual([0, 0, 0.75])
+  })
+
+  it('the view direction need not be unit length', () => {
+    expect(inferredAxis(WORLD_DRAWING_AXES, fwd([0, 40, -0.1]))).toBe(1)
+    expect(inferredAxis(WORLD_DRAWING_AXES, fwd([3.5 * 7, -3 * 7, -2.5 * 7]))).toBe(2)
+  })
+})
+
+describe('resolveIdleDrawTarget over nothing — step 7', () => {
+  function emptyScene(frame: number[] = WORLD_FRAME_FLAT) {
+    return {
+      sketch_plane: vi.fn(() => undefined),
+      pick_sketch: vi.fn(() => undefined),
+      pick_sketch_region: vi.fn(() => undefined),
+      pick_sketch_region_in_instance: vi.fn(() => undefined),
+      sketch_lines: vi.fn(() => new Float32Array()),
+      axes: vi.fn(() => new Float64Array(frame)),
+    }
+  }
+  const RAY: Ray = { origin: [0, -5, 1], direction: [0, 1, -0.05] }
+
+  it('from Front: the green plane through the origin, carrying inferredAxis', () => {
+    const resolved = resolveIdleDrawTarget(emptyScene() as unknown as WasmScene, new SketchPickCache(), RAY, TOP, undefined, '', FRONT_VIEW)
+    const green = axisDrawPlane(1, [0, 0, 0])
+    expect(resolved).toEqual({ plane: green, target: { kind: 'plane', plane: green, instance: null }, inferredAxis: 1 })
+  })
+
+  it('from the home view: the exact ground, shaped exactly as before (no inferredAxis)', () => {
+    const resolved = resolveIdleDrawTarget(emptyScene() as unknown as WasmScene, new SketchPickCache(), RAY, TOP, undefined, '', HOME_VIEW)
+    expect(resolved).toStrictEqual({ plane: groundDrawPlane(), target: { kind: 'plane', plane: groundDrawPlane(), instance: null } })
+  })
+
+  it('without a view direction: the literal ground, and the frame is never read', () => {
+    const scene = emptyScene(rotatedAboutZFlat(30, [0, 0, 2]))
+    const resolved = resolveIdleDrawTarget(scene as unknown as WasmScene, new SketchPickCache(), RAY, TOP)
+    expect(resolved).toStrictEqual({ plane: groundDrawPlane(), target: { kind: 'plane', plane: groundDrawPlane(), instance: null } })
+    expect(resolveIdleDrawTarget(scene as unknown as WasmScene, new SketchPickCache(), RAY, TOP, undefined, '', null).plane).toEqual(groundDrawPlane())
+    expect(scene.axes).not.toHaveBeenCalled()
+  })
+
+  it('D1: a moved frame\'s blue plane carries inferredAxis 2 (the cue shows it)', () => {
+    const scene = emptyScene([0, 0, 0.75, 1, 0, 0, 0, 1, 0, 0, 0, 1])
+    const resolved = resolveIdleDrawTarget(scene as unknown as WasmScene, new SketchPickCache(), RAY, TOP, undefined, '', HOME_VIEW)
+    expect(resolved.inferredAxis).toBe(2)
+    expect(resolved.plane.origin).toEqual([0, 0, 0.75])
+    expect(resolved.plane.ground).toBe(false)
+  })
+
+  it('inside an instance context the inferred plane carries the instance handle', () => {
+    const ctx: EditContext = { kind: 'instance', id: 42n, component: 5n }
+    const scene = { ...emptyScene(), component_member_sketches: vi.fn(() => new BigUint64Array()) }
+    const resolved = resolveIdleDrawTarget(scene as unknown as WasmScene, new SketchPickCache(), RAY, ctx, undefined, '', FRONT_VIEW)
+    expect(resolved.target).toEqual({ kind: 'plane', plane: axisDrawPlane(1, [0, 0, 0]), instance: 42n })
+  })
+
+  it('a foreign face beats the inference (step 6 before step 7)', () => {
+    const resolved = resolveIdleDrawTarget(
+      emptyScene() as unknown as WasmScene, new SketchPickCache(), RAY, TOP,
+      () => ({ point: [0, 0, 0.3], normal: [0, 0, 1], depth: 4 }), '', FRONT_VIEW,
+    )
+    expect(resolved.plane.normal).toEqual([0, 0, 1])
+    expect(resolved.plane.origin).toEqual([0, 0, 0.3])
+    expect(resolved.inferredAxis).toBeUndefined()
+  })
+
+  it('the memo never serves the old plane when the camera turns under a reused ray (§12 lens 2)', () => {
+    const scene = emptyScene()
+    const cache = new SketchPickCache()
+    const wasm = scene as unknown as WasmScene
+    expect(resolveIdleDrawTarget(wasm, cache, RAY, TOP, undefined, '', FRONT_VIEW).plane.normal).toEqual([0, 1, 0])
+    expect(resolveIdleDrawTarget(wasm, cache, RAY, TOP, undefined, '', HOME_VIEW).plane).toEqual(groundDrawPlane())
+    expect(resolveIdleDrawTarget(wasm, cache, RAY, TOP, undefined, '', RIGHT_VIEW).plane.normal).toEqual([1, 0, 0])
+    // The same view twice is served from the memo: one pick for the ray.
+    const again = resolveIdleDrawTarget(wasm, cache, RAY, TOP, undefined, '', RIGHT_VIEW)
+    expect(again).toBe(resolveIdleDrawTarget(wasm, cache, RAY, TOP, undefined, '', RIGHT_VIEW))
+    expect(scene.pick_sketch).toHaveBeenCalledTimes(1)
+  })
+
+  it('…nor when the drawing axes move under a reused ray with the same axis chosen', () => {
+    let frame = WORLD_FRAME_FLAT
+    const scene = { ...emptyScene(), axes: vi.fn(() => new Float64Array(frame)) }
+    const cache = new SketchPickCache()
+    const wasm = scene as unknown as WasmScene
+    expect(resolveIdleDrawTarget(wasm, cache, RAY, TOP, undefined, '', FRONT_VIEW).plane.origin).toEqual([0, 0, 0])
+    frame = [0, 4, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]
+    expect(resolveIdleDrawTarget(wasm, cache, RAY, TOP, undefined, '', FRONT_VIEW).plane.origin).toEqual([0, 4, 0])
+  })
+})
+
+function rotatedAboutZFlat(deg: number, origin: V3): number[] {
+  const f = rotatedAboutZ(deg, origin)
+  return [...f.origin, ...f.x, ...f.y, ...f.z]
+}
+
+describe('resolveClickDrawTarget with a view direction', () => {
+  const scene = {
+    pick_sketch: vi.fn(() => undefined),
+    pick_sketch_region: vi.fn(() => undefined),
+    pick_sketch_region_in_instance: vi.fn(() => undefined),
+    axes: vi.fn(() => new Float64Array(WORLD_FRAME_FLAT)),
+  } as unknown as WasmScene
+  const RAY: Ray = { origin: [0, -5, 1], direction: [0, 1, -0.05] }
+
+  it('unlocked, it passes the view through to the inference', () => {
+    expect(resolveClickDrawTarget(scene, new SketchPickCache(), null, null, RAY, TOP, undefined, '', FRONT_VIEW)?.plane)
+      .toEqual(axisDrawPlane(1, [0, 0, 0]))
+  })
+
+  it('an arrow lock beats the inference: ↑ from Front draws on the ground through the click', () => {
+    const resolved = resolveClickDrawTarget(scene, new SketchPickCache(), 2, { x: 1, y: 2, z: 0, kind: 'free' }, RAY, TOP, undefined, '', FRONT_VIEW)
+    expect(resolved?.plane.ground).toBe(true)
+    expect(resolved?.inferredAxis).toBeUndefined()
+  })
+})
+
+describe('drawPlaneCue — the idle hover plane (view-plane §5)', () => {
+  const GREEN = axisDrawPlane(1, [0, 0, 0])
+  const ray: Ray = { origin: [0.4, -5, 1], direction: [0, 1, -0.1] }
+  const idle = { anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: null } as const
+
+  it('a patch on the inferred plane through the ray\'s hit on it', () => {
+    const cue = drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: null, idleHoverCue: { plane: GREEN, ray } })
+    expect(cue?.plane).toBe(GREEN)
+    expect(cue?.through[0]).toBeCloseTo(0.4, 12)
+    expect(cue?.through[1]).toBeCloseTo(0, 12)
+    expect(cue?.through[2]).toBeCloseTo(0.5, 12)
+  })
+
+  it('null for the ground (the world grid is the cue)', () => {
+    const down: Ray = { origin: [0, -5, 3], direction: [0, 1, -1] }
+    expect(drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: null, idleHoverCue: { plane: groundDrawPlane(), ray: down } })).toBeNull()
+  })
+
+  it('a moved frame\'s blue plane does cue (D1)', () => {
+    const raised = inferredAxisPlane({ ...WORLD_DRAWING_AXES, origin: [0, 0, 0.75] }, HOME_VIEW)
+    const down: Ray = { origin: [0, -5, 3], direction: [0, 1, -1] }
+    expect(drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: null, idleHoverCue: { plane: raised, ray: down } })?.through[2]).toBeCloseTo(0.75, 12)
+  })
+
+  it('an active arrow lock beats it, with or without a hover', () => {
+    expect(drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: 0, idleHover: null, idleHoverCue: { plane: GREEN, ray } })).toBeNull()
+    const locked = drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: 0, idleHover: [1, 2, 3], idleHoverCue: { plane: GREEN, ray } })
+    expect(locked?.plane.normal).toEqual([1, 0, 0])
+  })
+
+  it('an anchored gesture beats it', () => {
+    const anchored = axisDrawPlane(0, [1, 1, 1])
+    expect(drawPlaneCue({ anchoredPlane: anchored, anchoredThrough: [1, 1, 1], idleLock: null, idleHover: null, idleHoverCue: { plane: GREEN, ray } })?.plane).toBe(anchored)
+  })
+
+  it('null when the ray never reaches the plane (parallel, or pointing away)', () => {
+    const parallel: Ray = { origin: [0, -5, 1], direction: [1, 0, 0] }
+    const away: Ray = { origin: [0, -5, 1], direction: [0, -1, 0] }
+    expect(drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: null, idleHoverCue: { plane: GREEN, ray: parallel } })).toBeNull()
+    expect(drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: null, idleHoverCue: { plane: GREEN, ray: away } })).toBeNull()
+  })
+  it('a hovered sketch\'s plane (+X through the origin): a patch through the ray\'s foot at x = 0, on the plane passed in', () => {
+    const red = drawPlaneThrough([0, 0, 0], [1, 0, 0])!
+    const crossing: Ray = { origin: [3, -3, 0.5], direction: [-3, 3.9, -0.13] }
+    const cue = drawPlaneCue({ ...idle, idleHoverCue: { plane: red, ray: crossing } })
+    expect(cue?.plane).toBe(red)
+    expect(cue?.through[0]).toBeCloseTo(0, 12)
+    expect(cue?.through[1]).toBeCloseTo(0.9, 12)
+    expect(cue?.through[2]).toBeCloseTo(0.37, 12)
+  })
+
+  it('an arrow lock wins over a hovered sketch\'s plane', () => {
+    const red = drawPlaneThrough([0, 0, 0], [1, 0, 0])!
+    const locked = drawPlaneCue({ ...idle, idleLock: 1, idleHover: [1, 2, 3], idleHoverCue: { plane: red, ray } })
+    expect(locked?.plane.normal).toEqual([0, 1, 0])
+    expect(locked?.through).toEqual([1, 2, 3])
+  })
+
+  it('a tilted plane (a sloped face) still shows a patch, through the ray\'s foot on it', () => {
+    const tilted = drawPlaneThrough([0, 0, 0], [0, -Math.SQRT1_2, Math.SQRT1_2])!
+    const cue = drawPlaneCue({ ...idle, idleHoverCue: { plane: tilted, ray } })
+    expect(cue?.plane).toBe(tilted)
+    // On the plane: y = z.
+    expect(cue!.through[1]).toBeCloseTo(cue!.through[2], 12)
+    expect(cue!.through[0]).toBeCloseTo(0.4, 12)
+  })
+})
+
+describe('idleHoverCue — which idle hovers show a patch (view-plane §5)', () => {
+  const ray: Ray = { origin: [0, -5, 1], direction: [0, 1, 0] }
+  const GREEN = axisDrawPlane(1, [0, 0, 0])
+
+  it('a face shows a patch while PATCH_OVER_FACES is on', () => {
+    expect(PATCH_OVER_FACES).toBe(true)
+    expect(idleHoverCue({ plane: GREEN, onFace: true }, ray, false)).toEqual({ plane: GREEN, ray })
+  })
+
+  it('a sketch or the inferred plane shows a patch at the top level', () => {
+    expect(idleHoverCue({ plane: GREEN }, ray, false)).toEqual({ plane: GREEN, ray })
+  })
+
+  it('inside an entered object only a face of it does: a click off it lands nowhere', () => {
+    expect(idleHoverCue({ plane: GREEN }, ray, true)).toBeNull()
+    expect(idleHoverCue({ plane: GREEN, onFace: true }, ray, true)).toEqual({ plane: GREEN, ray })
+  })
+
+  it('resolveIdleDrawTarget flags only an ineligible face as onFace', () => {
+    const scene = {
+      pick_sketch: vi.fn(() => undefined),
+      pick_sketch_region: vi.fn(() => undefined),
+      axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
+    } as unknown as WasmScene
+    const face = () => ({ point: [0, 0, 0.3] as V3, normal: [0, 0, 1] as V3, depth: 4 })
+    expect(resolveIdleDrawTarget(scene, new SketchPickCache(), ray, TOP, face, '', FRONT_VIEW).onFace).toBe(true)
+    expect(resolveIdleDrawTarget(scene, new SketchPickCache(), ray, TOP, undefined, '', FRONT_VIEW).onFace).toBeUndefined()
+  })
+})
+
+describe('groundNaturalTarget — the plane a released lock returns to (view-plane §6)', () => {
+  const anchor: V3 = [1, 0.5, 0.3]
+
+  it('a locked click from Front releases to green through the anchor, not to ground', () => {
+    const natural = groundNaturalTarget(TOP, anchor, FRONT_VIEW, WORLD_DRAWING_AXES)
+    expect(natural.plane).toEqual(axisDrawPlane(1, anchor))
+    expect(natural.plane.normal).toEqual([0, 1, 0])
+    // Locked to red at the click, then → again mid-gesture: the lock clears
+    // and the gesture lands where an unlocked click would have, through the anchor.
+    const released = nextGestureLockPlane(0, 'ArrowRight', anchor, natural, WORLD_DRAWING_AXES, TOP)
+    expect(released.lock).toBeNull()
+    expect(released.plane.normal).toEqual([0, 1, 0])
+    expect(released.plane.origin).toEqual(anchor)
+  })
+
+  it('from the home view: a level plane through the anchor; the exact ground when the anchor is at z = 0', () => {
+    expect(groundNaturalTarget(TOP, anchor, HOME_VIEW, WORLD_DRAWING_AXES).plane).toEqual(axisDrawPlane(2, anchor))
+    const onGround = groundNaturalTarget(TOP, [1, 2, 0], HOME_VIEW, WORLD_DRAWING_AXES)
+    expect(onGround.plane.ground).toBe(true)
+    expect(onGround).toEqual(groundNaturalTarget(TOP, [1, 2, 0]))
+  })
+
+  it('D1: under a moved frame the blue choice follows the frame; without a view, the literal Z as before', () => {
+    // A frame tilted 90° about X: its blue axis is world −Y.
+    const tilted: DrawingAxes = { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 0, 1], z: [0, -1, 0] }
+    expect(inferredAxis(tilted, TOP_VIEW)).not.toBe(2)
+    expect(inferredAxis(tilted, FRONT_VIEW)).toBe(2)
+    expect(groundNaturalTarget(TOP, anchor, FRONT_VIEW, tilted).plane.normal).toEqual([0, -1, 0])
+    expect(groundNaturalTarget(TOP, anchor).plane.normal).toEqual([0, 0, 1])
+    expect(groundNaturalTarget(TOP, anchor, null, tilted).plane.normal).toEqual([0, 0, 1])
+  })
+
+  it('carries the instance handle', () => {
+    const ctx: EditContext = { kind: 'instance', id: 42n, component: 5n }
+    expect(groundNaturalTarget(ctx, anchor, FRONT_VIEW, WORLD_DRAWING_AXES).target).toEqual({ kind: 'plane', plane: axisDrawPlane(1, anchor), instance: 42n })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Over a sketch's filled interior (view-plane design §2 step 4b), and a
+// ground sketch keeping the ground from a low camera.
+// ---------------------------------------------------------------------------
+
+describe('resolveIdleDrawTarget over a sketch fill (view-plane §2 step 4b)', () => {
+  const RED_SKETCH = 11n
+  const GROUND_SKETCH = 12n
+  const RED_PLANE = new Float64Array([0, 0, 0, 1, 0, 0])
+  const GROUND_PLANE = new Float64Array([0, 0, 0, 0, 0, 1])
+  // A 1 × 1 square on the ground, its corner at the origin.
+  const GROUND_SQUARE = new Float32Array([
+    0, 0, 0, 1, 0, 0,
+    1, 0, 0, 1, 1, 0,
+    1, 1, 0, 0, 1, 0,
+    0, 1, 0, 0, 0, 0,
+  ])
+
+  function fakePick(sketch: bigint, detached = false) {
+    return { sketch: () => sketch, region: () => 1n, depth: () => 99, detached: () => detached, free: vi.fn() }
+  }
+
+  /** A scene whose edge pick (`pick_sketch`) answers `edge` and whose fill
+   *  pick (`pick_sketch_region` and its `_in_instance` sibling) answers a
+   *  fresh `fill()` pick per call. */
+  function fillScene(opts: {
+    edge?: bigint
+    fill?: () => ReturnType<typeof fakePick> | undefined
+    lines?: Float32Array
+    pose?: Float64Array
+  }) {
+    const planes = new Map<bigint, Float64Array>([[RED_SKETCH, RED_PLANE], [GROUND_SKETCH, GROUND_PLANE]])
+    const picks: ReturnType<typeof fakePick>[] = []
+    const pickFill = (..._ray: unknown[]) => {
+      const p = opts.fill?.()
+      if (p !== undefined) picks.push(p)
+      return p
+    }
+    return {
+      picks,
+      sketch_plane: vi.fn((h: bigint) => planes.get(h)),
+      pick_sketch: vi.fn(() => opts.edge),
+      sketch_lines: vi.fn(() => opts.lines ?? new Float32Array()),
+      sketch_is_detached: vi.fn(() => false),
+      pick_sketch_region: vi.fn(pickFill),
+      pick_sketch_region_in_instance: vi.fn(pickFill),
+      instance_pose: vi.fn(() => opts.pose ?? new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])),
+      axes: vi.fn(() => new Float64Array(WORLD_FRAME_FLAT)),
+    }
+  }
+
+  /** A ray from the Front side, off-centre, into the middle of a rectangle
+   *  standing on the red plane x = 0 (the ray crosses that plane 4.9 m out). */
+  const RED_RAY: Ray = { origin: [3, -3, 0.5], direction: [-3, 3.9, -0.13] }
+
+  it('a fill on the red plane beats step 7 from a Front view: that sketch, not the inferred green plane', () => {
+    const scene = fillScene({ fill: () => fakePick(RED_SKETCH) })
+    const resolved = resolveIdleDrawTarget(scene as unknown as WasmScene, new SketchPickCache(), RED_RAY, TOP, undefined, '', FRONT_VIEW)
+    expect(resolved.target).toEqual({ kind: 'existing', handle: RED_SKETCH, instance: null })
+    expect(resolved.plane.normal[0]).toBeCloseTo(1, 12)
+    expect(resolved.plane.normal[1]).toBeCloseTo(0, 12)
+    expect(resolved.plane.normal[2]).toBeCloseTo(0, 12)
+    expect(resolved.inferredAxis).toBeUndefined()
+  })
+
+  const LOW_VIEW = viewAt(15, 0) // below the 20° switch: step 7 would infer green
+  /** From `LOW_VIEW`'s eye down onto the ground at (0.5, 0.5, 0). */
+  const GROUND_RAY: Ray = {
+    origin: LOW_VIEW.eye,
+    direction: [0.5 - LOW_VIEW.eye[0], 0.5 - LOW_VIEW.eye[1], -LOW_VIEW.eye[2]],
+  }
+  /** …and onto the square's edge at (0.5, 0, 0). */
+  const GROUND_EDGE_RAY: Ray = {
+    origin: LOW_VIEW.eye,
+    direction: [0.5 - LOW_VIEW.eye[0], -LOW_VIEW.eye[1], -LOW_VIEW.eye[2]],
+  }
+
+  it('a ground-sketch fill from a 15° view gives the ground, not the inferred vertical plane', () => {
+    expect(inferredAxis(WORLD_DRAWING_AXES, LOW_VIEW)).toBe(1)
+    const scene = fillScene({ fill: () => fakePick(GROUND_SKETCH) })
+    const resolved = resolveIdleDrawTarget(scene as unknown as WasmScene, new SketchPickCache(), GROUND_RAY, TOP, undefined, '', LOW_VIEW)
+    expect(resolved).toStrictEqual({ plane: groundDrawPlane(), target: { kind: 'plane', plane: groundDrawPlane(), instance: null } })
+  })
+
+  it('a ground-sketch EDGE from a 15° view gives the ground too', () => {
+    const scene = fillScene({ edge: GROUND_SKETCH, lines: GROUND_SQUARE })
+    const resolved = resolveIdleDrawTarget(scene as unknown as WasmScene, new SketchPickCache(), GROUND_EDGE_RAY, TOP, undefined, '', LOW_VIEW)
+    expect(resolved).toStrictEqual({ plane: groundDrawPlane(), target: { kind: 'plane', plane: groundDrawPlane(), instance: null } })
+    expect(scene.pick_sketch_region).not.toHaveBeenCalled() // the edge settled it
+  })
+
+  it('a DETACHED fill is never adopted (the pick\'s own flag): the hover falls through to step 7', () => {
+    const scene = fillScene({ fill: () => fakePick(RED_SKETCH, true) })
+    const resolved = resolveIdleDrawTarget(scene as unknown as WasmScene, new SketchPickCache(), RED_RAY, TOP, undefined, '', FRONT_VIEW)
+    expect(resolved.inferredAxis).toBe(1)
+    expect(resolved.target.kind).toBe('plane')
+  })
+
+  it('an ineligible face strictly nearer than the fill wins; a farther one loses', () => {
+    const face = (depth: number) => () => ({ point: [0, 0, 0.3] as V3, normal: [0, 0, 1] as V3, depth })
+    const near = resolveIdleDrawTarget(
+      fillScene({ fill: () => fakePick(RED_SKETCH) }) as unknown as WasmScene, new SketchPickCache(), RED_RAY, TOP, face(1), '', FRONT_VIEW,
+    )
+    expect(near.plane.normal).toEqual([0, 0, 1])
+    expect(near.target).toEqual({ kind: 'plane', plane: near.plane, instance: null })
+    const far = resolveIdleDrawTarget(
+      fillScene({ fill: () => fakePick(RED_SKETCH) }) as unknown as WasmScene, new SketchPickCache(), RED_RAY, TOP, face(10), '', FRONT_VIEW,
+    )
+    expect(far.target).toEqual({ kind: 'existing', handle: RED_SKETCH, instance: null })
+  })
+
+  it('inside an instance context it asks pick_sketch_region_in_instance, and poses the plane through that instance', () => {
+    const ctx: EditContext = { kind: 'instance', id: 3n, component: 5n }
+    // The definition's red-plane sketch, posed +0.5 along x into the world.
+    const scene = fillScene({ fill: () => fakePick(RED_SKETCH), pose: new Float64Array([1, 0, 0, 0.5, 0, 1, 0, 0, 0, 0, 1, 0]) })
+    const resolved = resolveIdleDrawTarget(scene as unknown as WasmScene, new SketchPickCache(), RED_RAY, ctx, undefined, '', FRONT_VIEW)
+    expect(scene.pick_sketch_region_in_instance).toHaveBeenCalledTimes(1)
+    expect(scene.pick_sketch_region_in_instance.mock.calls[0][0]).toBe(3n)
+    expect(scene.pick_sketch_region).not.toHaveBeenCalled()
+    expect(scene.instance_pose).toHaveBeenCalledWith(3n)
+    expect(resolved.target).toEqual({ kind: 'existing', handle: RED_SKETCH, instance: 3n })
+    expect(resolved.plane.origin).toEqual([0.5, 0, 0])
+  })
+
+  it('frees every fill pick exactly once, hit or not', () => {
+    const scene = fillScene({ fill: () => fakePick(RED_SKETCH) })
+    resolveIdleDrawTarget(scene as unknown as WasmScene, new SketchPickCache(), RED_RAY, TOP, undefined, '', FRONT_VIEW)
+    const detached = fillScene({ fill: () => fakePick(RED_SKETCH, true) })
+    resolveIdleDrawTarget(detached as unknown as WasmScene, new SketchPickCache(), RED_RAY, TOP, undefined, '', FRONT_VIEW)
+    for (const s of [scene, detached]) {
+      expect(s.picks).toHaveLength(1)
+      expect(s.picks[0].free).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it('the fill pick is memoized per ray, even when a camera turn re-resolves the target', () => {
+    const scene = fillScene({ fill: () => fakePick(RED_SKETCH) })
+    const cache = new SketchPickCache()
+    const wasm = scene as unknown as WasmScene
+    expect(resolveIdleDrawTarget(wasm, cache, RED_RAY, TOP, undefined, '', FRONT_VIEW).target.kind).toBe('existing')
+    expect(resolveIdleDrawTarget(wasm, cache, RED_RAY, TOP, undefined, '', HOME_VIEW).target.kind).toBe('existing')
+    expect(resolveIdleDrawTarget(wasm, cache, RED_RAY, TOP, undefined, '', HOME_VIEW).target.kind).toBe('existing')
+    expect(scene.pick_sketch_region).toHaveBeenCalledTimes(1)
+    // A new ray asks again.
+    resolveIdleDrawTarget(wasm, cache, { ...RED_RAY }, TOP, undefined, '', HOME_VIEW)
+    expect(scene.pick_sketch_region).toHaveBeenCalledTimes(2)
   })
 })

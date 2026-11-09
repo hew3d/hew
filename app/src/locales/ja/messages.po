@@ -3069,6 +3069,27 @@ msgstr ""
 msgid "eye height"
 msgstr ""
 
+#: src/tools/CircleTool.ts
+#: src/tools/PolygonTool.ts
+msgid "Facing the {axis} plane — click the center to draw on it; ↑ for the ground, Shift pins it."
+msgstr ""
+
+#: src/tools/PlaceImageTool.ts
+msgid "Facing the {axis} plane — click the first corner of \"{name}\" to place it there; ↑ for the ground. Esc cancels."
+msgstr ""
+
+#: src/tools/RectangleTool.ts
+msgid "Facing the {axis} plane — click the first corner to draw on it; ↑ for the ground, Shift pins it."
+msgstr ""
+
+#: src/tools/ArcTool.ts
+msgid "Facing the {axis} plane — click the first endpoint to draw on it; ↑ for the ground, Shift pins it."
+msgstr ""
+
+#: src/tools/LineTool.ts
+msgid "Facing the {axis} plane — click to start a line on it; ↑ for the ground, Shift pins it."
+msgstr ""
+
 #: src/viewport/MeasurementBox.tsx
 msgid "Factor"
 msgstr ""

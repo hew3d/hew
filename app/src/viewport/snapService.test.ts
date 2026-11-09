@@ -61,6 +61,50 @@ describe('SnapService — fallback tier', () => {
     expect(snap).toBeNull()
   })
 
+  it('a fallbackPlane is the miss target (kind "plane") but never reaches the kernel', () => {
+    const scene = fakeScene()
+    const svc = new SnapService(scene)
+    const snapFn = scene.snap as unknown as ReturnType<typeof vi.fn>
+    // The green plane y = 0 seen from the front: a level ray that never
+    // reaches the ground still lands on it.
+    const fallbackPlane = { point: [0, 0, 0] as [number, number, number], normal: [0, 1, 0] as [number, number, number] }
+    const ray: Ray = { origin: [1, -10, 0.5], direction: [0, 1, 0] }
+    const { snap, fromKernel } = svc.resolve(
+      ray, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, fallbackPlane,
+    )
+    expect(fromKernel).toBe(false)
+    expect(snap?.kind).toBe('plane')
+    expect(snap?.x).toBeCloseTo(1, 12)
+    expect(snap?.y).toBeCloseTo(0, 12)
+    expect(snap?.z).toBeCloseTo(0.5, 12)
+    // Argument 9 is the kernel's constraint plane: unset, so geometry
+    // anywhere stays a candidate.
+    expect(snapFn).toHaveBeenCalled()
+    for (const call of snapFn.mock.calls) expect(call[9]).toBeNull()
+  })
+
+  it('without a fallbackPlane the same level ray finds nothing (it never reaches the ground)', () => {
+    const svc = new SnapService(fakeScene())
+    const ray: Ray = { origin: [1, -10, 0.5], direction: [0, 1, 0] }
+    expect(svc.resolve(ray, 800, PERSPECTIVE_45).snap).toBeNull()
+  })
+
+  it('a constraintPlane beats a fallbackPlane, and is the one sent to the kernel', () => {
+    const scene = fakeScene()
+    const svc = new SnapService(scene)
+    const snapFn = scene.snap as unknown as ReturnType<typeof vi.fn>
+    const constraintPlane = { point: [2, 0, 0] as [number, number, number], normal: [1, 0, 0] as [number, number, number] }
+    const fallbackPlane = { point: [0, 3, 0] as [number, number, number], normal: [0, 1, 0] as [number, number, number] }
+    const ray: Ray = { origin: [0, 0, 0], direction: [Math.SQRT1_2, Math.SQRT1_2, 0] }
+    const { snap } = svc.resolve(
+      ray, 800, PERSPECTIVE_45, undefined, undefined, constraintPlane, undefined, undefined, undefined, undefined, undefined, fallbackPlane,
+    )
+    expect(snap?.kind).toBe('plane')
+    expect(snap?.x).toBeCloseTo(2, 12)
+    expect(snap?.y).toBeCloseTo(2, 12)
+    expect(Array.from(snapFn.mock.calls.at(-1)?.[9] as Float64Array)).toEqual([2, 0, 0, 1, 0, 0])
+  })
+
   it('forwards offPlanePoints to Scene.snap as argument 13 (false when omitted)', () => {
     // The 3d-line staircase fix rides entirely on this bit reaching the
     // engine: LineTool opts in via `snapConstraint().offPlanePoints` and the

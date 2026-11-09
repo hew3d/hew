@@ -47,7 +47,7 @@
  */
 
 import type { V3 } from '../viewport/geoHelpers'
-import { applyAffine3x4, invertAffine3x4 } from '../viewport/geoHelpers'
+import { applyAffine3x4, invertAffine3x4, transformNormalThroughPose } from '../viewport/geoHelpers'
 import type { DrawPlane } from './drawPlane'
 import { planeKey } from './drawPlane'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -106,14 +106,11 @@ const PLANE_EPS = 1e-9
  * `instance`, when set, means `sketch` is DEFINITION-owned: `sketch_plane`
  * then answers in DEFINITION-local space, not world, so `plane` (always
  * world-space — see `SketchTarget`'s doc) is compared against the sketch's
- * plane POSED forward through the instance first. Approximates the proper
- * normal transform (the linear part of the pose applied directly, then
- * re-normalized) rather than the exact inverse-transpose a non-uniform-scale
- * pose would technically need — correct for the common rotation/uniform-
- * scale/mirror/translation case; a non-uniform-scale instance can at worst
- * miss a cache hit and mint an extra (still geometrically correct) sketch,
- * never produce wrong geometry, since every actual commit goes through the
- * kernel's own exact pose⁻¹ mapping regardless of this check's outcome.
+ * plane POSED forward through the instance first: the point through the
+ * pose, the normal through its inverse-transpose
+ * (`transformNormalThroughPose`), the same mapping `planeFromSketch` uses,
+ * so a non-uniformly scaled instance's sketch still matches the plane it
+ * was opened on and the cache hits.
  */
 function isStillOnPlane(
   wasmScene: WasmScene,
@@ -128,14 +125,10 @@ function isStillOnPlane(
   if (instance !== null) {
     const pose = wasmScene.instance_pose(instance)
     if (pose === undefined) return false
-    const worldOrigin = applyAffine3x4(pose, [px, py, pz])
-    const rnx = pose[0] * nx + pose[1] * ny + pose[2] * nz
-    const rny = pose[4] * nx + pose[5] * ny + pose[6] * nz
-    const rnz = pose[8] * nx + pose[9] * ny + pose[10] * nz
-    const len = Math.hypot(rnx, rny, rnz)
-    if (len <= 1e-12) return false
-    ;[px, py, pz] = worldOrigin
-    ;[nx, ny, nz] = [rnx / len, rny / len, rnz / len]
+    const worldNormal = transformNormalThroughPose(pose, [nx, ny, nz])
+    if (worldNormal === null) return false
+    ;[px, py, pz] = applyAffine3x4(pose, [px, py, pz])
+    ;[nx, ny, nz] = worldNormal
   }
 
   // Parallel normals, orientation-free: |cross(sketchNormal, planeNormal)| ~ 0.

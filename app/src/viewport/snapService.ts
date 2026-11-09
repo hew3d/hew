@@ -263,8 +263,9 @@ export class SnapService {
    * if neither produced a valid intersection.
    *
    * The returned Snap has kind "ground" when it's a pure fallback with no
-   * constraint plane, or "plane" when it's a pure fallback onto a supplied
-   * `constraintPlane` (no kernel snap available either way). All other kind
+   * constraint or fallback plane, or "plane" when it's a pure fallback onto a
+   * supplied `constraintPlane` or `fallbackPlane` (no kernel snap available
+   * either way). All other kind
    * strings come from the kernel.
    *
    * **Magnetic hysteresis:** discrete inference points (endpoint/midpoint/…,
@@ -333,6 +334,15 @@ export class SnapService {
      * `see_through_points`). Unset: the plain plane filter in every mode.
      */
     seeThroughPoints?: boolean,
+    /**
+     * A plane for step 4's ray∩plane fallback ONLY (`SnapConstraint.
+     * fallbackPlane`): never sent to the kernel, so geometry anywhere in
+     * the scene still snaps, but a miss lands on this plane (`kind:
+     * 'plane'`) rather than the ground. An idle draw tool passes the axis
+     * plane the view faces (view-plane design, picker step 7).
+     * `constraintPlane`, when also given, wins.
+     */
+    fallbackPlane?: { point: [number, number, number]; normal: [number, number, number] },
   ): { snap: Snap | null; fromKernel: boolean } {
     const anchorArr = anchor !== undefined ? new Float64Array(anchor) : null
     const constraintPlaneArr =
@@ -391,9 +401,12 @@ export class SnapService {
     }
 
     // 4. Fallback: ray∩constraintPlane when one was supplied (an anchored
-    //    non-ground gesture — sketches on any plane, Phase 1), else ray∩ground.
-    if (constraintPlane !== undefined) {
-      const p = rayPlaneIntersect(ray.origin, ray.direction, constraintPlane.point, constraintPlane.normal)
+    //    non-ground gesture — sketches on any plane, Phase 1), else
+    //    ray∩fallbackPlane (an idle draw tool's view-facing plane, which
+    //    the kernel never saw), else ray∩ground.
+    const plane = constraintPlane ?? fallbackPlane
+    if (plane !== undefined) {
+      const p = rayPlaneIntersect(ray.origin, ray.direction, plane.point, plane.normal)
       if (p !== null) {
         this.lastSnap = { x: p[0], y: p[1], z: p[2], kind: 'plane' }
         return { snap: this.lastSnap, fromKernel: false }
