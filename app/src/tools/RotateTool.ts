@@ -141,6 +141,7 @@ import {
   dropRidingDrafts,
   copyOwnersAndDrawing,
 } from './transformSelection'
+import { surfaceSketchTransformReports } from './draftCommit'
 import {
   arrowToAxis,
   editArrayBuffer,
@@ -1036,12 +1037,14 @@ export class RotateTool implements Tool {
             this.onCommit(committed)
           }
         }
+        surfaceSketchTransformReports((m) => this.onToast(m))
         this.retype.arm({ nodes, guide: null, pivot, axis, theta, copy: true })
       } else {
         // The whole selection: the planner leaves riding shapes to their
         // owner and hands them back re-found where they landed.
         const committed = commitSelectionTransform(this.wasmScene, allNodes, affineF64, this._activeInstance, t({ context: 'tool', message: 'Rotate' }))
         this.onCommit(committed)
+        surfaceSketchTransformReports((m) => this.onToast(m))
         // Armed with the PRE-commit `nodes`: the window's undo restores the
         // original unit keys (geometry hashes), which the re-resolved
         // `committed` refs of an arranging landing do not name.
@@ -1100,6 +1103,7 @@ export class RotateTool implements Tool {
     } else {
       this.selection = landed.nodes
       this.onArrayCommit(landed.nodes)
+      surfaceSketchTransformReports((m) => this.onToast(m))
     }
   }
 

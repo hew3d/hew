@@ -39,6 +39,8 @@ export interface DraftMockOpts {
   ctxObjects?: bigint[]
   /** Plane-membership check: throw `PointOffPlane` for off-plane segments. */
   enforcePlane?: boolean
+  /** Extra report fields (`faces_closed`, `cells`) merged into the nth `draft_end` report. */
+  reportExtras?: (n: number) => Record<string, unknown>
 }
 
 export function draftMock(opts: DraftMockOpts = {}) {
@@ -127,6 +129,7 @@ export function draftMock(opts: DraftMockOpts = {}) {
         objects: open.objects.map((o) => Number(o)),
         sketches: open.sketches.map((s) => Number(s)),
         kept_as_sketch: [],
+        ...(opts.reportExtras?.(log.ended) ?? {}),
       }
       open = null
       log.ended += 1

@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { useClearSelectionOnDrawTool } from './useClearSelectionOnDrawTool'
 import { i18n } from '@lingui/core'
 import { ph, plural, t } from '@lingui/core/macro'
 import { Trans, useLingui } from '@lingui/react/macro'
@@ -56,6 +57,7 @@ import { ChangesPanel } from './panels/ChangesPanel'
 import { ModelHealthPanel, selectionObjectIds } from './panels/ModelHealthPanel'
 import { FloatingWindow } from './panels/FloatingWindow'
 import { MakeSolidWizard } from './panels/MakeSolidWizard'
+import { MakeSolidSketches, selectedSketchIds } from './panels/MakeSolidSketches'
 import { BADGE_TOOLTIP_LIST, MENU, badgeText, importLogSplit, type WizardScope } from './health/healthCopy'
 import { IsolationBar } from './viewport/IsolationBar'
 import type { IsolationTarget } from './viewport/isolation'
@@ -673,18 +675,34 @@ export default function App() {
   /** The Make Solid wizard: null when closed, else where it was opened from
    *  (the last import, the selection with its object ids, or the whole model). */
   const [makeSolid, setMakeSolid] = useState<{ scope: WizardScope; objectIds: bigint[]; nonce: number } | null>(null)
+  /** Make Solid on a selection of sketches (wireframe faces §6): the second
+   *  input of Object ▸ Make Solid…; null when closed. */
+  const [makeSolidSketches, setMakeSolidSketches] = useState<{ sketchIds: bigint[]; nonce: number } | null>(null)
   /** The sides of the viewport the Model Health window covers (zeros while
    *  it is closed). */
   const [healthCover, setHealthCover] = useState({ left: 0, right: 0 })
   // Framing an isolated item fits it beside the wizard and the Model Health
   // window, not under them.
   useEffect(() => {
-    const wizard = makeSolid !== null ? fixWizardWidth : 0
+    const wizard = makeSolid !== null || makeSolidSketches !== null ? fixWizardWidth : 0
     viewportApi.current?.setFramingInset?.(Math.max(wizard, healthCover.right), healthCover.left)
-  }, [makeSolid, fixWizardWidth, healthCover])
+  }, [makeSolid, makeSolidSketches, fixWizardWidth, healthCover])
   const openMakeSolid = useCallback((scope: WizardScope, objectIds: bigint[] = []) => {
+    setMakeSolidSketches(null)
     setMakeSolid((prev) => ({ scope, objectIds, nonce: (prev?.nonce ?? 0) + 1 }))
   }, [])
+  const openMakeSolidSketches = useCallback((sketchIds: bigint[]) => {
+    setMakeSolid(null)
+    setMakeSolidSketches((prev) => ({ sketchIds, nonce: (prev?.nonce ?? 0) + 1 }))
+  }, [])
+  // The window is about the selection it opened on: a different one closes
+  // it (and with it the overlay it drew).
+  const sketchSelectionRef = useRef(selectedIds)
+  useEffect(() => {
+    if (sketchSelectionRef.current === selectedIds) return
+    sketchSelectionRef.current = selectedIds
+    setMakeSolidSketches(null)
+  }, [selectedIds])
   /** Bumped on every request to open Model Health, to bring its window
    * forward (the window takes focus). */
   const [healthFocusNonce, setHealthFocusNonce] = useState(0)
@@ -2511,15 +2529,10 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state, selectedIds, activeContext, docRev, sessionStack, clipboardAvailable])
 
-  // Choosing a Draw tool at top level clears the selection: the user is
-  // about to create geometry, so a still-selected object/group/component
-  // would pin the contextual dock (and Object Info) to stale context.
-  // In-context (edit-mode) selections are the drawing target and are kept.
-  useEffect(() => {
-    if (!DRAW_TOOLS.has(activeTool)) return
-    if (activeContext.length > 0) return
-    setSelectedIds((cur) => (cur.length > 0 ? [] : cur))
-  }, [activeTool, activeContext])
+  // Choosing a Draw tool at top level clears the selection (see the hook).
+  useClearSelectionOnDrawTool(activeTool, DRAW_TOOLS, activeContext.length > 0, () =>
+    setSelectedIds((cur) => (cur.length > 0 ? [] : cur)),
+  )
 
   // ---------------------------------------------------------------- palette: dynamic Model entries
   // Object/group/component/tag names as searchable palette entries. Selecting
@@ -5678,7 +5691,11 @@ export default function App() {
         // selected, else the whole model.
         const scene = sceneRef.current
         const ids = scene === null ? [] : selectionObjectIds(scene, selectedIds)
+        // A selection of sketches is the second input; one that also holds
+        // Objects keeps today's behavior (the Objects' wizard).
+        const sketches = selectedSketchIds(selectedIds, scene ?? undefined)
         if (ids.length > 0) openMakeSolid('selection', ids)
+        else if (sketches.length > 0) openMakeSolidSketches(sketches)
         else openMakeSolid('model')
         break
       }
@@ -7537,6 +7554,23 @@ export default function App() {
             />
           )}
 
+          {makeSolidSketches !== null && state !== null && (
+            <MakeSolidSketches
+              key={makeSolidSketches.nonce}
+              scene={state.scene}
+              sketchIds={makeSolidSketches.sketchIds}
+              docRev={docRev}
+              docGeneration={docGeneration}
+              onClose={() => setMakeSolidSketches(null)}
+              onHealthOverlay={handleWizardOverlay}
+              escapeBusy={wizardEscapeBusy}
+              onGeometryChanged={refreshAfterPanelMutation}
+              onSelectObject={(id) => handleSelect({ kind: 'object', id }, 'replace')}
+              onToast={handleToast}
+              onWidthChange={setFixWizardWidth}
+            />
+          )}
+
           {/* Model Health: a floating, non-modal window over the viewport,
               closed at every launch. The panel unmounts with it, which clears
               its overlay and its isolation. */}
@@ -7545,7 +7579,7 @@ export default function App() {
               title={MENU.modelHealth}
               storageKey="hew.ui.modelHealthWindow"
               onClose={() => setShowModelHealth(false)}
-              reservedRight={makeSolid !== null ? fixWizardWidth : 0}
+              reservedRight={makeSolid !== null || makeSolidSketches !== null ? fixWizardWidth : 0}
               onCoverChange={setHealthCover}
               focusNonce={healthFocusNonce}
               data-model-health-window
@@ -7574,7 +7608,7 @@ export default function App() {
             <IsolationBar
               count={isolatedCount}
               onShowEverything={handleClearIsolation}
-              rightInset={makeSolid !== null ? fixWizardWidth : 0}
+              rightInset={makeSolid !== null || makeSolidSketches !== null ? fixWizardWidth : 0}
             />
           )}
 
@@ -8397,7 +8431,7 @@ export default function App() {
             const ids = solidWarning.ids
             exportTargetRef.current = null
             setSolidWarning(null)
-            openMakeSolid('selection', ids)
+            openMakeSolid('export', ids)
           }}
           onCancel={() => {
             exportTargetRef.current = null

@@ -97,6 +97,7 @@ import {
   dropRidingDrafts,
   copyOwnersAndDrawing,
 } from './transformSelection'
+import { surfaceSketchTransformReports } from './draftCommit'
 import {
   arrowToAxis,
   editArrayBuffer,
@@ -828,12 +829,14 @@ export class MoveTool implements Tool {
             this.onCommit(committed)
           }
         }
+        surfaceSketchTransformReports((m) => this.onToast(m))
         this.retype.arm({ nodes, guide: null, vector: [tx, ty, tz], copy: true })
       } else {
         // The whole selection: the planner leaves riding shapes to their
         // owner and hands them back re-found where they landed.
         const committed = commitSelectionTransform(this.wasmScene, allNodes, affineF64, this._activeInstance)
         this.onCommit(committed)
+        surfaceSketchTransformReports((m) => this.onToast(m))
         // The window is armed with the PRE-commit `nodes`, not `committed`:
         // its apply() undoes the commit first, which restores the drawing
         // with its ORIGINAL unit keys (they are geometry hashes), and an
@@ -1038,6 +1041,7 @@ export class MoveTool implements Tool {
     } else {
       this.selection = landed.nodes
       this.onArrayCommit(landed.nodes)
+      surfaceSketchTransformReports((m) => this.onToast(m))
     }
   }
 

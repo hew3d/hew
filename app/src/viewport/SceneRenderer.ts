@@ -126,6 +126,10 @@ const SECTION_CUT_WIDTH_MAX_PX = 12
  * sketch-line width above so the orange overlay reads as clearly on top of
  * it rather than disappearing into (or under) it, worst case in light mode. */
 const SKETCH_HIGHLIGHT_WIDTH_PX = 3.8
+/** Make Solid's loose open-edge overlay: wider and later than the selection
+ *  highlight it sits on (render order 999), so it stays visible. */
+const LOOSE_HEALTH_WIDTH_PX = 7
+const LOOSE_HEALTH_ORDER = 1000
 /** Normal translucency of a sketch region fill. */
 const SKETCH_REGION_OPACITY = 0.4
 /**
@@ -2469,7 +2473,8 @@ export class SceneRenderer {
       overlay !== null &&
       prev.rev === overlay.rev &&
       sameIds(prev.ids, overlay.ids) &&
-      sameIds(prev.warnIds, overlay.warnIds)
+      sameIds(prev.warnIds, overlay.warnIds) &&
+      prev.segments === overlay.segments
     // Listed rims: the expensive read (every listed object's rims), kept while
     // only the current finding / preview moves.
     if (!sameRims) this._rebuildHealthRims()
@@ -2513,6 +2518,17 @@ export class SceneRenderer {
       this.isolationFade === null ? [...ids] : ids.filter((id) => !this.hiddenObjectIds.has(id))
     const ids = keep(overlay.ids)
     const warnIds = keep(overlay.warnIds)
+    // Loose segments (drawn faces Make Solid could not close): the same two
+    // colors as the rims, not tied to any Object.
+    // The sketches being made solid are selected, and their highlight (3.8 px,
+    // render order 999, no depth test) would bury a 2.5 px line beneath it, so
+    // these draw wider and after it: a colored band either side of the highlight.
+    if (overlay.segments !== undefined) {
+      // Open edges last: a non-planar loop's edges are also open, so the red
+      // sits on the warn halo.
+      this._addHealthLine(this.healthRimLines, overlay.segments.warn, dark ? 0xe8c84a : 0xb8860b, LOOSE_HEALTH_WIDTH_PX + 4, LOOSE_HEALTH_ORDER)
+      this._addHealthLine(this.healthRimLines, overlay.segments.open, dark ? 0xe0714f : 0xc4543f, LOOSE_HEALTH_WIDTH_PX, LOOSE_HEALTH_ORDER + 1)
+    }
     if (ids.length > 0) {
       this._addHealthLine(this.healthRimLines, this.wasmScene.health_rim_segments(BigUint64Array.from(ids)), dark ? 0xe0714f : 0xc4543f, 2.5, 990)
     }

@@ -515,8 +515,15 @@ export const SHOW_EVERYTHING = msg`Show everything`
 
 // ------------------------------------------------------------------ wizard
 
-/** Where Make Solid runs: the last import, the selection, or the whole model. */
-export type WizardScope = 'import' | 'selection' | 'model'
+/** Where Make Solid runs: the last import, the selection, the objects an
+ *  export warned about, or the whole model. */
+export type WizardScope = 'import' | 'selection' | 'export' | 'model'
+
+/** Scopes that cover a list of object ids the caller passes in, and that
+ *  recommend closing openings (the person is making those objects solid). */
+export function scopeIsPicked(scope: WizardScope): boolean {
+  return scope === 'selection' || scope === 'export'
+}
 
 export const WIZARD = {
   get title() {
@@ -550,7 +557,9 @@ export const WIZARD = {
   overviewTitle: (scope: WizardScope): string =>
     scope === 'selection'
       ? t`Make the selection solid`
-      : scope === 'import'
+      : scope === 'export'
+        ? t`Make these objects solid`
+        : scope === 'import'
         ? t`Make this import solid`
         : t`Make this model solid`,
   overview: (scope: WizardScope, objects: number, solid: number): string => {
@@ -559,7 +568,9 @@ export const WIZARD = {
         ? plural(objects, { one: 'Hew checked the object in this import.', other: 'Hew checked the # objects in this import.' })
         : scope === 'selection'
           ? plural(objects, { one: 'Hew checked the object you selected.', other: 'Hew checked the # objects you selected.' })
-          : plural(objects, { one: 'Hew checked the object in this model.', other: 'Hew checked the # objects in this model.' })
+          : scope === 'export'
+            ? plural(objects, { one: 'Hew checked the object that is not solid.', other: 'Hew checked the # objects that are not solid.' })
+            : plural(objects, { one: 'Hew checked the object in this model.', other: 'Hew checked the # objects in this model.' })
     const parts = [checked]
     parts.push(
       solid === objects

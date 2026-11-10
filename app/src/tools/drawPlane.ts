@@ -22,6 +22,7 @@ import { pickPolicyGeneration } from './pickPolicy'
 import { detachedSketchIds } from './planeUnits'
 import type { SketchTarget } from './sketchGesture'
 import type { EditContext, Snap } from './types'
+import { distanceOffPlane, FACE_PLANE_EPS_M } from './faceDraw'
 
 /** A drawing plane: any point on it, its unit normal, and a right-handed
  *  in-plane basis (u, v) with `cross(u, v) === normal`. */
@@ -361,9 +362,16 @@ export function drawPlaneCue(params: {
   idleHoverCue?: { plane: DrawPlane; ray: Ray } | null
 }): { plane: DrawPlane; through: V3 } | null {
   if (params.anchoredPlane !== null && params.anchoredThrough !== null) {
-    return params.anchoredPlane.ground
-      ? null
-      : { plane: params.anchoredPlane, through: params.anchoredThrough }
+    // A Shift pin holds the plane's orientation, not its height: a first
+    // click through a named point off it starts the shape at that point
+    // (planePin `pointPlane`), so the patch shows that lifted plane, and a
+    // ground pin lifted off the ground is no longer the ground.
+    const through = params.anchoredThrough
+    const off = Math.abs(distanceOffPlane(through, params.anchoredPlane.origin, params.anchoredPlane.normal)) > FACE_PLANE_EPS_M
+    const plane: DrawPlane = off
+      ? { ...params.anchoredPlane, origin: through, ground: isGroundPlane(through, params.anchoredPlane.normal) }
+      : params.anchoredPlane
+    return plane.ground ? null : { plane, through }
   }
   if (params.idleLock !== null) {
     if (params.idleHover === null) return null
@@ -661,8 +669,10 @@ export interface IdleDrawTarget {
   plane: DrawPlane
   target: SketchTarget
   /**
-   * Set only when the plane came from picker step 7 (the axis plane the
-   * view faces, over nothing) AND is not the exact ground plane: the axis
+   * Set only when the plane's orientation came from the view (picker step 7,
+   * the axis plane the view faces, over nothing; or a named point lifted
+   * through that plane, `planeThroughNamedPoint`) AND is not the exact
+   * ground plane: the axis
    * `inferredAxis` chose — 0 red, 1 green, 2 blue (blue only under a moved
    * drawing-axes frame, D1). This is what the tools' status-bar inference
    * line (shown for 0 and 1) keys on; a face, sketch, or ground answer
@@ -725,6 +735,9 @@ export interface IdleDrawTarget {
  * before the view-plane design, and the drawing-axes frame is not read.
  * The memo key includes the inferred axis and the frame, so a camera that
  * turned under a reused ray never serves the old plane.
+ *
+ * Last, `snap` (when given) may lift the plane through a named point in the
+ * air (`planeThroughNamedPoint`, wireframe-faces-and-solids design §2.1).
  */
 export function resolveIdleDrawTarget(
   wasmScene: WasmScene,
@@ -734,6 +747,23 @@ export function resolveIdleDrawTarget(
   foreignFace?: () => { point: V3; normal: V3; depth: number } | null,
   foreignKey = '',
   view: CameraView | null = null,
+  snap: Snap | null = null,
+): IdleDrawTarget {
+  const resolved = resolveIdleDrawTargetAt(wasmScene, sketchPickCache, ray, editContext, foreignFace, foreignKey, view)
+  // A snap to a named point is that point (§2.1): applied after the memo,
+  // since it depends on the snap and the memo is keyed by the ray.
+  if (!isNamedPointSnap(snap)) return resolved
+  return planeThroughNamedPoint(resolved, snap, ray, wasmScene, view, editContext)
+}
+
+function resolveIdleDrawTargetAt(
+  wasmScene: WasmScene,
+  sketchPickCache: SketchPickCache,
+  ray: Ray,
+  editContext: EditContext,
+  foreignFace: (() => { point: V3; normal: V3; depth: number } | null) | undefined,
+  foreignKey: string,
+  view: CameraView | null,
 ): IdleDrawTarget {
   const instance = instanceOf(editContext)
   const frame = view === null ? null : getDrawingAxes(wasmScene)
@@ -823,6 +853,99 @@ export function resolveIdleDrawTarget(
   }, key)
 }
 
+/** The snap kinds that name one exact point (the engine's `point_kind`:
+ *  Endpoint, Center, Quadrant, Intersection, Midpoint; a guide point is an
+ *  Endpoint). Every other kind (on-edge, on-face, on-axis, plane, ground)
+ *  lies somewhere along a line or surface and is not a point the cursor
+ *  asked for. */
+export const NAMED_POINT_KINDS: ReadonlySet<string> = new Set(['endpoint', 'midpoint', 'center', 'quadrant', 'intersection'])
+
+/** Whether `snap` is a named point (wireframe-faces-and-solids design §2). */
+export function isNamedPointSnap(snap: Snap | null): snap is Snap {
+  return snap !== null && NAMED_POINT_KINDS.has(snap.kind)
+}
+
+/**
+ * The §2.1 test alone: `snap` is a named point that is off the plane
+ * (`planePoint`, `normal`) by more than `FACE_PLANE_EPS_M` and, when
+ * `onlyIfNearer` (the default), nearer the eye than the place the cursor ray
+ * meets the plane (or the ray does not meet it). A type guard: the snap is
+ * non-null past it.
+ *
+ * The nearer-the-eye half exists because an Object's face can hide a point
+ * behind it; a plane cannot (R18 a), so callers testing the ground, a sketch
+ * plane, the inferred axis plane or a pin pass `onlyIfNearer: false`.
+ */
+export function namedPointLeavesPlane(snap: Snap | null, ray: Ray, planePoint: V3, normal: V3, onlyIfNearer = true): snap is Snap {
+  if (!isNamedPointSnap(snap)) return false
+  const point: V3 = [snap.x, snap.y, snap.z]
+  if (Math.abs(distanceOffPlane(point, planePoint, normal)) <= FACE_PLANE_EPS_M) return false
+  if (!onlyIfNearer) return true
+  const hit = rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
+  if (hit === null) return true
+  const dist = (p: V3): number => Math.hypot(p[0] - ray.origin[0], p[1] - ray.origin[1], p[2] - ray.origin[2])
+  return dist(point) < dist(hit)
+}
+
+/**
+ * The post-picker step (wireframe-faces-and-solids design §2.1 as amended by
+ * R18): a snap to a named point is that point.
+ *
+ * - When the picker chose an Object face (`resolved.onFace`), the point lifts
+ *   the plane only if it is off the face and nearer the eye than the ray's hit
+ *   on it (a face can hide a point). Otherwise it keeps the old answer: the
+ *   tool drops it onto the face and says "projected".
+ * - When the picker chose the ground, a sketch's plane or the inferred axis
+ *   plane, a named point off that plane always lifts it (R18 a): a plane
+ *   hides nothing.
+ * - At a named point of a free sketch, with the view's inferred axis red or
+ *   green, the plane is the inferred axis plane THROUGH the point rather than
+ *   the sketch's own (R18 b), unless the sketch's plane already has that
+ *   orientation. A ground sketch keeps the ground from an ordinary (blue)
+ *   view, and over its fill.
+ *
+ * The lifted plane is the camera-facing axis plane through the point
+ * (`inferredAxis`; without `view`, the frame's blue axis). Through a point at
+ * z = 0 in the world frame this is the exact ground plane (`axisDrawPlane`'s
+ * fast path). Anything else (no snap, a snap that is not a named point, a
+ * point already on the plane) returns `resolved` itself, so every existing
+ * result is untouched.
+ */
+export function planeThroughNamedPoint(
+  resolved: IdleDrawTarget,
+  snap: Snap | null,
+  ray: Ray,
+  wasmScene: WasmScene,
+  view: CameraView | null,
+  editContext: EditContext,
+): IdleDrawTarget {
+  if (!isNamedPointSnap(snap)) return resolved
+  const point: V3 = [snap.x, snap.y, snap.z]
+  const { plane } = resolved
+  const off = namedPointLeavesPlane(snap, ray, plane.origin, plane.normal, resolved.onFace === true)
+  // R18 b: a sketch's plane (a ground sketch gives the literal ground) at a
+  // named point, seen from a red or green view. `inferredAxis` set means the
+  // plane IS step 7's; `onFace` a face's.
+  const sketchAdopted = view !== null && resolved.inferredAxis === undefined && resolved.onFace !== true &&
+    (resolved.target.kind === 'existing' || plane.ground)
+  if (!off && !sketchAdopted) return resolved
+  const frame = getDrawingAxes(wasmScene)
+  const axis = view === null ? 2 : inferredAxis(frame, view)
+  if (!off) {
+    // On the sketch's plane already: keep it unless the view calls for a
+    // red or green plane of another orientation.
+    if (axis === 2) return resolved
+    const n = axis === 0 ? frame.x : frame.y
+    const parallel = Math.abs(plane.normal[0] * n[0] + plane.normal[1] * n[1] + plane.normal[2] * n[2]) > 1 - 1e-9
+    if (parallel) return resolved
+  }
+  const lifted = axisDrawPlane(axis, point, frame)
+  const target: SketchTarget = { kind: 'plane', plane: lifted, instance: instanceOf(editContext) }
+  // Like step 7's result: the view chose this plane's orientation, so the
+  // "Facing the ... plane" hint shows at the lifted corner (R21).
+  return view !== null && !lifted.ground ? { plane: lifted, target, inferredAxis: axis } : { plane: lifted, target }
+}
+
 /**
  * Resolve the plane/target the FIRST click of a gesture anchors onto
  * (design §5.2) — shared by the same five draw tools.
@@ -855,7 +978,7 @@ export function resolveClickDrawTarget(
     const plane = axisDrawPlane(idlePlaneLock, clickedPoint, getDrawingAxes(wasmScene))
     return { plane, target: { kind: 'plane', plane, instance: instanceOf(editContext) } }
   }
-  return resolveIdleDrawTarget(wasmScene, sketchPickCache, ray, editContext, foreignFace, foreignKey, view)
+  return resolveIdleDrawTarget(wasmScene, sketchPickCache, ray, editContext, foreignFace, foreignKey, view, snap)
 }
 
 /**

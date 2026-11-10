@@ -158,7 +158,7 @@ fn draw_detached(
     label: &str,
     runs: Vec<Run>,
 ) -> Result<Value, CmdError> {
-    let (sketch, curve) = match target {
+    let (sketch, curve, closed) = match target {
         PlaneTarget::Face(face) => draft::draw_detached_on_face(ctx, face, label, runs)?,
         PlaneTarget::NewPlane(plane) => draft::draw_detached(ctx, plane, None, label, runs)?,
         PlaneTarget::Sketch(_) => {
@@ -174,7 +174,9 @@ fn draw_detached(
         .sketch(sketch)
         .map(|sk| sk.regions().keys().collect())
         .unwrap_or_default();
-    Ok(draw_result(ctx, sketch, &regions, curve))
+    let mut out = draw_result(ctx, sketch, &regions, curve);
+    closed.annotate(ctx, &mut out);
+    Ok(out)
 }
 
 /// `n` evenly spaced points around a circle's circumference in `plane`'s
@@ -333,7 +335,7 @@ pub(super) fn draw_line(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     }
     let (sketch, _plane) = commit_target(ctx, target)?;
 
-    let reports = super::run_sketch_gesture(ctx, sketch, |s| {
+    let (reports, closed) = super::run_drawing_gesture(ctx, sketch, |s| {
         let mut reports = Vec::with_capacity(pts.len() - 1);
         for w in pts.windows(2) {
             reports.push(s.add_segment(w[0], w[1]).map_err(sketch_err)?);
@@ -342,7 +344,9 @@ pub(super) fn draw_line(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     })?;
 
     let regions = net_created_regions(&reports);
-    Ok(draw_result(ctx, sketch, &regions, None))
+    let mut out = draw_result(ctx, sketch, &regions, None);
+    closed.annotate(ctx, &mut out);
+    Ok(out)
 }
 
 pub(super) fn draw_rect(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -376,7 +380,7 @@ pub(super) fn draw_rect(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     let [a, p2, b, p4] = rect_corners(&plane, a, b);
     let loop_pts = [a, p2, b, p4, a];
 
-    let reports = super::run_sketch_gesture(ctx, sketch, |s| {
+    let (reports, closed) = super::run_drawing_gesture(ctx, sketch, |s| {
         let mut reports = Vec::with_capacity(4);
         for w in loop_pts.windows(2) {
             reports.push(s.add_segment(w[0], w[1]).map_err(sketch_err)?);
@@ -385,7 +389,9 @@ pub(super) fn draw_rect(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     })?;
 
     let regions = net_created_regions(&reports);
-    Ok(draw_result(ctx, sketch, &regions, None))
+    let mut out = draw_result(ctx, sketch, &regions, None);
+    closed.annotate(ctx, &mut out);
+    Ok(out)
 }
 
 pub(super) fn draw_circle(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -443,7 +449,7 @@ pub(super) fn draw_circle(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdErr
     let (sketch, plane) = commit_target(ctx, target)?;
     let ring = ring_points(&plane, center, p.radius, n);
 
-    let (curve, reports) = super::run_sketch_gesture(ctx, sketch, |s| {
+    let ((curve, reports), closed) = super::run_drawing_gesture(ctx, sketch, |s| {
         let curve = s.begin_curve_with(geom).map_err(sketch_err)?;
         let mut reports = Vec::with_capacity(n);
         for i in 0..n {
@@ -457,7 +463,9 @@ pub(super) fn draw_circle(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdErr
     })?;
 
     let regions = net_created_regions(&reports);
-    Ok(draw_result(ctx, sketch, &regions, Some(curve)))
+    let mut out = draw_result(ctx, sketch, &regions, Some(curve));
+    closed.annotate(ctx, &mut out);
+    Ok(out)
 }
 
 /// How a drawn arc's ends are closed (mirrors the UI Arc tool's Alt-cycled
@@ -638,7 +646,7 @@ pub(super) fn draw_arc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError>
     let (sketch, plane) = commit_target(ctx, target)?;
     let pts = arc_points(&plane, center, p.radius, p.start_angle, sweep, n);
 
-    let (curve, reports) = super::run_sketch_gesture(ctx, sketch, |s| {
+    let ((curve, reports), closed) = super::run_drawing_gesture(ctx, sketch, |s| {
         let curve = s.begin_curve_with(geom).map_err(sketch_err)?;
         let mut reports = Vec::with_capacity(n);
         for w in pts.windows(2) {
@@ -667,7 +675,9 @@ pub(super) fn draw_arc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError>
     })?;
 
     let regions = net_created_regions(&reports);
-    Ok(draw_result(ctx, sketch, &regions, Some(curve)))
+    let mut out = draw_result(ctx, sketch, &regions, Some(curve));
+    closed.annotate(ctx, &mut out);
+    Ok(out)
 }
 
 /// The most sides `hew.sketch.draw_polygon` accepts — the Polygon tool's own
@@ -730,7 +740,7 @@ pub(super) fn draw_polygon(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdEr
     let (sketch, plane) = commit_target(ctx, target)?;
     let ring = ring_points(&plane, center, p.radius, n);
 
-    let (curve, reports) = super::run_sketch_gesture(ctx, sketch, |s| {
+    let ((curve, reports), closed) = super::run_drawing_gesture(ctx, sketch, |s| {
         let curve = s
             .begin_curve_with_kind(geom, SketchCurveKind::Polygon)
             .map_err(sketch_err)?;
@@ -746,7 +756,9 @@ pub(super) fn draw_polygon(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdEr
     })?;
 
     let regions = net_created_regions(&reports);
-    Ok(draw_result(ctx, sketch, &regions, Some(curve)))
+    let mut out = draw_result(ctx, sketch, &regions, Some(curve));
+    closed.annotate(ctx, &mut out);
+    Ok(out)
 }
 
 pub(super) fn offset(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {

@@ -8,8 +8,9 @@
  * click would land on — the hovered eligible face's plane, a hovered
  * sketch's plane, or the ground (`trackHover`). A Shift press pins that
  * plane: the tool's snap query is constrained to it, the first click
- * anchors a PLANE-mode gesture on it, and the cursor stays on it wherever
- * it goes — off the face's edge, over the ground, over another solid.
+ * anchors a PLANE-mode gesture on its orientation (through a named point
+ * off the plane when the click is on one, `clickTarget`), and the cursor
+ * stays on it wherever it goes — off the face's edge, over the ground, over another solid.
  * Pressing Shift again, or Escape while idle, releases the pin. The pin
  * survives a completed gesture (draw several shapes on one plane) exactly
  * like the arrow-key idle plane lock does, and `cancel()` — a tool switch,
@@ -31,8 +32,9 @@
 import type { V3 } from '../viewport/geoHelpers'
 import type { DrawPlane } from './drawPlane'
 import type { SketchTarget } from './sketchGesture'
-import type { EditContext } from './types'
-import { instanceOf } from './drawPlane'
+import type { EditContext, Snap } from './types'
+import { instanceOf, isGroundPlane, isNamedPointSnap } from './drawPlane'
+import { distanceOffPlane, FACE_PLANE_EPS_M } from './faceDraw'
 
 /** A plane worth pinning, with the hover point it was found under (the
  *  point the plane cue draws through until the cursor moves again). */
@@ -113,19 +115,40 @@ export class PlanePin {
 
   /** The plane-mode target a first click anchors onto while pinned, or
    *  null when nothing is pinned. Namespaced to the edit context's
-   *  instance exactly like every other plane-mode target. */
-  clickTarget(editContext: EditContext): { plane: DrawPlane; target: SketchTarget } | null {
+   *  instance exactly like every other plane-mode target.
+   *
+   *  A pin holds the plane's ORIENTATION for the first click (R18 c): when
+   *  `snap` names a point (corner, midpoint, center, quadrant, guide point)
+   *  off the pinned plane, the target is the pinned plane's orientation
+   *  THROUGH that point, so the gesture starts at the point the cursor named
+   *  instead of on its foot. Later points of the gesture are held to the
+   *  frozen plane and project, disclosed, as before. */
+  clickTarget(editContext: EditContext, snap: Snap | null = null): { plane: DrawPlane; target: SketchTarget } | null {
     if (this.pinned === null) return null
-    const plane = this.pinned.plane
+    const plane = this.pointPlane(snap) ?? this.pinned.plane
     return { plane, target: { kind: 'plane', plane, instance: instanceOf(editContext) } }
   }
 
-  /** The snap constraint the pinned plane imposes: every candidate must lie
-   *  on it — the cursor is locked INTO the plane, so a vertex above a
-   *  pinned ground plane is not a target, its foot on the plane is. Null
-   *  when nothing is pinned. */
-  constraint(): { constraintPlane: { point: V3; normal: V3 } } | null {
+  /** The pinned plane's orientation through `snap`'s point, when `snap` is a
+   *  named point more than the plane tolerance off the pinned plane; null
+   *  otherwise (nothing pinned, no named point, or the point is on it). */
+  pointPlane(snap: Snap | null): DrawPlane | null {
+    if (this.pinned === null || !isNamedPointSnap(snap)) return null
+    const pinned = this.pinned.plane
+    const point: V3 = [snap.x, snap.y, snap.z]
+    if (Math.abs(distanceOffPlane(point, pinned.origin, pinned.normal)) <= FACE_PLANE_EPS_M) return null
+    return { ...pinned, origin: point, ground: isGroundPlane(point, pinned.normal) }
+  }
+
+  /** The snap constraint the pinned plane imposes: candidates are held to
+   *  the plane, so an edge or face off it is not a target, its foot on the
+   *  plane is. Named points (corner, midpoint, center, quadrant, guide
+   *  point) off the plane are still offered (`offPlanePoints`): the first
+   *  click starts through them (`clickTarget`), and later clicks drop them
+   *  onto the frozen plane, disclosed (`cursorOnFrozenPlane`). Null when
+   *  nothing is pinned. */
+  constraint(): { constraintPlane: { point: V3; normal: V3 }; offPlanePoints: true } | null {
     if (this.pinned === null) return null
-    return { constraintPlane: { point: this.pinned.plane.origin, normal: this.pinned.plane.normal } }
+    return { constraintPlane: { point: this.pinned.plane.origin, normal: this.pinned.plane.normal }, offPlanePoints: true }
   }
 }

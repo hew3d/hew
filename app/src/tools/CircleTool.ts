@@ -76,8 +76,9 @@ import { DetachedMode, type OnDetachedChange } from './detachedMode'
 import type { SketchTarget } from './sketchGesture'
 import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
 import { cameraView } from './viewPlaneInference'
-import { drawPlaneCue, idleHoverCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane, type IdleDrawTarget, type CameraView } from './drawPlane'
+import { namedPointLeavesPlane, isNamedPointSnap, drawPlaneCue, idleHoverCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane, type IdleDrawTarget, type CameraView } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
+import { ReferenceLines, drawingFrame, resolveDrawCursor, resolveIdleReference, type DrawCursor } from './referenceLines'
 import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick, cursorOnFrozenPlane, firstPointOnFace } from './faceDraw'
 import { pickRenderMode } from './pickPolicy'
 import { PlanePin } from './planePin'
@@ -390,7 +391,7 @@ export class CircleTool implements Tool {
    * re-check is needed here.
    */
   private _resolveIdleTarget(ray: Ray, snap: Snap | null = null): IdleDrawTarget {
-    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext, () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap), snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '', this._view)
+    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext, () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap), snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '', this._view, snap)
   }
 
   /**
@@ -404,7 +405,7 @@ export class CircleTool implements Tool {
    * point yet (nothing to click through).
    */
   private _resolveClickTarget(snap: Snap | null, ray: Ray): IdleDrawTarget | null {
-    const pinned = this.pin.clickTarget(this._editContext)
+    const pinned = this.pin.clickTarget(this._editContext, snap)
     if (pinned !== null) return pinned
     return resolveClickDrawTarget(
       this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray, this._editContext,
@@ -422,9 +423,11 @@ export class CircleTool implements Tool {
   private _planeCursor(snap: Snap | null, ray: Ray, plane: DrawPlane): V3 | null {
     if (plane.ground) {
       if (snap === null) return null
-      // Records whether the z about to be discarded was actually carrying
-      // information — see `snapProjected`.
-      this._snapProjected = snap.z !== 0
+      // The foot and the "projected" verdict come from the one place every
+      // frozen plane gets them (`cursorOnFrozenPlane`); the committed
+      // coordinates stay the exact legacy `[x, y, 0]`, so ground commits are
+      // bit-identical (at world identity the foot of (x, y, z) is (x, y, 0)).
+      this._snapProjected = cursorOnFrozenPlane(snap, ray, plane.origin, plane.normal)?.projected ?? false
       return [snap.x, snap.y, 0]
     }
     // A non-ground plane is frozen like a face: an off-plane snap (X-ray)
@@ -432,6 +435,47 @@ export class CircleTool implements Tool {
     const at = cursorOnFrozenPlane(snap, ray, plane.origin, plane.normal)
     this._snapProjected = at?.projected ?? false
     return at?.point ?? null
+  }
+
+  /** Reference points and lines (design §3, `referenceLines.ts`). */
+  private readonly refs = new ReferenceLines()
+
+  /** The snap the cue should draw for the last plane-mode move: a reference
+   *  line's (kind `from-point`, with its foot and tie) or a projected snap's
+   *  (tie line), else the engine's own; null when there is nothing to
+   *  override (`Viewport.toolSnapForCues`). */
+  lastSnap: Snap | null = null
+
+  /** Live pixel-scale feed (`Tool.updateDiskScale`): the reference-line
+   *  acquire radius is a screen distance. */
+  updateDiskScale(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void {
+    this.refs.updateScale(camera, worldPerPixel)
+  }
+
+  /** The tool became the active one: the points the cursor rested on while
+   *  another tool was active are forgotten (design §3.2). */
+  activate(): void {
+    this.refs.clearRing()
+  }
+
+  /** The gesture's own reference points (`ReferenceLines.resolve`). */
+  private _gesturePoints(): V3[] {
+    return []
+  }
+
+  /** `_planeCursor` for an anchored gesture, then the reference lines
+   *  (`resolveDrawCursor`): the point to use and the snap to draw. */
+  private _anchoredCursor(snap: Snap | null, ray: Ray, plane: DrawPlane, anchor: V3): { point: V3; snap: Snap | null } | null {
+    const cursor = this._planeCursor(snap, ray, plane)
+    if (cursor === null) return null
+    const out = resolveDrawCursor(this.refs, {
+      snap, cursor, plane, anchor, lockDir: null,
+      frame: () => drawingFrame(this.wasmScene),
+      gesture: this._gesturePoints(),
+      projected: this._snapProjected,
+    })
+    if (out.reference) this._snapProjected = false
+    return { point: out.point, snap: out.snap }
   }
 
   /** See `Tool.snapProjected`. Set by `_planeCursor` and `_faceCursor`,
@@ -470,7 +514,20 @@ export class CircleTool implements Tool {
     // sketch-hover adoption (design §5.2) — the user already chose a plane.
     if (this.idlePlaneLock !== null || this.pin.current !== null) return 'plane'
     if (ray === undefined) return 'plane'
-    return this._facePickAt(snap, ray) !== null ? 'face' : 'plane'
+    const face = this._facePickAt(snap, ray)
+    if (face === null) return 'plane'
+    return this._faceGivesWay(face.object, face.face, snap, ray) ? 'plane' : 'face'
+  }
+
+  /** Whether a snap to a named point in front of the hovered face's plane
+   *  makes the face give way to the plane through the point
+   *  (wireframe-faces-and-solids design §2.1, ruling R1). Never inside an
+   *  entered Object, where the tool stays in face mode and the point drops
+   *  onto the face, disclosed. */
+  private _faceGivesWay(object: bigint, face: bigint, snap: Snap | null, ray: Ray): boolean {
+    if (this._activeContext !== null || !isNamedPointSnap(snap)) return false
+    const plane = worldFacePlane(this.wasmScene, object, face, this._activeInstance)
+    return plane !== null && namedPointLeavesPlane(snap, ray, plane.point, plane.normal)
   }
 
   /**
@@ -504,6 +561,11 @@ export class CircleTool implements Tool {
         // Dropped onto the plane and disclosed (`cursorOnFrozenPlane`), so
         // X-ray and Wireframe may offer hidden points through it.
         seeThroughPoints: true,
+        // A snap to a named point is that point (design §2.3): Shaded mode
+        // offers a corner or guide point off the plane too, and the cursor
+        // drops it onto the plane and says "projected" instead of the
+        // engine discarding it.
+        offPlanePoints: true,
       }
     }
 
@@ -517,6 +579,11 @@ export class CircleTool implements Tool {
         // Dropped onto the plane and disclosed (`cursorOnFrozenPlane`), so
         // X-ray and Wireframe may offer hidden points through it.
         seeThroughPoints: true,
+        // A snap to a named point is that point (design §2.3): Shaded mode
+        // offers a corner or guide point off the plane too, and the cursor
+        // drops it onto the plane and says "projected" instead of the
+        // engine discarding it.
+        offPlanePoints: true,
       }
     }
 
@@ -549,7 +616,7 @@ export class CircleTool implements Tool {
       // Hidden points through the hovered face only in X-ray, where the
       // first click can adopt or be dropped onto that face; Wireframe has no
       // faces to adopt.
-      return { constraintPlane: { point: plane.origin, normal: plane.normal }, seeThroughPoints: pickRenderMode() === 'xray' }
+      return { constraintPlane: { point: plane.origin, normal: plane.normal }, seeThroughPoints: pickRenderMode() === 'xray', offPlanePoints: true }
     }
     return null
   }
@@ -582,7 +649,7 @@ export class CircleTool implements Tool {
       }
     }
     const eligible = this._eligiblePickFor(ray)
-    if (eligible !== null) {
+    if (eligible !== null && !this._faceGivesWay(eligible.object, eligible.face, snap, ray)) {
       const plane = worldFacePlane(this.wasmScene, eligible.object, eligible.face, this._activeInstance)
       if (plane !== null) {
         const drawPlane = drawPlaneThrough(plane.point, plane.normal)
@@ -678,6 +745,21 @@ export class CircleTool implements Tool {
     return resolved.inferredAxis === undefined ? null : { axis: resolved.inferredAxis, plane: resolved.plane, ray }
   }
 
+  /** The reference-line snap the idle hover and the first click share
+   *  (`resolveIdleReference`): the dwell ring's lines on the plane the click
+   *  would freeze. */
+  private _idleReferenceAt(snap: Snap | null, ray: Ray): DrawCursor | null {
+    if (this.refs.dwellPoints.length === 0) return null
+    const target = this._resolveClickTarget(snap, ray)
+    if (target === null) return null
+    const before = this._snapProjected
+    const cursor = this._planeCursor(snap, ray, target.plane)
+    const projected = this._snapProjected
+    this._snapProjected = before
+    if (cursor === null) return null
+    return resolveIdleReference(this.refs, this.wasmScene, { snap, cursor, plane: target.plane, projected })
+  }
+
   /** Idle hover bookkeeping: the hover point for the plane cue (arrow lock
    *  and Shift pin previews both draw through it) and, for the pin, the
    *  plane the next click would land on (`_idleHoverPlane`). */
@@ -696,15 +778,26 @@ export class CircleTool implements Tool {
     if (this._currentMode(ray, snap) === 'face') {
       const face = this._facePickAt(snap, ray)
       if (face !== null) this._idleProjected = firstPointOnFace(this.wasmScene, face, this._activeInstance, snap, ray).projected
+    } else if (this.idlePlaneLock === null && this.pin.current === null && isNamedPointSnap(snap)) {
+      // Plane mode: what the first click would do with a named point. In the
+      // air it starts there (not projected); hidden behind the picked plane
+      // it drops onto it (projected). Asked of `_planeCursor` itself, which
+      // keeps this in step with the click.
+      this._planeCursor(snap, ray, this._idleHoverPlane(ray, snap))
+      this._idleProjected = this._snapProjected
+      this._snapProjected = false
     }
     const through: V3 = [snap.x, snap.y, snap.z]
     this._lastIdleHoverPoint = through
     if (this.idlePlaneLock === null) this.pin.trackHover(this._idleHoverPlane(ray, snap), through)
     this._idleInferred = this.idlePlaneLock === null && this.pin.current === null ? this._inferredAt(ray, snap) : null
     this._idleHoverCue = this.idlePlaneLock === null && this.pin.current === null ? idleHoverCue(this._idleHoverResolution(ray, snap), ray, this._activeContext !== null) : null
+    this.lastSnap = this._currentMode(ray, snap) === 'face' ? null : (this._idleReferenceAt(snap, ray)?.snap ?? null)
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
+    this.refs.observeHover(snap)
+    this.lastSnap = null
     if (this._currentMode(ray, snap) === 'face') {
       // Face mode
       if (this.faceStage.kind !== 'anchored') {
@@ -744,7 +837,9 @@ export class CircleTool implements Tool {
         return
       }
       const { plane, center } = this.planeStage
-      const cursor = this._planeCursor(snap, ray, plane)
+      const resolvedCursor = this._anchoredCursor(snap, ray, plane, center)
+      const cursor = resolvedCursor === null ? null : resolvedCursor.point
+      this.lastSnap = resolvedCursor === null ? null : resolvedCursor.snap
       if (cursor === null) {
         this._clearPreview()
         // An open retype buffer owns the readout: the key router re-runs
@@ -834,6 +929,8 @@ export class CircleTool implements Tool {
 
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
+      // Esc from idle forgets the points the cursor rested on (design §3.2).
+      if (!this.capturingInput()) this.refs.clearRing()
       // Idle with an active plane lock: Escape clears the lock FIRST — only
       // a second Escape (already idle, unlocked) falls through to today's
       // idle-Escape behavior (design §5.2).
@@ -958,6 +1055,8 @@ export class CircleTool implements Tool {
   }
 
   cancel(): void {
+    this.lastSnap = null
+    this.refs.endGesture()
     this.retype.close()
     this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
@@ -980,6 +1079,7 @@ export class CircleTool implements Tool {
    */
   onDocumentReset(): void {
     this.cancel()
+    this.refs.clearRing()
     this.sep.reset()
     // A new document's handles can reuse the old one's: no memoized pick
     // or hover memory may outlive it.
@@ -1153,7 +1253,7 @@ export class CircleTool implements Tool {
       const resolved = this._resolveClickTarget(snap, ray)
       if (resolved === null) return
       const { plane, target } = resolved
-      const center = this._planeCursor(snap, ray, plane)
+      const center = this._idleReferenceAt(snap, ray)?.point ?? this._planeCursor(snap, ray, plane)
       if (center === null) return
 
       // The unlocked resolution at this SAME click (design §2a) — reuse it
@@ -1165,12 +1265,17 @@ export class CircleTool implements Tool {
         ? groundNaturalTarget(this._editContext, center, this._gestureView, getDrawingAxes(this.wasmScene))
         : resolved
       this.planeStage = { kind: 'anchored', plane, target, center, natural }
+      this.refs.beginGesture(this.wasmScene, snap, center, ray)
       this._lastPlaneCursor = null
     } else {
       // Second click: commit the circle.
       const { plane, target, center } = this.planeStage
-      const cursor = this._planeCursor(snap, ray, plane)
-      if (cursor === null) return
+      const resolvedCursor = this._anchoredCursor(snap, ray, plane, center)
+      if (resolvedCursor === null) return
+      const cursor = resolvedCursor.point
+      // What the commit sees is the snap the cue showed (a reference line is a hard pick).
+      const pickSnap = resolvedCursor.snap
+      this.lastSnap = null
 
       // Skip degenerate circles (zero radius). The ground branch keeps the
       // EXACT legacy per-axis check — bit-identical gating to before this
@@ -1183,7 +1288,7 @@ export class CircleTool implements Tool {
       }
 
       // A free pick commits the DISPLAYED radius, exactly as if typed.
-      if (this._commitDisplayed(snap, center, cursor)) return
+      if (this._commitDisplayed(pickSnap, center, cursor)) return
 
       const committed = this._commitPlaneCircle(plane, target, center, cursor)
       this.planeStage = { kind: 'idle' }
@@ -1229,6 +1334,7 @@ export class CircleTool implements Tool {
         addDraftLoop(this.wasmScene, d, verts, { kind: 'circle', center, radius }),
       )
       refreshAfterDraft(report, {
+        onToast: (m) => this.onToast(m),
         onObject: (o) => this.onFaceImprint(o),
         onSketch: (sketchHandle) => this.onCommit({ sketchHandle, regionsCreated }),
       })

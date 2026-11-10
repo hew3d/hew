@@ -287,7 +287,7 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
           }
         }
         gen++
-        return id
+        return JSON.stringify({ objects: [], sketches: [Number(id)], kept_as_sketch: [], faces_closed: [], cells: [] })
       },
     ),
   }

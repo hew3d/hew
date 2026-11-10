@@ -252,7 +252,50 @@ below.
 - Detached shapes: Ctrl/Cmd on a draw tool keeps the shape apart from the
   plane's drawing (`Sketch::detached`, sketch-only draft scope,
   `draft_begin_detached`, API `detached`); Push/Pull on it makes a new
-  Object; the Getting Started cutter is drawn this way
+  Object; the Getting Started cutter is drawn this way. A detached shape
+  takes part in no arrangement with ordinary drawing, and never closes a
+  face against a solid's face edge, except that an Object edge in its
+  plane whose two ends are corners of the detached shape closes it; a
+  detached line closes a face with other detached lines and with such
+  Objects' edges only. Detached lines that share corners close a face;
+  lines that only cross do not, and a crossing line neither splits nor
+  blocks a face. Every region the connected detached lines bound becomes
+  a face, not only those the newest line bounds (a gable split by a post
+  fills both halves); a region a loop of the connected set already holds
+  is never made again, so a face is final to later detached gestures (a
+  line drawn across it stays loose), while a separate shape never blocks
+  one (nested shapes both fill). A detached loop on an Object's face is a
+  loose face there. A curve taken into a face keeps its curve chain
+- Faces from lines on any planes: a loop of straight edges on one plane
+  is a face whichever sketches hold its lines. Edges that lie in a plane
+  but belong to another sketch or to an Object are foreign edges to that
+  plane's lift (fixed, never moved), and a close pass after every draft
+  and sketch move/copy finds the planes the edit's edges close (the plane
+  through the edit and each edge meeting it), writes the face into that
+  plane's free sketch, and takes the edge out of the sketch it was drawn
+  in if it bounded no region there. Three lines up to a corner's apex
+  fill a triangle on an inclined plane; a wire cube fills as it
+  closes. Exact planarity: lines that miss a plane make no face, and
+  Line says so. Tag-hidden and closed-group sketches take no part. No
+  file format change
+- Automatic solids and growing a solid: when an edit leaves flat faces
+  that enclose a space with no gap, they become one Object in the same
+  undo step (`document/cells.rs`: refine, rims, prune, cell walk, build
+  through `from_polygons_impl`, Watertight and `validate()` or nothing).
+  A shape closed against one solid's faces (a roof on a box) grows that
+  solid: new id, name, tags, and parent carried over, imprints kept.
+  Detached faces give a separate Object (a detached gable closes against
+  a box's top edge when the edge's two ends are corners of the shape);
+  a cell inside a solid does nothing; two rooms sharing a wall are two
+  solids; a union that refuses leaves a separate Object and a toast.
+  API: `faces_closed` and `solid {object_id, grew}` on the nine drawing
+  and unit-edit commands. The wasm sketch moves and copies
+  (`transform_sketch_islands`, `copy_sketch_islands`) return the draw
+  calls' report JSON, so a Move, Rotate, Scale or Copy that closes a
+  face or a solid reports it (moving a whole sketch, as opposed to part
+  of one, reports nothing yet)
+- Push-through keeps the Object's name and tags on every result piece
+  (an inward push that severs the solid gives each piece both)
 - Push/pull to extrude a closed profile into a solid, with a live preview
   that borrows its depth only from references OFF the face's own plane (a
   face's own edges and the drawing axes are never a depth), and picks a
@@ -588,6 +631,29 @@ below.
   and the soft axis is capped on screen to an edge's pick radius rather
   than reaching by angle alone; Select's clicks and hover get no extra
   point reach, so a small face's middle still selects the face
+- A snap to a point is that point: Line no longer drops a snapped
+  corner, midpoint, or guide point onto the ground, and the first click of
+  any draw tool on a point in the air starts there, on the camera-facing
+  axis plane through the point (when it is nearer the eye than the ray's
+  hit on the chosen plane; a hidden point still drops with "projected").
+  Later clicks of Line honor a named point off the chain's plane and
+  re-home; Rectangle, Circle, Polygon, and Arc drop it onto their frozen
+  plane and say "projected". An arrow lock holds the plane for all of
+  them; a Shift pin holds the plane's orientation, and the first click
+  through a named point off it starts the shape at that point's height
+  (later clicks are the "projected" ones). The up arrow forces the ground
+- From Point reference lines on the drawing plane
+  (`app/src/tools/referenceLines.ts`, shared by the five draw tools): a
+  reference point offers two lines through its foot on the plane, along
+  the two directions a Rectangle's sides take there, and the crossing of
+  two such lines snaps. Reference points are the gesture's own points,
+  the corners of the shape the gesture started on (up to the 64 nearest
+  the anchor, read with the wasm call `snap_owner_points`), and up to
+  four points the cursor rested on for 300 ms (cleared on a tool change
+  and on Esc from idle). A reference line replaces only a weak engine
+  answer (plane, ground, on-face, on-axis); a real point or edge wins.
+  The cue is a dashed line from the foot, a dot at the foot, and a tie
+  from an off-plane point to its foot; the chip reads "From Point"
 - Analytic curve snaps: the exact center, quadrant points, and
   tangent-from-anchor points of drawn circles and arcs, honoring each
   arc's actual angular range
@@ -1013,7 +1079,20 @@ below.
   Push/Pull on a flat panel makes it a slab. The same is in the API
   (`hew.doc.health` with per-rim `cappable` / `shared` / `sheet_edge`,
   `hew.solid.cap` / `thicken` / `delete_faces` / `mark_surface`, `health`
-  in `hew.query`), so a script can repair a file
+  in `hew.query`), so a script can repair a file. Make Solid also takes
+  selected **sketches**: it runs the close pass over every line of the
+  selection, then the closed-faces search (see Drawing) seeded by every
+  face of the selection and every face the pass made, which covers files
+  drawn before automatic solids and faces an older build never formed. It
+  makes a solid or nothing at all: when none forms, the pass's faces are
+  not kept and no undo step is recorded; when one forms, every face the
+  pass made is kept, those on shapes that stayed open included. When the faces do not close, the viewport marks the
+  open edges in red, edges of faces that lie over each other in red too,
+  and loops of lines that do not lie on one plane in the warning color
+  (`faces_open_edge_segments`, read-only), and the page says how many
+  edges are open. `faces_not_solid` carries `detail.segments`. API: `hew.solid.from_faces {sketches}`
+  returns `{object_id, grew}` or refuses `faces_not_closed`,
+  `loop_not_planar`, `faces_not_solid`, or `unknown_entity`
 - Binary STL export, scaled for 3D printing; export is gated on every
   object being a solid, so an exported file is guaranteed manifold
 - STL curve resolution: cylinder walls re-facet from their analytic

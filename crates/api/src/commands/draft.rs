@@ -31,7 +31,7 @@
 //! other drawing taking part; a plane or face spec never sees it. A draw
 //! with `detached: true` ([`draw_detached`]) makes one new detached sketch.
 
-use super::{CmdError, Ctx, Handler};
+use super::{Closed, CmdError, Ctx, Handler};
 use crate::geom;
 use crate::ids;
 use crate::locate::{self, FaceRef, PlaneTarget};
@@ -562,20 +562,11 @@ fn sketch_err(e: SketchError) -> CmdError {
     CmdError::from(DocumentError::Sketch(e))
 }
 
-fn edge_key_in(w: &Sketch, e: SketchEdgeId) -> u64 {
-    let ed = w.edges()[e];
-    kernel::edge_key(
-        &w.plane(),
-        w.vertices()[ed.from].position,
-        w.vertices()[ed.to].position,
-    )
-}
-
-/// Closes the open draft as one undo step; on a refusal the draft is
-/// cancelled so nothing stays open.
-fn finish_draft(ctx: &mut Ctx) -> Result<(), CmdError> {
+/// Closes the open draft as one undo step and answers what it closed; on
+/// a refusal the draft is cancelled so nothing stays open.
+fn finish_draft(ctx: &mut Ctx) -> Result<Closed, CmdError> {
     match ctx.doc.end_draft() {
-        Ok(_) => Ok(()),
+        Ok((report, _)) => Ok(Closed::of(&report)),
         Err(e) => {
             ctx.doc.cancel_draft();
             Err(CmdError::from(e))
@@ -601,23 +592,23 @@ fn edit_units(
     let keys = expand_keys(&dc.plane, &before, raw)?;
 
     begin(ctx, &dc, label)?;
-    let ids = ctx.doc.draft_edges_by_key(&keys);
-    let found: BTreeSet<u64> = {
-        let w = ctx.doc.draft_sketch().expect("draft just opened");
-        ids.iter().map(|&e| edge_key_in(w, e)).collect()
-    };
-    if let Some(missing) = keys.iter().find(|k| !found.contains(k)) {
+    // (A listed edge another plane's line crosses in the lift names every
+    // piece of it: `draft_edges_for_keys`.)
+    let (ids, missing) = ctx.doc.draft_edges_for_keys(&keys);
+    if let Some(&missing) = missing.first() {
         ctx.doc.cancel_draft();
-        return Err(unknown_unit(&key_str("edg", *missing)));
+        return Err(unknown_unit(&key_str("edg", missing)));
     }
     let edited = edit(ctx.doc.draft_sketch_mut().expect("draft open"), &ids);
     if let Err(e) = edited {
         ctx.doc.cancel_draft();
         return Err(sketch_err(e));
     }
-    finish_draft(ctx)?;
+    let closed = finish_draft(ctx)?;
     let after = units_of(ctx, &dc)?;
-    Ok(json!({ "units": new_entries(ctx, &before, &after) }))
+    let mut out = json!({ "units": new_entries(ctx, &before, &after) });
+    closed.annotate(ctx, &mut out);
+    Ok(out)
 }
 
 #[derive(serde::Deserialize)]
@@ -813,15 +804,17 @@ fn on_or_in(ring: &[Point3], normal: Vec3, p: Point3) -> bool {
 /// Draws `runs` as ONE new detached sketch on `plane` in `frame` (detached
 /// shapes D3, D10): nothing on the plane is lifted, so the shape neither
 /// splits nor joins a face or other drawing, and extruding it always makes
-/// a new Object. Returns the new sketch and, when a run claimed a curve,
-/// the curve chain carrying it. One undo step; a refusal changes nothing.
+/// a new Object. Returns the new sketch, the curve chain carrying a run's
+/// claimed curve (if any), and what the draw closed (a detached line closes
+/// faces with other detached drawing and Objects' edges, §4.3). One undo
+/// step; a refusal changes nothing.
 pub(super) fn draw_detached(
     ctx: &mut Ctx,
     plane: Plane,
     frame: Option<ComponentId>,
     label: &str,
     runs: Vec<Run>,
-) -> Result<(SketchId, Option<kernel::SketchCurveId>), CmdError> {
+) -> Result<(SketchId, Option<kernel::SketchCurveId>, Closed), CmdError> {
     let (report, _) = ctx.doc.draft_detached_new(plane, frame, label, |w| {
         for run in &runs {
             if let Some((g, kind)) = run.claim {
@@ -851,7 +844,7 @@ pub(super) fn draw_detached(
                 .and_then(|sk| sk.edges().values().find_map(|e| e.curve))
         })
         .flatten();
-    Ok((sketch, curve))
+    Ok((sketch, curve, Closed::of(&report)))
 }
 
 /// [`draw_on_face`]'s sibling for `detached: true`: the same plane and frame
@@ -863,7 +856,7 @@ pub(super) fn draw_detached_on_face(
     face: FaceRef,
     label: &str,
     runs: Vec<Run>,
-) -> Result<(SketchId, Option<kernel::SketchCurveId>), CmdError> {
+) -> Result<(SketchId, Option<kernel::SketchCurveId>, Closed), CmdError> {
     let plane = face_plane(ctx, face)?;
     let frame = ctx.doc.object_owner_component(face.object);
     check_on_face(&plane, &runs)?;
@@ -901,7 +894,7 @@ pub(super) fn draw_on_face(
     let frame = ctx.doc.object_owner_component(face.object);
     check_on_face(&plane, &runs)?;
     let dc = context_of(ctx, plane, frame, Some(face.object));
-    ctx.doc.draft(plane, frame, &dc.objects, label, |w| {
+    let (report, _) = ctx.doc.draft(plane, frame, &dc.objects, label, |w| {
         for run in &runs {
             if let Some((g, kind)) = run.claim {
                 w.begin_curve_with_kind(g, kind)?;
@@ -963,5 +956,7 @@ pub(super) fn draw_on_face(
 
     let object_id = public_opt(ctx, EntityRef::Object(face.object))
         .expect("an object this command just touched always carries a stable id");
-    Ok(json!({ "object_id": object_id, "units": entries }))
+    let mut out = json!({ "object_id": object_id, "units": entries });
+    Closed::of(&report).annotate(ctx, &mut out);
+    Ok(out)
 }

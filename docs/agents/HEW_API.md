@@ -714,7 +714,7 @@ for, not shipped.
 | `hew.doc` | `attach` (to a named document, §4.2), `transact`, `new`, `open` (the desktop app opens each into a new background window), `close`, `focus` (desktop app windows; `app` profile), `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats), `purge_unused` (delete every unused palette material and component definition, one undo entry), `health` (every open object with its verdict, open rims and seam family) | Required (`import`, `purge_unused`, `health`, `close`, `focus` Standard) |
 | `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack) | Required |
 | `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` (a sketch region, or a face/plane region by unit key), `units` (list a plane's drawing as units), `move`, `rotate`, `scale`, `copy`, `delete` (edit units on a plane) | Required (`units`, `move`, `rotate`, `scale`, `copy`, `delete` Standard) |
-| `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form), `cap`, `delete_faces`, `mark_surface`, `thicken` (repair open objects, see below) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint`, and the repair commands Standard) |
+| `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form), `cap`, `delete_faces`, `mark_surface`, `thicken` (repair open objects, see below), `from_faces` (Make Solid on drawn faces) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint`, the repair commands and `from_faces` Standard) |
 | `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy/array), `rotate`, `scale` | Required |
 | `hew.context` | `enter`, `exit` | Required |
 | `hew.group` | `create`, `explode`, `reparent` | Required (`reparent` Standard) |
@@ -784,15 +784,57 @@ Semantics notes, normative:
   that produced no face (a loose line, a shape wholly over the void) mints
   no token, and a later `{"$face": ...}` reference to one refuses
   `face_token_unknown`.
+- **Faces and solids from drawing.** A loop on one plane is a face,
+  whichever sketches hold its lines, and flat faces that enclose a space
+  with no gap become a solid, in the same undo step as the edit that
+  closed them; a shape that closes against one solid's face grows that
+  solid (it gets a new id and keeps the old one's name and tags), and a
+  detached shape is a solid of its own. This applies to API drawing as to
+  pointer drawing: `draw_line`, `draw_rect`, `draw_polygon`,
+  `draw_circle`, `draw_arc`, and the unit edits `move`, `rotate`, `scale`
+  and `copy` add two optional result fields — `faces_closed`, the
+  sketches that now hold a face the edit closed on another plane (a face
+  a solid consumed in the same step is not listed), and `solid:
+  {object_id, grew}`, the first solid the edit made. A rectangle and four
+  lines to an apex, each line on any plane through it, return `solid` on
+  the closing `draw_line`. Planarity is exact: four points that miss a
+  plane make no face. `hew.solid.from_faces {sketches}` is Make Solid for
+  faces that are already drawn (a file drawn before this rule, or a shape
+  whose closing edit was not a draw): the close pass first fills any loop
+  of the named sketches' lines that is not yet a face, as a draw would;
+  then every face the named sketches hold, and every face the pass made,
+  seeds the search, which gathers the faces connected to them through
+  shared edges, and the result is `{object_id, grew}` as above, one undo
+  step labeled "Make Solid" (every face the pass made is kept, those of
+  named shapes that stayed open included). Nothing made refuses with the
+  document untouched: `loop_not_planar` when a gap's open edges close a loop that
+  lies on no one plane (`detail.loops`, the loops' corners), else
+  `faces_not_closed` with `detail.open_edges` (the count) and
+  `detail.segments` (up to eight sample open edges, `[[x,y,z],[x,y,z]]`),
+  else `faces_not_solid` when the faces close but build no solid
+  (`detail.reason`: `overlapping_faces`, `inside_solid` — a shape drawn
+  inside the solid it closes against makes nothing —, `self_touching`,
+  `invalid`; with `overlapping_faces`, `detail.segments` gives up to
+  eight edges two faces lie over each other along, `[[x,y,z],[x,y,z]]`).
+  When faces lie over each other while open edges or a non-planar loop
+  remain elsewhere, `faces_not_closed` and `loop_not_planar` name the
+  overlap too: `detail.reason: "overlapping_faces"` and
+  `detail.overlapping_segments` (up to eight edges), beside their own
+  fields. An id that names no live sketch refuses `unknown_entity`. Two faces
+  with the same loop on one plane (the same wall drawn twice, say once
+  as a detached shape) are one face, not an overlap: the solid takes the
+  ordinary one, else the earlier drawn, and the other stays a sketch.
 - **Detached shapes.** `draw_line`, `draw_rect`, `draw_circle`,
   `draw_arc` and `draw_polygon` take an optional `detached` (default
   `false`). With `detached: true` on a `{"ground"}`, `{origin, normal}` or
   `{"face"}` plane spec, the shape is drawn as one new **detached**
-  sketch: drawing that takes part in no plane arrangement, so it neither
-  splits nor joins the face or the drawing under it (a circle centered on
-  a face's corner stays a whole circle and the face stays whole), nothing
-  drawn later joins it, and extruding one of its regions always makes a
-  new Object. Snapping still sees it. The result is the sketch shape
+  sketch: drawing that takes part in no arrangement with ordinary
+  drawing, so it neither splits nor joins the face or the drawing under it
+  (a circle centered on a face's corner stays a whole circle and the face
+  stays whole) and nothing drawn later joins it. The one exception: an
+  Object edge in its plane whose two ends are corners of the detached
+  shape closes it. Extruding one of its regions always makes a new
+  Object. Snapping still sees it. The result is the sketch shape
   `{sketch, region_ids, region_id?, curve_id?}` whatever the plane spec
   (no face tokens: no face changed), so a following `hew.solid.extrude`
   chains through `region_id` as on the ground. With a `{"sketch": id}`

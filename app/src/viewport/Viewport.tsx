@@ -162,7 +162,7 @@ import {
   ctxOfSketchUnits,
   widenCurveRef,
 } from '../tools/planeUnits'
-import { runDraft } from '../tools/draftCommit'
+import { runDraft, setDraftSolidSelector } from '../tools/draftCommit'
 import { dedupeRefs, invertWithin, objectDrawingIslands } from './drawnSelection'
 import { cursorFor as toolIconCursor } from '../tools/toolIcons'
 import {
@@ -4808,6 +4808,13 @@ export default function Viewport({
       onToastRef.current?.(message, code)
     }
 
+    // A draft that formed a solid selects its Object, as an extrusion does
+    // (wireframe faces §5): refresh it into the scene, then select it.
+    setDraftSolidSelector((objectId) => {
+      handleSceneRefresh({ objectIds: [objectId] })
+      onSelectRef.current?.({ kind: 'object', id: objectId }, 'replace')
+    })
+
     // Imperative command surface for the parent. Editing INSIDE a component
     // instance's own definition (component-edit-parity.md phase A2) routes
     // through `boolean_in_component` instead of the world `boolean_nodes` —
@@ -8905,7 +8912,7 @@ export default function Viewport({
       const snap = toolController.activeToolName === 'Select' ? excludeAxisSnapForSelect(rawSnap) : rawSnap
       activeTool.onPointerMove(snap, ray)
       const cueSnap = toolSnapForCues(snap, activeTool)
-      cueLayer.update(cueSnap, readOnlyRef.current)
+      cueLayer.update(cueSnap, readOnlyRef.current, getDrawingAxes(wasmScene))
       drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
       publishSnapCues(cueSnap, activeTool)
     }
@@ -9516,7 +9523,7 @@ export default function Viewport({
       // Measure's isn't, so this is what actually hides ITS line while
       // leaving the snap — and therefore its SnapDot/tooltip — intact).
       const cueSnap = toolSnapForCues(snap, activeTool)
-      cueLayer.update(cueSnap, readOnlyRef.current)
+      cueLayer.update(cueSnap, readOnlyRef.current, getDrawingAxes(wasmScene))
       drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
       scheduleRender()
 
@@ -10328,7 +10335,7 @@ export default function Viewport({
             // has none) — `suppressAxisLine` keeps its on-axis snap fully
             // functional while hiding the incoherent guide line, same as
             // the pointer-move path.
-            cueLayer.update(toolSnapForCues(snap, activeTool), readOnlyRef.current)
+            cueLayer.update(toolSnapForCues(snap, activeTool), readOnlyRef.current, getDrawingAxes(wasmScene))
             drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
           }
           return
@@ -11342,6 +11349,7 @@ export default function Viewport({
 
     // ------------------------------------------------------------------ cleanup
     return () => {
+      setDraftSolidSelector(null)
       renderScheduler.cancel()
       document.removeEventListener('visibilitychange', onVisibilityChange)
       // A Scene camera tween and its settle timer outlive nothing: cancel

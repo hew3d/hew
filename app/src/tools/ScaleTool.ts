@@ -74,6 +74,7 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { resolveDraft } from './planeUnits'
 import { clearPreview } from './transformPreview'
 import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
+import { surfaceSketchTransformReports } from './draftCommit'
 import { editLengthBuffer, isLengthInputKey, parseDistance } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
@@ -1232,6 +1233,8 @@ export class ScaleTool implements Tool {
       }
     }
     this.onCommit(committed)
+    // An identity scale committed nothing: no held report is its own.
+    if (!isIdentity) surfaceSketchTransformReports((m) => this.onToast(m))
     // Redraw the gizmo at the (possibly new) size so a follow-up grip can be
     // grabbed right away — handles stay stable through a transform (kernel
     // strong guarantee; a drawn shape is re-found above), so `committed`

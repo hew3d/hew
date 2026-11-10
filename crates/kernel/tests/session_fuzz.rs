@@ -19,6 +19,16 @@
 //!   serializes as if every open session were closed;
 //! - with no session open, `load(save())` succeeds too.
 //!
+//! Drawing joins in too (wireframe faces §11): lines in 3D between lattice
+//! points (the boxes' corners and points above them), each drafted on a
+//! plane through it as Line re-homes a slanted segment, Detached or not,
+//! and moves and copies of free sketches — the edits that run the close
+//! pass. For each,
+//! one undo restores the document exactly and one redo returns the edit's
+//! state. Whole axis-aligned rectangles between lattice points, and Make
+//! Solid on a free sketch's faces, drive the cell search (§5): closed faces
+//! become solids or grow the boxes, in the same step.
+//!
 //! Failures shrink to a short op list. Run deeper than the default 256
 //! cases with `PROPTEST_CASES=20000 cargo test -p kernel --test
 //! session_fuzz`.
@@ -81,6 +91,44 @@ enum Op {
     CloseSession,
     Undo,
     Redo,
+    /// A line between two lattice points, drafted at the top level on a
+    /// plane through it (`tilt` picks which), Detached or not (a detached
+    /// line closes against a box's edges ending on its shape, §16 R8).
+    Line3D {
+        a: usize,
+        b: usize,
+        tilt: u8,
+        detached: bool,
+    },
+    /// A translation of a whole free sketch by a lattice step.
+    MoveSketch {
+        sel: usize,
+        step: u8,
+    },
+    /// A copy of every island of a free sketch, a lattice step away.
+    CopySketch {
+        sel: usize,
+        step: u8,
+    },
+    /// An axis-aligned rectangle with opposite corners at two lattice
+    /// points, drafted at the top level on its plane (`flip`: facing the
+    /// other way).
+    Rect3D {
+        a: usize,
+        b: usize,
+        flip: bool,
+    },
+    /// Make Solid on every face of a free sketch ([`Document::close_cells`]).
+    CloseCells {
+        sel: usize,
+    },
+    /// A half-metre box drawn as faces, one draft per face (its bottom
+    /// only on the ground): on the ground, or on a box's top (where the
+    /// faces close against it and grow it), Detached or not.
+    FaceBox {
+        at: u8,
+        detached: bool,
+    },
 }
 
 fn arb_op() -> impl Strategy<Value = Op> {
@@ -104,7 +152,67 @@ fn arb_op() -> impl Strategy<Value = Op> {
         3 => Just(Op::CloseSession),
         2 => Just(Op::Undo),
         2 => Just(Op::Redo),
+        6 => (sel(), sel(), 0u8..3, any::<bool>())
+            .prop_map(|(a, b, tilt, detached)| Op::Line3D { a, b, tilt, detached }),
+        2 => (sel(), 0u8..6).prop_map(|(sel, step)| Op::MoveSketch { sel, step }),
+        1 => (sel(), 0u8..6).prop_map(|(sel, step)| Op::CopySketch { sel, step }),
+        4 => (sel(), sel(), any::<bool>()).prop_map(|(a, b, flip)| Op::Rect3D { a, b, flip }),
+        1 => sel().prop_map(|sel| Op::CloseCells { sel }),
+        3 => (any::<u8>(), any::<bool>()).prop_map(|(at, detached)| Op::FaceBox { at, detached }),
     ]
+}
+
+/// The drawing lattice: the boxes' corners (x = 3i, 3i + 1; y = 0, 1;
+/// z = 0, 1) and the points 1 m above their tops and halfway across.
+fn lattice() -> Vec<Point3> {
+    let mut v = Vec::new();
+    for x in [0.0, 0.5, 1.0, 3.0, 3.5, 4.0] {
+        for y in [0.0, 0.5, 1.0] {
+            for z in [0.0, 1.0, 2.0] {
+                v.push(Point3::new(x, y, z));
+            }
+        }
+    }
+    v
+}
+
+/// A lattice step: one unit along an axis, either way.
+fn step_of(step: u8) -> Vec3 {
+    match step % 6 {
+        0 => Vec3::new(1.0, 0.0, 0.0),
+        1 => Vec3::new(-1.0, 0.0, 0.0),
+        2 => Vec3::new(0.0, 1.0, 0.0),
+        3 => Vec3::new(0.0, -1.0, 0.0),
+        4 => Vec3::new(0.0, 0.0, 1.0),
+        _ => Vec3::new(0.0, 0.0, -1.0),
+    }
+}
+
+/// A plane through `a–b`: the vertical one (`tilt` 0), the one holding the
+/// x axis direction (1), or the y axis direction (2); for a line along that
+/// direction, the plane facing +x through it.
+fn home_plane(a: Point3, b: Point3, tilt: u8) -> Option<Plane> {
+    let d = b - a;
+    let other = match tilt % 3 {
+        0 => Vec3::new(0.0, 0.0, 1.0),
+        1 => Vec3::new(1.0, 0.0, 0.0),
+        _ => Vec3::new(0.0, 1.0, 0.0),
+    };
+    let n = d.cross(other);
+    let n = if n.length() > 1e-6 {
+        n
+    } else {
+        d.cross(Vec3::new(1.0, 1.0, 0.0))
+    };
+    Plane::from_point_normal(a, n).ok()
+}
+
+/// The free world sketches a move or copy picks from.
+fn free_sketches(doc: &Document) -> Vec<kernel::SketchId> {
+    doc.sketch_ids()
+        .into_iter()
+        .filter(|&s| doc.sketch_owner_object(s).is_none())
+        .collect()
 }
 
 fn add_box(doc: &mut Document, x: f64) -> ObjectId {
@@ -142,10 +250,35 @@ fn pick<T: Copy>(items: &[T], sel: usize) -> Option<T> {
     (!items.is_empty()).then(|| items[sel % items.len()])
 }
 
+thread_local! {
+    /// The state hash before the last undo step an op recorded, when the
+    /// op records several (a [`Op::FaceBox`] drafts one face at a time).
+    static LAST_STEP_BEFORE: std::cell::Cell<Option<(u64, u64)>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Applies one op. A typed refusal is a legal answer and is ignored; what
 /// must never happen is a panic or a document that no longer reopens, both
 /// checked by the caller.
 fn apply(doc: &mut Document, op: &Op) {
+    // Drawing waits until every editing session is closed: a loose line
+    // drawn on a member's face inside a component session leaves an owned
+    // sketch that the autosave does not fold with its owner, so the bytes
+    // do not reopen. That defect predates the close pass (reproduced on
+    // the base without it) and is tracked on its own; until it is fixed,
+    // the drawing ops here exercise the close pass at the top level only.
+    if matches!(
+        op,
+        Op::Line3D { .. }
+            | Op::MoveSketch { .. }
+            | Op::CopySketch { .. }
+            | Op::Rect3D { .. }
+            | Op::CloseCells { .. }
+            | Op::FaceBox { .. }
+    ) && !doc.session_stack().is_empty()
+    {
+        return;
+    }
     let nodes = live_nodes(doc);
     let instances = doc.instance_ids();
     let groups = doc.group_ids();
@@ -238,7 +371,185 @@ fn apply(doc: &mut Document, op: &Op) {
         Op::Redo => {
             let _ = doc.redo();
         }
+        Op::Line3D {
+            a,
+            b,
+            tilt,
+            detached,
+        } => {
+            let pts = lattice();
+            let (a, b) = (pts[a % pts.len()], pts[b % pts.len()]);
+            if a == b {
+                return;
+            }
+            let Some(h) = home_plane(a, b, tilt) else {
+                return;
+            };
+            let edit = |w: &mut kernel::Sketch| w.add_segment(a, b).map(|_| ());
+            let _ = if detached {
+                doc.draft_detached_new(h, None, "Line", edit)
+            } else {
+                let objects = doc.drawable_objects_on_plane(h, None);
+                doc.draft(h, None, &objects, "Line", edit)
+            };
+        }
+        Op::MoveSketch { sel, step } => {
+            if let Some(s) = pick(&free_sketches(doc), sel) {
+                let _ = doc.transform_sketch(s, &Transform::translation(step_of(step)));
+            }
+        }
+        Op::Rect3D { a, b, flip } => {
+            let pts = lattice();
+            let (a, b) = (pts[a % pts.len()], pts[b % pts.len()]);
+            let d = b - a;
+            let flat = [d.x, d.y, d.z].iter().filter(|c| c.abs() < 1e-12).count();
+            if flat != 1 {
+                return;
+            }
+            let n = if d.x.abs() < 1e-12 {
+                Vec3::new(1.0, 0.0, 0.0)
+            } else if d.y.abs() < 1e-12 {
+                Vec3::new(0.0, 1.0, 0.0)
+            } else {
+                Vec3::new(0.0, 0.0, 1.0)
+            };
+            let n = if flip { n * -1.0 } else { n };
+            let Ok(h) = Plane::from_point_normal(a, n) else {
+                return;
+            };
+            // The other two corners: each varies one of the two free axes.
+            let (c, e) = if d.x.abs() < 1e-12 {
+                (Point3::new(a.x, b.y, a.z), Point3::new(a.x, a.y, b.z))
+            } else if d.y.abs() < 1e-12 {
+                (Point3::new(b.x, a.y, a.z), Point3::new(a.x, a.y, b.z))
+            } else {
+                (Point3::new(b.x, a.y, a.z), Point3::new(a.x, b.y, a.z))
+            };
+            let objects = doc.drawable_objects_on_plane(h, None);
+            let _ = doc.draft(h, None, &objects, "Rectangle", |w| {
+                for (p, q) in [(a, c), (c, b), (b, e), (e, a)] {
+                    w.add_segment(p, q)?;
+                }
+                Ok(())
+            });
+        }
+        Op::FaceBox { at, detached } => {
+            let x0 = [0.0, 0.5, 3.0, 3.5][usize::from(at % 4)];
+            let y0 = [0.0, 0.5][usize::from(at / 4 % 2)];
+            let z0 = [0.0, 1.0][usize::from(at / 8 % 2)];
+            let c = [
+                Point3::new(x0, y0, z0),
+                Point3::new(x0 + 0.5, y0, z0),
+                Point3::new(x0 + 0.5, y0 + 0.5, z0),
+                Point3::new(x0, y0 + 0.5, z0),
+            ];
+            let up = |q: Point3| Point3::new(q.x, q.y, z0 + 0.5);
+            let mut faces: Vec<(Vec3, [Point3; 4])> = Vec::new();
+            if z0 == 0.0 {
+                faces.push((Vec3::new(0.0, 0.0, 1.0), c));
+            }
+            for i in 0..4 {
+                let (u, v) = (c[i], c[(i + 1) % 4]);
+                faces.push((
+                    (v - u).cross(Vec3::new(0.0, 0.0, 1.0)),
+                    [u, v, up(v), up(u)],
+                ));
+            }
+            // The order the faces go down in follows `at` too.
+            let k = usize::from(at / 16) % faces.len();
+            faces.rotate_left(k);
+            for (n, q) in faces {
+                let Ok(h) = Plane::from_point_normal(q[0], n) else {
+                    return;
+                };
+                LAST_STEP_BEFORE.set(Some((doc.state_hash(), doc.history_generation())));
+                let edit = |w: &mut kernel::Sketch| {
+                    for i in 0..4 {
+                        w.add_segment(q[i], q[(i + 1) % 4])?;
+                    }
+                    Ok(())
+                };
+                let _ = if detached {
+                    doc.draft_detached_new(h, None, "Rectangle", edit)
+                } else {
+                    let objects = doc.drawable_objects_on_plane(h, None);
+                    doc.draft(h, None, &objects, "Rectangle", edit)
+                };
+            }
+        }
+        Op::CloseCells { sel } => {
+            if let Some(s) = pick(&free_sketches(doc), sel) {
+                let scope = kernel::CellScope::default();
+                let out = doc.close_cells(&[kernel::CellSeed::Sketch(s)], &scope);
+                // Every solid made validates.
+                for o in out {
+                    if let kernel::CellOutcome::Created(id)
+                    | kernel::CellOutcome::Grew { to: id, .. }
+                    | kernel::CellOutcome::Unjoined { object: id, .. } = o
+                    {
+                        let obj = doc.object(id).expect("a made solid is visible");
+                        assert_eq!(obj.watertight(), kernel::WatertightState::Watertight);
+                        obj.validate().expect("a made solid validates");
+                    }
+                }
+            }
+        }
+        Op::CopySketch { sel, step } => {
+            if let Some(s) = pick(&free_sketches(doc), sel) {
+                let islands: Vec<_> = doc
+                    .sketch(s)
+                    .map(|sk| sk.islands().keys().collect())
+                    .unwrap_or_default();
+                let _ =
+                    doc.copy_sketch_islands(s, &islands, &Transform::translation(step_of(step)));
+            }
+        }
     }
+}
+
+/// For a drawing op that recorded a step (lens 2 of the design's review):
+/// one undo restores the document exactly, one redo returns the edit's
+/// state.
+fn check_one_step(
+    doc: &mut Document,
+    before: (u64, u64),
+    step: usize,
+    op: &Op,
+) -> Result<(), TestCaseError> {
+    if !matches!(
+        op,
+        Op::Line3D { .. }
+            | Op::MoveSketch { .. }
+            | Op::CopySketch { .. }
+            | Op::Rect3D { .. }
+            | Op::CloseCells { .. }
+            | Op::FaceBox { .. }
+    ) || doc.history_generation() == before.1
+    {
+        return Ok(());
+    }
+    let after = doc.state_hash();
+    if let Err(e) = doc.undo() {
+        return Err(TestCaseError::fail(format!(
+            "step {step} ({op:?}): undo refused: {e}"
+        )));
+    }
+    if doc.state_hash() != before.0 {
+        return Err(TestCaseError::fail(format!(
+            "step {step} ({op:?}): one undo does not restore the document"
+        )));
+    }
+    if let Err(e) = doc.redo() {
+        return Err(TestCaseError::fail(format!(
+            "step {step} ({op:?}): redo refused: {e}"
+        )));
+    }
+    if doc.state_hash() != after {
+        return Err(TestCaseError::fail(format!(
+            "step {step} ({op:?}): redo does not return the edit's state"
+        )));
+    }
+    Ok(())
 }
 
 fn check_reopens(doc: &Document, step: usize, op: &Op) -> Result<(), TestCaseError> {
@@ -400,7 +711,13 @@ fn run_case(boxes: usize, ops: Vec<Op>) -> Result<(), TestCaseError> {
         add_box(&mut doc, 3.0 * i as f64);
     }
     for (step, op) in ops.iter().enumerate() {
+        let mut before = (doc.state_hash(), doc.history_generation());
+        LAST_STEP_BEFORE.set(None);
         apply(&mut doc, op);
+        if let Some(last) = LAST_STEP_BEFORE.take() {
+            before = last;
+        }
+        check_one_step(&mut doc, before, step, op)?;
         check_reopens(&doc, step, op)?;
         check_sibling_render(&doc, step, op)?;
     }

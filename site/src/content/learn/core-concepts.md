@@ -20,7 +20,7 @@ Every Object knows whether it is solid: closed all around, with no gaps.
 - **Object Info** shows the selected object's geometry: **Solid**, **Flat panel**, **Curved sheet**, or **Open** with what's open ("Open: 2 openings").
 - The **Outliner** draws a flat panel or curved sheet with a thin outline icon, and any other open shape with a dashed one.
 
-Everything you model is solid. Only an import can bring in something that isn't, and that's normal: SketchUp uses single faces for glass, signs and terrain, and open shapes for ducts, pipe fittings and boxes without lids. Hew keeps them as they are, and they work for everything except Push/Pull, combining, slicing and 3D printing. For those, **Object ▸ Make Solid…** closes what can be closed. See [Making imported shapes solid](/learn/import-export/#making-imported-shapes-solid).
+Everything you model is solid, including shapes made of lines: flat faces that enclose a space become a solid by themselves. Only an import can bring in something that isn't, and that's normal: SketchUp uses single faces for glass, signs and terrain, and open shapes for ducts, pipe fittings and boxes without lids. Hew keeps them as they are, and they work for everything except Push/Pull, combining, slicing and 3D printing. For those, **Object ▸ Make Solid…** closes what can be closed. See [Making imported shapes solid](/learn/import-export/#making-imported-shapes-solid).
 
 ## Combining Objects is always explicit
 
@@ -52,6 +52,7 @@ As you draw, Hew's inference engine constantly looks for meaningful relationship
 | On Intersection Line (where a face of one object meets a face of another — not a real edge, since objects never merge, but a line you can slide along) | Orange-red |
 | On Face | Blue |
 | On Guide | Purple |
+| From Point (a reference line from a nearby point, or where two cross, on the plane you are drawing on) | Axis color for an axis direction, otherwise neutral |
 | On Axis | The axis color (X red, Y green, Z blue) |
 | Ground | Gray |
 

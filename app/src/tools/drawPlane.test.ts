@@ -381,6 +381,21 @@ describe('drawPlaneCue', () => {
     ).toBeNull()
   })
 
+  it('a ground pin through a named point in the air shows the lifted plane the click will use', () => {
+    const cue = drawPlaneCue({ anchoredPlane: groundDrawPlane(), anchoredThrough: [1, 1, 2], idleLock: null, idleHover: null })
+    expect(cue).not.toBeNull()
+    expect(cue?.plane.origin).toEqual([1, 1, 2])
+    expect(cue?.plane.normal).toEqual([0, 0, 1])
+    expect(cue?.plane.ground).toBe(false)
+    expect(cue?.through).toEqual([1, 1, 2])
+  })
+
+  it('a ground pin through a named point back on the ground still shows no cue', () => {
+    expect(
+      drawPlaneCue({ anchoredPlane: groundDrawPlane(), anchoredThrough: [1, 1, 0], idleLock: null, idleHover: null }),
+    ).toBeNull()
+  })
+
   it('the frozen plane, through the anchor, when anchored on a NON-ground plane', () => {
     const cue = drawPlaneCue({ anchoredPlane: TILTED, anchoredThrough: [3, 0, 5], idleLock: null, idleHover: null })
     expect(cue).toEqual({ plane: TILTED, through: [3, 0, 5] })
@@ -1419,5 +1434,130 @@ describe('resolveIdleDrawTarget over a sketch fill (view-plane §2 step 4b)', ()
     // A new ray asks again.
     resolveIdleDrawTarget(wasm, cache, { ...RED_RAY }, TOP, undefined, '', HOME_VIEW)
     expect(scene.pick_sketch_region).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('resolveIdleDrawTarget at a named point (R18)', () => {
+  const GROUND_SKETCH = 12n
+  const WALL_SKETCH = 13n
+  const GROUND_PLANE = new Float64Array([0, 0, 0, 0, 0, 1])
+  const GREEN_WALL = new Float64Array([0, 0, 0, 0, 1, 0])
+  const RED_WALL = new Float64Array([0, 0, 0, 1, 0, 0])
+  const GROUND_SQUARE = new Float32Array([0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0])
+
+  function scene(edge: bigint | undefined, lines: Float32Array = GROUND_SQUARE) {
+    const planes = new Map<bigint, Float64Array>([[GROUND_SKETCH, GROUND_PLANE], [WALL_SKETCH, GREEN_WALL]])
+    return {
+      sketch_plane: vi.fn((h: bigint) => planes.get(h)),
+      pick_sketch: vi.fn(() => edge),
+      pick_sketch_region: vi.fn(() => undefined),
+      sketch_lines: vi.fn(() => lines),
+      sketch_is_detached: vi.fn(() => false),
+      axes: vi.fn(() => new Float64Array(WORLD_FRAME_FLAT)),
+    } as unknown as WasmScene
+  }
+
+  const named = (p: V3, kind = 'endpoint') => ({ x: p[0], y: p[1], z: p[2], kind }) as never
+
+  /** The Rectangle's far corner (0, 1, 0), seen from low and to the left
+   *  (green inferred); the ray ends AT the corner. */
+  const LEFT = viewAt(15, 0) // eye below the 20 degree switch, square to the green wall
+  const ray = (view: CameraView, to: V3): Ray => ({
+    origin: view.eye,
+    direction: [to[0] - view.eye[0], to[1] - view.eye[1], to[2] - view.eye[2]],
+  })
+  const FAR: V3 = [0, 1, 0]
+
+  it('a ground sketch\'s far corner from a green view starts on the green plane THROUGH the corner (not the ground, not projected)', () => {
+    expect(inferredAxis(WORLD_DRAWING_AXES, LEFT)).toBe(1)
+    const r = ray(LEFT, FAR)
+    const resolved = resolveIdleDrawTarget(scene(GROUND_SKETCH), new SketchPickCache(), r, TOP, undefined, '', LEFT, named(FAR))
+    expect(resolved.plane.normal).toEqual([0, 1, 0])
+    expect(resolved.plane.origin).toEqual(FAR)
+    expect(resolved.plane.ground).toBe(false)
+    expect(resolved.target).toEqual({ kind: 'plane', plane: resolved.plane, instance: null })
+  })
+
+  it('the lifted result carries the inferred axis (the Facing hint shows), and none for an exact ground lift', () => {
+    const r = ray(LEFT, FAR)
+    const resolved = resolveIdleDrawTarget(scene(GROUND_SKETCH), new SketchPickCache(), r, TOP, undefined, '', LEFT, named(FAR))
+    expect(resolved.inferredAxis).toBe(1)
+    const grounded = resolveIdleDrawTarget(scene(undefined), new SketchPickCache(), ray(HOME_VIEW, [2, 2, 0]), TOP, undefined, '', HOME_VIEW, named([2, 2, 0]))
+    expect(grounded.plane.ground).toBe(true)
+    expect(grounded.inferredAxis).toBeUndefined()
+  })
+
+  it('the same corner from an ordinary (blue) view keeps the ground sketch\'s plane', () => {
+    const r = ray(HOME_VIEW, FAR)
+    const resolved = resolveIdleDrawTarget(scene(GROUND_SKETCH), new SketchPickCache(), r, TOP, undefined, '', HOME_VIEW, named(FAR))
+    expect(resolved.plane.ground).toBe(true)
+  })
+
+  it('a corner on the green plane itself keeps that orientation (through the corner)', () => {
+    const near: V3 = [0, 0, 0]
+    const resolved = resolveIdleDrawTarget(scene(GROUND_SKETCH), new SketchPickCache(), ray(LEFT, near), TOP, undefined, '', LEFT, named(near))
+    expect(resolved.plane.normal).toEqual([0, 1, 0])
+    expect(resolved.plane.origin).toEqual(near)
+  })
+
+  it('no snap, or a snap that names no point, leaves the ground sketch\'s ground', () => {
+    const r = ray(LEFT, FAR)
+    expect(resolveIdleDrawTarget(scene(GROUND_SKETCH), new SketchPickCache(), r, TOP, undefined, '', LEFT, null).plane.ground).toBe(true)
+    expect(resolveIdleDrawTarget(scene(GROUND_SKETCH), new SketchPickCache(), { ...r }, TOP, undefined, '', LEFT, named(FAR, 'on-edge')).plane.ground).toBe(true)
+  })
+
+  it('a named point off a hovered non-ground sketch\'s plane lifts it, nearer or not (a plane hides nothing)', () => {
+    // A wall sketch on the green plane; the point is 1 m behind it from the eye.
+    const wallScene = scene(WALL_SKETCH, new Float32Array([0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0]))
+    const r = ray(LEFT, [0.5, 0, 0])
+    const behind: V3 = [0.5, 1, 0]
+    const resolved = resolveIdleDrawTarget(wallScene, new SketchPickCache(), r, TOP, undefined, '', LEFT, named(behind))
+    expect(resolved.plane.origin).toEqual(behind)
+    expect(resolved.plane.normal).toEqual([0, 1, 0])
+  })
+
+  it('a named point on a hovered wall sketch that already faces the view keeps that sketch (the parallel early return)', () => {
+    expect(inferredAxis(WORLD_DRAWING_AXES, LEFT)).toBe(1)
+    const wallScene = scene(WALL_SKETCH, new Float32Array([0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0]))
+    const onWall: V3 = [0.5, 0, 0]
+    const resolved = resolveIdleDrawTarget(wallScene, new SketchPickCache(), ray(LEFT, onWall), TOP, undefined, '', LEFT, named(onWall))
+    expect(resolved.target.kind).toBe('existing')
+    expect(resolved.plane.normal).toEqual([0, 1, 0])
+    expect(resolved.plane.origin).toEqual([0, 0, 0])
+  })
+
+  it('a point on a face the picker chose still needs to be nearer the eye than the face to lift it', () => {
+    const face = () => ({ point: [0, 0, 0.3] as V3, normal: [0, 0, 1] as V3, depth: 1 })
+    const r: Ray = { origin: [0.5, 0.5, 5], direction: [0, 0, -1] }
+    const hidden = resolveIdleDrawTarget(scene(undefined), new SketchPickCache(), r, TOP, face, '', null, named([0.5, 0.5, -1]))
+    expect(hidden.onFace).toBe(true)
+    expect(hidden.plane.origin).toEqual([0, 0, 0.3])
+    const nearer = resolveIdleDrawTarget(scene(undefined), new SketchPickCache(), { ...r }, TOP, face, '', null, named([0.5, 0.5, 2]))
+    expect(nearer.plane.origin).toEqual([0.5, 0.5, 2])
+  })
+
+  it('a red view lifts to the red plane through a corner of a ground sketch', () => {
+    const RIGHT = viewAt(15, 90)
+    expect(inferredAxis(WORLD_DRAWING_AXES, RIGHT)).toBe(0)
+    const corner: V3 = [1, 1, 0]
+    const resolved = resolveIdleDrawTarget(scene(GROUND_SKETCH), new SketchPickCache(), ray(RIGHT, corner), TOP, undefined, '', RIGHT, named(corner))
+    expect(resolved.plane.normal).toEqual([1, 0, 0])
+    expect(resolved.plane.origin).toEqual(corner)
+  })
+
+  it('a red wall sketch\'s corner from a green view takes the green plane (the sketch\'s own orientation does not hold)', () => {
+    const planes = new Map<bigint, Float64Array>([[WALL_SKETCH, RED_WALL]])
+    const s = {
+      sketch_plane: vi.fn((h: bigint) => planes.get(h)),
+      pick_sketch: vi.fn(() => WALL_SKETCH),
+      pick_sketch_region: vi.fn(() => undefined),
+      sketch_lines: vi.fn(() => new Float32Array([0, 0, 0, 0, 1, 0])),
+      sketch_is_detached: vi.fn(() => false),
+      axes: vi.fn(() => new Float64Array(WORLD_FRAME_FLAT)),
+    } as unknown as WasmScene
+    const corner: V3 = [0, 1, 0]
+    const resolved = resolveIdleDrawTarget(s, new SketchPickCache(), ray(LEFT, corner), TOP, undefined, '', LEFT, named(corner))
+    expect(resolved.plane.normal).toEqual([0, 1, 0])
+    expect(resolved.plane.origin).toEqual(corner)
   })
 })

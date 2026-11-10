@@ -99,6 +99,102 @@ pub(super) fn run_sketch_gesture<T>(
     }
 }
 
+/// What a drawing edit closed (wireframe faces §4.2, §5): the free sketches
+/// the close pass made a face in, and the cells the solid search made.
+#[derive(Debug, Default)]
+pub(super) struct Closed {
+    pub faces_closed: Vec<kernel::SketchId>,
+    pub cells: Vec<kernel::CellOutcome>,
+}
+
+impl Closed {
+    /// From a draft's report.
+    pub fn of(report: &kernel::DraftReport) -> Closed {
+        Closed {
+            faces_closed: report.faces_closed.clone(),
+            cells: report.cells.clone(),
+        }
+    }
+
+    /// Adds the optional result fields of the drawing commands
+    /// (docs/agents/HEW_API.md §7): `faces_closed`, the public ids of the
+    /// free sketches that now hold a face the edit closed on another plane
+    /// (a face a solid consumed in the same step is not listed: see
+    /// `solid`), and `solid: {object_id, grew}`, the first solid the edit
+    /// made from closed faces. Each is present only when non-empty.
+    pub fn annotate(&self, ctx: &Ctx, out: &mut serde_json::Value) {
+        let faces: Vec<String> = self
+            .faces_closed
+            .iter()
+            .filter(|&&s| ctx.doc.sketch(s).is_some())
+            .filter_map(|&s| {
+                let entity = kernel::EntityRef::Sketch(s);
+                ctx.doc
+                    .sid_of(&entity)
+                    .map(|sid| crate::ids::public_id(&entity, sid))
+            })
+            .collect();
+        if !faces.is_empty() {
+            out["faces_closed"] = serde_json::json!(faces);
+        }
+        if let Some(solid) = solid_of(ctx, &self.cells) {
+            out["solid"] = solid;
+        }
+    }
+}
+
+/// `{object_id, grew}` for the first solid among `cells` (a new Object, a
+/// grown one, or one whose union refused), or `None` when there is none.
+pub(super) fn solid_of(ctx: &Ctx, cells: &[kernel::CellOutcome]) -> Option<serde_json::Value> {
+    cells.iter().find_map(|c| {
+        let (object, grew) = match *c {
+            kernel::CellOutcome::Created(o) => (o, false),
+            kernel::CellOutcome::Grew { to, .. } => (to, true),
+            kernel::CellOutcome::Unjoined { object, .. } => (object, false),
+            kernel::CellOutcome::Declined(_) => return None,
+        };
+        let entity = kernel::EntityRef::Object(object);
+        let sid = ctx.doc.sid_of(&entity)?;
+        Some(serde_json::json!({
+            "object_id": crate::ids::public_id(&entity, sid),
+            "grew": grew,
+        }))
+    })
+}
+
+/// [`run_sketch_gesture`] for the drawing commands: the gesture ends
+/// through [`kernel::Document::end_sketch_gesture_closing_faces`], so the
+/// rules of wireframe faces §4.2 and §5 apply to API drawing as to pointer
+/// drawing, inside the gesture's one undo step.
+pub(super) fn run_drawing_gesture<T>(
+    ctx: &mut Ctx,
+    sketch: kernel::SketchId,
+    body: impl FnOnce(&mut kernel::Sketch) -> Result<T, CmdError>,
+) -> Result<(T, Closed), CmdError> {
+    ctx.doc.begin_sketch_gesture(sketch)?;
+    let outcome = match ctx.doc.sketch_mut(sketch) {
+        Some(s) => body(s),
+        None => Err(CmdError::Internal("sketch vanished mid-gesture".into())),
+    };
+    match outcome {
+        Ok(v) => {
+            let (_, faces_closed, cells) = ctx.doc.end_sketch_gesture_closing_faces(sketch)?;
+            Ok((
+                v,
+                Closed {
+                    faces_closed,
+                    cells,
+                },
+            ))
+        }
+        Err(e) => {
+            // A refused body closes nothing (the envelope rolls back).
+            let _ = ctx.doc.end_sketch_gesture(sketch);
+            Err(e)
+        }
+    }
+}
+
 pub mod attrs;
 /// Shared camera-spec parsing for `hew.view.snapshot` (doc.rs) and
 /// `hew.view.camera` (view.rs) — not a command namespace of its own, so

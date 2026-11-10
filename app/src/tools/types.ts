@@ -55,6 +55,22 @@ export interface Snap {
    *  projected onto the locked line (`x/y/z` are the projection). The cue
    *  layer draws the dotted tie between the two. */
   projectedFrom?: [number, number, number]
+  /** For a reference-line snap (`kind === 'from-point'`, `referenceLines.ts`):
+   *  the foot on the drawing plane of the reference point the line runs
+   *  through. The cue draws the dashed line from here to the snap point. */
+  from?: [number, number, number]
+  /** The reference point itself when it is off the drawing plane (the foot's
+   *  source), so the cue can draw the thin tie from it to its foot. Also set
+   *  on a plain projected snap (a named point dropped onto the plane), where
+   *  it is the point before the drop and `x/y/z` is the foot. */
+  fromSource?: [number, number, number]
+  /** For a reference-line CROSSING: the second line through the snap point,
+   *  drawn like the first. */
+  fromAlso?: {
+    from: [number, number, number]
+    direction: [number, number, number]
+    fromSource?: [number, number, number]
+  }
   /** For an `'intersection'` snap: true when an edge passes THROUGH a face
    *  of another owner (the kernel's `pierced_face` is set), false when two
    *  edges — or an edge and a guide or axis — cross. The edge is the snap's

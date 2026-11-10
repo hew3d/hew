@@ -9,6 +9,7 @@ import { ctxGround, draftRef } from './planeUnits'
 import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
 import { SiblingPreviewMirror } from '../viewport/siblingPreview'
 import { isSessionGhost } from './transformPreview'
+import { noteSketchTransformReport, setDraftSolidSelector } from './draftCommit'
 
 /** `updateGripScale` now takes a `worldPerPixel` callback (the CameraRig
  * form, docs/design/camera.md §1) instead of a raw `(camera, viewportH)`
@@ -797,6 +798,7 @@ describe('ScaleTool — retype after an arranging drawn-shape scale', () => {
           { key: 99n, edge: 60n, a: [0, 0, 0], b: [2, 2, affine[10]] },
           units[1],
         ]
+        return '{"objects":[],"sketches":[],"kept_as_sketch":[],"faces_closed":[],"cells":[]}'
       }),
       scene_undo: vi.fn(() => {
         gen += 1n
@@ -893,6 +895,25 @@ describe('ScaleTool — an identity retype retracts the scale', () => {
   })
 })
 
+
+describe('ScaleTool — an identity scale surfaces no held report', () => {
+  it('a x1 click leaves a stale held report alone: no toast, no selection', () => {
+    const ID = 9n
+    const t = makeTool([{ kind: 'object', id: ID } as NodeRef], makeBoxObjectsGroup(ID, [0, 0, 0], [2, 2, 1]))
+    const selected: bigint[] = []
+    setDraftSolidSelector((o) => selected.push(o))
+    // What a failed earlier commit would have left behind.
+    noteSketchTransformReport(
+      JSON.stringify({ objects: [], sketches: [3], kept_as_sketch: [], faces_closed: [], cells: [{ created: 20 }] }),
+    )
+    t.tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1])) // grab +Z face
+    t.tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1])) // click back on the grip: x1
+    setDraftSolidSelector(null)
+    expect(t.wasmScene.transform_selection).not.toHaveBeenCalled()
+    expect(t.onToast).not.toHaveBeenCalled()
+    expect(selected).toEqual([])
+  })
+})
 
 describe('ScaleTool — a clicked factor is exactly the displayed factor', () => {
   const ID = 9n

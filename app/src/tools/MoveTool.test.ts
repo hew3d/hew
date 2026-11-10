@@ -198,7 +198,11 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
     }),
     transform_sketch: vi.fn(() => { state.hash++; state.gen++ }),
     transform_sketch_island: vi.fn(() => { state.hash++; state.gen++ }),
-    transform_sketch_islands: vi.fn(() => { state.hash++; state.gen++ }),
+    transform_sketch_islands: vi.fn(() => {
+      state.hash++
+      state.gen++
+      return '{"objects":[],"sketches":[],"kept_as_sketch":[],"faces_closed":[],"cells":[]}'
+    }),
     duplicate_selection_array: vi.fn(
       (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
         const out: { kind: string; id: bigint }[] = []

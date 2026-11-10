@@ -24,7 +24,11 @@
 //!   states;
 //! - every detached sketch (`Sketch::detached`) an op does not itself edit
 //!   is `==` before and after it (detached shapes §3.8): no plane draft,
-//!   imprint, move, or extrusion ever arranges with one (see
+//!   imprint, move, or extrusion ever arranges with one; after a detached
+//!   draw or edit, the other detached sketches obey wireframe faces §16
+//!   R34 instead: one the gesture's connected set does not reach is `==`,
+//!   and one it reaches only loses loose line parts that went into a face
+//!   the step made (take), its faces and curves kept (see
 //!   `check_detached_untouched`);
 //! - fully unwinding the document log and replaying it twice reproduces the
 //!   same states up to tolerance-aware equivalence (canonical fingerprints).
@@ -1681,17 +1685,57 @@ fn op_target_sketch(doc: &Document, op: &DocOp) -> Option<kernel::SketchId> {
     }
 }
 
-/// Detached shapes §3.8: every detached sketch of `before` that `op` does
-/// not itself edit (`target`) and that is still live is `==` (plane, flag,
-/// drawing, handles) — no plane arrangement ever reached it — and no live
-/// detached sketch is object-owned (I9). Undo, redo, and a whole-document
-/// rescale legitimately change every sketch and are not checked.
+/// A detached draw's or edit's own gesture, recorded by the op as it
+/// applies, from the state before the step (wireframe faces §16 R34): the
+/// plane and the gesture's own vertices (never read back from the sketch
+/// after the op, or a wrongly taken line would prove its own linkage).
+#[derive(Debug, Clone)]
+struct Gesture {
+    plane: Plane,
+    verts: Vec<Point3>,
+    /// The segments the gesture drew (or moved to).
+    segs: Vec<Seg>,
+    /// The sketches the step's report names: those it wrote on its plane
+    /// and those the close pass closed a face in.
+    made: Vec<kernel::SketchId>,
+}
+
+thread_local! {
+    static GESTURE: std::cell::RefCell<Option<Gesture>> = const { std::cell::RefCell::new(None) };
+}
+
+fn record_gesture(plane: Plane, verts: Vec<Point3>, segs: Vec<Seg>, report: &kernel::DraftReport) {
+    let mut made = report.sketches.clone();
+    made.extend(report.faces_closed.iter().copied());
+    GESTURE.with(|g| {
+        *g.borrow_mut() = Some(Gesture {
+            plane,
+            verts,
+            segs,
+            made,
+        })
+    });
+}
+
+fn take_gesture() -> Option<Gesture> {
+    GESTURE.with(|g| g.borrow_mut().take())
+}
+
+/// Detached shapes §3.8 and wireframe faces §16 R34: no live detached
+/// sketch is object-owned (I9), and every detached sketch of `before` other
+/// than the one `op` itself edits (`target`) comes through the op as the
+/// rules allow. After a detached draw or edit whose gesture was recorded
+/// (`gesture`), [`check_detached_take`] (R34); after any other op, a live
+/// one is `==` (plane, flag, drawing, handles): no plane arrangement ever
+/// reached it. Undo, redo, and a whole-document rescale legitimately change
+/// every sketch and are not checked.
 fn check_detached_untouched(
     doc: &Document,
     step: usize,
     op: &DocOp,
     before: &[(kernel::SketchId, kernel::Sketch)],
     target: Option<kernel::SketchId>,
+    gesture: Option<&Gesture>,
 ) -> Result<(), TestCaseError> {
     for s in detached_sketch_ids(doc) {
         prop_assert!(
@@ -1703,6 +1747,11 @@ fn check_detached_untouched(
     }
     if matches!(op, DocOp::Undo | DocOp::Redo | DocOp::Rescale { .. }) {
         return Ok(());
+    }
+    if let Some(g) = gesture
+        && matches!(op, DocOp::DrawDetached { .. } | DocOp::EditDetached { .. })
+    {
+        return check_detached_take(doc, step, op, before, target, g);
     }
     for (s, sk) in before {
         if Some(*s) == target {
@@ -1716,6 +1765,394 @@ fn check_detached_untouched(
                 op,
                 s
             );
+        }
+    }
+    Ok(())
+}
+
+type Seg = (Point3, Point3);
+
+/// Whether `c–d` lies along `a–b` (both ends within `POINT_MERGE` of it), as
+/// `draft.rs`'s `along`.
+fn seg_along(c: Point3, d: Point3, a: Point3, b: Point3) -> bool {
+    let near = |p: Point3| {
+        let ab = b - a;
+        let len2 = ab.length_squared();
+        if len2 <= 0.0 {
+            return p.approx_eq(a, kernel::tol::POINT_MERGE);
+        }
+        let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
+        (a + ab * t - p).length() <= kernel::tol::POINT_MERGE
+    };
+    near(c) && near(d)
+}
+
+/// The parts of `a–b` that no segment of `cover` lying along its line
+/// covers, as parameter intervals mapped back to points; parts no longer
+/// than `POINT_MERGE` are none.
+fn gaps(a: Point3, b: Point3, cover: &[Seg]) -> Vec<Seg> {
+    let ab = b - a;
+    let len2 = ab.length_squared();
+    if len2 <= 0.0 {
+        return Vec::new();
+    }
+    let len = len2.sqrt();
+    let m = kernel::tol::POINT_MERGE;
+    let on_line = |p: Point3| ab.cross(p - a).length() / len <= m;
+    let mut spans: Vec<(f64, f64)> = cover
+        .iter()
+        .filter(|&&(c, d)| on_line(c) && on_line(d))
+        .map(|&(c, d)| {
+            let (tc, td) = ((c - a).dot(ab) / len2, (d - a).dot(ab) / len2);
+            (tc.min(td), tc.max(td))
+        })
+        .collect();
+    spans.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let eps = m / len;
+    let mut out = Vec::new();
+    let mut at = 0.0f64;
+    for (lo, hi) in spans {
+        if lo > at + eps && at < 1.0 {
+            out.push((at, lo.min(1.0)));
+        }
+        at = at.max(hi);
+    }
+    if at < 1.0 - eps {
+        out.push((at, 1.0));
+    }
+    out.into_iter()
+        .filter(|&(t0, t1)| (t1 - t0) * len > m)
+        .map(|(t0, t1)| (a + ab * t0, a + ab * t1))
+        .collect()
+}
+
+/// `sk`'s edges as position pairs, with the analytic circle of the chain
+/// each lies on.
+fn edges_of(sk: &kernel::Sketch) -> Vec<(Seg, Option<kernel::CurveAnalytic>)> {
+    let pos = |v| sk.vertices()[v].position;
+    sk.edges()
+        .values()
+        .map(|e| {
+            (
+                (pos(e.from), pos(e.to)),
+                e.curve.and_then(|c| sk.curve_analytic(c)),
+            )
+        })
+        .collect()
+}
+
+/// Every region's ring segments (outer and holes) of `sk`.
+fn ring_segments(sk: &kernel::Sketch) -> Vec<Seg> {
+    let pos = |v| sk.vertices()[v].position;
+    let mut out = Vec::new();
+    for r in sk.regions().values() {
+        for ring in std::iter::once(&r.outer).chain(r.holes.iter()) {
+            for i in 0..ring.len() {
+                out.push((pos(ring[i]), pos(ring[(i + 1) % ring.len()])));
+            }
+        }
+    }
+    out
+}
+
+/// Region `r` of `sk` by ring geometry: each ring's points sorted, the
+/// outer ring first, then the holes sorted.
+fn region_key(sk: &kernel::Sketch, r: &kernel::SketchRegion) -> Vec<Vec<Point3>> {
+    let pos = |v| sk.vertices()[v].position;
+    let key = |ring: &[kernel::SketchVertexId]| {
+        let mut pts: Vec<Point3> = ring.iter().map(|&v| pos(v)).collect();
+        pts.sort_by(|p, q| {
+            p.x.total_cmp(&q.x)
+                .then(p.y.total_cmp(&q.y))
+                .then(p.z.total_cmp(&q.z))
+        });
+        pts
+    };
+    let mut holes: Vec<Vec<Point3>> = r.holes.iter().map(|h| key(h)).collect();
+    holes.sort_by(|p, q| {
+        p.first()
+            .map(|a| (a.x, a.y, a.z))
+            .partial_cmp(&q.first().map(|a| (a.x, a.y, a.z)))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    std::iter::once(key(&r.outer)).chain(holes).collect()
+}
+
+/// `sk`'s faced regions by ring geometry ([`region_key`]).
+fn faced_rings(sk: &kernel::Sketch) -> Vec<Vec<Vec<Point3>>> {
+    sk.regions()
+        .values()
+        .filter(|r| !r.faceless)
+        .map(|r| region_key(sk, r))
+        .collect()
+}
+
+fn same_region(a: &[Vec<Point3>], b: &[Vec<Point3>]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y)
+                    .all(|(p, q)| p.approx_eq(*q, kernel::tol::POINT_MERGE))
+        })
+}
+
+/// Wireframe faces §16 R34, after a detached draw or edit: with G the
+/// step's sketches (the target, and the sketches the step's report names:
+/// the drawn one, and those the close pass closed a face in),
+/// P the gesture's plane and V its own vertices (`gesture`, from the state
+/// before the step), S the detached sketches of `before` whose edges lying
+/// in P the closure from V through shared ends reaches, and F the faced
+/// regions G holds after the step that it did not hold before (by ring
+/// geometry), every other detached sketch D of `before`:
+/// 1. not in S: live and `==`;
+/// 2. in S, live: same plane and flag, the same faced regions (by ring
+///    geometry), every edge lying along one edge it held before with that
+///    edge's curve kind and circle, and no new edge;
+/// 3. every part it lost lay on an old edge of D bounding no region of D,
+///    lies along edges of regions in F, and lay in P;
+/// 4. every edge of a region in F lying along a loose old edge of a sketch
+///    in S is no longer held there (a take that copied and left the line
+///    is no take);
+/// 5. missing: in S, held no faced region, and every old edge was lost as
+///    (3) allows;
+///
+/// and every segment the gesture drew lies along an edge of G, of a face in
+/// F, or of a sketch of S: its drawing is never silently lost.
+fn check_detached_take(
+    doc: &Document,
+    step: usize,
+    op: &DocOp,
+    before: &[(kernel::SketchId, kernel::Sketch)],
+    target: Option<kernel::SketchId>,
+    g: &Gesture,
+) -> Result<(), TestCaseError> {
+    let m = kernel::tol::POINT_MERGE;
+    let in_p = |q: Point3| g.plane.signed_distance(q).abs() <= kernel::tol::PLANE_DIST;
+    // ---- S: the connected set over the before snapshot ----
+    let in_plane: Vec<(kernel::SketchId, Seg)> = before
+        .iter()
+        .flat_map(|(s, sk)| {
+            edges_of(sk)
+                .into_iter()
+                .map(move |(e, _)| (*s, e))
+                .filter(|&(_, (a, b))| in_p(a) && in_p(b))
+        })
+        .collect();
+    let mut shape: Vec<Point3> = g.verts.clone();
+    let at = |shape: &[Point3], p: Point3| shape.iter().any(|&q| q.approx_eq(p, m));
+    let mut reached = vec![false; in_plane.len()];
+    loop {
+        let mut grew = false;
+        for (k, &(_, (a, b))) in in_plane.iter().enumerate() {
+            if reached[k] || !(at(&shape, a) || at(&shape, b)) {
+                continue;
+            }
+            reached[k] = true;
+            grew = true;
+            for p in [a, b] {
+                if !at(&shape, p) {
+                    shape.push(p);
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let in_s: std::collections::BTreeSet<kernel::SketchId> = in_plane
+        .iter()
+        .zip(&reached)
+        .filter(|&(_, &r)| r)
+        .map(|(&(s, _), _)| s)
+        .collect();
+    // ---- G and F ----
+    let mut g_ids: Vec<kernel::SketchId> = g.made.clone();
+    g_ids.extend(target);
+    g_ids.sort_unstable();
+    g_ids.dedup();
+    let target_before: Vec<Vec<Vec<Point3>>> = target
+        .and_then(|t| before.iter().find(|(s, _)| *s == t))
+        .map(|(_, sk)| faced_rings(sk))
+        .unwrap_or_default();
+    let mut f_segs: Vec<Seg> = Vec::new();
+    for &s in &g_ids {
+        let Some(sk) = doc.sketch(s) else { continue };
+        let pos = |v| sk.vertices()[v].position;
+        for r in sk.regions().values().filter(|r| !r.faceless) {
+            let key = region_key(sk, r);
+            if Some(s) == target && target_before.iter().any(|t| same_region(t, &key)) {
+                continue;
+            }
+            for ring in std::iter::once(&r.outer).chain(r.holes.iter()) {
+                for i in 0..ring.len() {
+                    f_segs.push((pos(ring[i]), pos(ring[(i + 1) % ring.len()])));
+                }
+            }
+        }
+    }
+    let by_f = |(a, b): Seg| in_p(a) && in_p(b) && gaps(a, b, &f_segs).is_empty();
+    // ---- each other detached sketch of before ----
+    for (d, old) in before {
+        if Some(*d) == target {
+            continue;
+        }
+        let now = doc.sketch(*d);
+        if !in_s.contains(d) {
+            prop_assert!(
+                now == Some(old),
+                "step {} ({:?}): detached sketch {:?} the gesture does not reach changed (R34 1)",
+                step,
+                op,
+                d
+            );
+            continue;
+        }
+        let old_edges = edges_of(old);
+        let old_rings = ring_segments(old);
+        let loose = |(a, b): Seg| {
+            !old_rings.iter().any(|&(c, e)| {
+                (a.approx_eq(c, m) && b.approx_eq(e, m)) || (a.approx_eq(e, m) && b.approx_eq(c, m))
+            })
+        };
+        let Some(now) = now else {
+            prop_assert!(
+                faced_rings(old).is_empty(),
+                "step {} ({:?}): faced detached sketch {:?} disappeared (R34 5)",
+                step,
+                op,
+                d
+            );
+            for &((a, b), _) in &old_edges {
+                prop_assert!(
+                    loose((a, b)) && by_f((a, b)),
+                    "step {} ({:?}): sketch {:?} lost {:?} not into a new face (R34 5)",
+                    step,
+                    op,
+                    d,
+                    (a, b)
+                );
+            }
+            continue;
+        };
+        prop_assert!(
+            now.plane() == old.plane() && now.detached() == old.detached(),
+            "step {}: sketch {:?} changed plane or kind (R34 2)",
+            step,
+            d
+        );
+        let (fo, fn_) = (faced_rings(old), faced_rings(now));
+        prop_assert!(
+            fo.len() == fn_.len() && fo.iter().all(|r| fn_.iter().any(|x| same_region(r, x))),
+            "step {} ({:?}): sketch {:?} faced regions changed (R34 2)",
+            step,
+            op,
+            d
+        );
+        let new_edges = edges_of(now);
+        for &((a, b), curve) in &new_edges {
+            let home = old_edges.iter().find(|&&((c, e), _)| seg_along(a, b, c, e));
+            prop_assert!(
+                home.is_some(),
+                "step {} ({:?}): sketch {:?} holds a new edge {:?} (R34 2)",
+                step,
+                op,
+                d,
+                (a, b)
+            );
+            if let Some(&(_, Some(was))) = home {
+                prop_assert!(
+                    curve.is_some_and(|c| c.kind == was.kind
+                        && c.geom.center.approx_eq(was.geom.center, m)
+                        && (c.geom.radius - was.geom.radius).abs() <= m),
+                    "step {} ({:?}): sketch {:?} edge {:?} lost its curve (R34 2, R30)",
+                    step,
+                    op,
+                    d,
+                    (a, b)
+                );
+            }
+        }
+        let now_segs: Vec<Seg> = new_edges.iter().map(|&(e, _)| e).collect();
+        for &((a, b), _) in &old_edges {
+            for part in gaps(a, b, &now_segs) {
+                prop_assert!(
+                    loose((a, b)) && by_f(part),
+                    "step {} ({:?}): sketch {:?} lost {:?} of {:?} not as a take into a new face (R34 3)",
+                    step,
+                    op,
+                    d,
+                    part,
+                    (a, b)
+                );
+            }
+        }
+    }
+    // ---- the gesture's own drawing is kept ----
+    // Every segment the gesture drew lies along an edge of the step's
+    // sketches, of a face it made, or of a sketch of the connected set it
+    // reached (drawing over a reached line adds nothing): a drawn edge is
+    // never silently lost.
+    let mut kept: Vec<Seg> = f_segs.clone();
+    for &s in &g_ids {
+        if let Some(sk) = doc.sketch(s) {
+            kept.extend(edges_of(sk).into_iter().map(|(e, _)| e));
+        }
+    }
+    for (d, _) in before {
+        if in_s.contains(d)
+            && let Some(sk) = doc.sketch(*d)
+        {
+            kept.extend(edges_of(sk).into_iter().map(|(e, _)| e));
+        }
+    }
+    for &(a, b) in &g.segs {
+        if a.approx_eq(b, m) {
+            continue;
+        }
+        let lost = gaps(a, b, &kept);
+        prop_assert!(
+            lost.is_empty(),
+            "step {} ({:?}): the gesture's segment {:?} lost {:?} (R34)",
+            step,
+            op,
+            (a, b),
+            lost
+        );
+    }
+    // ---- (4) the converse: a face's edge along a loose linked line left home ----
+    for (d, old) in before {
+        if Some(*d) == target || !in_s.contains(d) {
+            continue;
+        }
+        let Some(now) = doc.sketch(*d) else { continue };
+        let old_rings = ring_segments(old);
+        let now_segs: Vec<Seg> = edges_of(now).into_iter().map(|(e, _)| e).collect();
+        for &((c, e), _) in &edges_of(old) {
+            let is_loose = !old_rings.iter().any(|&(x, y)| {
+                (c.approx_eq(x, m) && e.approx_eq(y, m)) || (c.approx_eq(y, m) && e.approx_eq(x, m))
+            });
+            if !is_loose {
+                continue;
+            }
+            for &(a, b) in f_segs.iter().filter(|&&(a, b)| seg_along(a, b, c, e)) {
+                // No positive-length part of a–b is still held by D.
+                let still: Vec<Seg> = now_segs
+                    .iter()
+                    .copied()
+                    .filter(|&(p, q)| seg_along(p, q, c, e))
+                    .collect();
+                let uncovered = gaps(a, b, &still);
+                let left: f64 = uncovered.iter().map(|&(p, q)| (q - p).length()).sum();
+                prop_assert!(
+                    ((b - a).length() - left).abs() <= 2.0 * m,
+                    "step {} ({:?}): face edge {:?} along loose line of {:?} was copied, not taken (R34 4)",
+                    step,
+                    op,
+                    (a, b),
+                    d
+                );
+            }
         }
     }
     Ok(())
@@ -2017,6 +2454,8 @@ fn apply_draw_detached(
     let v = plane.normal().cross(u);
     let at = |x: i32, y: i32| origin + u * (f64::from(x) * 0.5) + v * (f64::from(y) * 0.5);
     let depth0 = doc.undo_depth();
+    let mut drawn: Vec<Point3> = Vec::new();
+    let mut segs: Vec<Seg> = Vec::new();
     let result = doc.draft_detached_new(plane, None, "Fuzz detached", |sk| {
         if circle {
             let center = at(a.0, a.1);
@@ -2027,6 +2466,8 @@ fn apply_draw_detached(
                     center + u * (radius * t.cos()) + v * (radius * t.sin())
                 })
                 .collect();
+            drawn.extend(ring.iter().copied());
+            segs.extend((0..segments).map(|i| (ring[i], ring[(i + 1) % segments])));
             sk.begin_curve_with(kernel::CurveGeom { center, radius })?;
             for i in 0..segments {
                 sk.add_segment(ring[i], ring[(i + 1) % segments])?;
@@ -2035,6 +2476,8 @@ fn apply_draw_detached(
         } else {
             let (x1, y1) = (a.0 + b.0, a.1 + b.1);
             let c = [at(a.0, a.1), at(x1, a.1), at(x1, y1), at(a.0, y1)];
+            drawn.extend(c);
+            segs.extend((0..4).map(|k| (c[k], c[(k + 1) % 4])));
             for k in 0..4 {
                 sk.add_segment(c[k], c[(k + 1) % 4])?;
             }
@@ -2051,6 +2494,7 @@ fn apply_draw_detached(
             );
             prop_assert_eq!(report.sketches.len(), 1, "step {}: one new sketch", step);
             let s = report.sketches[0];
+            record_gesture(plane, drawn, segs, &report);
             prop_assert!(
                 doc.sketch(s).is_some_and(|sk| sk.detached()),
                 "step {}: the new sketch is not detached",
@@ -2088,6 +2532,10 @@ fn apply_edit_detached(
         }
     };
     let depth0 = doc.undo_depth();
+    // The gesture's own vertices, from the state before the step (§16 R34):
+    // the sketch's vertices, and what the edit adds or moves them to.
+    let mut drawn: Vec<Point3> = sk.vertices().values().map(|x| x.position).collect();
+    let mut segs: Vec<Seg> = Vec::new();
     let result = doc.draft_detached(s, "Fuzz detached edit", |w| {
         match mode {
             0 => {
@@ -2103,6 +2551,10 @@ fn apply_edit_detached(
                             .expect("a listed edge is in the lift")
                     })
                     .collect();
+                for e in &unit.edges {
+                    drawn.extend([e.a + by, e.b + by]);
+                    segs.push((e.a + by, e.b + by));
+                }
                 w.apply_transform_edges(&es, &Transform::translation(by))?;
             }
             1 => {
@@ -2116,6 +2568,8 @@ fn apply_edit_detached(
                 if let Some(p) = nth(&vs, sel)
                     && by.length() > 0.0
                 {
+                    drawn.extend([p, p + by]);
+                    segs.push((p, p + by));
                     w.add_segment(p, p + by)?;
                 }
             }
@@ -2145,12 +2599,45 @@ fn apply_edit_detached(
             if let Some(now) = doc.sketch(s) {
                 prop_assert!(now.detached(), "step {}: the sketch lost its flag", step);
             }
+            record_gesture(sk.plane(), drawn, segs, &report);
             Ok(())
         }
         Err(e) => Err(TestCaseError::fail(format!(
             "step {step}: a detached edit (mode {mode}) was refused: {e:?}"
         ))),
     }
+}
+
+/// The edges of `sk` lying along `a–b` (both ends within
+/// [`kernel::tol::POINT_MERGE`] of it), when they cover it end to end;
+/// `None` otherwise.
+fn pieces_covering(sk: &kernel::Sketch, a: Point3, b: Point3) -> Option<Vec<kernel::SketchEdgeId>> {
+    let m = kernel::tol::POINT_MERGE;
+    let ab = b - a;
+    let len = ab.length();
+    let near = |p: Point3| {
+        let t = ((p - a).dot(ab) / (len * len)).clamp(0.0, 1.0);
+        (a + ab * t - p).length() <= m
+    };
+    let mut spans: Vec<(f64, f64)> = Vec::new();
+    let mut ids = Vec::new();
+    for (id, e) in sk.edges().iter() {
+        let (p, q) = (sk.vertices()[e.from].position, sk.vertices()[e.to].position);
+        if near(p) && near(q) {
+            let (tp, tq) = ((p - a).dot(ab) / len, (q - a).dot(ab) / len);
+            spans.push((tp.min(tq), tp.max(tq)));
+            ids.push(id);
+        }
+    }
+    spans.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut reach = 0.0;
+    for (lo, hi) in spans {
+        if lo > reach + m {
+            return None;
+        }
+        reach = f64::max(reach, hi);
+    }
+    (!ids.is_empty() && reach >= len - m).then_some(ids)
 }
 
 /// One [`DocOp::Draft`].
@@ -2234,12 +2721,17 @@ fn apply_draft(
             }
             4 | 5 => {
                 let unit = unit.as_ref().expect("a unit was picked");
+                // A listed edge that another plane's line crosses in the
+                // lift is there as the pieces that cover it end to end
+                // (`Document::draft_edges_for_keys`, how a draft names it).
                 let es: Vec<_> = unit
                     .edges
                     .iter()
-                    .map(|e| {
-                        sk.edge_at_positions(e.a, e.b)
-                            .expect("a unit edge in the lift")
+                    .flat_map(|e| {
+                        sk.edge_at_positions(e.a, e.b).map_or_else(
+                            || pieces_covering(sk, e.a, e.b).expect("a unit edge in the lift"),
+                            |id| vec![id],
+                        )
                     })
                     .collect();
                 if shape == 4 {
@@ -4236,11 +4728,13 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
     for (step, op) in ops.iter().enumerate() {
         let detached_before = detached_snapshot(&doc);
         let target = op_target_sketch(&doc, op);
+        take_gesture();
         if !apply_doc_op(&mut doc, step, op, &materials)? {
             return Ok(());
         }
+        let gesture = take_gesture();
         check_doc(&doc, step, "apply")?;
-        check_detached_untouched(&doc, step, op, &detached_before, target)?;
+        check_detached_untouched(&doc, step, op, &detached_before, target, gesture.as_ref())?;
         check_save_and_sketch_owners(&doc, &format!("step {step}"))?;
         // Every committed state reopens: an op that left a face the
         // loader rejects would lose the user's file on the next save.
@@ -4338,6 +4832,92 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
         "second full redo did not reproduce the maximal state"
     );
     Ok(())
+}
+
+/// Wireframe faces §16 R34: the harness check keeps a detached gesture's
+/// own drawing. A detached post on the plane x = 1, lying on the ground from
+/// (1, -1) to (1, 3); then a ground detached Rectangle (1, 0)-(2, 1) whose
+/// side x = 1 runs along the post, sharing no end with it. The post is no
+/// part of the Rectangle's connected set, and the Rectangle keeps all four
+/// sides (one face), so `check_detached_untouched` holds; a build that lost
+/// the side along the post fails it.
+#[test]
+fn a_side_drawn_along_a_stray_post_is_kept_under_the_harness() {
+    let mut doc = Document::new();
+    doc.set_torture_mode(true);
+    let (lo, hi) = (Point3::new(1.0, -1.0, 0.0), Point3::new(1.0, 3.0, 0.0));
+    let wall = Plane::from_point_normal(lo, Vec3::new(1.0, 0.0, 0.0)).expect("unit normal");
+    doc.draft_detached_new(wall, None, "Post", |w| w.add_segment(lo, hi).map(|_| ()))
+        .expect("the post lowers");
+    let op = DocOp::DrawDetached {
+        obj_sel: 0,
+        face_sel: 0,
+        ground: true,
+        circle: false,
+        a: (2, 0),
+        b: (2, 2),
+        segments: 24,
+    };
+    let before = detached_snapshot(&doc);
+    take_gesture();
+    apply_draw_detached(&mut doc, 0, 0, 0, true, false, (2, 0), (2, 2), 24)
+        .expect("the Rectangle lowers");
+    let gesture = take_gesture().expect("the draw recorded its gesture");
+    check_detached_untouched(&doc, 0, &op, &before, None, Some(&gesture))
+        .expect("the side along the post is kept and the post untouched");
+}
+
+/// Seed `0452ee2a`, replayed under every harness invariant: a ground
+/// circle lent, curve and all (§16 R30), to an ordinary draft on a box's
+/// underside, where a Line starts on the exact circle inside a facet. The
+/// lifted facet bent to that point and the draft was refused as touching a
+/// boundary edge. The minimized spec is
+/// `a_line_from_a_lent_circles_point_leaves_the_circle_whole` in
+/// `cell_solid_specs.rs`.
+#[test]
+fn seed_0452ee2a_a_line_from_a_lent_circles_point() {
+    let rect = |a: (i32, i32), b: (i32, i32)| DocOp::DrawDetached {
+        obj_sel: 0,
+        face_sel: 0,
+        ground: false,
+        circle: false,
+        a,
+        b,
+        segments: 24,
+    };
+    let ops = vec![
+        rect((1, 2), (5, 5)),
+        rect((0, 0), (1, 1)),
+        rect((0, 0), (1, 1)),
+        DocOp::EditDetached {
+            sk_sel: 9_248_708_117_396_948_472,
+            mode: 0,
+            sel: 0,
+            d: (-5, -5),
+        },
+        DocOp::ExtrudeDetached {
+            sk_sel: 12_972_457_934_127_434_838,
+            reg_sel: 0,
+            distance: 1.248_144_368_094_599,
+        },
+        DocOp::DrawCircleOnGround {
+            cx: 15,
+            cy: 0,
+            r: 3,
+            segments: 25,
+        },
+        DocOp::Draft {
+            obj_sel: 0,
+            face_sel: 9_161_544_369_431_051_388,
+            ground: false,
+            shape: 2,
+            a: (9, -1),
+            b: (1, 1),
+            sel: 0,
+            segments: 24,
+        },
+    ];
+    run_doc_case(vec![], ops).expect("the seed's case holds");
 }
 
 /// KB-22, the fuzzer's original seed: a sketch drawn into a definition

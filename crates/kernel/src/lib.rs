@@ -50,11 +50,12 @@ pub use attr::{AttrDict, AttrValue, AttrValueError};
 pub use axes::{AxesFrame, AxesFrameError};
 pub use camera::{CameraProjection, CameraState};
 pub use document::{
-    AttrTarget, CompoundMeta, DocChange, DocTransaction, Document, DocumentError, DraftCurveRun,
-    DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore, DraftUnit, EntityRef,
-    FollowMePath, HistoryArg, HistoryEntries, HistoryEntryInfo, HistoryKind, HistoryOrigin,
-    IngestJob, IngestProgress, InsertOptions, InsertReport, LibraryProvenance, MAX_COMPONENT_DEPTH,
-    MaterialScope, NodeId, PendingActionKind, PlaneListing, PlaneUnits, PurgeReport,
+    AttrTarget, CellDecline, CellDeclineReason, CellOutcome, CellScope, CellSeed, ClosingEdge,
+    CompoundMeta, DocChange, DocTransaction, Document, DocumentError, DraftCurveRun, DraftEdge,
+    DraftRegion, DraftRegionWhy, DraftReport, DraftStore, DraftUnit, EntityRef, FollowMePath,
+    HistoryArg, HistoryEntries, HistoryEntryInfo, HistoryKind, HistoryOrigin, IngestJob,
+    IngestProgress, InsertOptions, InsertReport, LibraryProvenance, MAX_COMPONENT_DEPTH,
+    MaterialScope, NodeId, OpenEdges, PendingActionKind, PlaneListing, PlaneUnits, PurgeReport,
 };
 pub use error::TopologyError;
 pub use geo::{GeoReference, GeoReferenceError};
