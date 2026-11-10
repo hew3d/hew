@@ -93,3 +93,41 @@ impl GuideSpan {
         }
     }
 }
+
+/// How a guide line is drawn: a 16-bit on/off pattern, least-significant bit
+/// first, one bit per fixed length along the line (the stipple mask a
+/// `.skp` guide carries). Any mask is valid and survives save, load and a
+/// `.skp` round trip; the named constants are the ones SketchUp's own
+/// guides use. The default is [`GuideDash::DASHED`], how Hew has always
+/// drawn its guides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GuideDash(pub u16);
+
+impl GuideDash {
+    /// An unbroken line.
+    pub const SOLID: GuideDash = GuideDash(0xFFFF);
+    /// Short dashes (the default).
+    pub const DASHED: GuideDash = GuideDash(0x3333);
+    /// Dots.
+    pub const DOTTED: GuideDash = GuideDash(0x8888);
+    /// Long dashes.
+    pub const LONG_DASH: GuideDash = GuideDash(0xF0F0);
+    /// Dash, dot, dash.
+    pub const DASH_DOT: GuideDash = GuideDash(0x1C47);
+
+    /// The mask, bit 0 first along the line.
+    pub fn mask(self) -> u16 {
+        self.0
+    }
+
+    /// Whether this is the default dash (omitted from a saved file).
+    pub fn is_default(self) -> bool {
+        self == GuideDash::default()
+    }
+}
+
+impl Default for GuideDash {
+    fn default() -> Self {
+        GuideDash::DASHED
+    }
+}

@@ -32,12 +32,13 @@
  */
 
 import * as THREE from 'three'
-import type { Tool, Snap } from './types'
+import type { Tool, Snap, SnapConstraint } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
 import { rayPlaneIntersect } from '../viewport/geoHelpers'
-import { axisDrawPlane } from './drawPlane'
+import { axisDrawPlane, inferredAxis, inferredAxisPlane, type CameraView } from './drawPlane'
+import { cameraView } from './viewPlaneInference'
 import { getDrawingAxes } from './drawingAxes'
 import { FacePickCache, worldFacePlane, snapOnObjectBoundary } from './faceDraw'
 import { t } from '@lingui/core/macro'
@@ -177,6 +178,8 @@ export function pictureRect(
 }
 
 export class PlaceImageTool implements Tool {
+  /** Idle over empty space, the plane follows the view (`Tool.followsViewPlane`). */
+  readonly followsViewPlane = true
   readonly name = 'PlaceImage'
 
   private wasmScene: WasmScene
@@ -189,6 +192,13 @@ export class PlaceImageTool implements Tool {
 
   private stage: Stage = { kind: 'idle' }
   private idlePlaneLock: 0 | 1 | 2 | null = null
+  /** The camera (forward and eye) from `updateCamera`: over empty space the
+   *  picture goes on the axis plane that faces the camera (view-plane
+   *  inference). */
+  private view: CameraView | null = null
+  /** The vertical axis (0 red, 1 green) the last idle hover inferred, or
+   *  null when the ground, a face or a lock decided. */
+  private inferredAxis: 0 | 1 | null = null
   private typed = ''
   private lastCursor: V3 | null = null
   private finished = false
@@ -221,6 +231,10 @@ export class PlaceImageTool implements Tool {
     return this.placement.pixelWidth / this.placement.pixelHeight
   }
 
+  updateCamera(camera: THREE.Camera): void {
+    this.view = cameraView(camera)
+  }
+
   statusHint(): string {
     if (this.stage.kind === 'anchored') {
       return t`Click the opposite corner — or type the width and press Enter.`
@@ -230,6 +244,10 @@ export class PlaceImageTool implements Tool {
       return t`Locked to the ${axis} plane — click the first corner; same arrow or Esc unlocks.`
     }
     const name = this.placement.name
+    if (this.inferredAxis !== null) {
+      const axis = axisLockColorName(this.inferredAxis)
+      return t`Facing the ${axis} plane — click the first corner of "${name}" to place it there; ↑ for the ground. Esc cancels.`
+    }
     return t`Click the first corner of "${name}" — on the ground or any face. Esc cancels.`
   }
 
@@ -244,15 +262,24 @@ export class PlaceImageTool implements Tool {
     return this.stage.kind === 'anchored'
   }
 
-  /** Snaps stay on the picture's plane once its first corner is down. */
-  snapConstraint(): { constraintPlane: { point: [number, number, number]; normal: [number, number, number] } } | null {
-    if (this.stage.kind !== 'anchored') return null
-    return { constraintPlane: { point: this.stage.frame.point, normal: this.stage.frame.normal } }
+  /** Snaps stay on the picture's plane once its first corner is down.
+   *  Idle and unlocked, a miss over empty space lands on the axis plane the
+   *  view faces (`fallbackPlane` only — never sent to the kernel, so any
+   *  geometry still snaps), matching where `idleFrame` places the picture. */
+  snapConstraint(): SnapConstraint | null {
+    if (this.stage.kind === 'anchored') {
+      return { constraintPlane: { point: this.stage.frame.point, normal: this.stage.frame.normal } }
+    }
+    if (this.idlePlaneLock !== null || this.view === null) return null
+    const inferred = inferredAxisPlane(getDrawingAxes(this.wasmScene), this.view)
+    if (inferred.ground) return null
+    return { fallbackPlane: { point: inferred.origin, normal: inferred.normal } }
   }
 
   /** The frame a click at this event would place the picture on, and the
    *  point on it under the cursor. */
   private idleFrame(snap: Snap | null, ray: Ray): { frame: PictureFrame; point: V3 } | null {
+    this.inferredAxis = null
     const axes = getDrawingAxes(this.wasmScene)
     const frameAt = (point: V3, normal: V3) => {
       const f = pictureFrame(point, normal, ray.direction, axes.z, axes.y)
@@ -260,6 +287,11 @@ export class PlaceImageTool implements Tool {
     }
     const snapPoint: V3 | null = snap !== null ? [snap.x, snap.y, snap.z] : null
     if (this.idlePlaneLock !== null) {
+      // The lock skips the face pick below, yet the boundary pick's hover
+      // memory (view-plane design §4.2 rule 2) must keep following the
+      // cursor for when the lock is released at a corner; the pick itself
+      // is discarded.
+      if (!snapOnObjectBoundary(snap)) this.pickCache.pickFor(this.wasmScene, ray, () => true)
       const ground = rayPlaneIntersect(ray.origin, ray.direction, [0, 0, 0], [0, 0, 1])
       const through = snapPoint ?? ground
       if (through === null) return null
@@ -271,6 +303,19 @@ export class PlaceImageTool implements Tool {
         ? snapPoint
         : rayPlaneIntersect(ray.origin, ray.direction, face.point, face.normal)
       if (hit !== null) return frameAt(hit, face.normal)
+    }
+    // Over empty space: the axis plane that faces the camera, the ground
+    // unless the view looks squarely at a wall (view-plane inference).
+    if (this.view !== null) {
+      const axis = inferredAxis(axes, this.view)
+      const inferred = inferredAxisPlane(axes, this.view)
+      if (!inferred.ground) {
+        const onPlane = snapPoint !== null && Math.abs(dot(sub(snapPoint, inferred.origin), inferred.normal)) < 1e-6
+        const hit = onPlane ? snapPoint : rayPlaneIntersect(ray.origin, ray.direction, inferred.origin, inferred.normal)
+        if (hit === null) return null
+        this.inferredAxis = axis === 2 ? null : axis
+        return frameAt(hit, inferred.normal)
+      }
     }
     const groundHit = snapPoint !== null && Math.abs(snapPoint[2]) < 1e-9
       ? snapPoint
@@ -477,6 +522,9 @@ export class PlaceImageTool implements Tool {
     this.typed = ''
     this.lastCursor = null
     this.hideGhost()
+    // A new document's handles can reuse the old one's: no memoized pick
+    // or hover memory may outlive it.
+    this.pickCache.clear()
   }
 
   /** Test seam: the current stage's kind and lock. */

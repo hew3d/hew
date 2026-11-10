@@ -257,7 +257,56 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 8;
 /// no detached sketch writes the same manifest as v22 apart from the
 /// version. Gated by [`DETACHED_SKETCH_MIN_VERSION`]; a reader also rejects
 /// `detached` together with `owner_object`. Geometry buffer unchanged.
-pub const MANIFEST_FORMAT_VERSION: u32 = 23;
+/// **v24**: `guides[].dash` (a guide line's 16-bit stipple mask, omitted
+/// at the default `0x3333`); `camera.image_width` and `camera.aspect_ratio`
+/// (a Match Photo camera's image width in meters and held ratio, top-level
+/// and in `scenes[].camera`); and the section and guide settings of a
+/// `view_style` (`section_cut_color`, `section_cut_width`, `section_fill`,
+/// `section_fill_color`, `active_section_color`, `guides_color`,
+/// `guides_hidden`). Each is optional and omitted when unset, so a
+/// document using none of them writes the same manifest as v23 apart from
+/// the version. Gated by [`GUIDE_DASH_MIN_VERSION`],
+/// [`CAMERA_IMAGE_MIN_VERSION`] and [`VIEW_STYLE_SECTION_MIN_VERSION`].
+/// Geometry buffer unchanged.
+/// **v25**: `geo` — the document's coordinate reference system (name,
+/// origin easting/northing/height, x axis, scale, datum, projection, zone,
+/// unit and the file's registry and calibration ids). Optional and omitted
+/// when the model has none, so a document without one writes the same
+/// manifest as v24 apart from the version. Gated by [`GEO_MIN_VERSION`].
+/// Geometry buffer unchanged.
+/// **v26**: `materials[].pbr` — a material's physically based properties
+/// (metallic and roughness factors, normal and occlusion strengths, and up
+/// to four map images stored as `textures/pbr_<material>_<slot>.<ext>`).
+/// Optional and omitted for a plain material, so a document without one
+/// writes the same manifest as v25 apart from the version. Gated by
+/// [`PBR_MIN_VERSION`]. Geometry buffer unchanged.
+pub const MANIFEST_FORMAT_VERSION: u32 = 26;
+
+/// The manifest version at which `materials[].pbr` was introduced. A file
+/// declaring an older version that carries one is rejected
+/// (reject-not-repair).
+pub(crate) const PBR_MIN_VERSION: u32 = 26;
+
+/// The manifest version at which `geo` was introduced. A file declaring an
+/// older version that carries one is rejected (reject-not-repair).
+pub(crate) const GEO_MIN_VERSION: u32 = 25;
+
+/// The manifest version at which `camera.image_width` and
+/// `camera.aspect_ratio` (top-level and in `scenes[].camera`) were
+/// introduced. A file declaring an older version that carries either is
+/// malformed for its own declared version and rejected.
+pub(crate) const CAMERA_IMAGE_MIN_VERSION: u32 = 24;
+
+/// The manifest version at which the section and guide fields of a
+/// `view_style` (`section_*`, `active_section_color`, `guides_*`) were
+/// introduced. A file declaring an older version that carries one is
+/// malformed for its own declared version and rejected.
+pub(crate) const VIEW_STYLE_SECTION_MIN_VERSION: u32 = 24;
+
+/// The manifest version at which `guides[].dash` was introduced. A file
+/// declaring an older version that carries it is malformed for its own
+/// declared version and rejected (reject-not-repair).
+pub(crate) const GUIDE_DASH_MIN_VERSION: u32 = 24;
 
 /// The manifest version at which `sketches[].detached` was introduced. A
 /// file declaring an older version that sets it is malformed for its own
@@ -1813,6 +1862,11 @@ pub(crate) struct Manifest {
     /// the frame differs from [`AxesFrame::IDENTITY`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axes: Option<AxesFrameDto>,
+    /// The document's coordinate reference system (manifest v25+;
+    /// `geo.rs`). Absent → the model has no place on a map, the only
+    /// possibility before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geo: Option<GeoReferenceDto>,
     /// Dimension/leader-text annotations (manifest v13+). Absent/empty in
     /// v1-v12 files → no annotations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1878,6 +1932,12 @@ pub(crate) struct SceneDto {
     /// The look the Scene captures (manifest v19+; §4.15's shape).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_style: Option<ViewStyleDto>,
+    /// The Scene's own transition time and delay in seconds; absent = the
+    /// document's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_s: Option<f64>,
 }
 
 /// serde's default `Option<Option<T>>` handling collapses an explicit
@@ -1901,6 +1961,84 @@ pub(crate) struct AxesFrameDto {
     pub y: [f64; 3],
 }
 
+/// A document-level geo-reference (manifest v25+; `geo.rs`). Empty text
+/// fields and an absent unit factor are omitted.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GeoReferenceDto {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    pub easting: f64,
+    pub northing: f64,
+    pub height: f64,
+    pub x_axis: [f64; 2],
+    pub scale: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub geodetic_datum: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vertical_datum: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub map_projection: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub map_zone: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub map_unit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_unit_metres: Option<f64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tgl_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub calibration_file_name: String,
+}
+
+fn encode_geo(g: &crate::geo::GeoReference) -> GeoReferenceDto {
+    GeoReferenceDto {
+        name: g.name.clone(),
+        description: g.description.clone(),
+        easting: g.easting,
+        northing: g.northing,
+        height: g.height,
+        x_axis: g.x_axis,
+        scale: g.scale,
+        geodetic_datum: g.geodetic_datum.clone(),
+        vertical_datum: g.vertical_datum.clone(),
+        map_projection: g.map_projection.clone(),
+        map_zone: g.map_zone.clone(),
+        map_unit: g.map_unit.clone(),
+        map_unit_metres: g.map_unit_metres,
+        tgl_id: g.tgl_id.clone(),
+        calibration_file_name: g.calibration_file_name.clone(),
+    }
+}
+
+/// Decodes the manifest's `geo`, rejecting (never repairing) a record
+/// whose numbers fail [`crate::geo::GeoReference::validate`].
+fn decode_geo(dto: &GeoReferenceDto) -> Result<crate::geo::GeoReference, LoadError> {
+    let g = crate::geo::GeoReference {
+        name: dto.name.clone(),
+        description: dto.description.clone(),
+        easting: dto.easting,
+        northing: dto.northing,
+        height: dto.height,
+        x_axis: dto.x_axis,
+        scale: dto.scale,
+        geodetic_datum: dto.geodetic_datum.clone(),
+        vertical_datum: dto.vertical_datum.clone(),
+        map_projection: dto.map_projection.clone(),
+        map_zone: dto.map_zone.clone(),
+        map_unit: dto.map_unit.clone(),
+        map_unit_metres: dto.map_unit_metres,
+        tgl_id: dto.tgl_id.clone(),
+        calibration_file_name: dto.calibration_file_name.clone(),
+    };
+    g.validate().map_err(|e| LoadError::MalformedManifest {
+        what: format!("geo: {e}"),
+    })?;
+    Ok(g)
+}
+
 /// The working camera view (manifest v13+; docs/design/camera.md §5). NOT
 /// undoable (`camera.rs`'s module doc) — saved on document save, applied on
 /// load, never touching `Document::undo`/`redo`.
@@ -1919,6 +2057,13 @@ pub(crate) struct CameraDto {
     pub eye: [f64; 3],
     pub target: [f64; 3],
     pub up: [f64; 3],
+    /// The Match Photo image width in meters (manifest v24+); omitted when
+    /// unset. See [`crate::camera::CameraState::image_width`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_width: Option<f64>,
+    /// The held width-to-height ratio (manifest v24+); omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect_ratio: Option<f64>,
 }
 
 /// How the document asks to be shown (manifest v19+; `style.rs`): the
@@ -1931,6 +2076,57 @@ pub(crate) struct ViewStyleDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ground: Option<[u8; 3]>,
     pub axes: bool,
+    /// The section cut's outline color (manifest v24+); each of the
+    /// fields below is optional and omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_cut_color: Option<[u8; 3]>,
+    /// The cut outline's width in pixels (v24+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_cut_width: Option<u32>,
+    /// Whether a cut face is filled (v24+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_fill: Option<bool>,
+    /// The fill's color (v24+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_fill_color: Option<[u8; 3]>,
+    /// The color of the plane that is cutting (v24+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_section_color: Option<[u8; 3]>,
+    /// The guides' color (v24+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guides_color: Option<[u8; 3]>,
+    /// Whether the style hides guides (v24+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guides_hidden: Option<bool>,
+}
+
+impl ViewStyleDto {
+    /// Whether the style says anything a v24 manifest introduced.
+    fn has_v24_fields(&self) -> bool {
+        self.section_cut_color.is_some()
+            || self.section_cut_width.is_some()
+            || self.section_fill.is_some()
+            || self.section_fill_color.is_some()
+            || self.active_section_color.is_some()
+            || self.guides_color.is_some()
+            || self.guides_hidden.is_some()
+    }
+}
+
+/// Rejects (never drops) a style field a manifest's own version predates.
+fn check_view_style_version(
+    dto: &ViewStyleDto,
+    format_version: u32,
+    whose: &str,
+) -> Result<(), LoadError> {
+    if format_version < VIEW_STYLE_SECTION_MIN_VERSION && dto.has_v24_fields() {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "{whose} view_style carries section or guide settings in a v{format_version} manifest (introduced at v{VIEW_STYLE_SECTION_MIN_VERSION})"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn encode_view_style(v: crate::style::ViewStyle) -> ViewStyleDto {
@@ -1939,6 +2135,13 @@ fn encode_view_style(v: crate::style::ViewStyle) -> ViewStyleDto {
         sky: v.sky,
         ground: v.ground,
         axes: v.axes,
+        section_cut_color: v.section.cut_color,
+        section_cut_width: v.section.cut_width,
+        section_fill: v.section.fill,
+        section_fill_color: v.section.fill_color,
+        active_section_color: v.section.active_color,
+        guides_color: v.guides_color,
+        guides_hidden: v.guides_hidden,
     }
 }
 
@@ -1948,6 +2151,15 @@ fn decode_view_style(v: &ViewStyleDto) -> crate::style::ViewStyle {
         sky: v.sky,
         ground: v.ground,
         axes: v.axes,
+        section: crate::style::SectionLook {
+            cut_color: v.section_cut_color,
+            cut_width: v.section_cut_width,
+            fill: v.section_fill,
+            fill_color: v.section_fill_color,
+            active_color: v.active_section_color,
+        },
+        guides_color: v.guides_color,
+        guides_hidden: v.guides_hidden,
     }
 }
 
@@ -2013,6 +2225,10 @@ pub(crate) struct GuideDto {
     /// line only (manifest v22+): where the line ends, as `from`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<f64>,
+    /// line only (manifest v24+): the stipple mask, bit 0 first along the
+    /// line; omitted for the default dashed `0x3333`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dash: Option<u16>,
 }
 
 /// A dimension/leader-text annotation entry (manifest v13+, HEW_FILE_FORMAT.md
@@ -2117,6 +2333,116 @@ pub(crate) struct MaterialDto {
     pub color: [u8; 4],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub texture: Option<TextureDto>,
+    /// Physically based properties (manifest v26+); omitted when plain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pbr: Option<PbrDto>,
+}
+
+/// A material's physically based properties (manifest v26+).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PbrDto {
+    pub metallic: f32,
+    pub roughness: f32,
+    pub normal_scale: f32,
+    pub occlusion_strength: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metallic_map: Option<PbrMapDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roughness_map: Option<PbrMapDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_map: Option<PbrMapDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occlusion_map: Option<PbrMapDto>,
+}
+
+/// One physically based map: the zip path of its verbatim image bytes and
+/// their codec (`"png"` or `"jpg"`).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PbrMapDto {
+    pub asset: String,
+    pub format: String,
+}
+
+/// The file extension and manifest token of an image codec.
+fn image_ext(f: ImageFormat) -> &'static str {
+    match f {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpg",
+    }
+}
+
+fn parse_image_format(token: &str) -> Option<ImageFormat> {
+    match token {
+        "png" => Some(ImageFormat::Png),
+        "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
+        _ => None,
+    }
+}
+
+/// Encodes a material's properties, pushing each map's bytes onto `assets`.
+fn encode_pbr(
+    p: &crate::material::Pbr,
+    index: usize,
+    assets: &mut Vec<(String, Vec<u8>)>,
+) -> PbrDto {
+    let mut map = |slot: &str, m: &Option<crate::material::PbrMap>| {
+        m.as_ref().map(|m| {
+            let ext = image_ext(m.format);
+            let path = format!("textures/pbr_{index}_{slot}.{ext}");
+            assets.push((path.clone(), m.image.clone()));
+            PbrMapDto {
+                asset: path,
+                format: ext.to_string(),
+            }
+        })
+    };
+    PbrDto {
+        metallic: p.metallic,
+        roughness: p.roughness,
+        normal_scale: p.normal_scale,
+        occlusion_strength: p.occlusion_strength,
+        metallic_map: map("metallic", &p.metallic_map),
+        roughness_map: map("roughness", &p.roughness_map),
+        normal_map: map("normal", &p.normal_map),
+        occlusion_map: map("occlusion", &p.occlusion_map),
+    }
+}
+
+/// Decodes a material's properties, reading each map through `read`.
+/// Rejects numbers [`Pbr::is_valid`](crate::material::Pbr::is_valid) refuses
+/// and an unknown codec, never repairing them.
+fn decode_pbr(
+    dto: &PbrDto,
+    mut read: impl FnMut(&str) -> Result<Vec<u8>, LoadError>,
+) -> Result<crate::material::Pbr, LoadError> {
+    let mut map = |m: &Option<PbrMapDto>| -> Result<Option<crate::material::PbrMap>, LoadError> {
+        let Some(m) = m else { return Ok(None) };
+        let format = parse_image_format(&m.format).ok_or_else(|| LoadError::MalformedManifest {
+            what: format!("unknown pbr map format '{}'", m.format),
+        })?;
+        Ok(Some(crate::material::PbrMap {
+            image: read(&m.asset)?,
+            format,
+        }))
+    };
+    let p = crate::material::Pbr {
+        metallic: dto.metallic,
+        roughness: dto.roughness,
+        normal_scale: dto.normal_scale,
+        occlusion_strength: dto.occlusion_strength,
+        metallic_map: map(&dto.metallic_map)?,
+        roughness_map: map(&dto.roughness_map)?,
+        normal_map: map(&dto.normal_map)?,
+        occlusion_map: map(&dto.occlusion_map)?,
+    };
+    if !p.is_valid() {
+        return Err(LoadError::MalformedManifest {
+            what: "a material's pbr values are out of range".to_string(),
+        });
+    }
+    Ok(p)
 }
 
 /// A texture entry inside a material.
@@ -2520,6 +2846,8 @@ pub(crate) struct DocSaveData {
     pub guides: Vec<(GuideId, Guide)>,
     /// Each guide's tag paths, parallel to `guides` (manifest v21+).
     pub guide_tags: Vec<Vec<Vec<String>>>,
+    /// Each guide's dash (manifest v24+), parallel to `guides`.
+    pub guide_dashes: Vec<crate::guide::GuideDash>,
     /// Live annotations, in slotmap key order: `(id, value, detached)`.
     pub annotations: Vec<(AnnotationId, Annotation, bool)>,
     /// Each annotation's tag paths, parallel to `annotations`.
@@ -2546,6 +2874,8 @@ pub(crate) struct DocSaveData {
     pub view_style: Option<crate::style::ViewStyle>,
     /// Movable drawing axes (manifest v13+, tool-parity design §4).
     pub axes: AxesFrame,
+    /// The coordinate reference system (manifest v25+; `geo.rs`).
+    pub geo: Option<crate::geo::GeoReference>,
     /// Per-entity stable ids (manifest v14+, docs/agents/HEW_API.md §5.1) — the
     /// document's whole table; `encode_document` looks up only the live
     /// rows above, so tombstoned/orphaned entries never serialize.
@@ -2672,6 +3002,10 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             name: mat.name.clone(),
             color: [mat.color.r, mat.color.g, mat.color.b, mat.color.a],
             texture: tex_dto,
+            pbr: mat
+                .pbr
+                .as_ref()
+                .map(|p| encode_pbr(p, i, &mut texture_entries)),
         });
     }
 
@@ -2808,6 +3142,11 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 tags: data.guide_tags.get(i).cloned().unwrap_or_default(),
                 from: span.from,
                 to: span.to,
+                dash: data
+                    .guide_dashes
+                    .get(i)
+                    .filter(|d| !d.is_default())
+                    .map(|d| d.mask()),
             },
             Guide::Point { position } => GuideDto {
                 id: i as u32,
@@ -2819,6 +3158,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 tags: data.guide_tags.get(i).cloned().unwrap_or_default(),
                 from: None,
                 to: None,
+                dash: None,
             },
         })
         .collect();
@@ -2927,6 +3267,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 y: [data.axes.y.x, data.axes.y.y, data.axes.y.z],
             })
         },
+        geo: data.geo.as_ref().map(encode_geo),
         section_plane: data.section_plane.map(encode_section_plane),
         scenes: encode_scenes(&data),
     };
@@ -3222,6 +3563,8 @@ pub(crate) struct DocLoadRaw {
     /// Each guide's tag paths (manifest v21+), parallel to `guides`; empty
     /// for none.
     pub guide_tags: Vec<Vec<Vec<String>>>,
+    /// Each guide's dash (manifest v24+), parallel to `guides`.
+    pub guide_dashes: Vec<crate::guide::GuideDash>,
     /// Annotations (manifest v13+), in manifest dense-id order, with
     /// `detached`. Anchor node references stay dense (`RawAnchor::node`,
     /// unresolved) until `Document::load` maps them to live ids — the same
@@ -3260,6 +3603,9 @@ pub(crate) struct DocLoadRaw {
     /// Movable drawing axes (manifest v13+; [`AxesFrame::IDENTITY`] for
     /// older files or a v13+ file that never moved them).
     pub axes: AxesFrame,
+    /// The coordinate reference system (manifest v25+; `None` for older
+    /// files or a model with no place on a map).
+    pub geo: Option<crate::geo::GeoReference>,
     /// Per-entity stable ids (manifest v14+, docs/agents/HEW_API.md §5.1), each
     /// vector parallel to its entity collection in dense order; tag sids
     /// parallel to `tag_meta`. ALL EMPTY for pre-v14 files (the loader
@@ -3351,11 +3697,26 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         } else {
             None
         };
+        let pbr = match &mat_dto.pbr {
+            Some(dto) => {
+                if manifest.format_version < PBR_MIN_VERSION {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!(
+                            "material '{}' carries pbr in a v{} manifest (introduced at v{})",
+                            mat_dto.name, manifest.format_version, PBR_MIN_VERSION
+                        ),
+                    });
+                }
+                Some(decode_pbr(dto, |path| zip_read_entry(&mut zip, path))?)
+            }
+            None => None,
+        };
         let c = mat_dto.color;
         materials.push(Material {
             name: mat_dto.name.clone(),
             color: crate::material::Rgba8::rgba(c[0], c[1], c[2], c[3]),
             texture,
+            pbr,
         });
     }
 
@@ -3391,7 +3752,29 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     // Decode guides (manifest v4+; absent in v1-v3 files → empty).
     let mut guides: Vec<Guide> = Vec::with_capacity(manifest.guides.len());
     let mut guide_tags: Vec<Vec<Vec<String>>> = Vec::with_capacity(manifest.guides.len());
+    let mut guide_dashes: Vec<crate::guide::GuideDash> = Vec::with_capacity(manifest.guides.len());
     for guide_dto in &manifest.guides {
+        // A guide's dash (manifest v24+): version-gated, line-only.
+        if guide_dto.dash.is_some() {
+            if manifest.format_version < GUIDE_DASH_MIN_VERSION {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "guide {} carries a dash in a v{} manifest (introduced at v{})",
+                        guide_dto.id, manifest.format_version, GUIDE_DASH_MIN_VERSION
+                    ),
+                });
+            }
+            if guide_dto.kind != "line" {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("guide {} is not a line but carries a dash", guide_dto.id),
+                });
+            }
+        }
+        guide_dashes.push(
+            guide_dto
+                .dash
+                .map_or_else(crate::guide::GuideDash::default, crate::guide::GuideDash),
+        );
         // A guide's stretch (manifest v22+): version-gated like its tags.
         if (guide_dto.from.is_some() || guide_dto.to.is_some())
             && manifest.format_version < GUIDE_SPAN_MIN_VERSION
@@ -3475,6 +3858,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     // Validate manifest references.
     validate_manifest_references(&manifest, obj_count, mat_count)?;
     let axes = decode_axes(&manifest)?;
+    let geo = manifest.geo.as_ref().map(decode_geo).transpose()?;
 
     // Decode the camera block (manifest v13+; already confirmed absent for
     // older declared versions by `validate_manifest_references`).
@@ -3769,6 +4153,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         sketch_tags,
         guides,
         guide_tags,
+        guide_dashes,
         annotations,
         annotation_tags,
         consumed: manifest.consumed.clone(),
@@ -3790,6 +4175,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         camera,
         view_style,
         axes,
+        geo,
         material_sids,
         obj_sids,
         group_sids,
@@ -4147,6 +4533,16 @@ fn validate_manifest_references(
         });
     }
 
+    // `geo` is a v25+ concept (`geo.rs`): same both-directions posture.
+    if manifest.geo.is_some() && manifest.format_version < GEO_MIN_VERSION {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "a v{} manifest must not carry geo (introduced at v{})",
+                manifest.format_version, GEO_MIN_VERSION
+            ),
+        });
+    }
+
     // `section_plane` / `scenes` are v16+ concepts (docs/design/scenes.md):
     // same both-directions posture — a pre-v16 file carrying either is
     // malformed for its own declared version, never honored.
@@ -4170,6 +4566,10 @@ fn validate_manifest_references(
                 manifest.format_version, VIEW_MIN_VERSION
             ),
         });
+    }
+
+    if let Some(style) = &manifest.view_style {
+        check_view_style_version(style, manifest.format_version, "the document's")?;
     }
 
     let _ = mat_count; // used above
@@ -4484,6 +4884,8 @@ fn encode_camera(state: CameraState) -> CameraDto {
         eye: [state.eye.x, state.eye.y, state.eye.z],
         target: [state.target.x, state.target.y, state.target.z],
         up: [state.up.x, state.up.y, state.up.z],
+        image_width: state.image_width,
+        aspect_ratio: state.aspect_ratio,
     }
 }
 
@@ -4537,6 +4939,25 @@ fn decode_camera(dto: &CameraDto, format_version: u32) -> Result<CameraState, Lo
         Some(h) => h,
         None => CameraState::height_at_target(eye, target, dto.fov_deg),
     };
+    // The image width and ratio (v24+): version-gated, finite and positive.
+    for (name, v) in [
+        ("image_width", dto.image_width),
+        ("aspect_ratio", dto.aspect_ratio),
+    ] {
+        let Some(v) = v else { continue };
+        if format_version < CAMERA_IMAGE_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "a v{format_version} manifest must not carry camera.{name} (introduced at v{CAMERA_IMAGE_MIN_VERSION})"
+                ),
+            });
+        }
+        if !v.is_finite() || v <= 0.0 {
+            return Err(LoadError::MalformedManifest {
+                what: format!("camera.{name} must be finite and positive"),
+            });
+        }
+    }
     Ok(CameraState {
         projection,
         fov_deg: dto.fov_deg,
@@ -4544,6 +4965,8 @@ fn decode_camera(dto: &CameraDto, format_version: u32) -> Result<CameraState, Lo
         eye,
         target,
         up,
+        image_width: dto.image_width,
+        aspect_ratio: dto.aspect_ratio,
     })
 }
 
@@ -4630,6 +5053,8 @@ fn encode_scenes(data: &DocSaveData) -> Vec<SceneDto> {
                 guides: d.guides,
             }),
             view_style: scene.view_style.map(encode_view_style),
+            transition_s: scene.transition_s,
+            delay_s: scene.delay_s,
         })
         .collect()
 }
@@ -4663,6 +5088,24 @@ fn decode_scene(dto: &SceneDto, format_version: u32) -> Result<crate::scenes::Sc
             ),
         });
     }
+    if let Some(style) = &dto.view_style {
+        check_view_style_version(style, format_version, &format!("scene '{}'s", dto.name))?;
+    }
+    // Timing is finite and not negative (HEW_FILE_FORMAT.md): the setters
+    // and the import path hold it, so a manifest that says otherwise is
+    // hand-edited, not repaired.
+    for (field, value) in [("transition_s", dto.transition_s), ("delay_s", dto.delay_s)] {
+        if let Some(v) = value
+            && !(v.is_finite() && v >= 0.0)
+        {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "scene '{}' has {field} {v}, which is not a finite, non-negative number of seconds",
+                    dto.name
+                ),
+            });
+        }
+    }
     Ok(crate::scenes::Scene {
         sid: dto.sid,
         name: dto.name.clone(),
@@ -4683,12 +5126,42 @@ fn decode_scene(dto: &SceneDto, format_version: u32) -> Result<crate::scenes::Sc
             guides: d.guides,
         }),
         view_style: dto.view_style.as_ref().map(decode_view_style),
+        transition_s: dto.transition_s,
+        delay_s: dto.delay_s,
     })
 }
 
 #[cfg(test)]
 mod camera_manifest_tests {
     use super::*;
+
+    /// A scene's timing must be finite and not negative, as documented: a
+    /// manifest carrying anything else is refused typed, and valid timing
+    /// (zero included) decodes.
+    #[test]
+    fn scene_timing_that_is_negative_or_not_finite_refuses_typed() {
+        let scene = |extra: &str| -> SceneDto {
+            serde_json::from_str(&format!(r#"{{"sid":1,"name":"A"{extra}}}"#)).unwrap()
+        };
+        for bad in [r#","transition_s":-5.0"#, r#","delay_s":-2.0"#] {
+            match decode_scene(&scene(bad), 20) {
+                Err(LoadError::MalformedManifest { what }) => {
+                    assert!(what.contains("seconds"), "wrong reason: {what}");
+                }
+                other => panic!("{bad}: expected MalformedManifest, got {other:?}"),
+            }
+        }
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut dto = scene("");
+            dto.transition_s = Some(v);
+            assert!(matches!(
+                decode_scene(&dto, 20),
+                Err(LoadError::MalformedManifest { .. })
+            ));
+        }
+        let ok = decode_scene(&scene(r#","transition_s":0.0,"delay_s":2.5"#), 20).unwrap();
+        assert_eq!((ok.transition_s, ok.delay_s), (Some(0.0), Some(2.5)));
+    }
 
     fn empty_manifest(format_version: u32, camera: Option<CameraDto>) -> Manifest {
         Manifest {
@@ -4709,6 +5182,7 @@ mod camera_manifest_tests {
             camera,
             view_style: None,
             axes: None,
+            geo: None,
             annotations: Vec::new(),
             attrs: BTreeMap::new(),
             section_plane: None,
@@ -4724,6 +5198,8 @@ mod camera_manifest_tests {
             eye: [0.0, 0.0, 5.0],
             target: [0.0, 0.0, 0.0],
             up: [0.0, 0.0, 1.0],
+            image_width: None,
+            aspect_ratio: None,
         }
     }
 
@@ -4774,6 +5250,8 @@ mod camera_manifest_tests {
                 eye: Point3::new(1.0, 2.0, 3.0),
                 target: Point3::new(-1.0, 0.5, 0.0),
                 up: Vec3::new(0.0, 0.0, 1.0),
+                image_width: None,
+                aspect_ratio: None,
             };
             let dto = encode_camera(state);
             let decoded = decode_camera(&dto, MANIFEST_FORMAT_VERSION)
@@ -5185,13 +5663,21 @@ fn read_item_summary_impl<R: Read + Seek>(
                     }
                 }
             };
-            let content_hash = texture.ok().map(|texture| {
+            // A material whose properties cannot be read also loses its badge.
+            let pbr: Result<Option<crate::material::Pbr>, ()> = match &m.pbr {
+                None => Ok(None),
+                Some(dto) => decode_pbr(dto, |path| zip_read_entry(&mut zip, path))
+                    .map(Some)
+                    .map_err(|_| ()),
+            };
+            let content_hash = texture.ok().zip(pbr.ok()).map(|(texture, pbr)| {
                 let mat = crate::material::Material {
                     name: m.name.clone(),
                     color: crate::material::Rgba8::rgba(
                         m.color[0], m.color[1], m.color[2], m.color[3],
                     ),
                     texture,
+                    pbr,
                 };
                 crate::material::material_content_hash(&mat).to_string()
             });

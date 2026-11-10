@@ -114,6 +114,7 @@ fn box_document() -> Document {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, Vec::new()).expect("ingest a plain box");
     doc
@@ -333,7 +334,7 @@ fn cli_host_exports_a_box_to_well_formed_binary_stl() {
     let doc = box_document();
     let mut host = CliHost::new();
     let bytes = host
-        .export_document(&doc, "stl", None, 0, None)
+        .export_document(&doc, "stl", None, 0, None, false)
         .expect("a solid box exports")
         .expect("no path given — bytes come back inline");
 
@@ -360,7 +361,7 @@ fn cli_host_export_with_a_path_writes_the_file_and_returns_no_bytes() {
     let mut host = CliHost::new();
 
     let result = host
-        .export_document(&doc, "stl", Some(out.to_str().unwrap()), 0, None)
+        .export_document(&doc, "stl", Some(out.to_str().unwrap()), 0, None, false)
         .expect("export succeeds");
     assert!(
         result.is_none(),
@@ -379,7 +380,7 @@ fn cli_host_export_refuses_nothing_to_export_on_an_empty_document() {
     let doc = Document::new();
     let mut host = CliHost::new();
     let err = host
-        .export_document(&doc, "stl", None, 0, None)
+        .export_document(&doc, "stl", None, 0, None, false)
         .unwrap_err();
     assert_eq!(err.name, "nothing_to_export");
 }
@@ -417,7 +418,7 @@ fn dispatch_export_3mf_glb_and_usdz_match_a_direct_export_byte_for_byte() {
         let reloaded = Document::load(&std::fs::read(&path).unwrap()).expect("reloads");
         let mut host = CliHost::new();
         let direct_bytes = host
-            .export_document(&reloaded, format, None, 0, None)
+            .export_document(&reloaded, format, None, 0, None, false)
             .unwrap_or_else(|e| panic!("{format}: direct export succeeds: {e:?}"))
             .unwrap_or_else(|| panic!("{format}: bytes returned inline"));
 
@@ -900,6 +901,7 @@ fn snapshot_respects_user_hidden_state() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, Vec::new()).expect("ingest two boxes");
     let ids = doc.visible_object_ids();
@@ -959,6 +961,7 @@ fn snapshot_scene_renders_through_the_scenes_own_resolved_state() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(import, Vec::new()).expect("ingest two boxes");
     let ids = doc.visible_object_ids();
@@ -1036,6 +1039,7 @@ fn snapshot_camera_only_scene_keeps_the_documents_live_hidden_state() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(import, Vec::new()).expect("ingest two boxes");
     let ids = doc.visible_object_ids();
@@ -1100,6 +1104,7 @@ fn snapshot_scene_refuses_unknown_scene() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(import, Vec::new()).expect("ingest a box");
 
@@ -1594,8 +1599,8 @@ fn skp_object_count(bytes: &[u8]) -> usize {
     doc.visible_object_ids().len()
 }
 
-fn container_of(bytes: &[u8]) -> skp_import::openskp::Container {
-    skp_import::openskp::detect_container(bytes)
+fn container_of(bytes: &[u8]) -> skp_import::skpwright::Container {
+    skp_import::skpwright::detect_container(bytes)
 }
 
 /// Open a `.skp`, edit, save back to the same path, reopen: the edit is
@@ -1705,41 +1710,100 @@ fn save_a_skp_as_hew_to_a_new_path() {
 }
 
 /// A `.hew` document saved to a `.skp` path writes the 2026 container; an
-/// explicit `skp2017` writes the 2017 one.
+/// explicit `skp3` to `skp8` or `skp2013` to `skp2020` writes that release of the stream
+/// container, which reopens with the box's one object.
 #[test]
 fn save_a_hew_document_as_each_skp_container() {
     let dir = scratch_dir("hew-as-skp");
     let hew = dir.join("model.hew");
     std::fs::write(&hew, box_document().save()).unwrap();
     let a = dir.join("a.skp");
-    let b = dir.join("b.skp");
-    let responses = run_calls(
-        &dir,
-        &[
-            (
-                "hew.doc.open",
-                serde_json::json!({ "path": hew.to_str().unwrap() }),
-            ),
-            (
-                "hew.doc.save",
-                serde_json::json!({ "path": a.to_str().unwrap() }),
-            ),
-            (
-                "hew.doc.save",
-                serde_json::json!({ "path": b.to_str().unwrap(), "format": "skp2017" }),
-            ),
-        ],
-    );
+    // Every stream release, by its wire name (`skp3`, `skp2017`).
+    let releases: Vec<(String, u8)> = api::SKP_STREAM_RELEASES
+        .iter()
+        .map(|&n| (format!("skp{}", api::skp_stream_year(n)), n))
+        .collect();
+    assert_eq!(releases.len(), 14);
+    let mut calls = vec![
+        (
+            "hew.doc.open",
+            serde_json::json!({ "path": hew.to_str().unwrap() }),
+        ),
+        (
+            "hew.doc.save",
+            serde_json::json!({ "path": a.to_str().unwrap() }),
+        ),
+    ];
+    for (format, _) in &releases {
+        calls.push((
+            "hew.doc.save",
+            serde_json::json!({
+                "path": dir.join(format!("{format}.skp")).to_str().unwrap(),
+                "format": format,
+            }),
+        ));
+    }
+    let responses = run_calls(&dir, &calls);
     assert!(
         responses.iter().all(|r| r.get("error").is_none()),
         "{responses:?}"
     );
-    use skp_import::openskp::Container;
-    assert_eq!(container_of(&std::fs::read(&a).unwrap()), Container::Zip);
-    assert_eq!(
-        container_of(&std::fs::read(&b).unwrap()),
-        Container::Carchive2017
-    );
+    use skp_import::skpwright::Container;
+    let zip = std::fs::read(&a).unwrap();
+    assert_eq!(container_of(&zip), Container::Zip);
+    assert_eq!(skp_object_count(&zip), 1);
+    for (format, number) in releases {
+        let bytes = std::fs::read(dir.join(format!("{format}.skp"))).unwrap();
+        assert_eq!(container_of(&bytes), Container::Stream, "{format}");
+        let model = skp_import::skpwright::Model::parse(&bytes).unwrap();
+        assert_eq!(
+            model.release().map(|r| r.number()),
+            Some(number),
+            "{format}"
+        );
+        assert_eq!(skp_object_count(&bytes), 1, "{format}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file of release 2018 to 2020 opens, saves back to the same path in its
+/// own release, and the edit-free save still reads as the same box.
+#[test]
+fn a_stream_release_file_saves_back_in_its_own_release() {
+    let dir = scratch_dir("release-back");
+    let hew = dir.join("model.hew");
+    std::fs::write(&hew, box_document().save()).unwrap();
+    for (format, number) in [("skp2018", 18u8), ("skp2019", 19), ("skp2020", 20)] {
+        let path = dir.join(format!("{format}.skp"));
+        let p = path.to_str().unwrap();
+        let responses = run_calls(
+            &dir,
+            &[
+                (
+                    "hew.doc.open",
+                    serde_json::json!({ "path": hew.to_str().unwrap() }),
+                ),
+                (
+                    "hew.doc.save",
+                    serde_json::json!({ "path": p, "format": format }),
+                ),
+                ("hew.doc.open", serde_json::json!({ "path": p })),
+                ("hew.doc.save", serde_json::json!({})),
+            ],
+        );
+        assert!(
+            responses.iter().all(|r| r.get("error").is_none()),
+            "{format}: {responses:?}"
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        let model = skp_import::skpwright::Model::parse(&bytes).unwrap();
+        assert_eq!(
+            model.release().map(|r| r.number()),
+            Some(number),
+            "{format}"
+        );
+        assert_eq!(skp_object_count(&bytes), 1, "{format}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1783,6 +1847,50 @@ fn save_with_a_format_that_contradicts_the_extension_refuses() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `compat` belongs to the 2021-and-later container: asked for a save that
+/// resolves to a `.hew` it is refused and nothing is written; an explicit
+/// `compat:false` is the same as absent.
+#[test]
+fn save_with_compat_on_a_non_container_target_refuses() {
+    let dir = scratch_dir("compat-refuse");
+    let hew = dir.join("model.hew");
+    let responses = run_calls(
+        &dir,
+        &[
+            (
+                "hew.doc.open",
+                serde_json::json!({ "path": skp_fixture("box.skp").to_str().unwrap() }),
+            ),
+            (
+                "hew.doc.save",
+                serde_json::json!({ "path": hew.to_str().unwrap(), "compat": true }),
+            ),
+        ],
+    );
+    assert_eq!(
+        last_refusal(&responses).as_deref(),
+        Some("format_mismatch"),
+        "{responses:?}"
+    );
+    assert!(!hew.exists(), "nothing was written");
+    let responses = run_calls(
+        &dir,
+        &[
+            (
+                "hew.doc.open",
+                serde_json::json!({ "path": skp_fixture("box.skp").to_str().unwrap() }),
+            ),
+            (
+                "hew.doc.save",
+                serde_json::json!({ "path": hew.to_str().unwrap(), "compat": false }),
+            ),
+        ],
+    );
+    assert_eq!(last_refusal(&responses), None, "{responses:?}");
+    assert!(hew.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `hew.doc.export` writes both SketchUp containers and never makes the
 /// export the document's file: a following bare save still refuses
 /// `path_required`.
@@ -1812,12 +1920,9 @@ fn export_writes_both_skp_formats_without_changing_the_working_file() {
             ("hew.doc.save", serde_json::json!({})),
         ],
     );
-    use skp_import::openskp::Container;
+    use skp_import::skpwright::Container;
     assert_eq!(container_of(&std::fs::read(&a).unwrap()), Container::Zip);
-    assert_eq!(
-        container_of(&std::fs::read(&b).unwrap()),
-        Container::Carchive2017
-    );
+    assert_eq!(container_of(&std::fs::read(&b).unwrap()), Container::Stream);
     assert_eq!(last_refusal(&responses).as_deref(), Some("path_required"));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1867,7 +1972,7 @@ fn skp_display_units_follow_the_app_save_rules_or_a_named_unit() {
     let model = dir.join("model.skp");
     std::fs::copy(skp_fixture("box.skp"), &model).unwrap();
     let unit = |p: &std::path::Path| {
-        skp_import::openskp::Model::parse(&std::fs::read(p).unwrap())
+        skp_import::skpwright::Model::parse(&std::fs::read(p).unwrap())
             .unwrap()
             .units
             .length_unit
@@ -1908,4 +2013,62 @@ fn skp_display_units_follow_the_app_save_rules_or_a_named_unit() {
     assert_eq!(unit(&model), own, "a save back keeps the file's own");
     assert_eq!(unit(&p("named.skp")), 3, "named over the file's own: cm");
     assert_eq!(unit(&p("new.skp")), 4, "a new file: meters");
+}
+
+/// A scene's own transition and delay are set through `hew.scenes.update`
+/// from a script, read back by `hew.scenes.list`, and saved in the file.
+#[test]
+fn run_script_sets_a_scenes_transition_and_delay() {
+    let dir = scratch_dir("scene-timing");
+    let script_path = dir.join("script.json");
+    let out_path = dir.join("model.hew");
+    let script = serde_json::json!([
+        { "jsonrpc": "2.0", "id": 1, "method": "hew.meta.hello", "params": { "protocol": 1 } },
+        { "jsonrpc": "2.0", "id": 2, "method": "hew.doc.new", "params": {} },
+        { "jsonrpc": "2.0", "id": 3, "method": "hew.scenes.add", "params": { "name": "A" } },
+        { "jsonrpc": "2.0", "id": 4, "method": "hew.scenes.list", "params": {} },
+    ]);
+    std::fs::write(&script_path, serde_json::to_vec(&script).unwrap()).unwrap();
+    let first = hew_cli::run::run_script(&script_path, None, None);
+    assert_eq!(first.exit_code, 0, "{:?}", first.responses.last());
+    let id = first.responses[2]["result"]["results"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let script = serde_json::json!([
+        { "jsonrpc": "2.0", "id": 1, "method": "hew.meta.hello", "params": { "protocol": 1 } },
+        { "jsonrpc": "2.0", "id": 2, "method": "hew.doc.new", "params": {} },
+        { "jsonrpc": "2.0", "id": 3, "method": "hew.scenes.add", "params": { "name": "A" } },
+        { "jsonrpc": "2.0", "id": 4, "method": "hew.scenes.update",
+          "params": { "id": id, "transition_s": 2.5, "delay_s": 1.0 } },
+        { "jsonrpc": "2.0", "id": 5, "method": "hew.scenes.list", "params": {} },
+    ]);
+    std::fs::write(&script_path, serde_json::to_vec(&script).unwrap()).unwrap();
+    let outcome = hew_cli::run::run_script(&script_path, Some(&out_path), None);
+    assert_eq!(outcome.exit_code, 0, "{:?}", outcome.responses.last());
+    let listed = &outcome.responses[4]["result"];
+    let scene = listed
+        .get("scenes")
+        .unwrap_or(&listed["results"][0]["scenes"])[0]
+        .clone();
+    assert_eq!(scene["transition_s"], 2.5);
+    assert_eq!(scene["delay_s"], 1.0);
+
+    let reloaded = Document::load(&std::fs::read(&out_path).unwrap()).unwrap();
+    assert_eq!(reloaded.scenes()[0].transition_s, Some(2.5));
+    assert_eq!(reloaded.scenes()[0].delay_s, Some(1.0));
+
+    // A negative time refuses and stops the script.
+    let script = serde_json::json!([
+        { "jsonrpc": "2.0", "id": 1, "method": "hew.meta.hello", "params": { "protocol": 1 } },
+        { "jsonrpc": "2.0", "id": 2, "method": "hew.doc.new", "params": {} },
+        { "jsonrpc": "2.0", "id": 3, "method": "hew.scenes.add", "params": { "name": "A" } },
+        { "jsonrpc": "2.0", "id": 4, "method": "hew.scenes.update",
+          "params": { "id": id, "delay_s": -1.0 } },
+    ]);
+    std::fs::write(&script_path, serde_json::to_vec(&script).unwrap()).unwrap();
+    let bad = hew_cli::run::run_script(&script_path, None, None);
+    assert_ne!(bad.exit_code, 0);
+    let _ = std::fs::remove_dir_all(&dir);
 }

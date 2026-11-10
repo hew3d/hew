@@ -25,6 +25,14 @@ an HTTP header, e.g. `Content-Security-Policy: frame-ancestors 'none'` (or
 `<meta>` is strictly better if the host allows it — the meta is the portable
 floor for dumb static hosts.
 
+**Hosted copies.** `app.hew3d.com` is the Cloudflare Pages project
+`hew-app`, deployed by `release.yml` with `_headers` copied into `dist/`.
+The beta copy at `beta.hew3d.com` is a second project, `hew-app-beta`,
+deployed by the `deploy-beta` job in `ci.yml`, which copies `_headers.beta`
+in its place. That file is the same header set plus `X-Robots-Tag: noindex`,
+so the unlinked beta stays out of search. Neither file goes into the
+self-hosting tarball.
+
 Validated: the built bundle loads in Chromium with the app booting (React mount,
 WASM kernel init, WebGL canvas) and **zero CSP violations**.
 

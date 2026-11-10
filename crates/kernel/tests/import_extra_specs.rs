@@ -63,6 +63,7 @@ fn scene(roots: Vec<ImportNode>) -> ImportScene {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     }
 }
 
@@ -362,6 +363,8 @@ fn a_scene_keeps_its_display_toggles() {
     };
     s.scenes.push(ImportSceneRecipe {
         view_style: None,
+        transition_s: None,
+        delay_s: None,
         name: "Plan".into(),
         description: String::new(),
         camera: None,

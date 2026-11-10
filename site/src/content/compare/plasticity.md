@@ -21,7 +21,7 @@ Price and openness may or may not matter to you: Plasticity is a one-time licens
 | Price | One-time license, paid major upgrades | Free, AGPL-3.0 open source |
 | Platforms | Windows, macOS, Linux | Windows, macOS, Linux, plus the full app in a browser |
 | Precision & snapping | Numeric input, snapping | Typed unit-aware lengths, inference snapping, guides, dimensions |
-| CAD interchange | STEP and Parasolid in/out | No STEP — `.skp`/COLLADA/glTF/STL in; STL/3MF/glTF/USDZ/SVG out |
+| CAD interchange | STEP and Parasolid in/out | No STEP — `.skp`/COLLADA/glTF/STL in; `.skp`/STL/3MF/glTF/USDZ/SVG out |
 | Documentation & organization | Minimal by design | Tags, scenes, outliner, dimensions, print to scale |
 
 Where Plasticity heads into surfacing and Hew heads into shop drawings, the comparison stops being useful — they're different rooms of the same direct-modeling house.

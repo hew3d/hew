@@ -31,8 +31,15 @@ below.
   hovered face's plane, a sketch's, or the ground) that holds the cursor
   to that plane wherever it goes until Shift or Escape releases it.
   Starting a shape on a solid's edge or corner draws on the face that
-  edge belongs to — the most camera-facing one when two share it — never
-  on the ground beneath; in face mode the shape's later points honour the
+  edge belongs to — the one the cursor is leaning toward within the snap
+  radius, the cursor's previous hover face at zero offset, else the most
+  camera-facing one — never on the ground beneath. Over empty space the
+  first click lands on the axis plane that faces the camera: the ground
+  unless a vertical plane of the drawing axes faces the view clearly more
+  (about 20 degrees above level, square-on to a wall), through the axes'
+  origin, with a tinted plane patch and a status-bar line naming it; Shift
+  pins the inferred plane and the arrow keys still override it (Place
+  Image takes the same inference). In face mode the shape's later points honour the
   snap the inference chip names (an endpoint IS the corner, not the ray's
   own plane hit a pixel off it). A Line chain on a face commits one cut per
   edge-to-edge stretch (a chain touching the boundary partway is not
@@ -589,6 +596,9 @@ below.
 - Analytic curve snaps: the exact center, quadrant points, and
   tangent-from-anchor points of drawn circles and arcs, honoring each
   arc's actual angular range
+- Tray sections: a long section can be given more or less height by a drag
+  handle or the Up/Down arrow keys; sections keep their automatic height
+  until one is resized
 - Construction guides — guide lines and points that participate in
   snapping and are saved with the model. Move and Rotate transform a
   guide like any selection (axis locks, typed and retyped values), and
@@ -811,6 +821,10 @@ below.
 - An object-level default material so newly extruded or grown faces inherit
   a sensible color automatically
 - Materials survive splitting, imprinting, and boolean operations
+- Physically based materials: metallic and roughness factors (Metallic and
+  Roughness sliders, `hew.material.set_pbr`) and metallic, roughness, normal
+  and occlusion maps carried from a `.skp`, approximated in the viewport with
+  Phong shading and written back on a save to the 2021-and-later container
 - Per-material opacity (glass, scrim, etc.), adjustable from the Materials
   panel and applying uniformly to flat colors and textures alike
 - Alt-click to sample a face's material into the current swatch, and
@@ -920,8 +934,8 @@ below.
 - COLLADA (`.dae`) import from SketchUp's own export path, with a healing
   pass that repairs common non-manifold export artifacts
 - Direct SketchUp (`.skp`) import — the 2026 container every current
-  SketchUp saves, and the 2017 format of older files — built on
-  [OpenSKP](https://github.com/hew3d/openskp), a clean-room reader with no
+  SketchUp saves, and every older release, 3 to 8 and 2013 to 2020 — built on
+  [Skpwright](https://github.com/hew3d/skpwright), a clean-room reader with no
   Trimble SDK code anywhere in its lineage — names, materials, components,
   tags, guides, scenes, and the saved view all come across natively, and
   identically from either container (every corpus file's 2026 save is
@@ -960,9 +974,9 @@ below.
   Each was checked against SketchUp itself on a production house model
   with 32 scenes
 - SketchUp (`.skp`) as a working format (`crates/skp-export`, on
-  OpenSKP's writers): File ▸ Open makes a `.skp` the document's own file,
+  Skpwright's writers): File ▸ Open makes a `.skp` the document's own file,
   Save writes it back in its own container, and Save As and Export write
-  `.hew`, the 2026 container, or the 2017 format SketchUp Make 2017 opens.
+  `.hew`, the 2021-and-later container (optionally at revision 17 for older apps), or any release from 3 to 8 and 2013 to 2020.
   Every Object becomes a SketchUp group of its own (solids stay
   discrete), merge groups and components keep their structure, sketches
   become loose geometry, curved walls are soft and smooth, circles are
@@ -1038,7 +1052,7 @@ below.
 | `.hew` (native) | yes | yes |
 | glTF / GLB | yes | yes |
 | COLLADA (`.dae`) | yes | — |
-| SketchUp (`.skp`, 2026 and 2017 formats) | yes | yes |
+| SketchUp (`.skp`, 2026 format and releases 3 to 8 and 2013 to 2020) | yes | yes |
 | STL | yes | yes |
 | 3MF | — | yes |
 | USDZ | — | yes |
@@ -1275,6 +1289,12 @@ below.
   logging and extra internal validation
 - Session recording and replay, so a captured session becomes both a bug
   reproducer and a permanent regression test
+- Help ▸ Sent Reports: a reporter who ticks "Let me know what happens with
+  this report" can read the thread, reply, attach a file, and see status
+  changes, through a per-report secret held only by the sending Hew (no
+  account, no email); the desktop shell and the web build both check for
+  replies after launch and badge the Help item with the unread count
+  (`workers/bug-intake`'s ReportThread, shell `follow.rs`)
 - Help ▸ Report Bug: a dialog that previews what a report contains (system
   details, recorded steps, imported files, a file that failed to open, the
   model, and a log tail, each one untickable) and sends it privately to Hew's bug-report intake service
@@ -1365,9 +1385,7 @@ below.
   of a group the document deleted (unplaced, as a purge would remove);
   SketchUp-native loose geometry opens as a healed mesh Object rather
   than as sketches; the `.skp` file association is macOS-only (the
-  Windows installer would take the default from SketchUp); files from
-  SketchUp 2016 and earlier do not open (OpenSKP reads their headers, not
-  their geometry, so Hew asks for a re-save from a current SketchUp)
+  Windows installer would take the default from SketchUp)
 - **Signed Windows installers** — macOS builds are signed and notarized,
   auto-update and the hosted web build are shipped; Windows executables
   ship unsigned (SmartScreen warns, documented as accepted) until the

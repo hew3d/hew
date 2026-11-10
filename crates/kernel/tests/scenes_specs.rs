@@ -696,7 +696,7 @@ fn scenes_round_trip_byte_identical_with_every_property_shape() {
 
     let bytes = f.doc.save();
     let m = manifest_json(&bytes);
-    assert_eq!(m["format_version"], 23);
+    assert_eq!(m["format_version"], 26);
     assert_eq!(m["scenes"].as_array().unwrap().len(), 3);
     assert_eq!(m["scenes"][0]["name"], "Cam only");
     assert!(
@@ -821,6 +821,9 @@ fn a_scene_restores_the_view_style_it_captured() {
         sky: None,
         ground: None,
         axes: false,
+        section: Default::default(),
+        guides_color: None,
+        guides_hidden: None,
     };
     doc.set_view_style(Some(white));
     let styled = doc
@@ -841,6 +844,9 @@ fn a_scene_restores_the_view_style_it_captured() {
         sky: Some([10, 20, 30]),
         ground: None,
         axes: true,
+        section: Default::default(),
+        guides_color: None,
+        guides_hidden: None,
     };
     doc.set_view_style(Some(blue));
     assert!(

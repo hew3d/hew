@@ -165,14 +165,17 @@ test('export: File ▸ Export… opens ONE dialog with a glTF/STL/3MF/USDZ/SVG/S
   const select = dialog.locator('#export-format-select')
   await expect(select).toHaveValue('glb')
   const options = select.locator('option')
-  await expect(options).toHaveCount(7)
+  // Six formats, then every SketchUp stream release (2020 down to 3).
+  await expect(options).toHaveCount(6 + 14)
   await expect(options.nth(0)).toContainText('glTF')
   await expect(options.nth(1)).toContainText('STL')
   await expect(options.nth(2)).toContainText('3MF')
   await expect(options.nth(3)).toContainText('USDZ')
   await expect(options.nth(4)).toContainText('SVG')
-  await expect(options.nth(5)).toContainText('SketchUp (.skp)')
-  await expect(options.nth(6)).toContainText('SketchUp 2017')
+  await expect(options.nth(5)).toContainText('SketchUp 2021 and later')
+  await expect(options.nth(6)).toContainText('SketchUp 2020')
+  await expect(options.nth(9)).toContainText('SketchUp 2017')
+  await expect(options.nth(19)).toContainText('SketchUp 3')
 
   // Format is switchable.
   await select.selectOption('stl')

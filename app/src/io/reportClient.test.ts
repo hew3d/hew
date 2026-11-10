@@ -107,6 +107,25 @@ describe('canSend', () => {
     expect(m.canSend()).toBe(true)
   })
 
+  it('is true at the beta origin too', async () => {
+    const m = await loadWebModule()
+    setOrigin('https://beta.hew3d.com/')
+    expect(m.canSend()).toBe(true)
+  })
+
+  it('is false at look-alike origins', async () => {
+    const m = await loadWebModule()
+    for (const url of [
+      'https://beta.hew3d.com.evil.example/',
+      'http://app.hew3d.com/',
+      'http://beta.hew3d.com/',
+      'https://evil.example/',
+    ]) {
+      setOrigin(url)
+      expect(m.canSend()).toBe(false)
+    }
+  })
+
   it('is true on the web off that origin only when the dev proxy flag is set', async () => {
     const m = await loadWebModule()
     expect(m.canSend()).toBe(false)
@@ -120,7 +139,7 @@ describe('submitReport — desktop', () => {
     const m = await loadTauriModule()
     mockInvoke.mockImplementation(async () => ({ id: 'HEW-7K3F-Q9XB' }))
     const result = await m.submitReport(GZIP_BYTES)
-    expect(result).toEqual({ id: 'HEW-7K3F-Q9XB' })
+    expect(result).toEqual({ id: 'HEW-7K3F-Q9XB', following: false })
     expect(mockInvoke).toHaveBeenCalledWith('report_submit', GZIP_BYTES)
   })
 
@@ -130,6 +149,17 @@ describe('submitReport — desktop', () => {
       Promise.reject({ kind: 'tooLarge', message: 'the report is too large to send' }),
     )
     await expect(m.submitReport(GZIP_BYTES)).rejects.toMatchObject({ kind: 'tooLarge' })
+  })
+
+  it('passes the follow option in the hew-options header and returns following', async () => {
+    const m = await loadTauriModule()
+    mockInvoke.mockImplementation(async () => ({ id: 'HEW-7K3F-Q9XB', following: true }))
+    const result = await m.submitReport(GZIP_BYTES, undefined, { follow: true, excerpt: 'It crashes', fileName: 'a.skp' })
+    expect(result).toEqual({ id: 'HEW-7K3F-Q9XB', following: true })
+    const [cmd, body, opts] = mockInvoke.mock.calls[0]
+    expect(cmd).toBe('report_submit')
+    expect(body).toBe(GZIP_BYTES)
+    expect(JSON.parse(decodeURIComponent(opts.headers['hew-options']))).toEqual({ follow: true, excerpt: 'It crashes', fileName: 'a.skp' })
   })
 
   it('treats an unrecognized rejection shape as unreachable', async () => {
@@ -151,7 +181,7 @@ describe('submitReport — web upload', () => {
     const calls = fakeService(happyPath)
     const result = await m.submitReport(GZIP_BYTES)
 
-    expect(result).toEqual({ id: 'HEW-AAAA-BBBB' })
+    expect(result).toEqual({ id: 'HEW-AAAA-BBBB', following: false })
     expect(calls.map((c) => `${c.method} ${c.url}`)).toEqual(['POST /report/', 'POST /report/HEW-AAAA-BBBB/commit'])
     expect(calls[0].headers).toEqual({ 'Content-Type': 'application/gzip', 'Hew-Upload-Length': '7' })
     expect(calls[0].bodyLength).toBe(7)
@@ -182,7 +212,7 @@ describe('submitReport — web upload', () => {
   it('retries a piece once after a network error', async () => {
     const m = await loadWebModule()
     const calls = fakeService((call, attempt) => (call.method === 'PUT' && attempt === 1 ? 'network' : happyPath(call)))
-    await expect(m.submitReport(new Uint8Array(PIECE + 1))).resolves.toEqual({ id: 'HEW-AAAA-BBBB' })
+    await expect(m.submitReport(new Uint8Array(PIECE + 1))).resolves.toEqual({ id: 'HEW-AAAA-BBBB', following: false })
     expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(2)
   })
 
@@ -214,7 +244,7 @@ describe('submitReport — web upload', () => {
       if (call.url.endsWith('/commit') && attempt === 1) return 'network'
       return happyPath(call)
     })
-    await expect(m.submitReport(GZIP_BYTES)).resolves.toEqual({ id: 'HEW-AAAA-BBBB' })
+    await expect(m.submitReport(GZIP_BYTES)).resolves.toEqual({ id: 'HEW-AAAA-BBBB', following: false })
   })
 
   it('never counts a retried commit that finds no upload as sent', async () => {
@@ -255,5 +285,70 @@ describe('submitReport — web upload', () => {
     const m = await loadWebModule()
     fakeService((call) => (call.url === '/report/' ? new Response('not json', { status: 201 }) : happyPath(call)))
     await expect(m.submitReport(GZIP_BYTES)).rejects.toMatchObject({ kind: 'status' })
+  })
+})
+
+describe('submitReport — web follow', () => {
+  const originalFetch = global.fetch
+  const SECRET = 's'.repeat(43)
+  afterEach(() => {
+    global.fetch = originalFetch
+    localStorage.clear()
+  })
+
+  it('sends Hew-Follow:1, stores the record only after COMMIT 201, and returns following', async () => {
+    const m = await loadWebModule()
+    const calls = fakeService((call) =>
+      call.method === 'POST' && call.url === '/report/' ? json(201, { id: 'HEW-AAAA-BBBB', token: TOKEN, follow: SECRET }) : happyPath(call),
+    )
+    const result = await m.submitReport(GZIP_BYTES, undefined, { follow: true, excerpt: 'It crashes', fileName: null })
+    expect(result).toEqual({ id: 'HEW-AAAA-BBBB', following: true })
+    expect(calls[0].headers['Hew-Follow']).toBe('1')
+    const stored = JSON.parse(localStorage.getItem('hew.followedReports') as string)
+    expect(stored[0]).toMatchObject({ id: 'HEW-AAAA-BBBB', secret: SECRET, excerpt: 'It crashes', state: 'following' })
+  })
+
+  it('reports following:false when the record could not be stored', async () => {
+    const m = await loadWebModule()
+    fakeService((call) =>
+      call.method === 'POST' && call.url === '/report/' ? json(201, { id: 'HEW-AAAA-BBBB', token: TOKEN, follow: SECRET }) : happyPath(call),
+    )
+    const spy = vi.spyOn(Object.getPrototypeOf(localStorage) as Storage, 'setItem').mockImplementation(() => {
+      throw new Error('quota')
+    })
+    try {
+      const result = await m.submitReport(GZIP_BYTES, undefined, { follow: true, excerpt: 'x', fileName: null })
+      expect(result).toEqual({ id: 'HEW-AAAA-BBBB', following: false })
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('stores nothing when the commit fails', async () => {
+    const m = await loadWebModule()
+    fakeService((call) =>
+      call.url === '/report/' ? json(201, { id: 'HEW-AAAA-BBBB', token: TOKEN, follow: SECRET }) : call.url.endsWith('/commit') ? json(507, { error: 'full' }) : happyPath(call),
+    )
+    await expect(m.submitReport(GZIP_BYTES, undefined, { follow: true, excerpt: 'x', fileName: null })).rejects.toMatchObject({ kind: 'full' })
+    expect(localStorage.getItem('hew.followedReports')).toBeNull()
+  })
+
+  it('is not following against a service that mints no secret, and sends no header when not asked', async () => {
+    const m = await loadWebModule()
+    const calls = fakeService(happyPath)
+    expect(await m.submitReport(GZIP_BYTES, undefined, { follow: true, excerpt: 'x', fileName: null })).toEqual({ id: 'HEW-AAAA-BBBB', following: false })
+    await m.submitReport(GZIP_BYTES, undefined, { follow: false, excerpt: 'x', fileName: null })
+    expect(calls[2].headers['Hew-Follow']).toBeUndefined()
+    expect(localStorage.getItem('hew.followedReports')).toBeNull()
+  })
+
+  it('a follow-up upload sends the parent and secret on START only', async () => {
+    const m = await loadWebModule()
+    const calls = fakeService(happyPath)
+    const r = await m.uploadFollowUpWeb('HEW-PARENT-0001', SECRET, GZIP_BYTES)
+    expect(r).toEqual({ id: 'HEW-AAAA-BBBB', following: false })
+    expect(calls[0].headers['Hew-Follow-Up']).toBe('HEW-PARENT-0001')
+    expect(calls[0].headers['Hew-Follow-Secret']).toBe(SECRET)
+    expect(JSON.stringify(calls.slice(1).map((c) => c.headers))).not.toContain(SECRET)
   })
 })

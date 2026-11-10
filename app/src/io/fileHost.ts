@@ -10,6 +10,7 @@
  */
 
 import type { HealthCounts } from '../health/healthReport'
+import type { SkpStreamFormat } from './docFormat'
 
 /**
  * A file the user picked whose bytes could not be read (its permission
@@ -31,11 +32,12 @@ export class FileReadError extends Error {
 
 /**
  * The on-disk format a document is bound to. `hew` is the native format;
- * `skp2026` / `skp2017` are the two SketchUp containers a `.skp` document
- * is saved back in (the format of the file that was opened, or the one
- * Save As picked). A persisted ref that predates this field is `hew`.
+ * `skp2026` and the stream releases (`SKP_STREAM_FORMATS`) are the SketchUp
+ * formats a `.skp` document is saved back in (the format of the file that
+ * was opened, or the one Save As picked). A persisted ref that predates
+ * this field is `hew`.
  */
-export type DocFormat = 'hew' | 'skp2026' | 'skp2017'
+export type DocFormat = 'hew' | 'skp2026' | SkpStreamFormat
 
 export interface FileRef {
   /** Display name (filename without directory). */
@@ -136,7 +138,7 @@ export interface FileHost {
 
   /**
    * Prompt the user to choose a model file to import — COLLADA (`.dae`),
-   * SketchUp (`.skp`, the 2026 container or the 2017 format), glTF (`.glb` /
+   * SketchUp (`.skp`, the 2026 container or a 2017 to 2020 release), glTF (`.glb` /
    * `.gltf`), or STL (`.stl`) — the
    * format is chosen by the file the user picks (the dialog offers a filter
    * for each). Returns null if the user cancels.

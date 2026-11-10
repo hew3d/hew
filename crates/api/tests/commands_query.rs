@@ -595,6 +595,7 @@ fn leaky_instance_doc() -> Document {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, Vec::new())
         .expect("ingest a component instance with a leaky sole member");

@@ -16,7 +16,8 @@
  * mode (design §5: a bug report is for Hew's developer, not a self-hosted
  * homelab). Web uploads same-origin under `/report/`, which only makes
  * sense — and is only attempted — when the page's own origin actually
- * serves that route: the production `app.hew3d.com` deployment, or a local
+ * serves that route: the production `app.hew3d.com` deployment, the
+ * `beta.hew3d.com` deployment (same Worker, its own route), or a local
  * `vite dev` with `HEW_REPORT_PROXY` forwarding it to `wrangler dev` (see
  * `vite.config.ts`). Every other web build (self-hosted, a plain dev
  * server) has nowhere to send to, so `canSend()` is false there and
@@ -25,6 +26,7 @@
  */
 
 import { isTauri } from './fileHost'
+import { recordWebFollow } from './webFollowStore'
 
 /** Mirrors `ReportErrorKind` in report_client.rs (serde camelCase), plus
  *  `offline` for a web `fetch` that never reached the network at all —
@@ -44,12 +46,15 @@ export type ReportErrorKind =
 export class ReportError extends Error {
   readonly kind: ReportErrorKind
   readonly status: number | undefined
+  /** Seconds a 429 asked the client to wait, when it said. */
+  readonly retryAfter: number | undefined
 
-  constructor(kind: ReportErrorKind, message: string, status?: number) {
+  constructor(kind: ReportErrorKind, message: string, status?: number, retryAfter?: number) {
     super(message)
     this.name = 'ReportError'
     this.kind = kind
     this.status = status
+    this.retryAfter = retryAfter
   }
 }
 
@@ -68,26 +73,29 @@ const KINDS: ReadonlySet<string> = new Set<ReportErrorKind>([
 
 /** Turns whatever the Tauri `report_submit` invoke rejected with into a
  *  `ReportError`. Mirrors `relayClient.ts`'s `toRelayError`. */
-function toReportError(err: unknown): ReportError {
+export function toReportError(err: unknown): ReportError {
   if (err instanceof ReportError) return err
   if (typeof err === 'object' && err !== null && 'kind' in err) {
     const kind = (err as { kind: unknown }).kind
     const message = (err as { message?: unknown }).message
     const status = (err as { status?: unknown }).status
+    const retryAfter = (err as { retryAfter?: unknown }).retryAfter
     if (typeof kind === 'string' && KINDS.has(kind)) {
       return new ReportError(
         kind as ReportErrorKind,
         typeof message === 'string' ? message : kind,
         typeof status === 'number' ? status : undefined,
+        typeof retryAfter === 'number' ? retryAfter : undefined,
       )
     }
   }
   return new ReportError('unreachable', err instanceof Error ? err.message : String(err))
 }
 
-/** The production intake host — the one web origin `/report/` uploads are
- *  ever attempted from outside a proxied dev server. */
-const CLOUD_APP_ORIGIN = 'https://app.hew3d.com'
+/** The cloud web origins whose zone routes `/report/` to the intake Worker —
+ *  the only web origins uploads are ever attempted from outside a proxied
+ *  dev server. Exact `location.origin` matches: scheme and host both count. */
+const CLOUD_APP_ORIGINS: readonly string[] = ['https://app.hew3d.com', 'https://beta.hew3d.com']
 
 /** Set by `vite.config.ts`'s `define` when `HEW_REPORT_PROXY` was configured
  *  for this dev server — see that file for why this needs to be a
@@ -99,18 +107,31 @@ declare const __HEW_REPORT_DEV_PROXY__: boolean | undefined
 /**
  * Whether this build/runtime can actually send a report anywhere. Desktop:
  * always (every server mode posts to the cloud intake service). Web: only
- * the production app origin, or a dev server with the proxy configured.
+ * a Hew cloud app origin (production or beta), or a dev server with the proxy configured.
  * Everything else (a self-hosted web build, `vite dev` with no proxy) has
  * no route to the intake service, so the dialog must not offer Send report.
  */
 export function canSend(): boolean {
   if (isTauri) return true
-  if (typeof location !== 'undefined' && location.origin === CLOUD_APP_ORIGIN) return true
+  if (typeof location !== 'undefined' && CLOUD_APP_ORIGINS.includes(location.origin)) return true
   return typeof __HEW_REPORT_DEV_PROXY__ !== 'undefined' && __HEW_REPORT_DEV_PROXY__
 }
 
 export interface ReportSubmitResult {
   id: string
+  /** True when the report is now being followed (the reporter asked for it
+   *  and the service minted a secret). False for a plain send, for a
+   *  follow-up attachment, and against a service that predates Follow. */
+  following: boolean
+}
+
+/** What the Report Bug dialog passes to follow the report it sends. */
+export interface ReportFollowOptions {
+  follow: boolean
+  /** The first line of the description, for the Sent Reports list. */
+  excerpt: string
+  /** The failed-open file sent with the report, if any. */
+  fileName: string | null
 }
 
 /** How much of the compressed report has been uploaded. */
@@ -149,16 +170,18 @@ function reportErrorFromResponse(status: number, body: unknown): ReportError {
 }
 /* oxlint-enable lingui/no-unlocalized-strings */
 
-/** Desktop path: the gzip bytes ride the invoke as a RAW body (the same
- *  convention `relayClient.ts`'s `relayPut` uses), never a JSON array — a
- *  report of hundreds of megabytes must not be serialized as hundreds of
- *  millions of numbers.
- *  Rust runs the piece-by-piece upload and reports progress as
- *  `report-progress` events. */
-async function submitDesktop(
+/** Runs a raw-body Tauri command that uploads a report in pieces, mapping
+ *  its rejection to a `ReportError` and relaying `report-progress` events.
+ *  The gzip bytes ride the invoke as a RAW body (the same convention
+ *  `relayClient.ts`'s `relayPut` uses), never a JSON array — a report of
+ *  hundreds of megabytes must not be serialized as hundreds of millions of
+ *  numbers. Options a raw body cannot carry ride in request `headers`. */
+export async function invokeUpload<T>(
+  command: string,
   gzipBytes: Uint8Array,
+  headers: Record<string, string> | undefined,
   onProgress?: (progress: ReportProgress) => void,
-): Promise<ReportSubmitResult> {
+): Promise<T> {
   const { invoke } = await import('@tauri-apps/api/core')
   let unlisten: (() => void) | undefined
   if (onProgress !== undefined) {
@@ -170,7 +193,9 @@ async function submitDesktop(
     }
   }
   try {
-    return await invoke<ReportSubmitResult>('report_submit', gzipBytes as never)
+    return await (headers === undefined
+      ? invoke<T>(command, gzipBytes as never)
+      : invoke<T>(command, gzipBytes as never, { headers }))
   } catch (err) {
     throw toReportError(err)
   } finally {
@@ -178,17 +203,38 @@ async function submitDesktop(
   }
 }
 
+/** Desktop path: Rust runs the piece-by-piece upload (and stores the follow
+ *  record itself when `follow` was asked for). */
+async function submitDesktop(
+  gzipBytes: Uint8Array,
+  onProgress?: (progress: ReportProgress) => void,
+  follow?: ReportFollowOptions,
+): Promise<ReportSubmitResult> {
+  const headers =
+    follow === undefined
+      ? undefined
+      : { 'hew-options': encodeURIComponent(JSON.stringify({ follow: follow.follow, excerpt: follow.excerpt, fileName: follow.fileName })) }
+  const result = await invokeUpload<{ id: string; following?: boolean }>('report_submit', gzipBytes, headers, onProgress)
+  return { id: result.id, following: result.following === true }
+}
+
 /** One `fetch` with the per-request timeout. A thrown error (offline, DNS,
  *  aborted by the timeout) comes back as `null` instead of a response. */
+const responseTimers = new WeakMap<Response, ReturnType<typeof setTimeout>>()
+
 async function fetchOnce(url: string, init: RequestInit): Promise<Response | null> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
   try {
-    return await fetch(url, { ...init, signal: controller.signal })
+    const response = await fetch(url, { ...init, signal: controller.signal })
+    // The timer stays armed until the body has been read (`readJson`), so a
+    // stalled body cannot hang forever; a body nobody reads is aborted at
+    // the deadline, which is harmless.
+    responseTimers.set(response, timer)
+    return response
   } catch {
-    return null
-  } finally {
     clearTimeout(timer)
+    return null
   }
 }
 
@@ -209,6 +255,9 @@ async function readJson(response: Response): Promise<unknown> {
     return await response.json()
   } catch {
     return null
+  } finally {
+    const timer = responseTimers.get(response)
+    if (timer !== undefined) clearTimeout(timer)
   }
 }
 
@@ -218,19 +267,23 @@ function pieceBody(bytes: Uint8Array, start: number, end: number): Uint8Array<Ar
   return bytes.subarray(start, end) as Uint8Array<ArrayBuffer>
 }
 
-/** Web path: start, pieces, commit, all same-origin under `/report/`. Only
- *  ever attempted when `canSend()` is true (the caller's responsibility —
- *  this function does not re-check). */
-async function submitWeb(
+/** Extra START headers for a web upload (follow requests). */
+type StartHeaders = Record<string, string>
+
+/** The chunked upload loop: start, pieces, commit, all same-origin under
+ *  `/report/`. Resolves with the new id and the START body (so a caller can
+ *  read `follow`) only after COMMIT answered 201. */
+async function uploadWeb(
   gzipBytes: Uint8Array,
-  onProgress?: (progress: ReportProgress) => void,
-): Promise<ReportSubmitResult> {
+  onProgress: ((progress: ReportProgress) => void) | undefined,
+  extraStartHeaders: StartHeaders,
+): Promise<{ id: string; startJson: unknown }> {
   const total = gzipBytes.byteLength
   const firstEnd = Math.min(PIECE_BYTES, total)
 
   const start = await fetchWithRetry('/report/', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/gzip', 'Hew-Upload-Length': String(total) },
+    headers: { 'Content-Type': 'application/gzip', 'Hew-Upload-Length': String(total), ...extraStartHeaders },
     body: pieceBody(gzipBytes, 0, firstEnd),
   })
   const startJson = await readJson(start)
@@ -261,8 +314,38 @@ async function submitWeb(
     method: 'POST',
     headers: { 'Hew-Upload-Token': token },
   })
-  if (commit.status === 201) return { id }
+  if (commit.status === 201) return { id, startJson }
   throw reportErrorFromResponse(commit.status, await readJson(commit))
+}
+
+/** Web path. Only ever attempted when `canSend()` is true (the caller's
+ *  responsibility — this does not re-check). The follow record is stored
+ *  only after COMMIT answered 201, so a failed send is never followed. */
+async function submitWeb(
+  gzipBytes: Uint8Array,
+  onProgress?: (progress: ReportProgress) => void,
+  follow?: ReportFollowOptions,
+): Promise<ReportSubmitResult> {
+  const wantsFollow = follow?.follow === true
+  const { id, startJson } = await uploadWeb(gzipBytes, onProgress, wantsFollow ? { 'Hew-Follow': '1' } : {})
+  const secret = wantsFollow && typeof startJson === 'object' && startJson !== null ? (startJson as { follow?: unknown }).follow : undefined
+  if (follow !== undefined && typeof secret === 'string' && secret !== '') {
+    const stored = recordWebFollow({ id, secret, excerpt: follow.excerpt, fileName: follow.fileName })
+    return { id, following: stored }
+  }
+  return { id, following: false }
+}
+
+/** Web follow-up attachment: a normal upload whose START names the parent
+ *  report and proves the secret. */
+export async function uploadFollowUpWeb(
+  parentId: string,
+  secret: string,
+  gzipBytes: Uint8Array,
+  onProgress?: (progress: ReportProgress) => void,
+): Promise<ReportSubmitResult> {
+  const { id } = await uploadWeb(gzipBytes, onProgress, { 'Hew-Follow-Up': parentId, 'Hew-Follow-Secret': secret })
+  return { id, following: false }
 }
 
 /** Submit a report — the gzip of the bundle `reportBundle.ts` builds
@@ -273,6 +356,7 @@ async function submitWeb(
 export function submitReport(
   gzipBytes: Uint8Array,
   onProgress?: (progress: ReportProgress) => void,
+  follow?: ReportFollowOptions,
 ): Promise<ReportSubmitResult> {
-  return isTauri ? submitDesktop(gzipBytes, onProgress) : submitWeb(gzipBytes, onProgress)
+  return isTauri ? submitDesktop(gzipBytes, onProgress, follow) : submitWeb(gzipBytes, onProgress, follow)
 }

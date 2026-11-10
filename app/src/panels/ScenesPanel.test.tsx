@@ -48,6 +48,8 @@ function useFakeScenesController(
     refreshDrift: vi.fn(),
     setProps: vi.fn(),
     setDescription: vi.fn(),
+    setTransition: vi.fn(),
+    setDelay: vi.fn(),
   }).current
 
   const add = (): number | null => {
@@ -94,6 +96,16 @@ function useFakeScenesController(
     setEntries((es) => es.map((e) => (e.sid === sid ? { ...e, description: text } : e)))
   }
 
+  const setTransition = (sid: number, seconds: number | null) => {
+    spies.setTransition(sid, seconds)
+    setEntries((es) => es.map((e) => (e.sid === sid ? { ...e, transitionS: seconds } : e)))
+  }
+
+  const setDelay = (sid: number, seconds: number | null) => {
+    spies.setDelay(sid, seconds)
+    setEntries((es) => es.map((e) => (e.sid === sid ? { ...e, delayS: seconds } : e)))
+  }
+
   return {
     entries,
     activeSid,
@@ -110,6 +122,8 @@ function useFakeScenesController(
     previous: vi.fn(),
     rename,
     setDescription,
+    setTransition,
+    setDelay,
     setProps,
     moveUp: (sid) => {
       spies.moveUp(sid)
@@ -257,6 +271,52 @@ describe('ScenesPanel — details expand', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Expand Scene details' }))
     fireEvent.click(screen.getByLabelText('Camera'))
     expect(controller!.spies.setProps).toHaveBeenCalledWith(1, PROP_ALL & ~1)
+  })
+
+  it('shows the Scene’s own transition and delay, blank when it has none', () => {
+    render(<Harness initial={[entry(1, 'A', { transitionS: 1.25, delayS: null })]} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Scene details' }))
+    expect(screen.getByLabelText('Transition (s)')).toHaveValue('1.25')
+    expect(screen.getByLabelText('Delay (s)')).toHaveValue('')
+  })
+
+  it('commits a typed transition on Enter and a cleared delay as null', () => {
+    let controller: ReturnType<typeof useFakeScenesController> | undefined
+    render(
+      <Harness
+        initial={[entry(1, 'A', { delayS: 3 })]}
+        onController={(c) => { controller = c }}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Scene details' }))
+    const transition = screen.getByLabelText('Transition (s)')
+    fireEvent.change(transition, { target: { value: '2.5' } })
+    fireEvent.keyDown(transition, { key: 'Enter' })
+    expect(controller!.spies.setTransition).toHaveBeenCalledWith(1, 2.5)
+    const delay = screen.getByLabelText('Delay (s)')
+    fireEvent.change(delay, { target: { value: '  ' } })
+    fireEvent.blur(delay)
+    expect(controller!.spies.setDelay).toHaveBeenCalledWith(1, null)
+  })
+
+  it('reverts a negative or non-numeric timing without committing', () => {
+    let controller: ReturnType<typeof useFakeScenesController> | undefined
+    render(
+      <Harness
+        initial={[entry(1, 'A', { transitionS: 4 })]}
+        onController={(c) => { controller = c }}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Scene details' }))
+    const transition = screen.getByLabelText('Transition (s)')
+    fireEvent.change(transition, { target: { value: '-1' } })
+    fireEvent.blur(transition)
+    expect(controller!.spies.setTransition).not.toHaveBeenCalled()
+    expect(transition).toHaveValue('4')
+    fireEvent.change(transition, { target: { value: 'soon' } })
+    fireEvent.keyDown(transition, { key: 'Enter' })
+    expect(controller!.spies.setTransition).not.toHaveBeenCalled()
+    expect(transition).toHaveValue('4')
   })
 
   it('shows the stale-refs line only for the active Scene when staleRefs > 0', () => {

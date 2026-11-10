@@ -566,6 +566,7 @@ pub fn import(
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     check(&scene)?;
     Ok(ImageImport {

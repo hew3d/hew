@@ -67,6 +67,7 @@ fn framed_quad_scene(pose: Transform) -> ImportScene {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     }
 }
 

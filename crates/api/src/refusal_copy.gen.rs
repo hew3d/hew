@@ -125,6 +125,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "DegenerateUvFrame" => {
             "That texture position isn't valid. Drag the handle further before releasing it."
         }
+        "InvalidMaterialPbr" => "Metallic and roughness must each be between 0 and 100%.",
         "BadUvFrame" => {
             "That texture position couldn't be read. Press Escape and start the positioning again."
         }
@@ -407,6 +408,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "UnknownAttr" => {
             "That attribute doesn't exist on this item, so there was nothing to remove."
+        }
+        "InvalidGeoReference" => {
+            "That geo-location has a number that isn't finite or a unit size that isn't above zero, so it wasn't set. Fix the value and try again."
         }
         "NotAContainer" => "This file isn't a Hew document. Pick a .hew file saved by Hew.",
         "Incomplete" => {

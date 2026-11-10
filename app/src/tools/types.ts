@@ -138,6 +138,15 @@ export interface SnapConstraint {
    */
   seeThroughPoints?: boolean
   facesOnly?: boolean
+  /**
+   * A plane used ONLY for the snap service's ray∩plane fallback when the
+   * kernel offers no candidate; never passed to the kernel, so geometry
+   * anywhere still snaps. The idle draw tools set it to the axis plane the
+   * view faces (view-plane design, picker step 7), so a click in empty space
+   * lands on that plane while a nearby corner or edge still wins.
+   * `constraintPlane`, when set, takes precedence.
+   */
+  fallbackPlane?: { point: [number, number, number]; normal: [number, number, number] }
 }
 
 /**
@@ -201,6 +210,17 @@ export interface Tool {
   updateCamera?(camera: THREE.Camera): void
 
   /**
+   * (optional) True for a tool whose idle hover follows the view: the plane
+   * a click in empty space lands on is inferred from the camera
+   * (docs/design/view-plane-inference.md), so a still cursor's answer
+   * changes when an idle key, Shift or the camera does. Only these tools get
+   * the Viewport's held-pointer hover replay after those events
+   * (`followsViewPlane`, heldPointerReplay.ts); every other tool keeps its
+   * hover where the last real pointer move left it.
+   */
+  readonly followsViewPlane?: boolean
+
+  /**
    * (optional) True when the snap most recently handed to `onPointerMove` was
    * PROJECTED onto the tool's drawing plane rather than used as-is — i.e. the
    * point the gesture will actually commit is not the point the inference
@@ -234,8 +254,10 @@ export interface Tool {
 
   /**
    * (optional) The pointer left the canvas. A tool that memoizes anything
-   * about what is hovered (`hoverHint`'s refusal line) drops it here, so the
-   * status bar does not keep describing a face the cursor is no longer over.
+   * about what is hovered (`hoverHint`'s refusal line, a draw tool's idle
+   * plane patch) drops it here, so the status bar and the drawing-plane cue
+   * (both re-polled right after) do not keep describing a face or plane the
+   * cursor is no longer over.
    */
   onPointerLeave?(): void
 

@@ -7,6 +7,7 @@ import {
   RATE_LIMIT_WINDOW_MS,
   RATE_LIMIT_DAY_MAX,
   EMAIL_DAY_MAX,
+  EMAIL_THREAD_RESERVE,
   STORE_CEILING_BYTES,
   IDLE_PRUNE_TIMEOUT_MS, UPLOAD_LIFETIME_MS } from './constants.ts'
 import { FakeDurableObjectStorage } from './testSupport/fakeDurableObject.ts'
@@ -319,6 +320,16 @@ describe('IndexStore: email cap', () => {
     assert.equal(await store.reserveEmail(now + DAY_MS), true)
   })
 
+  test('thread emails stop EMAIL_THREAD_RESERVE short of the cap; report emails use the rest', async () => {
+    const store = makeStore()
+    for (let i = 0; i < EMAIL_DAY_MAX - EMAIL_THREAD_RESERVE; i++) {
+      assert.equal(await store.reserveEmail(now, 'thread'), true)
+    }
+    assert.equal(await store.reserveEmail(now, 'thread'), false)
+    for (let i = 0; i < EMAIL_THREAD_RESERVE; i++) assert.equal(await store.reserveEmail(now, 'report'), true)
+    assert.equal(await store.reserveEmail(now, 'report'), false)
+  })
+
   test('the cap is account-wide, not per report', async () => {
     const store = makeStore()
     let reserved = 0
@@ -362,5 +373,129 @@ describe('IndexStore: absolute upload lifetime', () => {
     await store.commitReport('HEW-OLD1-0000')
     assert.deepEqual(await store.findAndDeleteIdleUncommittedIds(now + UPLOAD_LIFETIME_MS * 50, 15 * 60 * 1000), [])
     assert.equal((await store.getReport('HEW-OLD1-0000'))?.committed, true)
+  })
+})
+
+describe('IndexStore: follow columns and row lifetime (follow-a-report §5.2)', () => {
+  test('a reports table from the first deploy gains every follow column, keeping its rows', async () => {
+    const storage = new FakeDurableObjectStorage()
+    storage.sql.exec(
+      `CREATE TABLE reports (
+         id TEXT PRIMARY KEY, receivedAt INTEGER NOT NULL, appVersion TEXT NOT NULL, platform TEXT NOT NULL,
+         descriptionPreview TEXT NOT NULL, sizeBytes INTEGER NOT NULL, triaged INTEGER NOT NULL DEFAULT 0,
+         committed INTEGER NOT NULL DEFAULT 0, lastActivity INTEGER NOT NULL DEFAULT 0)`,
+    )
+    storage.sql.exec(
+      "INSERT INTO reports VALUES ('HEW-OLD0-0001', ?, '1.2.0', 'web', 'old one', 500, 1, 1, ?)",
+      now,
+      now,
+    )
+    const store = new IndexStore(storage)
+    const row = await store.getReport('HEW-OLD0-0001')
+    assert.deepEqual(row, {
+      id: 'HEW-OLD0-0001',
+      receivedAt: now,
+      appVersion: '1.2.0',
+      platform: 'web',
+      descriptionPreview: 'old one',
+      sizeBytes: 500,
+      triaged: true,
+      committed: true,
+      following: false,
+      status: 'open',
+      statusVersion: null,
+      reporterActivityAt: null,
+      adminViewedAt: null,
+      parentId: null,
+      bundleDeleted: false,
+    })
+    // A second instance over the same storage finds nothing to add.
+    await new IndexStore(storage).listReports()
+  })
+
+  test('commitReport(id, true) marks following, also on a retry', async () => {
+    const store = makeStore()
+    await store.reserveReport('c', now, reservation())
+    assert.equal(await store.commitReport('HEW-AAAA-BBBB', false), 'flipped')
+    assert.equal((await store.getReport('HEW-AAAA-BBBB'))?.following, false)
+    assert.equal(await store.commitReport('HEW-AAAA-BBBB', true), 'already-committed')
+    assert.equal((await store.getReport('HEW-AAAA-BBBB'))?.following, true)
+  })
+
+  test('bundleExpired keeps a followed committed row with sizeBytes 0, deletes everything else', async () => {
+    const store = makeStore()
+    await store.reserveReport('c', now, reservation({ id: 'HEW-AAAA-0001' }))
+    await store.reserveReport('c', now, reservation({ id: 'HEW-AAAA-0002' }))
+    await store.reserveReport('c', now, reservation({ id: 'HEW-AAAA-0003' }))
+    await store.commitReport('HEW-AAAA-0001', true)
+    await store.commitReport('HEW-AAAA-0002', false)
+    // 0003 stays uncommitted (an abandonment alarm).
+    assert.deepEqual(
+      [await store.bundleExpired('HEW-AAAA-0001'), await store.bundleExpired('HEW-AAAA-0002'), await store.bundleExpired('HEW-AAAA-0003')],
+      [false, true, true], // whether the row is gone
+    )
+    const kept = await store.getReport('HEW-AAAA-0001')
+    assert.equal(kept?.bundleDeleted, true)
+    assert.equal(kept?.sizeBytes, 0)
+    assert.equal(await store.getReport('HEW-AAAA-0002'), null)
+    assert.equal(await store.getReport('HEW-AAAA-0003'), null)
+    assert.equal(await store.totalStoredBytes(), 0)
+    assert.equal(await store.bundleExpired('HEW-AAAA-0001'), false) // idempotent
+    assert.equal(await store.bundleExpired('HEW-AAAA-0002'), true)
+    assert.equal((await store.getReport('HEW-AAAA-0001'))?.bundleDeleted, true)
+  })
+
+  test('threadEnded deletes a bundle-less row and flips following (and resets the status cache) on a live one', async () => {
+    const store = makeStore()
+    await store.reserveReport('c', now, reservation({ id: 'HEW-AAAA-0001' }))
+    await store.reserveReport('c', now, reservation({ id: 'HEW-AAAA-0002' }))
+    await store.commitReport('HEW-AAAA-0001', true)
+    await store.commitReport('HEW-AAAA-0002', true)
+    await store.setThreadCache('HEW-AAAA-0002', { status: 'fixed', statusVersion: '1.3.2' })
+    await store.bundleExpired('HEW-AAAA-0001')
+    await store.threadEnded('HEW-AAAA-0001')
+    await store.threadEnded('HEW-AAAA-0002')
+    await store.threadEnded('HEW-GONE-0000')
+    assert.equal(await store.getReport('HEW-AAAA-0001'), null)
+    const live = await store.getReport('HEW-AAAA-0002')
+    assert.equal(live?.following, false)
+    assert.equal(live?.status, 'open')
+    assert.equal(live?.statusVersion, null)
+    assert.equal(live?.sizeBytes, 1000)
+  })
+
+  test('setThreadCache, markAdminViewed, and listChildren', async () => {
+    const store = makeStore()
+    await store.reserveReport('c', now, reservation({ id: 'HEW-PARE-NT00' }))
+    await store.reserveReport('c', now + 1, reservation({ id: 'HEW-CHLD-0001', parentId: 'HEW-PARE-NT00' }))
+    await store.reserveReport('c', now + 2, reservation({ id: 'HEW-CHLD-0002', parentId: 'HEW-PARE-NT00' }))
+    await store.commitReport('HEW-PARE-NT00', true)
+    await store.commitReport('HEW-CHLD-0001')
+    // CHLD-0002 uncommitted: not listed.
+    await store.setThreadCache('HEW-PARE-NT00', { status: 'fixed', statusVersion: '1.3.2', reporterActivityAt: now + 5 })
+    await store.markAdminViewed('HEW-PARE-NT00', now + 9)
+    const row = await store.getReport('HEW-PARE-NT00')
+    assert.equal(row?.status, 'fixed')
+    assert.equal(row?.statusVersion, '1.3.2')
+    assert.equal(row?.reporterActivityAt, now + 5)
+    assert.equal(row?.adminViewedAt, now + 9)
+    await store.setThreadCache('HEW-PARE-NT00', { reporterActivityAt: now + 10 })
+    assert.equal((await store.getReport('HEW-PARE-NT00'))?.status, 'fixed', 'a patch without status leaves it')
+    assert.deepEqual(
+      (await store.listChildren('HEW-PARE-NT00')).map((r) => [r.id, r.parentId]),
+      [['HEW-CHLD-0001', 'HEW-PARE-NT00']],
+    )
+  })
+
+  test('countThreadRequest allows THREAD_RATE_WINDOW_MAX per window, separately from submissions', async () => {
+    const store = makeStore()
+    const start = Math.floor(now / RATE_LIMIT_WINDOW_MS) * RATE_LIMIT_WINDOW_MS
+    for (let i = 0; i < 60; i++) assert.deepEqual(await store.countThreadRequest('client', start + i), { ok: true })
+    assert.deepEqual(await store.countThreadRequest('client', start + 100), { ok: false, retryAfterMs: RATE_LIMIT_WINDOW_MS - 100 })
+    assert.deepEqual(await store.countThreadRequest('other', start + 100), { ok: true })
+    // The submission limit for the same client hash is untouched.
+    assert.deepEqual(await store.reserveReport('client', start + 200, reservation()), { ok: true })
+    // A new window starts fresh.
+    assert.deepEqual(await store.countThreadRequest('client', start + RATE_LIMIT_WINDOW_MS), { ok: true })
   })
 })

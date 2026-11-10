@@ -129,6 +129,7 @@ pub fn parse_dae(dae_bytes: &[u8], images: &ImageMap) -> Result<DaeScene, DaeErr
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
 
     let mut warnings = warnings.messages;

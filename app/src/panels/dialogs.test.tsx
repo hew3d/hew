@@ -792,7 +792,7 @@ describe('ExportDialog', () => {
     const onExport = vi.fn()
     render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('glb', 48, undefined)
+    expect(onExport).toHaveBeenCalledWith('glb', 48, undefined, false)
   })
 
   it('SVG reveals view/scale/hidden-lines options and passes them to onExport (1:1 default)', () => {
@@ -815,7 +815,7 @@ describe('ExportDialog', () => {
     render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
     fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'stl' } })
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('stl', 48, undefined)
+    expect(onExport).toHaveBeenCalledWith('stl', 48, undefined, false)
   })
 
   it('hides the curve-resolution select for glTF and shows it for STL', () => {
@@ -831,7 +831,7 @@ describe('ExportDialog', () => {
     fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'stl' } })
     fireEvent.change(screen.getByLabelText(/curve resolution/i), { target: { value: '96' } })
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('stl', 96, undefined)
+    expect(onExport).toHaveBeenCalledWith('stl', 96, undefined, false)
   })
 
   it('offers a stored-facets ("as modeled") resolution choice', () => {
@@ -840,7 +840,29 @@ describe('ExportDialog', () => {
     fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'stl' } })
     fireEvent.change(screen.getByLabelText(/curve resolution/i), { target: { value: '0' } })
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('stl', 0, undefined)
+    expect(onExport).toHaveBeenCalledWith('stl', 0, undefined, false)
+  })
+
+  it('lists the older SketchUp releases under one group and shows the compat box for the 2021-and-later container only', () => {
+    const onExport = vi.fn()
+    render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
+    const select = screen.getByLabelText('Format') as HTMLSelectElement
+    const groups = select.querySelectorAll('optgroup')
+    expect(groups).toHaveLength(1)
+    expect(groups[0].label).toBe('Older SketchUp versions')
+    expect([...groups[0].querySelectorAll('option')].map((o) => o.value)).toEqual([
+      'skp2020', 'skp2019', 'skp2018', 'skp2017', 'skp2016', 'skp2015', 'skp2014', 'skp2013',
+      'skp8', 'skp7', 'skp6', 'skp5', 'skp4', 'skp3',
+    ])
+    expect(screen.queryByTestId('export-skp-compat')).not.toBeInTheDocument()
+    fireEvent.change(select, { target: { value: 'skp' } })
+    fireEvent.click(screen.getByTestId('export-skp-compat'))
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }))
+    expect(onExport).toHaveBeenCalledWith('skp', 48, undefined, true)
+    fireEvent.change(select, { target: { value: 'skp2017' } })
+    expect(screen.queryByTestId('export-skp-compat')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }))
+    expect(onExport).toHaveBeenLastCalledWith('skp2017', 48, undefined, false)
   })
 
   it('calls onExport with "3mf" after switching the Format select to 3MF', () => {
@@ -848,7 +870,7 @@ describe('ExportDialog', () => {
     render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
     fireEvent.change(screen.getByLabelText(/format/i), { target: { value: '3mf' } })
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('3mf', 48, undefined)
+    expect(onExport).toHaveBeenCalledWith('3mf', 48, undefined, false)
   })
 
   it('calls onExport with "usdz" after switching the Format select to USDZ', () => {
@@ -856,7 +878,7 @@ describe('ExportDialog', () => {
     render(<ExportDialog onExport={onExport} onCancel={vi.fn()} />)
     fireEvent.change(screen.getByLabelText(/format/i), { target: { value: 'usdz' } })
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
-    expect(onExport).toHaveBeenCalledWith('usdz', 48, undefined)
+    expect(onExport).toHaveBeenCalledWith('usdz', 48, undefined, false)
   })
 
   it('hides the curve-resolution select for USDZ, like glTF and 3MF', () => {

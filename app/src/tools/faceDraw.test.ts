@@ -1,7 +1,8 @@
-import { describe, it, expect, vi } from 'vitest'
-import { FacePickCache, cursorOnFrozenPlane, defaultFaceEligible, worldFaceNormal, worldFacePlane } from './faceDraw'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
+import { FacePickCache, PICK_NUDGE_PX, PICK_NUDGE_RAD, cursorOnFrozenPlane, defaultFaceEligible, ineligibleFacePlane, worldFaceNormal, worldFacePlane } from './faceDraw'
+import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { setPickRenderMode } from './pickPolicy'
+import { pickNudgeRad, setPickAperture, setPickRenderMode } from './pickPolicy'
 import type { Ray } from '../viewport/math'
 import type { V3 } from '../viewport/geoHelpers'
 
@@ -355,5 +356,422 @@ describe('cursorOnFrozenPlane (a frozen draw plane meeting an off-plane snap)', 
   it('with no snap, the ray hit; parallel rays miss', () => {
     expect(cursorOnFrozenPlane(null, ray, [0, 0, 1], [0, 0, 1])).toEqual({ point: [0.2, 0.3, 1], projected: false })
     expect(cursorOnFrozenPlane(null, ray, [0, 0, 0], [1, 0, 0])).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The face the cursor leans toward (view-plane design §4, OW-10).
+//
+// These run `faceThrough` against a small real ray caster — convex planar
+// faces with the kernel's strict boundary test — so the ring probes, the
+// cursor's own ray, and the facing rule all meet genuine geometry. Leans are
+// built from the CAMERA's screen basis (right = forward × Z, up = right ×
+// forward), never from faceDraw's ring frame, so a ring/lean basis that
+// disagreed in handedness or orientation would fail them (§12 lens 4).
+// ---------------------------------------------------------------------------
+
+type Vec = [number, number, number]
+const vsub = (a: Vec, b: Vec): Vec => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+const vadd = (a: Vec, b: Vec): Vec => [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+const vscale = (a: Vec, k: number): Vec => [a[0] * k, a[1] * k, a[2] * k]
+const vdot = (a: Vec, b: Vec): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+const vcross = (a: Vec, b: Vec): Vec => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+const vnorm = (a: Vec): Vec => vscale(a, 1 / Math.hypot(a[0], a[1], a[2]))
+
+interface GeoFace { object: bigint; face: bigint; verts: Vec[] }
+
+/** A scene double that really casts: `pick_face` returns the nearest face
+ *  whose polygon the ray crosses STRICTLY inside (a ray through an edge or
+ *  corner misses, as the kernel's does), and `face_plane`/`face_normal`
+ *  answer from the polygons (normal from the vertex winding). */
+function castingScene(faces: GeoFace[]) {
+  const normalOf = (f: GeoFace): Vec => vnorm(vcross(vsub(f.verts[1], f.verts[0]), vsub(f.verts[2], f.verts[0])))
+  const byId = new Map(faces.map((f) => [`${f.object}:${f.face}`, f]))
+  const pick_face = vi.fn((ox: number, oy: number, oz: number, dx: number, dy: number, dz: number) => {
+    const o: Vec = [ox, oy, oz]
+    const d: Vec = vnorm([dx, dy, dz])
+    let best: { f: GeoFace; t: number } | null = null
+    for (const f of faces) {
+      const n = normalOf(f)
+      const den = vdot(d, n)
+      if (Math.abs(den) < 1e-12) continue
+      const t = vdot(vsub(f.verts[0], o), n) / den
+      if (t <= 0) continue
+      const hit = vadd(o, vscale(d, t))
+      let inside = true
+      for (let i = 0; i < f.verts.length; i++) {
+        const a = f.verts[i]
+        const b = f.verts[(i + 1) % f.verts.length]
+        if (vdot(vcross(vsub(b, a), vsub(hit, a)), n) <= 1e-12) { inside = false; break }
+      }
+      if (inside && (best === null || t < best.t)) best = { f, t }
+    }
+    if (best === null) return undefined
+    const hitFace = best
+    return { object: () => hitFace.f.object, face: () => hitFace.f.face, instance: () => undefined, depth: () => hitFace.t, free: vi.fn() }
+  })
+  const face_normal = vi.fn((object: bigint, face: bigint) => new Float64Array(normalOf(byId.get(`${object}:${face}`)!)))
+  const face_plane = vi.fn((object: bigint, face: bigint) => {
+    const f = byId.get(`${object}:${face}`)!
+    return new Float64Array([...f.verts[0], ...normalOf(f)])
+  })
+  return { pick_face, face_normal, face_plane, node_parent: vi.fn(() => undefined) } as unknown as WasmScene
+}
+
+const CUBE = 7n
+const FRONT = 1n
+const BACK = 2n
+const LEFT = 3n
+const RIGHT = 4n
+const BOTTOM = 5n
+const TOP_FACE = 6n
+/** The unit cube [0,1]³, each face wound counter-clockwise about its outward normal. */
+const CUBE_FACES: GeoFace[] = [
+  { object: CUBE, face: FRONT, verts: [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]] }, // y = 0, −Y
+  { object: CUBE, face: BACK, verts: [[0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0]] }, // y = 1, +Y
+  { object: CUBE, face: LEFT, verts: [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]] }, // x = 0, −X
+  { object: CUBE, face: RIGHT, verts: [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]] }, // x = 1, +X
+  { object: CUBE, face: BOTTOM, verts: [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]] }, // z = 0, −Z
+  { object: CUBE, face: TOP_FACE, verts: [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]] }, // z = 1, +Z
+]
+
+/** A camera at `eye` looking at `target`, with the screen basis three.js
+ *  gives it for an up of world Z (Y when looking straight up or down). */
+function camera(eye: Vec, target: Vec) {
+  const f = vnorm(vsub(target, eye))
+  const up: Vec = Math.abs(f[2]) > 0.999999 ? [0, 1, 0] : [0, 0, 1]
+  const right = vnorm(vcross(f, up))
+  const screenUp = vcross(right, f)
+  /** The cursor ray `size` radians from the snapped point `p`, toward
+   *  screen angle `deg` (0 = screen-right, 90 = screen-up). `size` 0 puts
+   *  the cursor exactly on `p`. */
+  const rayNear = (p: Vec, deg: number, size: number): Ray => {
+    const a = (deg * Math.PI) / 180
+    const dirP = vnorm(vsub(p, eye))
+    const offset = vadd(vscale(right, Math.cos(a) * size), vscale(screenUp, Math.sin(a) * size))
+    return { origin: [...eye], direction: vnorm(vadd(dirP, offset)) }
+  }
+  return { eye, f, right, screenUp, rayNear }
+}
+
+/** The home view (eye offset [3.5, −3, 2.5] from the target, math.ts),
+ *  framing the unit cube from twice the home distance. */
+const HOME = camera(vadd([0.5, 0.5, 0.5], vscale([3.5, -3.0, 2.5], 2)), [0.5, 0.5, 0.5])
+/** About 4.5 px of lean at this distance on a 720 px canvas — well inside
+ *  the 8 px snap radius, well outside the 1.5 px dead zone. */
+const LEAN = 0.006
+const ALL = () => true
+
+const facePicked = (pick: { object: bigint; face: bigint } | null) => (pick === null ? null : pick.face)
+
+describe('FacePickCache.faceThrough — the face the cursor leans toward (view-plane §4)', () => {
+  // Screen angles of the cube's edges from the home view, measured from the
+  // camera basis:
+  //   the upper-front-LEFT corner L = (0,0,1), on the silhouette:
+  //     front face (y = 0) wedge −88°…−29°, top face −29°…+20°, the rest
+  //     (+20° round through 180° to −88°) is off the cube;
+  //   the near upper-front-right corner N = (1,0,1), inside the silhouette:
+  //     front 151°…270°, right (x = 1) −90°…+22°, top +22°…151°.
+  const L: Vec = [0, 0, 1]
+  const N: Vec = [1, 0, 1]
+
+  function through(cache: FacePickCache, scene: WasmScene, ray: Ray, p: Vec) {
+    // The Viewport's order per event: `snapConstraint` picks the plain ray
+    // first, then the tool asks for the boundary face at the snapped point.
+    cache.pickFor(scene, ray, ALL)
+    return cache.faceThrough(scene, ray, ALL, null, [p])
+  }
+
+  it('leaning into each face at the near corner picks that face', () => {
+    const scene = castingScene(CUBE_FACES)
+    expect(facePicked(through(new FacePickCache(), scene, HOME.rayNear(N, 210, LEAN), N))).toBe(FRONT)
+    expect(facePicked(through(new FacePickCache(), scene, HOME.rayNear(N, 85, LEAN), N))).toBe(TOP_FACE)
+    expect(facePicked(through(new FacePickCache(), scene, HOME.rayNear(N, -35, LEAN), N))).toBe(RIGHT)
+  })
+
+  it('at the silhouette corner: down-into-front gives front, up-into-top gives top', () => {
+    const scene = castingScene(CUBE_FACES)
+    expect(facePicked(through(new FacePickCache(), scene, HOME.rayNear(L, -60, LEAN), L))).toBe(FRONT)
+    expect(facePicked(through(new FacePickCache(), scene, HOME.rayNear(L, -5, LEAN), L))).toBe(TOP_FACE)
+  })
+
+  it('off the cube, the nearest face\'s plane extended: left of the corner takes the front (side) face, above it the top', () => {
+    const scene = castingScene(CUBE_FACES)
+    const left = HOME.rayNear(L, 180, LEAN)
+    const above = HOME.rayNear(L, 90, LEAN)
+    // Neither cursor ray touches the cube: only the ring at the corner can answer.
+    expect(new FacePickCache().pickFor(scene, left, ALL)).toBeNull()
+    expect(new FacePickCache().pickFor(scene, above, ALL)).toBeNull()
+    const leftPick = through(new FacePickCache(), scene, left, L)
+    expect(facePicked(leftPick)).toBe(FRONT)
+    expect(leftPick?.normal).toEqual([0, -1, 0])
+    expect(facePicked(through(new FacePickCache(), scene, above, L))).toBe(TOP_FACE)
+    // Down and off to the lower left, still nearer the front face's wedge.
+    expect(facePicked(through(new FacePickCache(), scene, HOME.rayNear(L, 250, LEAN), L))).toBe(FRONT)
+  })
+
+  it('the face under the cursor wins even where the nearest ring probe struck its neighbour', () => {
+    // −25° is inside the top face's wedge (−29°…+20°) but nearer the −45°
+    // probe, which struck the front face, than the 0° probe on the top.
+    const scene = castingScene(CUBE_FACES)
+    const ray = HOME.rayNear(L, -25, LEAN)
+    expect(new FacePickCache().pickFor(scene, ray, ALL)).toEqual({ object: CUBE, face: TOP_FACE })
+    expect(facePicked(through(new FacePickCache(), scene, ray, L))).toBe(TOP_FACE)
+  })
+
+  it('zero offset: the face hovered before the snap acquired (came from), on both sides', () => {
+    const scene = castingScene(CUBE_FACES)
+    const atCorner = () => HOME.rayNear(N, 0, 0)
+    for (const [deg, face] of [[210, FRONT], [85, TOP_FACE], [-35, RIGHT]] as const) {
+      const cache = new FacePickCache()
+      // A plain hover over the face, well away from the corner (not a boundary snap).
+      expect(cache.pickFor(scene, HOME.rayNear(N, deg, 0.05), ALL)?.face).toBe(face)
+      expect(facePicked(through(cache, scene, atCorner(), N)), `came from ${face}`).toBe(face)
+    }
+  })
+
+  it('zero offset with no hover memory: the facing rule', () => {
+    const scene = castingScene(CUBE_FACES)
+    // From the home view the right face (+X) faces the camera most at N
+    // (|d·x| ≈ 0.66 beats front ≈ 0.57 and top ≈ 0.47).
+    expect(facePicked(through(new FacePickCache(), scene, HOME.rayNear(N, 0, 0), N))).toBe(RIGHT)
+    // Inside the dead zone the lean is ignored even though it is nonzero.
+    expect(facePicked(through(new FacePickCache(), scene, HOME.rayNear(N, 85, PICK_NUDGE_RAD * 0.5), N))).toBe(RIGHT)
+  })
+
+  it('a hover over empty space forgets the face hovered before it', () => {
+    const scene = castingScene(CUBE_FACES)
+    const cache = new FacePickCache()
+    cache.pickFor(scene, HOME.rayNear(N, 85, 0.05), ALL) // over the top face
+    const empty = HOME.rayNear(L, 160, 0.2) // well off the cube
+    expect(cache.pickFor(scene, empty, ALL)).toBeNull()
+    expect(facePicked(through(cache, scene, HOME.rayNear(N, 0, 0), N))).toBe(RIGHT) // facing, not top
+  })
+
+  it('a rounding hit on a boundary event never overwrites where the cursor came from', () => {
+    const scene = castingScene(CUBE_FACES)
+    const cache = new FacePickCache()
+    cache.pickFor(scene, HOME.rayNear(N, 210, 0.05), ALL) // came from the front face
+    // Two boundary events inside the dead zone whose plain rays land on the top face.
+    for (let i = 0; i < 2; i++) {
+      const ray = HOME.rayNear(N, 85, PICK_NUDGE_RAD * 0.5)
+      expect(cache.pickFor(scene, ray, ALL)?.face).toBe(TOP_FACE)
+      expect(facePicked(cache.faceThrough(scene, ray, ALL, null, [N]))).toBe(FRONT)
+    }
+  })
+
+  it('…nor when the boundary face is asked for before the plain pick of the same event', () => {
+    // `ineligibleFacePlane` and a tool's `_facePickAt` can ask `faceThrough`
+    // first; the plain pick that follows on the same ray is still a
+    // boundary event's and must not become the memory.
+    const scene = castingScene(CUBE_FACES)
+    const cache = new FacePickCache()
+    cache.pickFor(scene, HOME.rayNear(N, 210, 0.05), ALL) // came from the front face
+    for (let i = 0; i < 2; i++) {
+      const ray = HOME.rayNear(N, 85, PICK_NUDGE_RAD * 0.5)
+      expect(facePicked(cache.faceThrough(scene, ray, ALL, null, [N]))).toBe(FRONT)
+      expect(cache.pickFor(scene, ray, ALL)?.face).toBe(TOP_FACE)
+    }
+  })
+
+  it('the memo never serves the old face once the hover memory has changed under a reused ray (§12 lens 2)', () => {
+    const scene = castingScene(CUBE_FACES)
+    const cache = new FacePickCache()
+    cache.pickFor(scene, HOME.rayNear(N, 210, 0.05), ALL) // front
+    const held = HOME.rayNear(N, 0, 0)
+    expect(facePicked(through(cache, scene, held, N))).toBe(FRONT)
+    // The cursor moves over the top face for two events, then a key press
+    // re-resolves against the held ray.
+    cache.pickFor(scene, HOME.rayNear(N, 85, 0.05), ALL)
+    cache.pickFor(scene, HOME.rayNear(N, 80, 0.05), ALL)
+    expect(facePicked(cache.faceThrough(scene, held, ALL, null, [N]))).toBe(TOP_FACE)
+    // clear() forgets it: the facing rule.
+    cache.clear()
+    expect(facePicked(cache.faceThrough(scene, held, ALL, null, [N]))).toBe(RIGHT)
+  })
+
+  describe('on an edge (two faces)', () => {
+    const M: Vec = [0.5, 0, 1] // the front-top edge's midpoint
+
+    it('leans into either face, both sides of the edge', () => {
+      const scene = castingScene(CUBE_FACES)
+      expect(facePicked(through(new FacePickCache(), scene, HOME.rayNear(M, -90, LEAN), M))).toBe(FRONT)
+      expect(facePicked(through(new FacePickCache(), scene, HOME.rayNear(M, 90, LEAN), M))).toBe(TOP_FACE)
+    })
+
+    it('zero offset: came from, else facing', () => {
+      const scene = castingScene(CUBE_FACES)
+      const cache = new FacePickCache()
+      // Over the top face (it spans only ~0.045 rad on screen from here).
+      expect(cache.pickFor(scene, HOME.rayNear(M, 90, 0.02), ALL)?.face).toBe(TOP_FACE)
+      expect(facePicked(through(cache, scene, HOME.rayNear(M, 0, 0), M))).toBe(TOP_FACE)
+      // And from the front face, the other side of the edge.
+      const fromFront = new FacePickCache()
+      expect(fromFront.pickFor(scene, HOME.rayNear(M, -90, 0.02), ALL)?.face).toBe(FRONT)
+      expect(facePicked(through(fromFront, scene, HOME.rayNear(M, 0, 0), M))).toBe(FRONT)
+      // No memory: the front face faces the home camera more than the top does.
+      expect(facePicked(through(new FacePickCache(), scene, HOME.rayNear(M, 0, 0), M))).toBe(FRONT)
+    })
+  })
+
+  describe('ring frame vs lean agree on every camera (§12 lens 4)', () => {
+    // A roof: two faces meeting along a ridge on x ∈ [0, 1] at y = 0.5,
+    // z = 1, falling to z = 0.5 at y = 0 (face A) and y = 1 (face B). The
+    // snapped point is the ridge's end, P = (1, 0.5, 1); a cursor off the
+    // end of the roof toward +Y is nearest B's wedge, toward −Y A's.
+    // Mirroring the lean against the ring would swap them.
+    const ROOF = 9n
+    const A = 1n
+    const B = 2n
+    const ROOF_FACES: GeoFace[] = [
+      { object: ROOF, face: A, verts: [[0, 0, 0.5], [1, 0, 0.5], [1, 0.5, 1], [0, 0.5, 1]] },
+      { object: ROOF, face: B, verts: [[0, 0.5, 1], [1, 0.5, 1], [1, 1, 0.5], [0, 1, 0.5]] },
+    ]
+    const P: Vec = [1, 0.5, 1]
+    /** The cursor ray from `eye` leaning `size` rad from P toward the world
+     *  point `toward` — a lean defined in the world, not on any screen. */
+    const leanToward = (eye: Vec, toward: Vec, size: number): Ray => {
+      const dirP = vnorm(vsub(P, eye))
+      const dirT = vnorm(vsub(toward, eye))
+      const perp = vnorm(vsub(dirT, vscale(dirP, vdot(dirT, dirP))))
+      return { origin: [...eye], direction: vnorm(vadd(dirP, vscale(perp, size))) }
+    }
+    const offRoofPlusY: Vec = [1.3, 0.8, 1.15]
+    const offRoofMinusY: Vec = [1.3, 0.2, 1.15]
+
+    const cameras: [string, Vec][] = [
+      ['Top', [0.5, 0.5 - 0.001 * 10, 11]],
+      ['Bottom', [0.5, 0.5 - 0.001 * 10, -9]],
+      ['just inside the Z-up branch (|d_z| ≈ 0.989)', [1 - 1.5, 0.5, 1 + 10]],
+      ['just inside the Y-up branch (|d_z| ≈ 0.991)', [1 - 1.3, 0.5, 1 + 10]],
+      // Low and off the gable end, where the ridge's end is a silhouette
+      // corner: up-and-sideways from it is off the roof.
+      ['a low view off the gable end', [4, 1.5, 1.4]],
+    ]
+
+    it.each(cameras)('%s', (_name, eye) => {
+      const scene = castingScene(ROOF_FACES)
+      const plus = leanToward(eye, offRoofPlusY, LEAN)
+      const minus = leanToward(eye, offRoofMinusY, LEAN)
+      // Off the roof: the plain cursor rays miss, so the ring decides.
+      expect(new FacePickCache().pickFor(scene, plus, ALL)).toBeNull()
+      expect(new FacePickCache().pickFor(scene, minus, ALL)).toBeNull()
+      expect(facePicked(through(new FacePickCache(), scene, plus, P))).toBe(B)
+      expect(facePicked(through(new FacePickCache(), scene, minus, P))).toBe(A)
+    })
+
+    it('the two branch-edge cameras really straddle the up-reference switch', () => {
+      const dz = (eye: Vec) => Math.abs(vnorm(vsub(P, eye))[2])
+      expect(dz(cameras[2][1])).toBeLessThan(0.99)
+      expect(dz(cameras[3][1])).toBeGreaterThan(0.99)
+    })
+  })
+
+  it('the ineligible variant on a grouped cube answers the same way (ineligibleFacePlane)', () => {
+    const scene = castingScene(CUBE_FACES)
+    const grouped = () => false
+    const snapAt = (p: Vec) => ({ x: p[0], y: p[1], z: p[2], kind: 'endpoint', object: CUBE, elementKind: 'vertex' }) as unknown as Snap
+    const plane = (ray: Ray, p: Vec, cache = new FacePickCache()) => {
+      cache.pickFor(scene, ray, grouped)
+      return ineligibleFacePlane(scene, cache, ray, grouped, snapAt(p))
+    }
+    expect(plane(HOME.rayNear(N, 210, LEAN), N)?.normal).toEqual([0, -1, 0])
+    expect(plane(HOME.rayNear(N, 85, LEAN), N)?.normal).toEqual([0, 0, 1])
+    expect(plane(HOME.rayNear(L, 180, LEAN), L)?.normal).toEqual([0, -1, 0]) // off the cube: front extended
+    expect(plane(HOME.rayNear(L, 90, LEAN), L)?.normal).toEqual([0, 0, 1])
+    // Came from, on a grouped face.
+    const cache = new FacePickCache()
+    cache.pickFor(scene, HOME.rayNear(N, 85, 0.05), grouped)
+    expect(plane(HOME.rayNear(N, 0, 0), N, cache)?.normal).toEqual([0, 0, 1])
+    expect(plane(HOME.rayNear(N, 0, 0), N)?.normal).toEqual([1, 0, 0]) // no memory: facing
+  })
+})
+
+const PERSPECTIVE_APERTURE = { kind: 'perspective', fovYDeg: 45 } as const
+
+describe('pickNudgeRad — 1.5 px on screen in either projection', () => {
+  afterEach(() => setPickAperture(PERSPECTIVE_APERTURE, 720))
+
+  it('perspective is the constant, bit for bit, at any distance', () => {
+    setPickAperture({ kind: 'perspective', fovYDeg: 30 }, 1400)
+    for (const d of [0, 1e-9, 0.5, 10, 1e6]) expect(pickNudgeRad(d)).toBe(PICK_NUDGE_RAD)
+    expect(PICK_NUDGE_RAD).toBe(0.002)
+  })
+
+  it('parallel spans PICK_NUDGE_PX world-per-pixel widths at the point, so it shrinks with distance', () => {
+    setPickAperture({ kind: 'parallel', worldPerPixel: 0.0014 }, 900)
+    expect(PICK_NUDGE_PX).toBe(1.5)
+    expect(pickNudgeRad(10)).toBeCloseTo((1.5 * 0.0014) / 10, 15)
+    expect(pickNudgeRad(2)).toBeCloseTo((1.5 * 0.0014) / 2, 15)
+    // A point at the eye stays finite (the distance is floored).
+    expect(pickNudgeRad(0)).toBeCloseTo((1.5 * 0.0014) / 1e-6, 6)
+    expect(Number.isFinite(pickNudgeRad(0))).toBe(true)
+  })
+
+  it('a later aperture replaces the earlier one', () => {
+    setPickAperture({ kind: 'parallel', worldPerPixel: 0.0014 }, 900)
+    setPickAperture(PERSPECTIVE_APERTURE, 900)
+    expect(pickNudgeRad(10)).toBe(PICK_NUDGE_RAD)
+  })
+})
+
+describe('FacePickCache.faceThrough under parallel projection (the lean in pixels, not radians)', () => {
+  const WPP = 0.0014
+  const D = 10
+  const N: Vec = [1, 0, 1] // the near upper-front-right corner from the home direction
+  beforeEach(() => setPickAperture({ kind: 'parallel', worldPerPixel: WPP }, 900))
+  afterEach(() => setPickAperture(PERSPECTIVE_APERTURE, 720))
+
+  /** A parallel-projection cursor ray: every ray runs along the view
+   *  direction, from an origin `D` meters back, offset on screen from the
+   *  snapped point `p` by `px` pixels toward screen angle `deg`. */
+  const orthoRayNear = (p: Vec, deg: number, px: number): Ray => {
+    const a = (deg * Math.PI) / 180
+    const offset = vadd(vscale(HOME.right, Math.cos(a) * px * WPP), vscale(HOME.screenUp, Math.sin(a) * px * WPP))
+    return { origin: vadd(vsub(p, vscale(HOME.f, D)), offset), direction: [...HOME.f] }
+  }
+  const through = (scene: WasmScene, ray: Ray, p: Vec, cache = new FacePickCache()) => {
+    cache.pickFor(scene, ray, ALL)
+    return cache.faceThrough(scene, ray, ALL, null, [p])
+  }
+
+  it('an 8 px lean into the front face is a lean (rule 1), though it is far under the perspective dead zone in radians', () => {
+    const scene = castingScene(CUBE_FACES)
+    const ray = orthoRayNear(N, 210, 8)
+    // The lean's angle at the point is about 0.0011 rad: inside 0.002.
+    const dirP = vnorm(vsub(N, ray.origin))
+    expect(Math.hypot(...vsub(HOME.f, dirP))).toBeLessThan(PICK_NUDGE_RAD)
+    expect(facePicked(through(scene, ray, N))).toBe(FRONT)
+    expect(facePicked(through(scene, orthoRayNear(N, 85, 8), N))).toBe(TOP_FACE)
+  })
+
+  it('a 1 px offset is inside the 1.5 px dead zone: no memory, so the facing rule', () => {
+    const scene = castingScene(CUBE_FACES)
+    expect(facePicked(through(scene, orthoRayNear(N, 210, 1), N))).toBe(RIGHT)
+  })
+
+  it('the ring probes land 1.5 px (in world widths) from the snapped point at its depth', () => {
+    const scene = castingScene(CUBE_FACES)
+    const ray = orthoRayNear(N, 210, 8)
+    const cache = new FacePickCache()
+    cache.pickFor(scene, ray, ALL)
+    const pick = scene.pick_face as unknown as ReturnType<typeof vi.fn>
+    pick.mockClear()
+    cache.faceThrough(scene, ray, ALL, null, [N])
+    const probes = pick.mock.calls.map((c) => c as number[])
+    expect(probes.length).toBe(8) // the plain ray's pick was memoized
+    const depth = Math.hypot(...vsub(N, ray.origin))
+    for (const [ox, oy, oz, dx, dy, dz] of probes) {
+      expect([ox, oy, oz]).toEqual(ray.origin)
+      const d = vnorm([dx, dy, dz])
+      // The probe's point abreast of N (its foot on the plane through N
+      // square to the direction to N).
+      const dirP = vnorm(vsub(N, ray.origin))
+      const along = depth / vdot(d, dirP)
+      const at = vadd(ray.origin, vscale(d, along))
+      const off = Math.hypot(...vsub(at, N))
+      expect(off).toBeGreaterThan(PICK_NUDGE_PX * WPP * 0.999)
+      expect(off).toBeLessThan(PICK_NUDGE_PX * WPP * 1.001)
+    }
   })
 })

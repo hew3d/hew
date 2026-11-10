@@ -47,7 +47,7 @@
 
 import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
-import type { Tool, Snap, EditContext } from './types'
+import type { Tool, Snap, SnapConstraint, EditContext } from './types'
 import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -60,7 +60,8 @@ import { editDimsBuffer, nextIdlePlaneLock, axisLockColorName } from './moveInpu
 import type { SketchTarget } from './sketchGesture'
 import { DetachedMode, type OnDetachedChange } from './detachedMode'
 import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
-import { drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
+import { cameraView } from './viewPlaneInference'
+import { drawPlaneCue, idleHoverCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane, type IdleDrawTarget, type CameraView } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
 import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick, cursorOnFrozenPlane, firstPointOnFace } from './faceDraw'
 import { pickRenderMode } from './pickPolicy'
@@ -172,9 +173,27 @@ function isDimsBufferKey(key: string): boolean {
 }
 
 export class RectangleTool implements Tool {
+  /** Idle over empty space, the plane follows the view (`Tool.followsViewPlane`). */
+  readonly followsViewPlane = true
   readonly name = 'Rectangle'
   /** Click-drag-release works as well as click-click (Tool.dragCommits). */
   readonly dragCommits = true
+
+  /** Live camera feed (Tool.updateCamera): keeps the view direction the idle
+   *  picker infers the drawing plane from. */
+  updateCamera(camera: THREE.Camera): void {
+    this._view = cameraView(camera)
+  }
+
+  /** The pointer left the canvas (Tool.onPointerLeave): nothing is hovered,
+   *  so the idle hover's plane patch, its "Facing" hint line and its projected verdict go with it. A
+   *  lock, a pin and an anchored gesture are choices, not hover, and stay;
+   *  the next move (or a held-pointer replay) rebuilds the hover. */
+  onPointerLeave(): void {
+    this._idleHoverCue = null
+    this._idleInferred = null
+    this._idleProjected = false
+  }
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
@@ -183,6 +202,9 @@ export class RectangleTool implements Tool {
   }
 
   private _stageHint(): string {
+    if (!this.capturingInput() && this.idlePlaneLock === null && this.pin.current === null && this.retype.isOpen) {
+      return t`Type exact dimensions to resize the rectangle you just drew — or click the first corner of the next one.`
+    }
     if (this.planeStage.kind !== 'idle' || this.faceStage.kind !== 'idle') {
       return t`Click the opposite corner — or type exact dimensions.`
     }
@@ -193,8 +215,9 @@ export class RectangleTool implements Tool {
     if (this.pin.current !== null) {
       return t`Pinned to the hovered plane — click to start; Shift again or Esc unpins.`
     }
-    if (this.retype.isOpen) {
-      return t`Type exact dimensions to resize the rectangle you just drew — or click the first corner of the next one.`
+    if (this._idleInferred !== null && this._idleInferred.axis !== 2) {
+      const axis = axisLockColorName(this._idleInferred.axis)
+      return t`Facing the ${axis} plane — click the first corner to draw on it; ↑ for the ground, Shift pins it.`
     }
     return t`Click the first corner — on the ground plane or any face or sketch.`
   }
@@ -262,6 +285,28 @@ export class RectangleTool implements Tool {
    *  `activeDrawPlaneCue()`'s idle-locked case. Reset to null whenever the
    *  lock itself changes (a fresh lock has no hover yet) and by `cancel()`. */
   private _lastIdleHoverPoint: V3 | null = null
+
+  /** The camera's forward direction and eye, refreshed every frame via
+   *  `updateCamera` (view-plane inference: the idle picker infers the axis
+   *  plane that faces the camera from it). `null` until the first frame, so a
+   *  caller that never feeds a camera keeps the ground fallback. */
+  private _view: CameraView | null = null
+  /** `_view` as it stood at the gesture's first press, so a mid-gesture
+   *  arrow release reverts to the plane an unlocked first click would have
+   *  chosen even if the camera has orbited since. */
+  private _gestureView: CameraView | null = null
+  /** What the idle picker inferred from the view at the last hover (step 7:
+   *  the axis plane facing the camera) with the ray it was resolved for, or
+   *  null when the ground, a face, a sketch, a lock or a pin decided
+   *  instead. Drives, for a vertical plane, the inference line of the
+   *  status hint (the patch reads `_idleHoverCue`). */
+  private _idleInferred: { axis: 0 | 1 | 2; plane: DrawPlane; ray: Ray } | null = null
+  /** The plane the next idle click would land on at the last hover, with
+   *  the ray it was resolved for, whenever no lock or pin decided instead
+   *  (`idleHoverCue`): the inferred plane, a hovered sketch's, or a hovered
+   *  or leaned-toward face's. Drives the idle plane patch only; the status
+   *  hint's inference line keys on `_idleInferred`. */
+  private _idleHoverCue: { plane: DrawPlane; ray: Ray } | null = null
 
   constructor(
     wasmScene: WasmScene,
@@ -348,8 +393,8 @@ export class RectangleTool implements Tool {
    * ruled out face mode (which takes priority), so no `_activeContext`
    * re-check is needed here.
    */
-  private _resolveIdleTarget(ray: Ray, snap: Snap | null = null): { plane: DrawPlane; target: SketchTarget } {
-    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext, () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap), snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '')
+  private _resolveIdleTarget(ray: Ray, snap: Snap | null = null): IdleDrawTarget {
+    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext, () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap), snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '', this._view)
   }
 
   /**
@@ -362,13 +407,14 @@ export class RectangleTool implements Tool {
    * active. Returns `null` only when a lock is active but there's no snap
    * point yet (nothing to click through).
    */
-  private _resolveClickTarget(snap: Snap | null, ray: Ray): { plane: DrawPlane; target: SketchTarget } | null {
+  private _resolveClickTarget(snap: Snap | null, ray: Ray): IdleDrawTarget | null {
     const pinned = this.pin.clickTarget(this._editContext)
     if (pinned !== null) return pinned
     return resolveClickDrawTarget(
       this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray, this._editContext,
       () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap),
       snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '',
+      this._view,
     )
   }
 
@@ -450,9 +496,13 @@ export class RectangleTool implements Tool {
    *   face, preventing the kernel from rejecting a non-planar rectangle;
    *   absent that, a top-level hover over a non-ground sketch returns ITS
    *   plane.
+   * - Idle over nothing with the view facing a vertical (or moved-frame)
+   *   axis plane (picker step 7): `fallbackPlane` only — a miss lands on
+   *   that plane, but the kernel is not constrained, so geometry anywhere
+   *   still snaps.
    * - Otherwise (ground mode): return null (unconstrained).
    */
-  snapConstraint(ray: Ray): { constraintPlane?: { point: [number, number, number]; normal: [number, number, number] }; seeThroughPoints?: boolean } | null {
+  snapConstraint(ray: Ray): SnapConstraint | null {
     if (this.faceStage.kind === 'anchored') {
       // Already anchored: lock to the established face plane
       return {
@@ -491,7 +541,19 @@ export class RectangleTool implements Tool {
     const pinned = this.pin.constraint()
     if (pinned !== null) return pinned
 
-    const plane = this._idleHoverPlane(ray)
+    // Over nothing, the axis plane the view faces (picker step 7) is only
+    // where a miss lands: it is never sent to the kernel as a constraint, so
+    // a corner or edge anywhere in the scene still snaps (and then decides
+    // the plane itself, steps 3-6).
+    const hover = this._idleHoverResolution(ray)
+    // Inside an entered object only its own faces take a click (`_currentMode`
+    // stays in face mode there, and the hover patch shows nothing else), so
+    // a sketch or plane from outside it must not filter the snap either.
+    if (this._activeContext !== null && hover.onFace !== true) return null
+    if (hover.inferredAxis !== undefined) {
+      return { fallbackPlane: { point: hover.plane.origin, normal: hover.plane.normal } }
+    }
+    const plane = hover.plane
     if (!plane.ground) {
       // Hidden points through the hovered face only in X-ray, where the
       // first click can adopt or be dropped onto that face; Wireframe has no
@@ -509,6 +571,14 @@ export class RectangleTool implements Tool {
    * for a stale face (no world normal), matching `_currentMode`'s miss.
    */
   private _idleHoverPlane(ray: Ray, snap: Snap | null = null): DrawPlane {
+    return this._idleHoverResolution(ray, snap).plane
+  }
+
+  /** `_idleHoverPlane` with how it was decided: `inferredAxis` is set
+   *  only when nothing was under the cursor and the plane is the axis
+   *  plane the view faces (picker step 7, `resolveIdleDrawTarget`);
+   *  `onFace` only when a face decided it (steps 3, 5, 6). */
+  private _idleHoverResolution(ray: Ray, snap: Snap | null = null): { plane: DrawPlane; inferredAxis?: 0 | 1 | 2; onFace?: true } {
     // Hovering an object's edge or corner: the plain ray pick misses there
     // (strict at the boundary), so the ranked boundary pick answers which
     // face the point belongs to — a Shift press over a wall's edge
@@ -517,7 +587,7 @@ export class RectangleTool implements Tool {
       const through = this._facePickAt(snap, ray)
       if (through !== null) {
         const drawPlane = drawPlaneThrough(through.point, through.normal)
-        if (drawPlane !== null) return drawPlane
+        if (drawPlane !== null) return { plane: drawPlane, onFace: true }
       }
     }
     const eligible = this._eligiblePickFor(ray)
@@ -525,18 +595,19 @@ export class RectangleTool implements Tool {
       const plane = worldFacePlane(this.wasmScene, eligible.object, eligible.face, this._activeInstance)
       if (plane !== null) {
         const drawPlane = drawPlaneThrough(plane.point, plane.normal)
-        if (drawPlane !== null) return drawPlane
+        if (drawPlane !== null) return { plane: drawPlane, onFace: true }
       }
     }
-    return this._resolveIdleTarget(ray, snap).plane
+    return this._resolveIdleTarget(ray, snap)
   }
 
   /**
    * The drawing-plane cue the Viewport should render right now (design §6
    * bullet 1) — a grid patch on the active NON-ground plane, or null (ground
    * is covered by the world grid already). See `drawPlaneCue` in
-   * `drawPlane.ts` for the two cases (anchored non-ground / idle-locked with
-   * a tracked hover).
+   * `drawPlane.ts` for the cases (anchored non-ground, idle-locked with a
+   * tracked hover, idle over a non-ground plane the next click would land
+   * on); a Shift pin draws through the hover like an anchored plane.
    */
   activeDrawPlaneCue(): { plane: DrawPlane; through: V3 } | null {
     if (this.faceStage.kind === 'anchored') {
@@ -582,6 +653,7 @@ export class RectangleTool implements Tool {
       idleLock: this.idlePlaneLock,
       idleHover: this._lastIdleHoverPoint,
       frame: getDrawingAxes(this.wasmScene),
+      idleHoverCue: this._idleHoverCue,
     })
   }
 
@@ -601,7 +673,18 @@ export class RectangleTool implements Tool {
     if (this.pin.setShiftHeld(held)) {
       this.idlePlaneLock = null
       this._lastIdleHoverPoint = null
+      this._idleInferred = null
+      this._idleHoverCue = null
     }
+  }
+
+  /** What step 7 of the idle picker inferred at this hover, or null when
+   *  anything else decided: a face, an edge or corner, a sketch, or the
+   *  plain ground. */
+  private _inferredAt(ray: Ray, snap: Snap | null): { axis: 0 | 1 | 2; plane: DrawPlane; ray: Ray } | null {
+    if (this._view === null || this._currentMode(ray, snap) === 'face') return null
+    const resolved = this._resolveIdleTarget(ray, snap)
+    return resolved.inferredAxis === undefined ? null : { axis: resolved.inferredAxis, plane: resolved.plane, ray }
   }
 
   /** Idle hover bookkeeping: the hover point for the plane cue (arrow lock
@@ -610,6 +693,14 @@ export class RectangleTool implements Tool {
   private _trackIdleHover(snap: Snap | null, ray: Ray): void {
     this._snapProjected = false
     this._idleProjected = false
+    this._idleInferred = null
+    this._idleHoverCue = null
+    // A lock or pin skips every face pick below (it beats face mode), yet
+    // the boundary pick's hover memory (`FacePickCache`, view-plane design
+    // §4.2 rule 2) must keep following the cursor, or a release at a corner
+    // would remember the face it was over before the lock. The pick itself
+    // is discarded; a boundary snap never feeds the memory.
+    if ((this.idlePlaneLock !== null || this.pin.current !== null) && !snapOnObjectBoundary(snap)) this._eligiblePickFor(ray)
     if (snap === null) return
     if (this._currentMode(ray, snap) === 'face') {
       const face = this._facePickAt(snap, ray)
@@ -618,6 +709,8 @@ export class RectangleTool implements Tool {
     const through: V3 = [snap.x, snap.y, snap.z]
     this._lastIdleHoverPoint = through
     if (this.idlePlaneLock === null) this.pin.trackHover(this._idleHoverPlane(ray, snap), through)
+    this._idleInferred = this.idlePlaneLock === null && this.pin.current === null ? this._inferredAt(ray, snap) : null
+    this._idleHoverCue = this.idlePlaneLock === null && this.pin.current === null ? idleHoverCue(this._idleHoverResolution(ray, snap), ray, this._activeContext !== null) : null
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
@@ -688,6 +781,7 @@ export class RectangleTool implements Tool {
     // Any pointer action ends the retype window — the next rectangle has
     // begun, and typed dimensions now belong to it.
     this.disarmRetype()
+    if (this.planeStage.kind === 'idle' && this.faceStage.kind === 'idle') this._gestureView = this._view
     if (this._currentMode(ray, snap) === 'face') {
       this._onPointerDownFace(snap, ray)
     } else {
@@ -771,6 +865,8 @@ export class RectangleTool implements Tool {
         this.idlePlaneLock = null
         this.pin.clear()
         this._lastIdleHoverPoint = null
+        this._idleInferred = null
+        this._idleHoverCue = null
         return
       }
       // Aborting an in-progress gesture keeps the plane lock: the lock is
@@ -807,6 +903,8 @@ export class RectangleTool implements Tool {
         this.pin.clear() // an arrow lock displaces a Shift pin, and vice versa
         // A fresh/changed lock has no tracked hover yet (design §6 bullet 1).
         this._lastIdleHoverPoint = null
+        this._idleInferred = null
+        this._idleHoverCue = null
       }
       return
     }
@@ -831,7 +929,7 @@ export class RectangleTool implements Tool {
         if (this._activeContext !== null) return
         const fromFace = this.faceStage
         const { anchor } = fromFace
-        const natural = groundNaturalTarget(this._editContext, anchor)
+        const natural = groundNaturalTarget(this._editContext, anchor, this._gestureView, getDrawingAxes(this.wasmScene))
         const next = nextGestureLockPlane(null, ev.key, anchor, natural, getDrawingAxes(this.wasmScene), this._editContext)
         if (next.lock === null) return // Down with no lock: nothing to release
         this.idlePlaneLock = next.lock
@@ -906,6 +1004,8 @@ export class RectangleTool implements Tool {
     this.idlePlaneLock = null
     this.pin.clear()
     this._lastIdleHoverPoint = null
+    this._idleInferred = null
+    this._idleHoverCue = null
     this._clearPreview()
     this.onMeasurementCb('')
   }
@@ -916,6 +1016,9 @@ export class RectangleTool implements Tool {
   onDocumentReset(): void {
     this.cancel()
     this.sep.reset()
+    // A new document's handles can reuse the old one's: no memoized pick
+    // or hover memory may outlive it.
+    this._pickCache.clear()
   }
 
   /** Ctrl/Cmd clean tap (Viewport-driven; a bare Ctrl never reaches onKey):
@@ -1153,7 +1256,7 @@ export class RectangleTool implements Tool {
       // A Shift pin's first click resolves to the pinned plane itself,
       // which is exactly what a later arrow-lock release should revert to.
       const natural = this.idlePlaneLock !== null
-        ? groundNaturalTarget(this._editContext, anchor)
+        ? groundNaturalTarget(this._editContext, anchor, this._gestureView, getDrawingAxes(this.wasmScene))
         : resolved
       this.planeStage = { kind: 'anchored', plane, target, anchor, natural }
       this._lastPlaneCursor = null

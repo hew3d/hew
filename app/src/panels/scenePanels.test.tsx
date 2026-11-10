@@ -117,6 +117,7 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     add_texture_material: vi.fn(),
     set_object_material: vi.fn(),
     set_material_alpha: vi.fn(),
+    set_material_pbr: vi.fn(),
     // v1.1 assets lane: material/definition rename+delete, purge unused.
     set_material_name: vi.fn(),
     delete_material: vi.fn(),
@@ -1591,7 +1592,7 @@ describe('MaterialPalette', () => {
       b: () => 0,
       a: () => 255,
       name: () => 'Red Paint',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
@@ -1608,7 +1609,7 @@ describe('MaterialPalette', () => {
       g: () => 128,
       b: () => 255,
       name: () => 'Sky Blue',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([3n]),
@@ -1627,9 +1628,9 @@ describe('MaterialPalette', () => {
   })
 
   it('filter narrows the materials list by case-insensitive substring match on name, without hiding the Default row', () => {
-    const infos: Record<string, { r: () => number; g: () => number; b: () => number; a: () => number; name: () => string; has_texture: () => boolean }> = {
-      '1': { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false },
-      '2': { r: () => 0, g: () => 128, b: () => 255, a: () => 255, name: () => 'Sky Blue', has_texture: () => false },
+    const infos: Record<string, { r: () => number; g: () => number; b: () => number; a: () => number; name: () => string; has_texture: () => boolean; has_pbr: () => boolean; metallic: () => number; roughness: () => number }> = {
+      '1': { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 },
+      '2': { r: () => 0, g: () => 128, b: () => 255, a: () => 255, name: () => 'Sky Blue', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 },
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n, 2n]),
@@ -1647,7 +1648,7 @@ describe('MaterialPalette', () => {
   })
 
   it('lists materials by name, case-insensitive and numeric ("paint 2" before "Paint 10")', () => {
-    const named = (name: string) => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false })
+    const named = (name: string) => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 })
     const infos: Record<string, ReturnType<typeof named>> = {
       '1': named('Paint 10'), '2': named('zinc'), '3': named('paint 2'), '4': named('Brick'),
     }
@@ -1664,7 +1665,7 @@ describe('MaterialPalette', () => {
   })
 
   it('shows "No materials match" when the filter matches nothing, and the × clears it back to the full list', () => {
-    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false }
+    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n]),
       material_info: () => mockInfo,
@@ -1680,7 +1681,7 @@ describe('MaterialPalette', () => {
   })
 
   it('filtering out the selected material does not clear the selection — the opacity slider keeps showing its alpha', () => {
-    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 128, name: () => 'Glass', has_texture: () => false }
+    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 128, name: () => 'Glass', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
       material_info: () => mockInfo,
@@ -1688,14 +1689,14 @@ describe('MaterialPalette', () => {
     render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} />)
     fireEvent.change(screen.getByLabelText('Filter materials'), { target: { value: 'zzz' } })
     expect(screen.queryByTitle('Glass')).not.toBeInTheDocument()
-    const slider = screen.getByRole('slider') as HTMLInputElement
+    const slider = screen.getByRole('slider', { name: /opacity/i }) as HTMLInputElement
     expect(slider).not.toBeDisabled()
     expect(slider.value).toBe('128')
   })
 
   it('scrolls the newly-selected swatch into view when currentMaterialId changes — the Alt-eyedropper\'s sample→select loop on a long list', () => {
     const mockInfoFor = (name: string) => ({
-      r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false,
+      r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     })
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n, 2n, 3n]),
@@ -1712,7 +1713,7 @@ describe('MaterialPalette', () => {
 
   it('an eyedropper sample landing on a filtered-out swatch clears the filter so the swatch is visible and still gets scrolled to', () => {
     const mockInfoFor = (name: string) => ({
-      r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false,
+      r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     })
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n, 2n, 3n]),
@@ -1738,7 +1739,7 @@ describe('MaterialPalette', () => {
   it('does not re-trigger the scroll on a re-render where the selection did not actually change', () => {
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n]),
-      material_info: () => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => 'Mat', has_texture: () => false }),
+      material_info: () => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => 'Mat', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }),
     })
     const { rerender } = render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={1n} docRev={0} />)
     ;(Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
@@ -1753,7 +1754,7 @@ describe('MaterialPalette', () => {
   it('a revealNonce bump re-scrolls to an already-current material, and an unchanged nonce does not', () => {
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n, 2n]),
-      material_info: () => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => 'Mat', has_texture: () => false }),
+      material_info: () => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => 'Mat', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }),
     })
     const { rerender } = render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={2n} revealNonce={1} />)
     const scroll = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>
@@ -1768,7 +1769,7 @@ describe('MaterialPalette', () => {
 
   it('opacity slider is disabled when the Default swatch is selected', () => {
     render(<MaterialPalette {...baseProps} scene={makeScene()} />)
-    expect(screen.getByRole('slider')).toBeDisabled()
+    expect(screen.getByRole('slider', { name: /opacity/i })).toBeDisabled()
   })
 
   it('opacity slider reflects the selected material\'s current alpha', () => {
@@ -1778,14 +1779,14 @@ describe('MaterialPalette', () => {
       b: () => 0,
       a: () => 128,
       name: () => 'Glass',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
       material_info: () => mockInfo,
     })
     render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} />)
-    const slider = screen.getByRole('slider') as HTMLInputElement
+    const slider = screen.getByRole('slider', { name: /opacity/i }) as HTMLInputElement
     expect(slider).not.toBeDisabled()
     expect(slider.value).toBe('128')
   })
@@ -1797,16 +1798,48 @@ describe('MaterialPalette', () => {
       b: () => 0,
       a: () => 255,
       name: () => 'Glass',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
       material_info: () => mockInfo,
     })
     render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} />)
-    fireEvent.change(screen.getByRole('slider'), { target: { value: '64' } })
+    fireEvent.change(screen.getByRole('slider', { name: /opacity/i }), { target: { value: '64' } })
     expect(screen.getByText('25%')).toBeInTheDocument()
     expect((scene as any).set_material_alpha).not.toHaveBeenCalled()
+  })
+
+  it('releasing the metallic or roughness slider commits both factors once through set_material_pbr', () => {
+    const mockInfo = {
+      r: () => 200,
+      g: () => 180,
+      b: () => 60,
+      a: () => 255,
+      name: () => 'Brass',
+      has_texture: () => false, has_pbr: () => true, metallic: () => 0.8, roughness: () => 0.4,
+    }
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([7n]),
+      material_info: () => mockInfo,
+    })
+    const onAlphaCommitted = vi.fn()
+    render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} onAlphaCommitted={onAlphaCommitted} />)
+    const metallic = screen.getByRole('slider', { name: /metallic/i }) as HTMLInputElement
+    const roughness = screen.getByRole('slider', { name: /roughness/i }) as HTMLInputElement
+    expect([metallic.value, roughness.value]).toEqual(['80', '40'])
+    fireEvent.change(roughness, { target: { value: '10' } })
+    expect((scene as any).set_material_pbr).not.toHaveBeenCalled()
+    fireEvent.blur(roughness)
+    expect((scene as any).set_material_pbr).toHaveBeenCalledTimes(1)
+    expect((scene as any).set_material_pbr).toHaveBeenCalledWith(7n, 0.8, 0.1)
+    expect(onAlphaCommitted).toHaveBeenCalledTimes(1)
+  })
+
+  it('the metallic and roughness sliders are disabled with no material selected', () => {
+    render(<MaterialPalette {...baseProps} scene={makeScene()} />)
+    expect(screen.getByRole('slider', { name: /metallic/i })).toBeDisabled()
+    expect(screen.getByRole('slider', { name: /roughness/i })).toBeDisabled()
   })
 
   it('releasing the opacity slider commits set_material_alpha and onAlphaCommitted once, and does not double-fire onDocumentChanged', () => {
@@ -1816,7 +1849,7 @@ describe('MaterialPalette', () => {
       b: () => 0,
       a: () => 255,
       name: () => 'Glass',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
@@ -1833,7 +1866,7 @@ describe('MaterialPalette', () => {
         onAlphaCommitted={onAlphaCommitted}
       />,
     )
-    const slider = screen.getByRole('slider')
+    const slider = screen.getByRole('slider', { name: /opacity/i })
     fireEvent.change(slider, { target: { value: '64' } })
     fireEvent.blur(slider)
     expect((scene as any).set_material_alpha).toHaveBeenCalledTimes(1)
@@ -1855,7 +1888,7 @@ describe('MaterialPalette', () => {
       b: () => 0,
       a: () => 254,
       name: () => 'Glass',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0.5, roughness: () => 0.5,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
@@ -1874,7 +1907,7 @@ describe('MaterialPalette', () => {
       b: () => 0,
       a: () => 255,
       name: () => 'Glass',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
@@ -1883,7 +1916,7 @@ describe('MaterialPalette', () => {
     const { unmount } = render(
       <MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} />,
     )
-    fireEvent.change(screen.getByRole('slider'), { target: { value: '64' } })
+    fireEvent.change(screen.getByRole('slider', { name: /opacity/i }), { target: { value: '64' } })
     expect((scene as any).set_material_alpha).not.toHaveBeenCalled()
     unmount()
     expect((scene as any).set_material_alpha).toHaveBeenCalledWith(7n, 64)
@@ -1901,7 +1934,7 @@ describe('MaterialPalette', () => {
   })
 
   it('clicking the × to clear the filter returns focus to the filter input, not <body>', () => {
-    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false }
+    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n]),
       material_info: () => mockInfo,

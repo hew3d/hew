@@ -524,6 +524,10 @@ pub enum RecordedCall {
     RenameScene { sid: u64, name: String },
     /// `set_scene_description(sid, text)`.
     SetSceneDescription { sid: u64, text: String },
+    /// `set_scene_transition(sid, seconds)`.
+    SetSceneTransition { sid: u64, seconds: Option<f64> },
+    /// `set_scene_delay(sid, seconds)`.
+    SetSceneDelay { sid: u64, seconds: Option<f64> },
     /// `move_scene(sid, index)`.
     MoveScene { sid: u64, index: u32 },
     /// `remove_scene(sid)`.
@@ -558,6 +562,13 @@ pub enum RecordedCall {
     },
     /// `set_material_alpha(material, alpha)`.
     SetMaterialAlpha { material: u64, alpha: u8 },
+    /// `set_material_pbr(material, metallic, roughness)`. Additive variant:
+    /// old recordings replay unchanged.
+    SetMaterialPbr {
+        material: u64,
+        metallic: f32,
+        roughness: f32,
+    },
     /// `set_material_name(material, name)` — palette material rename (v1.1
     /// assets lane). Additive variant (the [`RecordedCall::SketchBeginCurveWith`]
     /// posture): old recordings replay unchanged; one that renames a

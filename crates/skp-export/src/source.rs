@@ -37,6 +37,11 @@ pub struct SkpSource {
     /// tag renames its layer in place, and a layer no tag stands for goes
     /// when nothing written uses it.
     pub layers: BTreeMap<u64, String>,
+    /// Scene stable id -> the index of the file scene it stands for: a
+    /// save back keeps that scene's page state for it, whatever either
+    /// is named now. A file scene some entry names is accounted for, and
+    /// no scene of another identity takes it by name.
+    pub scenes: BTreeMap<u64, usize>,
     /// Sketch stable id -> its drawing's hash, for the sketches read from
     /// the file's loose edges: kept as those edges while unchanged.
     pub loose_sketches: BTreeMap<u64, u64>,
@@ -172,6 +177,13 @@ impl SkpSource {
                 Some((doc.sid_of(&EntityRef::Tag(path.clone()))?, name.clone()))
             })
             .collect();
+        let scenes = provenance
+            .scenes
+            .iter()
+            .filter_map(|&(recipe, file)| {
+                Some((report.scenes.get(recipe).copied().flatten()?, file))
+            })
+            .collect();
         let loose_sketches = provenance
             .loose_sketches
             .iter()
@@ -189,6 +201,7 @@ impl SkpSource {
             annotations,
             unread: None,
             layers,
+            scenes,
             loose_sketches,
         }
     }
@@ -222,6 +235,11 @@ impl SkpSource {
             .iter()
             .map(|(sid, name)| serde_json::json!([sid, name]))
             .collect();
+        let scenes: Vec<serde_json::Value> = self
+            .scenes
+            .iter()
+            .map(|(sid, file)| serde_json::json!([sid, file]))
+            .collect();
         let loose_sketches: Vec<serde_json::Value> = self
             .loose_sketches
             .iter()
@@ -234,6 +252,7 @@ impl SkpSource {
             "annotations": annotations,
             "unread": self.unread,
             "layers": layers,
+            "scenes": scenes,
             "loose_sketches": loose_sketches,
         })
         .to_string();
@@ -315,6 +334,17 @@ impl SkpSource {
             let l = l.as_array()?;
             layers.insert(num(l.first()?)?, l.get(1)?.as_str()?.to_string());
         }
+        let mut scenes = BTreeMap::new();
+        // Absent from a blob written before scenes were tracked by identity.
+        for l in v
+            .get("scenes")
+            .and_then(|a| a.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let l = l.as_array()?;
+            scenes.insert(num(l.first()?)?, usize::try_from(num(l.get(1)?)?).ok()?);
+        }
         let mut loose_sketches = BTreeMap::new();
         for l in v
             .get("loose_sketches")
@@ -341,6 +371,7 @@ impl SkpSource {
                 _ => None,
             },
             layers,
+            scenes,
             loose_sketches,
         })
     }
@@ -730,6 +761,7 @@ mod tests {
             annotations,
             unread: Some([4807, 52_979].into()),
             layers: [(7u64, "Walls".to_string())].into(),
+            scenes: [(11u64, 2usize), (12, 0)].into(),
             loose_sketches: [(9u64, 77u64)].into(),
         };
         let back = SkpSource::from_blob(&s.to_blob()).expect("reads");
@@ -737,6 +769,7 @@ mod tests {
         assert_eq!(back.nodes, s.nodes);
         assert_eq!(back.defs, s.defs);
         assert_eq!(back.layers, s.layers);
+        assert_eq!(back.scenes, s.scenes);
         assert_eq!(back.loose_sketches, s.loose_sketches);
         assert_eq!(back.annotations, s.annotations);
         assert_eq!(back.unread, s.unread);

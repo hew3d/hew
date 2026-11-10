@@ -545,3 +545,35 @@ after sending (prefilled with the description, version, platform, and report
 ID, never an attachment), or file one directly at
 https://github.com/hew3d/hew/issues with the same three files attached by
 hand.
+
+### Attachments, follow-up uploads, and followed reports
+
+A bundle is format 1. It may carry one optional top-level `attachment` key,
+`{"name", "label", "size", "bytes"}`, with `bytes` in base64 as `failedFile`
+uses it. Follow-up bundles use this key. A file sent as a reply to a report
+(**Attach a file…** in Help ▸ Sent Reports, or the one-click attach for a
+file that failed to open) is uploaded as a new report whose
+`report.description` starts with `File for report HEW-XXXX-XXXX: <file name>`,
+optionally followed by a blank line and the reporter's own note. The head
+scanner reads only `format`, `report`, and `system`, so these bundles pass
+through it unchanged.
+
+A follow-up upload is the normal chunked upload, except that START carries
+two extra headers: `Hew-Follow-Up: <parent ID>` and
+`Hew-Follow-Secret: <key>`. START with `Hew-Follow: 1` returns an extra
+`follow` field in its 201 body.
+
+Thread routes take the same `Hew-Follow-Secret: <key>` header. Every failure
+returns 403 with `{"error":"forbidden"}`.
+
+- `GET /report/<id>/thread?after=<seq>` reads messages after a sequence number.
+- `POST /report/<id>/thread` with `{"text"}` adds a reply.
+- `POST /report/<id>/thread/seen` with `{"upTo"}` marks messages as seen by the reporter.
+- `DELETE /report/<id>/thread` deletes the conversation.
+
+The desktop app keeps followed reports in `followed-reports.json` in the app's
+config folder, readable only by the user. Each entry holds the report ID, the
+follow key, the date sent, the Hew version, the first line of the description,
+and the time of the last check. The web build keeps the same records in the
+app's local storage. In debug builds, `HEW_REPORT_URL` sets the base URL for
+the thread routes as well as the upload routes.

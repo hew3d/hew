@@ -12,7 +12,7 @@
  */
 
 import type { V3 } from '../viewport/geoHelpers'
-import { applyAffine3x4, facePlaneBasis, rayPlaneIntersect } from '../viewport/geoHelpers'
+import { applyAffine3x4, facePlaneBasis, rayPlaneIntersect, transformNormalThroughPose } from '../viewport/geoHelpers'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { DrawingAxes } from './drawingAxes'
@@ -102,14 +102,15 @@ export function groundDrawPlane(): DrawPlane {
  * refuses a def-owned sketch rather than silently answer in the wrong
  * frame). The plane is posed forward through `instance` before being
  * returned, so every caller gets a genuinely WORLD-space `DrawPlane` either
- * way — mirrors `sketchGesture.ts`'s `isStillOnPlane`, including its
- * approximate (linear-part, re-normalized) normal transform rather than the
- * exact inverse-transpose a non-uniform-scale pose would technically need;
- * see that function's doc for why that's safe here (this only gates
- * SKETCH-MODE adoption — every actual commit still goes through the
- * kernel's own exact pose⁻¹ mapping regardless of this plane's precision).
+ * way. The point maps through the pose; the normal maps through the
+ * pose's inverse-transpose (`transformNormalThroughPose`, as Push/Pull's and
+ * `faceDraw.ts`'s instance faces do), so a non-uniformly scaled instance
+ * still yields a plane that holds the posed sketch: the plain linear part
+ * would tilt the normal off it. The plane is not just an adoption gate: an
+ * in-instance fill hover hands it to the idle plane patch, the snap's
+ * constraint plane and the depth test against a nearer face.
  * Returns `null` (never falls back to the raw local plane) for a
- * stale/unknown instance or a degenerate posed normal.
+ * stale/unknown or singular instance pose, or a degenerate posed normal.
  */
 export function planeFromSketch(
   wasmScene: WasmScene,
@@ -123,12 +124,9 @@ export function planeFromSketch(
     const pose = wasmScene.instance_pose(instance)
     if (pose === undefined) return null
     ;[px, py, pz] = applyAffine3x4(pose, [px, py, pz])
-    const rnx = pose[0] * nx + pose[1] * ny + pose[2] * nz
-    const rny = pose[4] * nx + pose[5] * ny + pose[6] * nz
-    const rnz = pose[8] * nx + pose[9] * ny + pose[10] * nz
-    const len = Math.hypot(rnx, rny, rnz)
-    if (len <= 1e-12) return null
-    ;[nx, ny, nz] = [rnx / len, rny / len, rnz / len]
+    const posed = transformNormalThroughPose(pose, [nx, ny, nz])
+    if (posed === null) return null
+    ;[nx, ny, nz] = posed
   }
   const origin: V3 = [px, py, pz]
   const normal: V3 = [nx, ny, nz]
@@ -187,6 +185,92 @@ export function axisDrawPlane(
   return { origin: through, normal, u: basis.u, v: basis.v, ground: false }
 }
 
+/** The camera elevation (degrees above level, looking square-on at a wall)
+ *  below which empty-space drawing leaves the blue plane for the wall's —
+ *  the one tunable of the view-plane design (§3.3, D3). */
+export const GROUND_PREFERENCE_DEG = 20
+
+/**
+ * How much more squarely a red or green plane must face the camera than the
+ * blue plane does before empty-space drawing takes it (view-plane design
+ * §3.3): cot(`GROUND_PREFERENCE_DEG`) ≈ 2.747. Square-on to a wall the switch
+ * comes at 20° above level; turned away from the wall it comes lower (15.4°
+ * at the home view's azimuth, 14.4° corner-on), because the wall faces the
+ * camera less. The blue plane wins every tie, so Hew's home view (28.5°),
+ * Iso, and every three-quarter view above 20° stay on the ground.
+ */
+export const GROUND_PREFERENCE = 1 / Math.tan((GROUND_PREFERENCE_DEG * Math.PI) / 180)
+
+/** The camera as the view-plane inference reads it: `dir`, its forward
+ *  direction (any length), and `eye`, its position, both in world space.
+ *  The draw tools build it from their `updateCamera` feed (`cameraView`). */
+export interface CameraView {
+  dir: V3
+  eye: V3
+}
+
+/**
+ * Which axis plane of `frame` faces a camera looking along `view.dir` (the
+ * camera's forward direction, not the cursor ray — one answer per view; see
+ * the view-plane design §8): 0 red, 1 green, 2 blue, named for the normal's
+ * axis like the arrow-key lock. The red or green plane, whichever faces more
+ * (`|dir · n|`; red on an exact tie), wins only when it faces more than
+ * `GROUND_PREFERENCE` times as squarely as the blue plane; otherwise blue.
+ * Orientation-free (absolute values), so a camera below the ground looking up
+ * mirrors one above it. A zero or non-finite `dir` answers blue.
+ *
+ * Behind the eye (§3.3): a red or green plane through the frame's origin
+ * that the camera faces but looks AWAY from — the eye already past it, or
+ * standing in it — is not a plane the cursor can point at, so the answer
+ * falls back to blue. With `n` the chosen normal, `s = (eye − origin)·n`
+ * and `f = dir·n`, the plane is behind when `s·f >= 0`. Blue is never
+ * second-guessed this way: it stays blue even when behind.
+ *
+ * No hysteresis (§3.5): a pure function of the view, so the same view always
+ * names the same plane.
+ */
+export function inferredAxis(frame: DrawingAxes, view: CameraView): 0 | 1 | 2 {
+  const dir = view.dir
+  const len = Math.hypot(dir[0], dir[1], dir[2])
+  if (!(len > 1e-12) || !Number.isFinite(len)) return 2
+  const dot = (a: V3, n: V3): number => a[0] * n[0] + a[1] * n[1] + a[2] * n[2]
+  const facing = (n: V3): number => Math.abs(dot(dir, n)) / len
+  const fx = facing(frame.x)
+  const fy = facing(frame.y)
+  const fz = facing(frame.z)
+  const side: 0 | 1 = fy > fx ? 1 : 0
+  if (!((side === 1 ? fy : fx) > GROUND_PREFERENCE * fz)) return 2
+  const n = side === 1 ? frame.y : frame.x
+  const o = frame.origin
+  const s = dot([view.eye[0] - o[0], view.eye[1] - o[1], view.eye[2] - o[2]], n)
+  return s * dot(dir, n) >= 0 ? 2 : side
+}
+
+/** The axis plane `axis` of `frame` through the frame's own origin — step
+ *  7's plane once `inferredAxis` has chosen. The exact `groundDrawPlane()`
+ *  for blue at world identity, so that path stays bit-identical. */
+function framePlane(frame: DrawingAxes, axis: 0 | 1 | 2): DrawPlane {
+  if (axis === 2 && isWorldIdentity(frame)) return groundDrawPlane()
+  return axisDrawPlane(axis, [frame.origin[0], frame.origin[1], frame.origin[2]], frame)
+}
+
+/**
+ * The plane an idle draw tool's click in empty space lands on (view-plane
+ * design §3, picker step 7): the axis plane of `frame` that faces a camera
+ * along `view.dir` from `view.eye` (`inferredAxis`), through the frame's
+ * origin.
+ *
+ * At world identity with blue chosen this IS `groundDrawPlane()` — the exact
+ * literal — so every ground-mode coordinate, state hash, and recording is
+ * unchanged. A moved frame's blue plane is the frame's own XY plane through
+ * its origin (D1), built the way the arrow-key lock builds it
+ * (`axisDrawPlane`), so it is never the ground fast path even when it
+ * happens to coincide with z = 0.
+ */
+export function inferredAxisPlane(frame: DrawingAxes, view: CameraView): DrawPlane {
+  return framePlane(frame, inferredAxis(frame, view))
+}
+
 /** Ray∩plane, delegating to the shared implementation in geoHelpers.ts. */
 export function pointOnPlane(ray: Ray, plane: DrawPlane): V3 | null {
   return rayPlaneIntersect(ray.origin, ray.direction, plane.origin, plane.normal)
@@ -224,19 +308,28 @@ export function planeKey(plane: DrawPlane): string {
 /**
  * The drawing-plane cue a draw tool should show RIGHT NOW (design §6 bullet
  * 1): a subtle finite grid patch on the active plane, so the user sees where
- * a non-ground gesture is about to land. Two cases produce a cue; everything
- * else is `null` (the world grid already covers the ground plane):
+ * a non-ground gesture is about to land. Three cases produce a cue;
+ * everything else is `null` (the world grid already covers the ground plane):
  *
  * - Anchored on a NON-ground plane (face mode or plane/sketch mode): the
  *   frozen plane, through the gesture's anchor point.
  * - Idle with an active arrow-key plane lock AND a tracked hover point: the
  *   locked axis plane through that hover point (so the cue previews where
  *   the plane would land if the user clicked now).
+ * - Idle and unlocked, when the plane the next click would land on is NOT
+ *   the ground (view-plane design §5): the inferred axis plane over nothing
+ *   (picker step 7), a hovered sketch's plane — edge or fill (step 4) — or
+ *   a hovered or leaned-toward face's plane, eligible or not (steps 3, 5,
+ *   6; see `PATCH_OVER_FACES`). Drawn through the hover RAY's hit on that
+ *   plane, not the snap point: an X-ray see-through snap or a fallback
+ *   plane can put the snap off the plane. An active lock beats it, as it
+ *   beats every inference; no hit (the ray runs parallel to the plane or
+ *   points away from it) shows no patch.
  *
  * Each tool calls this from its own `activeDrawPlaneCue()`, passing its own
- * anchored-plane/anchor pair (or nulls when not anchored) and idle-lock
- * state — the four draw tools share this one implementation instead of
- * reimplementing the same two-case dispatch four times.
+ * anchored-plane/anchor pair (or nulls when not anchored) and idle state —
+ * the draw tools share this one implementation instead of reimplementing
+ * the same dispatch in each.
  */
 export function drawPlaneCue(params: {
   /** The frozen plane of whichever stage (face or plane mode) is anchored, or null if neither is. */
@@ -258,13 +351,22 @@ export function drawPlaneCue(params: {
    * doesn't need to pass anything.
    */
   frame?: DrawingAxes
+  /**
+   * The plane the next idle click would land on at the current hover (the
+   * tool's `_idleHoverPlane`, gated by `idleHoverCue`) and the ray it was
+   * resolved for. Only read while idle and unlocked (`idleLock === null`);
+   * pass null (or omit) under a pin, or when the hover shows no patch. A
+   * ground plane gives no cue.
+   */
+  idleHoverCue?: { plane: DrawPlane; ray: Ray } | null
 }): { plane: DrawPlane; through: V3 } | null {
   if (params.anchoredPlane !== null && params.anchoredThrough !== null) {
     return params.anchoredPlane.ground
       ? null
       : { plane: params.anchoredPlane, through: params.anchoredThrough }
   }
-  if (params.idleLock !== null && params.idleHover !== null) {
+  if (params.idleLock !== null) {
+    if (params.idleHover === null) return null
     const plane = axisDrawPlane(params.idleLock, params.idleHover, params.frame ?? WORLD_DRAWING_AXES)
     // A Z lock through a hover point that happens to sit at z=0 resolves to
     // the exact ground plane (mirrors the click-time `begin_ground_sketch`
@@ -273,7 +375,43 @@ export function drawPlaneCue(params: {
     // ground plane, per `axisDrawPlane`'s doc comment.
     return plane.ground ? null : { plane, through: params.idleHover }
   }
+  const hover = params.idleHoverCue ?? null
+  if (hover !== null && !hover.plane.ground) {
+    const through = pointOnPlane(hover.ray, hover.plane)
+    return through === null ? null : { plane: hover.plane, through }
+  }
   return null
+}
+
+/**
+ * Whether the idle plane patch shows over a hovered face (view-plane design
+ * §5): an eligible face under the cursor (picker step 3), the face the
+ * cursor leans toward at an object's edge or corner (step 5), or an
+ * ineligible group or component face at the top level (step 6). The rule is
+ * "the patch shows the plane the next click would land on, whenever that
+ * plane is not the ground"; this one switch drops the face half of it if
+ * the patch over faces reads as noise, leaving sketches and the inferred
+ * plane untouched.
+ */
+export const PATCH_OVER_FACES = true
+
+/**
+ * The idle hover cue a draw tool hands `drawPlaneCue` as `idleHoverCue`:
+ * `hover` is the tool's `_idleHoverResolution` (the plane the next click
+ * would land on, `onFace` set when a face decided it), `ray` the hover ray.
+ * `inObjectContext` is true inside an entered object, where a click off
+ * the object's faces does nothing (the tools stay in face mode there), so
+ * only a face of it shows a patch.
+ */
+export function idleHoverCue(
+  hover: { plane: DrawPlane; onFace?: true },
+  ray: Ray,
+  inObjectContext: boolean,
+): { plane: DrawPlane; ray: Ray } | null {
+  // Faces (steps 3, 5, 6): the one face branch, behind PATCH_OVER_FACES.
+  if (hover.onFace === true) return PATCH_OVER_FACES ? { plane: hover.plane, ray } : null
+  if (inObjectContext) return null
+  return { plane: hover.plane, ray }
 }
 
 /**
@@ -282,11 +420,13 @@ export function drawPlaneCue(params: {
  * `Ray` passed in (the Viewport builds one Ray object per event); a miss
  * just recomputes.
  *
- * Two memos, because both halves are paid more than once per event. The
+ * Three memos, because every part is paid more than once per event. The
  * Viewport calls `snapConstraint(ray)` before EVERY pointer event and then,
  * on a click, the tool's `onPointerDown` resolves the same ray again — so
  * without this, one click runs the whole resolution twice, and every idle
- * move runs it once. `pickFor` memoizes the `pick_sketch` raycast;
+ * move runs it once. `pickFor` memoizes the `pick_sketch` raycast,
+ * `regionFor` the `pick_sketch_region` fill raycast (both survive a
+ * `targetFor` re-resolve under a reused ray, e.g. a camera turn);
  * `targetFor` memoizes the full resolved `{plane, target}` including
  * `rayLandsOnSketch`'s `sketch_lines` marshal and per-segment scan, which
  * is the expensive half on a dense sketch (a 96-facet circle, a hand-traced
@@ -294,8 +434,8 @@ export function drawPlaneCue(params: {
  */
 export class SketchPickCache {
   private cache: { ray: Ray; gen: number; handle: bigint | null } | null = null
-  private targetCache: { ray: Ray; gen: number; key: string; resolved: { plane: DrawPlane; target: SketchTarget } } | null =
-    null
+  private regionCache: { ray: Ray; gen: number; instance: bigint | null; region: SketchFillPick | null } | null = null
+  private targetCache: { ray: Ray; gen: number; key: string; resolved: IdleDrawTarget } | null = null
 
   pickFor(wasmScene: WasmScene, ray: Ray): bigint | null {
     if (this.cache !== null && this.cache.ray === ray && this.cache.gen === pickPolicyGeneration()) {
@@ -310,14 +450,58 @@ export class SketchPickCache {
     return handle
   }
 
+  /** Memoized fill pick: the sketch whose filled region the ray lands in
+   *  (`pick_sketch_region`, or `pick_sketch_region_in_instance` inside an
+   *  instance context, whose handles are definition-local members by
+   *  construction), or `null` on a miss — always a miss in Wireframe,
+   *  where a fill is no input target. Mirrors `PushPullTool._pickRegionFor`:
+   *  keyed by `ray`, `instance` and the pick-policy generation; the wasm
+   *  pick object is read and freed at once. */
+  regionFor(wasmScene: WasmScene, ray: Ray, instance: bigint | null): SketchFillPick | null {
+    if (
+      this.regionCache !== null &&
+      this.regionCache.ray === ray &&
+      this.regionCache.instance === instance &&
+      this.regionCache.gen === pickPolicyGeneration()
+    ) {
+      return this.regionCache.region
+    }
+    const pick =
+      instance !== null
+        ? wasmScene.pick_sketch_region_in_instance(
+            instance,
+            ray.origin[0], ray.origin[1], ray.origin[2],
+            ray.direction[0], ray.direction[1], ray.direction[2],
+          )
+        : wasmScene.pick_sketch_region(
+            ray.origin[0], ray.origin[1], ray.origin[2],
+            ray.direction[0], ray.direction[1], ray.direction[2],
+          )
+    let region: SketchFillPick | null = null
+    if (pick !== undefined) {
+      try {
+        region = { sketch: pick.sketch(), detached: pick.detached() }
+      } finally {
+        pick.free()
+      }
+    }
+    this.regionCache = { ray, gen: pickPolicyGeneration(), instance, region }
+    return region
+  }
+
   /** Memoized `resolve` for `ray`, computed via `compute` on a miss. Only
    *  `resolveIdleDrawTarget` calls this; it is a method rather than a free
-   *  memo so the whole per-event cache clears as one (`clear`). */
+   *  memo so the whole per-event cache clears as one (`clear`). `key` must
+   *  name every input besides `ray` that can change the answer while the
+   *  same ray is reused (a re-resolve on a key press, a camera change
+   *  between events that share a cached ray): the boundary snap point and
+   *  the inferred plane's axis and frame, as `resolveIdleDrawTarget`
+   *  builds it. */
   targetFor(
     ray: Ray,
-    compute: () => { plane: DrawPlane; target: SketchTarget },
+    compute: () => IdleDrawTarget,
     key = '',
-  ): { plane: DrawPlane; target: SketchTarget } {
+  ): IdleDrawTarget {
     if (this.targetCache !== null && this.targetCache.ray === ray && this.targetCache.gen === pickPolicyGeneration() && this.targetCache.key === key) {
       return this.targetCache.resolved
     }
@@ -328,8 +512,16 @@ export class SketchPickCache {
 
   clear(): void {
     this.cache = null
+    this.regionCache = null
     this.targetCache = null
   }
+}
+
+/** What `SketchPickCache.regionFor` keeps of a fill pick: the owning sketch
+ *  and whether it is a detached shape. */
+export interface SketchFillPick {
+  sketch: bigint
+  detached: boolean
 }
 
 /**
@@ -358,8 +550,13 @@ function distSqToSegment(p: V3, a: V3, b: V3): number {
 }
 
 /**
- * True iff the ray genuinely LANDS ON `sketch` — the gate that turns a
- * `pick_sketch` hit into sketch-mode adoption.
+ * True iff the ray genuinely LANDS ON `sketch`'s geometry — the gate that
+ * turns a `pick_sketch` EDGE hit into sketch-mode adoption. It measures only
+ * the distance to the sketch's segments, so a ray through the middle of a
+ * filled region does not land here; `resolveIdleDrawTarget` adopts that case
+ * through its fill pick (`pick_sketch_region`) instead, which needs no such
+ * gate because the kernel already tested the pierce point against the
+ * region.
  *
  * `pick_sketch` models the pick as a cone around the ray axis, measuring the
  * PERPENDICULAR distance from the axis to a sketch edge. That measure is
@@ -458,21 +655,49 @@ function isDetachedSketch(wasmScene: WasmScene, sketch: bigint): boolean {
   return detachedSketchIds(wasmScene).has(sketch)
 }
 
+/** What `resolveIdleDrawTarget` (and an unlocked `resolveClickDrawTarget`)
+ *  answers: the plane and the sketch target a click would anchor onto. */
+export interface IdleDrawTarget {
+  plane: DrawPlane
+  target: SketchTarget
+  /**
+   * Set only when the plane came from picker step 7 (the axis plane the
+   * view faces, over nothing) AND is not the exact ground plane: the axis
+   * `inferredAxis` chose — 0 red, 1 green, 2 blue (blue only under a moved
+   * drawing-axes frame, D1). This is what the tools' status-bar inference
+   * line (shown for 0 and 1) keys on; a face, sketch, or ground answer
+   * leaves it absent, so the ground result is unchanged in shape.
+   */
+  inferredAxis?: 0 | 1 | 2
+  /** Set only when an ineligible face decided the plane (picker step 6),
+   *  so the idle plane patch can tell a face from a sketch or the
+   *  inferred plane (`idleHoverCue`, `PATCH_OVER_FACES`). */
+  onFace?: true
+}
+
 /**
  * Resolve the plane/target an IDLE gesture would anchor onto at `ray`
  * (design §1/§4) — the one implementation the five plane-mode draw tools
  * (Line/Rectangle/Circle/Polygon/Arc) share.
  *
- * A top-level `pick_sketch` hit whose plane is non-ground adopts that sketch
- * (SKETCH MODE) — but only if the ray really lands on it (`rayLandsOnSketch`,
- * which see); otherwise the ground plane (PLANE MODE, the default). Callers
- * reach this only once face mode has been ruled out (face mode takes
- * priority), so there is no `activeContext` re-check here for an object/group
- * context.
+ * Over a sketch (view-plane design §2 step 4) the hover adopts that
+ * sketch's plane (SKETCH MODE), in two tries: (4a) a `pick_sketch` edge hit
+ * the ray really lands on (`rayLandsOnSketch`, which see), then (4b) the
+ * nearest filled region the ray passes through (`pick_sketch_region`, its
+ * `_in_instance` sibling inside an instance context). A detached shape is
+ * never adopted either way. A sketch on the ground plane gives the literal
+ * ground PLANE-MODE target instead, exactly the pre-inference ground
+ * fallback, so a hovered ground sketch keeps the ground from any camera. At
+ * the top level an ineligible face (`foreignFace`) strictly nearer than the
+ * point the ray pierces the sketch's plane wins (step 6); one the sketch lies
+ * on does not. Callers reach this only once face mode has been ruled out
+ * (face mode takes priority), so there is no `activeContext` re-check here
+ * for an object/group context.
  *
  * Inside an INSTANCE context (`editContext.kind === 'instance'`,
  * component-edit-parity.md phase A2): a hovered sketch adopts only when it is
- * a member of the entered definition (`isDefMemberSketch`); otherwise — and
+ * a member of the entered definition (`isDefMemberSketch` for an edge pick;
+ * the fill pick's `_in_instance` sibling returns only members); otherwise — and
  * for the empty-space PLANE MODE default — the target carries the instance
  * handle, so `runSketchGesture` mints/uses a DEFINITION-owned sketch
  * (`begin_sketch_on_plane_in_instance`) instead of a world one. This is the
@@ -491,6 +716,15 @@ function isDetachedSketch(wasmScene: WasmScene, sketch: bigint): boolean {
  * leaves a member sketch's plane in the wrong frame, silently missing every
  * hover on a posed instance's own sketch and falling through to a fresh
  * ground-plane sketch instead.
+ *
+ * Over nothing (view-plane design §2 step 7) the plane is the axis plane
+ * the view faces (`inferredAxisPlane`) when `view` — the camera's
+ * forward direction and eye, from the tool's `updateCamera` feed — is given; the
+ * result then carries `inferredAxis` whenever that plane is not the exact
+ * ground. Without `view` the fallback is the literal ground plane, as
+ * before the view-plane design, and the drawing-axes frame is not read.
+ * The memo key includes the inferred axis and the frame, so a camera that
+ * turned under a reused ray never serves the old plane.
  */
 export function resolveIdleDrawTarget(
   wasmScene: WasmScene,
@@ -499,40 +733,73 @@ export function resolveIdleDrawTarget(
   editContext: EditContext,
   foreignFace?: () => { point: V3; normal: V3; depth: number } | null,
   foreignKey = '',
-): { plane: DrawPlane; target: SketchTarget } {
+  view: CameraView | null = null,
+): IdleDrawTarget {
   const instance = instanceOf(editContext)
+  const frame = view === null ? null : getDrawingAxes(wasmScene)
+  const axis = frame === null || view === null ? null : inferredAxis(frame, view)
+  const key = frame === null
+    ? foreignKey
+    : `${foreignKey}|${axis}|${frame.origin.join(',')}|${frame.x.join(',')}|${frame.y.join(',')}`
   return sketchPickCache.targetFor(ray, () => {
-    const sketchHandle = sketchPickCache.pickFor(wasmScene, ray)
-    // A detached shape touches nothing: hovering it never adopts it as the
-    // sketch to draw into (separate-shapes design D3), so a plain shape
-    // drawn over it lands on the face or plane beneath, as if it were not
-    // there. Only a detached drawing tool call continues one, deliberately.
-    if (sketchHandle !== null && !isDetachedSketch(wasmScene, sketchHandle)) {
-      const isEligible =
-        instance === null ||
-        (editContext.kind === 'instance' &&
-          isDefMemberSketch(wasmScene, editContext.component, sketchHandle))
-      if (isEligible) {
-        // `instance` is exactly the right mapping frame here: null at top
-        // level (no mapping — `sketchHandle` is a world sketch), or the
-        // entered instance when `sketchHandle` was just confirmed to be one
-        // of ITS definition's own members.
-        const plane = planeFromSketch(wasmScene, sketchHandle, instance)
+    // Adopt `handle`'s plane (picker step 4), or `null` to fall through.
+    // `viaEdge`: the handle came from the edge pick (`pick_sketch`), which
+    // needs the detached and membership gates and the landing check; a
+    // fill pick has already answered those (its ray is inside a region,
+    // its detached flag is read off the pick, and the `_in_instance`
+    // variant only returns the entered definition's own members).
+    const adopt = (handle: bigint, viaEdge: boolean): IdleDrawTarget | null => {
+      if (viaEdge) {
+        // A detached shape touches nothing: hovering it never adopts it as
+        // the sketch to draw into (separate-shapes design D3), so a plain
+        // shape drawn over it lands on the face or plane beneath, as if it
+        // were not there. Only a detached drawing tool call continues one,
+        // deliberately.
+        if (isDetachedSketch(wasmScene, handle)) return null
         if (
-          plane !== null &&
-          !plane.ground &&
-          rayLandsOnSketch(wasmScene, sketchHandle, plane, ray, instance)
+          instance !== null &&
+          !(editContext.kind === 'instance' && isDefMemberSketch(wasmScene, editContext.component, handle))
         ) {
-          // A sketch behind a face the ray struck first is not what the
-          // cursor is on; one lying on that face (equal depth) still is.
-          const hit = pointOnPlane(ray, plane)
-          const ff = editContext.kind === 'top' && foreignFace !== undefined ? foreignFace() : null
-          const sketchDepth = hit === null ? 0 : Math.hypot(hit[0] - ray.origin[0], hit[1] - ray.origin[1], hit[2] - ray.origin[2])
-          if (ff === null || sketchDepth <= ff.depth + 1e-6) {
-            return { plane, target: { kind: 'existing', handle: sketchHandle, instance } }
-          }
+          return null
         }
       }
+      // `instance` is exactly the right mapping frame here: null at top
+      // level (no mapping — `handle` is a world sketch), or the entered
+      // instance when `handle` is one of ITS definition's own members.
+      const plane = planeFromSketch(wasmScene, handle, instance)
+      if (plane === null) return null
+      if (viaEdge && !rayLandsOnSketch(wasmScene, handle, plane, ray, instance)) return null
+      const hit = pointOnPlane(ray, plane)
+      if (hit === null) return null
+      // A sketch behind a face the ray struck first is not what the cursor
+      // is on; one lying on that face (equal depth) still is.
+      const sketchDepth = Math.hypot(hit[0] - ray.origin[0], hit[1] - ray.origin[1], hit[2] - ray.origin[2])
+      const ff = editContext.kind === 'top' && foreignFace !== undefined ? foreignFace() : null
+      if (ff !== null && sketchDepth > ff.depth + 1e-6) return null
+      // A ground sketch gives the ground: the literal z = 0 plane-mode
+      // target, bit-identical to the pre-inference ground fallback (and
+      // still literal z = 0 under a moved drawing-axes frame, D1), so a
+      // low camera's inferred vertical plane never replaces it.
+      if (plane.ground) {
+        const ground = groundDrawPlane()
+        return { plane: ground, target: { kind: 'plane', plane: ground, instance } }
+      }
+      return { plane, target: { kind: 'existing', handle, instance } }
+    }
+
+    // 4a: a sketch edge within the pick aperture.
+    const edgeHandle = sketchPickCache.pickFor(wasmScene, ray)
+    if (edgeHandle !== null) {
+      const adopted = adopt(edgeHandle, true)
+      if (adopted !== null) return adopted
+    }
+    // 4b: inside a sketch's filled region. A detached fill is never adopted;
+    // the pick returns only the nearest fill, so one hides whatever fill
+    // lies behind it (the hover falls through to steps 6-7).
+    const fill = sketchPickCache.regionFor(wasmScene, ray, instance)
+    if (fill !== null && !fill.detached) {
+      const adopted = adopt(fill.sketch, false)
+      if (adopted !== null) return adopted
     }
     // A face of a group member or component instance, struck from outside at
     // the top level: draw on that face's world plane as free drawing (the
@@ -541,12 +808,19 @@ export function resolveIdleDrawTarget(
       const ff = foreignFace()
       if (ff !== null) {
         const facePlane = drawPlaneThrough(ff.point, ff.normal)
-        if (facePlane !== null) return { plane: facePlane, target: { kind: 'plane', plane: facePlane, instance: null } }
+        if (facePlane !== null) return { plane: facePlane, target: { kind: 'plane', plane: facePlane, instance: null }, onFace: true }
       }
     }
-    const plane = groundDrawPlane()
-    return { plane, target: { kind: 'plane', plane, instance } }
-  }, foreignKey)
+    if (frame === null || axis === null) {
+      const plane = groundDrawPlane()
+      return { plane, target: { kind: 'plane', plane, instance } }
+    }
+    // Over nothing: the axis plane the view faces (step 7), carrying the
+    // instance handle exactly as the ground fallback does.
+    const plane = framePlane(frame, axis)
+    const target: SketchTarget = { kind: 'plane', plane, instance }
+    return plane.ground ? { plane, target } : { plane, target, inferredAxis: axis }
+  }, key)
 }
 
 /**
@@ -561,6 +835,8 @@ export function resolveIdleDrawTarget(
  * `null` only when a lock is active but there is no snap point yet (nothing
  * to click through). Carries the instance handle through to the locked-plane
  * target too, same as `resolveIdleDrawTarget`'s plane-mode default.
+ * `view` is passed through to `resolveIdleDrawTarget` (the view-plane
+ * inference over nothing); a lock never reads it.
  */
 export function resolveClickDrawTarget(
   wasmScene: WasmScene,
@@ -571,14 +847,15 @@ export function resolveClickDrawTarget(
   editContext: EditContext,
   foreignFace?: () => { point: V3; normal: V3; depth: number } | null,
   foreignKey = '',
-): { plane: DrawPlane; target: SketchTarget } | null {
+  view: CameraView | null = null,
+): IdleDrawTarget | null {
   if (idlePlaneLock !== null) {
     if (snap === null) return null
     const clickedPoint: V3 = [snap.x, snap.y, snap.z]
     const plane = axisDrawPlane(idlePlaneLock, clickedPoint, getDrawingAxes(wasmScene))
     return { plane, target: { kind: 'plane', plane, instance: instanceOf(editContext) } }
   }
-  return resolveIdleDrawTarget(wasmScene, sketchPickCache, ray, editContext, foreignFace, foreignKey)
+  return resolveIdleDrawTarget(wasmScene, sketchPickCache, ray, editContext, foreignFace, foreignKey, view)
 }
 
 /**
@@ -626,11 +903,11 @@ export function nextGestureLockPlane(
 
 /**
  * The `natural` plane/target a tool's first click should record for
- * `nextGestureLockPlane` above, WITHOUT probing sketch-hover — a plane
- * through `anchor` (the point that first click actually resolved, on the
- * ACTIVE lock's plane) with the LITERAL ground orientation (normal
- * [0,0,1]), namespaced to `editContext`'s instance exactly like any other
- * plane-mode target.
+ * `nextGestureLockPlane` above, WITHOUT probing sketch-hover — the plane an
+ * unlocked click in empty space would have taken, moved to pass through
+ * `anchor` (the point that first click actually resolved, on the ACTIVE
+ * lock's plane), namespaced to `editContext`'s instance exactly like any
+ * other plane-mode target.
  *
  * Used only when the first click itself happened WHILE an idle plane lock
  * was already active (design §5.2): `resolveClickDrawTarget`'s locked
@@ -640,49 +917,55 @@ export function nextGestureLockPlane(
  * there is no genuine hover result to remember for a LATER mid-gesture
  * release to revert to.
  *
- * MUST be anchored through `anchor`, not the world origin: the locked click
+ * MUST be anchored through `anchor`, not the frame origin: the locked click
  * that produced `anchor` built its plane via `axisDrawPlane` through the
  * CLICKED point, so `anchor` can sit anywhere in space (e.g. a corner
  * picked while locked to a vertical plane) — that is entirely normal, not
- * an edge case. A release fallback of `groundDrawPlane()` verbatim would not
- * contain that anchor; the rest of the gesture would then resolve against a
- * plane that silently drops the anchor's own elevation, computing the WRONG
- * shape with no refusal (tool-parity playtest-2 review finding A).
+ * an edge case. A release fallback through the origin would not contain
+ * that anchor; the rest of the gesture would then resolve against a plane
+ * that silently drops the anchor's offset, computing the WRONG shape with
+ * no refusal (tool-parity playtest-2 review finding A).
  *
- * MUST use the LITERAL world Z as the normal — `axisDrawPlane(2, anchor,
- * WORLD_DRAWING_AXES)`, not the CURRENT drawing-axes `frame` — because that
- * is what this is standing in for: the unlocked resolution `anchor`'s own
- * click would have gotten instead, i.e. `resolveIdleDrawTarget`'s
- * plane-mode default, which is frame-agnostic (it always falls back to the
- * literal `groundDrawPlane()`, never reading the drawing-axes frame at all).
- * A movable drawing-axes frame's blue axis is only x×y with no verticality
- * constraint (`Scene::set_axes`) — AxesTool lets a user park it anywhere —
- * so passing the live `frame` here would anchor the release fallback to a
- * TILTED plane while the real unlocked click always lands on literal
- * ground: a gesture anchored off-lock, then released, would commit onto a
- * plane no unlocked click could ever produce (tool-parity DELTA review
- * finding 1). `axisDrawPlane`'s own fast path still collapses this to the
- * exact literal ground plane whenever the anchor really is on it, so the
- * ordinary (unmoved-frame or z=0-anchor) case is unchanged either way.
- * Repeating the sketch-hover probe at release time (the key event has no
- * ray to do it with) or eagerly probing at click time (which would violate
- * the "never probes while locked" invariant above) are not options. When
- * the first click was UNLOCKED, by contrast, `resolveClickDrawTarget`'s own
- * result already ties resolveIdleDrawTarget's answer — callers reuse that
- * directly instead of calling this, at no extra cost.
+ * The plane's ORIENTATION is the empty-space inference's (view-plane design
+ * §6): pass `view` — the camera (forward and eye) AT THE FIRST CLICK — with the
+ * current drawing-axes `frame` (both, or neither), and the plane takes
+ * `inferredAxis`'s choice of the frame's axes, so releasing a lock from a
+ * Front view lands on the green plane through the anchor, exactly where an
+ * unlocked click would have gone, and under a moved frame the blue choice
+ * follows the frame's own Z (D1), as the unlocked click now does.
+ * `axisDrawPlane`'s fast path still collapses a world-identity blue plane
+ * through a z = 0 anchor to the exact literal ground plane, so the ordinary
+ * case stays bit-identical.
  *
- * (Open design question, not resolved here: arguably the movable axes frame
- * SHOULD redefine the default drawing plane everywhere — SketchUp's own
- * Axes tool works that way — in which case `resolveIdleDrawTarget`'s
- * ground-literal fallback would be the thing to change, and this function
- * would then want to follow `frame` again. That is a scope expansion beyond
- * a fix round; this function instead stays consistent with today's actual
- * unlocked-click behavior.)
+ * Without `view` (omitted, or null before any camera feed) the plane
+ * keeps its pre-inference orientation, the LITERAL world Z
+ * (`axisDrawPlane(2, anchor, WORLD_DRAWING_AXES)`), matching a
+ * `resolveIdleDrawTarget` called without a view direction. Repeating the
+ * sketch-hover probe at release time (the key event has no ray to do it
+ * with) or eagerly probing at click time (which would violate the "never
+ * probes while locked" invariant above) are not options. When the first
+ * click was UNLOCKED, by contrast, `resolveClickDrawTarget`'s own result
+ * already IS the unlocked resolution — callers reuse that directly instead
+ * of calling this, at no extra cost.
  */
 export function groundNaturalTarget(
   editContext: EditContext,
   anchor: V3,
+): { plane: DrawPlane; target: SketchTarget }
+export function groundNaturalTarget(
+  editContext: EditContext,
+  anchor: V3,
+  view: CameraView | null,
+  frame: DrawingAxes,
+): { plane: DrawPlane; target: SketchTarget }
+export function groundNaturalTarget(
+  editContext: EditContext,
+  anchor: V3,
+  view: CameraView | null = null,
+  frame: DrawingAxes = WORLD_DRAWING_AXES,
 ): { plane: DrawPlane; target: SketchTarget } {
-  const plane = axisDrawPlane(2, anchor, WORLD_DRAWING_AXES)
+  const plane = view === null
+    ? axisDrawPlane(2, anchor, WORLD_DRAWING_AXES)
+    : axisDrawPlane(inferredAxis(frame, view), anchor, frame)
   return { plane, target: { kind: 'plane', plane, instance: instanceOf(editContext) } }
 }

@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use kernel::{Document, NodeId};
-use skp_export::{SkpSource, Target, WriteEnv, save};
+use skp_export::{SkpSource, WriteEnv, save};
 
 fn open(bytes: &[u8]) -> (Document, SkpSource) {
     let out = skp_import::import(bytes).expect("imports");
@@ -22,7 +22,7 @@ fn open(bytes: &[u8]) -> (Document, SkpSource) {
 }
 
 /// Per definition name: (faces, edges, soft edges, curves, textured faces).
-fn runs(m: &openskp::Model) -> std::collections::BTreeMap<String, [usize; 5]> {
+fn runs(m: &skpwright::Model) -> std::collections::BTreeMap<String, [usize; 5]> {
     let mut out = std::collections::BTreeMap::new();
     for r in &m.geometry {
         let name = match r.def_index {
@@ -52,10 +52,7 @@ fn production_files_save_back() {
     };
     for path in files.split(':').filter(|p| !p.is_empty()) {
         let bytes = std::fs::read(path).unwrap();
-        let target = match openskp::detect_container(&bytes) {
-            openskp::Container::Carchive2017 => Target::Skp2017,
-            _ => Target::Skp2026,
-        };
+        let target = skp_export::target_of(&bytes);
         let env = WriteEnv {
             unix_time: 1_800_000_000,
             seed: 9,
@@ -66,8 +63,8 @@ fn production_files_save_back() {
         let t = Instant::now();
         let saved = save(&doc, target, env, Some(&src)).unwrap();
         let saved_in = t.elapsed();
-        let before = openskp::Model::parse(&bytes).unwrap();
-        let after = openskp::Model::parse(&saved.export.bytes).unwrap();
+        let before = skpwright::Model::parse(&bytes).unwrap();
+        let after = skpwright::Model::parse(&saved.export.bytes).unwrap();
         assert!(
             after.diagnostics.iter().all(|d| !d.is_desync()),
             "{path}: desyncs"
@@ -111,7 +108,7 @@ fn production_files_save_back() {
         let t = Instant::now();
         let edited = save(&doc, target, env, Some(&src)).unwrap();
         println!("  edit saved in {:?}", t.elapsed());
-        let back = openskp::Model::parse(&edited.export.bytes).unwrap();
+        let back = skpwright::Model::parse(&edited.export.bytes).unwrap();
         assert!(
             back.diagnostics.iter().all(|d| !d.is_desync()),
             "{path}: desyncs after edit"

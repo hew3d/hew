@@ -180,6 +180,47 @@ describe('anchorDownload', () => {
   })
 })
 
+describe('WebFileHost saveAs with the File System Access API', () => {
+  afterEach(() => {
+    delete (window as { showSaveFilePicker?: unknown }).showSaveFilePicker
+  })
+
+  function pickerReturning(name: string, move?: (n: string) => Promise<void>) {
+    const written: Uint8Array[] = []
+    const handle = {
+      name,
+      move,
+      createWritable: async () => ({
+        write: async (b: Uint8Array) => { written.push(b) },
+        close: async () => {},
+      }),
+    }
+    ;(window as unknown as { showSaveFilePicker: unknown }).showSaveFilePicker = async () => handle
+    return { handle, written }
+  }
+
+  it('refuses a name the picker left without the format extension, writing nothing', async () => {
+    const { written } = pickerReturning('Model.hew')
+    await expect(new WebFileHost().saveAs(new Uint8Array([1]), 'Model', 'skp2017')).rejects.toThrow()
+    expect(written).toEqual([])
+  })
+
+  it('asks the picker handle to rename it when it can', async () => {
+    const renamed: string[] = []
+    const { written } = pickerReturning('Model.hew', async (n) => { renamed.push(n) })
+    await new WebFileHost().saveAs(new Uint8Array([1]), 'Model', 'skp2017')
+    expect(renamed).toEqual(['Model.skp'])
+    expect(written.length).toBe(1)
+  })
+
+  it('leaves a correctly named file alone', async () => {
+    const { written } = pickerReturning('Model.skp')
+    const ref = await new WebFileHost().saveAs(new Uint8Array([1]), 'Model', 'skp2026')
+    expect(ref?.name).toBe('Model.skp')
+    expect(written.length).toBe(1)
+  })
+})
+
 describe('WebFileHost save/saveAs without the File System Access API (format-aware fallback)', () => {
   const captured: Array<{ download: string }> = []
 

@@ -369,7 +369,7 @@ export interface HewTestHarness {
    * Additive, exactly like File▸Import's kernel call. Test-only. */
   importStl(bytes: number[], unitScale: number): StlImportReportJs
   /** `Scene.skp_container(bytes)`: which `.skp` container the bytes are
-   * (`'skp2026'`, `'skp2017'`, or `''`). Reads nothing from the document. Test-only. */
+   * (`'skp2026'`, a stream release such as `'skp2017'` or `'skp8'`, or `''`). Reads nothing from the document. Test-only. */
   skpContainer(bytes: number[]): string
   // recording ( high + low, one artifact)
   startRecording(): void
@@ -1111,6 +1111,14 @@ export interface HewTestHarness {
    * grabbing a Scale-gizmo grip by its exact projected position instead of a
    * hard-coded pixel). `behind` true = the point is behind the camera. */
   worldToScreen(world: Vec3): { x: number; y: number; behind: boolean }
+
+  /** The drawing-plane patch the viewport shows right now (its plane normal
+   *  and the point it is drawn through), or null when none shows. */
+  getDrawPlaneCue(): { normal: Vec3; through: Vec3 } | null
+
+  /** The world ray the pointer at canvas-relative CSS pixel (`x`, `y`)
+   *  casts for the camera as it is now. */
+  rayAtCanvasPoint(x: number, y: number): { origin: Vec3; direction: Vec3 }
   /**
    * View-only isolation (`ViewportApi.isolate`), through the app's own handler
    * so the kernel's hide state follows exactly as it does from Model Health.
@@ -2391,6 +2399,18 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       return api.worldToScreen(world)
+    },
+
+    getDrawPlaneCue: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getDrawPlaneCue()
+    },
+
+    rayAtCanvasPoint: (x, y) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.rayAtCanvasPoint(x, y)
     },
 
     isolate: (targets) => {

@@ -225,3 +225,127 @@ jobs:
         run: |
           cd workers/bug-intake
           npm test
+
+  # beta.hew3d.com — the pre-release copy of main for testers. Every push to
+  # main that passes the WHOLE workflow is deployed here, so testers see
+  # fixes and features before the next tagged release reaches app.hew3d.com.
+  #
+  # It needs all three gates (verify, relay-contract, bug-intake-tests):
+  # "main is green" means the entire workflow, not just the app lane, and a
+  # broken relay or intake service is not something to hand to testers.
+  #
+  # `--branch=main` matters: the Pages project's production branch is main,
+  # and the production deployment is what the custom domain serves. Any
+  # other branch name would publish a preview URL and leave beta.hew3d.com
+  # unchanged. cancel-in-progress only trims the queue; runs for different
+  # pushes finish in any order and an old run can be re-run. The tip check
+  # (compare GITHUB_SHA with the live main) is what guarantees the newest
+  # commit wins, including re-runs of old runs.
+  #
+  # The deploy self-skips when the Cloudflare secrets are absent, which is
+  # the case on forks and on clones that have not configured them; the guard
+  # on `github.repository` keeps forks from running the job at all. This is
+  # separate from the production deploy: release.yml's `web` job still
+  # publishes app.hew3d.com at tag time and is unaffected.
+  deploy-beta:
+    needs: [verify, relay-contract, bug-intake-tests]
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.repository == 'hew3d/hew'
+    concurrency:
+      group: deploy-beta
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install wasm-pack (pinned)
+        run: scripts/install-wasm-pack.sh
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      # pnpm's version comes from `packageManager` in the root package.json.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      # Ask pnpm where its store is rather than assuming — see the desktop job.
+      - name: Locate pnpm store
+        run: echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+      - name: Cache pnpm store
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.PNPM_STORE }}
+          key: pnpm-${{ runner.os }}-X64-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-X64-
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Freshness guard. Skip a stale run before spending minutes building it.
+      - name: Skip if main has moved on
+        run: |
+          tip="$(git ls-remote --exit-code origin refs/heads/main | cut -f1)"
+          if [ -z "$tip" ]; then
+            echo "::error::Could not read the tip of main; refusing to deploy blind."
+            exit 1
+          fi
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::notice::main has moved on ($GITHUB_SHA is not the tip $tip); skipping the beta deploy."
+            echo "STALE=1" >> "$GITHUB_ENV"
+          fi
+
+      # app build + CSP <meta> injection. HEW_BETA_SHA stamps the version as
+      # `<version>+beta.<sha>` so testers can quote exactly which build they
+      # ran. The `${GITHUB_SHA::8}` is bash parameter expansion, evaluated by
+      # the shell at run time, not by the workflow expression parser.
+      - name: Build web shell (beta stamp)
+        if: env.STALE != '1'
+        run: |
+          HEW_BETA_SHA="${GITHUB_SHA::8}" pnpm --dir shells/web build
+
+      # A separate, complete headers file (not an append to the production
+      # one) so everything beta serves is reviewable in one place.
+      - name: Install beta headers
+        if: env.STALE != '1'
+        run: cp shells/web/_headers.beta shells/web/dist/_headers
+
+      - name: Deploy beta.hew3d.com (Cloudflare Pages)
+        if: env.STALE != '1'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::notice::Cloudflare secrets not set — skipping the beta.hew3d.com deploy."
+            exit 0
+          fi
+          # Re-check right before the upload to close the window since the
+          # early check.
+          tip="$(git ls-remote --exit-code origin refs/heads/main | cut -f1)"
+          if [ -z "$tip" ]; then
+            echo "::error::Could not read the tip of main; refusing to deploy blind."
+            exit 1
+          fi
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::notice::main has moved on ($GITHUB_SHA is not the tip $tip); skipping the beta deploy."
+            exit 0
+          fi
+          # The default shell has no pipefail; without it a failed deploy
+          # would be masked by tee's exit status.
+          set -o pipefail
+          npx wrangler@4 pages deploy shells/web/dist \
+            --project-name=hew-app-beta --branch=main --commit-dirty=true \
+            2>&1 | tee wrangler.log
+          version="$(node -p "require('./app/package.json').version")+beta.${GITHUB_SHA::8}"
+          url="$(grep -Eo 'https://[^ ]+' wrangler.log | tail -n 1 || true)"
+          echo "::notice::Deployed beta $version to ${url:-an unknown URL (wrangler printed none)}."

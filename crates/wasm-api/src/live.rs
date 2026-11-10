@@ -232,7 +232,7 @@ impl Host for LiveHost {
     /// than refusing the whole command. A `.skp` format is refused too:
     /// the live document's file belongs to the app (its own Save keeps
     /// the SketchUp source and container), so an API save only ever
-    /// produces `.hew` bytes; `hew.doc.export` with `skp` / `skp2017`
+    /// produces `.hew` bytes; `hew.doc.export` with `skp` or a stream release
     /// hands back a SketchUp file without touching the document's file.
     fn save_document(
         &mut self,
@@ -240,6 +240,7 @@ impl Host for LiveHost {
         path: Option<&str>,
         format: Option<DocFormat>,
         _units: Option<&str>,
+        _compat: bool,
     ) -> Result<SaveOutcome, Refusal> {
         if path.is_some() {
             return Err(refuse(
@@ -252,7 +253,7 @@ impl Host for LiveHost {
             return Err(refuse(
                 "save a SketchUp file",
                 "The live document's file belongs to the app. Use the app's File > Save, or \
-                 hew.doc.export with format \"skp\" / \"skp2017\" to receive a SketchUp file.",
+                 hew.doc.export with format \"skp\", \"skp3\" to \"skp8\" or \"skp2013\" to \"skp2020\" to receive a SketchUp file.",
             ));
         }
         Ok(SaveOutcome {
@@ -274,6 +275,7 @@ impl Host for LiveHost {
         path: Option<&str>,
         segments_per_turn: u32,
         units: Option<&str>,
+        compat: bool,
     ) -> Result<Option<Vec<u8>>, Refusal> {
         if path.is_some() {
             return Err(refuse(
@@ -289,12 +291,16 @@ impl Host for LiveHost {
         // desktop app's own interactive File > Export goes through
         // `Scene::export` instead, which passes `false`.
         let bytes = match format {
-            "skp" | "skp2017" => {
-                let target = if format == "skp" {
-                    skp_export::Target::Skp2026
-                } else {
-                    skp_export::Target::Skp2017
-                };
+            _ if DocFormat::skp_from_name(format).is_some() => {
+                let target = match DocFormat::skp_from_name(format) {
+                    Some(DocFormat::SkpStream(n)) => {
+                        skp_import::skpwright::Release::of_name(u32::from(n))
+                            .map(skp_export::Target::Stream)
+                            .unwrap_or(skp_export::Target::Skp2026)
+                    }
+                    _ => skp_export::Target::Skp2026,
+                }
+                .with_compat(compat);
                 let units = units
                     .or(self.display_units.as_deref())
                     .and_then(skp_export::DisplayUnits::from_name);
@@ -772,6 +778,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new()).expect("ingest a plain box");
         doc
@@ -783,15 +790,26 @@ mod tests {
     fn export_document_hands_back_both_skp_containers() {
         let doc = box_document();
         let mut host = LiveHost::default();
-        for (format, container) in [
-            ("skp", skp_import::openskp::Container::Zip),
-            ("skp2017", skp_import::openskp::Container::Carchive2017),
-        ] {
+        for format in DocFormat::skp_wire_names() {
+            let container = if format == "skp" {
+                skp_import::skpwright::Container::Zip
+            } else {
+                skp_import::skpwright::Container::Stream
+            };
             let bytes = host
-                .export_document(&doc, format, None, 0, None)
+                .export_document(&doc, &format, None, 0, None, false)
                 .expect("a box exports as a .skp live")
                 .expect("bytes come back");
-            assert_eq!(skp_import::openskp::detect_container(&bytes), container);
+            assert_eq!(skp_import::skpwright::detect_container(&bytes), container);
+            // Each stream release writes its own header version.
+            if let Some(DocFormat::SkpStream(n)) = DocFormat::from_name(&format) {
+                let (version, _) = skp_import::skpwright::header_info(&bytes).unwrap();
+                assert_eq!(
+                    skp_import::skpwright::Release::of_version(&version).map(|r| r.number()),
+                    Some(n),
+                    "{format}: {version}"
+                );
+            }
         }
     }
 
@@ -806,10 +824,10 @@ mod tests {
         };
         let unit = |host: &mut LiveHost, units: Option<&str>| {
             let bytes = host
-                .export_document(&doc, "skp", None, 0, units)
+                .export_document(&doc, "skp", None, 0, units, false)
                 .unwrap()
                 .unwrap();
-            skp_import::openskp::Model::parse(&bytes)
+            skp_import::skpwright::Model::parse(&bytes)
                 .unwrap()
                 .units
                 .length_unit
@@ -825,14 +843,17 @@ mod tests {
     fn save_document_refuses_a_skp_format_but_serves_hew() {
         let doc = box_document();
         let mut host = LiveHost::default();
-        for format in [DocFormat::Skp, DocFormat::Skp2017] {
+        for format in DocFormat::skp_wire_names()
+            .iter()
+            .filter_map(|n| DocFormat::skp_from_name(n))
+        {
             let err = host
-                .save_document(&doc, None, Some(format), None)
+                .save_document(&doc, None, Some(format), None, false)
                 .unwrap_err();
             assert_eq!(err.name, "host_capability_missing");
         }
         let out = host
-            .save_document(&doc, None, Some(DocFormat::Hew), None)
+            .save_document(&doc, None, Some(DocFormat::Hew), None, false)
             .expect("hew saves");
         assert!(out.bytes.is_some());
     }
@@ -848,7 +869,7 @@ mod tests {
         let doc = box_document();
         let mut host = LiveHost::default();
         let bytes = host
-            .export_document(&doc, "stl", None, 0, None)
+            .export_document(&doc, "stl", None, 0, None, false)
             .expect("a solid box exports live")
             .expect("bytes come back since there is no filesystem to write to");
         let direct =
@@ -866,7 +887,7 @@ mod tests {
         let doc = box_document();
         let mut host = LiveHost::default();
         let err = host
-            .export_document(&doc, "stl", Some("/tmp/out.stl"), 0, None)
+            .export_document(&doc, "stl", Some("/tmp/out.stl"), 0, None, false)
             .unwrap_err();
         assert_eq!(err.name, "host_capability_missing");
     }
@@ -876,7 +897,7 @@ mod tests {
         let doc = kernel::Document::new();
         let mut host = LiveHost::default();
         let err = host
-            .export_document(&doc, "stl", None, 0, None)
+            .export_document(&doc, "stl", None, 0, None, false)
             .unwrap_err();
         assert_eq!(err.name, "nothing_to_export");
     }

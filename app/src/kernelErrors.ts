@@ -103,6 +103,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   EmptySceneName: msg`A Scene needs a name.`,
   InvalidSectionPlane: msg`That section plane isn't valid. Place it again on a face or the ground.`,
   DegenerateUvFrame: msg`That texture position isn't valid. Drag the handle further before releasing it.`,
+  InvalidMaterialPbr: msg`Metallic and roughness must each be between 0 and 100%.`,
   BadUvFrame: msg`That texture position couldn't be read. Press Escape and start the positioning again.`,
 
   // ------------------------------------------------- extrude / push-pull
@@ -326,6 +327,11 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   NonFiniteAttrValue: msg`Attribute numbers can't be NaN or infinity. Use a finite number and try again.`,
   AttrValueTooDeep: msg`This attribute value is nested too deeply to store. Flatten it and try again.`,
   UnknownAttr: msg`That attribute doesn't exist on this item, so there was nothing to remove.`,
+
+  // ------------------------------------------------------ geo-location
+  // Reachable only through the API surface (hew.geo.set).
+  InvalidGeoReference:
+    msg`That geo-location has a number that isn't finite or a unit size that isn't above zero, so it wasn't set. Fix the value and try again.`,
 
   // ------------------------------------------------------ file loading
   NotAContainer: msg`This file isn't a Hew document. Pick a .hew file saved by Hew.`,

@@ -294,6 +294,11 @@ pub struct ImportSceneRecipe {
     /// The look the scene captures (a `.skp` scene's saved style:
     /// backdrop and axes), when it captures one.
     pub view_style: Option<crate::style::ViewStyle>,
+    /// The scene's own transition time in seconds; `None` is the
+    /// document's own.
+    pub transition_s: Option<f64>,
+    /// The scene's own delay in seconds; `None` is the document's own.
+    pub delay_s: Option<f64>,
 }
 
 /// A construction guide carried by an import (`.skp` guides).
@@ -310,6 +315,8 @@ pub enum ImportGuide {
         /// direction from `origin` ([`crate::GuideSpan::INFINITE`] for the
         /// whole line; one of no length → skipped, reported).
         span: crate::guide::GuideSpan,
+        /// How the line is drawn (a `.skp` guide's stipple mask).
+        dash: crate::guide::GuideDash,
         /// Tag paths, root-first (a `.skp` guide's layer, then each
         /// container's above it); the guide hides with them.
         tags: Vec<Vec<String>>,
@@ -363,6 +370,10 @@ pub struct ImportScene {
     /// How the source document is shown (`style.rs`), adopted under the
     /// same empty-document rule as [`ImportScene::camera`].
     pub view_style: Option<crate::style::ViewStyle>,
+    /// The source document's coordinate reference system, adopted under
+    /// the same empty-document rule as [`ImportScene::camera`]. A record
+    /// that fails [`crate::GeoReference::validate`] is not adopted.
+    pub geo: Option<crate::GeoReference>,
     /// Sketches and attribute dictionaries.
     pub extra: ImportSceneExtra,
 }
@@ -414,6 +425,9 @@ pub struct ImportReport {
     /// The annotations created, in [`ImportSceneExtra::annotations`] order
     /// (`None` for one that was skipped — reported in `skipped`).
     pub annotations: Vec<Option<crate::ids::AnnotationId>>,
+    /// The stable id of each scene created, in [`ImportScene::scenes`]
+    /// order (`None` for one that could not be added).
+    pub scenes: Vec<Option<u64>>,
 }
 
 // ── DocAction::Imported + ingest ──────────────────────────────────────────────

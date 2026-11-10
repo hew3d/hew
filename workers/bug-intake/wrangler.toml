@@ -24,9 +24,22 @@ class_name = "ReportDrop"
 name = "REPORT_INDEX"
 class_name = "ReportIndex"
 
+# One `ReportThread` per FOLLOWED report: the two-way channel between the
+# reporter's copy of Hew (holding the report's follow secret) and the admin
+# page. Its own class because a thread outlives the 90-day bundle and is
+# read by a public, secret-gated route that must not land on the single
+# `ReportIndex` (README.md "Following a report").
+[[durable_objects.bindings]]
+name = "REPORT_THREAD"
+class_name = "ReportThread"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ReportDrop", "ReportIndex"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["ReportThread"]
 
 # The maintainer notification email (src/email.ts, src/emailMailer.ts). No
 # `destination_address` here: the recipient comes from the `NOTIFY_TO`
@@ -40,4 +53,9 @@ name = "NOTIFY"
 # trusted, on first deploy — see README.md's deploy checklist).
 [[routes]]
 pattern = "app.hew3d.com/report/*"
+zone_name = "hew3d.com"
+
+# The beta host (beta.hew3d.com) posts to the same Worker the same way.
+[[routes]]
+pattern = "beta.hew3d.com/report/*"
 zone_name = "hew3d.com"

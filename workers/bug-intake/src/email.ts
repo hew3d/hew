@@ -55,7 +55,7 @@ export function sanitizeHeaderValue(value: string): string {
   return value.replace(/[\r\n]+/g, ' ').trim()
 }
 
-function formatBytes(n: number): string {
+export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / (1024 * 1024)).toFixed(1)} MB`
@@ -88,6 +88,10 @@ export function buildNotificationMime(report: NotifyReport, from: string, to: st
     ``,
   ].join('\r\n')
 
+  return assembleMime(from, to, subject, body)
+}
+
+function assembleMime(from: string, to: string, subject: string, body: string): string {
   const headers = [
     `From: Hew Bug Intake <${from}>`,
     `To: <${to}>`,
@@ -99,6 +103,70 @@ export function buildNotificationMime(report: NotifyReport, from: string, to: st
   ].join('\r\n')
 
   return `${headers}\r\n\r\n${body}`
+}
+
+/** A thread event worth an email (docs/design/follow-a-report.md §3.3,
+ *  D19): a reporter's message, or a follow-up attachment landing. `id` is
+ *  the FOLLOWED report (the parent, for an attachment). Never carries the
+ *  follow secret — nothing in this module ever sees it. */
+export type ThreadEvent =
+  | { kind: 'reply'; id: string; text: string; reopened: boolean }
+  | { kind: 'attachment'; id: string; childId: string; label: string; sizeBytes: number }
+
+export function buildThreadEventMime(event: ThreadEvent, from: string, to: string): string {
+  const adminLink = `https://app.hew3d.com/report/admin/${event.id}`
+  if (event.kind === 'reply') {
+    const subject = `[Hew bug report] ${event.id} — reply from the reporter`
+    const body = [
+      `The reporter of ${event.id} wrote:`,
+      ``,
+      event.text,
+      ``,
+      ...(event.reopened ? [`This reopened the report (it was marked fixed or closed).`, ``] : []),
+      `Admin: ${adminLink}`,
+      ``,
+    ].join('\r\n')
+    return assembleMime(from, to, subject, body)
+  }
+  // The subject carries only the server-computed size; the reporter-chosen
+  // file name stays in the body (no header to sanitize it into).
+  const subject = `[Hew bug report] ${event.id} — file attached (${formatBytes(event.sizeBytes)})`
+  const body = [
+    `The reporter of ${event.id} attached a file as report ${event.childId}:`,
+    ``,
+    event.label,
+    ``,
+    `Admin: ${adminLink}`,
+    `Attachment: https://app.hew3d.com/report/admin/${event.childId}`,
+    ``,
+  ].join('\r\n')
+  return assembleMime(from, to, subject, body)
+}
+
+/** `sendNotification`'s twin for thread events — the same configuration
+ *  skip, the same shared daily counter, and the same never-throws rule: it
+ *  runs after the event is durably stored, so a failure is only logged.
+ *  Thread mail stops `EMAIL_THREAD_RESERVE` short of `EMAIL_DAY_MAX`, so
+ *  it can never starve the notification for a new report. */
+export async function sendThreadNotification(env: BugIntakeEnv, event: ThreadEvent, mailer: RawMailSender): Promise<boolean> {
+  try {
+    const to = env.NOTIFY_TO
+    const from = env.NOTIFY_FROM
+    if (!to || !from) {
+      console.log(`bug-intake: skipping ${event.kind} notification for ${event.id}: NOTIFY_TO/NOTIFY_FROM not configured`)
+      return false
+    }
+    const index = env.REPORT_INDEX.get(env.REPORT_INDEX.idFromName(INDEX_DO_NAME))
+    if (!(await index.reserveEmail(Date.now(), 'thread'))) {
+      console.log(`bug-intake: skipping ${event.kind} notification for ${event.id}: daily email cap reached`)
+      return false
+    }
+    await mailer.send(from, to, buildThreadEventMime(event, from, to))
+    return true
+  } catch (err) {
+    console.error(`bug-intake: ${event.kind} notification email failed for ${event.id}:`, err)
+    return false
+  }
 }
 
 /** Sends the notification, or skips it — GENUINELY never throws: the whole

@@ -43,8 +43,10 @@ import {
   RATE_LIMIT_WINDOW_MAX,
   RATE_LIMIT_WINDOW_MS,
   EMAIL_DAY_MAX,
+  EMAIL_THREAD_RESERVE,
   STORE_CEILING_BYTES,
   UPLOAD_LIFETIME_MS,
+  THREAD_RATE_WINDOW_MAX,
 } from './constants.ts'
 
 export interface ReportRow {
@@ -56,6 +58,23 @@ export interface ReportRow {
   sizeBytes: number
   triaged: boolean
   committed: boolean
+  /** Display caches for the admin list (docs/design/follow-a-report.md
+   *  §5.2) — the report's `ReportThread` is the source of truth, and every
+   *  handler that changes a thread updates these in the same request.
+   *  `following`: a thread with a reporter's secret exists. */
+  following: boolean
+  status: string
+  statusVersion: string | null
+  /** When the reporter last wrote or attached something. */
+  reporterActivityAt: number | null
+  /** When the maintainer last opened the detail page. */
+  adminViewedAt: number | null
+  /** A follow-up attachment's parent report. */
+  parentId: string | null
+  /** The bundle's retention ran out while the report was followed: the row
+   *  stays (metadata and thread, `sizeBytes = 0`) but there is nothing to
+   *  download. */
+  bundleDeleted: boolean
 }
 
 /** What `reserveReport` is called with — everything about the report
@@ -68,7 +87,17 @@ export interface ReportRow {
  *  start, not placeholders `commitReport` has to fill in later.
  *  `triaged`/`committed` aren't inputs: every reservation starts life
  *  untriaged and uncommitted. */
-export type ReportReservation = Omit<ReportRow, 'triaged' | 'committed'>
+export type ReportReservation = Pick<
+  ReportRow,
+  'id' | 'receivedAt' | 'appVersion' | 'platform' | 'descriptionPreview' | 'sizeBytes'
+> & { parentId?: string | null }
+
+/** The display-cache fields a thread change writes into a row. */
+export interface ThreadCachePatch {
+  status?: string
+  statusVersion?: string | null
+  reporterActivityAt?: number
+}
 
 export type ReserveResult =
   | { ok: true }
@@ -82,7 +111,7 @@ function utcDay(now: number): string {
   return new Date(now).toISOString().slice(0, 10)
 }
 
-function rowToReportRow(r: {
+interface RawReportRow {
   id: string
   receivedAt: number
   appVersion: string
@@ -91,14 +120,46 @@ function rowToReportRow(r: {
   sizeBytes: number
   triaged: number
   committed: number
-}): ReportRow {
-  return { ...r, triaged: r.triaged !== 0, committed: r.committed !== 0 }
+  following: number
+  status: string | null
+  statusVersion: string | null
+  reporterActivityAt: number | null
+  adminViewedAt: number | null
+  parentId: string | null
+  bundleDeleted: number
 }
 
-const REPORT_COLUMNS = 'id, receivedAt, appVersion, platform, descriptionPreview, sizeBytes, triaged, committed'
+function rowToReportRow(r: RawReportRow): ReportRow {
+  return {
+    ...r,
+    triaged: r.triaged !== 0,
+    committed: r.committed !== 0,
+    following: r.following !== 0,
+    status: r.status ?? 'open',
+    bundleDeleted: r.bundleDeleted !== 0,
+  }
+}
+
+const REPORT_COLUMNS =
+  'id, receivedAt, appVersion, platform, descriptionPreview, sizeBytes, triaged, committed, ' +
+  'following, status, statusVersion, reporterActivityAt, adminViewedAt, parentId, bundleDeleted'
+
+/** Columns added after the first deploy, with the definition each gets on
+ *  a `reports` table that predates it (docs/design/follow-a-report.md
+ *  §5.2). Also part of `CREATE TABLE` for a fresh database. */
+const ADDED_REPORT_COLUMNS: ReadonlyArray<[string, string]> = [
+  ['following', 'INTEGER NOT NULL DEFAULT 0'],
+  ['status', "TEXT NOT NULL DEFAULT 'open'"],
+  ['statusVersion', 'TEXT'],
+  ['reporterActivityAt', 'INTEGER'],
+  ['adminViewedAt', 'INTEGER'],
+  ['parentId', 'TEXT'],
+  ['bundleDeleted', 'INTEGER NOT NULL DEFAULT 0'],
+]
 
 export class IndexStore {
   private readonly storage: DurableObjectStorage
+  private columnsChecked = false
 
   constructor(storage: DurableObjectStorage) {
     this.storage = storage
@@ -128,9 +189,21 @@ export class IndexStore {
          sizeBytes INTEGER NOT NULL,
          triaged INTEGER NOT NULL DEFAULT 0,
          committed INTEGER NOT NULL DEFAULT 0,
-         lastActivity INTEGER NOT NULL DEFAULT 0
+         lastActivity INTEGER NOT NULL DEFAULT 0,
+         ${ADDED_REPORT_COLUMNS.map(([name, def]) => `${name} ${def}`).join(',\n         ')}
        )`,
     )
+    // A `reports` table from the first deploy lacks the follow columns: add
+    // each one missing, guarded by `PRAGMA table_info`, once per instance.
+    if (!this.columnsChecked) {
+      const present = new Set(
+        this.storage.sql.exec<{ name: string }>('PRAGMA table_info(reports)').toArray().map((r) => r.name),
+      )
+      for (const [name, def] of ADDED_REPORT_COLUMNS) {
+        if (!present.has(name)) this.storage.sql.exec(`ALTER TABLE reports ADD COLUMN ${name} ${def}`)
+      }
+      this.columnsChecked = true
+    }
     this.storage.sql.exec(
       `CREATE TABLE IF NOT EXISTS rate_window (
          clientHash TEXT NOT NULL,
@@ -227,8 +300,8 @@ export class IndexStore {
       day,
     )
     this.storage.sql.exec(
-      `INSERT INTO reports (id, receivedAt, appVersion, platform, descriptionPreview, sizeBytes, triaged, committed, lastActivity)
-       VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+      `INSERT INTO reports (id, receivedAt, appVersion, platform, descriptionPreview, sizeBytes, triaged, committed, lastActivity, parentId)
+       VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
       entry.id,
       entry.receivedAt,
       entry.appVersion,
@@ -236,6 +309,7 @@ export class IndexStore {
       entry.descriptionPreview,
       entry.sizeBytes,
       now,
+      entry.parentId ?? null,
     )
     return { ok: true }
   }
@@ -254,10 +328,13 @@ export class IndexStore {
    *  successfully), which the caller needs to tell apart from
    *  `'already-committed'` rather than silently answering success for a
    *  report the index no longer knows about. */
-  async commitReport(id: string): Promise<CommitReportOutcome> {
+  async commitReport(id: string, following: boolean = false): Promise<CommitReportOutcome> {
     this.migrate()
     const row = this.storage.sql.exec<{ committed: number }>('SELECT committed FROM reports WHERE id = ?', id).toArray()[0]
     if (row === undefined) return 'not-found'
+    // `following` is set on a retry too: COMMIT creates the thread before
+    // calling this, so a retry after this call failed must still mark it.
+    if (following) this.storage.sql.exec('UPDATE reports SET following = 1 WHERE id = ?', id)
     if (row.committed !== 0) return 'already-committed'
     this.storage.sql.exec('UPDATE reports SET committed = 1 WHERE id = ?', id)
     return 'flipped'
@@ -324,16 +401,7 @@ export class IndexStore {
   async listReports(): Promise<ReportRow[]> {
     this.migrate()
     return this.storage.sql
-      .exec<{
-        id: string
-        receivedAt: number
-        appVersion: string
-        platform: string
-        descriptionPreview: string
-        sizeBytes: number
-        triaged: number
-        committed: number
-      }>(`SELECT ${REPORT_COLUMNS} FROM reports WHERE committed = 1 ORDER BY receivedAt DESC`)
+      .exec<RawReportRow>(`SELECT ${REPORT_COLUMNS} FROM reports WHERE committed = 1 ORDER BY receivedAt DESC`)
       .toArray()
       .map(rowToReportRow)
   }
@@ -344,16 +412,7 @@ export class IndexStore {
   async getReport(id: string): Promise<ReportRow | null> {
     this.migrate()
     const rows = this.storage.sql
-      .exec<{
-        id: string
-        receivedAt: number
-        appVersion: string
-        platform: string
-        descriptionPreview: string
-        sizeBytes: number
-        triaged: number
-        committed: number
-      }>(`SELECT ${REPORT_COLUMNS} FROM reports WHERE id = ?`, id)
+      .exec<RawReportRow>(`SELECT ${REPORT_COLUMNS} FROM reports WHERE id = ?`, id)
       .toArray()
     if (rows.length === 0) return null
     return rowToReportRow(rows[0])
@@ -374,19 +433,115 @@ export class IndexStore {
   }
 
   // -------------------------------------------------------------------
+  // Following (docs/design/follow-a-report.md §5.2)
+  // -------------------------------------------------------------------
+
+  /** A `ReportDrop`'s alarm fired (abandonment or retention). A committed
+   *  row someone follows keeps its metadata and thread: `bundleDeleted =
+   *  1`, `sizeBytes = 0` (the ceiling frees). Every other row — not
+   *  followed, or never committed — is deleted, as `deleteReport` did
+   *  before. Idempotent. Returns whether the row is gone afterwards (also
+   *  `true` when it already was), which tells the caller (`expireReport`
+   *  in `handlers.ts`) to destroy any admin-only thread for `id` too. */
+  async bundleExpired(id: string): Promise<boolean> {
+    this.migrate()
+    this.storage.sql.exec(
+      'UPDATE reports SET bundleDeleted = 1, sizeBytes = 0 WHERE id = ? AND committed = 1 AND following = 1',
+      id,
+    )
+    this.storage.sql.exec('DELETE FROM reports WHERE id = ? AND NOT (committed = 1 AND following = 1)', id)
+    return this.storage.sql.exec<{ n: number }>('SELECT COUNT(*) AS n FROM reports WHERE id = ?', id).toArray()[0].n === 0
+  }
+
+  /** A `ReportThread` ended (its alarm, or Forget): a row whose bundle is
+   *  already gone is deleted; a live one stops showing as followed and its
+   *  cached status goes back to the default (`open`, no version) — the
+   *  thread that status belonged to is gone, and a later admin action
+   *  starts a fresh one at `open`. Idempotent; a no-op for a row that no
+   *  longer exists. */
+  async threadEnded(id: string): Promise<void> {
+    this.migrate()
+    this.storage.sql.exec('DELETE FROM reports WHERE id = ? AND bundleDeleted = 1', id)
+    this.storage.sql.exec("UPDATE reports SET following = 0, status = 'open', statusVersion = NULL WHERE id = ?", id)
+  }
+
+  /** Copies a thread change into the row's display caches. */
+  async setThreadCache(id: string, patch: ThreadCachePatch): Promise<void> {
+    this.migrate()
+    if (patch.status !== undefined) {
+      this.storage.sql.exec(
+        'UPDATE reports SET status = ?, statusVersion = ? WHERE id = ?',
+        patch.status,
+        patch.statusVersion ?? null,
+        id,
+      )
+    }
+    if (patch.reporterActivityAt !== undefined) {
+      this.storage.sql.exec('UPDATE reports SET reporterActivityAt = ? WHERE id = ?', patch.reporterActivityAt, id)
+    }
+  }
+
+  /** The maintainer opened the detail page (clears the list's "new"). */
+  async markAdminViewed(id: string, now: number): Promise<void> {
+    this.migrate()
+    this.storage.sql.exec('UPDATE reports SET adminViewedAt = ? WHERE id = ?', now, id)
+  }
+
+  /** A report's committed follow-up attachments, oldest first. */
+  async listChildren(parentId: string): Promise<ReportRow[]> {
+    this.migrate()
+    return this.storage.sql
+      .exec<RawReportRow>(`SELECT ${REPORT_COLUMNS} FROM reports WHERE parentId = ? AND committed = 1 ORDER BY receivedAt ASC`, parentId)
+      .toArray()
+      .map(rowToReportRow)
+  }
+
+  /** The thread-route quota guard (§5.4): `THREAD_RATE_WINDOW_MAX` requests
+   *  per client hash per `RATE_LIMIT_WINDOW_MS`, counted in `rate_window`
+   *  under a `thread:` prefix so it never mixes with the submission limit.
+   *  Called only after the thread DO accepted the secret (design D10). A
+   *  request over the limit is refused WITHOUT incrementing, so a client
+   *  hammering past it costs a read, not a write. */
+  async countThreadRequest(clientHash: string, now: number): Promise<{ ok: true } | { ok: false; retryAfterMs: number }> {
+    this.migrate()
+    const key = `thread:${clientHash}`
+    const bucket = Math.floor(now / RATE_LIMIT_WINDOW_MS)
+    this.storage.sql.exec('DELETE FROM rate_window WHERE bucket < ?', bucket - 2)
+    const count =
+      this.storage.sql
+        .exec<{ count: number }>('SELECT count FROM rate_window WHERE clientHash = ? AND bucket = ?', key, bucket)
+        .toArray()[0]?.count ?? 0
+    if (count >= THREAD_RATE_WINDOW_MAX) {
+      return { ok: false, retryAfterMs: (bucket + 1) * RATE_LIMIT_WINDOW_MS - now }
+    }
+    this.storage.sql.exec(
+      `INSERT INTO rate_window (clientHash, bucket, count) VALUES (?, ?, 1)
+       ON CONFLICT (clientHash, bucket) DO UPDATE SET count = count + 1`,
+      key,
+      bucket,
+    )
+    return { ok: true }
+  }
+
+  // -------------------------------------------------------------------
   // Email cap
   // -------------------------------------------------------------------
 
   /** Reserves one of today's email slots, returning whether one was
    *  available. Like `reserveReport`'s rate-limit half, check-and-increment
-   *  in one call so two concurrent sends can't both observe `count < max`. */
-  async reserveEmail(now: number): Promise<boolean> {
+   *  in one call so two concurrent sends can't both observe `count < max`.
+   *  A `'thread'` email (a reporter reply or follow-up attachment) stops
+   *  at `EMAIL_DAY_MAX - EMAIL_THREAD_RESERVE`, so thread traffic can never
+   *  use up the slots a new report's email needs; a `'report'` email may
+   *  use the whole cap. */
+  async reserveEmail(now: number, purpose: 'report' | 'thread' = 'report'): Promise<boolean> {
     this.migrate()
     const day = utcDay(now)
     this.storage.sql.exec('DELETE FROM email_day WHERE day <> ?', day)
     const count =
       this.storage.sql.exec<{ count: number }>('SELECT count FROM email_day WHERE day = ?', day).toArray()[0]?.count ?? 0
-    if (count >= EMAIL_DAY_MAX) return false
+    const max = purpose === 'thread' ? EMAIL_DAY_MAX - EMAIL_THREAD_RESERVE : EMAIL_DAY_MAX
+    if (count >= max) return false
     this.storage.sql.exec(
       `INSERT INTO email_day (day, count) VALUES (?, 1)
        ON CONFLICT (day) DO UPDATE SET count = count + 1`,

@@ -71,6 +71,18 @@ msgstr ""
 msgid "{count} + {extraPages} cut list"
 msgstr ""
 
+#: src/panels/FollowNoticeBar.tsx
+msgid "{count} of your bug reports have news."
+msgstr ""
+
+#: src/panels/FollowNoticeBar.tsx
+msgid "{count} of your bug reports have replies."
+msgstr ""
+
+#: src/panels/FollowNoticeBar.tsx
+msgid "{count} of your bug reports have updates."
+msgstr ""
+
 #: src/log/RenderStatsReadout.tsx
 msgid "{cpuMs} cpu ms"
 msgstr ""
@@ -290,6 +302,10 @@ msgstr ""
 
 #: src/io/documentSession.ts
 msgid "{name} — Hew"
+msgstr ""
+
+#: src/io/documentSession.ts
+msgid "{name} — Hew Beta"
 msgstr ""
 
 #. Hover tip: a thing and the container it sits in
@@ -632,6 +648,10 @@ msgstr ""
 
 #: src/io/documentSession.ts
 msgid "• {name} — Hew"
+msgstr ""
+
+#: src/io/documentSession.ts
+msgid "• {name} — Hew Beta"
 msgstr ""
 
 #: src/palette/CommandPalette.tsx
@@ -1077,6 +1097,19 @@ msgstr ""
 msgid "At the cursor"
 msgstr ""
 
+#. placeholder {0}: failedOpen.name
+#: src/panels/SentReportsDialog.tsx
+#~ msgid "Attach {0} (the file that didn’t open)"
+#~ msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Attach {failedName} (the file that didn’t open)"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Attach a file…"
+msgstr ""
+
 #: src/i18n/historyLabels.ts
 msgid "Attach sketch"
 msgstr ""
@@ -1096,6 +1129,10 @@ msgstr ""
 
 #: src/settings/ThemePane.tsx
 msgid "Auto follows your OS's light/dark appearance setting."
+msgstr ""
+
+#: src/io/docFormat.ts
+msgid "Avoid features older SketchUp versions cannot open"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -1126,6 +1163,14 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Behind"
+msgstr ""
+
+#: src/panels/MenuBar.tsx
+msgid "BETA"
+msgstr ""
+
+#: src/panels/WelcomeScreen.tsx
+msgid "Beta build {betaVersion}. Files saved here may not open in the released Hew."
 msgstr ""
 
 #. Color of the Z axis in a status-bar hint, lowercase
@@ -1185,6 +1230,10 @@ msgstr ""
 msgid "Browser storage"
 msgstr ""
 
+#: src/palette/registry.ts
+msgid "bug"
+msgstr ""
+
 #: src/panels/ImportingOverlay.tsx
 msgid "Building objects: {done} of {total}"
 msgstr ""
@@ -1225,6 +1274,7 @@ msgstr ""
 #: src/panels/RescaleConfirmDialog.tsx
 #: src/panels/SaveFormatDialog.tsx
 #: src/panels/ScenesPanel.tsx
+#: src/panels/SentReportsDialog.tsx
 #: src/panels/StlUnitsDialog.tsx
 #: src/panels/TextDialog.tsx
 #: src/panels/UnsavedChangesDialog.tsx
@@ -1268,6 +1318,10 @@ msgid "Change material opacity"
 msgstr ""
 
 #: src/i18n/historyLabels.ts
+msgid "Change material surface"
+msgstr ""
+
+#: src/i18n/historyLabels.ts
 msgid "Change tags"
 msgstr ""
 
@@ -1288,7 +1342,12 @@ msgstr ""
 
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
+#: src/panels/SentReportsDialog.tsx
 msgid "Check for Updates…"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Check now"
 msgstr ""
 
 #: src/viewport/gpuCapability.ts
@@ -1303,12 +1362,20 @@ msgstr ""
 msgid "Checking the objects"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Checking…"
+msgstr ""
+
 #: src/settings/FluentSettingsPage.tsx
 msgid "Checks that the address serves a Hew relay and, if it needs one, that your upload key is accepted. Over plain http:// the phone's in-app scanner can't open the camera; scan with the camera app instead. A certificate from your own authority must be trusted on this computer and on the phone."
 msgstr ""
 
 #: src/settings/FluentSettingsPage.tsx
 msgid "Checks that the Hew cloud relay is reachable from this computer."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Choose a file to attach"
 msgstr ""
 
 #: src/panels/MaterialPalette.tsx
@@ -1645,6 +1712,7 @@ msgstr ""
 #: src/panels/MenuBar.tsx
 #: src/panels/PhoneShareDialog.tsx
 #: src/panels/ReportBugDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 #: src/TitleBar.tsx
 msgid "Close"
 msgstr ""
@@ -1687,6 +1755,10 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Close this opening"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Closed"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -1826,6 +1898,10 @@ msgstr ""
 msgid "Controls how lengths are displayed (e.g. the Move tool's live measurement). Precision sets how far readouts are rounded: a number of decimals, or a fraction of an inch. A rounded readout is marked with ~, and Exact shows every digit a length needs. Each format remembers its own choice. Model geometry is always stored in meters internally."
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Coordinate system"
+msgstr ""
+
 #: src/ErrorBoundary.tsx
 #: src/log/LogPanel.tsx
 #: src/panels/ReportBugDialog.tsx
@@ -1927,6 +2003,10 @@ msgid "Couldn't close: {reason}"
 msgstr ""
 
 #: src/log/reportBundle.ts
+msgid "Couldn’t compress this file."
+msgstr ""
+
+#: src/log/reportBundle.ts
 msgid "Couldn’t compress this report. Save it to a file instead."
 msgstr ""
 
@@ -2011,8 +2091,16 @@ msgstr ""
 msgid "Couldn't print: {errorText}"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Couldn’t reach the report service. Check your internet connection and try again."
+msgstr ""
+
 #: src/App.tsx
 msgid "Couldn't read library item: {reason}"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Couldn’t read that file."
 msgstr ""
 
 #: src/App.tsx
@@ -2152,6 +2240,10 @@ msgstr ""
 msgid "Dark"
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Datum"
+msgstr ""
+
 #: src/settings/FluentSettingsPage.tsx
 #: src/settings/SettingsWindow.tsx
 msgid "Debug"
@@ -2183,6 +2275,7 @@ msgid "Decimal inches (60.125\")"
 msgstr ""
 
 #: src/panels/MaterialPalette.tsx
+#: src/panels/ScenesPanel.tsx
 msgid "Default"
 msgstr ""
 
@@ -2192,6 +2285,10 @@ msgstr ""
 
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Definition Name"
+msgstr ""
+
+#: src/panels/ScenesPanel.tsx
+msgid "Delay (s)"
 msgstr ""
 
 #: src/App.tsx
@@ -2723,6 +2820,10 @@ msgstr ""
 msgid "Each Scene ({sceneCount})"
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Easting"
+msgstr ""
+
 #: src/shop/InspectCard.tsx
 msgctxt "measurement"
 msgid "edge"
@@ -2972,6 +3073,27 @@ msgstr ""
 msgid "eye height"
 msgstr ""
 
+#: src/tools/CircleTool.ts
+#: src/tools/PolygonTool.ts
+msgid "Facing the {axis} plane — click the center to draw on it; ↑ for the ground, Shift pins it."
+msgstr ""
+
+#: src/tools/PlaceImageTool.ts
+msgid "Facing the {axis} plane — click the first corner of \"{name}\" to place it there; ↑ for the ground. Esc cancels."
+msgstr ""
+
+#: src/tools/RectangleTool.ts
+msgid "Facing the {axis} plane — click the first corner to draw on it; ↑ for the ground, Shift pins it."
+msgstr ""
+
+#: src/tools/ArcTool.ts
+msgid "Facing the {axis} plane — click the first endpoint to draw on it; ↑ for the ground, Shift pins it."
+msgstr ""
+
+#: src/tools/LineTool.ts
+msgid "Facing the {axis} plane — click to start a line on it; ↑ for the ground, Shift pins it."
+msgstr ""
+
 #: src/viewport/MeasurementBox.tsx
 msgid "Factor"
 msgstr ""
@@ -2990,6 +3112,10 @@ msgstr ""
 msgid "Faster"
 msgstr ""
 
+#: src/palette/registry.ts
+msgid "feedback"
+msgstr ""
+
 #: src/viewport/MeasurementBox.tsx
 msgid "Field of View"
 msgstr ""
@@ -2997,6 +3123,10 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 msgid "File"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "File attached"
 msgstr ""
 
 #: src/panels/SaveFormatDialog.tsx
@@ -3086,6 +3216,14 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "fix"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Fixed"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Fixed in Hew {v}"
 msgstr ""
 
 #: src/health/healthCopy.ts
@@ -3178,6 +3316,22 @@ msgstr ""
 msgid "Font family"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Forget"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Forget this report?"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Forget this report? Hew stops checking for replies and the thread is removed from the service. The report itself stays with Hew’s developer."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Forget this report…"
+msgstr ""
+
 #: src/panels/ExportDialog.tsx
 #: src/settings/UnitsPane.tsx
 msgid "Format"
@@ -3229,6 +3383,10 @@ msgstr ""
 
 #: src/log/RenderStatsReadout.tsx
 msgid "geo {geometries}"
+msgstr ""
+
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Geo-location"
 msgstr ""
 
 #: src/panels/ObjectInfoPanel.tsx
@@ -3417,6 +3575,10 @@ msgstr ""
 msgid "health"
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Height"
+msgstr ""
+
 #: src/panels/TextDialog.tsx
 msgid "Height ({unit})"
 msgstr ""
@@ -3446,6 +3608,10 @@ msgstr ""
 msgid "Hew {version} is available — you have {current}.\n"
 "\n"
 "Download and install it now?"
+msgstr ""
+
+#: src/shop/ShopApp.tsx
+msgid "Hew Beta"
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
@@ -3511,6 +3677,10 @@ msgstr ""
 msgid "Hew is already checking for updates."
 msgstr ""
 
+#: src/panels/ReportBugDialog.tsx
+msgid "Hew keeps a private key for this report on this computer and checks for a reply when it starts. No account, no email. You can stop any time under Help ▸ Sent Reports."
+msgstr ""
+
 #: src/io/docFormat.ts
 #: src/io/tauriFileHost.ts
 #: src/io/webFileHost.ts
@@ -3539,6 +3709,14 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "Hew tries to stand the profile up automatically, but couldn't square it to the path here. Move the profile closer to where the sweep should start — on a drawn circle, near the rim, in line with the circle's center."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Hew’s developer"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Hew’s developer asked for something. See below."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -4048,6 +4226,7 @@ msgid "Last steps:"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
+#: src/panels/FollowNoticeBar.tsx
 msgid "Later"
 msgstr ""
 
@@ -4121,6 +4300,10 @@ msgstr ""
 
 #: src/settings/FluentSettingsPage.tsx
 msgid "Length format"
+msgstr ""
+
+#: src/panels/ReportBugDialog.tsx
+msgid "Let me know what happens with this report"
 msgstr ""
 
 #: src/print/paper.ts
@@ -4461,6 +4644,22 @@ msgstr ""
 msgid "Merge two selected solids into one (boolean add)."
 msgstr ""
 
+#: src/panels/MaterialPalette.tsx
+msgid "Metallic"
+msgstr ""
+
+#: src/panels/MaterialPalette.tsx
+msgid "Metallic (select a material swatch first)"
+msgstr ""
+
+#: src/kernelErrors.ts
+msgid "Metallic and roughness must each be between 0 and 100%."
+msgstr ""
+
+#: src/panels/MaterialPalette.tsx
+msgid "Metallic for {selectedName}"
+msgstr ""
+
 #: src/settings/stlImportUnit.ts
 #: src/settings/units.ts
 msgid "Meters"
@@ -4738,6 +4937,10 @@ msgstr ""
 msgid "Needs at least {DESCRIPTION_MIN} characters ({trimmedLength} so far)"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Needs your help"
+msgstr ""
+
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
 #: src/panels/MenuBar.tsx
@@ -4840,6 +5043,10 @@ msgstr ""
 msgid "No log entries"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "No longer available"
+msgstr ""
+
 #: src/palette/CommandPalette.tsx
 msgid "No matches for “{query}”."
 msgstr ""
@@ -4850,6 +5057,10 @@ msgstr ""
 
 #: src/panels/MaterialPalette.tsx
 msgid "No materials match"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "No messages yet."
 msgstr ""
 
 #: src/panels/LibraryDialog.tsx
@@ -4882,6 +5093,10 @@ msgstr ""
 
 #: src/log/reportBundle.ts
 msgid "no recording available"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "No reports from this computer are being followed. When you send one with “Let me know what happens” ticked, it appears here along with any reply."
 msgstr ""
 
 #: src/scenes/scenesModel.ts
@@ -4917,6 +5132,10 @@ msgstr ""
 #: src/panels/PrintDialog.tsx
 #: src/settings/view.ts
 msgid "Normal"
+msgstr ""
+
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Northing"
 msgstr ""
 
 #: src/settings/FoldersPane.tsx
@@ -5107,6 +5326,18 @@ msgstr ""
 msgid "OK"
 msgstr ""
 
+#: src/panels/SaveFormatDialog.tsx
+msgid "Older SketchUp version"
+msgstr ""
+
+#: src/io/docFormat.ts
+msgid "Older SketchUp versions"
+msgstr ""
+
+#: src/io/docFormat.ts
+msgid "Older SketchUp versions (.skp)"
+msgstr ""
+
 #: src/settings/FluentSettingsPage.tsx
 msgid "On"
 msgstr ""
@@ -5232,6 +5463,7 @@ msgid "Opacity for {selectedName}"
 msgstr ""
 
 #: src/panels/LibraryDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 #: src/panels/WelcomeScreen.tsx
 #: src/shop/ReceiveConfirmSheet.tsx
 msgid "Open"
@@ -5396,12 +5628,44 @@ msgid "Openings"
 msgstr ""
 
 #: src/io/savePanel.ts
-msgid "opens in SketchUp Make 2017 and later"
+msgid "opens in SketchUp {release} and later"
 msgstr ""
 
 #: src/io/docFormat.ts
-msgid "Opens in SketchUp Make 2017 and later."
+msgid "Opens in SketchUp {release} and later."
 msgstr ""
+
+#: src/io/savePanel.ts
+#~ msgid "opens in SketchUp 2018 and later"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "Opens in SketchUp 2018 and later."
+#~ msgstr ""
+
+#: src/io/savePanel.ts
+#~ msgid "opens in SketchUp 2019 and later"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "Opens in SketchUp 2019 and later."
+#~ msgstr ""
+
+#: src/io/savePanel.ts
+#~ msgid "opens in SketchUp 2020 and later"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "Opens in SketchUp 2020 and later."
+#~ msgstr ""
+
+#: src/io/savePanel.ts
+#~ msgid "opens in SketchUp Make 2017 and later"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "Opens in SketchUp Make 2017 and later."
+#~ msgstr ""
 
 #: src/shop/ScanSheet.tsx
 msgid "Or scan the QR with your camera app instead."
@@ -5840,6 +6104,7 @@ msgstr ""
 msgid "projected"
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
 #: src/shop/ViewsSheet.tsx
 msgid "Projection"
 msgstr ""
@@ -6145,6 +6410,10 @@ msgstr ""
 msgid "Rejoin the pieces and remove the inside walls"
 msgstr ""
 
+#: src/io/savePanel.ts
+msgid "Release"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "reload"
 msgstr ""
@@ -6152,6 +6421,10 @@ msgstr ""
 #: src/App.tsx
 #: src/ErrorBoundary.tsx
 msgid "Reload"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Reload Hew"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -6260,6 +6533,14 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "repair"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "reply"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "report"
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
@@ -6467,6 +6748,18 @@ msgstr ""
 msgid "Rotate the selection around an inferred axis."
 msgstr ""
 
+#: src/panels/MaterialPalette.tsx
+msgid "Roughness"
+msgstr ""
+
+#: src/panels/MaterialPalette.tsx
+msgid "Roughness (select a material swatch first)"
+msgstr ""
+
+#: src/panels/MaterialPalette.tsx
+msgid "Roughness for {selectedName}"
+msgstr ""
+
 #: src/viewport/Viewport.tsx
 msgid "Running without graphics acceleration — large models will be slow."
 msgstr ""
@@ -6632,6 +6925,7 @@ msgstr ""
 
 #: src/io/savePanel.ts
 #: src/panels/ExportDialog.tsx
+#: src/panels/GeoReferenceInfo.tsx
 #: src/panels/PrintDialog.tsx
 msgid "Scale"
 msgstr ""
@@ -6704,6 +6998,10 @@ msgstr ""
 
 #: src/scenes/useScenesController.ts
 msgid "Scene properties failed: {reason}"
+msgstr ""
+
+#: src/scenes/useScenesController.ts
+msgid "Scene timing failed: {reason}"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
@@ -6788,6 +7086,10 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/tools/toolRegistry.ts
 msgid "Section Plane"
+msgstr ""
+
+#: src/palette/registry.ts
+msgid "See replies and the status of bug reports you sent from this computer."
 msgstr ""
 
 #: src/palette/registry.ts
@@ -6888,16 +7190,37 @@ msgstr ""
 msgid "Self-hosted"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Send reply"
+msgstr ""
+
 #: src/panels/ReportBugDialog.tsx
 msgid "Send report"
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 msgid "Sending…"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sending… {attachPercent}%"
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
 msgid "Sending… {sendPercent}%"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent {attachedName}."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent {date} from Hew {version}."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent {date} from Hew {version}. No reply yet."
 msgstr ""
 
 #: src/log/reportBundle.ts
@@ -6906,6 +7229,28 @@ msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
 msgid "Sent privately to the Hew developer. Not posted publicly."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent reports"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Sent Reports"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+msgid "Sent Reports ({n} new)…"
+msgstr ""
+
+#: src/panels/MenuBar.tsx
+msgid "Sent Reports ({sentReportsNew} new)…"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+msgid "Sent Reports…"
 msgstr ""
 
 #: src/settings/AdvancedPane.tsx
@@ -6927,6 +7272,10 @@ msgstr ""
 
 #: src/i18n/historyLabels.ts
 msgid "Set attribute {namespace}.{key}"
+msgstr ""
+
+#: src/i18n/historyLabels.ts
+msgid "Set geo-location"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
@@ -7174,16 +7523,61 @@ msgstr ""
 
 #: src/io/docFormat.ts
 #: src/io/savePanel.ts
-msgid "SketchUp (.skp)"
+#~ msgid "SketchUp (.skp)"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#: src/io/savePanel.ts
+msgid "SketchUp {release} (.skp)"
+msgstr ""
+
+#: src/io/docFormat.ts
+msgid "SketchUp {release} model"
+msgstr ""
+
+#: src/io/savePanel.ts
+msgid "SketchUp {year}"
 msgstr ""
 
 #: src/io/docFormat.ts
 #: src/io/savePanel.ts
-msgid "SketchUp 2017 (.skp)"
-msgstr ""
+#~ msgid "SketchUp 2017 (.skp)"
+#~ msgstr ""
 
 #: src/io/docFormat.ts
-msgid "SketchUp 2017 model"
+#~ msgid "SketchUp 2017 model"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#: src/io/savePanel.ts
+#~ msgid "SketchUp 2018 (.skp)"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "SketchUp 2018 model"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#: src/io/savePanel.ts
+#~ msgid "SketchUp 2019 (.skp)"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "SketchUp 2019 model"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#: src/io/savePanel.ts
+#~ msgid "SketchUp 2020 (.skp)"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "SketchUp 2020 model"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#: src/io/savePanel.ts
+msgid "SketchUp 2021 and later (.skp)"
 msgstr ""
 
 #: src/health/healthCopy.ts
@@ -7663,6 +8057,14 @@ msgstr ""
 msgid "That face isn’t part of what you’re editing — press Esc to step out first."
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "That file is too large to send."
+msgstr ""
+
+#: src/kernelErrors.ts
+msgid "That geo-location has a number that isn't finite or a unit size that isn't above zero, so it wasn't set. Fix the value and try again."
+msgstr ""
+
 #: src/kernelErrors.ts
 msgid "That group is no longer there — the model changed since it was picked. Click it again."
 msgstr ""
@@ -7859,6 +8261,10 @@ msgstr ""
 msgid "The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first."
 msgstr ""
 
+#: src/io/webFileHost.ts
+msgid "The file name must end in {ext}."
+msgstr ""
+
 #: src/viewport/Viewport.tsx
 msgid "The graphics context was lost (this can follow sleep/resume or a driver reset on Linux). Recovering automatically when it returns…"
 msgstr ""
@@ -7968,8 +8374,16 @@ msgstr ""
 msgid "The relay is full — try again in a minute, or ask its admin to raise the memory cap."
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "The report service didn’t accept that."
+msgstr ""
+
 #: src/panels/ReportBugDialog.tsx
 msgid "The report service is temporarily full — try again later."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "The report service is temporarily full. Try again later."
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
@@ -7977,6 +8391,7 @@ msgid "The report service is unavailable right now."
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 msgid "The report service’s certificate isn’t trusted by this computer."
 msgstr ""
 
@@ -8147,6 +8562,10 @@ msgstr ""
 msgid "This build can’t send reports directly. Save the file below and attach it to a GitHub issue instead."
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "This build can’t send reports, so there is nothing to follow."
+msgstr ""
+
 #: src/panels/PhoneShareDialog.tsx
 msgid "This code expired — reopen to try again."
 msgstr ""
@@ -8173,6 +8592,14 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "This edge has a face on only one side — there's nothing to merge it with."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "This file can’t be sent."
+msgstr ""
+
+#: src/log/reportBundle.ts
+msgid "This file is {size} compressed, over the {limit} limit."
 msgstr ""
 
 #: src/kernelErrors.ts
@@ -8331,6 +8758,10 @@ msgstr ""
 msgid "This report is {size} compressed, over the {limit} limit. Save it to a file instead."
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "This report is no longer available from the service. Hew has stopped checking it."
+msgstr ""
+
 #: src/panels/ReportBugDialog.tsx
 msgid "This report is too large to send."
 msgstr ""
@@ -8343,8 +8774,20 @@ msgstr ""
 msgid "This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart."
 msgstr ""
 
+#: src/panels/SkpLossNotice.tsx
+msgid "This SketchUp format left out:"
+msgstr ""
+
+#: src/panels/SkpLossNotice.tsx
+#~ msgid "This SketchUp version’s format left out:"
+#~ msgstr ""
+
 #: src/kernelErrors.ts
 msgid "This step couldn't be undone or redone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
+msgstr ""
+
+#: src/log/reportBundle.ts
+msgid "This system can’t compress reports, so it can’t send them."
 msgstr ""
 
 #: src/log/reportBundle.ts
@@ -8463,6 +8906,14 @@ msgstr ""
 msgid "Too many reports sent recently — try again in a few minutes."
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Too many requests right now. Try again in {secs} seconds."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Too many requests right now. Try again in a few minutes."
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "tool names"
 msgstr ""
@@ -8505,6 +8956,10 @@ msgstr ""
 #: src/i18n/historyLabels.ts
 msgctxt "undo verb"
 msgid "Transform"
+msgstr ""
+
+#: src/panels/ScenesPanel.tsx
+msgid "Transition (s)"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -8679,6 +9134,7 @@ msgid "Unexpected response from the report service ({status})."
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
+#: src/panels/SentReportsDialog.tsx
 msgid "Unexpected response from the report service."
 msgstr ""
 
@@ -8730,6 +9186,10 @@ msgstr ""
 msgid "unknown OS"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Unread"
+msgstr ""
+
 #: src/panels/UnsavedChangesDialog.tsx
 msgid "Unsaved changes"
 msgstr ""
@@ -8754,6 +9214,10 @@ msgstr ""
 
 #: src/i18n/nativeMenu.ts
 msgid "Update available"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Update Hew through your package manager."
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
@@ -8846,9 +9310,14 @@ msgstr ""
 msgid "vertex"
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Vertical datum"
+msgstr ""
+
 #: src/i18n/nativeMenu.ts
 #: src/io/savePanel.ts
 #: src/panels/ExportDialog.tsx
+#: src/panels/FollowNoticeBar.tsx
 #: src/panels/LibraryDialog.tsx
 #: src/panels/MenuBar.tsx
 #: src/panels/PrintDialog.tsx
@@ -9006,8 +9475,16 @@ msgstr ""
 msgid "World size must be positive numbers."
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "Write a reply"
+msgstr ""
+
 #: src/settings/DebugPane.tsx
 msgid "Written to the app log directory as <0>diagnostic.log</0>."
+msgstr ""
+
+#: src/panels/GeoReferenceInfo.tsx
+msgid "X axis"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -9028,8 +9505,37 @@ msgstr ""
 msgid "Y-up, meters, for AR Quick Look and USD pipelines"
 msgstr ""
 
+#: src/panels/SentReportsDialog.tsx
+msgid "You"
+msgstr ""
+
+#: src/panels/ReportBugDialog.tsx
+msgid "You’ll find replies and the report’s status under <0>Help ▸ Sent Reports…</0>"
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "You’re on {running}."
+msgstr ""
+
+#. placeholder {0}: only.id
+#: src/panels/FollowNoticeBar.tsx
+#~ msgid "Your bug report {0} has a reply from Hew’s developer."
+#~ msgstr ""
+
+#: src/panels/FollowNoticeBar.tsx
+msgid "Your bug report {onlyId} has a reply from Hew’s developer."
+msgstr ""
+
+#: src/panels/FollowNoticeBar.tsx
+msgid "Your bug report {onlyId} has an update from Hew’s developer."
+msgstr ""
+
 #: src/panels/LibraryDialog.tsx
 msgid "Your library folder needs permission again."
+msgstr ""
+
+#: src/panels/SentReportsDialog.tsx
+msgid "Your reply"
 msgstr ""
 
 #: src/io/savePanel.ts
@@ -9038,6 +9544,10 @@ msgstr ""
 
 #: src/io/savePanel.ts
 msgid "Z-up, millimeters, keeps part names and colors"
+msgstr ""
+
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Zone"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts

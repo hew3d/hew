@@ -12,9 +12,22 @@
  */
 
 import { t } from '@lingui/core/macro'
-import type { DocFormat } from './fileHost'
-import { isTauri } from './fileHost'
-import { SAVE_FORMAT_CHOICES, extensionFor } from './docFormat'
+import { isTauri, type DocFormat } from './fileHost'
+import {
+  SAVE_FORMAT_CHOICES,
+  SKP_OLDER_PICKER_ID,
+  SKP_STREAM_FORMATS,
+  compatLabel,
+  extensionFor,
+  isSkpStreamFormat,
+  normalizeDocFormat,
+  olderGroupLabel,
+  olderReleaseFor,
+  olderReleaseFrom,
+  skpStreamYear,
+  takesCompat,
+  type SkpStreamFormat,
+} from './docFormat'
 import { VIEW_LABEL, type PrintViewKind } from '../print/printJob'
 import { scaleDisplay, scaleHint, scalePresetsFor, type PrintScale } from '../print/scale'
 import type { LengthFormat } from '../settings/units'
@@ -63,20 +76,69 @@ export async function pickSaveTarget(
 
 // ------------------------------------------------------------------ Save As
 
-/** Save As's formats: the browser's in-app step's, by the same labels. */
-export const SAVE_PANEL_FORMATS: PanelFormat[] = SAVE_FORMAT_CHOICES.map((c) => ({
-  id: c.format,
-  // A getter so the label follows the active locale at read time.
-  get label() {
-    return c.label
-  },
-  extension: extensionFor(c.format).slice(1),
-}))
+/** The picker entry that stands for the older releases: one list entry whose
+ * `release` option carries which, preselected to `release`. */
+function olderPanelFormat(release: SkpStreamFormat): PanelFormat {
+  return {
+    id: SKP_OLDER_PICKER_ID,
+    label: olderGroupLabel(),
+    extension: 'skp',
+    options: [
+      {
+        kind: 'select',
+        id: 'release',
+        label: t`Release`,
+        choices: SKP_STREAM_FORMATS.map((f) => {
+          const year = skpStreamYear(f)
+          return { value: f, label: t`SketchUp ${year}` }
+        }),
+        value: release,
+      },
+    ],
+  }
+}
+
+/** The compat checkbox of the 2021-and-later container. */
+function compatOption(value: boolean): PanelOption {
+  return { kind: 'check', id: 'compat', label: compatLabel(), value }
+}
+
+/** The panel's entry id for a document format: the older releases share one. */
+export function panelIdFor(format: DocFormat): string {
+  return isSkpStreamFormat(format) ? SKP_OLDER_PICKER_ID : format
+}
+
+/**
+ * Save As's formats, as the in-app step lists them: Hew, the 2021-and-later
+ * container (with its compat checkbox), then one "Older SketchUp versions"
+ * entry that lists the releases — preselected to the file's own, `current`.
+ */
+export function savePanelFormats(current?: DocFormat, compat = false): PanelFormat[] {
+  return [
+    ...SAVE_FORMAT_CHOICES.filter((c) => c.group === undefined).map(
+      (c): PanelFormat => ({
+        id: c.format,
+        label: c.label,
+        extension: extensionFor(c.format).slice(1),
+        options: takesCompat(c.format) ? [compatOption(compat)] : [],
+      }),
+    ),
+    olderPanelFormat(olderReleaseFor(current)),
+  ]
+}
 
 // ------------------------------------------------------------------- Export
 
-/** `skp` is the SketchUp 2026 container, `skp2017` the 2017 format. */
-export type ExportFormat = 'glb' | 'stl' | '3mf' | 'usdz' | 'svg' | 'skp' | 'skp2017'
+/** `skp` is the SketchUp 2021-and-later container; the stream releases (`SKP_STREAM_FORMATS`) are those releases' own formats. */
+export type ExportFormat = 'glb' | 'stl' | '3mf' | 'usdz' | 'svg' | 'skp' | SkpStreamFormat
+
+/** The SketchUp export formats. */
+export type SkpExportFormat = Extract<ExportFormat, `skp${string}`>
+
+/** Whether an export format writes a `.skp`. */
+export function isSkpExportFormat(format: ExportFormat): format is SkpExportFormat {
+  return format.startsWith('skp')
+}
 
 /** SVG line-drawing options (docs/design/printing.md §7b). */
 export interface SvgExportOptions {
@@ -87,7 +149,14 @@ export interface SvgExportOptions {
 }
 
 /** Export's formats: the panel's labels (the in-app dialog adds a hint). */
-export const EXPORT_FORMATS: { format: ExportFormat; label: string; extension: string; hint: string }[] = [
+export const EXPORT_FORMATS: {
+  format: ExportFormat
+  label: string
+  extension: string
+  hint: string
+  /** `older`: a stream release, listed under "Older SketchUp versions". */
+  group?: 'older'
+}[] = [
   {
     format: 'glb',
     get label() {
@@ -141,21 +210,25 @@ export const EXPORT_FORMATS: { format: ExportFormat; label: string; extension: s
   {
     format: 'skp',
     get label() {
-      return t`SketchUp (.skp)`
+      return t`SketchUp 2021 and later (.skp)`
     },
     extension: 'skp',
     hint: '',
   },
-  {
-    format: 'skp2017',
+  // Every stream release, newest to oldest, after the 2021-and-later container.
+  ...SKP_STREAM_FORMATS.map((format) => ({
+    format,
+    group: 'older' as const,
     get label() {
-      return t`SketchUp 2017 (.skp)`
+      const release = skpStreamYear(format)
+      return t`SketchUp ${release} (.skp)`
     },
     extension: 'skp',
     get hint() {
-      return t`opens in SketchUp Make 2017 and later`
+      const release = skpStreamYear(format)
+      return t`opens in SketchUp ${release} and later`
     },
-  },
+  })),
 ]
 
 /** STL curve-resolution choices: segments per full turn (0 = stored facets). */
@@ -208,9 +281,10 @@ export function svgScaleLabel(p: PrintScale, unit: LengthFormat): string {
 }
 
 /** Export's formats for the native panel, each with its options. */
-export function exportPanelFormats(unit: LengthFormat): PanelFormat[] {
+export function exportPanelFormats(unit: LengthFormat, current?: ExportFormat, compat = false): PanelFormat[] {
   const presets = scalePresetsFor(unit)
   const options: Partial<Record<ExportFormat, PanelOption[]>> = {
+    skp: [compatOption(compat)],
     stl: [
       {
         kind: 'select',
@@ -239,29 +313,43 @@ export function exportPanelFormats(unit: LengthFormat): PanelFormat[] {
       { kind: 'check', id: 'dimensions', label: t`Dimensions & text`, value: true },
     ],
   }
-  return EXPORT_FORMATS.map((f) => ({
-    id: f.format,
-    label: f.label,
-    extension: f.extension,
-    options: options[f.format] ?? [],
-  }))
+  return [
+    ...EXPORT_FORMATS.filter((f) => f.group === undefined).map((f) => ({
+      id: f.format as string,
+      label: f.label,
+      extension: f.extension,
+      options: options[f.format] ?? [],
+    })),
+    olderPanelFormat(olderReleaseFor(current !== undefined && isSkpStreamFormat(current) ? current : undefined)),
+  ]
+}
+
+/** The panel entry an export format is listed under. */
+export function exportPanelIdFor(format: ExportFormat): string {
+  return isSkpStreamFormat(format) ? SKP_OLDER_PICKER_ID : format
 }
 
 /** What an export does, read back from the panel's answer. */
 export interface ExportChoice {
   format: ExportFormat
+  /** `skp` only: write revision 17 of the container. */
+  skpCompat: boolean
   stlSegmentsPerTurn: number
   svg?: SvgExportOptions
 }
 
 /** Turn the panel's answer into an export; `null` for an unknown format. */
 export function exportChoiceFrom(result: PanelResult, unit: LengthFormat): ExportChoice | null {
-  const format = EXPORT_FORMATS.find((f) => f.format === result.format)?.format
-  if (format === undefined) return null
   const o = result.options
+  const format =
+    result.format === SKP_OLDER_PICKER_ID
+      ? olderReleaseFrom(o.release)
+      : EXPORT_FORMATS.find((f) => f.format === result.format && f.group === undefined)?.format
+  if (format === undefined) return null
   const segments = Number(o.segments ?? DEFAULT_STL_SEGMENTS)
   const choice: ExportChoice = {
     format,
+    skpCompat: format === 'skp' && o.compat === true,
     stlSegmentsPerTurn: Number.isFinite(segments) ? segments : DEFAULT_STL_SEGMENTS,
   }
   if (format === 'svg') {
@@ -281,5 +369,11 @@ export function exportChoiceFrom(result: PanelResult, unit: LengthFormat): Expor
 
 /** Save As's format from the panel's answer (anything else is `.hew`). */
 export function saveFormatFrom(result: PanelResult): DocFormat {
-  return result.format === 'skp2026' || result.format === 'skp2017' ? result.format : 'hew'
+  if (result.format === SKP_OLDER_PICKER_ID) return olderReleaseFrom(result.options.release)
+  return normalizeDocFormat(result.format)
+}
+
+/** Whether the panel's answer asked for revision 17 of the 2021-and-later container. */
+export function saveCompatFrom(result: PanelResult): boolean {
+  return takesCompat(saveFormatFrom(result)) && result.options.compat === true
 }
