@@ -329,7 +329,7 @@ describe('PlaceImageTool', () => {
     const { tool, place } = makeTool({ pick: makePick(1n, 2n, 4n), facePlane: [0, 5, 0, 0, 1, 0], instancePose: pose })
     const ray = (y: number, z: number): Ray => ({ origin: [20, y, z], direction: [-1, 0, 0] })
     tool.onPointerDown({ x: 5, y: 1, z: 1, kind: 'on-face' }, ray(1, 1))
-    const plane = tool.snapConstraint()!.constraintPlane
+    const plane = tool.snapConstraint()!.constraintPlane!
     expect(close(plane.point, [5, 1, 1])).toBe(true)
     // Turned toward the viewer, who is on +X.
     expect(close(plane.normal, [1, 0, 0])).toBe(true)
@@ -366,5 +366,90 @@ describe('parsePlacedImage', () => {
       definition: 3n, instance: 4n, width: 1.5, height: 0.5,
     })
     expect(parsePlacedImage(undefined)).toEqual({ definition: 0n, instance: 0n, width: 0, height: 0 })
+  })
+})
+
+describe('view-plane inference', () => {
+  const camera = (eye: [number, number, number]) => {
+    const cam = new THREE.PerspectiveCamera(45, 1.5, 0.1, 1000)
+    cam.position.set(...eye)
+    cam.up.set(0, 0, 1)
+    cam.lookAt(0, 0, 0)
+    cam.updateMatrixWorld(true)
+    return cam
+  }
+  const rayFrom = (eye: [number, number, number], p: [number, number, number]): Ray => {
+    const d = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]]
+    const len = Math.hypot(d[0], d[1], d[2])
+    return { origin: eye, direction: [d[0] / len, d[1] / len, d[2] / len] }
+  }
+  const free = (p: [number, number, number]): Snap => ({ x: p[0], y: p[1], z: p[2], kind: 'plane' })
+
+  it('stands the picture on the green plane from a Front view and says so', () => {
+    const { tool } = makeTool()
+    const eye: [number, number, number] = [0, -10, 0]
+    tool.updateCamera(camera(eye))
+    tool.onPointerMove(free([1, 0, 1]), rayFrom(eye, [1, 0, 1]))
+    expect(tool.statusHint()).toContain('Facing the green plane')
+    const c = tool.ghostCorners()!
+    // Every corner lies on y = 0, the green plane through the origin.
+    expect(c.every((p) => Math.abs(p[1]) < 1e-9)).toBe(true)
+  })
+
+  it('names the plane with the placement copy, and offers it only as the snap fallback', () => {
+    const { tool } = makeTool()
+    const eye: [number, number, number] = [0, -10, 0]
+    tool.updateCamera(camera(eye))
+    tool.onPointerMove(free([1, 0, 1]), rayFrom(eye, [1, 0, 1]))
+    expect(tool.statusHint()).toMatch(/^Facing the green plane — click the first corner of ".*" to place it there; ↑ for the ground\. Esc cancels\.$/)
+    const c = tool.snapConstraint()
+    expect(c?.constraintPlane).toBeUndefined()
+    expect(c?.fallbackPlane?.normal).toEqual([0, 1, 0])
+    expect(c?.fallbackPlane?.point).toEqual([0, 0, 0])
+  })
+
+  it('no snap fallback from the home view, under an arrow lock, or with the plane behind the eye', () => {
+    const home = makeTool()
+    home.tool.updateCamera(camera([3.5, -3, 2.5]))
+    expect(home.tool.snapConstraint()).toBeNull()
+
+    const locked = makeTool()
+    locked.tool.updateCamera(camera([0, -10, 0]))
+    locked.tool.onKey({ key: 'ArrowUp', repeat: false, preventDefault: () => { /* no-op */ } } as unknown as KeyboardEvent)
+    expect(locked.tool.snapConstraint()).toBeNull()
+
+    const behind = makeTool()
+    const cam = new THREE.PerspectiveCamera(45, 1.5, 0.1, 1000)
+    cam.position.set(0, 2, 0)
+    cam.up.set(0, 0, 1)
+    cam.lookAt(0, 12, 0)
+    cam.updateMatrixWorld(true)
+    behind.tool.updateCamera(cam)
+    expect(behind.tool.snapConstraint()).toBeNull()
+    behind.tool.onPointerMove(null, rayFrom([0, 2, 0], [1, 8, -1]))
+    expect(behind.tool.statusHint()).not.toContain('Facing')
+  })
+
+  it('keeps the ground from the home view, and with no camera fed', () => {
+    const eye: [number, number, number] = [3.5, -3, 2.5]
+    const home = makeTool()
+    home.tool.updateCamera(camera(eye))
+    home.tool.onPointerMove(null, rayFrom(eye, [1, 1, 0]))
+    expect(home.tool.statusHint()).not.toContain('Facing')
+    expect(home.tool.ghostCorners()!.every((p) => Math.abs(p[2]) < 1e-9)).toBe(true)
+
+    const bare = makeTool()
+    bare.tool.onPointerMove(ground(0, 0), down(0, 0))
+    expect(bare.tool.statusHint()).not.toContain('Facing')
+  })
+})
+
+describe('PlaceImageTool — a document reset', () => {
+  it('forgets the memoized face picks and the hover memory', () => {
+    const { tool } = makeTool()
+    const cache = (tool as unknown as { pickCache: { clear(): void } }).pickCache
+    const clear = vi.spyOn(cache, 'clear')
+    tool.onDocumentReset()
+    expect(clear).toHaveBeenCalled()
   })
 })

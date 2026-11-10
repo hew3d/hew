@@ -10,14 +10,87 @@ is not guaranteed: releases that change the `.hew` format say so under
 
 ## [Unreleased]
 
+### Changed
+
+- **Drawing:** Shapes drawn in empty space land on the axis plane facing the camera, as in SketchUp. From a low view that squarely faces a wall (a Front or Side standard view, for one) Line, Rectangle, Circle, Polygon, Arc, and Place Image start on that wall's plane, shown by a tinted patch and a status-bar line before you click; from above or a three-quarter view they still start on the ground. The tinted patch shows the plane under the cursor, including a sketch or face you hover. The arrow keys and Shift still override it. With the drawing axes moved, empty-space drawing follows the moved axes' ground.
+- **Drawing:** At a corner or edge shared by two faces, a shape starts on the face the cursor is leaning toward, not always the one facing the camera most squarely. Off the solid to one side, it takes that side's plane.
+
+## [1.4.0] (2026-11-08) - The "All In" Release
+
+Hew now opens and saves every SketchUp file there is, from SketchUp 3
+through SketchUp 2027. Save writes the file back in the version it came in.
+Save As writes any version, including the ones SketchUp itself stopped
+writing years ago, so a 2027 model can go out as a SketchUp 8 file and come
+back. More of what a file holds survives the round trip: layer folders,
+scene timing, guide dash patterns, the section plane's look, Match Photo
+cameras, geo-location, and physically based materials, which also brings
+Metallic and Roughness sliders to the material palette.
+
+Modeling got the pieces that SketchUp hands kept reaching for. A Ctrl or
+Cmd tap keeps a drawn shape off the face under it, and drawing is now
+color-coded: blue for a shape that becomes a new object, orange for one
+that is part of a solid. Two new snaps find the point where an edge pierces
+a face and the line where two objects' faces meet. Editing one copy of a
+component leaves the other copies in view and moving with every change.
+Guides can be moved, rotated, and copied in rows and fans. A whole line is
+dimensioned with one click.
+
+This is also the first release with a wave of outside work: eight pull
+requests from two new contributors, covering the guide tools, the one-click
+dimension, three selection fixes, resizable tray sections, and the Flatpak
+install fix. Eight user-reported bugs are fixed, along with two kernel
+faults found by fuzzing. Reporters can now hear back from Help ▸ Sent
+Reports without an account, and beta.hew3d.com runs what the next release
+will be.
+
 ### Added
+
+- **SketchUp files:** Hew opens and saves every SketchUp version, from SketchUp 3 through 2027: releases 3 to 8 and 2013 to 2020 (the stream container, each saved in its own release's layout) as well as the container that SketchUp 2021 and later save. Save writes back in the format a file was opened in; Save As and Export offer the 2021-and-later format and an "Older SketchUp versions" group. A file is read by its content, not its header's version label. What an older release cannot hold is reported in a short list after the save.
+- **SketchUp files:** A 2021-and-later save is written by content at revision 17 or 18. The "Avoid features older SketchUp versions cannot open" option (`compat` on `hew.doc.save` and `hew.doc.export`) writes revision 17, leaving out layer folders, hatch patterns, PBR materials, environments, snaps, procedures, page extras and the coordinate system. Revision, not the header's version, decides what SketchUp opens: revision 18 and below open in SketchUp 2027, and SketchUp 2027 desktop refuses a hand-edited file of revision 19 or above (the web app accepted it; no real file above 18 exists). A `compat` save to a target other than the 2021-and-later container is refused with `format_mismatch`. SketchUp 2021 to 2025 are supported: they use the same container, and the files to hand them are the revision 17 ones.
+- **SketchUp files:** Layer folders map to tags and back. A scene's timing, a guide's dash and the section plane's look are kept.
 
 - **Drawing:** Tap Ctrl (⌘ on a Mac) on any draw tool to detach the shape from the face or drawing under it. Push/Pull turns a detached shape into a new object instead of changing the face. The cursor shows a small + while Detach is on, and the outline being drawn is orange when the shape will join the face and blue when it stays detached.
 - **Drawing:** Drawing now has two colors. Blue drawing belongs to no solid and pushes into a new object; orange drawing is part of a solid's face and pushes the solid itself. The outline you draw on the ground or in empty space is blue, and one you draw on a face is orange until you detach it. Push/Pull ghosts follow the same rule: orange where the solid grows, red where it loses material, and blue where a new object appears, including when you push a free shape inward. Offset shows its preview in the color of the shape it starts from.
 
+- **SketchUp files:** Guide lines keep their dash pattern (dashed, dotted, long dashes, dash-dot or any other), draw with it, and save back with it. A camera set to a photo (Match Photo) keeps its image width and ratio through a save back until you move the view. A file's section-cut outline color and width are drawn, and its section fill, active section color, guide color and guide visibility settings are kept. Hew's own format is now manifest format 24.
+
+- **SketchUp files:** A model's geo-location (its coordinate reference system: name, datum, projection, unit, and the origin's easting, northing and height) now opens with the file, shows at the top of Model Info, and is written back to a SketchUp 2021-and-later file with every field the file held. It is also stored in Hew's own format (manifest format 25) and can be read and set through `hew.geo.get` and `hew.geo.set`, one undo step each. Older SketchUp formats have no such record and leave it out.
+
+- **SketchUp files:** Physically based materials open with the file: a material's metallic and roughness settings are drawn in the viewport (approximated with a Phong shading model), along with its metallic, roughness, normal and occlusion maps, and a save back writes them with everything else the file held about the material (workflow, enabled maps, normal-map style). The material palette has Metallic and Roughness sliders, and `hew.material.set_pbr` sets them, one undo step each. They are also stored in Hew's own format (manifest format 26).
+
+- **SketchUp files:** Opening a file that holds things Hew keeps through a save back but cannot show or edit (hatch patterns, environments, snaps, procedures, layer line styles, the current style record, layer page behaviours) now says so in one line of the open report, with a count for each kind.
+
+- **Guides:** Move and Rotate now take a guide like any selection. With nothing selected, click a guide to move it, or set the Rotate pivot on a guide to turn it. Axis locks, typed values, and the copy toggle all work, including `6x` and `6/` for a row or a fan of evenly spaced copies. A guide you click is selected only for that gesture. [#91] [#78] [#94]
+- **Dimensions:** Click a line itself, rather than a point on it, to dimension its whole length: both ends are taken at once and you go straight to placing the dimension. Works on a solid's edge and on a drawn line, inside a component too. [#70]
+- **Snapping:** Hew now snaps where an edge of one object passes through the face of another, such as a panel set into a wall. It reads as an Intersection, and the Tape Measure hint says "where the edge meets the face".
+- **Snapping:** A new On Intersection Line snap follows the line where a face of one object meets a face of another, such as where a slab passes through a wall. Objects never merge, so it is no real edge, but it is a line you can see and slide along. It works in Shaded and X-ray, and its middle and ends are snap points too. [#63]
+- **Components:** While you edit one copy of a component, the other copies stay visible and update with every change, as in SketchUp. A Push/Pull, Offset, Move, Rotate, or Scale drag previews on every copy before you click. Hovering a face of a component you are not editing now says how to get into it.
+- **Selection:** While a component, group, or object is open for editing, clicks reach it through whatever is in front of it, so a component sunk partly into a solid can be edited without turning on X-ray. Everything outside the open item is ignored by picks in Shaded and X-ray.
+- **Help:** Sent Reports follows a bug report you sent. Leave "Let me know what happens with this report" ticked in Report Bug and you can read replies and status, answer, and attach another file from Help ▸ Sent Reports, with no account or email address. A notice appears when something new arrives.
+- **Panels:** Drag the handle at the bottom of a long tray section to give it more or less height, or focus the handle and use the Up and Down arrow keys. Sections keep their automatic height until you resize one. [#42]
+
+### Changed
+
+- **Format:** The `.hew` format moves from manifest version 22 to 26 (detached drawing, guide dash and section look, geo-location, physically based materials). Hew opens every older file, but a file saved with these features needs this release or later.
+
+- **Subtract:** A Subtract that would remove nothing, because the cutter misses the target or only touches it, is now refused with "Nothing was cut away" instead of quietly handing back the target and using up the cutter. Both shapes stay where they are, so you can move the cutter and try again. Follow Me still merges a sweep that engulfs its base.
+- **License:** The logo, mark, app icons, and brand sheet are now licensed CC BY 4.0, so app launchers and package catalogs can bundle them with attribution. The license grants no trademark rights.
+
 ### Fixed
 
 - **Push/Pull:** The hint for the Ctrl/⌘ new-object toggle now refreshes the moment you tap the key.
+- **Selection:** A drag that encloses an object no longer sometimes selects nothing. A left-to-right (window) drag now also picks an object that it covers at least 80% of on screen and touches. Window is a solid blue box tagged Window and crossing is a dashed green one tagged Crossing, with the status bar explaining each, and selecting over a large model takes milliseconds instead of seconds.
+- **Selection:** A line lying along a guide or an axis can be selected by clicking it, from any distance the snap holds at. Guides and dimension lines also stay clickable when you are zoomed in on one that runs into the distance. [#67] [#69]
+- **Components:** Copy, Cut and Paste of a component instance now places another instance of the same component, so editing either copy edits both and the Components panel keeps one entry with its count raised. Before, a pasted copy was unlinked from the original.
+- **Undo:** A circle drawn tangent to a face's edge could leave Undo unable to step back past a merge of the regions around it. Undo now unwinds it.
+- **Export:** STL, glTF, and USDZ exports leave out the rare hairline-thin triangle that would flip direction when rounded to the file's precision, which a slicer or viewer read as a facet facing into the solid. The same filter keeps such triangles out of the viewport. Ordinary exports are byte-for-byte what they were.
+- **Open on Phone:** The share relay's route is now declared with the Worker, so a redeploy cannot drop it, and a scheduled check watches the live service. This fixes "could not reach the share server (status 405)".
+- **COLLADA:** `.dae` files from exporters that leave out the created and modified dates now import instead of failing with "expected <created>".
+- **Linux:** The Flatpak install commands and bundle now install Hew and its GNOME runtime in the same scope, with Hew supplying updates and Flathub the runtime, which is meant to fix "runtime not found" on systems where Flathub is configured per user. [#48]
+
+### Security
+
+- **All:** Updated the zip crate to 9.0.5 for CVE-2026-115905 (GHSA-m665-v7pm-7grj), a mismatch between an entry's local and central headers that could hide a file from checks.
 
 ## [1.3.1] (2026-10-26) - The "Safe to Reopen" Release
 

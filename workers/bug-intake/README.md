@@ -51,10 +51,11 @@ first), then **COMMIT**.
 | `/report/admin/<id>/reply` | `POST` | form `text`, or `canned=ask-file` / `canned=ask-steps`; redirects to the detail page | |
 | `/report/admin/<id>/status` | `POST` | form `status` (`open`/`need-info`/`fixed`/`closed`), `version` (required for `fixed`), `note`; redirects to the detail page | |
 
-Every response carries `Cache-Control: no-store`; none carry CORS headers
-— the web build posts same-origin under `app.hew3d.com`, and the desktop
-client isn't a browser, so there is nothing for CORS to gate here (unlike
-`share-relay`, which serves a phone's browser directly).
+Every response carries `Cache-Control: no-store`; none carry CORS headers —
+the web build posts same-origin under `app.hew3d.com` (and under
+`beta.hew3d.com`), and the desktop client isn't a browser, so there is nothing
+for CORS to gate here (unlike `share-relay`, which serves a phone's browser
+directly).
 
 **START** (`POST /report/`) validates, in order (cheapest first): the
 declared `Content-Length` for THIS piece (`411`/`413`), `Content-Type:
@@ -537,13 +538,14 @@ Every report-derived value that reaches an admin page — the description,
 `src/adminPages.ts`'s `escapeHtml` runs on every one of them before it
 reaches a template string; there is no exception. A strict
 `Content-Security-Policy` (`default-src 'none'; style-src 'unsafe-inline';
-form-action 'self'; frame-ancestors 'none'`) rides every admin response as
-a second layer, not a substitute for escaping. Mutating routes (`delete`,
+form-action 'self'; frame-ancestors 'none'`) rides every admin response as a
+second layer, not a substitute for escaping. Mutating routes (`delete`,
 `triage`) also check the request's `Origin` header against
-`https://app.hew3d.com` — the admin pages' own origin — before doing
-anything. An upload still in progress (or abandoned and not yet pruned) is
-`404` in the detail/download routes and simply absent from the list — it
-isn't a real report yet.
+`https://app.hew3d.com` — the admin pages' own origin — before doing anything.
+Admin pages are only ever served from `app.hew3d.com`, so reports sent from
+the beta host are administered there too. An upload still in progress (or
+abandoned and not yet pruned) is `404` in the detail/download routes and
+simply absent from the list — it isn't a real report yet.
 
 Neither admin route reassembles a report's pieces into one buffer any
 more — the old approach (read every stored piece into an array, concatenate
@@ -742,14 +744,15 @@ so there is no Paid-plan requirement anywhere in this checklist.
    npx wrangler secret put IP_HASH_SECRET       # any long random value; submissions 503 without it
    ```
 6. **Wire the route**: `wrangler.toml`'s `[[routes]]` block
-   (`app.hew3d.com/report/*` on zone `hew3d.com`) takes effect on the next
-   deploy — it requires `hew3d.com` to already be a Cloudflare-managed
-   zone, and `app.hew3d.com` to already carry the Pages-hosted web app.
-   Redeploy (`npx wrangler deploy`) after adding it if it wasn't there for
-   step 4. Verify the Workers route wins over the Pages custom domain on
-   this hostname the same way `share-relay`'s checklist does: `curl -s
-   https://app.hew3d.com/report/` should return the identity JSON, not the
-   web app's HTML.
+   (`app.hew3d.com/report/*` on zone `hew3d.com`, and
+   `beta.hew3d.com/report/*` for the beta host) takes effect on the next
+   deploy — it requires `hew3d.com` to already be a Cloudflare-managed zone,
+   and `app.hew3d.com` to already carry the Pages-hosted web app. Redeploy
+   (`npx wrangler deploy`) after adding it if it wasn't there for step 4. Any
+   later change to the routes needs the same redeploy. Verify the Workers
+   route wins over the Pages custom domain on this hostname the same way
+   `share-relay`'s checklist does: `curl -s https://app.hew3d.com/report/`
+   should return the identity JSON, not the web app's HTML.
 7. **Create a Cloudflare Access application** for
    `app.hew3d.com/report/admin/*` (Zero Trust dashboard → **Access** →
    **Applications** → **Add an application** → **Self-hosted**), with the

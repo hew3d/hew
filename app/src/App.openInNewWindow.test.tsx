@@ -70,6 +70,7 @@ const mockScene = {
   undo_depth: () => 0,
   redo_depth: () => 0,
   history_entries_json: () => JSON.stringify({ undo: [], redo: [], savedDepth: null }),
+  geo_reference_json: () => 'null',
   save: () => new Uint8Array(),
   load: vi.fn(),
   camera_state: () => undefined,

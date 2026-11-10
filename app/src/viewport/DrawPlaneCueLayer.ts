@@ -77,6 +77,13 @@ function patchColor(plane: DrawPlane, frame?: DrawingAxes): number {
 export class DrawPlaneCueLayer {
   readonly group: THREE.Group
   private mesh: THREE.LineSegments | null = null
+  private shown: { normal: V3; through: V3 } | null = null
+
+  /** The plane and point the patch is drawn for right now, or null when no
+   *  patch shows. Observe-only (the E2E harness reads it). */
+  get current(): { normal: V3; through: V3 } | null {
+    return this.shown === null ? null : { normal: [...this.shown.normal], through: [...this.shown.through] }
+  }
 
   constructor() {
     this.group = new THREE.Group()
@@ -104,6 +111,7 @@ export class DrawPlaneCueLayer {
     mesh.name = 'DrawPlaneCue'
     this.mesh = mesh
     this.group.add(mesh)
+    this.shown = { normal: [...cue.plane.normal], through: [...cue.through] }
   }
 
   /** Dispose and hide the cue — tool switch, cancel, document reset. */
@@ -112,6 +120,7 @@ export class DrawPlaneCueLayer {
   }
 
   private _dispose(): void {
+    this.shown = null
     if (this.mesh === null) return
     this.mesh.geometry.dispose()
     if (this.mesh.material instanceof THREE.Material) this.mesh.material.dispose()

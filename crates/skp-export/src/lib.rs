@@ -1,6 +1,6 @@
-//! Hew [`Document`] -> SketchUp `.skp`, through the clean-room OpenSKP
-//! writer: the 2026 container every current SketchUp saves, or the 2017
-//! format SketchUp Make 2017 and every later release open.
+//! Hew [`Document`] -> SketchUp `.skp`, through the clean-room Skpwright
+//! writer: the 2026 container every current SketchUp saves, or the stream
+//! container in any release Skpwright writes (3 to 8 and 2013 to 2020).
 //!
 //! The mapping is the one `skp-import` reads back as the same document, so
 //! a document survives Hew -> `.skp` -> Hew:
@@ -20,9 +20,14 @@
 //! - an **instance** becomes a component placement with its pose;
 //! - a **sketch** (drawn, not extruded) becomes loose edges and faces in its
 //!   owner's entity list — SketchUp's own form for unextruded drawing;
-//! - **tags** become layers (a path joins with `/`), **materials** keep
+//! - **tags** become layers: in the 2026 container a path of several
+//!   segments is layer folders (every segment but the last) holding a
+//!   layer named by the last; a stream release has no folders, so a path
+//!   joins with `/` into one flat layer. **Materials** keep
 //!   name, color, opacity and texture, **scenes** keep camera, hidden
-//!   entities, hidden tags and section cut, **guides** keep lines and
+//!   entities, hidden tags (a hidden tag hides its subtree, so a hidden
+//!   folder is a page's hidden folder) and section cut, and their own
+//!   transition time and delay, **guides** keep lines and
 //!   points, and the section plane, camera and axes come along.
 //!
 //! What `.skp` cannot hold is reported in [`Export::simplified`] — the
@@ -34,7 +39,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod curves;
 mod dicts;
+mod folders;
 mod merge;
+mod pbr;
 mod source;
 mod texture;
 
@@ -48,7 +55,7 @@ use kernel::{
     InstanceId, MaterialId, NodeId, Object, ObjectId, Point3, SectionPlaneState, SketchId,
     Transform,
 };
-use openskp::{
+use skpwright::{
     Definition, DefinitionKind, Dictionary, GeometryRun, GuidePoint, Instance, Layer, Material,
     Mesh, MeshEdge, MeshFace, Model, Owner, PlacedInstance, SceneProperties, SectionPlane, Value,
 };
@@ -56,10 +63,113 @@ use openskp::{
 /// Which `.skp` container to write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
-    /// The 2026 container (a ZIP archive): what current SketchUp saves.
+    /// The 2021-and-later container (a ZIP archive, what current SketchUp
+    /// saves) at the lowest revision that holds the content
+    /// ([`skpwright::ArchiveTarget::ByContent`]).
     Skp2026,
-    /// The 2017 format: opens in SketchUp Make 2017 and every later release.
-    Skp2017,
+    /// The same container at revision 17, for the widest compatibility: what
+    /// only revision 18 holds (layer folders, hatch patterns, PBR materials,
+    /// environments, snaps and the other post-2017 content) is left out, each
+    /// kind with a note in [`Export::writer_notes`].
+    Skp2026Compat,
+    /// The stream container in one of its releases: every release of
+    /// [`skpwright::Release::ALL`] (3 to 8 and 2013 to 2020), each written
+    /// in its own layout.
+    Stream(skpwright::Release),
+}
+
+impl Target {
+    /// The stream release this target writes (`None` for the 2026
+    /// container).
+    pub fn release(self) -> Option<skpwright::Release> {
+        match self {
+            Target::Skp2026 | Target::Skp2026Compat => None,
+            Target::Stream(r) => Some(r),
+        }
+    }
+
+    /// Whether this is the 2021-and-later container (either revision class).
+    pub fn is_archive(self) -> bool {
+        !matches!(self, Target::Stream(_))
+    }
+
+    /// The archive target a revision class stands for: `compat` for revision
+    /// 17, else by content. A stream target is unchanged.
+    pub fn with_compat(self, compat: bool) -> Target {
+        match self {
+            Target::Skp2026 | Target::Skp2026Compat if compat => Target::Skp2026Compat,
+            Target::Skp2026Compat => Target::Skp2026,
+            t => t,
+        }
+    }
+}
+
+/// The target a save writes back for an opened `.skp` file's bytes: the
+/// 2021-and-later container for a ZIP file (revision 17 files keep to
+/// [`Target::Skp2026Compat`], a newer revision is written by content), and for a stream file its own release
+/// (the header's version, [`skpwright::Release::of_version`]). A stream
+/// file of a release Skpwright does not list (9 to 12, or one later than
+/// 2020) takes the nearest release it writes; [`unlisted_note`] says so.
+pub fn target_of(bytes: &[u8]) -> Target {
+    match skpwright::detect_container(bytes) {
+        skpwright::Container::Stream => {
+            let version = skpwright::header_info(bytes).map(|(version, _)| version);
+            match version.as_deref().and_then(skpwright::Release::of_version) {
+                Some(r) => Target::Stream(r),
+                None => Target::Stream(nearest_release(
+                    version.as_deref().and_then(version_major).unwrap_or(0),
+                )),
+            }
+        }
+        skpwright::Container::Zip => match skpwright::Document::open(bytes)
+            .ok()
+            .and_then(|d| d.revision())
+        {
+            Some(r) if r <= skpwright::Revision::R17 => Target::Skp2026Compat,
+            _ => Target::Skp2026,
+        },
+        _ => Target::Skp2026,
+    }
+}
+
+/// Major number of a header's brace-form version: `"{17.3.116}"` is 17.
+fn version_major(version: &str) -> Option<u32> {
+    version
+        .trim_start_matches('{')
+        .split(['.', '}'])
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// The written release closest to a version number (the older one on a
+/// tie).
+fn nearest_release(major: u32) -> skpwright::Release {
+    skpwright::Release::ALL
+        .into_iter()
+        .min_by_key(|r| u32::from(r.number()).abs_diff(major))
+        .expect("Release::ALL is not empty")
+}
+
+/// What to tell the user when a stream file of a release Skpwright does not
+/// list is saved back as `release`: the file's own version cannot be
+/// written, so the nearest release is. `None` for a listed release, a ZIP
+/// or anything that is no SketchUp file.
+pub fn unlisted_note(bytes: &[u8], release: skpwright::Release) -> Option<String> {
+    if !matches!(
+        skpwright::detect_container(bytes),
+        skpwright::Container::Stream
+    ) {
+        return None;
+    }
+    let (version, _) = skpwright::header_info(bytes)?;
+    if skpwright::Release::of_version(&version).is_some() {
+        return None;
+    }
+    Some(format!(
+        "the file's release {version} is not one Skpwright writes; saved as release {}",
+        release.number()
+    ))
 }
 
 /// A written `.skp` file.
@@ -71,8 +181,8 @@ pub struct Export {
     /// short user-facing phrases, deduplicated and sorted. Empty when the
     /// file holds everything.
     pub simplified: Vec<String>,
-    /// The OpenSKP writer's own notes (what a 2026 model lost on the way
-    /// to the 2017 format).
+    /// The Skpwright writer's own notes (what a 2026 model lost on the way
+    /// to a stream release).
     pub writer_notes: Vec<String>,
     /// The persistent id each written node took: Hew stable id -> `.skp`
     /// persistent id, for objects, groups and instances.
@@ -97,13 +207,13 @@ impl std::fmt::Display for ExportError {
 
 impl std::error::Error for ExportError {}
 
-impl From<openskp::Error> for ExportError {
-    fn from(e: openskp::Error) -> Self {
+impl From<skpwright::Error> for ExportError {
+    fn from(e: skpwright::Error) -> Self {
         ExportError::Write(e.0)
     }
 }
 
-pub use openskp::WriteEnv;
+pub use skpwright::WriteEnv;
 
 /// Write `doc` as a `.skp` file in the `target` container. Any open
 /// group or component editing session is closed first, exactly as a `.hew`
@@ -123,7 +233,10 @@ pub fn export_in(
     units: Option<DisplayUnits>,
 ) -> Result<Export, ExportError> {
     let doc = doc.session_closed();
-    let mut authored = author(&doc);
+    let mut authored = author_with(Author {
+        folders: target == Target::Skp2026,
+        ..Author::new(&doc)
+    });
     if let Some(u) = units {
         authored.model.units = u.units();
     }
@@ -170,14 +283,14 @@ impl DisplayUnits {
     /// places, or 4 for 1/16"), length snapping to one step of that
     /// precision (stored in inches, as SketchUp's own metric files hold
     /// it), angle snapping to 15°, and area and volume in the same unit.
-    pub fn units(self) -> openskp::Units {
-        self.over(openskp::Units::sketchup_default())
+    pub fn units(self) -> skpwright::Units {
+        self.over(skpwright::Units::sketchup_default())
     }
 
     /// `units` with these length settings (format, unit, precision,
     /// snapping step, area and volume) and every other setting as it was:
     /// a file's own angle precision and snapping survive a change of unit.
-    pub fn over(self, units: openskp::Units) -> openskp::Units {
+    pub fn over(self, units: skpwright::Units) -> skpwright::Units {
         use DisplayUnits::*;
         const IN: f64 = 0.0254;
         let (format, unit, precision, snap) = match self {
@@ -188,7 +301,7 @@ impl DisplayUnits {
             FractionalInches => (3, 0, 4, 0.0625),
             DecimalInches => (0, 0, 3, 0.001),
         };
-        openskp::Units {
+        skpwright::Units {
             length_format: format,
             length_unit: unit,
             length_precision: precision,
@@ -211,18 +324,23 @@ pub(crate) fn write(
 ) -> Result<(Vec<u8>, Vec<String>), ExportError> {
     Ok(match target {
         Target::Skp2026 => (
-            openskp::Document::from_model_with(model, env)?.write()?,
+            skpwright::Document::from_model_with(model, env)?.write()?,
             Vec::new(),
         ),
-        Target::Skp2017 => {
-            let d = openskp::Document17::from_model_with(model, env)?;
+        Target::Skp2026Compat => model.to_archive_with(
+            skpwright::ArchiveTarget::Revision(skpwright::Revision::R17),
+            env,
+        )?,
+        stream => {
+            let release = stream.release().expect("stream targets have a release");
+            let d = skpwright::StreamDocument::from_model_with(model, release, env)?;
             let notes = d.notes().to_vec();
             (d.write(), notes)
         }
     })
 }
 
-/// A document as an OpenSKP model, before it is written.
+/// A document as an Skpwright model, before it is written.
 pub struct Authored {
     pub model: Model,
     pub simplified: BTreeSet<String>,
@@ -237,13 +355,15 @@ pub struct Authored {
     pub kept_annotations: BTreeSet<kernel::AnnotationId>,
     /// Tag stable id -> the written layer's name ([`SkpSource::layers`]).
     pub tag_layers: BTreeMap<u64, String>,
+    /// Each scene's stable id, in the written file's scene order.
+    pub scene_sids: Vec<u64>,
     /// The source's loose geometry was kept as it was.
     pub loose_kept: bool,
     /// The source file's placements carried unread ([`SkpSource::unread`]).
     pub unread: BTreeSet<u32>,
 }
 
-/// Build the OpenSKP model for `doc` (which must have no open session —
+/// Build the Skpwright model for `doc` (which must have no open session —
 /// [`export`] closes it).
 pub fn author(doc: &Document) -> Authored {
     author_with(Author::new(doc))
@@ -318,8 +438,23 @@ fn author_with(mut a: Author) -> Authored {
     a.push_run(root, root_map);
     if reuse {
         a.prune_unplaced_groups_on_source();
+    }
+    if a.folders {
+        a.release_folder_layers();
+    }
+    if reuse || a.folders {
         a.prune_layers_on_source();
     }
+    if a.folders {
+        a.finish_folders();
+    }
+    if a.folders {
+        // The file's folders are the tags' hierarchy: a reader takes them
+        // over the recorded paths, which a SketchUp edit leaves stale.
+        a.model_hew.set("folders", Value::Bool(true));
+    }
+    a.finish_pages();
+    a.instance_hatch_on_source();
     a.model.definition_links.sort_by_key(|l| l.0);
     a.finish_dictionaries();
     // The layer each tag stands for in the written file, by stable id.
@@ -332,8 +467,12 @@ fn author_with(mut a: Author) -> Authored {
             Some((sid, name))
         })
         .collect();
+    if !a.folders && doc.tag_meta().any(|(p, _)| p.len() > 1) {
+        a.note("layer folders: nested tags are written as flat layers named by their path");
+    }
     Authored {
         tag_layers,
+        scene_sids: a.scene_sids,
         loose_kept: a.loose_kept,
         model: a.model,
         simplified: a.simplified,
@@ -394,6 +533,21 @@ struct Author<'d> {
     /// since it was read from it), not written again.
     kept_annotations: BTreeSet<kernel::AnnotationId>,
     loose_kept: bool,
+    /// Writing the 2026 container: tag paths become layer folders.
+    folders: bool,
+    /// The source file's folders as tag paths, pre-order.
+    src_folder_paths: Vec<Vec<String>>,
+    /// Tags whose layer this save made (not the file's own).
+    new_tag_layers: BTreeSet<Vec<String>>,
+    /// The attributes of the tags that stand as folders alone, by path:
+    /// they move from the layer the tag gave up to its folder.
+    released_attrs: Vec<(Vec<String>, Vec<skpwright::Dictionary>)>,
+    /// Each scene's own page settings, in the document's order.
+    page_plans: Vec<folders::PagePlan>,
+    /// Each document scene's stable id, in the order written.
+    scene_sids: Vec<u64>,
+    /// The folders' paths before and after this save, pre-order.
+    folder_paths: Option<folders::FolderPaths>,
 }
 
 impl<'d> Author<'d> {
@@ -420,6 +574,13 @@ impl<'d> Author<'d> {
             loose_written: 0,
             kept_annotations: BTreeSet::new(),
             loose_kept: false,
+            folders: false,
+            src_folder_paths: Vec::new(),
+            new_tag_layers: BTreeSet::new(),
+            released_attrs: Vec::new(),
+            page_plans: Vec::new(),
+            scene_sids: Vec::new(),
+            folder_paths: None,
         }
     }
 
@@ -445,13 +606,13 @@ impl<'d> Author<'d> {
         let ri = self.model.geometry.len();
         let face_dicts = std::mem::take(&mut run.face_dicts);
         for (fi, d) in face_dicts {
-            self.model.dictionaries.push(openskp::Attributes {
+            self.model.dictionaries.push(skpwright::Attributes {
                 owner: Owner::Face(ri, fi),
                 dictionaries: vec![d],
             });
         }
         for (ci, d) in std::mem::take(&mut run.curve_dicts) {
-            self.model.dictionaries.push(openskp::Attributes {
+            self.model.dictionaries.push(skpwright::Attributes {
                 owner: Owner::Curve(ri, ci),
                 dictionaries: vec![d],
             });
@@ -467,7 +628,7 @@ impl<'d> Author<'d> {
                 }
                 let mut h = HewDict::default();
                 h.set("sketch", Value::Int(si as i32));
-                self.model.dictionaries.push(openskp::Attributes {
+                self.model.dictionaries.push(skpwright::Attributes {
                     owner: Owner::Edge(ri, ei),
                     dictionaries: h.into_dictionary().into_iter().collect(),
                 });
@@ -582,7 +743,7 @@ impl<'d> Author<'d> {
         }
         for (pid, dictionaries) in std::mem::take(&mut self.placement_dicts) {
             if let Some(&(ri, pi)) = at.get(&pid) {
-                self.model.dictionaries.push(openskp::Attributes {
+                self.model.dictionaries.push(skpwright::Attributes {
                     owner: Owner::Instance(ri, pi),
                     dictionaries,
                 });
@@ -607,7 +768,7 @@ impl<'d> Author<'d> {
                 .iter()
                 .position(|d| d.map_index == Some(map as usize))
             {
-                self.model.dictionaries.push(openskp::Attributes {
+                self.model.dictionaries.push(skpwright::Attributes {
                     owner: Owner::Definition(di),
                     dictionaries,
                 });
@@ -622,7 +783,7 @@ impl<'d> Author<'d> {
         if let Some(h) = std::mem::take(&mut self.model_hew).into_dictionary() {
             model.push(h);
         }
-        self.model.dictionaries.push(openskp::Attributes {
+        self.model.dictionaries.push(skpwright::Attributes {
             owner: Owner::Model,
             dictionaries: model,
         });
@@ -646,6 +807,14 @@ impl<'d> Author<'d> {
             let name = unique_name(&m.name, "Material", &mut taken);
             let written = material_record(&name, m);
             self.model.materials.push(written);
+            if m.pbr.is_some() {
+                let mut rec = skpwright::PbrMaterial::default();
+                pbr::apply(&mut rec, m.pbr.as_ref(), true);
+                self.model
+                    .features
+                    .material_pbr
+                    .push((self.model.materials.len() - 1, rec));
+            }
             let slot = self.model.materials.len() as u16;
             self.model
                 .material_links
@@ -653,7 +822,7 @@ impl<'d> Author<'d> {
             self.mat_slot.insert(id, slot);
             let d = self.attrs(AttrTarget::Entity(EntityRef::Material(id)));
             if !d.is_empty() {
-                self.model.dictionaries.push(openskp::Attributes {
+                self.model.dictionaries.push(skpwright::Attributes {
                     owner: Owner::Material(self.model.materials.len() - 1),
                     dictionaries: d,
                 });
@@ -683,14 +852,15 @@ impl<'d> Author<'d> {
             if path.is_empty() {
                 continue;
             }
-            let name = unique_name(&path.join("/"), "Tag", &mut taken);
+            let name = unique_name(&self.layer_name_for(&path), "Tag", &mut taken);
+            self.new_tag_layers.insert(path.clone());
             tag_paths.push(Value::Array(vec![
                 Value::Text(name.clone()),
                 dicts::path_value(&path),
             ]));
             let d = self.attrs(AttrTarget::Entity(EntityRef::Tag(path.clone())));
             if !d.is_empty() {
-                self.model.dictionaries.push(openskp::Attributes {
+                self.model.dictionaries.push(skpwright::Attributes {
                     owner: Owner::Layer(self.model.layers.len()),
                     dictionaries: d,
                 });
@@ -853,7 +1023,7 @@ impl<'d> Author<'d> {
                 defref,
                 offset: 0,
                 translation_m: [transform[9], transform[10], transform[11]]
-                    .map(|v| v / openskp::INCH),
+                    .map(|v| v / skpwright::INCH),
                 transform,
                 material: Some(material),
                 name: Some(n.to_string()),
@@ -1398,12 +1568,12 @@ impl<'d> Author<'d> {
                 } => {
                     let d = self.attrs(AttrTarget::Entity(EntityRef::Guide(gid)));
                     if !d.is_empty() {
-                        self.model.dictionaries.push(openskp::Attributes {
+                        self.model.dictionaries.push(skpwright::Attributes {
                             owner: Owner::Guide(self.model.guides.len()),
                             dictionaries: d,
                         });
                     }
-                    self.model.guides.push(openskp::Guide {
+                    self.model.guides.push(skpwright::Guide {
                         def_index: None,
                         point_m: [origin.x, origin.y, origin.z],
                         direction: [direction.x, direction.y, direction.z],
@@ -1414,6 +1584,7 @@ impl<'d> Author<'d> {
                         hidden: false,
                         casts_shadows: true,
                         receives_shadows: true,
+                        stipple: self.doc.guide_dash(gid).mask(),
                     })
                 }
                 Guide::Point { position } => {
@@ -1490,6 +1661,14 @@ impl<'d> Author<'d> {
                 _ => None,
             })
             .collect();
+        let tag_path: BTreeMap<u64, Vec<String>> = self
+            .doc
+            .sids()
+            .filter_map(|(e, sid)| match e {
+                EntityRef::Tag(path) => Some((sid, path.clone())),
+                _ => None,
+            })
+            .collect();
         let scenes: Vec<kernel::Scene> = self.doc.scenes().to_vec();
         let mut displays = Vec::new();
         for s in scenes {
@@ -1509,13 +1688,37 @@ impl<'d> Author<'d> {
                     .collect();
             }
             let mut hidden_layers = Vec::new();
+            let mut hidden_paths = None;
             if let Some(tags) = &s.hidden_tags {
                 saved |= SceneProperties::VISIBLE_LAYERS;
                 hidden_layers = tags
                     .iter()
                     .filter_map(|sid| tag_layer.get(sid).copied())
                     .collect();
+                let paths: Vec<Vec<String>> = tags
+                    .iter()
+                    .filter_map(|sid| tag_path.get(sid).cloned())
+                    .collect();
+                if self.folders {
+                    // A hidden tag hides its subtree: the layers under a
+                    // hidden folder are hidden on the page too.
+                    for (p, slot) in &self.layer_slot {
+                        if paths.iter().any(|h| p.starts_with(h))
+                            && let Some(l) = self.model.layer_links.iter().find(|l| l.0 == *slot)
+                            && !hidden_layers.contains(&l.1)
+                        {
+                            hidden_layers.push(l.1);
+                        }
+                    }
+                }
+                hidden_paths = Some(paths);
             }
+            self.scene_sids.push(s.sid);
+            self.page_plans.push(folders::PagePlan {
+                transition_s: s.transition_s,
+                delay_s: s.delay_s,
+                hidden: hidden_paths,
+            });
             let mut active_section_planes = Vec::new();
             if let Some(section) = s.section {
                 saved |= SceneProperties::ACTIVE_SECTION_PLANES;
@@ -1544,11 +1747,11 @@ impl<'d> Author<'d> {
             // backdrop and axes the scene captured.
             let rendering = s.view_style.map(|v| {
                 saved |= SceneProperties::STYLE_AND_FOG;
-                let mut r = openskp::RenderingOptions::sketchup_default();
-                style_into(&mut r, v);
+                let mut r = skpwright::RenderingOptions::sketchup_default();
+                style_into(&mut r, v, true);
                 r
             });
-            self.model.scenes.push(openskp::Scene {
+            self.model.scenes.push(skpwright::Scene {
                 name: s.name.clone(),
                 description: s.description.clone(),
                 saved: SceneProperties(saved),
@@ -1580,7 +1783,7 @@ impl<'d> Author<'d> {
         let m = |p: Point3| [p.x, p.y, p.z];
         // A point in space is anchor kind 1, as SketchUp writes one; kind
         // 0 is no anchor at all, which SketchUp reads as the origin.
-        let free = |p: Point3| openskp::Anchor {
+        let free = |p: Point3| skpwright::Anchor {
             kind: 1,
             point_m: m(p),
             ..Default::default()
@@ -1626,7 +1829,7 @@ impl<'d> Author<'d> {
                         n = n * -1.0;
                     }
                     let pid = self.pid();
-                    self.model.dimensions.push(openskp::Dimension {
+                    self.model.dimensions.push(skpwright::Dimension {
                         pid,
                         text_override: dimension_text(text_override.as_deref()),
                         start: free(a.point),
@@ -1650,12 +1853,12 @@ impl<'d> Author<'d> {
                         self.note(following);
                     }
                     let pid = self.pid();
-                    self.model.texts.push(openskp::Text {
+                    self.model.texts.push(skpwright::Text {
                         pid,
                         content: text,
                         anchor: free(anchor.point),
                         leader_offset: [offset.x, offset.y, offset.z],
-                        leader: openskp::Leader::Pushpin,
+                        leader: skpwright::Leader::Pushpin,
                         arrow: 2,
                         layer,
                         ..Default::default()
@@ -1690,7 +1893,7 @@ impl<'d> Author<'d> {
                                 && an.dot(n).abs() > 1.0 - 1e-6
                         })
                         .collect();
-                    let arcs: Vec<&openskp::Arc> = on_circle.iter().map(|s| &s.arc).collect();
+                    let arcs: Vec<&skpwright::Arc> = on_circle.iter().map(|s| &s.arc).collect();
                     let site = radial_arc(&arcs, anchor.point)
                         .map(|i| on_circle[i])
                         .map(|s| ArcSite {
@@ -1732,16 +1935,18 @@ impl<'d> Author<'d> {
                     let off = inches(curve.radius * 0.25) * if out { -1.0 } else { 1.0 };
                     let (map, edge) = (site.map, site.edge_pid);
                     let pid = self.pid();
-                    self.model.radial_dimensions.push(openskp::RadialDimension {
-                        pid,
-                        def_index: Some(map as usize),
-                        edge: Some(edge),
-                        diameter: kind == kernel::RadialKind::Diameter,
-                        leader: [angle, off],
-                        text_override: dimension_text(text_override.as_deref()),
-                        layer,
-                        ..Default::default()
-                    });
+                    self.model
+                        .radial_dimensions
+                        .push(skpwright::RadialDimension {
+                            pid,
+                            def_index: Some(map as usize),
+                            edge: Some(edge),
+                            diameter: kind == kernel::RadialKind::Diameter,
+                            leader: [angle, off],
+                            text_override: dimension_text(text_override.as_deref()),
+                            layer,
+                            ..Default::default()
+                        });
                     let i = self.model.radial_dimensions.len() - 1;
                     self.annotation_dict(Owner::RadialDimension(i), hew);
                 }
@@ -1754,30 +1959,46 @@ impl<'d> Author<'d> {
 
     fn annotation_dict(&mut self, owner: Owner, hew: HewDict) {
         if let Some(d) = hew.into_dictionary() {
-            self.model.dictionaries.push(openskp::Attributes {
+            self.model.dictionaries.push(skpwright::Attributes {
                 owner,
                 dictionaries: vec![d],
             });
         }
     }
 
+    fn geo_reference(&mut self) {
+        let unknown = self
+            .model
+            .features
+            .crs
+            .take()
+            .map(|c| c.unknown)
+            .unwrap_or_default();
+        self.model.features.crs = self.doc.geo_reference().map(|g| crs_of(g, unknown));
+    }
+
     fn view(&mut self) {
-        self.model.camera = self.doc.camera_state().as_ref().map(camera);
+        // (A save back sets the camera from the file's own: `camera_on_source`.)
+        if self.reuse.is_none() {
+            self.model.camera = self.doc.camera_state().as_ref().map(camera);
+        }
         // The document's view style sets the backdrop and the axes in the
         // display settings (the rest stays as the file has it, or as a
         // new SketchUp document's); a file without one is written with
         // SketchUp's own look, and says so to a reader of Hew's.
         if let Some(v) = self.doc.view_style() {
+            let fresh = self.reuse.is_none();
             let r = self
                 .model
                 .rendering
-                .get_or_insert_with(openskp::RenderingOptions::sketchup_default);
-            style_into(r, v);
+                .get_or_insert_with(skpwright::RenderingOptions::sketchup_default);
+            style_into(r, v, fresh);
             self.model_hew.set("view_style", Value::Bool(true));
         }
+        self.geo_reference();
         let ax = self.doc.axes();
         let z = ax.x.cross(ax.y);
-        self.model.axes = Some(openskp::Axes {
+        self.model.axes = Some(skpwright::Axes {
             origin_m: [ax.origin.x, ax.origin.y, ax.origin.z],
             x: [ax.x.x, ax.x.y, ax.x.z],
             y: [ax.y.x, ax.y.y, ax.y.z],
@@ -1786,11 +2007,36 @@ impl<'d> Author<'d> {
     }
 }
 
+/// The coordinate reference system of the written model, carried by the
+/// 2026 container only. The document's record sets every field it holds;
+/// a save back keeps the file's trailing records Hew does not read
+/// (`Crs::unknown`), and a document without a record writes none.
+fn crs_of(g: &kernel::GeoReference, unknown: Vec<(u16, Vec<u8>)>) -> skpwright::Crs {
+    skpwright::Crs {
+        eastings: g.easting,
+        northings: g.northing,
+        height: g.height,
+        x_axis: g.x_axis,
+        scale: g.scale,
+        name: g.name.clone(),
+        description: g.description.clone(),
+        map_zone: g.map_zone.clone(),
+        geodetic_datum: g.geodetic_datum.clone(),
+        vertical_datum: g.vertical_datum.clone(),
+        map_projection: g.map_projection.clone(),
+        map_unit: g.map_unit.clone(),
+        map_unit_metres: g.map_unit_metres,
+        tgl_id: g.tgl_id.clone(),
+        calibration_file_name: g.calibration_file_name.clone(),
+        unknown,
+    }
+}
+
 /// An arc of a world Object, where a radius dimension can hang: its
 /// geometry, the persistent id given to one of its edges, and the group
 /// definition holding it.
 struct ArcSite {
-    arc: openskp::Arc,
+    arc: skpwright::Arc,
     edge_pid: u32,
     map: u32,
 }
@@ -1798,8 +2044,8 @@ struct ArcSite {
 /// Which of a circle's welded arcs a radius dimension hangs on: the one
 /// under its `point` (a circle SketchUp drew as several arcs keeps each
 /// one's dimension on it), else the longest.
-fn radial_arc(arcs: &[&openskp::Arc], point: Point3) -> Option<usize> {
-    let holds = |a: &openskp::Arc| {
+fn radial_arc(arcs: &[&skpwright::Arc], point: Point3) -> Option<usize> {
+    let holds = |a: &skpwright::Arc| {
         let v = |m: [f64; 3]| kernel::Vec3::new(m[0], m[1], m[2]);
         let d = point - Point3::new(a.center_m[0], a.center_m[1], a.center_m[2]);
         // Measured from the arc's start, so a point a hair before its first
@@ -1816,7 +2062,7 @@ fn radial_arc(arcs: &[&openskp::Arc], point: Point3) -> Option<usize> {
     };
     (0..arcs.len()).find(|&i| holds(arcs[i])).or_else(|| {
         (0..arcs.len()).max_by(|&i, &j| {
-            let sweep = |a: &openskp::Arc| a.end_rad - a.start_rad;
+            let sweep = |a: &skpwright::Arc| a.end_rad - a.start_rad;
             sweep(arcs[i]).total_cmp(&sweep(arcs[j]))
         })
     })
@@ -1834,9 +2080,9 @@ struct RunBuf {
     sections: Vec<SectionPlane>,
     guide_points: Vec<GuidePoint>,
     active_section: Option<u32>,
-    curves: Vec<openskp::Curve>,
+    curves: Vec<skpwright::Curve>,
     /// The file's placed images the list keeps (a save back only).
-    images: Vec<openskp::ImagePlacement>,
+    images: Vec<skpwright::ImagePlacement>,
     /// Dictionaries of faces, by index in `mesh.faces`.
     face_dicts: Vec<(usize, Dictionary)>,
     /// What the list's loose geometry is, for the `hew` dictionary.
@@ -1853,7 +2099,7 @@ struct RunBuf {
 
 impl RunBuf {
     /// Start from an existing list's geometry (new geometry welds onto it).
-    fn seed(&mut self, mesh: &Mesh, curves: &[openskp::Curve]) {
+    fn seed(&mut self, mesh: &Mesh, curves: &[skpwright::Curve]) {
         self.mesh = mesh.clone();
         self.curves = curves.to_vec();
         for (i, v) in mesh.vertices.iter().enumerate() {
@@ -1941,7 +2187,7 @@ impl RunBuf {
                 let _ = self.edge(ring[k], ring[(k + 1) % ring.len()], false);
             }
         }
-        // OpenSKP's rings all run counter-clockwise about the normal, holes
+        // Skpwright's rings all run counter-clockwise about the normal, holes
         // included (its writer turns holes back to SketchUp's clockwise
         // storage); Hew's holes run clockwise.
         let holes = holes
@@ -2026,7 +2272,7 @@ fn face_texture(
     n: kernel::Vec3,
     corners: &[Point3],
     size: (f64, f64),
-) -> Option<openskp::FaceTexture> {
+) -> Option<skpwright::FaceTexture> {
     let (u_axis, v_axis) = face_frame(n);
     let inch = |p: Point3| p.to_vec() * (1.0 / 0.0254);
     let local = |p: Point3| (inch(p).dot(u_axis), inch(p).dot(v_axis));
@@ -2068,7 +2314,7 @@ fn face_texture(
         _ => own,
     };
     let k = inv3(&kinv)?;
-    Some(openskp::FaceTexture {
+    Some(skpwright::FaceTexture {
         front: k,
         back: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
         front_extra: [0.0; 3],
@@ -2221,7 +2467,7 @@ fn transform13(t: &Transform) -> [f64; 13] {
     ]
 }
 
-fn camera(c: &kernel::CameraState) -> openskp::Camera {
+fn camera(c: &kernel::CameraState) -> skpwright::Camera {
     let eye = [c.eye.x, c.eye.y, c.eye.z];
     let target = [c.target.x, c.target.y, c.target.z];
     // SketchUp keeps the camera's up square to the view; Hew may hold the
@@ -2230,7 +2476,7 @@ fn camera(c: &kernel::CameraState) -> openskp::Camera {
     let up = view
         .and_then(|v| (c.up - v * c.up.dot(v)).normalized().ok())
         .unwrap_or(c.up);
-    openskp::Camera {
+    skpwright::Camera {
         eye_m: eye,
         target_m: target,
         up: [up.x, up.y, up.z],
@@ -2240,10 +2486,33 @@ fn camera(c: &kernel::CameraState) -> openskp::Camera {
         two_point_perspective: false,
         description: String::new(),
         undecoded: [1.0, 1000.0],
-        aspect_ratio: 0.0,
+        // Unset is zero in a file.
+        aspect_ratio: c.aspect_ratio.unwrap_or(0.0),
         scale_2d: 1.0,
         offset_2d: [0.0, 0.0],
+        image_width: c.image_width.map_or(0.0, |w| w * skpwright::INCH),
     }
+}
+
+/// Whether two cameras look the same way from the same place: projection,
+/// eye, view direction, up and field of view (the target's depth and the
+/// stored height aside, which Hew re-measures at an open).
+fn same_look(a: &skpwright::Camera, b: &skpwright::Camera) -> bool {
+    let v = |c: &skpwright::Camera| {
+        let d = [
+            c.target_m[0] - c.eye_m[0],
+            c.target_m[1] - c.eye_m[1],
+            c.target_m[2] - c.eye_m[2],
+        ];
+        let n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        [d[0] / n, d[1] / n, d[2] / n]
+    };
+    let close = |x: [f64; 3], y: [f64; 3]| (0..3).all(|i| (x[i] - y[i]).abs() < 1e-6);
+    a.perspective == b.perspective
+        && (a.fov_deg - b.fov_deg).abs() < 1e-6
+        && close(a.eye_m, b.eye_m)
+        && close(a.up, b.up)
+        && close(v(a), v(b))
 }
 
 /// A Hew cut as a SketchUp plane `[a, b, c, d]` (inches): SketchUp's
@@ -2294,7 +2563,11 @@ fn layer_color(i: usize) -> [u8; 4] {
 /// Sets the part of a style Hew keeps (`kernel::ViewStyle`) into a
 /// file's rendering options: the backdrop and the model axes; the rest
 /// stays as it is.
-pub(crate) fn style_into(r: &mut openskp::RenderingOptions, v: kernel::ViewStyle) {
+///
+/// `fresh` says `r` is SketchUp's default style, not a file's: the 2026-only
+/// fill settings Hew holds no value for are then unset, as they were read,
+/// rather than the default's.
+pub(crate) fn style_into(r: &mut skpwright::RenderingOptions, v: kernel::ViewStyle, fresh: bool) {
     let rgba = |c: [u8; 3]| [c[0], c[1], c[2], 255];
     r.background = rgba(v.background);
     r.sky = v.sky.is_some();
@@ -2306,6 +2579,40 @@ pub(crate) fn style_into(r: &mut openskp::RenderingOptions, v: kernel::ViewStyle
         r.ground_color = rgba(c);
     }
     r.model_axes = v.axes;
+    // The section cut and guide settings: a value Hew holds is written (its
+    // color keeping the file's alpha); one it does not hold leaves the
+    // file's own, and every other setting (hidden geometry and objects, the
+    // section display bits) stays as the file has it.
+    let keep_alpha = |c: [u8; 3], old: [u8; 4]| [c[0], c[1], c[2], old[3]];
+    let s = v.section;
+    if let Some(c) = s.cut_color {
+        r.section_cut_color = keep_alpha(c, r.section_cut_color);
+    }
+    if let Some(w) = s.cut_width {
+        r.section_cut_width = w;
+    }
+    if fresh || s.fill.is_some() {
+        r.section_fill = s.fill;
+    }
+    match s.fill_color {
+        Some(c) => {
+            r.section_fill_color = Some(keep_alpha(
+                c,
+                r.section_fill_color.unwrap_or([0, 0, 0, 255]),
+            ));
+        }
+        None if fresh => r.section_fill_color = None,
+        None => {}
+    }
+    if let Some(c) = s.active_color {
+        r.active_section_color = keep_alpha(c, r.active_section_color);
+    }
+    if let Some(c) = v.guides_color {
+        r.guides_color = keep_alpha(c, r.guides_color);
+    }
+    if let Some(h) = v.guides_hidden {
+        r.guides_hidden = h;
+    }
 }
 
 /// A guide line's stretch as a `.skp` file holds it: line parameters in
@@ -2313,8 +2620,8 @@ pub(crate) fn style_into(r: &mut openskp::RenderingOptions, v: kernel::ViewStyle
 /// forever.
 pub(crate) fn guide_bounds(span: kernel::GuideSpan) -> [f64; 2] {
     [
-        span.from.map_or(-1e30, |a| a * openskp::INCH),
-        span.to.map_or(1e30, |b| b * openskp::INCH),
+        span.from.map_or(-1e30, |a| a * skpwright::INCH),
+        span.to.map_or(1e30, |b| b * skpwright::INCH),
     ]
 }
 
@@ -2323,7 +2630,7 @@ pub(crate) fn guide_bounds(span: kernel::GuideSpan) -> [f64; 2] {
 /// the pose (the inverse of [`guide_bounds`]).
 pub(crate) fn file_guide_span(bounds: [f64; 2], direction_length: f64) -> kernel::GuideSpan {
     const OPEN: f64 = 1.0e29;
-    let end = |b: f64| (b.abs() < OPEN).then_some(b / openskp::INCH * direction_length);
+    let end = |b: f64| (b.abs() < OPEN).then_some(b / skpwright::INCH * direction_length);
     kernel::GuideSpan {
         from: end(bounds[0]),
         to: end(bounds[1]),
@@ -2431,14 +2738,14 @@ mod tests {
 
     #[test]
     fn a_unit_change_keeps_a_files_other_unit_settings() {
-        let own = openskp::Units {
+        let own = skpwright::Units {
             angle_precision: 3,
             snap_angle: 7.5,
             angle_snap: false,
             suppress_units_display: true,
             force_inch_display: true,
             length_snap: false,
-            ..openskp::Units::sketchup_default()
+            ..skpwright::Units::sketchup_default()
         };
         let u = DisplayUnits::Millimeters.over(own.clone());
         assert_eq!(
@@ -2465,7 +2772,7 @@ mod tests {
         // second, and with no arc under the point, the longest.
         let arc = |from_deg: f64, sweep_deg: f64| {
             let t = from_deg.to_radians();
-            openskp::Arc {
+            skpwright::Arc {
                 center_m: [0.0; 3],
                 normal: [0.0, 0.0, 1.0],
                 x_axis_m: [t.cos(), t.sin(), 0.0],

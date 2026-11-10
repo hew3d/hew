@@ -1945,3 +1945,26 @@ describe('ShopApp — Scenes (docs/design/scenes.md §6)', () => {
     expect(mockScene.set_hidden).not.toHaveBeenCalled()
   })
 })
+
+describe('ShopApp — beta tab title', () => {
+  const ORIGINAL_TITLE = document.title
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    document.title = ORIGINAL_TITLE
+  })
+
+  it('sets the document title in a beta build', async () => {
+    vi.stubGlobal('__HEW_BETA__', true)
+    document.title = 'untouched'
+    await renderAndLoad()
+    expect(document.title).toBe('Hew Beta')
+  })
+
+  it('does not write the document title in a normal build', async () => {
+    vi.stubGlobal('__HEW_BETA__', false)
+    document.title = 'untouched'
+    await renderAndLoad()
+    expect(document.title).toBe('untouched')
+  })
+})

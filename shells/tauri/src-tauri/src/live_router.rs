@@ -1195,6 +1195,34 @@ fn revert_is_app_side(app: &AppHandle, conn: &ConnRoute, params: &Value) -> bool
 /// on (`app/src/settings/units.ts`'s `LengthFormat` is the third copy).
 const LENGTH_FORMATS: &[&str] = &["m", "cm", "mm", "arch", "frac_in", "dec_in"];
 
+/// The stream releases a SketchUp file is saved in, newest first (the
+/// major number of each release's version string): keep in step with
+/// `crates/api`'s `SKP_STREAM_RELEASES`, which this crate does not depend
+/// on. Adding a release is one number here and there.
+const SKP_STREAM_RELEASES: &[u8] = &[20, 19, 18, 17, 16, 15, 14, 13, 8, 7, 6, 5, 4, 3];
+
+/// The wire name of a stream release: `skp8`, `skp2017`.
+fn stream_format_name(release: u8) -> String {
+    let year = if release >= 13 {
+        2000 + u32::from(release)
+    } else {
+        u32::from(release)
+    };
+    format!("skp{year}")
+}
+
+/// Every name `hew.doc.save`'s `format` takes.
+fn doc_format_names() -> Vec<String> {
+    ["hew".to_string(), "skp".to_string()]
+        .into_iter()
+        .chain(SKP_STREAM_RELEASES.iter().map(|&r| stream_format_name(r)))
+        .collect()
+}
+
+fn is_doc_format(name: &str) -> bool {
+    doc_format_names().iter().any(|n| n == name)
+}
+
 /// `hew.doc.save` in the desktop app: the window saves through its own save
 /// path — the file is written, the unsaved mark cleared, the document bound
 /// to the file (title, recents, "open the same file" focus) exactly as if
@@ -1205,7 +1233,7 @@ fn cmd_save(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Val
         o.keys().find(|k| {
             !matches!(
                 k.as_str(),
-                "path" | "document" | "copy" | "format" | "units"
+                "path" | "document" | "copy" | "format" | "units" | "compat"
             )
         })
     }) {
@@ -1224,12 +1252,10 @@ fn cmd_save(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Val
     // The same `format` and `units` the headless host takes; the window
     // resolves what they leave open (the document's own container).
     let format = params.get("format").and_then(Value::as_str);
-    if params.get("format").is_some()
-        && !matches!(format, Some("hew") | Some("skp") | Some("skp2017"))
-    {
+    if params.get("format").is_some() && !format.is_some_and(is_doc_format) {
         return Err(Refused::new(
             "invalid_params",
-            "`format` is one of \"hew\", \"skp\", \"skp2017\"",
+            format!("`format` is one of {:?}", doc_format_names()),
         ));
     }
     let units = params.get("units").and_then(Value::as_str);
@@ -1237,6 +1263,16 @@ fn cmd_save(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Val
         return Err(Refused::new(
             "invalid_params",
             format!("`units` is one of {LENGTH_FORMATS:?}"),
+        ));
+    }
+    let compat = params.get("compat").and_then(Value::as_bool);
+    if params.get("compat").is_some() && compat.is_none() {
+        return Err(Refused::new("invalid_params", "`compat` is a boolean"));
+    }
+    if compat == Some(true) && !format.is_none_or(|f| f == "skp") {
+        return Err(Refused::new(
+            "invalid_params",
+            "`compat` applies to the 2021-and-later container (format \"skp\")",
         ));
     }
     if let Some(path) = path {
@@ -1300,6 +1336,9 @@ fn cmd_save(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Val
     }
     if let Some(u) = units {
         op["units"] = json!(u);
+    }
+    if let Some(c) = compat {
+        op["compat"] = json!(c);
     }
     if let Err(e) = run_op(app, &label, "save", op) {
         return Err(Refused {

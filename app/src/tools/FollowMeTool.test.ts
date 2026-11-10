@@ -12,6 +12,7 @@ import type { NodeRef } from '../panels/treeModel'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 import { worldPerPixelPerspective } from '../viewport/math'
+import { followsViewPlane } from '../viewport/heldPointerReplay'
 import { clearPreview } from './transformPreview'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
@@ -171,6 +172,16 @@ function makeTool(scene: WasmScene, selection: NodeRef[] = []) {
   const tool = new FollowMeTool(scene, preview, onCommit, onToast, onMeasurement, selection)
   return { tool, preview, onCommit, onToast, onMeasurement }
 }
+
+describe('FollowMeTool — no view-plane hover replay', () => {
+  it('does not follow the view, so an idle key (Escape mid-drag) replays no hover at the held pointer', () => {
+    // Escape mid-drag backs up to profile-pick; a replayed hover where the
+    // drag left the cursor (on the path, off the profile) would drop the
+    // armed profile's verdict from the status hint.
+    const { tool } = makeTool(makeWasmScene({}))
+    expect(followsViewPlane(tool)).toBe(false)
+  })
+})
 
 describe('FollowMeTool — path from preselection', () => {
   it('starts at pick-profile when sketch edges are preselected, and commits on a region click', () => {

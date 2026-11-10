@@ -6,6 +6,24 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::{AttrTarget, Document, EntityRef, NodeId, Object, Point3};
 
+// ── Targets ───────────────────────────────────────────────────────────────
+
+/// Every container and every stream release whose layout carries all of
+/// the content these suites compare (the 2026 container, then releases 5
+/// to 2020). Releases 3 and 4 have no layer or attribute records, and
+/// release 3 neither hidden state nor radial dimensions: they are covered
+/// by `native.rs`'s every-release test, which checks what they do hold.
+pub fn all_targets() -> Vec<skp_export::Target> {
+    std::iter::once(skp_export::Target::Skp2026)
+        .chain(
+            skpwright::Release::ALL
+                .into_iter()
+                .filter(|r| *r >= skpwright::Release::R5)
+                .map(skp_export::Target::Stream),
+        )
+        .collect()
+}
+
 // ── Digest ────────────────────────────────────────────────────────────────
 
 pub type P = [i64; 3];

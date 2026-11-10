@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use kernel::{AttrDict, AttrValue, DisplayState, Point3, SurfaceRef, Vec3};
-use openskp::{Dictionary, Owner, Value};
+use skpwright::{Dictionary, Owner, Value};
 
 /// The name of Hew's own dictionary; never imported as an attribute.
 pub(crate) const HEW: &str = "hew";
@@ -40,11 +40,30 @@ fn key(o: Owner) -> OwnerKey {
         Owner::Dimension(i) => (14, i, 0),
         Owner::RadialDimension(i) => (15, i, 0),
         Owner::RenderingOptions => (16, 0, 0),
+        Owner::CurrentStyle => (18, 0, 0),
+        Owner::Axes => (19, 0, 0),
+        Owner::ShadowInfo => (20, 0, 0),
+        Owner::LineStyle(i) => (21, i, 0),
+        Owner::Scene(i) => (22, i, 0),
+        Owner::SceneRendering(i) => (23, i, 0),
+        Owner::LayerFolder(i) => (24, i, 0),
+        Owner::HatchPattern(i) => (25, i, 0),
+        Owner::Style(i) => (26, i, 0),
+        Owner::SceneShadowInfo(i) => (27, i, 0),
+        Owner::SceneAxes(i) => (28, i, 0),
+        Owner::Materials => (29, 0, 0),
+        Owner::Layers => (30, 0, 0),
+        Owner::Definitions => (31, 0, 0),
+        Owner::Scenes => (32, 0, 0),
+        Owner::Styles => (33, 0, 0),
+        Owner::LineStyles => (34, 0, 0),
+        Owner::HatchPatterns => (35, 0, 0),
+        Owner::Environments => (36, 0, 0),
     }
 }
 
 impl Dicts {
-    pub(crate) fn of(model: &openskp::Model) -> Dicts {
+    pub(crate) fn of(model: &skpwright::Model) -> Dicts {
         let mut by_owner: BTreeMap<OwnerKey, Vec<Dictionary>> = BTreeMap::new();
         for a in &model.dictionaries {
             by_owner
@@ -224,6 +243,9 @@ pub(crate) struct HewModel {
     pub written_by_hew: bool,
     /// Layer name -> the tag path it was written from.
     pub tag_paths: BTreeMap<String, Vec<String>>,
+    /// The file's layer folders are the tags' hierarchy: a layer's folders
+    /// stand over its recorded path, which a SketchUp edit leaves stale.
+    pub folders: bool,
     /// The model's loose geometry is drawn sketches.
     pub loose_sketches: bool,
     /// The model's loose geometry is as Hew built it (no repair needed).
@@ -257,6 +279,7 @@ impl HewModel {
                 }
             }
         }
+        out.folders = entry(d, "folders") == Some(&Value::Bool(true));
         out.loose_sketches = entry(d, "loose") == Some(&Value::Text("sketches".into()));
         out.loose_built = entry(d, "loose_built") == Some(&Value::Bool(true));
         out.view_style = entry(d, "view_style") == Some(&Value::Bool(true));

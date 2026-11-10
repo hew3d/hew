@@ -135,6 +135,7 @@ pub fn build_scene(
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         },
         mat_table.missing,
         warnings,

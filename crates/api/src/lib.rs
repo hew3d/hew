@@ -36,9 +36,9 @@ pub use envelope::{ErrorObject, Request, RequestId, Response, codes};
 pub use host::{
     DepthPass, DocFormat, Host, ImportImage, ImportOptions, LENGTH_FORMATS, LibraryItemEntry,
     LibraryListing, LibraryReadResult, LibraryWriteResult, LibraryWriteTarget, LineDrawingFormat,
-    LineDrawingParams, LineDrawingResult, NoHost, PrintPdfParams, PrintPdfResult, SaveOutcome,
-    SnapshotCamera, SnapshotParams, SnapshotProjection, SnapshotResult, StandardView,
-    ViewCameraSpec, resolve_document,
+    LineDrawingParams, LineDrawingResult, NoHost, PrintPdfParams, PrintPdfResult,
+    SKP_STREAM_RELEASES, SaveOutcome, SnapshotCamera, SnapshotParams, SnapshotProjection,
+    SnapshotResult, StandardView, ViewCameraSpec, resolve_document, skp_stream_year,
 };
 pub use ids::IdResolver;
 pub use refusal::Refusal;

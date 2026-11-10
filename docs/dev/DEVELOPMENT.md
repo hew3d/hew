@@ -94,7 +94,7 @@ crates/mesh-heal/     healing passes for imported foreign meshes
 crates/dae-import/    COLLADA .dae -> Objects/Instances
 crates/gltf-import/   glTF -> Objects/Instances
 crates/skp-import/    SketchUp .skp -> Objects/Instances, built on the
-                      clean-room OpenSKP reader (see rule 7)
+                      clean-room Skpwright reader (see rule 7)
 crates/stl-import/    STL (binary + ASCII) -> Objects; hand-written parser,
                       no external STL dependency
 crates/image-import/  PNG/JPEG -> a placed picture (one painted face in a
@@ -133,7 +133,7 @@ Hew's Objects/Instances, then hand off to the kernel:
   can export to, via a vendored `dae-parser`.
 - `gltf-import` reads glTF 2.0 (`.gltf`/`.glb`).
 - `skp-import` reads SketchUp's native `.skp` format directly, using
-  [OpenSKP](https://github.com/hew3d/openskp) (crates.io: `openskp`), a
+  [Skpwright](https://github.com/hew3d/skpwright) (crates.io: `skpwright`), a
   clean-room implementation with no SketchUp SDK in its history (rule 7).
 - `stl-import` reads STL (binary and ASCII, auto-detected), the format the
   maker community lives in. Hand-written on `std` — no external STL crate —
@@ -156,6 +156,46 @@ The native `.hew` file format is an open, documented container (a zip
 holding a JSON manifest and binary geometry buffers). Its spec lives in
 `docs/dev/HEW_FILE_FORMAT.md` and any serialization change must update that spec
 in the same commit.
+
+**The website** (`site/`) is built by Cloudflare Pages from the `site-live`
+branch, not from `main`, so hew3d.com describes the release people can
+download while `main` carries the Learn pages for features that have not
+shipped yet. Docs for a feature still land on `main` in the feature's own
+commit; nothing changes about how you write them. `site-live` is a pointer,
+never a branch anyone commits to: the release workflow moves it to each
+`vX.Y.Z` tag, and only forward, judged by the version in
+`site/src/data/releases.json`, so an out-of-order or re-run release never
+rewinds it. The job runs from the workflow file at the tagged commit, so a
+patch tag cut from an older release branch moves the pointer only if that
+branch carries the job. With Pages' default preview setting, a push to `main`
+only produces a preview deployment at `https://main.<pages-project>.pages.dev`
+(the project name is in the Cloudflare dashboard), which is the user guide for
+the next release and the place to proofread it. A site fix that cannot wait
+for the next release goes to `main` first, then onto the branch from a
+throwaway worktree based on the remote tip, never on a stale local branch:
+
+```sh
+git fetch origin
+git worktree add -B site-live ../hew-site-fix origin/site-live
+# cherry-pick the fix, then a plain push; a rejected push means a stale base
+```
+
+The next release moves the pointer to its tag, so the fix must be in that
+tag's history: if the release is cut from a release branch rather than
+`main`, cherry-pick the fix there too.
+
+**The beta web app** (beta.hew3d.com) is a second Cloudflare Pages project,
+`hew-app-beta`, separate from the release app at app.hew3d.com. The
+`deploy-beta` job in `.github/workflows/ci.yml` deploys it on every push to
+`main`, once the gate jobs (`verify`, `relay-contract`, `bug-intake-tests`)
+are green. Builds that deploy there set `HEW_BETA_SHA`, which stamps the
+version as `<version>+beta.<sha>` and switches on the in-app beta cues and
+the "Hew Beta" PWA name. Releases, local builds, E2E builds and the
+self-hosting tarball never set it, so they are unchanged. The two Workers
+that serve same-origin routes, share-relay and bug-intake, carry
+`beta.hew3d.com` routes in their `wrangler.toml`; redeploy each with
+`npx wrangler deploy` whenever those routes change. The beta is deliberately
+unlinked from the website and the README, so do not add links to it there.
 
 ## 3. The rules
 
@@ -188,8 +228,8 @@ this list.
 7. **Licensing wall.** Nothing derived from the SketchUp SDK — headers,
    constants, or format knowledge obtained under Trimble's license — enters
    this repository or any part of its dependency chain. That admissibility
-   test is the rule, full stop. [OpenSKP](https://github.com/hew3d/openskp)
-   (crates.io: `openskp`), the reader behind `crates/skp-import`, is
+   test is the rule, full stop. [Skpwright](https://github.com/hew3d/skpwright)
+   (crates.io: `skpwright`), the reader behind `crates/skp-import`, is
    derived solely from self-authored test corpora, their own COLLADA
    exports, and public documentation of the MFC `CArchive` serialization
    convention — no SketchUp SDK anywhere in its history. It passes this

@@ -98,6 +98,20 @@ pub(crate) fn camera_from_json(json: &str) -> Result<CameraState, ApiError> {
                 ApiError("BadCamera: parallelHeight must be a finite positive number".to_string())
             })?,
     };
+    // The Match Photo image width (meters) and ratio, when the camera
+    // holds them; absent or null is unset.
+    let positive = |key: &str| -> Result<Option<f64>, ApiError> {
+        match v.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(x) => x
+                .as_f64()
+                .filter(|x| x.is_finite() && *x > 0.0)
+                .map(Some)
+                .ok_or_else(|| {
+                    ApiError(format!("BadCamera: {key} must be a finite positive number"))
+                }),
+        }
+    };
     Ok(CameraState {
         projection,
         fov_deg,
@@ -105,6 +119,8 @@ pub(crate) fn camera_from_json(json: &str) -> Result<CameraState, ApiError> {
         eye,
         target,
         up,
+        image_width: positive("imageWidth")?,
+        aspect_ratio: positive("aspectRatio")?,
     })
 }
 
@@ -132,6 +148,28 @@ pub(crate) fn view_style_from_json(json: &str) -> Result<kernel::ViewStyle, ApiE
             x => rgb(x, what).map(Some),
         }
     };
+    // The optional section and guide settings; absent or null is unset.
+    let flag = |key: &str| -> Result<Option<bool>, ApiError> {
+        match &v[key] {
+            serde_json::Value::Null => Ok(None),
+            x => x
+                .as_bool()
+                .map(Some)
+                .ok_or_else(|| ApiError(format!("BadViewStyle: {key} must be a boolean"))),
+        }
+    };
+    let width = match &v["sectionCutWidth"] {
+        serde_json::Value::Null => None,
+        x => Some(
+            x.as_u64()
+                .and_then(|w| u32::try_from(w).ok())
+                .ok_or_else(|| {
+                    ApiError(
+                        "BadViewStyle: sectionCutWidth must be a non-negative integer".to_string(),
+                    )
+                })?,
+        ),
+    };
     Ok(kernel::ViewStyle {
         background: rgb(&v["background"], "background")?,
         sky: opt(&v["sky"], "sky")?,
@@ -139,20 +177,54 @@ pub(crate) fn view_style_from_json(json: &str) -> Result<kernel::ViewStyle, ApiE
         axes: v["axes"]
             .as_bool()
             .ok_or_else(|| ApiError("BadViewStyle: axes must be a boolean".to_string()))?,
+        section: kernel::SectionLook {
+            cut_color: opt(&v["sectionCutColor"], "sectionCutColor")?,
+            cut_width: width,
+            fill: flag("sectionFill")?,
+            fill_color: opt(&v["sectionFillColor"], "sectionFillColor")?,
+            active_color: opt(&v["activeSectionColor"], "activeSectionColor")?,
+        },
+        guides_color: opt(&v["guidesColor"], "guidesColor")?,
+        guides_hidden: flag("guidesHidden")?,
     })
 }
 
 pub(crate) fn view_style_to_json(v: &kernel::ViewStyle) -> serde_json::Value {
-    serde_json::json!({
+    let mut out = serde_json::json!({
         "background": v.background,
         "sky": v.sky,
         "ground": v.ground,
         "axes": v.axes,
-    })
+    });
+    // The section and guide settings, present only when set.
+    let s = &v.section;
+    for (key, value) in [
+        ("sectionCutColor", s.cut_color.map(|c| serde_json::json!(c))),
+        ("sectionCutWidth", s.cut_width.map(|w| serde_json::json!(w))),
+        ("sectionFill", s.fill.map(|f| serde_json::json!(f))),
+        (
+            "sectionFillColor",
+            s.fill_color.map(|c| serde_json::json!(c)),
+        ),
+        (
+            "activeSectionColor",
+            s.active_color.map(|c| serde_json::json!(c)),
+        ),
+        ("guidesColor", v.guides_color.map(|c| serde_json::json!(c))),
+        (
+            "guidesHidden",
+            v.guides_hidden.map(|h| serde_json::json!(h)),
+        ),
+    ] {
+        if let Some(value) = value {
+            out[key] = value;
+        }
+    }
+    out
 }
 
 pub(crate) fn camera_to_json(c: &CameraState) -> serde_json::Value {
-    serde_json::json!({
+    let mut v = serde_json::json!({
         "projection": match c.projection {
             CameraProjection::Perspective => "perspective",
             CameraProjection::Parallel => "parallel",
@@ -162,7 +234,15 @@ pub(crate) fn camera_to_json(c: &CameraState) -> serde_json::Value {
         "eye": [c.eye.x, c.eye.y, c.eye.z],
         "target": [c.target.x, c.target.y, c.target.z],
         "up": [c.up.x, c.up.y, c.up.z],
-    })
+    });
+    // Present only when set, so a camera without them reads as before.
+    if let Some(w) = c.image_width {
+        v["imageWidth"] = w.into();
+    }
+    if let Some(r) = c.aspect_ratio {
+        v["aspectRatio"] = r.into();
+    }
+    v
 }
 
 /// `{grid, axes, guides}` → [`DisplayState`].
@@ -198,6 +278,8 @@ fn scene_to_json(s: &kernel::Scene) -> serde_json::Value {
         "name": s.name,
         "description": s.description,
         "props": mask_from_props(s.props()),
+        "transitionS": s.transition_s,
+        "delayS": s.delay_s,
     });
     if let Some(c) = &s.camera {
         v["camera"] = camera_to_json(c);
@@ -555,6 +637,24 @@ impl Scene {
         Ok(())
     }
 
+    /// Sets a Scene's own transition time in seconds (finite, not
+    /// negative); `undefined` returns it to the document's own. Not
+    /// undoable, like the Scene's other fields.
+    pub fn set_scene_transition(&mut self, sid: u64, seconds: Option<f64>) -> Result<(), ApiError> {
+        self.doc
+            .set_scene_transition(sid, seconds)
+            .map_err(doc_err)?;
+        recording::record(recording::RecordedCall::SetSceneTransition { sid, seconds });
+        Ok(())
+    }
+
+    /// Sets a Scene's own delay in seconds; as [`Scene::set_scene_transition`].
+    pub fn set_scene_delay(&mut self, sid: u64, seconds: Option<f64>) -> Result<(), ApiError> {
+        self.doc.set_scene_delay(sid, seconds).map_err(doc_err)?;
+        recording::record(recording::RecordedCall::SetSceneDelay { sid, seconds });
+        Ok(())
+    }
+
     /// Moves a Scene to `index` in tab order (clamped).
     pub fn move_scene(&mut self, sid: u64, index: u32) -> Result<(), ApiError> {
         self.doc.move_scene(sid, index as usize).map_err(doc_err)?;
@@ -616,5 +716,68 @@ impl Scene {
             "staleRefs": d.stale_refs,
         })
         .to_string())
+    }
+}
+
+#[cfg(test)]
+mod display_json_tests {
+    use super::*;
+
+    /// A style's section and guide settings cross the JSON boundary both
+    /// ways, present only when set, so a style without them reads as before.
+    #[test]
+    fn a_view_styles_section_and_guide_settings_round_trip_through_json() {
+        let json = r#"{"background":[1,2,3],"sky":null,"ground":null,"axes":true,
+            "sectionCutColor":[200,0,10],"sectionCutWidth":5,"sectionFill":true,
+            "sectionFillColor":[4,5,6],"activeSectionColor":[0,200,0],
+            "guidesColor":[0,0,255],"guidesHidden":false}"#;
+        let style = view_style_from_json(json).unwrap();
+        assert_eq!(style.section.cut_color, Some([200, 0, 10]));
+        assert_eq!(style.section.cut_width, Some(5));
+        assert_eq!(style.section.fill, Some(true));
+        assert_eq!(style.guides_color, Some([0, 0, 255]));
+        assert_eq!(style.guides_hidden, Some(false));
+        let back = view_style_to_json(&style);
+        assert_eq!(view_style_from_json(&back.to_string()).unwrap(), style);
+
+        let plain =
+            view_style_from_json(r#"{"background":[1,2,3],"sky":null,"ground":null,"axes":true}"#)
+                .unwrap();
+        assert!(plain.section.is_unset() && plain.guides_color.is_none());
+        let out = view_style_to_json(&plain);
+        assert!(out.get("sectionCutColor").is_none() && out.get("guidesHidden").is_none());
+
+        assert!(
+            view_style_from_json(
+                r#"{"background":[1,2,3],"sky":null,"ground":null,"axes":true,"sectionCutWidth":-1}"#
+            )
+            .is_err(),
+            "a negative width is refused"
+        );
+    }
+
+    /// A camera's image width and ratio cross as `imageWidth` and
+    /// `aspectRatio`, present only when set.
+    #[test]
+    fn a_cameras_image_width_and_ratio_round_trip_through_json() {
+        let json = r#"{"projection":"perspective","fovDeg":35,"eye":[4,-6,3],
+            "target":[0,0,0],"up":[0,0,1],"imageWidth":25.4,"aspectRatio":1.5}"#;
+        let cam = camera_from_json(json).unwrap();
+        assert_eq!((cam.image_width, cam.aspect_ratio), (Some(25.4), Some(1.5)));
+        let back = camera_to_json(&cam);
+        assert_eq!(camera_from_json(&back.to_string()).unwrap(), cam);
+        let plain = camera_from_json(
+            r#"{"projection":"parallel","fovDeg":35,"eye":[4,-6,3],"target":[0,0,0],"up":[0,0,1]}"#,
+        )
+        .unwrap();
+        assert_eq!((plain.image_width, plain.aspect_ratio), (None, None));
+        let out = camera_to_json(&plain);
+        assert!(out.get("imageWidth").is_none() && out.get("aspectRatio").is_none());
+        assert!(
+            camera_from_json(
+                r#"{"projection":"parallel","fovDeg":35,"eye":[4,-6,3],"target":[0,0,0],"up":[0,0,1],"imageWidth":0}"#
+            )
+            .is_err()
+        );
     }
 }

@@ -1,23 +1,40 @@
 /**
  * SaveFormatDialog — the in-app format choice File ▸ Save As… shows before
- * the native save picker: Hew document, SketchUp (the 2026 container), or
- * SketchUp 2017. The picker's filter and forced extension follow the choice
+ * the native save picker: Hew document, SketchUp 2021 and later (with the
+ * option to avoid features older versions cannot open), or an older SketchUp
+ * release picked from a list (the file's own release preselected). The picker's filter and forced extension follow the choice
  * (`FileHost.saveAs`'s `format`). The selection starts on the current
  * document's format (`hew` for a new document).
  *
  * Enter continues, Escape cancels; styled like ConfirmDialog.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { Trans, useLingui } from '@lingui/react/macro'
 import type { DocFormat } from '../io/fileHost'
-import { SAVE_FORMAT_CHOICES } from '../io/docFormat'
+import {
+  SAVE_FORMAT_CHOICES,
+  compatLabel,
+  isSkpStreamFormat,
+  olderGroupLabel,
+  olderReleaseFor,
+  takesCompat,
+} from '../io/docFormat'
 import { isComposingKey } from '../input/keyboard'
+
+/** What the dialog answers: the format and, for the 2021-and-later
+ * container, whether to avoid features older versions cannot open. */
+export interface SaveFormatAnswer {
+  format: DocFormat
+  compat: boolean
+}
 
 interface SaveFormatDialogProps {
   /** The format selected when the dialog opens. */
   initial: DocFormat
-  onChoose: (format: DocFormat) => void
+  /** The compat box starts ticked (a revision-17 file is being saved back). */
+  initialCompat?: boolean
+  onChoose: (answer: SaveFormatAnswer) => void
   onCancel: () => void
 }
 
@@ -94,9 +111,15 @@ const CONFIRM_BUTTON_STYLE: React.CSSProperties = {
   border: 'none',
 }
 
-export function SaveFormatDialog({ initial, onChoose, onCancel }: SaveFormatDialogProps) {
+export function SaveFormatDialog({ initial, initialCompat = false, onChoose, onCancel }: SaveFormatDialogProps) {
   const { t } = useLingui()
   const [format, setFormat] = useState<DocFormat>(initial)
+  const [compat, setCompat] = useState(initialCompat)
+  // The older releases share one radio and a list; it keeps the last release
+  // picked, starting on the file's own.
+  const [older, setOlder] = useState(olderReleaseFor(initial))
+  const olderChosen = isSkpStreamFormat(format)
+  const answer = (): SaveFormatAnswer => ({ format, compat: takesCompat(format) && compat })
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -110,10 +133,10 @@ export function SaveFormatDialog({ initial, onChoose, onCancel }: SaveFormatDial
         if (e.target instanceof HTMLButtonElement) return
         e.preventDefault()
         e.stopPropagation()
-        onChoose(format)
+        onChoose({ format, compat: takesCompat(format) && compat })
       }
     },
-    [onCancel, onChoose, format],
+    [onCancel, onChoose, format, compat],
   )
 
   useEffect(() => {
@@ -134,8 +157,9 @@ export function SaveFormatDialog({ initial, onChoose, onCancel }: SaveFormatDial
           <Trans>Save As</Trans>
         </div>
         <div role="radiogroup" aria-label={t`File format`}>
-          {SAVE_FORMAT_CHOICES.map((choice) => (
-            <label key={choice.format} style={OPTION_STYLE}>
+          {SAVE_FORMAT_CHOICES.filter((c) => c.group === undefined).map((choice) => (
+            <Fragment key={choice.format}>
+            <label style={OPTION_STYLE}>
               <input
                 type="radio"
                 name="save-format"
@@ -149,13 +173,55 @@ export function SaveFormatDialog({ initial, onChoose, onCancel }: SaveFormatDial
                 <div style={OPTION_HINT_STYLE}>{choice.hint}</div>
               </span>
             </label>
+            {takesCompat(choice.format) && format === choice.format && (
+              <label style={{ ...OPTION_STYLE, paddingLeft: '30px', alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={compat}
+                  onChange={(e) => setCompat(e.target.checked)}
+                  data-testid="save-skp-compat"
+                />
+                <span style={OPTION_HINT_STYLE}>{compatLabel()}</span>
+              </label>
+            )}
+            </Fragment>
           ))}
+          <label style={OPTION_STYLE}>
+            <input
+              type="radio"
+              name="save-format"
+              value="older"
+              checked={olderChosen}
+              onChange={() => setFormat(older)}
+              autoFocus={isSkpStreamFormat(initial)}
+            />
+            <span>
+              <div style={OPTION_LABEL_STYLE}>{olderGroupLabel()}</div>
+              <select
+                aria-label={t`Older SketchUp version`}
+                data-testid="save-older-release"
+                value={older}
+                onChange={(e) => {
+                  const release = olderReleaseFor(e.target.value as DocFormat)
+                  setOlder(release)
+                  setFormat(release)
+                }}
+                style={{ marginTop: '4px' }}
+              >
+                {SAVE_FORMAT_CHOICES.filter((c) => c.group === 'older').map((choice) => (
+                  <option key={choice.format} value={choice.format}>
+                    {choice.label}
+                  </option>
+                ))}
+              </select>
+            </span>
+          </label>
         </div>
         <div style={BUTTON_ROW_STYLE}>
           <button style={CANCEL_BUTTON_STYLE} onClick={onCancel}>
             <Trans>Cancel</Trans>
           </button>
-          <button style={CONFIRM_BUTTON_STYLE} onClick={() => onChoose(format)}>
+          <button style={CONFIRM_BUTTON_STYLE} onClick={() => onChoose(answer())}>
             <Trans>Continue</Trans>
           </button>
         </div>

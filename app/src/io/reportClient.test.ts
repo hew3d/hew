@@ -107,6 +107,25 @@ describe('canSend', () => {
     expect(m.canSend()).toBe(true)
   })
 
+  it('is true at the beta origin too', async () => {
+    const m = await loadWebModule()
+    setOrigin('https://beta.hew3d.com/')
+    expect(m.canSend()).toBe(true)
+  })
+
+  it('is false at look-alike origins', async () => {
+    const m = await loadWebModule()
+    for (const url of [
+      'https://beta.hew3d.com.evil.example/',
+      'http://app.hew3d.com/',
+      'http://beta.hew3d.com/',
+      'https://evil.example/',
+    ]) {
+      setOrigin(url)
+      expect(m.canSend()).toBe(false)
+    }
+  })
+
   it('is true on the web off that origin only when the dev proxy flag is set', async () => {
     const m = await loadWebModule()
     expect(m.canSend()).toBe(false)

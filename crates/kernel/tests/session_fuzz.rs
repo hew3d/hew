@@ -304,7 +304,35 @@ fn check_sibling_render(doc: &Document, step: usize, op: &Op) -> Result<(), Test
             .into_iter()
             .filter(|&o| doc.is_world_object(o))
             .collect();
+        // A nested instance the frame surfaced or placed renders ITS
+        // definition; when that definition is on loan to an OUTER frame
+        // (a component holding a copy of the component being edited two
+        // frames up), it renders that frame's in-progress world geometry
+        // through its own pose: the on-loan rule one level down. Those
+        // world objects are expected too, reached the same way a renderer
+        // reaches them. The frame's direct members are its top-level
+        // nodes; a surfaced member group is descended, because the open
+        // surfaces the instances inside it as well.
+        let mut pending = doc.session_direct_members().unwrap_or_default();
+        while let Some(node) = pending.pop() {
+            match node {
+                NodeId::Group(g) => pending.extend(doc.group_members(g).unwrap_or_default()),
+                NodeId::Instance(i) => {
+                    let Some(nested) = doc.instance_def(i) else {
+                        continue;
+                    };
+                    expected.extend(
+                        doc.expanded_def_placements(nested)
+                            .iter()
+                            .map(|(o, _)| *o)
+                            .filter(|&o| doc.is_world_object(o)),
+                    );
+                }
+                NodeId::Object(_) => {}
+            }
+        }
         expected.sort();
+        expected.dedup();
         // A nested member instance surfaced by the frame expands to ITS
         // definition's def-owned members through its pose, so the world
         // objects among the rendered set are exactly the session's, and
@@ -399,4 +427,100 @@ proptest! {
     ) {
         run_case(boxes, ops)?;
     }
+}
+
+/// KB-41 (nightly fuzz): with a component, a group inside it, and a
+/// component inside that group all open, the
+/// innermost component's siblings render the OUTER frame's world objects through
+/// the nested copy it holds, which the check did not expect.
+#[test]
+fn nested_component_group_component_renders_the_outer_frame_through_the_nested_copy() {
+    let ops = vec![
+        Op::Duplicate { sel: 0 },
+        Op::Group {
+            a: 772239617138806239,
+            b: 9941832662847844180,
+        },
+        Op::MakeComponent {
+            sel: 15742533718512779,
+        },
+        Op::MakeComponent {
+            sel: 6736377549977266289,
+        },
+        Op::Explode { sel: 0 },
+        Op::Undo,
+        Op::Place {
+            comp: 6095189737473883388,
+        },
+        Op::OpenComponentSession {
+            sel: 2515554890444926613,
+        },
+        Op::OpenGroupSession { sel: 0 },
+        Op::OpenComponentSession { sel: 0 },
+    ];
+    run_case(4, ops).unwrap();
+}
+
+/// KB-41's first sighting (nightly fuzz): the same shape with a group
+/// session closed earlier in the sequence.
+#[test]
+fn nested_component_group_component_after_a_closed_group_session() {
+    let ops = vec![
+        Op::Group {
+            a: 26031354693265861,
+            b: 5039752818948471677,
+        },
+        Op::OpenGroupSession { sel: 0 },
+        Op::Delete { sel: 0 },
+        Op::CloseSession,
+        Op::MakeComponent {
+            sel: 3669795555711896687,
+        },
+        Op::Place { comp: 0 },
+        Op::MakeComponent {
+            sel: 5298141792758286970,
+        },
+        Op::OpenComponentSession {
+            sel: 589821356543176086,
+        },
+        Op::OpenGroupSession { sel: 0 },
+        Op::OpenComponentSession { sel: 0 },
+    ];
+    run_case(3, ops).unwrap();
+}
+
+/// The nested copy sits INSIDE a surfaced member group of the innermost
+/// component: the copy is not a top-level session node, but a sibling of
+/// the inner component still renders the outer frame through it.
+#[test]
+fn nested_copy_inside_a_surfaced_group_renders_the_outer_frame() {
+    let mut doc = Document::new();
+    doc.set_torture_mode(true);
+    let b1 = add_box(&mut doc, 0.0);
+    let b2 = add_box(&mut doc, 3.0);
+    let b3 = add_box(&mut doc, 6.0);
+    // A = { G1 { b1, b2 } }, placed as a1.
+    let (g1, _) = doc
+        .group_nodes(&[NodeId::Object(b1), NodeId::Object(b2)])
+        .expect("group");
+    let (comp_a, a1, _) = doc
+        .make_component(&[NodeId::Group(g1)])
+        .expect("component A");
+    // B = { G2 { a1, b3 } }, placed as b_inst.
+    let (g2, _) = doc
+        .group_nodes(&[NodeId::Instance(a1), NodeId::Object(b3)])
+        .expect("group 2");
+    let (_comp_b, b_inst, _) = doc
+        .make_component(&[NodeId::Group(g2)])
+        .expect("component B");
+    // A second copy of A to edit; the check compares B's definition
+    // rendering against the session, so B needs no sibling of its own.
+    let (a2, _) = doc
+        .place_instance(comp_a, Transform::translation(Vec3::new(0.0, 10.0, 0.0)))
+        .expect("place A");
+    doc.open_explode_session(a2).expect("open A");
+    doc.open_group_session(g1).expect("open G1");
+    doc.open_explode_session(b_inst).expect("open B");
+    check_reopens(&doc, 0, &Op::CloseSession).unwrap();
+    check_sibling_render(&doc, 0, &Op::CloseSession).unwrap();
 }

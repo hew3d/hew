@@ -107,6 +107,7 @@ mod camera;
 pub mod doc;
 pub mod draft;
 pub mod entity;
+pub mod geo;
 pub mod health;
 pub mod history;
 pub mod library;
@@ -135,6 +136,7 @@ pub fn handler(name: &str) -> Option<Handler> {
         .or_else(|| doc::handler(name))
         .or_else(|| view::handler(name))
         .or_else(|| scenes::handler(name))
+        .or_else(|| geo::handler(name))
         .or_else(|| print::handler(name))
         .or_else(|| library::handler(name))
 }

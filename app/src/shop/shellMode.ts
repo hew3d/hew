@@ -134,7 +134,7 @@ const KEY_RE = /^[A-Za-z0-9_-]{43}$/
 
 /**
  * Parses the "Open on Phone" E2E-encrypted handoff off either a full URL
- * (`https://app.hew3d.com/#recv=…` — what a QR decodes to, or what a
+ * (`https://app.hew3d.com/#recv=…`, or the beta host's equivalent — what a QR decodes to, or what a
  * camera-app scan lands Safari on) or a bare fragment (`#recv=…` — what
  * `window.location.hash` reads, and what `ScanSheet.tsx`'s in-app decoder
  * also hands this after stripping a scanned URL down to just its hash).

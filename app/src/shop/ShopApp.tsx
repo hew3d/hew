@@ -67,6 +67,7 @@ import { HintEngine, largestVisiblePart, testHintsSuppressed, type ActiveHint } 
 import { HintOverlay } from './HintOverlay'
 import { isArQuickLookCandidate, launchArQuickLook } from './arQuickLook'
 import { seedLocaleLengthUnit } from './localeUnits'
+import { isBetaBuild } from '../buildInfo'
 import { buildPartsSheetSections, totalPartCount } from './partsSheetModel'
 import { DocumentMenu } from './DocumentMenu'
 import { SettingsMenu } from './SettingsMenu'
@@ -263,6 +264,12 @@ export function ShopApp() {
   const { t, i18n } = useLingui()
   const orientation = useShopOrientation()
   const isLandscape = orientation === 'landscape'
+
+  // Shop Mode has no MenuBar or WelcomeScreen, so on the beta build the tab
+  // title is the only place that says beta. Non-beta builds never write it.
+  useEffect(() => {
+    if (isBetaBuild()) document.title = t`Hew Beta`
+  }, [t])
 
   const [scene, setScene] = useState<Scene | null>(null)
   const [kernelError, setKernelError] = useState<string | null>(null)
@@ -1044,7 +1051,7 @@ export function ShopApp() {
     try {
       // The relay lives next to THIS page — `<origin>/relay/` (io/shareRelay.ts):
       // a self-hosted PWA reads from its own relay, the public one from the
-      // Workers route on app.hew3d.com. Same origin, so no CORS either way.
+      // Workers route on app.hew3d.com (beta.hew3d.com likewise). Same origin, so no CORS either way.
       const response = await fetch(`${phoneRelayBase()}/drop/${params.token}`)
       if (!response.ok) {
         // A 404 here means the token was already consumed, expired (10

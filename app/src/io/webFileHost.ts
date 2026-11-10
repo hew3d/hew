@@ -19,7 +19,7 @@
  * isCoarsePointer().
  */
 
-import { t } from '@lingui/core/macro'
+import { ph, t } from '@lingui/core/macro'
 import type { DocFormat, ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
 import { FileReadError } from './fileHost'
 import { extensionFor, formatDescription, nameForFormat } from './docFormat'
@@ -259,6 +259,19 @@ export class WebFileHost implements FileHost {
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return null
         throw err
+      }
+      // The chosen format's extension is forced, as the desktop panel does:
+      // one format's bytes never land under the other's name. A picker that
+      // let the name through without it is asked to rename the file, and
+      // the save is refused (nothing written) when it cannot.
+      const wanted = extensionFor(format)
+      if (!handle.name.toLowerCase().endsWith(wanted)) {
+        const renamed = nameForFormat(handle.name, format)
+        const movable = handle as FileSystemFileHandle & { move?: (name: string) => Promise<void> }
+        if (typeof movable.move !== 'function') {
+          throw new Error(t`The file name must end in ${ph({ ext: wanted })}.`)
+        }
+        await movable.move(renamed)
       }
       const writable = await handle.createWritable()
       await writable.write(new Uint8Array(bytes))

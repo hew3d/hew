@@ -385,8 +385,8 @@ describe('friendlyErrorText', () => {
     // the toast intact, not buried in the unknown-code fallback.
     const skp =
       'SKP: unsupported SketchUp version {21.1.0}: open it in SketchUp (the ' +
-      'free web app works) and save it again as a current .skp, or ' +
-      'File ▸ Save As ▸ SketchUp Version 2017, then import that'
+      'free web app works) and save it again as a current .skp, then ' +
+      'import that'
     expect(friendlyErrorText(new Error(skp))).toBe(skp.slice('SKP: '.length))
     expect(friendlyErrorText(new Error('DAE: missing <library_geometries>'))).toBe(
       'missing <library_geometries>',

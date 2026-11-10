@@ -1,5 +1,5 @@
 # skp-export — Hew Document -> SketchUp `.skp` (2026 container or 2017),
-# via the clean-room OpenSKP writer. The mirror of skp-import: the mapping
+# via the clean-room Skpwright writer. The mirror of skp-import: the mapping
 # here is the one skp-import reads back as the same document.
 [package]
 name = "skp-export"
@@ -9,7 +9,7 @@ license.workspace = true
 
 [dependencies]
 kernel = { workspace = true }
-openskp = { workspace = true }
+skpwright = { workspace = true }
 # The tessellator's plane basis: Hew's own texture placement on a face
 # without a UV frame, written out as an explicit placement.
 tessellate = { workspace = true }

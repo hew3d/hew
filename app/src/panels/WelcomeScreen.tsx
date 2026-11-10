@@ -27,6 +27,7 @@ import type { RecentEntry } from '../io/recents'
 import { formatRelativeTime } from '../io/relativeTime'
 import { LENGTH_FORMAT_OPTIONS, type LengthFormat } from '../settings/units'
 import { isComposingKey } from '../input/keyboard'
+import { appVersionString, isBetaBuild } from '../buildInfo'
 
 /** One bundled sample: the asset file under `samples/` plus display copy.
  * `title` and `description` are getters on the table below, so they resolve
@@ -191,6 +192,13 @@ const WELCOME_CSS = `
   font-size: 12.5px;
   line-height: 1.55;
   color: var(--text-tertiary);
+}
+.hw-welcome__beta {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
 }
 .hw-welcome__rail-spacer {
   flex: 1 1 auto;
@@ -411,6 +419,7 @@ export function WelcomeScreen({
   onUnitChange,
 }: WelcomeScreenProps) {
   const { t } = useLingui()
+  const betaVersion = appVersionString()
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (isComposingKey(e)) return
@@ -460,6 +469,13 @@ export function WelcomeScreen({
           <p className="hw-welcome__tagline">
             <Trans>The intuitive, Open Source, cross-platform, solids-first 3D modeler.</Trans>
           </p>
+          {isBetaBuild() && (
+            <p className="hw-welcome__beta" data-testid="welcome-beta-note">
+              <Trans>
+                Beta build {betaVersion}. Files saved here may not open in the released Hew.
+              </Trans>
+            </p>
+          )}
           <div className="hw-welcome__rail-spacer" />
           <a
             className="hw-welcome__guide"

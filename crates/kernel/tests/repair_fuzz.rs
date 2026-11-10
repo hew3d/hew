@@ -208,6 +208,7 @@ fn seed() -> Document {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         },
         Vec::new(),
     )

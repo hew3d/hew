@@ -147,7 +147,7 @@ fn run_script_embedded(
                 responses,
             };
         };
-        if let Err(refusal) = host.save_document(&doc, Some(out_str), None, None) {
+        if let Err(refusal) = host.save_document(&doc, Some(out_str), None, None, false) {
             eprintln!(
                 "{}",
                 serde_json::to_string(&refusal_data(&refusal)).unwrap()
@@ -434,7 +434,7 @@ pub fn dispatch_file(file: &Path, method: &str, params: serde_json::Value) -> Di
         };
     }
 
-    if !read_only && let Err(refusal) = host.save_document(&doc, None, None, None) {
+    if !read_only && let Err(refusal) = host.save_document(&doc, None, None, None, false) {
         eprintln!(
             "{}",
             serde_json::to_string(&refusal_data(&refusal)).unwrap()

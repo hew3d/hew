@@ -9,6 +9,8 @@ import {
   nextSceneName,
   parseDriftJson,
   parseScenesJson,
+  parseViewStyleJson,
+  parseSecondsInput,
   sceneIndex,
 } from './scenesModel'
 
@@ -79,5 +81,62 @@ describe('ordering helpers', () => {
     expect(nextSceneName(entries)).toBe('Scene 1')
     const named = parseScenesJson(JSON.stringify([{ sid: 1, name: 'Scene 1', props: 0 }, { sid: 2, name: 'Scene 3', props: 0 }]))
     expect(nextSceneName(named)).toBe('Scene 2')
+  })
+})
+
+describe('scene timings', () => {
+  it('parses transitionS / delayS, null for absent, null or invalid', () => {
+    const [a, b, c] = parseScenesJson(
+      JSON.stringify([
+        { sid: 1, name: 'A', props: 0, transitionS: 1.5, delayS: 0 },
+        { sid: 2, name: 'B', props: 0, transitionS: null },
+        { sid: 3, name: 'C', props: 0, transitionS: -2, delayS: 'x' },
+      ]),
+    )
+    expect([a.transitionS, a.delayS]).toEqual([1.5, 0])
+    expect([b.transitionS, b.delayS]).toEqual([null, null])
+    expect([c.transitionS, c.delayS]).toEqual([null, null])
+  })
+
+  it('parseSecondsInput: blank clears, a non-negative number sets, the rest is invalid', () => {
+    expect(parseSecondsInput('')).toBeNull()
+    expect(parseSecondsInput('  ')).toBeNull()
+    expect(parseSecondsInput('2.5')).toBe(2.5)
+    expect(parseSecondsInput('0')).toBe(0)
+    expect(parseSecondsInput('-1')).toBeUndefined()
+    expect(parseSecondsInput('abc')).toBeUndefined()
+    expect(parseSecondsInput('Infinity')).toBeUndefined()
+  })
+})
+
+describe('parseViewStyleJson', () => {
+  const base = { background: [1, 2, 3], sky: null, ground: null, axes: true }
+
+  it('reads the backdrop alone, as before', () => {
+    expect(parseViewStyleJson(base)).toEqual(base)
+  })
+
+  it('keeps the section and guide settings a document sets, and drops malformed ones', () => {
+    const style = parseViewStyleJson({
+      ...base,
+      sectionCutColor: [200, 0, 10],
+      sectionCutWidth: 5,
+      sectionFill: true,
+      sectionFillColor: [1, 1, 1],
+      activeSectionColor: [0, 200, 0],
+      guidesColor: [0, 0, 255],
+      guidesHidden: false,
+    })
+    expect(style).toMatchObject({
+      sectionCutColor: [200, 0, 10],
+      sectionCutWidth: 5,
+      sectionFill: true,
+      sectionFillColor: [1, 1, 1],
+      activeSectionColor: [0, 200, 0],
+      guidesColor: [0, 0, 255],
+      guidesHidden: false,
+    })
+    const bad = parseViewStyleJson({ ...base, sectionCutColor: [300, 0, 0], sectionCutWidth: -1, guidesHidden: 'yes' })
+    expect(bad).toEqual(base)
   })
 })

@@ -3,7 +3,7 @@
 //! `.skp` curves (`SKP_FORMAT.md` §6.4), so a circle or arc drawn in Hew is
 //! one selectable curve in SketchUp rather than loose segments.
 //!
-//! SketchUp's rules for a curve, from OpenSKP's acceptance work
+//! SketchUp's rules for a curve, from Skpwright's acceptance work
 //! (`docs/WRITING.md`): members run in their edges' own start-to-end
 //! direction from a chain end, and an arc's start is the start vertex of
 //! its first member; a curve whose members break either rule is dropped on
@@ -42,7 +42,7 @@ type Oriented = Vec<(usize, u32, u32)>;
 /// A chain, oriented: each member's `(edge, from, to)`.
 pub(crate) struct Chain {
     pub members: Oriented,
-    pub curve: openskp::Curve,
+    pub curve: skpwright::Curve,
 }
 
 /// Split one claim's members into connected, unbranched chains and build
@@ -118,7 +118,7 @@ pub(crate) fn chains(members: &[Member], claim: Claim) -> Vec<Chain> {
             Claim::Plain => vec![(c, None)],
         })
         .map(|(c, arc)| Chain {
-            curve: openskp::Curve {
+            curve: skpwright::Curve {
                 pid: 0,
                 members: c.len() as u32,
                 arc,
@@ -138,7 +138,7 @@ fn arcs_of(
     pos: &BTreeMap<u32, Point3>,
     center: Point3,
     radius: f64,
-) -> Vec<(Oriented, openskp::Arc)> {
+) -> Vec<(Oriented, skpwright::Arc)> {
     if let Some(arc) = arc_of(&chain, pos, center, radius) {
         return vec![(chain, arc)];
     }
@@ -185,7 +185,7 @@ fn arc_of(
     pos: &BTreeMap<u32, Point3>,
     center: Point3,
     radius: f64,
-) -> Option<openskp::Arc> {
+) -> Option<skpwright::Arc> {
     let p = |v: u32| pos[&v] - center;
     let (_, f0, _) = chain[0];
     // The axis the whole chain turns about (every chord's turn summed): a
@@ -216,7 +216,7 @@ fn arc_of(
     let x = flat(f0).normalized().ok()?;
     let y = normal.cross(x);
     let m = |v: Vec3| [v.x, v.y, v.z];
-    Some(openskp::Arc {
+    Some(skpwright::Arc {
         center_m: [center.x, center.y, center.z],
         normal: m(normal),
         x_axis_m: m(x * radius),

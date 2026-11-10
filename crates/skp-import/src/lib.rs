@@ -1,7 +1,7 @@
-//! SketchUp `.skp` import: clean-room OpenSKP reader -> Hew Objects/Instances.
+//! SketchUp `.skp` import: clean-room Skpwright reader -> Hew Objects/Instances.
 //!
-//! Provenance: the `openskp` dependency is **OpenSKP**
-//! (https://github.com/hew3d/openskp), a clean-room reader for SketchUp
+//! Provenance: the `skpwright` dependency is **Skpwright**
+//! (https://github.com/hew3d/skpwright), a clean-room reader for SketchUp
 //! files — the 2026 container (`{26.x}`, a ZIP holding a tagged record
 //! tree) that every current SketchUp release saves, the free web app
 //! included, and the 2017 `CArchive` stream (`{17.x}`) of older files —
@@ -16,27 +16,31 @@
 //! reverse; takes bytes, no filesystem or network. The entry point is
 //! [`import`]; it emits a `kernel::ImportScene` recipe which
 //! `Document::ingest` materialises. Import-quality gaps are fixed upstream in
-//! OpenSKP and the rev pin advanced — never papered over here ( rule).
+//! Skpwright and the rev pin advanced — never papered over here ( rule).
 
-pub use openskp;
+pub use skpwright;
 
 mod convert;
 mod extras;
 mod material;
+pub use material::pbr_of;
 
 /// Typed failures from [`import`].
 #[derive(Debug, Clone)]
 pub enum SkpError {
     /// The bytes are not a SketchUp file at all.
     NotSkp,
-    /// A SketchUp file in a layout the reader has not decoded: a `CArchive`
-    /// stream from a release other than 2017 (2013–2016, or 2018–2025,
-    /// whose files are unobserved). Carries the file's own version string
+    /// A SketchUp file the reader could not read: a `CArchive` stream
+    /// from a release Skpwright does not list (releases 9 to 12 and any
+    /// later stream are unobserved) that Skpwright itself refused, or an
+    /// intact file whose container is neither layout and whose version is
+    /// not one the reader decodes. Carries the file's own version string
     /// (e.g. `"{21.1.0}"`) so the UI can say which SketchUp wrote it and
     /// suggest saving it again from a current SketchUp (the free web app
-    /// writes the 2026 container) or **File ▸ Save As ▸ SketchUp Version
-    /// 2017**. Any file in the 2026 ZIP container is read, whatever its
-    /// version says: that is the layout current releases share.
+    /// writes the 2026 container). Any file in the 2026 ZIP container is
+    /// read, whatever its version says: that is the layout current
+    /// releases share; a stream container of an unlisted release is read
+    /// when Skpwright can read it, with a warning.
     UnsupportedVersion {
         /// The header's version string, brace form.
         version: String,
@@ -53,7 +57,7 @@ pub enum SkpError {
     },
     /// The file is cut short or damaged and nothing of its model could be
     /// read: a SketchUp header with no readable model behind it, a 2026
-    /// container missing its ZIP end record, or a 2017 stream the
+    /// container missing its ZIP end record, or a stream file the
     /// whole-file grammar refused for running out of data that yielded
     /// nothing. A file that is cut
     /// short (a download or copy that did not finish) is the usual cause,
@@ -67,9 +71,9 @@ impl std::fmt::Display for SkpError {
             SkpError::NotSkp => write!(f, "not a SketchUp .skp file"),
             SkpError::UnsupportedVersion { version } => write!(
                 f,
-                "unsupported SketchUp version {version}: open it in SketchUp (the \
-                 free web app works) and save it again as a current .skp, or \
-                 File \u{25b8} Save As \u{25b8} SketchUp Version 2017, then import that"
+                "unsupported SketchUp version {version}: this reader could not read \
+                 a file of that release. Open it in SketchUp (the free web app \
+                 works) and save it again as a current .skp, then import that"
             ),
             SkpError::Parse(msg) => write!(f, ".skp parse error: {msg}"),
             SkpError::EmptyScene { recovery_notes: 0 } => {
@@ -103,8 +107,8 @@ pub struct SkpScene {
     /// Reader recovery notes: non-empty means the reader skipped a damaged
     /// or unknown record (2026) or had to resync inside a malformed section
     /// (2017) and content may be missing. Clean SketchUp files of either
-    /// container produce none (an OpenSKP regression guarantee). Surface
-    /// these in the import report; fixes belong upstream in OpenSKP.
+    /// container produce none (an Skpwright regression guarantee). Surface
+    /// these in the import report; fixes belong upstream in Skpwright.
     pub warnings: Vec<String>,
     /// Where each imported node and definition came from in the file, by
     /// importer key ([`kernel::ImportReport::keys`]) and definition recipe
@@ -157,10 +161,37 @@ pub struct Provenance {
     /// renames the layer in place when the tag is renamed, and knows a
     /// layer no tag stands for any more.
     pub tags: Vec<(Vec<String>, String)>,
+    /// Scene recipe index (into the scene's scenes) -> the index of the
+    /// file scene it was read from: a save back gives the document's scene
+    /// the page state that file scene holds, whatever either is named now.
+    pub scenes: Vec<(usize, usize)>,
     /// Sketch indices (into the scene's sketches) read from the file's
     /// loose edges: a save back keeps those edges as they are while the
     /// sketches are unchanged.
     pub loose_sketches: Vec<usize>,
+}
+
+/// The tag-path segment of each of sibling layer folders, in order: the
+/// folder's own name, except that a later sibling of the same name takes
+/// `Name (2)`, `Name (3)`, … (the first free), so each folder is a tag of
+/// its own. Deterministic in the siblings alone, so a save back derives
+/// the same segments from the file and writes each folder under the name
+/// the file gave it.
+pub fn folder_segments<S: AsRef<str>>(names: &[S]) -> Vec<String> {
+    let mut used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    names
+        .iter()
+        .map(|n| {
+            let name = n.as_ref();
+            let mut seg = name.to_string();
+            let mut k = 2;
+            while !used.insert(seg.clone()) {
+                seg = format!("{name} ({k})");
+                k += 1;
+            }
+            seg
+        })
+        .collect()
 }
 
 /// The SketchUp record an imported annotation was read from: its list in
@@ -172,7 +203,7 @@ pub enum AnnotationOrigin {
     RadialDimension { index: usize, pid: u32 },
 }
 
-/// Parse SketchUp `.skp` bytes — the 2026 container or the 2017 format —
+/// Parse SketchUp `.skp` bytes — the 2026 container or the stream container —
 /// into a kernel `ImportScene` recipe.
 ///
 /// I/O-free; textures are embedded in the format, so unlike `dae-import` no
@@ -188,34 +219,39 @@ pub fn import(bytes: &[u8]) -> Result<SkpScene, SkpError> {
 /// Start an import: read the file (the one step that cannot be split)
 /// and set up the conversion. See [`ImportJob`].
 pub fn import_begin(bytes: &[u8]) -> Result<ImportJob, SkpError> {
-    // Container gate: identify ANY SketchUp file from its header, then
-    // accept the two decoded layouts. The 2026 ZIP container is read
-    // whatever version string it carries — it is the layout every current
-    // release writes, and a record from a newer release the reader does not
-    // know surfaces as a warning, never as a refusal. A `CArchive` stream is
-    // accepted only from 2017, the one release of that layout OpenSKP has
-    // decoded; 2013–2016 and 2018–2025 streams are refused with their
-    // version so the message can point at the re-save. A header from a
-    // decoded release whose body is neither layout is damage, not an
-    // unsupported version, and says so.
-    let (version, _guid) = openskp::header_info(bytes).ok_or(SkpError::NotSkp)?;
-    let decoded_release = matches!(version_major(&version), Some(17 | 26));
-    match openskp::detect_container(bytes) {
-        openskp::Container::Zip => {}
-        openskp::Container::Carchive2017 if version_major(&version) == Some(17) => {}
-        openskp::Container::Unknown if decoded_release => return Err(SkpError::Damaged),
-        openskp::Container::Carchive2017 | openskp::Container::Unknown => {
+    // Container gate: identify ANY SketchUp file from its header and let
+    // its body decide, not its version: a stream container (the MFC
+    // `CArchive` layout of releases 3 to 8 and 2013 to 2020) or the 2026
+    // ZIP container is handed to Skpwright whatever version the header
+    // says. A stream file of a release Skpwright does not list (9 to 12, or
+    // later than 2020) is read as far as Skpwright can read it, with a
+    // warning, and refused only when Skpwright itself refuses it. A header
+    // whose body is neither layout is damage when its major is one the
+    // reader decodes, an unsupported version otherwise.
+    let (version, _guid) = skpwright::header_info(bytes).ok_or(SkpError::NotSkp)?;
+    let container = skpwright::detect_container(bytes);
+    match container {
+        skpwright::Container::Zip | skpwright::Container::Stream => {}
+        skpwright::Container::Unknown if decoded_major(&version) => {
+            return Err(SkpError::Damaged);
+        }
+        skpwright::Container::Unknown => {
             return Err(SkpError::UnsupportedVersion { version });
         }
     }
+    let unlisted = matches!(container, skpwright::Container::Stream)
+        && skpwright::Release::of_version(&version).is_none();
 
-    let model = openskp::Model::parse(bytes).map_err(|e| {
+    let model = skpwright::Model::parse(bytes).map_err(|e| {
         // A 2026 container keeps its ZIP directory at the very end, so a
         // file cut short loses it first.
-        if matches!(openskp::detect_container(bytes), openskp::Container::Zip)
-            && !has_zip_end_record(bytes)
-        {
+        if matches!(container, skpwright::Container::Zip) && !has_zip_end_record(bytes) {
             SkpError::Damaged
+        } else if unlisted {
+            // Skpwright refused a release it does not list: say which.
+            SkpError::UnsupportedVersion {
+                version: version.clone(),
+            }
         } else {
             SkpError::Parse(e.to_string())
         }
@@ -236,12 +272,13 @@ pub fn import_begin(bytes: &[u8]) -> Result<ImportJob, SkpError> {
     // else (a structure the grammar does not decode, in a healthy file)
     // leaves the walk's result as it was.
     let incomplete = model.diagnostics.iter().any(|d| {
-        matches!(d, openskp::Diagnostic::WholeFileRefused { detail } if ran_out_of_data(detail))
+        matches!(d, skpwright::Diagnostic::WholeFileRefused { detail } if ran_out_of_data(detail))
     });
     Ok(ImportJob {
         job: convert::ConvertJob::begin(std::rc::Rc::new(model)),
         recovery_notes,
         incomplete,
+        unlisted: unlisted.then_some(version),
     })
 }
 
@@ -255,7 +292,7 @@ pub const INCOMPLETE_NOTE: &str = "this .skp file looks incomplete or damaged, s
 
 /// True when a whole-file refusal's `detail` says the stream ran out: a
 /// read past the last byte, a declared count larger than the bytes left, or
-/// a string longer than them. These are OpenSKP 0.5's three wordings (its
+/// a string longer than them. These are Skpwright 0.5's three wordings (its
 /// `ar17` reader); the cut-short specs in `tests/import_specs.rs` fail if a
 /// later release rewords them.
 fn ran_out_of_data(detail: &str) -> bool {
@@ -289,6 +326,9 @@ pub struct ImportJob {
     /// The 2017 whole-file grammar refused the file for running out of
     /// data (see [`import_begin`]).
     incomplete: bool,
+    /// The header's version when the file is a stream container of a
+    /// release Skpwright does not list (read anyway, with a warning).
+    unlisted: Option<String>,
 }
 
 impl ImportJob {
@@ -315,6 +355,13 @@ impl ImportJob {
             && out.scene.defs.is_empty()
             && out.scene.guides.is_empty()
             && out.scene.extra.sketches.is_empty();
+        // A release Skpwright does not list that yielded nothing was not
+        // read at all, however clean the reader found it.
+        if let (true, Some(version)) = (empty, &self.unlisted) {
+            return Err(SkpError::UnsupportedVersion {
+                version: version.clone(),
+            });
+        }
         if empty && self.incomplete {
             return Err(SkpError::Damaged);
         }
@@ -322,6 +369,9 @@ impl ImportJob {
             return Err(SkpError::EmptyScene {
                 recovery_notes: self.recovery_notes,
             });
+        }
+        if let Some(version) = &self.unlisted {
+            out.warnings.insert(0, unlisted_note(version));
         }
         if self.incomplete {
             out.warnings.insert(0, INCOMPLETE_NOTE.to_string());
@@ -332,6 +382,27 @@ impl ImportJob {
             warnings: out.warnings,
             provenance: out.provenance,
         })
+    }
+}
+
+/// The first of [`SkpScene::warnings`] when the file is a stream container
+/// of a release Skpwright does not list but could read: nothing has been
+/// checked against a real file of that release.
+pub fn unlisted_note(version: &str) -> String {
+    format!(
+        "this file is release {version}, which Skpwright does not list; it was read as the \
+         stream container anyway, so parts of the model may be missing or wrong"
+    )
+}
+
+/// True when the header's major version is one whose container the reader
+/// decodes: a stream release (3 to 8, 2013 to 2020) or 26 and later (the
+/// ZIP container). A file of such a version whose body is neither layout
+/// is damaged rather than newer than the reader.
+fn decoded_major(version: &str) -> bool {
+    match version_major(version) {
+        Some(m) => m >= 26 || skpwright::Release::of_version(version).is_some(),
+        None => false,
     }
 }
 
@@ -349,8 +420,8 @@ fn version_major(version: &str) -> Option<u32> {
 ///
 /// The thinnest end-to-end use of the clean-room reader ( probe); kept
 /// as a cheap pre-import inspection alongside the full import pipeline.
-pub fn probe_topology(bytes: &[u8]) -> Vec<openskp::Topology> {
-    openskp::geometry_runs(bytes)
+pub fn probe_topology(bytes: &[u8]) -> Vec<skpwright::Topology> {
+    skpwright::geometry_runs(bytes)
         .into_iter()
         .map(|run| run.topology)
         .collect()

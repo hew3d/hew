@@ -30,24 +30,29 @@ use std::collections::{BTreeMap, BTreeSet};
 use kernel::{
     AttrTarget, ComponentId, Document, EntityRef, Guide, GuideId, NodeId, Point3, SectionPlaneState,
 };
-use openskp::{Model, Owner, PlacedInstance, SceneProperties, Value};
+use skpwright::{Model, Owner, PlacedInstance, SceneProperties, Value};
 
 use crate::source::{DefSource, NodeSource, entity};
 use crate::{
     Author, Export, ExportError, Frame, Origin, RunBuf, SkpSource, Target, WriteEnv, camera, dicts,
-    same_plane, skp_plane, transform13,
+    same_look, same_plane, skp_plane, transform13,
 };
 
 /// What the merge knows about the source file.
 pub(crate) struct Reuse {
+    /// The hatch pattern of each hatched placement of the file, by the
+    /// placement's pid: the file names one by its place among the runs'
+    /// placements, which the save moves, so the hatches are set aside at
+    /// the open and put back by pid ([`Author::instance_hatch_on_source`]).
+    pub(crate) hatch_by_pid: BTreeMap<u32, usize>,
     /// Persistent ids of the file's placements the document never read in
     /// ([`SkpSource::unread`]): the file's, carried as they are wherever
     /// their list is rewritten.
     pub(crate) unread: BTreeSet<u32>,
     /// The root list's placements never read in, with their dictionaries.
-    pub(crate) carried_root: Vec<(PlacedInstance, Vec<openskp::Dictionary>)>,
+    pub(crate) carried_root: Vec<(PlacedInstance, Vec<skpwright::Dictionary>)>,
     /// A rewritten definition's placements never read in, by its run.
-    pub(crate) carried_runs: BTreeMap<usize, Vec<(PlacedInstance, Vec<openskp::Dictionary>)>>,
+    pub(crate) carried_runs: BTreeMap<usize, Vec<(PlacedInstance, Vec<skpwright::Dictionary>)>>,
     pub(crate) source: SkpSource,
     /// The source's root list.
     pub(crate) root: usize,
@@ -56,7 +61,7 @@ pub(crate) struct Reuse {
     pub(crate) placements: BTreeMap<u32, (PlacedInstance, [f64; 16])>,
     /// The file's placed images, by pid, wherever they were: what an
     /// image's instance is written back as when its list is rewritten.
-    pub(crate) images: BTreeMap<u32, openskp::ImagePlacement>,
+    pub(crate) images: BTreeMap<u32, skpwright::ImagePlacement>,
     /// Pids written so far: one placement per pid.
     pub(crate) used: BTreeSet<u32>,
     /// Pids some other entity of the file also carries (a 2017 file reuses
@@ -114,7 +119,7 @@ fn micron(p: [f64; 3]) -> [i64; 3] {
 }
 
 impl LooseAttrs {
-    fn face_key(mesh: &openskp::Mesh, outer: &[u32]) -> Vec<[i64; 3]> {
+    fn face_key(mesh: &skpwright::Mesh, outer: &[u32]) -> Vec<[i64; 3]> {
         let mut k: Vec<[i64; 3]> = outer
             .iter()
             .map(|&i| micron(mesh.vertices[i as usize]))
@@ -123,7 +128,7 @@ impl LooseAttrs {
         k
     }
 
-    fn edge_key(mesh: &openskp::Mesh, a: u32, b: u32) -> [[i64; 3]; 2] {
+    fn edge_key(mesh: &skpwright::Mesh, a: u32, b: u32) -> [[i64; 3]; 2] {
         let mut k = [
             micron(mesh.vertices[a as usize]),
             micron(mesh.vertices[b as usize]),
@@ -132,7 +137,7 @@ impl LooseAttrs {
         k
     }
 
-    pub(crate) fn of(mesh: &openskp::Mesh) -> Self {
+    pub(crate) fn of(mesh: &skpwright::Mesh) -> Self {
         let mut out = Self::default();
         for f in &mesh.faces {
             out.faces.insert(
@@ -155,7 +160,7 @@ impl LooseAttrs {
     /// hides them all.
     pub(crate) fn apply(
         &self,
-        mesh: &mut openskp::Mesh,
+        mesh: &mut skpwright::Mesh,
         faces: usize,
         edges: usize,
         layer: u16,
@@ -250,10 +255,9 @@ pub fn save_in(
     let base = source.and_then(|s| {
         let m = Model::parse(&s.bytes).ok()?;
         // A model read only in part cannot be written back as the whole.
-        let partial = m
-            .diagnostics
-            .iter()
-            .any(|d| matches!(d, openskp::Diagnostic::ContinuousFallback { .. }) || d.is_desync());
+        let partial = m.diagnostics.iter().any(|d| {
+            matches!(d, skpwright::Diagnostic::ContinuousFallback { .. }) || d.is_desync()
+        });
         // Without provenance nothing can be told unchanged: building on a
         // file with content of its own would keep it beside the document's
         // copy of it. (A file whose content the document could not take —
@@ -267,10 +271,11 @@ pub fn save_in(
         (!partial && (known || !content)).then_some((m, s.clone()))
     });
     let fresh = base.is_none();
-    let a = match base {
+    let mut a = match base {
         Some((model, src)) => Author::on_source(&doc, model, src),
         None => Author::new(&doc),
     };
+    a.folders = target == Target::Skp2026;
     let mut authored = crate::author_with(a);
     let units = match units {
         SaveUnits::Set(u) => Some(u),
@@ -280,7 +285,10 @@ pub fn save_in(
     if let Some(u) = units {
         authored.model.units = u.over(authored.model.units.clone());
     }
-    let (bytes, writer_notes) = crate::write(&authored.model, target, env)?;
+    let (bytes, mut writer_notes) = crate::write(&authored.model, target, env)?;
+    if let (Some(s), Target::Stream(r)) = (source_in, target) {
+        writer_notes.extend(crate::unlisted_note(&s.bytes, r));
+    }
     let mut source = SkpSource {
         nodes: authored
             .origins
@@ -344,6 +352,12 @@ pub fn save_in(
             })
             .unwrap_or_default(),
         layers: authored.tag_layers.clone(),
+        scenes: authored
+            .scene_sids
+            .iter()
+            .enumerate()
+            .map(|(i, &sid)| (sid, i))
+            .collect(),
         // The file's loose edges still standing for the document's drawing.
         loose_sketches: source
             .filter(|_| authored.loose_kept)
@@ -484,7 +498,7 @@ impl<'d> Author<'d> {
         let root = match model.geometry.iter().position(|r| r.def_index.is_none()) {
             Some(r) => r,
             None => {
-                model.geometry.push(openskp::GeometryRun::default());
+                model.geometry.push(skpwright::GeometryRun::default());
                 model.geometry.len() - 1
             }
         };
@@ -558,7 +572,7 @@ impl<'d> Author<'d> {
             .definitions
             .iter()
             .enumerate()
-            .filter(|(_, d)| d.kind == openskp::DefinitionKind::Component)
+            .filter(|(_, d)| d.kind == skpwright::DefinitionKind::Component)
             .map(|(i, d)| (d.name.clone(), i))
             .collect();
         let source_loose_built = model
@@ -636,7 +650,7 @@ impl<'d> Author<'d> {
             && loose_drawing_kept
             && !root_drawing_new;
 
-        let images: BTreeMap<u32, openskp::ImagePlacement> = model
+        let images: BTreeMap<u32, skpwright::ImagePlacement> = model
             .geometry
             .iter()
             .flat_map(|r| r.images.iter().map(|im| (im.pid, im.clone())))
@@ -672,13 +686,18 @@ impl<'d> Author<'d> {
         // What the document rewrites is dropped from the file's records:
         // the root list's placements (rewritten from the tree), its loose
         // geometry when not kept, and the dictionaries hanging on them.
+        let hatch_by_pid: BTreeMap<u32, usize> = std::mem::take(&mut model.features.instance_hatch)
+            .into_iter()
+            .filter_map(|(i, h)| Some((model.instances.get(i)?.pid, h)))
+            .filter(|&(pid, _)| pid != 0)
+            .collect();
         let root_pids: BTreeSet<u32> = model.geometry[root]
             .placed
             .iter()
             .map(|p| p.pid)
             .filter(|p| !unread.contains(p))
             .collect();
-        model.instances.retain(|i| !root_pids.contains(&i.pid));
+        drop_instances(&mut model, |i| root_pids.contains(&i.pid));
         let loose_attrs = if keep_loose {
             LooseAttrs::default()
         } else {
@@ -687,16 +706,17 @@ impl<'d> Author<'d> {
         let r = &mut model.geometry[root];
         r.placed.clear();
         if !keep_loose {
-            r.mesh = openskp::Mesh::default();
+            r.mesh = skpwright::Mesh::default();
             r.curves.clear();
             r.curve_members.clear();
             r.relationships.clear();
         }
         model.dictionaries.retain(|a| match a.owner {
             Owner::Instance(ri, _) => ri != root,
-            Owner::Face(ri, _) | Owner::Edge(ri, _) | Owner::Curve(ri, _) => {
-                ri != root || keep_loose
-            }
+            Owner::Face(ri, _)
+            | Owner::Edge(ri, _)
+            | Owner::Curve(ri, _)
+            | Owner::Vertex(ri, _) => ri != root || keep_loose,
             _ => true,
         });
         // (Names live on the instance list, by pid: the root placements'
@@ -708,6 +728,7 @@ impl<'d> Author<'d> {
         a.next_pid = next_pid;
         a.next_def = next_def;
         a.reuse = Some(Reuse {
+            hatch_by_pid,
             unread,
             carried_root,
             carried_runs: BTreeMap::new(),
@@ -858,9 +879,8 @@ impl<'d> Author<'d> {
             return false;
         }
         // The root list's copy, if the image was there, goes with it.
-        let root = r.root;
-        self.model.geometry[root].images.retain(|im| im.pid != pid);
-        run.images.push(openskp::ImagePlacement {
+        self.remove_root_images(|im| im.pid == pid);
+        run.images.push(skpwright::ImagePlacement {
             pid,
             defref: template.defref,
             transform: transform13(&pose),
@@ -891,11 +911,57 @@ impl<'d> Author<'d> {
                 _ => None,
             })
             .collect();
-        let root = r.root;
         let gone: BTreeSet<u32> = read_in.difference(&r.used).copied().collect();
-        self.model.geometry[root]
+        self.remove_root_images(|im| gone.contains(&im.pid));
+    }
+
+    /// Removes the root list's placed images `gone` picks. Their attribute
+    /// dictionaries are keyed by position in that list, so the removed
+    /// images' go and the later ones' keys close up.
+    fn remove_root_images(&mut self, gone: impl Fn(&skpwright::ImagePlacement) -> bool) {
+        let Some(root) = self.reuse.as_ref().map(|r| r.root) else {
+            return;
+        };
+        let removed: Vec<usize> = self.model.geometry[root]
             .images
-            .retain(|im| !gone.contains(&im.pid));
+            .iter()
+            .enumerate()
+            .filter(|(_, im)| gone(im))
+            .map(|(k, _)| k)
+            .collect();
+        if removed.is_empty() {
+            return;
+        }
+        self.model.geometry[root].images.retain(|im| !gone(im));
+        self.model.dictionaries.retain_mut(|a| match &mut a.owner {
+            Owner::Image(x, k) if *x == root => match removed.binary_search(k) {
+                Ok(_) => false,
+                Err(before) => {
+                    *k -= before;
+                    true
+                }
+            },
+            _ => true,
+        });
+    }
+
+    /// Puts the file's instance hatches back on the placements that still
+    /// carry their pid, by their place among the runs' placements as the
+    /// written file has them; a hatch whose placement is gone goes too.
+    pub(crate) fn instance_hatch_on_source(&mut self) {
+        let Some(r) = self.reuse.as_ref() else {
+            return;
+        };
+        let patterns = self.model.features.hatch_patterns.len();
+        self.model.features.instance_hatch = self
+            .model
+            .geometry
+            .iter()
+            .flat_map(|run| run.placed.iter())
+            .enumerate()
+            .filter_map(|(i, p)| Some((i, *r.hatch_by_pid.get(&p.pid)?)))
+            .filter(|&(_, h)| h < patterns)
+            .collect();
     }
 
     /// The file's placement `pid` (its definition, and so its whole
@@ -1042,7 +1108,7 @@ impl<'d> Author<'d> {
         let (placed, world) = r.placements.get(&pid)?;
         let defref = placed.defref;
         let di = self.model.definitions.iter().position(|d| {
-            d.map_index == Some(defref as usize) && d.kind == openskp::DefinitionKind::Group
+            d.map_index == Some(defref as usize) && d.kind == skpwright::DefinitionKind::Group
         })?;
         if r.claimed_defs.contains(&di) {
             return None;
@@ -1095,6 +1161,7 @@ impl<'d> Author<'d> {
             Owner::Face(x, _)
             | Owner::Edge(x, _)
             | Owner::Curve(x, _)
+            | Owner::Vertex(x, _)
             | Owner::Instance(x, _)
             | Owner::Image(x, _)
             | Owner::SectionPlane(x, _)
@@ -1159,6 +1226,7 @@ impl<'d> Author<'d> {
                     self.model.materials.len() - 1
                 }
             };
+            self.pbr_on_source(index, m.pbr.as_ref());
             let slot = match self.model.material_links.iter().find(|l| l.1 == index) {
                 Some(l) => l.0,
                 None => {
@@ -1168,18 +1236,38 @@ impl<'d> Author<'d> {
                 }
             };
             self.mat_slot.insert(id, slot);
-            let d = self.attrs(AttrTarget::Entity(EntityRef::Material(id)));
+            let d = dicts::with_unread(
+                &self.model.dictionaries,
+                &Owner::Material(index),
+                self.attrs(AttrTarget::Entity(EntityRef::Material(id))),
+            );
             self.model
                 .dictionaries
                 .retain(|a| a.owner != Owner::Material(index));
             if !d.is_empty() {
-                self.model.dictionaries.push(openskp::Attributes {
+                self.model.dictionaries.push(skpwright::Attributes {
                     owner: Owner::Material(index),
                     dictionaries: d,
                 });
             }
         }
         self.model.material_links.sort_by_key(|l| l.0);
+    }
+
+    /// The document's physically based properties onto the file's record
+    /// for material `index`: only what changed, a new record when the file
+    /// had none and the document has properties.
+    fn pbr_on_source(&mut self, index: usize, doc: Option<&kernel::Pbr>) {
+        let list = &mut self.model.features.material_pbr;
+        match list.iter_mut().find(|(i, _)| *i == index) {
+            Some((_, rec)) => crate::pbr::apply(rec, doc, false),
+            None if doc.is_some() => {
+                let mut rec = skpwright::PbrMaterial::default();
+                crate::pbr::apply(&mut rec, doc, true);
+                list.push((index, rec));
+            }
+            None => {}
+        }
     }
 
     /// The file's layers under the document's tags. A tag stands for the
@@ -1221,6 +1309,10 @@ impl<'d> Author<'d> {
                 _ => None,
             })
             .collect();
+        // (A file's own folders name the rest: the path of their names,
+        // then the layer's.)
+        let (in_folders, src_pre) = crate::folders::source_paths(&self.model);
+        self.src_folder_paths = src_pre;
         let by_path: BTreeMap<Vec<String>, usize> = self
             .model
             .layers
@@ -1231,13 +1323,18 @@ impl<'d> Author<'d> {
                 (
                     recorded
                         .get(&l.name)
+                        .or_else(|| in_folders.get(&l.name))
                         .cloned()
                         .unwrap_or_else(|| vec![l.name.clone()]),
                     i,
                 )
             })
             .collect();
-        // The layer each tag was read from, by its stable id.
+        // The layer each tag was read from, by its stable id. Layers are
+        // matched by name because the import itself reads a tag per name: two
+        // layers of one name (which SketchUp does not normally allow) are one
+        // tag in the document, so the first of them stands for it and the
+        // other is left to the unused-layer pruning at the end of the save.
         let by_sid: BTreeMap<u64, usize> = self
             .reuse
             .as_ref()
@@ -1296,7 +1393,9 @@ impl<'d> Author<'d> {
                 continue;
             }
             let name = self.model.layers[k].name.clone();
-            let wanted_by_tag = tags.iter().any(|(path, _, _)| path.join("/") == name);
+            let wanted_by_tag = tags
+                .iter()
+                .any(|(path, _, _)| self.layer_name_for(path) == name);
             if wanted_by_tag {
                 taken.remove(&name);
                 let fresh = crate::unique_name(&format!("{name} (unused)"), "Tag", &mut taken);
@@ -1316,8 +1415,12 @@ impl<'d> Author<'d> {
                     self.model.layers[i].visible = !hidden;
                     // A renamed tag renames its layer, in place: the name
                     // its path spells, unless another layer has it.
-                    let wanted = path.join("/");
-                    if self.model.layers[i].name != wanted {
+                    // (With folders, a layer named by the last segment or by
+                    // the joined path already stands for its tag.)
+                    let wanted = self.layer_name_for(&path);
+                    let current = &self.model.layers[i].name;
+                    let stands = *current == wanted || (self.folders && *current == path.join("/"));
+                    if !stands {
                         taken.remove(&self.model.layers[i].name);
                         let name = crate::unique_name(&wanted, "Tag", &mut taken);
                         self.model.layers[i].name = name;
@@ -1325,8 +1428,9 @@ impl<'d> Author<'d> {
                     i
                 }
                 None => {
-                    let name = crate::unique_name(&path.join("/"), "Tag", &mut taken);
-                    self.model.layers.push(openskp::Layer {
+                    let name = crate::unique_name(&self.layer_name_for(&path), "Tag", &mut taken);
+                    self.new_tag_layers.insert(path.clone());
+                    self.model.layers.push(skpwright::Layer {
                         name,
                         visible: !hidden,
                         rgba: crate::layer_color(self.model.layers.len()),
@@ -1355,12 +1459,16 @@ impl<'d> Author<'d> {
                 Value::Text(self.model.layers[i].name.clone()),
                 dicts::path_value(&path),
             ]));
-            let d = self.attrs(AttrTarget::Entity(EntityRef::Tag(path)));
+            let d = dicts::with_unread(
+                &self.model.dictionaries,
+                &Owner::Layer(i),
+                self.attrs(AttrTarget::Entity(EntityRef::Tag(path))),
+            );
             self.model
                 .dictionaries
                 .retain(|a| a.owner != Owner::Layer(i));
             if !d.is_empty() {
-                self.model.dictionaries.push(openskp::Attributes {
+                self.model.dictionaries.push(skpwright::Attributes {
                     owner: Owner::Layer(i),
                     dictionaries: d,
                 });
@@ -1399,7 +1507,7 @@ impl<'d> Author<'d> {
                 .iter()
                 .enumerate()
                 .filter(|(_, d)| {
-                    d.kind == openskp::DefinitionKind::Group
+                    d.kind == skpwright::DefinitionKind::Group
                         && d.map_index.is_some_and(|m| !placed.contains(&(m as u32)))
                 })
                 .map(|(i, _)| i)
@@ -1420,6 +1528,22 @@ impl<'d> Author<'d> {
         let m = &mut self.model;
         let map = m.definitions[di].map_index;
         m.definitions.remove(di);
+        // The features keyed by definition index: a removed definition's
+        // snaps and procedure go with it, the rest move down.
+        let down = |d: usize| if d > di { d - 1 } else { d };
+        m.features.snaps.retain(|s| s.definition != Some(di));
+        for s in &mut m.features.snaps {
+            s.definition = s.definition.map(down);
+        }
+        m.features
+            .procedures
+            .retain(|p| p.definition != di && p.results.iter().all(|r| r.definition != di));
+        for p in &mut m.features.procedures {
+            p.definition = down(p.definition);
+            for r in &mut p.results {
+                r.definition = down(r.definition);
+            }
+        }
         m.definition_links.retain(|l| l.1 != di);
         for l in &mut m.definition_links {
             if l.1 > di {
@@ -1480,13 +1604,14 @@ impl<'d> Author<'d> {
             map.and_then(|map| m.geometry.iter().position(|r| r.def_index == Some(map)))
         {
             let pids: BTreeSet<u32> = m.geometry[ri].placed.iter().map(|p| p.pid).collect();
-            m.instances.retain(|i| !pids.contains(&i.pid));
+            drop_instances(m, |i| pids.contains(&i.pid));
             m.geometry.remove(ri);
             m.dictionaries.retain(|a| {
                 !matches!(a.owner,
                     Owner::Face(x, _)
                     | Owner::Edge(x, _)
                     | Owner::Curve(x, _)
+                    | Owner::Vertex(x, _)
                     | Owner::Instance(x, _)
                     | Owner::Image(x, _)
                     | Owner::SectionPlane(x, _)
@@ -1498,6 +1623,7 @@ impl<'d> Author<'d> {
                     Owner::Face(x, _)
                     | Owner::Edge(x, _)
                     | Owner::Curve(x, _)
+                    | Owner::Vertex(x, _)
                     | Owner::Instance(x, _)
                     | Owner::Image(x, _)
                     | Owner::SectionPlane(x, _)
@@ -1541,20 +1667,7 @@ impl<'d> Author<'d> {
             })
             .collect();
         let m = &self.model;
-        let mut used: BTreeSet<u16> = BTreeSet::new();
-        for r in &m.geometry {
-            used.extend(r.mesh.faces.iter().map(|f| f.layer));
-            used.extend(r.mesh.edges.iter().map(|e| e.layer));
-            used.extend(r.placed.iter().map(|p| p.layer));
-            used.extend(r.sections.iter().map(|s| s.layer));
-            used.extend(r.guide_points.iter().map(|g| g.layer));
-            used.extend(r.polylines.iter().map(|p| p.layer));
-            used.extend(r.images.iter().map(|im| im.layer));
-        }
-        used.extend(m.texts.iter().map(|t| t.layer));
-        used.extend(m.dimensions.iter().map(|d| d.layer));
-        used.extend(m.radial_dimensions.iter().map(|d| d.layer));
-        used.extend(m.guides.iter().map(|g| g.layer));
+        let used = crate::folders::used_slots(m);
         let slot_of = |i: usize| m.layer_links.iter().find(|l| l.1 == i).map(|l| l.0);
         let gone: BTreeSet<usize> = (1..m.layers.len())
             .filter(|i| !claimed.contains(i))
@@ -1596,6 +1709,31 @@ impl<'d> Author<'d> {
                 .filter_map(|&i| remap.get(i).copied().flatten())
                 .collect();
         }
+        // The features keyed by layer index follow their layers; a folder
+        // loses the layers that are gone.
+        fn remap_folders(list: &mut [skpwright::LayerFolder], remap: &[Option<usize>]) {
+            for f in list {
+                f.layers = f
+                    .layers
+                    .iter()
+                    .filter_map(|&i| remap.get(i).copied().flatten())
+                    .collect();
+                remap_folders(&mut f.folders, remap);
+            }
+        }
+        remap_folders(&mut m.features.layer_folders, &remap);
+        m.features.layer_line_styles = m
+            .features
+            .layer_line_styles
+            .iter()
+            .filter_map(|&(l, s)| Some((remap.get(l).copied().flatten()?, s)))
+            .collect();
+        m.features.layer_page_behaviour = m
+            .features
+            .layer_page_behaviour
+            .iter()
+            .filter_map(|&(l, v)| Some((remap.get(l).copied().flatten()?, v)))
+            .collect();
         m.dictionaries
             .retain(|a| !matches!(a.owner, Owner::Layer(i) if gone.contains(&i)));
         for a in &mut m.dictionaries {
@@ -1728,10 +1866,17 @@ impl<'d> Author<'d> {
         // Hew moves the guide), and a file guide on the line of two document
         // guides takes the one on its own layer first.
         let doc_layers: Vec<u16> = doc_guide_ids.iter().map(|&g| self.guide_layer(g)).collect();
+        // Each document guide's dash: what the file's guide is drawn with
+        // once matched (the document carries the file's stipple from
+        // opening, so an untouched guide keeps its own).
+        let doc_dashes: Vec<u16> = doc_guide_ids
+            .iter()
+            .map(|&g| self.doc.guide_dash(g).mask())
+            .collect();
         let r = self.reuse.as_ref().expect("reuse mode");
         let ri = r.root;
         let near = |a: Point3, b: [f64; 3]| (a - Point3::new(b[0], b[1], b[2])).length() < 1e-6;
-        let line_matches = |g: &openskp::Guide, h: &Guide| match *h {
+        let line_matches = |g: &skpwright::Guide, h: &Guide| match *h {
             Guide::Line {
                 origin,
                 direction,
@@ -1795,7 +1940,7 @@ impl<'d> Author<'d> {
         // and is matched like any other): the file keeps it as it is.
         let unseen = |_layer: u16, hidden: bool| hidden;
         let mut keep: Vec<bool> = Vec::new();
-        let mut relayer: Vec<(usize, u16)> = Vec::new();
+        let mut relayer: Vec<(usize, u16, u16)> = Vec::new();
         for (gi, g) in self.model.guides.iter().enumerate() {
             if let Some(m) = g.def_index {
                 keep.push(!reframed.contains(&m));
@@ -1819,14 +1964,15 @@ impl<'d> Author<'d> {
             match hit {
                 Some((hi, _)) => {
                     matched[hi] = true;
-                    relayer.push((gi, doc_layers[hi]));
+                    relayer.push((gi, doc_layers[hi], doc_dashes[hi]));
                     keep.push(true);
                 }
                 None => keep.push(false),
             }
         }
-        for (gi, layer) in relayer {
+        for (gi, layer, stipple) in relayer {
             self.model.guides[gi].layer = layer;
+            self.model.guides[gi].stipple = stipple;
         }
         // Guide points among the root list's own.
         let points = std::mem::take(&mut self.model.geometry[ri].guide_points);
@@ -1890,7 +2036,7 @@ impl<'d> Author<'d> {
                     origin,
                     direction,
                     span,
-                } => self.model.guides.push(openskp::Guide {
+                } => self.model.guides.push(skpwright::Guide {
                     def_index: None,
                     point_m: [origin.x, origin.y, origin.z],
                     direction: [direction.x, direction.y, direction.z],
@@ -1901,10 +2047,11 @@ impl<'d> Author<'d> {
                     hidden: false,
                     casts_shadows: true,
                     receives_shadows: true,
+                    stipple: doc_dashes[hi],
                 }),
                 Guide::Point { position } => {
                     let p = [position.x, position.y, position.z];
-                    root.guide_points.push(openskp::GuidePoint {
+                    root.guide_points.push(skpwright::GuidePoint {
                         pid,
                         point_m: p,
                         anchor_m: p,
@@ -1927,7 +2074,7 @@ impl<'d> Author<'d> {
         let mut planes: Vec<(SectionPlaneState, u32)> = Vec::new();
         // A file plane is the cut when it holds the cut's origin and keeps
         // the side the cut keeps (its normal is the cut's turned over).
-        let file_plane = |sp: &openskp::SectionPlane, s: &SectionPlaneState| {
+        let file_plane = |sp: &skpwright::SectionPlane, s: &SectionPlaneState| {
             let [a, b, c, d] = sp.plane;
             let n = kernel::Vec3::new(a, b, c);
             let on = (n.dot(s.origin.to_vec()) * 39.37007874015748 + d).abs() < 1e-4;
@@ -1948,7 +2095,7 @@ impl<'d> Author<'d> {
                 Some(sp) => sp.pid,
                 None => {
                     let pid = self.pid();
-                    root.sections.push(openskp::SectionPlane {
+                    root.sections.push(skpwright::SectionPlane {
                         pid,
                         plane: skp_plane(s),
                         ..Default::default()
@@ -1967,7 +2114,7 @@ impl<'d> Author<'d> {
         planes
     }
 
-    /// Scenes, by name: the document's camera, hidden nodes, hidden layers
+    /// Scenes, by identity (by name for one the source has no record of): the document's camera, hidden nodes, hidden layers
     /// and cut over the file's scene of the same name (whose style,
     /// shadows, axes, thumbnail and hidden faces and edges stay); the
     /// document's order; a scene the document dropped goes.
@@ -1986,9 +2133,50 @@ impl<'d> Author<'d> {
             .collect();
         self.scenes(planes);
         let authored = std::mem::take(&mut self.model.scenes);
-        for mut s in authored {
-            if let Some(f) = file_scenes.iter().find(|f| f.name == s.name) {
+        // The file scene each written scene stands for: by identity (the
+        // scene the document's own came from), else by name for a scene
+        // the source has no record of. A file scene the source accounts
+        // for goes only to its own scene: one the document deleted donates
+        // nothing to a new scene that reuses its name.
+        let src = &self.reuse.as_ref().expect("reuse mode").source;
+        let accounted: BTreeSet<usize> = src.scenes.values().copied().collect();
+        let mut taken: BTreeSet<usize> = BTreeSet::new();
+        let mut matched: Vec<Option<usize>> = vec![None; authored.len()];
+        for (k, m) in matched.iter_mut().enumerate() {
+            if let Some(&fi) = self.scene_sids.get(k).and_then(|sid| src.scenes.get(sid))
+                && fi < file_scenes.len()
+                && taken.insert(fi)
+            {
+                *m = Some(fi);
+            }
+        }
+        for (k, m) in matched.iter_mut().enumerate() {
+            let known = self
+                .scene_sids
+                .get(k)
+                .is_some_and(|sid| src.scenes.contains_key(sid));
+            if m.is_some() || known {
+                continue;
+            }
+            if let Some(fi) = file_scenes.iter().enumerate().position(|(fi, f)| {
+                f.name == authored[k].name && !accounted.contains(&fi) && !taken.contains(&fi)
+            }) {
+                taken.insert(fi);
+                *m = Some(fi);
+            }
+        }
+        // Where each file scene lands in the written list, for what is
+        // keyed by scene index.
+        let mut landing: Vec<Option<usize>> = vec![None; file_scenes.len()];
+        for (k, m) in matched.iter().enumerate() {
+            if let Some(fi) = *m {
+                landing[fi] = Some(k);
+            }
+        }
+        for (k, mut s) in authored.into_iter().enumerate() {
+            if let Some(f) = matched[k].map(|fi| &file_scenes[fi]) {
                 let mut merged = f.clone();
+                merged.name = s.name.clone();
                 // The properties the document captures, in the file's own
                 // terms: a hidden set the file already saves keeps the
                 // file's bits for it (2017 has one, 2026 two).
@@ -2039,7 +2227,20 @@ impl<'d> Author<'d> {
                 }
                 merged.saved = SceneProperties(bits);
                 merged.description = std::mem::take(&mut s.description);
+                // The scene's own camera, with what Hew holds no state for
+                // (two-point perspective, 2D zoom and pan) kept while its
+                // view is the file's own.
+                let file_camera = merged.camera.take();
                 merged.camera = s.camera.take();
+                if let (Some(old), Some(new)) = (file_camera.as_ref(), merged.camera.as_mut())
+                    && same_look(old, new)
+                {
+                    new.two_point_perspective = old.two_point_perspective;
+                    new.scale_2d = old.scale_2d;
+                    new.offset_2d = old.offset_2d;
+                    new.description = old.description.clone();
+                    new.undecoded = old.undecoded;
+                }
                 let kept: Vec<u32> = f
                     .hidden_entities
                     .iter()
@@ -2057,13 +2258,42 @@ impl<'d> Author<'d> {
                 self.model.scenes.push(s);
             }
         }
-        if self
-            .model
-            .selected_scene
-            .is_some_and(|i| i >= self.model.scenes.len())
-        {
-            self.model.selected_scene = None;
+        let m = &mut self.model;
+        m.features.scene_pages = m
+            .features
+            .scene_pages
+            .iter()
+            .filter_map(|(i, e)| Some((landing.get(*i).copied().flatten()?, e.clone())))
+            .collect();
+        m.features.scene_environment = m
+            .features
+            .scene_environment
+            .iter()
+            .filter_map(|(i, e)| Some((landing.get(*i).copied().flatten()?, e.clone())))
+            .collect();
+        m.dictionaries.retain(|a| match a.owner {
+            Owner::Scene(i)
+            | Owner::SceneRendering(i)
+            | Owner::SceneShadowInfo(i)
+            | Owner::SceneAxes(i) => landing.get(i).copied().flatten().is_some(),
+            _ => true,
+        });
+        for a in &mut m.dictionaries {
+            match a.owner {
+                Owner::Scene(i) => a.owner = Owner::Scene(landing[i].unwrap_or(i)),
+                Owner::SceneRendering(i) => {
+                    a.owner = Owner::SceneRendering(landing[i].unwrap_or(i))
+                }
+                Owner::SceneShadowInfo(i) => {
+                    a.owner = Owner::SceneShadowInfo(landing[i].unwrap_or(i))
+                }
+                Owner::SceneAxes(i) => a.owner = Owner::SceneAxes(landing[i].unwrap_or(i)),
+                _ => {}
+            }
         }
+        m.selected_scene = m
+            .selected_scene
+            .and_then(|i| landing.get(i).copied().flatten());
     }
 
     /// The model's dictionaries: the file's own (SketchUp's and anything
@@ -2088,7 +2318,7 @@ impl<'d> Author<'d> {
             .dictionaries
             .retain(|a| a.owner != Owner::Model || !a.dictionaries.is_empty());
         if !doc_attrs.is_empty() {
-            self.model.dictionaries.push(openskp::Attributes {
+            self.model.dictionaries.push(skpwright::Attributes {
                 owner: Owner::Model,
                 dictionaries: doc_attrs,
             });
@@ -2171,7 +2401,7 @@ impl<'d> Author<'d> {
             // its placements.
             holds(list, e) || (path.is_empty() && reachable.iter().any(|&ri| holds(Some(ri), e)))
         };
-        let held = |a: &openskp::Anchor| {
+        let held = |a: &skpwright::Anchor| {
             (a.entity.is_none() || lands(a.entity, &a.path))
                 && (a.second.is_none() || lands(a.second, &a.second_path))
         };
@@ -2194,7 +2424,7 @@ impl<'d> Author<'d> {
         let pruned: BTreeSet<usize> = model
             .definitions
             .iter()
-            .filter(|d| d.kind == openskp::DefinitionKind::Group)
+            .filter(|d| d.kind == skpwright::DefinitionKind::Group)
             .filter_map(|d| d.map_index)
             .filter(|m| !placed_now.contains(&(*m as u32)))
             .collect();
@@ -2335,7 +2565,22 @@ impl<'d> Author<'d> {
 
     pub(crate) fn camera_on_source(&mut self) {
         if let Some(c) = self.doc.camera_state() {
-            self.model.camera = Some(camera(&c));
+            let mut cam = camera(&c);
+            // The file's camera keeps what Hew holds no state for (two-point
+            // perspective, the 2D zoom and pan, the description) for as long
+            // as the view is the file's own; a camera the user moved starts
+            // again from the defaults, with no image width or ratio unless
+            // the document still holds them.
+            if let Some(file) = self.model.camera.as_ref().filter(|f| same_look(f, &cam)) {
+                cam.two_point_perspective = file.two_point_perspective;
+                cam.scale_2d = file.scale_2d;
+                cam.offset_2d = file.offset_2d;
+                cam.description = file.description.clone();
+                cam.undecoded = file.undecoded;
+            }
+            self.model.camera = Some(cam);
+        } else {
+            self.model.camera = None;
         }
     }
 }
@@ -2358,7 +2603,7 @@ fn carry_unread(
     model: &Model,
     ri: usize,
     unread: &BTreeSet<u32>,
-) -> Vec<(PlacedInstance, Vec<openskp::Dictionary>)> {
+) -> Vec<(PlacedInstance, Vec<skpwright::Dictionary>)> {
     model.geometry[ri]
         .placed
         .iter()
@@ -2383,17 +2628,19 @@ fn is_sketchup_owned(name: &str) -> bool {
         || name.starts_with("SU_")
 }
 
-fn material_name(m: &openskp::Material) -> &str {
+fn material_name(m: &skpwright::Material) -> &str {
     match m {
-        openskp::Material::Solid { name, .. } | openskp::Material::Textured { name, .. } => name,
+        skpwright::Material::Solid { name, .. } | skpwright::Material::Textured { name, .. } => {
+            name
+        }
     }
 }
 
 /// The document's color, opacity and texture onto the file's record; a
 /// texture the document changed (or added, or removed) replaces the
 /// record's shape.
-fn update_material(file: &mut openskp::Material, doc: &openskp::Material) {
-    use openskp::Material::{Solid, Textured};
+fn update_material(file: &mut skpwright::Material, doc: &skpwright::Material) {
+    use skpwright::Material::{Solid, Textured};
     match (&mut *file, doc) {
         (
             Solid { rgba, opacity, .. },
@@ -2482,7 +2729,7 @@ fn max_pid(m: &Model) -> u32 {
 fn expanded_definition_guides(model: &Model) -> DefinitionGuides {
     let tree = model.scene();
     let mut placements: BTreeMap<usize, Vec<[f64; 16]>> = BTreeMap::new();
-    let mut stack: Vec<&openskp::Node> = tree.iter().collect();
+    let mut stack: Vec<&skpwright::Node> = tree.iter().collect();
     while let Some(n) = stack.pop() {
         if let Some(di) = n.run.and_then(|ri| model.geometry.get(ri)?.def_index) {
             placements.entry(di).or_default().push(n.world);
@@ -2521,4 +2768,31 @@ fn expanded_definition_guides(model: &Model) -> DefinitionGuides {
         }
     }
     (out, points)
+}
+
+/// Removes the instances `gone` names from the model, renumbering the
+/// features keyed by instance index.
+fn drop_instances(m: &mut skpwright::Model, gone: impl Fn(&skpwright::Instance) -> bool) {
+    let mut remap = Vec::with_capacity(m.instances.len());
+    let mut next = 0usize;
+    for i in &m.instances {
+        if gone(i) {
+            remap.push(None);
+        } else {
+            remap.push(Some(next));
+            next += 1;
+        }
+    }
+    let mut k = 0;
+    m.instances.retain(|_| {
+        let keep = remap[k].is_some();
+        k += 1;
+        keep
+    });
+    m.features.instance_hatch = m
+        .features
+        .instance_hatch
+        .iter()
+        .filter_map(|&(i, h)| Some((remap.get(i).copied().flatten()?, h)))
+        .collect();
 }

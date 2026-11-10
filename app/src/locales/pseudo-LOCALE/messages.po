@@ -312,6 +312,10 @@ msgstr ""
 msgid "{name} — Hew"
 msgstr ""
 
+#: src/io/documentSession.ts
+msgid "{name} — Hew Beta"
+msgstr ""
+
 #. Hover tip: a thing and the container it sits in
 #: src/panels/selectionPath.ts
 msgid "{name} · in {parentLabel}"
@@ -652,6 +656,10 @@ msgstr ""
 
 #: src/io/documentSession.ts
 msgid "• {name} — Hew"
+msgstr ""
+
+#: src/io/documentSession.ts
+msgid "• {name} — Hew Beta"
 msgstr ""
 
 #: src/palette/CommandPalette.tsx
@@ -1140,6 +1148,10 @@ msgstr ""
 msgid "Auto follows your OS's light/dark appearance setting."
 msgstr ""
 
+#: src/io/docFormat.ts
+msgid "Avoid features older SketchUp versions cannot open"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "axes"
 msgstr ""
@@ -1168,6 +1180,14 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Behind"
+msgstr ""
+
+#: src/panels/MenuBar.tsx
+msgid "BETA"
+msgstr ""
+
+#: src/panels/WelcomeScreen.tsx
+msgid "Beta build {betaVersion}. Files saved here may not open in the released Hew."
 msgstr ""
 
 #. Color of the Z axis in a status-bar hint, lowercase
@@ -1313,6 +1333,10 @@ msgstr ""
 
 #: src/i18n/historyLabels.ts
 msgid "Change material opacity"
+msgstr ""
+
+#: src/i18n/historyLabels.ts
+msgid "Change material surface"
 msgstr ""
 
 #: src/i18n/historyLabels.ts
@@ -1910,6 +1934,10 @@ msgstr ""
 msgid "Controls how lengths are displayed (e.g. the Move tool's live measurement). Precision sets how far readouts are rounded: a number of decimals, or a fraction of an inch. A rounded readout is marked with ~, and Exact shows every digit a length needs. Each format remembers its own choice. Model geometry is always stored in meters internally."
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Coordinate system"
+msgstr ""
+
 #: src/ErrorBoundary.tsx
 #: src/log/LogPanel.tsx
 #: src/panels/ReportBugDialog.tsx
@@ -2248,6 +2276,10 @@ msgstr ""
 msgid "Dark"
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Datum"
+msgstr ""
+
 #: src/settings/FluentSettingsPage.tsx
 #: src/settings/SettingsWindow.tsx
 msgid "Debug"
@@ -2279,6 +2311,7 @@ msgid "Decimal inches (60.125\")"
 msgstr ""
 
 #: src/panels/MaterialPalette.tsx
+#: src/panels/ScenesPanel.tsx
 msgid "Default"
 msgstr ""
 
@@ -2288,6 +2321,10 @@ msgstr ""
 
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Definition Name"
+msgstr ""
+
+#: src/panels/ScenesPanel.tsx
+msgid "Delay (s)"
 msgstr ""
 
 #: src/App.tsx
@@ -2815,6 +2852,10 @@ msgstr ""
 msgid "Each Scene ({sceneCount})"
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Easting"
+msgstr ""
+
 #: src/shop/InspectCard.tsx
 msgctxt "measurement"
 msgid "edge"
@@ -3066,6 +3107,27 @@ msgstr ""
 
 #: src/palette/registry.ts
 msgid "eye height"
+msgstr ""
+
+#: src/tools/CircleTool.ts
+#: src/tools/PolygonTool.ts
+msgid "Facing the {axis} plane — click the center to draw on it; ↑ for the ground, Shift pins it."
+msgstr ""
+
+#: src/tools/PlaceImageTool.ts
+msgid "Facing the {axis} plane — click the first corner of \"{name}\" to place it there; ↑ for the ground. Esc cancels."
+msgstr ""
+
+#: src/tools/RectangleTool.ts
+msgid "Facing the {axis} plane — click the first corner to draw on it; ↑ for the ground, Shift pins it."
+msgstr ""
+
+#: src/tools/ArcTool.ts
+msgid "Facing the {axis} plane — click the first endpoint to draw on it; ↑ for the ground, Shift pins it."
+msgstr ""
+
+#: src/tools/LineTool.ts
+msgid "Facing the {axis} plane — click to start a line on it; ↑ for the ground, Shift pins it."
 msgstr ""
 
 #: src/viewport/MeasurementBox.tsx
@@ -3359,6 +3421,10 @@ msgstr ""
 msgid "geo {geometries}"
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Geo-location"
+msgstr ""
+
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Geometry"
 msgstr ""
@@ -3545,6 +3611,10 @@ msgstr ""
 msgid "health"
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Height"
+msgstr ""
+
 #: src/panels/TextDialog.tsx
 msgid "Height ({unit})"
 msgstr ""
@@ -3574,6 +3644,10 @@ msgstr ""
 msgid "Hew {version} is available — you have {current}.\n"
 "\n"
 "Download and install it now?"
+msgstr ""
+
+#: src/shop/ShopApp.tsx
+msgid "Hew Beta"
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
@@ -4610,6 +4684,22 @@ msgstr ""
 msgid "Merge two selected solids into one (boolean add)."
 msgstr ""
 
+#: src/panels/MaterialPalette.tsx
+msgid "Metallic"
+msgstr ""
+
+#: src/panels/MaterialPalette.tsx
+msgid "Metallic (select a material swatch first)"
+msgstr ""
+
+#: src/kernelErrors.ts
+msgid "Metallic and roughness must each be between 0 and 100%."
+msgstr ""
+
+#: src/panels/MaterialPalette.tsx
+msgid "Metallic for {selectedName}"
+msgstr ""
+
 #: src/settings/stlImportUnit.ts
 #: src/settings/units.ts
 msgid "Meters"
@@ -5085,6 +5175,10 @@ msgstr ""
 msgid "Normal"
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Northing"
+msgstr ""
+
 #: src/settings/FoldersPane.tsx
 msgid "Not available"
 msgstr ""
@@ -5271,6 +5365,18 @@ msgstr ""
 #: src/panels/LibraryWindow.tsx
 #: src/panels/TextDialog.tsx
 msgid "OK"
+msgstr ""
+
+#: src/panels/SaveFormatDialog.tsx
+msgid "Older SketchUp version"
+msgstr ""
+
+#: src/io/docFormat.ts
+msgid "Older SketchUp versions"
+msgstr ""
+
+#: src/io/docFormat.ts
+msgid "Older SketchUp versions (.skp)"
 msgstr ""
 
 #: src/settings/FluentSettingsPage.tsx
@@ -5563,12 +5669,44 @@ msgid "Openings"
 msgstr ""
 
 #: src/io/savePanel.ts
-msgid "opens in SketchUp Make 2017 and later"
+msgid "opens in SketchUp {release} and later"
 msgstr ""
 
 #: src/io/docFormat.ts
-msgid "Opens in SketchUp Make 2017 and later."
+msgid "Opens in SketchUp {release} and later."
 msgstr ""
+
+#: src/io/savePanel.ts
+#~ msgid "opens in SketchUp 2018 and later"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "Opens in SketchUp 2018 and later."
+#~ msgstr ""
+
+#: src/io/savePanel.ts
+#~ msgid "opens in SketchUp 2019 and later"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "Opens in SketchUp 2019 and later."
+#~ msgstr ""
+
+#: src/io/savePanel.ts
+#~ msgid "opens in SketchUp 2020 and later"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "Opens in SketchUp 2020 and later."
+#~ msgstr ""
+
+#: src/io/savePanel.ts
+#~ msgid "opens in SketchUp Make 2017 and later"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "Opens in SketchUp Make 2017 and later."
+#~ msgstr ""
 
 #: src/shop/ScanSheet.tsx
 msgid "Or scan the QR with your camera app instead."
@@ -6011,6 +6149,7 @@ msgstr ""
 msgid "projected"
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
 #: src/shop/ViewsSheet.tsx
 msgid "Projection"
 msgstr ""
@@ -6318,6 +6457,10 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Rejoin the pieces and remove the inside walls"
+msgstr ""
+
+#: src/io/savePanel.ts
+msgid "Release"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -6670,6 +6813,18 @@ msgstr ""
 msgid "Rotate the selection around an inferred axis."
 msgstr ""
 
+#: src/panels/MaterialPalette.tsx
+msgid "Roughness"
+msgstr ""
+
+#: src/panels/MaterialPalette.tsx
+msgid "Roughness (select a material swatch first)"
+msgstr ""
+
+#: src/panels/MaterialPalette.tsx
+msgid "Roughness for {selectedName}"
+msgstr ""
+
 #: src/viewport/Viewport.tsx
 msgid "Running without graphics acceleration — large models will be slow."
 msgstr ""
@@ -6835,6 +6990,7 @@ msgstr ""
 
 #: src/io/savePanel.ts
 #: src/panels/ExportDialog.tsx
+#: src/panels/GeoReferenceInfo.tsx
 #: src/panels/PrintDialog.tsx
 msgid "Scale"
 msgstr ""
@@ -6907,6 +7063,10 @@ msgstr ""
 
 #: src/scenes/useScenesController.ts
 msgid "Scene properties failed: {reason}"
+msgstr ""
+
+#: src/scenes/useScenesController.ts
+msgid "Scene timing failed: {reason}"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
@@ -7191,6 +7351,10 @@ msgstr ""
 msgid "Set attribute {namespace}.{key}"
 msgstr ""
 
+#: src/i18n/historyLabels.ts
+msgid "Set geo-location"
+msgstr ""
+
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/settings/FluentSettingsPage.tsx
@@ -7436,16 +7600,61 @@ msgstr ""
 
 #: src/io/docFormat.ts
 #: src/io/savePanel.ts
-msgid "SketchUp (.skp)"
+#~ msgid "SketchUp (.skp)"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#: src/io/savePanel.ts
+msgid "SketchUp {release} (.skp)"
+msgstr ""
+
+#: src/io/docFormat.ts
+msgid "SketchUp {release} model"
+msgstr ""
+
+#: src/io/savePanel.ts
+msgid "SketchUp {year}"
 msgstr ""
 
 #: src/io/docFormat.ts
 #: src/io/savePanel.ts
-msgid "SketchUp 2017 (.skp)"
-msgstr ""
+#~ msgid "SketchUp 2017 (.skp)"
+#~ msgstr ""
 
 #: src/io/docFormat.ts
-msgid "SketchUp 2017 model"
+#~ msgid "SketchUp 2017 model"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#: src/io/savePanel.ts
+#~ msgid "SketchUp 2018 (.skp)"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "SketchUp 2018 model"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#: src/io/savePanel.ts
+#~ msgid "SketchUp 2019 (.skp)"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "SketchUp 2019 model"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#: src/io/savePanel.ts
+#~ msgid "SketchUp 2020 (.skp)"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#~ msgid "SketchUp 2020 model"
+#~ msgstr ""
+
+#: src/io/docFormat.ts
+#: src/io/savePanel.ts
+msgid "SketchUp 2021 and later (.skp)"
 msgstr ""
 
 #: src/health/healthCopy.ts
@@ -7930,6 +8139,10 @@ msgid "That file is too large to send."
 msgstr ""
 
 #: src/kernelErrors.ts
+msgid "That geo-location has a number that isn't finite or a unit size that isn't above zero, so it wasn't set. Fix the value and try again."
+msgstr ""
+
+#: src/kernelErrors.ts
 msgid "That group is no longer there — the model changed since it was picked. Click it again."
 msgstr ""
 
@@ -8123,6 +8336,10 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first."
+msgstr ""
+
+#: src/io/webFileHost.ts
+msgid "The file name must end in {ext}."
 msgstr ""
 
 #: src/viewport/Viewport.tsx
@@ -8634,6 +8851,14 @@ msgstr ""
 msgid "This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart."
 msgstr ""
 
+#: src/panels/SkpLossNotice.tsx
+msgid "This SketchUp format left out:"
+msgstr ""
+
+#: src/panels/SkpLossNotice.tsx
+#~ msgid "This SketchUp version’s format left out:"
+#~ msgstr ""
+
 #: src/kernelErrors.ts
 msgid "This step couldn't be undone or redone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
 msgstr ""
@@ -8809,6 +9034,10 @@ msgstr ""
 #: src/i18n/historyLabels.ts
 msgctxt "undo verb"
 msgid "Transform"
+msgstr ""
+
+#: src/panels/ScenesPanel.tsx
+msgid "Transition (s)"
 msgstr ""
 
 #: src/palette/registry.ts
@@ -9163,6 +9392,10 @@ msgstr ""
 msgid "vertex"
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Vertical datum"
+msgstr ""
+
 #: src/i18n/nativeMenu.ts
 #: src/io/savePanel.ts
 #: src/panels/ExportDialog.tsx
@@ -9332,6 +9565,10 @@ msgstr ""
 msgid "Written to the app log directory as <0>diagnostic.log</0>."
 msgstr ""
 
+#: src/panels/GeoReferenceInfo.tsx
+msgid "X axis"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "x ray"
 msgstr ""
@@ -9389,6 +9626,10 @@ msgstr ""
 
 #: src/io/savePanel.ts
 msgid "Z-up, millimeters, keeps part names and colors"
+msgstr ""
+
+#: src/panels/GeoReferenceInfo.tsx
+msgid "Zone"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts

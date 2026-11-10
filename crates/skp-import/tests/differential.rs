@@ -6,7 +6,7 @@
 //! container, even where they differ structurally (the `.dae` path
 //! bakes/flattens hierarchy; the `.skp` path keeps shared definitions).
 //!
-//! Import-quality gaps surfacing here get filed upstream in OpenSKP, never
+//! Import-quality gaps surfacing here get filed upstream in Skpwright, never
 //! papered over in `skp-import` (docs/agents/ROADMAP.md).
 
 use std::path::Path;
@@ -103,8 +103,8 @@ const AABB_TOL: f64 = 1e-3;
 /// Every face SketchUp itself holds, each placed definition's once per
 /// placement.
 fn sketchup_faces(name: &str) -> usize {
-    let m = skp_import::openskp::Model::parse(&fixture(name)).expect(name);
-    fn walk(nodes: &[skp_import::openskp::Node], m: &skp_import::openskp::Model) -> usize {
+    let m = skp_import::skpwright::Model::parse(&fixture(name)).expect(name);
+    fn walk(nodes: &[skp_import::skpwright::Node], m: &skp_import::skpwright::Model) -> usize {
         nodes
             .iter()
             .map(|n| n.run.map_or(0, |r| m.geometry[r].mesh.faces.len()) + walk(&n.children, m))
@@ -188,7 +188,7 @@ differential! {
 /// The 10.7 MB third-party production model (theater), end-to-end, from
 /// the 2017 original and from its 2026 conversion (7.4 MB), which must
 /// land the same frozen numbers. The files are too large to freeze as
-/// fixtures; the tests run wherever the OpenSKP dev clone sits next to the
+/// fixtures; the tests run wherever the Skpwright dev clone sits next to the
 /// Hew checkout (every dev box) and skip silently elsewhere.
 #[test]
 fn theater_production_model_end_to_end() {
@@ -202,10 +202,10 @@ fn theater_2026_production_model_end_to_end() {
 
 fn theater(file: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../openskp/corpus/third-party")
+        .join("../../../skpwright/corpus/third-party")
         .join(file);
     let Ok(bytes) = std::fs::read(&path) else {
-        eprintln!("skipped: no ../openskp checkout");
+        eprintln!("skipped: no ../skpwright checkout");
         return;
     };
     let out = skp_import::import(&bytes).expect("theater parses");
@@ -232,7 +232,7 @@ fn theater(file: &str) {
     );
 
     // Nothing missing: theater's shared-texture records (four, across three
-    // owning materials) resolve to the owners' image bytes (OpenSKP 0.2.0
+    // owning materials) resolve to the owners' image bytes (Skpwright 0.2.0
     // back-ref resolution), so the loud rule-4 channel stays empty.
     assert!(
         out.textures_missing.is_empty(),
@@ -257,7 +257,7 @@ fn theater(file: &str) {
     // graph shrinks — conservation still holds (geometry parity against
     // the .dae ground truths above, unaffected by this change). The
     // 13 user-hidden nodes are untouched: hidden carries identically for
-    // both node kinds. If an OpenSKP or heal improvement moves these,
+    // both node kinds. If an Skpwright or heal improvement moves these,
     // update deliberately with the rev bump.
     // Coplanar faces stay apart as SketchUp holds them, so non-manifold
     // meshes split into 16 more open pieces (979 -> 995, leaky 139 -> 155,

@@ -16,7 +16,8 @@
  * mode (design §5: a bug report is for Hew's developer, not a self-hosted
  * homelab). Web uploads same-origin under `/report/`, which only makes
  * sense — and is only attempted — when the page's own origin actually
- * serves that route: the production `app.hew3d.com` deployment, or a local
+ * serves that route: the production `app.hew3d.com` deployment, the
+ * `beta.hew3d.com` deployment (same Worker, its own route), or a local
  * `vite dev` with `HEW_REPORT_PROXY` forwarding it to `wrangler dev` (see
  * `vite.config.ts`). Every other web build (self-hosted, a plain dev
  * server) has nowhere to send to, so `canSend()` is false there and
@@ -91,9 +92,10 @@ export function toReportError(err: unknown): ReportError {
   return new ReportError('unreachable', err instanceof Error ? err.message : String(err))
 }
 
-/** The production intake host — the one web origin `/report/` uploads are
- *  ever attempted from outside a proxied dev server. */
-const CLOUD_APP_ORIGIN = 'https://app.hew3d.com'
+/** The cloud web origins whose zone routes `/report/` to the intake Worker —
+ *  the only web origins uploads are ever attempted from outside a proxied
+ *  dev server. Exact `location.origin` matches: scheme and host both count. */
+const CLOUD_APP_ORIGINS: readonly string[] = ['https://app.hew3d.com', 'https://beta.hew3d.com']
 
 /** Set by `vite.config.ts`'s `define` when `HEW_REPORT_PROXY` was configured
  *  for this dev server — see that file for why this needs to be a
@@ -105,13 +107,13 @@ declare const __HEW_REPORT_DEV_PROXY__: boolean | undefined
 /**
  * Whether this build/runtime can actually send a report anywhere. Desktop:
  * always (every server mode posts to the cloud intake service). Web: only
- * the production app origin, or a dev server with the proxy configured.
+ * a Hew cloud app origin (production or beta), or a dev server with the proxy configured.
  * Everything else (a self-hosted web build, `vite dev` with no proxy) has
  * no route to the intake service, so the dialog must not offer Send report.
  */
 export function canSend(): boolean {
   if (isTauri) return true
-  if (typeof location !== 'undefined' && location.origin === CLOUD_APP_ORIGIN) return true
+  if (typeof location !== 'undefined' && CLOUD_APP_ORIGINS.includes(location.origin)) return true
   return typeof __HEW_REPORT_DEV_PROXY__ !== 'undefined' && __HEW_REPORT_DEV_PROXY__
 }
 

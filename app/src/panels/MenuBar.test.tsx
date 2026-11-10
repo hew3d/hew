@@ -38,6 +38,32 @@ describe('MenuBar', () => {
     expect(container.firstChild).toBeNull()
   })
 
+  it('shows a passive BETA chip with the full version only in a beta build', () => {
+    vi.stubGlobal('__HEW_BETA__', true)
+    vi.stubGlobal('__HEW_VERSION__', '1.3.1+beta.deadbeef')
+    try {
+      render(<MenuBar {...defaultProps} />)
+      const chip = screen.getByTestId('beta-chip')
+      expect(chip).toHaveTextContent('BETA')
+      expect(chip).toHaveAttribute('title', '1.3.1+beta.deadbeef')
+      expect(chip.tagName).toBe('SPAN')
+      expect(chip).not.toHaveAttribute('tabindex')
+      expect(chip).not.toHaveAttribute('role')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('renders no BETA chip in a normal build', () => {
+    vi.stubGlobal('__HEW_BETA__', false)
+    try {
+      render(<MenuBar {...defaultProps} />)
+      expect(screen.queryByTestId('beta-chip')).toBeNull()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('renders the bar element when nativeMenuBar=false', () => {
     render(<MenuBar {...defaultProps} />)
     expect(screen.getByTestId('menu-bar')).toBeInTheDocument()

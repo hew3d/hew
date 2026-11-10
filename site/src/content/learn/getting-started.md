@@ -101,7 +101,7 @@ Drawing a shape on a solid and then pushing into the solid is a very common way 
 
 So far, all of our work has happened on parts on the "ground". This is the "blue" plane (or *Z-plane*) that crosses the origin. Blue planes can be anywhere up and down the Z-axis, though. There are two other planes - the "red" plane ("X-plane") and "green" plane ("Y-plane"). Likewise, they can move anywhere on the X-axis or Y-axis, resp.
 
-There are several ways to switch to another plane. The two primary ways are to hover over a face that is already on your intended plane and pressing the **Shift** key to lock the cursor into that plane or to use the arrow keys to **lock** onto a particular axis. This is all pretty abstract, so let's make this concrete.
+There are several ways to switch to another plane. The three primary ways are to orbit until the plane you want faces you (a Front or Side standard view does it in one click), so that shapes drawn in empty space land on it; to hover over a face that is already on your intended plane and press the **Shift** key to lock the cursor into that plane; or to use the arrow keys to **lock** onto a particular axis. This is all pretty abstract, so let's make this concrete.
 
 Start by creating a hollow box for use as our parts bin. We will try one new tool to help hollow out the rectangle.
 

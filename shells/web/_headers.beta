@@ -1,0 +1,9 @@
+# Cloudflare Pages response headers for beta.hew3d.com, the pre-release copy
+# of the web app built from main. Copied into dist/ by ci.yml's deploy-beta
+# job ONLY, in place of _headers, so the beta is served from its own file.
+# The X-Robots-Tag line keeps the unlinked beta out of search results. Keep
+# the other lines in step with _headers.
+/*
+  Content-Security-Policy: frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  X-Robots-Tag: noindex

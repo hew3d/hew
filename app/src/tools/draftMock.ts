@@ -8,7 +8,8 @@
  * report JSON naming what a draft of that kind changes (a face draft
  * changes its object's topology; a plane/sketch draft touches a sketch),
  * and `draft_cancel` closes the open draft. Only one draft may be open —
- * a second begin throws `DraftAlreadyOpen`, like the kernel.
+ * a second begin throws `DraftAlreadyOpen`, like the kernel. It also
+ * stubs the sketch-region fill pick as a miss (see the members' tail).
  */
 import { vi } from 'vitest'
 
@@ -137,6 +138,11 @@ export function draftMock(opts: DraftMockOpts = {}) {
       log.cancelled += 1
       return true
     }),
+    // Not part of the draft surface, but every draw tool's idle hover asks
+    // it (`resolveIdleDrawTarget`'s fill pick, view-plane design §2 step
+    // 4b): no filled region under the ray unless a test overrides these.
+    pick_sketch_region: vi.fn(() => undefined),
+    pick_sketch_region_in_instance: vi.fn(() => undefined),
   }
   return { members, log, isOpen: () => open !== null }
 }

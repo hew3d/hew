@@ -43,7 +43,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
 import { applyAffine3x4, rayPlaneIntersect, transformNormalThroughPose } from '../viewport/geoHelpers'
 import { parseKernelErrorCode } from '../kernelErrors'
-import { pickPolicyGeneration, pickRenderMode } from './pickPolicy'
+import { pickNudgeRad, pickPolicyGeneration, pickRenderMode } from './pickPolicy'
 
 /** May the face on `object` (hit through `instance`, when the ray struck
  *  instanced geometry) be drawn on directly? */
@@ -341,38 +341,112 @@ export function ineligibleFacePlane(
   return { point: plane.point, normal: plane.normal, depth: raw.depth }
 }
 
-/** Angular nudge of the boundary probes in `FacePickCache.faceThrough` —
- *  about a pixel and a half of a 45° view on a 720 px canvas, so a probe
- *  lands on the face beside an edge without reaching anything a hand would
- *  not have aimed at. */
-const PICK_NUDGE_RAD = 0.002
+/** Angular nudge of the boundary probes in `FacePickCache.faceThrough`
+ *  under perspective — about a pixel and a half of a 45° view on a 720 px
+ *  canvas, so a probe lands on the face beside an edge without reaching
+ *  anything a hand would not have aimed at. Also the lean dead zone
+ *  (view-plane design §4.2): a cursor closer than this to the snapped point
+ *  gives no reading of which way it leans. Parallel projection derives the
+ *  same on-screen width from `PICK_NUDGE_PX` (`pickNudgeRad`). */
+export const PICK_NUDGE_RAD = 0.002
+/** The boundary ring's radius and the lean dead zone in screen pixels —
+ *  what `PICK_NUDGE_RAD` spans under perspective, and what `pickNudgeRad`
+ *  converts to an angle at the snapped point's distance under parallel
+ *  projection, where a fixed angle would be a different number of pixels at
+ *  every depth. */
+export const PICK_NUDGE_PX = 1.5
 
-/** Eight directions a hair off `dir`, evenly spaced around it: the four
- *  screen-axis nudges (up, down, left, right) and the four diagonals. A ray
- *  through a point ON an edge or corner misses both faces that meet there
- *  (the polygon test is strict at the boundary), and a single nudge can miss
- *  too — sliding along a vertical edge, say — so the probe is a full ring. */
-function ringDirections(dir: V3): V3[] {
+/** Number of boundary probes around the snapped point (45° sectors). */
+const RING_SIZE = 8
+
+/** The ring's frame about a view direction (`ringFrame`): `d` the unit
+ *  direction, `u` sideways (horizontal when possible), `v` the remaining
+ *  axis (roughly screen-vertical). Always `u × v = −d`. */
+interface RingFrame {
+  d: V3
+  u: V3
+  v: V3
+}
+
+/**
+ * The frame the boundary ring is laid out in around `dir`, or `null` for a
+ * zero direction. `u = d × upRef` (normalized) and `v = u × d`, so (u, v) is
+ * a screen-style pair for an eye looking along `d` with `u × v = −d`
+ * (toward the eye) — `u` toward screen-right and `v` toward screen-up when
+ * `upRef` is the camera's up. `upRef` is world Z, or world Y when `d` is
+ * within ~8° of vertical (Top and Bottom views), where Z would be
+ * degenerate; the switch rotates the pair within the screen plane but never
+ * mirrors it (`u × v = −d` either way), and every angle
+ * `faceThrough` compares — the ring probes' and the cursor's lean — is
+ * measured in this ONE frame, so the comparison is consistent on every
+ * camera regardless of how the pair sits on screen.
+ */
+function ringFrame(dir: V3): RingFrame | null {
   const [dx, dy, dz] = dir
   const len = Math.hypot(dx, dy, dz)
-  if (len < 1e-12) return []
+  if (!(len >= 1e-12)) return null
   const d: V3 = [dx / len, dy / len, dz / len]
-  // A perpendicular pair: `u` sideways (horizontal when possible), `v` the
-  // remaining axis (roughly screen-vertical).
   const upRef: V3 = Math.abs(d[2]) < 0.99 ? [0, 0, 1] : [0, 1, 0]
   let u: V3 = [d[1] * upRef[2] - d[2] * upRef[1], d[2] * upRef[0] - d[0] * upRef[2], d[0] * upRef[1] - d[1] * upRef[0]]
   const ul = Math.hypot(u[0], u[1], u[2])
   u = [u[0] / ul, u[1] / ul, u[2] / ul]
   const v: V3 = [u[1] * d[2] - u[2] * d[1], u[2] * d[0] - u[0] * d[2], u[0] * d[1] - u[1] * d[0]]
-  const e = PICK_NUDGE_RAD
+  return { d, u, v }
+}
+
+/** Eight directions `nudge` radians off the frame's `d`, evenly spaced
+ *  around it: direction `k` sits at angle `k·45°` in the frame's (u, v)
+ *  plane, counter-clockwise from `u` — the four screen-axis nudges and the
+ *  four diagonals. A ray through a point ON an edge or corner misses both
+ *  faces that meet there (the polygon test is strict at the boundary), and a
+ *  single nudge can miss too — sliding along a vertical edge, say — so the
+ *  probe is a full ring. */
+function ringDirections(frame: RingFrame | null, nudge: number): V3[] {
+  if (frame === null) return []
+  const { d, u, v } = frame
+  const e = nudge
   const out: V3[] = []
-  for (let k = 0; k < 8; k++) {
-    const a = (k * Math.PI) / 4
+  for (let k = 0; k < RING_SIZE; k++) {
+    const a = (k * 2 * Math.PI) / RING_SIZE
     const cu = Math.cos(a) * e
     const sv = Math.sin(a) * e
     out.push([d[0] + u[0] * cu + v[0] * sv, d[1] + u[1] * cu + v[1] * sv, d[2] + u[2] * cu + v[2] * sv])
   }
   return out
+}
+
+/**
+ * Where the cursor leans around the snapped point, in `frame`'s (u, v)
+ * plane (view-plane design §4.1): `angle` (radians, counter-clockwise from
+ * `u`, the same convention as `ringDirections`' probe `k` at `k·45°`) is the
+ * direction FROM the snapped point TO the cursor, and `size` (radians of
+ * view angle) how far. `frame.d` is the unit direction to the snapped point;
+ * `cursor` is the cursor ray's direction (any length). `null` for a zero
+ * cursor direction.
+ */
+function cursorLean(frame: RingFrame, cursor: V3): { angle: number; size: number } | null {
+  const len = Math.hypot(cursor[0], cursor[1], cursor[2])
+  if (!(len >= 1e-12)) return null
+  const delta: V3 = [cursor[0] / len - frame.d[0], cursor[1] / len - frame.d[1], cursor[2] / len - frame.d[2]]
+  const du = delta[0] * frame.u[0] + delta[1] * frame.u[1] + delta[2] * frame.u[2]
+  const dv = delta[0] * frame.v[0] + delta[1] * frame.v[1] + delta[2] * frame.v[2]
+  return { angle: Math.atan2(dv, du), size: Math.hypot(du, dv) }
+}
+
+/** The unsigned angle between two angles, in [0, π]. */
+function angleBetween(a: number, b: number): number {
+  const d = Math.abs(a - b) % (2 * Math.PI)
+  return d > Math.PI ? 2 * Math.PI - d : d
+}
+
+/** Two lean-sector distances closer than this are a tie (§4.2: the cursor
+ *  exactly on the boundary between two sectors). */
+const SECTOR_TIE_RAD = 1e-9
+
+/** The identity of a picked face, for dedup and for matching the hover
+ *  memory against `faceThrough`'s candidates. */
+function faceId(raw: { object: bigint; face: bigint; instance: bigint | undefined }): string {
+  return `${raw.object}:${raw.face}:${raw.instance ?? ''}`
 }
 
 /** An eligible face found by `FacePickCache.faceThrough`, with its world
@@ -392,6 +466,41 @@ export interface FaceThroughPick extends EligibleFacePick {
 export class FacePickCache {
   private cache: { ray: Ray; gen: number; raw: RawFacePick | null; eligible: EligibleFacePick | null } | null = null
   private throughCache: { ray: Ray; gen: number; key: string; pick: FaceThroughPick | null } | null = null
+  /**
+   * The hover memory of the view-plane design §4.2 rule 2 ("came from"):
+   * the face the cursor was over on the most recent pointer event that was
+   * NOT a boundary snap, or `null` when that event's ray hit nothing. Kept
+   * across boundary-snap events, so a cursor that slides from a face onto
+   * its corner still remembers the face; replaced by the next non-boundary
+   * event's pick. Stored raw (eligible or not) so the ineligible variant of
+   * `faceThrough` answers the same way; `faceThrough`'s candidates are
+   * filtered on their own, so a remembered face only ever matches one that
+   * passed the same filter.
+   */
+  private hoverMemory: RawFacePick | null = null
+  /**
+   * The latest fresh `pickFor` result, not yet known to be a non-boundary
+   * event. Whether an event is a boundary snap is only known once the tool
+   * asks `faceThrough` for the same ray — the Viewport resolves the snap
+   * AFTER `snapConstraint` has already picked — so the pick waits here and
+   * becomes `hoverMemory` when a later event's ray arrives without
+   * `faceThrough` having claimed it. A pick on a boundary ray (the cursor
+   * within the snap radius of a corner, where the plain ray lands on
+   * whichever neighbor rounding favors) never overwrites the memory.
+   */
+  private hoverPending: { ray: Ray; raw: RawFacePick | null } | null = null
+  /** The last ray `faceThrough` was asked about: that event was a boundary
+   *  snap, so its `pickFor` result is not hover memory. */
+  private boundaryRay: Ray | null = null
+
+  /** Fold the previous event's pending pick into the hover memory once an
+   *  event with a different ray arrives (see `hoverPending`). */
+  private settleHover(ray: Ray): void {
+    if (this.hoverPending !== null && this.hoverPending.ray !== ray) {
+      this.hoverMemory = this.hoverPending.raw
+      this.hoverPending = null
+    }
+  }
 
   pickFor(
     wasmScene: WasmScene,
@@ -407,6 +516,8 @@ export class FacePickCache {
       eligible = { object: raw.object, face: raw.face }
     }
     this.cache = { ray, gen: pickPolicyGeneration(), raw, eligible }
+    this.settleHover(ray)
+    if (this.boundaryRay !== ray) this.hoverPending = { ray, raw }
     return eligible
   }
 
@@ -419,21 +530,44 @@ export class FacePickCache {
    * rounding favours — a coin toss the user cannot see, and one that put a
    * Rectangle started on a vertical edge's midpoint onto the ground plane.
    *
-   * Candidates are the plain ray hit plus a ring of eight probes a hair
-   * around it (`ringDirections`), deduplicated, eligibility-filtered, and
-   * kept only when their plane contains every `through` point within
+   * Candidates are the plain cursor-ray hit plus a ring of eight probes a
+   * hair around the SNAPPED point `through[0]` (`ringDirections`; around the
+   * cursor ray when `through` is empty), deduplicated, eligibility-filtered,
+   * and kept only when their plane contains every `through` point within
    * `FACE_PLANE_EPS_M` (the snapped point itself; for a Line chain's second
    * point, the anchor as well — the face the user is drawing ACROSS holds
-   * both). Ties between the surviving neighbours — a vertical edge shared by
-   * two visible walls — go to the face most squarely facing the camera
-   * (largest `normal · −ray`): the one the user sees most of, and the one a
-   * SketchUp user expects the edge click to land on. `null` when no
-   * eligible face through those points is under or beside the cursor.
+   * both). The ring sits on the snapped point, not the cursor, so its hits
+   * sample each face's screen-space wedge AT the corner or edge: the probes
+   * that struck the front face are the front face's wedge, those that struck
+   * nothing lie outside the silhouette.
    *
-   * Memoized per `ray` reference AND `through` set, like `pickFor`; a
-   * caller pairs it with the snap under the cursor (an object vertex or
-   * edge — see LineTool's `_snapOnBoundary`), never with a free point, so
-   * the nine raycasts run only for boundary hovers/clicks.
+   * The choice among candidates (view-plane design §4.2), with the cursor's
+   * lean measured from the snapped point in the ring's own frame
+   * (`cursorLean`):
+   *
+   * 1. Lean — the cursor is more than the ring's radius (`pickNudgeRad`,
+   *    1.5 px on screen) from the snapped point: the candidate the cursor ray itself struck, if any (the face
+   *    the cursor is on); else the candidate whose ring probe is angularly
+   *    nearest the lean, ignoring probes that struck no candidate, so a
+   *    cursor nudged off the solid takes the nearest face's plane extended
+   *    past it. Two candidates equally near (the cursor exactly on a sector
+   *    boundary) go to the facing rule between the two.
+   * 2. Came from — within the dead zone: the face the cursor hovered before
+   *    the snap acquired (`hoverMemory`), if it is a candidate.
+   * 3. Facing — otherwise, the candidate most squarely facing the camera
+   *    (largest `normal · −ray`), ties kept in probe order (cursor ray, then
+   *    the ring from `u` counter-clockwise), which is deterministic.
+   *
+   * `null` when no eligible face through those points is under or beside the
+   * cursor. `ineligible` inverts the filter for `ineligibleFacePlane` (a
+   * group's or component's corner, mapped through the instance it was struck
+   * through), with the same three rules.
+   *
+   * Memoized per `ray` reference AND `through` set AND hover memory, like
+   * `pickFor`; a caller pairs it with the snap under the cursor (an object
+   * vertex or edge — see LineTool's `_snapOnBoundary`), never with a free
+   * point, so the nine raycasts run only for boundary hovers/clicks. Asking
+   * marks the event as a boundary snap for the hover memory.
    */
   faceThrough(
     wasmScene: WasmScene,
@@ -443,39 +577,63 @@ export class FacePickCache {
     through: readonly V3[],
     ineligible = false,
   ): FaceThroughPick | null {
-    const key = through.map((p) => p.join(',')).join(';') + `|${activeInstance ?? ''}|${ineligible ? 'x' : ''}`
+    // This event is a boundary snap: its pending plain pick is not hover
+    // memory (and a previous event's pending pick now is).
+    this.settleHover(ray)
+    if (this.hoverPending !== null && this.hoverPending.ray === ray) this.hoverPending = null
+    this.boundaryRay = ray
+    const memoryId = this.hoverMemory === null ? '' : faceId(this.hoverMemory)
+    const key = through.map((p) => p.join(',')).join(';') + `|${activeInstance ?? ''}|${ineligible ? 'x' : ''}|${memoryId}`
     if (this.throughCache !== null && this.throughCache.ray === ray && this.throughCache.gen === pickPolicyGeneration() && this.throughCache.key === key) {
       return this.throughCache.pick
     }
-    const seen = new Set<string>()
+    const rejected = new Set<string>()
+    const indexOf = new Map<string, number>()
     const candidates: { pick: FaceThroughPick; facing: number }[] = []
+    /** Candidate index each ring probe struck (undefined: no candidate). */
+    const ringHit: (number | undefined)[] = []
+    let cursorHit: number | undefined
     const dirLen = Math.hypot(ray.direction[0], ray.direction[1], ray.direction[2])
-    const consider = (raw: RawFacePick | null) => {
+    const consider = (raw: RawFacePick | null, probe: number | 'cursor') => {
       if (raw === null) return
-      const id = `${raw.object}:${raw.face}:${raw.instance ?? ''}`
-      if (seen.has(id)) return
-      seen.add(id)
-      if (isEligible(raw.object, raw.instance) === ineligible) return
-      const plane = worldFacePlane(wasmScene, raw.object, raw.face, ineligible ? (raw.instance ?? null) : activeInstance)
-      if (plane === null) return
-      for (const p of through) {
-        if (Math.abs(distanceOffPlane(p, plane.point, plane.normal)) > FACE_PLANE_EPS_M) return
+      const id = faceId(raw)
+      if (rejected.has(id)) return
+      let index = indexOf.get(id)
+      if (index === undefined) {
+        const plane = isEligible(raw.object, raw.instance) === ineligible
+          ? null
+          : worldFacePlane(wasmScene, raw.object, raw.face, ineligible ? (raw.instance ?? null) : activeInstance)
+        if (plane === null || through.some((p) => Math.abs(distanceOffPlane(p, plane.point, plane.normal)) > FACE_PLANE_EPS_M)) {
+          rejected.add(id)
+          return
+        }
+        const facing = dirLen < 1e-12
+          ? 0
+          : -(plane.normal[0] * ray.direction[0] + plane.normal[1] * ray.direction[1] + plane.normal[2] * ray.direction[2]) / dirLen
+        index = candidates.length
+        indexOf.set(id, index)
+        candidates.push({ pick: { object: raw.object, face: raw.face, point: plane.point, normal: plane.normal }, facing })
       }
-      const facing = dirLen < 1e-12
-        ? 0
-        : -(plane.normal[0] * ray.direction[0] + plane.normal[1] * ray.direction[1] + plane.normal[2] * ray.direction[2]) / dirLen
-      candidates.push({ pick: { object: raw.object, face: raw.face, point: plane.point, normal: plane.normal }, facing })
+      if (probe === 'cursor') cursorHit ??= index
+      else ringHit[probe] ??= index
     }
+    // The ring is laid out around the snapped point, the cursor's lean
+    // measured from it in the same frame.
+    const p0 = through.length > 0 ? through[0] : null
+    const toP: V3 | null = p0 === null ? null : [p0[0] - ray.origin[0], p0[1] - ray.origin[1], p0[2] - ray.origin[2]]
+    const frame = ringFrame(toP ?? ray.direction)
+    // The ring's radius and the lean dead zone: 1.5 px on screen at the
+    // snapped point's depth, under either projection (`pickNudgeRad`).
+    const nudge = pickNudgeRad(toP === null ? 1 : Math.hypot(toP[0], toP[1], toP[2]))
+    const ring = ringDirections(frame, nudge)
     // The plain ray first (reusing `pickFor`'s memo when it already ran for
     // this ray), then the ring.
     if (this.cache !== null && this.cache.ray === ray && this.cache.gen === pickPolicyGeneration()) {
-      consider(this.cache.raw)
+      consider(this.cache.raw, 'cursor')
     } else {
-      consider(rawPick(wasmScene, ray.origin, ray.direction))
+      consider(rawPick(wasmScene, ray.origin, ray.direction), 'cursor')
     }
-    for (const d of ringDirections(ray.direction)) {
-      consider(rawPick(wasmScene, ray.origin, d))
-    }
+    ring.forEach((d, k) => consider(rawPick(wasmScene, ray.origin, d), k))
     // Nothing found, though the point is on an Object's edge or corner: in
     // X-ray it is hidden behind nearer faces, which nothing occludes there.
     // Ask where the geometry is instead — the same probes, started just
@@ -484,23 +642,64 @@ export class FacePickCache {
     // face it lies on rather than falling through to the ground. Never in
     // Wireframe: faces do not exist for input there, so a gesture started
     // on a point keeps the ground or a locked plane.
-    if (candidates.length === 0 && through.length > 0 && pickRenderMode() === 'xray') {
-      const p = through[0]
-      const dist = Math.hypot(p[0] - ray.origin[0], p[1] - ray.origin[1], p[2] - ray.origin[2])
+    if (candidates.length === 0 && p0 !== null && pickRenderMode() === 'xray') {
+      const dist = Math.hypot(p0[0] - ray.origin[0], p0[1] - ray.origin[1], p0[2] - ray.origin[2])
       const start = dist * (1 - THROUGH_RESTART_FRACTION)
-      for (const d of [ray.direction, ...ringDirections(ray.direction)]) {
+      const restart = (d: V3, probe: number | 'cursor') => {
         const len = Math.hypot(d[0], d[1], d[2])
-        if (len < 1e-12) continue
+        if (len < 1e-12) return
         const origin: V3 = [ray.origin[0] + (d[0] / len) * start, ray.origin[1] + (d[1] / len) * start, ray.origin[2] + (d[2] / len) * start]
-        consider(rawGeometryPick(wasmScene, origin, d))
+        consider(rawGeometryPick(wasmScene, origin, d), probe)
       }
+      restart(ray.direction, 'cursor')
+      ring.forEach((d, k) => restart(d, k))
     }
-    // Most camera-facing first; a tie keeps probe order (plain ray, then
-    // the ring from screen-right counter-clockwise), which is deterministic.
-    candidates.sort((a, b) => b.facing - a.facing)
-    const pick = candidates.length > 0 ? candidates[0].pick : null
+    const pick = candidates.length === 0
+      ? null
+      : candidates[this.chooseCandidate(candidates, frame, ray, nudge, cursorHit, ringHit, indexOf)].pick
     this.throughCache = { ray, gen: pickPolicyGeneration(), key, pick }
     return pick
+  }
+
+  /** `faceThrough`'s rules 1-3 over a non-empty candidate list; returns the
+   *  winning index. */
+  private chooseCandidate(
+    candidates: readonly { facing: number }[],
+    frame: RingFrame | null,
+    ray: Ray,
+    nudge: number,
+    cursorHit: number | undefined,
+    ringHit: readonly (number | undefined)[],
+    indexOf: ReadonlyMap<string, number>,
+  ): number {
+    const mostFacing = (indices: readonly number[]): number =>
+      indices.reduce((best, i) => (candidates[i].facing > candidates[best].facing ? i : best), indices[0])
+    const lean = frame === null ? null : cursorLean(frame, ray.direction)
+    if (lean !== null && lean.size > nudge) {
+      // Rule 1: lean. The face under the cursor itself, else the nearest
+      // ring sector that struck a candidate.
+      if (cursorHit !== undefined) return cursorHit
+      let best = Infinity
+      let tied: number[] = []
+      ringHit.forEach((index, k) => {
+        if (index === undefined) return
+        const gap = angleBetween(lean.angle, (k * 2 * Math.PI) / RING_SIZE)
+        if (gap < best - SECTOR_TIE_RAD) {
+          best = gap
+          tied = [index]
+        } else if (gap <= best + SECTOR_TIE_RAD && !tied.includes(index)) {
+          tied.push(index)
+        }
+      })
+      if (tied.length === 1) return tied[0]
+      if (tied.length > 1) return mostFacing(tied)
+    } else if (this.hoverMemory !== null) {
+      // Rule 2: came from.
+      const remembered = indexOf.get(faceId(this.hoverMemory))
+      if (remembered !== undefined) return remembered
+    }
+    // Rule 3: facing.
+    return mostFacing(candidates.map((_, i) => i))
   }
 
   /**
@@ -529,6 +728,9 @@ export class FacePickCache {
   clear(): void {
     this.cache = null
     this.throughCache = null
+    this.hoverMemory = null
+    this.hoverPending = null
+    this.boundaryRay = null
   }
 }
 

@@ -26,6 +26,10 @@
 #              table once all assets exist; it never overwrites a body that
 #              already carries one, so hand-edited draft notes survive
 #              re-runs
+#   Site       hew3d.com is built by Cloudflare Pages from the `site-live`
+#              branch, which the final job force-moves to the tag, so the
+#              docs describe the release people can download rather than
+#              whatever main says today (see docs/dev/DEVELOPMENT.md §2)
 #
 # Releases stay DRAFTS. Publishing is a deliberate human act after smoke
 # installs.
@@ -844,3 +848,46 @@ jobs:
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
             -F body=@body.md > /dev/null
           echo "::notice::Download table written to the release body."
+
+  # hew3d.com. Cloudflare Pages builds the site from `site-live`, not from
+  # main, so the Learn pages match the release people can download while
+  # main carries docs for features that have not shipped yet. `site-live` is
+  # a pointer, never a branch anyone commits to: this job moves it to the
+  # tagged commit (HEAD after checkout) and the next release moves it again.
+  # A GITHUB_TOKEN push starts no workflow run here, but Cloudflare's GitHub
+  # App still receives the push and builds. Waits on the web job so the
+  # site never advances past a release whose app deploy failed.
+  #
+  # The pointer only ever moves FORWARD. The version the site currently
+  # describes is site/src/data/releases.json on the branch (the release bump
+  # keeps it equal to the tag), so a re-run of an older tag's run, or two
+  # tags whose runs finish out of order, cannot rewind it; and a re-run of
+  # this tag's own run leaves alone any hotfix cherry-picked onto the branch
+  # since. The lease makes the push atomic against another run's move.
+  site-live:
+    needs: [create-release, web]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Point site-live at the tagged commit
+        run: |
+          new="${TAG#v}"
+          if git fetch --depth=1 origin refs/heads/site-live 2>/dev/null; then
+            live_sha="$(git rev-parse FETCH_HEAD)"
+            live="$( (git show FETCH_HEAD:site/src/data/releases.json 2>/dev/null || true) \
+              | sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+            if [ -n "$live" ] && [ "$(printf '%s\n%s\n' "$live" "$new" | sort -V | tail -1)" = "$live" ]; then
+              if [ "$live" = "$new" ]; then
+                echo "::notice::site-live already describes $new (at ${live_sha:0:8}); leaving it alone. If you re-tagged $TAG on a different commit, move the branch by hand."
+              else
+                echo "::notice::site-live describes $live, newer than $new; not rewinding it."
+              fi
+              exit 0
+            fi
+          else
+            live_sha=""
+          fi
+          git push --force-with-lease="refs/heads/site-live:$live_sha" origin "HEAD:refs/heads/site-live"
+          echo "::notice::site-live now points at $TAG ($(git rev-parse --short HEAD)); Cloudflare Pages should rebuild hew3d.com from it."

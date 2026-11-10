@@ -23,6 +23,7 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.material.paint" => material_paint,
         "hew.material.set_default" => material_set_default,
         "hew.material.set_opacity" => material_set_opacity,
+        "hew.material.set_pbr" => material_set_pbr,
         "hew.material.position_texture" => material_position_texture,
         "hew.material.replace" => material_replace,
         "hew.tag.create" => tag_create,
@@ -234,6 +235,29 @@ fn material_set_opacity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     }
     let material = resolve_material(ctx, &p.material)?;
     ctx.doc.set_material_alpha(material, p.alpha as u8)?;
+    Ok(serde_json::json!({}))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetPbrParams {
+    material: String,
+    metallic: f64,
+    roughness: f64,
+}
+
+fn material_set_pbr(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: SetPbrParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    let unit = |v: f64| v.is_finite() && (0.0..=1.0).contains(&v);
+    if !unit(p.metallic) || !unit(p.roughness) {
+        return Err(CmdError::Params(
+            "metallic and roughness must each be from 0 to 1".into(),
+        ));
+    }
+    let material = resolve_material(ctx, &p.material)?;
+    ctx.doc
+        .set_material_pbr(material, p.metallic as f32, p.roughness as f32)?;
     Ok(serde_json::json!({}))
 }
 

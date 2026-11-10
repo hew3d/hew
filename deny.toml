@@ -73,7 +73,7 @@ unused-allowed-license = "allow"
 allow = [
     # Hew's own crates.
     "AGPL-3.0-only",
-    # OpenSKP, the clean-room .skp reader (DEVELOPMENT.md rule 7). GPLv3 is
+    # Skpwright, the clean-room .skp reader (DEVELOPMENT.md rule 7). GPLv3 is
     # one-way compatible into an AGPLv3 work, which is the direction we need.
     "GPL-3.0-only",
     # Permissive, in rough order of how much of the tree they cover.

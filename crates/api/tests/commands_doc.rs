@@ -78,6 +78,9 @@ struct FakeHost {
     /// The `units` the last `save_document`/`export_document` was given.
     last_save_units: Option<String>,
     last_export_units: Option<String>,
+    /// The `compat` the last `save_document` / `export_document` was given.
+    last_save_compat: bool,
+    last_export_compat: bool,
     /// If set, a save to a path returns this instead of a bare write.
     save_outcome: Option<SaveOutcome>,
     /// If set, `export_document` returns this instead of its default.
@@ -119,7 +122,9 @@ impl Host for FakeHost {
         path: Option<&str>,
         format: Option<DocFormat>,
         units: Option<&str>,
+        compat: bool,
     ) -> Result<SaveOutcome, Refusal> {
+        self.last_save_compat = compat;
         self.last_save_format = format;
         self.last_save_units = units.map(str::to_string);
         match path {
@@ -142,7 +147,9 @@ impl Host for FakeHost {
         _path: Option<&str>,
         _segments_per_turn: u32,
         units: Option<&str>,
+        compat: bool,
     ) -> Result<Option<Vec<u8>>, Refusal> {
+        self.last_export_compat = compat;
         self.last_export_units = units.map(str::to_string);
         self.export_result
             .take()
@@ -513,15 +520,19 @@ fn save_forwards_the_path_and_returns_the_empty_result() {
     assert_eq!(host.last_save_path.as_deref(), Some("out.hew"));
 }
 
-/// `format` reaches the host as the typed enum, and the three wire names
+/// `format` reaches the host as the typed enum, and these wire names
 /// are the only ones the command takes.
 #[test]
 fn save_forwards_each_format_to_the_host_as_the_enum() {
-    for (wire, expected) in [
-        ("hew", DocFormat::Hew),
-        ("skp", DocFormat::Skp),
-        ("skp2017", DocFormat::Skp2017),
-    ] {
+    let mut formats = vec![("hew".to_string(), DocFormat::Hew)];
+    formats.push(("skp".to_string(), DocFormat::Skp));
+    for &release in api::SKP_STREAM_RELEASES {
+        let year = api::skp_stream_year(release);
+        formats.push((format!("skp{year}"), DocFormat::SkpStream(release)));
+    }
+    // Every release has its own wire name, 3 to 8 and 2013 to 2020.
+    assert_eq!(formats.len(), 16);
+    for (wire, expected) in formats {
         let mut conn = Connection::new(Profile::Core, "test");
         let mut doc = Document::new();
         let mut host = FakeHost::default();
@@ -536,6 +547,41 @@ fn save_forwards_each_format_to_the_host_as_the_enum() {
         );
         assert_eq!(host.last_save_format, Some(expected), "{wire}");
     }
+}
+
+/// The wire names are exactly `skp`, `skp3` to `skp8` and `skp2013` to
+/// `skp2020`; a name that is not one of them is no format, and each
+/// format names itself back.
+#[test]
+fn doc_format_wire_names_are_exact() {
+    for bad in [
+        "skp2021", "skp9", "skp12", "skp13", "skp20", "skp17", "skp03", "skp2017 ", "SKP", "skp0",
+        "skp2012", "",
+    ] {
+        assert_eq!(DocFormat::from_name(bad), None, "{bad:?}");
+    }
+    for name in DocFormat::wire_names() {
+        let f = DocFormat::from_name(&name).unwrap_or_else(|| panic!("{name}"));
+        assert_eq!(f.as_str(), name);
+    }
+    // The 2026 container first, then newest to oldest.
+    let skp = DocFormat::skp_wire_names();
+    assert_eq!(skp.first().map(String::as_str), Some("skp"));
+    assert_eq!(skp.get(1).map(String::as_str), Some("skp2020"));
+    assert_eq!(skp.last().map(String::as_str), Some("skp3"));
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let r = call(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.doc.save",
+        json!({ "path": "out.skp", "format": "skp2021" }),
+    );
+    assert!(r.error.is_some(), "skp2021 is no format");
 }
 
 #[test]
@@ -602,6 +648,66 @@ fn save_and_export_hand_named_units_to_the_host() {
 }
 
 #[test]
+fn compat_reaches_the_host_for_the_2021_and_later_container_and_is_refused_elsewhere() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.doc.save",
+        json!({ "path": "out.skp", "format": "skp", "compat": true }),
+    );
+    assert!(host.last_save_compat);
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.doc.save",
+        json!({ "path": "out.skp", "format": "skp" }),
+    );
+    assert!(!host.last_save_compat, "absent means by content");
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        4,
+        "hew.doc.export",
+        json!({ "format": "skp", "compat": true }),
+    );
+    assert!(host.last_export_compat);
+    for (id, method, params) in [
+        (
+            5,
+            "hew.doc.save",
+            json!({ "path": "out.skp", "format": "skp2017", "compat": true }),
+        ),
+        (
+            6,
+            "hew.doc.save",
+            json!({ "path": "out.hew", "format": "hew", "compat": true }),
+        ),
+        (
+            7,
+            "hew.doc.export",
+            json!({ "format": "skp2017", "compat": true }),
+        ),
+        (
+            8,
+            "hew.doc.export",
+            json!({ "format": "stl", "compat": true }),
+        ),
+    ] {
+        let r = call(&mut conn, &mut doc, &mut host, id, method, params.clone());
+        assert_eq!(r.error.unwrap().code, codes::INVALID_PARAMS, "{params}");
+    }
+}
+
+#[test]
 fn units_outside_the_length_formats_or_off_a_skp_export_are_refused_before_the_host() {
     let mut conn = Connection::new(Profile::Core, "test");
     let mut doc = Document::new();
@@ -657,7 +763,7 @@ fn save_reports_simplified_and_writer_notes_for_a_skp() {
     let mut doc = Document::new();
     let mut host = FakeHost {
         save_outcome: Some(SaveOutcome {
-            format: Some(DocFormat::Skp2017),
+            format: Some(DocFormat::SkpStream(17)),
             simplified: vec!["curved faces".to_string()],
             writer_notes: vec!["dropped scenes".to_string()],
             ..SaveOutcome::default()
@@ -749,6 +855,7 @@ fn save_leaves_the_document_dirty_when_the_host_only_returns_bytes() {
             _path: Option<&str>,
             _format: Option<DocFormat>,
             _units: Option<&str>,
+            _compat: bool,
         ) -> Result<SaveOutcome, Refusal> {
             Ok(SaveOutcome::with_bytes(doc.save_for_persistence()))
         }
@@ -782,6 +889,7 @@ fn save_returns_bytes_when_the_host_has_no_filesystem() {
             path: Option<&str>,
             _format: Option<DocFormat>,
             _units: Option<&str>,
+            _compat: bool,
         ) -> Result<SaveOutcome, Refusal> {
             assert!(path.is_none(), "the caller strips the path for such a host");
             Ok(SaveOutcome::with_bytes(doc.save_for_persistence()))
@@ -834,7 +942,7 @@ fn export_with_no_path_returns_bytes_base64() {
 /// forwards the name and echoes it back.
 #[test]
 fn export_takes_the_skp_formats() {
-    for format in ["skp", "skp2017"] {
+    for format in ["skp", "skp2017", "skp2018", "skp2019", "skp2020"] {
         let mut conn = Connection::new(Profile::Core, "test");
         let mut doc = Document::new();
         let mut host = FakeHost::default();

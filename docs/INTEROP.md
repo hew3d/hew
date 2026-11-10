@@ -12,8 +12,8 @@ bring outside geometry in, or send Hew models out to other tools. SketchUp
 |---|---|---|---|
 | `.hew` (native) | save / load | Supported | Zip container, JSON manifest, binary geometry buffers. Lossless round-trip; the only format that preserves components/instances, tags, guides, and document metadata. |
 | COLLADA `.dae` | Import | Supported | SketchUp's own COLLADA export, and any COLLADA 1.4 source. Geometry, materials/textures, node hierarchy, and component instancing all map through. |
-| SketchUp `.skp` | Import / open | Supported | Direct read via OpenSKP (see below) of the 2026 container every current SketchUp saves, and of the 2017 format. Names, materials, textures, tags (from layers), guides, scenes, and component instancing carry over. File ▸ Open makes the file the document's own; File ▸ Import… adds it to the current document. |
-| SketchUp `.skp` | Save / Save As / Export | Supported | Written in either container: 2026 (`skp2026`) or 2017 (`skp2017`, opens in SketchUp Make 2017 and later). Save writes back in the container the file was opened in; Save As and Export choose one. What a SketchUp file cannot hold exactly is reported as a short list in the app (a one-time notice per document for Save and Save As, every time for Export). |
+| SketchUp `.skp` | Import / open | Supported | Direct read via Skpwright (see below) of every SketchUp version, 3 through 2027: the 2021-and-later container every SketchUp since 2021 saves, and every older stream-format release (3 to 8 and 2013 to 2020). Names, materials, textures, tags (from layers), guides, scenes, and component instancing carry over. File ▸ Open makes the file the document's own; File ▸ Import… adds it to the current document. |
+| SketchUp `.skp` | Save / Save As / Export | Supported | Writes every SketchUp version, 3 through 2027. Written in the 2021-and-later container (`skp` on the API, `skp2026` in the app; the lowest revision that holds the content, or with `compat` / "Avoid features older SketchUp versions cannot open" revision 17, which leaves out what only the newest SketchUp opens: layer folders, hatch patterns, PBR materials, environments, snaps, procedures, page extras and the coordinate system) or as any stream release Skpwright writes: `skp3` to `skp8` and `skp2013` to `skp2020` (SketchUp 3 to 8 and 2013 to 2020), each in its own release's layout (a file opens in the release it was written for and every later one). Save writes back in the format the file was opened in, so every file of release 3 to 8 or 2013 to 2020 saves in its own release; A file of revision 17 saves back at revision 17. Save As and Export choose one: the 2021-and-later container first, then an "Older SketchUp versions" group of the stream releases, newest to oldest, preselected to the file's own release. A file of SketchUp 2021 to 2027 is read as the 2021-and-later container and saved back in it, because those releases share that container and its revision gate. Releases 3 and 4 carry fewer kinds of content than newer ones (no layer or attribute records, and release 3 neither hidden state nor radial dimensions); the writer's notes say what was left out. What a SketchUp file cannot hold exactly, and what an older release's format or revision 17 leaves out (one entry per kind of content, for the document's own content and for what the opened file carried), is reported as a short list in the app (a one-time notice per document for Save, every time for Save As and Export); nothing is reported when nothing is lost. |
 | glTF / GLB | Import | Supported | `.gltf` and `.glb`, including Hew's own export output. Geometry, materials, and embedded textures round-trip; see known gaps below. |
 | glTF / GLB | Export | Supported | Binary `.glb`, written by the shared kernel-side writer in `mesh-export`. Y-up, meters. |
 | STL | Export | Supported | Binary STL, Z-up, millimeters (the slicer convention). Export is gated on the model being watertight — a non-solid Object is flagged before writing. |
@@ -87,8 +87,8 @@ Objects**.
 
 ## SketchUp import provenance
 
-`.skp` import is powered by **OpenSKP**
-(https://github.com/hew3d/openskp, published on crates.io as `openskp`), a
+`.skp` import is powered by **Skpwright**
+(https://github.com/hew3d/skpwright, published on crates.io as `skpwright`), a
 clean-room SketchUp file reader written specifically for this purpose. It is
 derived solely from:
 
@@ -99,25 +99,40 @@ derived solely from:
   SketchUp's file format is built on.
 
 No Trimble SketchUp SDK material — headers, constants, or format knowledge
-obtained under Trimble's license — exists anywhere in OpenSKP or in Hew's
+obtained under Trimble's license — exists anywhere in Skpwright or in Hew's
 dependency chain on it. That separation is a hard project rule, not a
-one-time check: every future change to OpenSKP or `crates/skp-import` must
+one-time check: every future change to Skpwright or `crates/skp-import` must
 keep holding it.
 
-**Supported:** the SketchUp 2026 container (internally versioned `{26.x}`),
-which is what every current SketchUp release saves, the free web app
-included — a `.skp` saved today is this format. Also the 2017 format
-(`{17.x}`), the last free desktop version's format, which many existing
-models still carry and which every SketchUp can still Save As. Both come
-out of the same reader as the same model: the importer's test suite holds
+**Supported, read and write: every SketchUp version, 3 through 2027.** The
+2021-and-later container (internally versioned `{26.x}`), which is what
+every SketchUp release since 2021 saves, the free web app included — a
+`.skp` saved today is this format. Also the
+older stream format (`{3.x}` to `{8.x}` and `{13.x}` to `{20.x}`: SketchUp 3
+to 8 and 2013 to 2020), including the 2017 release, the last free desktop
+version, which many existing models still carry. All come out of the same
+reader as the same model: the importer's test suite holds
 every corpus file's 2026 save to its fully decoded 2017 original, and a
 10.7 MB production model imports to the same document from either.
 
 **Known limitations:**
-- A `.skp` in a layout the reader has not decoded — files saved by
-  SketchUp 2013–2016 or 2018–2025 — is refused with its version rather
-  than imported partially; open it in any current SketchUp (the free web
-  app works) and save it again, or Save As ▸ SketchUp Version 2017.
+- A file is read by its body, not its header's version: a stream
+  container or a ZIP container goes to Skpwright whatever version the header
+  says. A stream file of a release Skpwright does not list (9 to 12, or
+  later than 2020, none of which has been observed) is read as far as
+  Skpwright can read it and opens with a warning that its release is
+  unlisted; it is refused, with its version, only when Skpwright itself
+  cannot read it (an error, or nothing in it). Saving it back writes the
+  nearest release Skpwright writes, and the writer's notes say so. An intact
+  file whose container is neither layout and whose version is not one the
+  reader decodes is refused with its version; a file of a decoded
+  version that is cut short or damaged is reported as such instead.
+- What gates opening in SketchUp is the model revision, not the header's version or label: revision 18 and below open in SketchUp 2027, and SketchUp 2027 desktop refuses a hand-edited file of revision 19 or above (the web app accepted it; no real file above 18 exists). Hew reads any revision (one above 18 as 18) and writes only revision 17 or 18. SketchUp 2021 to 2025 are supported: they use the same container, and the files to hand them are the revision 17 ones.
+- Hatch patterns, environments, snaps, procedures, layer line styles, the current style record and layer page behaviours are kept through a save back verbatim but are neither shown nor editable; an open reports a count of each kind in one line.
+- Geo reference (coordinate reference system) opens and is shown read-only at the top of Model Info; `hew.geo.get` / `hew.geo.set` read and set it. Layer folders map to tags, and scene timing, guide dash and the section plane's look are kept.
+- Physically based materials: metallic and roughness are editable (sliders in the material palette, `hew.material.set_pbr`) and drawn with a Phong approximation; the maps and the workflow are kept as the file held them.
+- `compat` (revision 17) applies only to the 2021-and-later container; asking for it with any other target is refused as `format_mismatch`.
+- A save back matches the file's scenes (pages) to Hew's by name, so a scene renamed in Hew loses the file-side state of the page it replaces (its display name, timing, environment, hidden entities, style, and shadow and thumbnail settings).
 - A record a future SketchUp release adds to the 2026 container is
   reported in the import warnings, not silently dropped.
 - Section planes: the cut of the scene the file was saved on, or else the

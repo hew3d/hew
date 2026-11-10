@@ -292,6 +292,7 @@ pub fn build_scene(
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         },
         warnings,
     )
@@ -311,6 +312,7 @@ fn empty_scene() -> ImportScene {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     }
 }
 

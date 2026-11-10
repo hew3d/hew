@@ -19,7 +19,7 @@ A quick refresher:
 - **Click** an object, sketch, or guide to select it, replacing whatever was selected before. Clicking empty space clears the selection.
 - **Triple-click** a line, or a drawn arc or circle, to select its whole connected shape instead of just the one line or curve run under the cursor. This works on the ground and on a solid's face alike.
 - **Drag an object** to move it (see above). `Esc` mid-drag cancels the move and puts everything back.
-- **Drag from empty space** to rubber-band a selection, SketchUp-style: dragging left→right draws a solid rectangle and selects what falls **entirely inside** it; dragging right→left draws a dashed rectangle and selects everything the rectangle **touches**.
+- **Drag from empty space** to rubber-band a selection, SketchUp-style: dragging left→right draws a solid blue rectangle tagged Window and selects what falls **entirely inside** it, plus anything it covers at least 80% of on screen and touches; dragging right→left draws a dashed green rectangle tagged Crossing and selects everything the rectangle **touches**.
 - **Double-click** a group, component, or object to enter its editing context (the rest of the scene dims); press `Esc` to step back out.
 
 ### Selecting more than one thing
