@@ -643,10 +643,34 @@ export class RotateTool implements Tool {
       this.lastSnapPoint = [snap.x, snap.y, snap.z]
       this.candidateNormal = this._resolveAxis(snap, ray)
     } else {
-      // Choosing the first point: the line runs from the center to it.
-      this._setRefLink(this.stage.pivot, [snap.x, snap.y, snap.z])
+      // Choosing the first point: the line runs from the center to where
+      // the click would put it (`_refPointFor`), so it does not jump there
+      // on the click.
+      const pivot = this.stage.pivot
+      this._setRefLink(pivot, this._refPointFor(pivot, [snap.x, snap.y, snap.z]) ?? [snap.x, snap.y, snap.z])
     }
     this._refreshDisk()
+  }
+
+  /**
+   * The first (0°) point a click at `rawRef` sets, or null when it lies on
+   * the axis through `pivot` (no baseline direction). When locked, the
+   * point projected INTO the rotation plane: `snapConstraint()` already
+   * asked the resolver to keep the snap in-plane, but this is the
+   * defensive/exact form regardless of what the resolved snap actually
+   * carried, so the drawn baseline arm passes through precisely the point
+   * the cursor confirmed. Unlocked rotation keeps the raw snap.
+   */
+  private _refPointFor(pivot: Vec3, rawRef: Vec3): Vec3 | null {
+    const effAxis = this._effectiveAxis()
+    const offset = projectOntoPlane(
+      rawRef[0] - pivot[0], rawRef[1] - pivot[1], rawRef[2] - pivot[2],
+      effAxis[0], effAxis[1], effAxis[2],
+    )
+    if (normalize3(offset) === null) return null
+    return this.lockedNormal !== null
+      ? [pivot[0] + offset[0], pivot[1] + offset[1], pivot[2] + offset[2]]
+      : rawRef
   }
 
   /** Run the center→first-point dashed line from `pivot` to `to`, creating
@@ -705,22 +729,8 @@ export class RotateTool implements Tool {
       // Ignore a reference that coincides with the pivot, or lies on the axis
       // through it: its projection into the rotation plane is ~zero, which would
       // freeze the sweep at 0° with no feedback. Wait for a usable reference.
-      const effAxis = this._effectiveAxis()
-      const offset = projectOntoPlane(
-        rawRef[0] - pivot[0], rawRef[1] - pivot[1], rawRef[2] - pivot[2],
-        effAxis[0], effAxis[1], effAxis[2],
-      )
-      const baseline = normalize3(offset)
-      if (baseline === null) return
-      // When locked, store the reference point projected INTO the rotation
-      // plane — `snapConstraint()` already asked the resolver to keep the
-      // snap in-plane, but this is the defensive/exact form regardless of
-      // what the resolved snap actually carried, so the drawn baseline arm
-      // passes through precisely the point the cursor confirmed. Unlocked
-      // rotation keeps the raw snap (unconstrained, as before).
-      const refPoint: Vec3 = this.lockedNormal !== null
-        ? [pivot[0] + offset[0], pivot[1] + offset[1], pivot[2] + offset[2]]
-        : rawRef
+      const refPoint = this._refPointFor(pivot, rawRef)
+      if (refPoint === null) return
       const previewMesh = guide !== null ? buildGuidePreview(this.wasmScene, guide) : this._buildPreview(nodes)
       if (previewMesh !== null) {
         this.preview.add(previewMesh)

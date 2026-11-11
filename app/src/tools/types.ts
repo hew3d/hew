@@ -262,6 +262,12 @@ export interface Tool {
   onPointerLeave?(): void
 
   /**
+   * (optional) What a click right now would pick up from under the cursor
+   * (`ClickAcquire`; null: nothing), for the viewport's hover highlight.
+   */
+  clickAcquire?(): ClickAcquire | null
+
+  /**
    * (optional) Return snap constraints the tool wants injected into the next
    * snapService.resolve() call.  Viewport feature-detects with
    * `'snapConstraint' in tool`.

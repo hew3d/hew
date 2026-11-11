@@ -1235,11 +1235,6 @@ export class MoveTool implements Tool {
     return this.copyMode ? t({ comment: 'Measurements box readout while the Copy toggle is on, followed by the measured value', message: `Copy · ${text}` }) : text
   }
 
-  /**
-   * Rebuild the axis guide line in the preview group.
-   * Called whenever lockAxis changes or the stage enters 'base'.
-   * Removes the previous guide (if any) before adding a new one.
-   */
   /** Run the base→destination dashed line, creating it on first use
    * (`_resetToIdle` clears it with the rest of the preview). */
   private _setLink(from: readonly [number, number, number], to: readonly [number, number, number]): void {
@@ -1256,6 +1251,11 @@ export class MoveTool implements Tool {
     this.link?.fitDash(camera, worldPerPixel)
   }
 
+  /**
+   * Rebuild the axis guide line in the preview group.
+   * Called whenever lockAxis changes or the stage enters 'base'.
+   * Removes the previous guide (if any) before adding a new one.
+   */
   private _updateGuideLine(): void {
     // Remove old guide
     if (this.guideLine !== null) {

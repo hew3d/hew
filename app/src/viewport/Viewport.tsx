@@ -122,7 +122,7 @@ import {
 import { shouldSkipToolSwitch } from './toolSwitchGuard'
 import { effectiveHidden, isPickHidden, isolationBaseline, resolveIsolation, sameTargets, sameView, type IsolationBaseline, type IsolationTarget, type IsolationView } from './isolation'
 import { worldBoundsForSelection } from '../panels/objectBounds'
-import type { ClickAcquire, Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
+import type { Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
 import { rayPlaneIntersect, subV3, addV3, perpComponentV3, type V3 } from './geoHelpers'
 import { readAnnotation, commitAnnotationText, initialEditorText, type AnnotationSnapshot } from './annotationEdit'
@@ -3719,14 +3719,11 @@ export default function Viewport({
      * changed under it).
      */
     function refreshAcquireHover(ray?: Ray, force = false): void {
-      const activeTool = toolControllerRef.current?.activeTool
-      const spec = activeTool !== undefined && 'clickAcquire' in activeTool
-        ? (activeTool as { clickAcquire(): ClickAcquire | null }).clickAcquire()
-        : null
+      const spec = toolControllerRef.current?.activeTool.clickAcquire?.() ?? null
       const at = ray ?? heldPointerRay()
       let guide: bigint | null = null
       let node: NodeRef | null = null
-      if (spec !== null && at !== undefined && pointerInsideCanvas && !cameraModeRef.current && !readOnlyRef.current) {
+      if (spec !== null && at !== undefined && pointerInsideCanvas && heldButtons === 0 && !cameraModeRef.current && !readOnlyRef.current) {
         if (spec.guides) guide = pickGuideTarget(at)
         if (guide === null && spec.nodes) node = pickTransformableUnderCursor(at)
       }
@@ -8205,6 +8202,10 @@ export default function Viewport({
     // canvas's bounds then shows there instead of the canvas). Kept apart
     // from `lastPointerClient`, the mid-drag switch's origin.
     const pointerRestClient = { x: 0, y: 0 }
+    // The buttons held as of the last pointer event on the canvas
+    // (`PointerEvent.buttons`): a press owns the pointer, so the transform
+    // tools' hover highlight stays off until every button is up.
+    let heldButtons = 0
     function configureControls(c: OrbitControls): void {
       // RIGHT is null, not PAN: the right button is Fly's (docs/design/
       // fly-navigation.md §3.1, §5 — "configureControls sets RIGHT: null so
@@ -9482,6 +9483,7 @@ export default function Viewport({
       pointerInsideCanvas = true
       pointerRestClient.x = ev.clientX
       pointerRestClient.y = ev.clientY
+      heldButtons = ev.buttons
 
       // Shift-fov drag owns the pointer for its whole gesture — armed at
       // pointerdown by onFovDragPointerDownCapture (camera-playtest2.md §3).
@@ -10833,6 +10835,7 @@ export default function Viewport({
     }
     function onPointerCancel(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
+      heldButtons = 0
       // A real pointer-capture loss (OS gesture interruption, etc.) — abort
       // the fov drag exactly like Escape/focus-loss (camera-playtest2.md
       // §3), scoped to the arming pointer (findings 1+2, camera-playtest2
@@ -10875,11 +10878,12 @@ export default function Viewport({
       // now is: the hover re-poll after it must ask there.
       const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
       lastPointerNdcRef.current = { ndcX, ndcY }
+      heldButtons = ev.buttons
       onPointerDown(ev)
       reportToolHint()
       refreshAcquireHover()
     }
-    const onPointerUpTracked = (ev: PointerEvent) => { onPointerUp(ev); reportToolHint(); refreshAcquireHover() }
+    const onPointerUpTracked = (ev: PointerEvent) => { heldButtons = ev.buttons; onPointerUp(ev); reportToolHint(); refreshAcquireHover() }
     const onDoubleClickTracked = (ev: MouseEvent) => { onDoubleClick(ev); reportToolHint() }
     const onKeyDownTracked = (ev: KeyboardEvent) => {
       onKeyDown(ev)

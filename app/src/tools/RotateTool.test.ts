@@ -594,6 +594,33 @@ describe('RotateTool — snapConstraint (axis-lock plane)', () => {
   })
 })
 
+describe('RotateTool — the center-to-first-point dashed line', () => {
+  /** The dashed line's [start, end] in the preview, or null. */
+  function linkEnds(preview: THREE.Group): number[][] | null {
+    let found: THREE.LineSegments | null = null
+    preview.traverse((o) => {
+      if (o instanceof THREE.LineSegments && o.material instanceof THREE.LineDashedMaterial) found = o
+    })
+    if (found === null) return null
+    const pos = (found as THREE.LineSegments).geometry.getAttribute('position')
+    return [[pos.getX(0), pos.getY(0), pos.getZ(0)], [pos.getX(1), pos.getY(1), pos.getZ(1)]]
+  }
+
+  it('locked, it ends where the click will put the first point: in the rotation plane', () => {
+    const { tool, preview } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot at origin
+    tool.onKey(makeKeyEvent('ArrowUp')) // lock Z
+    // A snap off the rotation plane (z = 0.5): the click would project it.
+    tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 0.5, kind: 'endpoint' }), rayThrough(1, 0))
+    const [start, end] = linkEnds(preview)!
+    expect(start).toEqual([0, 0, 0])
+    expect(end[0]).toBeCloseTo(1)
+    expect(end[1]).toBeCloseTo(0)
+    expect(end[2]).toBeCloseTo(0)
+  })
+})
+
 describe('RotateTool — locked sweep consumes the constrained snap', () => {
   it('the live sweep target is the resolved snap point (not a raw ray∩plane recompute) once locked', () => {
     const { tool, onMeasurement, wasmScene } = makeTool()

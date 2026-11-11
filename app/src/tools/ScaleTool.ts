@@ -31,7 +31,8 @@
  *                     multi-selection → one transform_selection call, one
  *                     undo step), then redraw the gizmo at the new size so a
  *                     follow-up grip can be grabbed right away.
- *   4. Esc          : cancel — the ghost clears, the gizmo redraws unchanged.
+ *   4. Esc          : cancel — the ghost and the gizmo clear; the gizmo
+ *                     returns unchanged on the next pointer move or click.
  *
  * Anchor (Ctrl, durable toggle — like Move's copy toggle, tap not hold): off
  * (default) anchors at the grabbed grip's OPPOSITE grip (grab the top face →
@@ -446,20 +447,26 @@ export class ScaleTool implements Tool {
     this._renderDrag()
   }
 
-  /** The pointer left the canvas: a gizmo redrawn now has no cursor over
-   * it to light a grip under. */
+  /** The pointer left the canvas (or something came up over it): a gizmo
+   * redrawn now has no cursor over it to light a grip under. */
   onPointerLeave(): void {
     this.lastRay = null
+    // Nothing is hovered any more: the idle hot pair goes (a drag's pair is
+    // the drag's own).
+    if (this.stage.kind !== 'idle') return
+    this.hotGrip = null
+    this._hideHotMarkers()
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
     // Any pointer action ends the retype window — the next scale begins.
     this.disarmRetype()
     this.lastRay = ray
-    if (snap === null) return
 
     if (this.stage.kind === 'idle') {
       let nodes = this.selection
+      // An idle click needs no snap: it picks along the ray, and a click on
+      // empty space often has none.
       // Until the render loop has handed over the screen-constant pick size
       // (`updateGripScale`), the fixed fallback tolerance could call a near
       // miss "off the grips" and clear the selection, so a click then only
@@ -535,7 +542,7 @@ export class ScaleTool implements Tool {
       this.typed = ''
       this._reportFactors([1, 1, 1])
       this._refreshHotMarkers()
-    } else if (this.stage.kind === 'dragging') {
+    } else if (this.stage.kind === 'dragging' && snap !== null) {
       // Resolve against THIS click's position, not a stale `lastCursor` from
       // the last move (there may have been none — a click straight after
       // grabbing, with no intervening pointer move, must still land where

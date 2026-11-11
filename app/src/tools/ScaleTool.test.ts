@@ -1052,6 +1052,7 @@ describe('ScaleTool — the hot pair (hovered grip and the point it scales about
     const { tool, preview } = makeBoxTool()
     tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
     tool.onPointerLeave()
+    expect(hotPair(preview)).toBeNull()
     tool.setSelection([{ kind: 'object', id: ID } as NodeRef])
     expect(hotPair(preview)).toBeNull()
     tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
@@ -1102,6 +1103,13 @@ describe('ScaleTool — a click off the grips re-targets (better than SketchUp)'
     expect(t.release).toHaveBeenCalledTimes(1)
     expect(t.preview.getObjectByName('ScaleGizmo')).toBeUndefined()
     expect(t.tool.statusHint()).toBe('Click the object you want to scale.')
+  })
+
+  it('on empty space with no snap: still clears (it picks along the ray)', () => {
+    const t = makeTwoBoxTool()
+    t.tool.setSelectionAcquirer(() => null, t.release)
+    t.tool.onPointerDown(null, rayThrough(20, 20))
+    expect(t.release).toHaveBeenCalledTimes(1)
   })
 
   it('before the render loop hands over the pick size, a click off the grips neither re-targets nor clears', () => {
