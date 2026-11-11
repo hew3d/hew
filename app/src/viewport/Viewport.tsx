@@ -20,6 +20,7 @@
 
 import { plural, t } from '@lingui/core/macro'
 import { isComposingKey, shortcutLetter } from '../input/keyboard'
+import { isTextFieldFocused } from '../clipboard/textFieldPaste'
 import { shownAnnotationIds } from './shownAnnotations'
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import * as THREE from 'three'
@@ -10880,7 +10881,13 @@ export default function Viewport({
     }
     const onPointerUpTracked = (ev: PointerEvent) => { onPointerUp(ev); reportToolHint(); refreshAcquireHover() }
     const onDoubleClickTracked = (ev: MouseEvent) => { onDoubleClick(ev); reportToolHint() }
-    const onKeyDownTracked = (ev: KeyboardEvent) => { onKeyDown(ev); reportToolHint(); refreshAcquireHover() }
+    const onKeyDownTracked = (ev: KeyboardEvent) => {
+      onKeyDown(ev)
+      reportToolHint()
+      // Typing in a dock or panel field is not a viewport key: no re-pick
+      // per keystroke (whatever it commits re-polls through the selection).
+      if (!isTextFieldFocused()) refreshAcquireHover()
+    }
     renderer.domElement.addEventListener('pointermove', onPointerMoveTracked)
     // Pointer presence for the held-pointer replay (`pointerInsideCanvas`).
     const onCanvasPointerEnter = (ev: PointerEvent) => {

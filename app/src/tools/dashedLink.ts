@@ -30,10 +30,14 @@ const ON_AXIS_TOL_DOT = Math.cos((0.01 * Math.PI) / 180)
 
 type Vec3 = readonly [number, number, number]
 
+const sameVec = (p: Vec3, q: Vec3): boolean => p[0] === q[0] && p[1] === q[1] && p[2] === q[2]
+
 export class DashedLink {
   readonly line: THREE.LineSegments
   /** The drawing axes the line is colored against, read on every `set`. */
   private readonly axes: () => DrawingAxes
+  /** The endpoints and color last set, so an unchanged `set` costs nothing. */
+  private last: { a: Vec3; b: Vec3; color: number } | null = null
 
   constructor(axes: () => DrawingAxes) {
     this.axes = axes
@@ -54,7 +58,11 @@ export class DashedLink {
       axisColorsForTheme(getResolvedTheme()),
       this.axes(),
     )
-    ;(this.line.material as THREE.LineDashedMaterial).color.setHex(match !== null ? match.color : LINK_COLOR)
+    const color = match !== null ? match.color : LINK_COLOR
+    const last = this.last
+    if (last !== null && last.color === color && sameVec(last.a, a) && sameVec(last.b, b)) return
+    this.last = { a: [a[0], a[1], a[2]], b: [b[0], b[1], b[2]], color }
+    ;(this.line.material as THREE.LineDashedMaterial).color.setHex(color)
     const pos = this.line.geometry.getAttribute('position') as THREE.BufferAttribute
     pos.setXYZ(0, a[0], a[1], a[2])
     pos.setXYZ(1, b[0], b[1], b[2])

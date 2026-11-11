@@ -3,7 +3,7 @@
  * two working points: the guides' gray, or the color of the drawing axis it lies on.
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import * as THREE from 'three'
 import { DashedLink, LINK_COLOR } from './dashedLink'
 import { GUIDE_COLOR } from '../viewport/guideColors'
@@ -56,6 +56,27 @@ describe('DashedLink', () => {
     link.set([0, 0, 0], [2, 2, 0])
     expect(colorOf(link)).toBe(axisColor(0))
     link.set([0, 0, 0], [2, 0, 0]) // world X, off the turned frame
+    expect(colorOf(link)).toBe(LINK_COLOR)
+  })
+
+  it('skips an unchanged set: no new distances or bounds', () => {
+    const link = new DashedLink(() => WORLD_DRAWING_AXES)
+    const bounds = vi.spyOn(link.line.geometry, 'computeBoundingSphere')
+    link.set([0, 0, 0], [1, 1, 0])
+    link.set([0, 0, 0], [1, 1, 0])
+    expect(bounds).toHaveBeenCalledTimes(1)
+    link.set([0, 0, 0], [2, 1, 0])
+    expect(bounds).toHaveBeenCalledTimes(2)
+  })
+
+  it('a set that changes only the color still recolors', () => {
+    let axes: DrawingAxes = WORLD_DRAWING_AXES
+    const link = new DashedLink(() => axes)
+    link.set([0, 0, 0], [2, 0, 0])
+    expect(colorOf(link)).toBe(axisColor(0))
+    const s = Math.SQRT1_2
+    axes = { origin: [0, 0, 0], x: [s, s, 0], y: [-s, s, 0], z: [0, 0, 1] }
+    link.set([0, 0, 0], [2, 0, 0]) // the same line, now off the turned axes
     expect(colorOf(link)).toBe(LINK_COLOR)
   })
 
