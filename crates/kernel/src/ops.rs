@@ -63,13 +63,48 @@ pub enum BooleanOp {
     Intersect,
 }
 
-/// Which operand of a two-Object operation an error refers to.
+/// Which operand of a boolean an error refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
     /// The first operand (`a`).
     A,
     /// The second operand (`b`).
     B,
+    /// The operand at this 1-based place in a combine of more than two
+    /// (the third and later).
+    Nth(u32),
+}
+
+impl Operand {
+    /// The operand at 0-based `index` of a combine: the first, the second,
+    /// or its place.
+    pub fn at(index: usize) -> Operand {
+        match index {
+            0 => Operand::A,
+            1 => Operand::B,
+            n => Operand::Nth(n as u32 + 1),
+        }
+    }
+
+    /// The operand's place in words: "first", "second", "third", "4th",
+    /// "21st".
+    pub fn ordinal(self) -> String {
+        match self {
+            Operand::A => "first".to_string(),
+            Operand::B => "second".to_string(),
+            Operand::Nth(3) => "third".to_string(),
+            Operand::Nth(n) => {
+                let suffix = match (n % 10, n % 100) {
+                    (_, 11..=13) => "th",
+                    (1, _) => "st",
+                    (2, _) => "nd",
+                    (3, _) => "rd",
+                    _ => "th",
+                };
+                format!("{n}{suffix}")
+            }
+        }
+    }
 }
 
 /// What `push_pull` changed.
@@ -807,7 +842,11 @@ impl std::fmt::Display for BooleanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BooleanError::OperandNotSolid { which } => {
-                write!(f, "boolean operand {which:?} is not watertight")
+                write!(
+                    f,
+                    "the {} boolean operand is not watertight",
+                    which.ordinal()
+                )
             }
             BooleanError::EmptyResult => write!(f, "boolean result is empty"),
             BooleanError::SingularTransform => {

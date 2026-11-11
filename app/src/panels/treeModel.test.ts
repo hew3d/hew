@@ -525,10 +525,20 @@ describe('canBoolean', () => {
     expect(canBoolean([inst, { kind: 'instance', id: 6n }], topLevel, live)).toBe(true)
   })
 
-  it('requires exactly two distinct operands', () => {
+  it('requires two or more distinct operands', () => {
     expect(canBoolean([a], topLevel, live)).toBe(false)
+    expect(canBoolean([], topLevel, live)).toBe(false)
     expect(canBoolean([a, a], topLevel, live)).toBe(false)
-    expect(canBoolean([a, b, g], topLevel, live)).toBe(false)
+    expect(canBoolean([a, b, a], topLevel, live)).toBe(false)
+    expect(canBoolean([a, b, g], topLevel, live)).toBe(true)
+    expect(canBoolean([a, b, g, inst], topLevel, live)).toBe(true)
+  })
+
+  it('every one of three operands must be live and top-level', () => {
+    const gNested = (n: NodeRef) => (n.id === 3n ? 99n : undefined)
+    expect(canBoolean([a, b, g], gNested, live)).toBe(false)
+    const gStale = (n: NodeRef) => n.id !== 3n
+    expect(canBoolean([a, b, g], topLevel, gStale)).toBe(false)
   })
 
   it('false when either operand is NESTED inside a group — the gate must match the kernel GroupedOperand refusal', () => {
@@ -560,9 +570,14 @@ describe('canBooleanInComponent', () => {
     expect(canBooleanInComponent([a, b], member)).toBe(true)
   })
 
-  it('requires exactly two distinct operands', () => {
+  it('requires two or more distinct operands', () => {
+    const c: NodeRef = { kind: 'object', id: 5n }
+    const memberOfThree = (n: NodeRef) => n.id === 1n || n.id === 2n || n.id === 5n
     expect(canBooleanInComponent([a], member)).toBe(false)
     expect(canBooleanInComponent([a, a], member)).toBe(false)
+    expect(canBooleanInComponent([a, b, a], memberOfThree)).toBe(false)
+    expect(canBooleanInComponent([a, b, c], memberOfThree)).toBe(true)
+    expect(canBooleanInComponent([a, b, c], member)).toBe(false)
   })
 
   it('false for a group or instance operand — a definition has no nested groups/instances', () => {

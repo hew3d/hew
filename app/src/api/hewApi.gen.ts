@@ -1555,15 +1555,17 @@ export interface SolidImprintsResult {
 }
 
 /**
- * `hew.solid.intersect` (v1) — Boolean intersection of two solids.
+ * `hew.solid.intersect` (v1) — Boolean intersection of two or more solids: the material in all of them.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity
  */
 export interface SolidIntersectParams {
-  /** a node id: obj_/grp_/ins_ */
-  a: string
-  /** a node id: obj_/grp_/ins_ */
-  b: string
+  /** the first node: obj_/grp_/ins_ (with b; or give operands) */
+  a?: string
+  /** the second node (with a; or give operands) */
+  b?: string
+  /** every node in order, two or more, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step */
+  operands?: string[]
 }
 
 export interface SolidIntersectResult {
@@ -1669,15 +1671,17 @@ export interface SolidSliceResult {
 }
 
 /**
- * `hew.solid.subtract` (v1) — Boolean subtraction of two solids.
+ * `hew.solid.subtract` (v1) — Boolean subtraction: the first solid minus every other one.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, nothing_removed
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, nothing_removed
  */
 export interface SolidSubtractParams {
-  /** a node id: obj_/grp_/ins_ */
-  a: string
-  /** a node id: obj_/grp_/ins_ */
-  b: string
+  /** the first node: obj_/grp_/ins_ (with b; or give operands) */
+  a?: string
+  /** the second node (with a; or give operands) */
+  b?: string
+  /** every node in order, two or more, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step */
+  operands?: string[]
 }
 
 export interface SolidSubtractResult {
@@ -1705,15 +1709,17 @@ export interface SolidThickenResult {
 }
 
 /**
- * `hew.solid.union` (v1) — Boolean union of two solids.
+ * `hew.solid.union` (v1) — Boolean union of two or more solids: the material in any of them.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity
  */
 export interface SolidUnionParams {
-  /** a node id: obj_/grp_/ins_ */
-  a: string
-  /** a node id: obj_/grp_/ins_ */
-  b: string
+  /** the first node: obj_/grp_/ins_ (with b; or give operands) */
+  a?: string
+  /** the second node (with a; or give operands) */
+  b?: string
+  /** every node in order, two or more, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step */
+  operands?: string[]
 }
 
 export interface SolidUnionResult {

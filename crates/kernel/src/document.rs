@@ -1045,11 +1045,11 @@ enum DocAction {
         /// Which combine ran — only a history label reads it.
         op: BooleanOp,
         result: ObjectId,
-        a: ObjectId,
-        b: ObjectId,
+        /// The consumed operands, in the order given (two or more).
+        operands: Vec<ObjectId>,
         /// The exact before/after `detached` snapshot of every annotation
-        /// [`Document::reevaluate_liveness_recorded`] changed when `a`/`b`
-        /// were consumed — undo/redo restore it verbatim, mirroring
+        /// [`Document::reevaluate_liveness_recorded`] changed when the
+        /// operands were consumed — undo/redo restore it verbatim, mirroring
         /// [`DocAction::Deleted::reanchored`].
         reanchored: Vec<AnnotationReanchor>,
     },
@@ -1062,16 +1062,12 @@ enum DocAction {
     BooleanNodes {
         /// Which combine ran — only a history label reads it.
         op: BooleanOp,
-        /// The first operand's root node. Undo/redo destructure this
-        /// variant with `..`, resolving purely from `hidden_operands` /
-        /// `result_objects` / `result_group`; kept for `Debug` diagnostics.
-        /// Previously read by the (now-removed) `DocAction: PartialEq`
-        /// derive, which is why `dead_code` did not flag it before.
+        /// The operands' root nodes, in the order given (two or more).
+        /// Undo/redo destructure this variant with `..`, resolving purely
+        /// from `hidden_operands` / `result_objects` / `result_group`; kept
+        /// for `Debug` diagnostics.
         #[allow(dead_code)]
-        a: NodeId,
-        /// The second operand's root node. See `a`.
-        #[allow(dead_code)]
-        b: NodeId,
+        operands: Vec<NodeId>,
         /// Every node hidden by consuming the operands (both subtrees,
         /// pre-order), so undo unhides exactly this set and nothing else.
         hidden_operands: Vec<NodeId>,
@@ -2264,7 +2260,11 @@ impl DocAction {
                 v
             }
             DocAction::ObjectOp { object } => vec![*object],
-            DocAction::Boolean { result, a, b, .. } => vec![*result, *a, *b],
+            DocAction::Boolean {
+                result, operands, ..
+            } => std::iter::once(*result)
+                .chain(operands.iter().copied())
+                .collect(),
             DocAction::BooleanNodes {
                 result_objects,
                 hidden_operands,
@@ -2997,6 +2997,8 @@ pub enum DocumentError {
     /// A [`Document::boolean_nodes`] operand contains no solid objects at all
     /// (defensive: the tree normally cannot produce an empty group).
     BooleanOperandEmpty,
+    /// A boolean was asked for with fewer than two operands.
+    BooleanNeedsTwo,
     /// A sketch operation (region lookup / profile tracing) failed.
     Sketch(SketchError),
     /// Extruding the region into a solid failed.
@@ -3271,6 +3273,9 @@ impl std::fmt::Display for DocumentError {
             DocumentError::MixedParents => {
                 write!(f, "only sibling nodes (sharing one parent) can be grouped")
             }
+            DocumentError::BooleanNeedsTwo => {
+                write!(f, "a boolean needs at least two operands")
+            }
             DocumentError::GroupedOperand => write!(
                 f,
                 "cannot combine, slice, or push-through an object inside a group — ungroup it first"
@@ -3280,13 +3285,10 @@ impl std::fmt::Display for DocumentError {
                 "cannot combine a component instance — explode it (or make it unique, then explode) first"
             ),
             DocumentError::BooleanOperandNotSolid { which } => {
-                let side = match which {
-                    Operand::A => "first",
-                    Operand::B => "second",
-                };
                 write!(
                     f,
-                    "an object in the {side} selection is not a watertight solid"
+                    "an object in the {} selection is not a watertight solid",
+                    which.ordinal()
                 )
             }
             DocumentError::BooleanOperandEmpty => {
@@ -12726,8 +12728,7 @@ impl Document {
             DocAction::Boolean {
                 op,
                 result: id,
-                a,
-                b,
+                operands: vec![a, b],
                 reanchored,
             },
             carried,
@@ -12779,44 +12780,66 @@ impl Document {
         b: ObjectId,
         op: BooleanOp,
     ) -> Result<(ObjectId, DocChange), DocumentError> {
-        info!(target: "kernel::op", op = "boolean_in_component", boolean_op = ?op);
+        self.boolean_in_component_many(component, &[a, b], op)
+    }
+
+    /// [`Document::boolean_in_component`] over any number of members of
+    /// `component`, as one undo step: a Union is the union of all of them,
+    /// a Subtract is the first minus the union of the rest, an Intersect is
+    /// the intersection of all.
+    ///
+    /// # Errors
+    /// As [`Document::boolean_in_component`], and
+    /// [`DocumentError::BooleanNeedsTwo`] for fewer than two operands.
+    pub fn boolean_in_component_many(
+        &mut self,
+        component: ComponentId,
+        operands: &[ObjectId],
+        op: BooleanOp,
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "boolean_in_component", boolean_op = ?op, operands = operands.len());
         if self.components.get(component).is_none_or(|c| c.hidden) {
             return Err(DocumentError::UnknownComponent);
         }
-        if a == b {
-            // A single object cannot be combined with itself (its faces
-            // would be fully coincident — a degenerate contact); reject
-            // before mutating.
-            return Err(DocumentError::Boolean(BooleanError::DegenerateContact));
+        if operands.len() < 2 {
+            return Err(DocumentError::BooleanNeedsTwo);
         }
-        let rec_a = self
-            .objects
-            .get(a)
-            .filter(|r| {
-                !r.hidden
-                    && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component)
-            })
-            .ok_or(DocumentError::UnknownObject)?;
-        let rec_b = self
-            .objects
-            .get(b)
-            .filter(|r| {
-                !r.hidden
-                    && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component)
-            })
-            .ok_or(DocumentError::UnknownObject)?;
+        for (i, o) in operands.iter().enumerate() {
+            if operands[..i].contains(o) {
+                // An object cannot be combined with itself (its faces would
+                // be fully coincident — a degenerate contact); reject
+                // before mutating.
+                return Err(DocumentError::Boolean(BooleanError::DegenerateContact));
+            }
+        }
+        let mut members: Vec<&Object> = Vec::with_capacity(operands.len());
+        for (i, &o) in operands.iter().enumerate() {
+            let rec = self
+                .objects
+                .get(o)
+                .filter(|r| {
+                    !r.hidden
+                        && matches!(r.owner, ObjectOwner::Definition { def: d, .. } if d == component)
+                })
+                .ok_or(DocumentError::UnknownObject)?;
+            // Checked here, by place, so the refusal names the member that
+            // is not solid (the fold below would name a side of its own).
+            if rec.object.watertight() != WatertightState::Watertight {
+                return Err(DocumentError::BooleanOperandNotSolid {
+                    which: Operand::at(i),
+                });
+            }
+            members.push(&rec.object);
+        }
 
-        let mut result = Object::boolean(op, &rec_a.object, &rec_b.object, &Transform::IDENTITY)
-            .map_err(DocumentError::Boolean)?;
+        let mut result = combine_all(op, &members)?;
 
         // Dissolve the coplanar seams the boolean introduced, preserving
         // coplanar edges the operands already had (`Document::boolean`'s
         // treatment).
-        let preserve: Vec<_> = rec_a
-            .object
-            .coplanar_edge_segments()
-            .into_iter()
-            .chain(rec_b.object.coplanar_edge_segments())
+        let preserve: Vec<_> = members
+            .iter()
+            .flat_map(|m| m.coplanar_edge_segments())
             .collect();
         result.merge_coplanar_faces(&preserve);
 
@@ -12831,14 +12854,16 @@ impl Document {
             name: None,
             tags: Vec::new(),
         });
-        self.objects[a].hidden = true;
-        self.objects[b].hidden = true;
+        for &o in operands {
+            self.objects[o].hidden = true;
+        }
         // Shared-geometry birth (component-edit-parity.md phase K2):
         // membership is structural; a hidden operand stays listed exactly
         // like `delete_def_member`'s tombstone (see `DocAction::DeletedDefMember`).
         self.components[component].members.push(NodeId::Object(id));
-        let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(a), NodeId::Object(b)]);
-        let carried = self.carry_owned_sketches(&[a, b], &[id]);
+        let nodes: Vec<NodeId> = operands.iter().map(|&o| NodeId::Object(o)).collect();
+        let reanchored = self.reevaluate_liveness_recorded(&nodes);
+        let carried = self.carry_owned_sketches(operands, &[id]);
         let carried_sketches: Vec<SketchId> = carried
             .iter()
             .flat_map(DocAction::touched_sketches)
@@ -12847,8 +12872,7 @@ impl Document {
             DocAction::Boolean {
                 op,
                 result: id,
-                a,
-                b,
+                operands: operands.to_vec(),
                 reanchored,
             },
             carried,
@@ -12856,12 +12880,18 @@ impl Document {
         self.commit_new_action();
         self.debug_validate();
 
-        let instances_touched = self.placing_instances(component);
+        let (components_touched, instances_touched) = self.def_owner_change(id);
         let mut change = DocChange {
-            objects_touched: vec![a, b, id],
-            components_touched: vec![component],
+            objects_touched: operands
+                .iter()
+                .copied()
+                .chain(std::iter::once(id))
+                .collect(),
+            sketches_touched: Vec::new(),
+            groups_touched: Vec::new(),
             instances_touched,
-            ..Default::default()
+            components_touched,
+            guides_touched: Vec::new(),
         };
         merge_unique(&mut change.sketches_touched, carried_sketches);
         Ok((id, change))
@@ -12921,42 +12951,69 @@ impl Document {
         a: NodeId,
         b: NodeId,
     ) -> Result<(NodeId, DocChange), DocumentError> {
-        info!(target: "kernel::op", op = "boolean_nodes", boolean_op = ?op);
-        // While a session is open, both operands must be session geometry
+        self.boolean_nodes_many(op, &[a, b])
+    }
+
+    /// [`Document::boolean_nodes`] over any number of nodes, as one undo
+    /// step: a Union is the union of all of them, a Subtract is the first
+    /// minus the union of the rest, an Intersect is the intersection of all.
+    /// A result in several pieces arrives in a group named after every
+    /// operand ("Hub ∪ Blade ∪ Blade").
+    ///
+    /// # Errors
+    /// [`DocumentError::BooleanNeedsTwo`] for fewer than two operands; a
+    /// repeated operand is a degenerate contact; otherwise as
+    /// [`Document::boolean_nodes`].
+    pub fn boolean_nodes_many(
+        &mut self,
+        op: BooleanOp,
+        operands: &[NodeId],
+    ) -> Result<(NodeId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "boolean_nodes", boolean_op = ?op, operands = operands.len());
+        if operands.len() < 2 {
+            return Err(DocumentError::BooleanNeedsTwo);
+        }
+        // While a session is open, every operand must be session geometry
         // — under a component frame that means session OBJECTS only; under
         // a group frame any member node (nested groups and instances
         // included) or mid-session creation qualifies.
-        for n in [a, b] {
+        for &n in operands {
             self.explode_scope_node(n)?;
         }
-        if a == b {
-            // A node cannot be combined with itself (fully coincident faces —
-            // a degenerate contact); reject before doing any work.
-            return Err(DocumentError::Boolean(BooleanError::DegenerateContact));
+        for (i, n) in operands.iter().enumerate() {
+            if operands[..i].contains(n) {
+                // A node cannot be combined with itself (fully coincident
+                // faces — a degenerate contact); reject before doing any work.
+                return Err(DocumentError::Boolean(BooleanError::DegenerateContact));
+            }
         }
-        let leaves_a = self.boolean_operand_leaves(a, Operand::A)?;
-        let leaves_b = self.boolean_operand_leaves(b, Operand::B)?;
+        let mut leaves: Vec<Vec<ObjectId>> = Vec::with_capacity(operands.len());
+        for (i, &n) in operands.iter().enumerate() {
+            leaves.push(self.boolean_operand_leaves(n, Operand::at(i))?);
+        }
         // Replacing op: operands are consumed and the result lands at the top
         // level, so an operand inside some other group would orphan that
-        // group's member list. Both operands top-level also means their
-        // subtrees are disjoint (neither can contain the other).
-        if self.node_parent(a).is_some() || self.node_parent(b).is_some() {
+        // group's member list. Every operand top-level also means their
+        // subtrees are disjoint (none can contain another).
+        if operands.iter().any(|&n| self.node_parent(n).is_some()) {
             return Err(DocumentError::GroupedOperand);
         }
 
         // ── Fallible geometry, entirely on clones (document untouched) ─────
-        let composite_a = self.compose_operand_union(&leaves_a)?;
-        let composite_b = self.compose_operand_union(&leaves_b)?;
-        let mut result = Object::boolean(op, &composite_a, &composite_b, &Transform::IDENTITY)
-            .map_err(DocumentError::Boolean)?;
+        let composites: Vec<Object> = leaves
+            .iter()
+            .map(|l| self.compose_operand_union(l))
+            .collect::<Result<_, _>>()?;
+        let refs: Vec<&Object> = composites.iter().collect();
+        let mut result = combine_all(op, &refs)?;
 
         // Dissolve the coplanar seams the composition unions and the final op
         // introduced, preserving imprints the original leaves already carried
         // (drawn-but-unextruded face imprints are content, not seams) — the
         // same preserve rule as `boolean`, collected across every leaf.
-        let preserve: Vec<_> = leaves_a
+        let preserve: Vec<_> = leaves
             .iter()
-            .chain(leaves_b.iter())
+            .flatten()
             .flat_map(|&o| self.objects[o].object.coplanar_edge_segments())
             .collect();
         result.merge_coplanar_faces(&preserve);
@@ -12977,19 +13034,21 @@ impl Document {
                 BooleanOp::Subtract => "\u{2212}",  // −
                 BooleanOp::Intersect => "\u{2229}", // ∩
             };
-            Some(format!(
-                "{} {} {}",
-                self.node_label(a),
-                sym,
-                self.node_label(b)
-            ))
+            Some(
+                operands
+                    .iter()
+                    .map(|&n| self.node_label(n))
+                    .collect::<Vec<_>>()
+                    .join(&format!(" {sym} ")),
+            )
         } else {
             None
         };
 
         let mut hidden_operands = Vec::new();
-        self.collect_subtree(a, &mut hidden_operands);
-        self.collect_subtree(b, &mut hidden_operands);
+        for &n in operands {
+            self.collect_subtree(n, &mut hidden_operands);
+        }
         for &n in &hidden_operands {
             match n {
                 NodeId::Object(id) => self.objects[id].hidden = true,
@@ -13047,8 +13106,7 @@ impl Document {
         self.push_with_followups(
             DocAction::BooleanNodes {
                 op,
-                a,
-                b,
+                operands: operands.to_vec(),
                 hidden_operands,
                 result_objects,
                 result_group,
@@ -20998,8 +21056,7 @@ impl Document {
             }
             DocAction::Boolean {
                 result,
-                a,
-                b,
+                operands,
                 reanchored,
                 ..
             } => {
@@ -21007,19 +21064,22 @@ impl Document {
                 // A definition-owned result (component-edit-parity.md phase
                 // K2: `boolean_in_component`) needs every instance to
                 // re-resolve.
-                let (result, a, b) = (*result, *a, *b);
+                let result = *result;
                 if let Some(rec) = self.objects.get_mut(result) {
                     rec.hidden = true;
                 }
-                self.objects[a].hidden = false;
-                self.objects[b].hidden = false;
+                for &o in operands {
+                    self.objects[o].hidden = false;
+                }
                 let (components_touched, instances_touched) = self.def_owner_change(result);
                 for r in reanchored {
                     self.annotations[r.annotation].annotation = r.before.clone();
                     self.annotations[r.annotation].detached = r.before_detached;
                 }
                 DocChange {
-                    objects_touched: vec![result, a, b],
+                    objects_touched: std::iter::once(result)
+                        .chain(operands.iter().copied())
+                        .collect(),
                     sketches_touched: Vec::new(),
                     groups_touched: Vec::new(),
                     instances_touched,
@@ -22675,25 +22735,27 @@ impl Document {
             }
             DocAction::Boolean {
                 result,
-                a,
-                b,
+                operands,
                 reanchored,
                 ..
             } => {
                 // Redo a combine: hide the operands again, show the result.
-                let (result, a, b) = (*result, *a, *b);
+                let result = *result;
                 if let Some(rec) = self.objects.get_mut(result) {
                     rec.hidden = false;
                 }
-                self.objects[a].hidden = true;
-                self.objects[b].hidden = true;
+                for &o in operands {
+                    self.objects[o].hidden = true;
+                }
                 let (components_touched, instances_touched) = self.def_owner_change(result);
                 for r in reanchored {
                     self.annotations[r.annotation].annotation = r.after.clone();
                     self.annotations[r.annotation].detached = r.after_detached;
                 }
                 DocChange {
-                    objects_touched: vec![result, a, b],
+                    objects_touched: std::iter::once(result)
+                        .chain(operands.iter().copied())
+                        .collect(),
                     sketches_touched: Vec::new(),
                     groups_touched: Vec::new(),
                     instances_touched,
@@ -25381,6 +25443,156 @@ fn group_change(group: GroupId, parent: Option<GroupId>, members: &[NodeId]) -> 
         instances_touched,
         components_touched: Vec::new(),
         guides_touched: Vec::new(),
+    }
+}
+
+/// `op` over `operands` (two or more, each a composite volume): a Union is
+/// the union of all, a Subtract the first minus the union of the rest, an
+/// Intersect the intersection of all. On clones; nothing is mutated.
+fn combine_all(op: BooleanOp, operands: &[&Object]) -> Result<Object, DocumentError> {
+    let (first, rest) = operands.split_first().expect("two operands or more");
+    match op {
+        BooleanOp::Intersect => {
+            let mut acc = (*first).clone();
+            for o in rest {
+                acc = join(BooleanOp::Intersect, &acc, o)?;
+            }
+            Ok(acc)
+        }
+        BooleanOp::Union | BooleanOp::Subtract => {
+            // The rest as one volume, in the order given, then the op
+            // against it.
+            let (second, more) = rest.split_first().expect("two operands or more");
+            let whole = more
+                .iter()
+                .try_fold((*second).clone(), |acc, o| join(BooleanOp::Union, &acc, o))
+                .and_then(|others| join(op, first, &others));
+            match whole {
+                // Two operands that only touch (an edge, a corner) cannot
+                // be one volume, and whether a fold in the order given
+                // meets such a pair depends on that order. The answer must
+                // not, so the operands are then taken piecewise.
+                Err(DocumentError::Boolean(BooleanError::DegenerateContact))
+                    if !more.is_empty() =>
+                {
+                    combine_piecewise(op, first, rest)
+                }
+                whole => whole,
+            }
+        }
+    }
+}
+
+/// One two-operand boolean in place, as [`combine_all`] composes them.
+fn join(op: BooleanOp, a: &Object, b: &Object) -> Result<Object, DocumentError> {
+    Object::boolean(op, a, b, &Transform::IDENTITY).map_err(DocumentError::Boolean)
+}
+
+/// `op` (Union or Subtract) of `rest` against `first` when `rest` does not
+/// fold into one volume in the order given. Operands are joined in the
+/// given order, but one that only touches the running volume waits and is
+/// tried again after every other has had its turn, so a later operand that
+/// bridges two touching ones lets all three join whatever the order. The
+/// set computed is the same as the one-volume form's.
+///
+/// A Union succeeds only when every operand joined. A Subtract first
+/// gathers its cutters into as few volumes as will join, then takes those
+/// off the same way; a cutter that no longer reaches what is left takes
+/// nothing off, which is not a refusal: only a Subtract in which no cutter
+/// removed anything is.
+fn combine_piecewise(
+    op: BooleanOp,
+    first: &Object,
+    rest: &[&Object],
+) -> Result<Object, DocumentError> {
+    let contact = || DocumentError::Boolean(BooleanError::DegenerateContact);
+    match op {
+        BooleanOp::Union => {
+            let pending: Vec<Object> = rest.iter().map(|o| (*o).clone()).collect();
+            let (all, waiting) = join_all_that_will(BooleanOp::Union, first.clone(), pending)?;
+            if waiting.is_empty() {
+                Ok(all)
+            } else {
+                Err(contact())
+            }
+        }
+        BooleanOp::Subtract => {
+            // Cutters gathered into volumes: each volume is every cutter
+            // that will join it, the ones left over seed the next.
+            let mut cutters: Vec<Object> = Vec::new();
+            let mut pending: Vec<Object> = rest.iter().map(|o| (*o).clone()).collect();
+            while !pending.is_empty() {
+                let seed = pending.remove(0);
+                let (volume, waiting) = join_all_that_will(BooleanOp::Union, seed, pending)?;
+                cutters.push(volume);
+                pending = waiting;
+            }
+            let mut acc = first.clone();
+            let mut removed_any = false;
+            let mut pending = cutters;
+            loop {
+                let mut waiting = Vec::new();
+                let mut progressed = false;
+                for cutter in pending {
+                    match join(BooleanOp::Subtract, &acc, &cutter) {
+                        Ok(next) => {
+                            acc = next;
+                            progressed = true;
+                            removed_any = true;
+                        }
+                        // What is left only shrinks, so a cutter that
+                        // misses it now misses it for good.
+                        Err(DocumentError::Boolean(BooleanError::NothingRemoved)) => {}
+                        Err(DocumentError::Boolean(BooleanError::DegenerateContact)) => {
+                            waiting.push(cutter);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                if waiting.is_empty() {
+                    break;
+                }
+                if !progressed {
+                    return Err(contact());
+                }
+                pending = waiting;
+            }
+            if removed_any {
+                Ok(acc)
+            } else {
+                Err(DocumentError::Boolean(BooleanError::NothingRemoved))
+            }
+        }
+        BooleanOp::Intersect => unreachable!("an Intersect folds in order"),
+    }
+}
+
+/// Joins into `acc` every one of `pending` that will, in order, trying
+/// again those that only touched it (a degenerate contact) each time
+/// another has joined. Returns the volume and the operands still waiting
+/// when a whole pass joins none.
+fn join_all_that_will(
+    op: BooleanOp,
+    mut acc: Object,
+    mut pending: Vec<Object>,
+) -> Result<(Object, Vec<Object>), DocumentError> {
+    loop {
+        let mut waiting = Vec::new();
+        let mut progressed = false;
+        for o in pending {
+            match join(op, &acc, &o) {
+                Ok(next) => {
+                    acc = next;
+                    progressed = true;
+                }
+                Err(DocumentError::Boolean(BooleanError::DegenerateContact)) => waiting.push(o),
+                Err(e) => return Err(e),
+            }
+        }
+        if waiting.is_empty() || !progressed {
+            return Ok((acc, waiting));
+        }
+        pending = waiting;
     }
 }
 

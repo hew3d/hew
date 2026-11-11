@@ -219,6 +219,14 @@ pub enum RecordedCall {
         b_kind: u8,
         b: u64,
     },
+    /// `boolean_nodes_many(op, kinds, ids)` — the same combine over any
+    /// number of nodes as one undo step. Additive variant: a recording that
+    /// uses it fails to parse on older builds, loudly.
+    BooleanNodesMany {
+        op: u8,
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+    },
     /// `group_nodes(kinds, ids)` — form a merge group. Additive variant;
     /// closes a pre-existing structural-op recording gap alongside
     /// [`RecordedCall::BooleanNodes`] (a group boolean is unreplayable
@@ -954,6 +962,13 @@ pub enum RecordedCall {
         op: u8,
         a: u64,
         b: u64,
+    },
+    /// `boolean_in_component_many(component, op, ids)`: the same over any
+    /// number of members of one definition. Additive variant.
+    BooleanInComponentMany {
+        component: u64,
+        op: u8,
+        ids: Vec<u64>,
     },
     /// `slice_def_member(instance, object, plane)`.
     SliceDefMember {

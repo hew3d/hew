@@ -318,13 +318,37 @@ fn boolean_op(ctx: &mut Ctx, params: &Value, op: kernel::BooleanOp) -> Result<Va
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct P {
-        a: String,
-        b: String,
+        #[serde(default)]
+        a: Option<String>,
+        #[serde(default)]
+        b: Option<String>,
+        /// Every operand in order, two or more; replaces `a` and `b`.
+        #[serde(default)]
+        operands: Vec<String>,
     }
     let p: P = parse_params(params)?;
-    let a = resolve_node(ctx, &p.a)?;
-    let b = resolve_node(ctx, &p.b)?;
-    let (result, _change) = ctx.doc.boolean_nodes(op, a, b)?;
+    let names: Vec<String> = if !p.operands.is_empty() {
+        if p.a.is_some() || p.b.is_some() {
+            return Err(CmdError::Params(
+                "give either operands or a and b, not both".to_string(),
+            ));
+        }
+        p.operands
+    } else {
+        match (p.a, p.b) {
+            (Some(a), Some(b)) => vec![a, b],
+            _ => {
+                return Err(CmdError::Params(
+                    "give a and b, or operands with two or more node ids".to_string(),
+                ));
+            }
+        }
+    };
+    let nodes: Vec<NodeId> = names
+        .iter()
+        .map(|n| resolve_node(ctx, n))
+        .collect::<Result<_, _>>()?;
+    let (result, _change) = ctx.doc.boolean_nodes_many(op, &nodes)?;
     let entity = match result {
         NodeId::Object(id) => EntityRef::Object(id),
         NodeId::Group(id) => EntityRef::Group(id),

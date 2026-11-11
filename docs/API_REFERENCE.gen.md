@@ -8143,7 +8143,7 @@ Kept for compatibility: list an object's drawn shapes (sub-faces and chords) per
 - **Class:** model-mutating
 - **Served:** kernel
 
-Boolean intersection of two solids.
+Boolean intersection of two or more solids: the material in all of them.
 
 **Params schema:**
 
@@ -8151,18 +8151,22 @@ Boolean intersection of two solids.
 {
   "properties": {
     "a": {
-      "description": "a node id: obj_/grp_/ins_",
+      "description": "the first node: obj_/grp_/ins_ (with b; or give operands)",
       "type": "string"
     },
     "b": {
-      "description": "a node id: obj_/grp_/ins_",
+      "description": "the second node (with a; or give operands)",
       "type": "string"
+    },
+    "operands": {
+      "description": "every node in order, two or more, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 2,
+      "type": "array"
     }
   },
-  "required": [
-    "a",
-    "b"
-  ],
   "type": "object"
 }
 ```
@@ -8185,6 +8189,7 @@ Boolean intersection of two solids.
 
 **Refusals:**
 
+- `boolean_needs_two` — Select at least two objects to combine.
 - `boolean_operand_has_instance` — Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.
 - `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
@@ -8642,7 +8647,7 @@ Slice a solid by a plane into two solids.
 - **Class:** model-mutating
 - **Served:** kernel
 
-Boolean subtraction of two solids.
+Boolean subtraction: the first solid minus every other one.
 
 **Params schema:**
 
@@ -8650,18 +8655,22 @@ Boolean subtraction of two solids.
 {
   "properties": {
     "a": {
-      "description": "a node id: obj_/grp_/ins_",
+      "description": "the first node: obj_/grp_/ins_ (with b; or give operands)",
       "type": "string"
     },
     "b": {
-      "description": "a node id: obj_/grp_/ins_",
+      "description": "the second node (with a; or give operands)",
       "type": "string"
+    },
+    "operands": {
+      "description": "every node in order, two or more, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 2,
+      "type": "array"
     }
   },
-  "required": [
-    "a",
-    "b"
-  ],
   "type": "object"
 }
 ```
@@ -8684,6 +8693,7 @@ Boolean subtraction of two solids.
 
 **Refusals:**
 
+- `boolean_needs_two` — Select at least two objects to combine.
 - `boolean_operand_has_instance` — Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.
 - `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
@@ -8693,7 +8703,7 @@ Boolean subtraction of two solids.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
-- `nothing_removed` — Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid.
+- `nothing_removed` — Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting.
 
 ### `hew.solid.thicken`
 
@@ -8773,7 +8783,7 @@ Pull a flat surface into a solid of the given thickness.
 - **Class:** model-mutating
 - **Served:** kernel
 
-Boolean union of two solids.
+Boolean union of two or more solids: the material in any of them.
 
 **Params schema:**
 
@@ -8781,18 +8791,22 @@ Boolean union of two solids.
 {
   "properties": {
     "a": {
-      "description": "a node id: obj_/grp_/ins_",
+      "description": "the first node: obj_/grp_/ins_ (with b; or give operands)",
       "type": "string"
     },
     "b": {
-      "description": "a node id: obj_/grp_/ins_",
+      "description": "the second node (with a; or give operands)",
       "type": "string"
+    },
+    "operands": {
+      "description": "every node in order, two or more, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 2,
+      "type": "array"
     }
   },
-  "required": [
-    "a",
-    "b"
-  ],
   "type": "object"
 }
 ```
@@ -8815,6 +8829,7 @@ Boolean union of two solids.
 
 **Refusals:**
 
+- `boolean_needs_two` — Select at least two objects to combine.
 - `boolean_operand_has_instance` — Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.
 - `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.

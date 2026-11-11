@@ -252,7 +252,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect."
         }
         "NothingRemoved" => {
-            "Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid."
+            "Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting."
         }
         "NotSolid" => {
             "Only a solid can be sliced. To make it solid, select it and choose Object ▸ Make Solid…"
@@ -306,6 +306,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "GroupCycle" => {
             "A group can't be moved into itself or into one of its own members. Pick a different group, or move it out to the top level."
         }
+        "BooleanNeedsTwo" => "Select at least two objects to combine.",
         "GroupedOperand" => {
             "This operation can't target an object inside a group. Ungroup it, or leave the group context, first."
         }

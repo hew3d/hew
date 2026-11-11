@@ -996,6 +996,12 @@ Semantics notes, normative:
   or a sketch curve id — validated for connectivity and refused typed
   where the tool itself refuses (branching selections, bends tighter
   than the profile). Exact schema in the registry.
+- `hew.solid.union`, `hew.solid.subtract` and `hew.solid.intersect` take
+  `a` and `b`, or `operands` (two or more node ids, in order) for one
+  combine over all of them as one undo step: a Union of all, the first
+  minus the union of the rest, the intersection of all. `operands` with
+  fewer than two refuses `boolean_needs_two`; `a` without `b`, or both
+  spellings at once, is a malformed request.
 - **Editable imprints** (kept for compatibility; implemented over the
   drafting engine's plane units — `hew.sketch.units`, `move`, `rotate`,
   `scale`, `delete` are the general form and take plane and unit keys):

@@ -204,7 +204,9 @@ longer replay.
 | `follow_me_along_edges` | `sketch`, `region`, `path_sketch`, `path_edges[]` | sweep a closed profile along a chain of sketch edges into an Object |
 | `follow_me_around_face` | `sketch`, `region`, `path_object`, `path_face` | sweep a closed profile around a solid face's outer boundary into an Object |
 | `boolean` | `op` (0=union, 1=subtract, 2=intersect), `a`, `b` | combine two Objects |
-| `boolean_nodes` | `op` (as `boolean`), `a_kind`/`a`, `b_kind`/`b` (kind 0=object, 1=group) | combine two tree nodes — plain solids or whole groups; the route every UI boolean command takes |
+| `boolean_nodes` | `op` (as `boolean`), `a_kind`/`a`, `b_kind`/`b` (kind 0=object, 1=group) | combine two tree nodes — plain solids or whole groups; the route a UI boolean of exactly two takes |
+| `boolean_nodes_many` | `op`, `kinds[]`/`ids[]` (parallel node lists) | combine two or more tree nodes as one step: a union of all, the first minus the union of the rest, the intersection of all; the route a UI boolean of more than two takes |
+| `boolean_in_component_many` | `component`, `op`, `ids[]` | the same over members of one component definition |
 | `group_nodes` | `kinds[]`/`ids[]` (parallel node lists, kind as `delete_node`) | form a merge group |
 | `duplicate_node` | `kind`, `id`, `affine[12]` (row-major 3×4) | deep-copy a node (Move+Alt) at the affine offset |
 | `slice_object` | `object`, `plane[6]` (`[px,py,pz,nx,ny,nz]`) | slice an Object by a plane |

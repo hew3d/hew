@@ -94,7 +94,7 @@ describe('boolean auto-explode through the real wasm module', () => {
     expect(Array.from(scene.object_ids())).toContain(otherBox)
   })
 
-  it('a multi-solid exploded set (the 3D Text shape: several disjoint solids under one instance) groups the exploded pieces and booleans the composite — matching the existing multi-select semantics, which already require grouping before a boolean of more than two solids', () => {
+  it('a multi-solid exploded set (the 3D Text shape: several disjoint solids under one instance) groups the exploded pieces and booleans the composite, so the exploded component stays one operand of the selection', () => {
     const scene = new Scene()
 
     const glyphA = makeBox(scene, -3, -1, -1, 1, 1)
@@ -117,13 +117,11 @@ describe('boolean auto-explode through the real wasm module', () => {
     const exploded = Array.from(scene.explode_instance(instance))
     expect(exploded.length).toBe(2)
 
-    // >1 exploded solid: existing multi-select boolean semantics
-    // (`canBoolean`/`boolean_nodes`) require exactly two top-level
-    // operands, so combining more than one piece against the other
-    // operand means grouping them first — the same thing a user would
-    // have to do by hand for any other >2-solid boolean. group_nodes
-    // internally unions a group operand's leaves before applying `op`
-    // between the two composites (Document::compose_operand_union).
+    // >1 exploded solid: the pieces are grouped first so the exploded
+    // component stays ONE operand in the user's selection (a hub minus
+    // its lettering is one subtract, not one per glyph). The kernel unions
+    // a group operand's leaves before applying `op` between the
+    // composites (Document::compose_operand_union).
     const groupId = scene.group_nodes(
       new Uint8Array([0, 0]),
       new BigUint64Array(exploded),
@@ -237,12 +235,10 @@ describe('runBooleanCore — the mutated-failed accounting itself (delta-review 
     )
     const otherBox = makeBox(scene, 8, 10, -1, 1, 1)
 
-    const outcome = runBooleanCore(
-      scene,
-      UNION,
+    const outcome = runBooleanCore(scene, UNION, [
       { kind: 'instance', id: mirrored },
       { kind: 'object', id: otherBox },
-    )
+    ])
 
     expect(outcome.kind).toBe('mutated-failed')
     if (outcome.kind !== 'mutated-failed') throw new Error('unreachable')
@@ -292,12 +288,10 @@ describe('runBooleanCore — the mutated-failed accounting itself (delta-review 
       new Float64Array([-1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0]),
     )
 
-    const outcome = runBooleanCore(
-      scene,
-      UNION,
+    const outcome = runBooleanCore(scene, UNION, [
       { kind: 'instance', id: instanceA },
       { kind: 'instance', id: mirroredB },
-    )
+    ])
 
     expect(outcome.kind).toBe('mutated-failed')
     if (outcome.kind !== 'mutated-failed') throw new Error('unreachable')
@@ -343,12 +337,10 @@ describe('runBooleanCore — the mutated-failed accounting itself (delta-review 
     const undoDepth = scene.undo_depth()
     const objectsBefore = Array.from(scene.object_ids())
 
-    const outcome = runBooleanCore(
-      scene,
-      SUBTRACT,
+    const outcome = runBooleanCore(scene, SUBTRACT, [
       { kind: 'object', id: plate },
       { kind: 'instance', id: glyph },
-    )
+    ])
 
     expect(outcome.kind).toBe('refused')
     if (outcome.kind !== 'refused') throw new Error('unreachable')
@@ -362,5 +354,57 @@ describe('runBooleanCore — the mutated-failed accounting itself (delta-review 
     expect(scene.instance_def(glyph)).toBe(def)
     expect(Array.from(scene.object_ids())).toEqual(objectsBefore)
     expect(scene.undo_depth()).toBe(undoDepth)
+  })
+
+  it('a Union of solids that do not overlap leaves a group of pieces', () => {
+    const scene = new Scene()
+    const a = makeBox(scene, 0, 1, 0, 1, 1)
+    const b = makeBox(scene, 2, 3, 0, 1, 1)
+    const outcome = runBooleanCore(scene, UNION, [{ kind: 'object', id: a }, { kind: 'object', id: b }])
+    expect(outcome.kind).toBe('ok')
+    if (outcome.kind !== 'ok') return
+    expect(outcome.node.kind).toBe('group')
+    expect(scene.group_members(outcome.node.id)).toHaveLength(2)
+  })
+
+  it('three overlapping solids union into one object in one undo step, and a subtract keeps the first', () => {
+    const scene = new Scene()
+    const a = makeBox(scene, 0, 1, 0, 1, 1)
+    const b = makeBox(scene, 0.5, 1.5, 0, 1, 1)
+    const c = makeBox(scene, 1, 2, 0, 1, 1)
+    const depth = scene.undo_depth()
+    const outcome = runBooleanCore(scene, UNION, [
+      { kind: 'object', id: a },
+      { kind: 'object', id: b },
+      { kind: 'object', id: c },
+    ])
+    expect(outcome.kind).toBe('ok')
+    if (outcome.kind !== 'ok') return
+    expect(outcome.node.kind).toBe('object')
+    expect(Array.from(scene.object_ids())).toHaveLength(1)
+    expect(scene.undo_depth()).toBe(depth + 1)
+    scene.scene_undo()
+    expect(Array.from(scene.object_ids())).toHaveLength(3)
+    // Subtract keeps the first operand given, wherever it sits in the
+    // row and whichever order the rest come in: what is left is the part
+    // of that box no other box covers.
+    const cases: Array<{ order: bigint[]; x: [number, number] }> = [
+      { order: [a, b, c], x: [0, 0.5] },
+      { order: [a, c, b], x: [0, 0.5] },
+      { order: [c, a, b], x: [1.5, 2] },
+      { order: [c, b, a], x: [1.5, 2] },
+    ]
+    for (const { order, x } of cases) {
+      const cut = runBooleanCore(scene, 1, order.map((id) => ({ kind: 'object' as const, id })))
+      expect(cut.kind).toBe('ok')
+      if (cut.kind !== 'ok') return
+      expect(cut.node.kind).toBe('object')
+      expect(scene.object_ids()).toHaveLength(1)
+      const bounds = scene.object_bounds(cut.node.id, undefined)
+      expect(bounds[0]).toBeCloseTo(x[0], 9)
+      expect(bounds[3]).toBeCloseTo(x[1], 9)
+      scene.scene_undo()
+      expect(Array.from(scene.object_ids())).toHaveLength(3)
+    }
   })
 })

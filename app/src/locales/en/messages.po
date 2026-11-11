@@ -648,8 +648,20 @@ msgid "{steps, plural, one {Component exploded to solids, but the boolean then f
 msgstr "{steps, plural, one {Component exploded to solids, but the boolean then failed: {reason} — undo once to restore it.} other {Component exploded to solids, but the boolean then failed: {reason} — undo # times to restore it.}}"
 
 #: src/viewport/Viewport.tsx
+msgid "{steps, plural, one {Components exploded to solids, but the boolean then failed: {reason} — undo once to restore it.} other {Components exploded to solids, but the boolean then failed: {reason} — undo # times to restore it.}}"
+msgstr "{steps, plural, one {Components exploded to solids, but the boolean then failed: {reason} — undo once to restore it.} other {Components exploded to solids, but the boolean then failed: {reason} — undo # times to restore it.}}"
+
+#: src/viewport/Viewport.tsx
+msgid "{steps, plural, one {One component could not be fully exploded for the boolean (the ones before it were, and are left exploded): {reason} — undo once to restore it.} other {One component could not be fully exploded for the boolean (the ones before it were, and are left exploded): {reason} — undo # times to restore it.}}"
+msgstr "{steps, plural, one {One component could not be fully exploded for the boolean (the ones before it were, and are left exploded): {reason} — undo once to restore it.} other {One component could not be fully exploded for the boolean (the ones before it were, and are left exploded): {reason} — undo # times to restore it.}}"
+
+#: src/viewport/Viewport.tsx
 msgid "{steps, plural, one {One component could not be fully exploded for the boolean (the other was, and is left exploded): {reason} — undo once to restore it.} other {One component could not be fully exploded for the boolean (the other was, and is left exploded): {reason} — undo # times to restore it.}}"
 msgstr "{steps, plural, one {One component could not be fully exploded for the boolean (the other was, and is left exploded): {reason} — undo once to restore it.} other {One component could not be fully exploded for the boolean (the other was, and is left exploded): {reason} — undo # times to restore it.}}"
+
+#: src/viewport/Viewport.tsx
+#~ msgid "{steps, plural, one {One component could not be fully exploded for the boolean (the others were, and are left exploded): {reason} — undo once to restore it.} other {One component could not be fully exploded for the boolean (the others were, and are left exploded): {reason} — undo # times to restore it.}}"
+#~ msgstr "{steps, plural, one {One component could not be fully exploded for the boolean (the others were, and are left exploded): {reason} — undo once to restore it.} other {One component could not be fully exploded for the boolean (the others were, and are left exploded): {reason} — undo # times to restore it.}}"
 
 #: src/settings/serverForm.ts
 msgid "{ttlMin} min TTL"
@@ -1947,6 +1959,10 @@ msgstr "components"
 msgid "Components"
 msgstr "Components"
 
+#: src/viewport/Viewport.tsx
+msgid "Components exploded to solids for the boolean."
+msgstr "Components exploded to solids for the boolean."
+
 #: src/panels/ReportBugDialog.tsx
 msgid "Compressing the report…"
 msgstr "Compressing the report…"
@@ -2293,6 +2309,10 @@ msgstr "Cut"
 msgid "Cut a solid into two separate watertight Objects."
 msgstr "Cut a solid into two separate watertight Objects."
 
+#: src/palette/registry.ts
+msgid "Cut every later selected solid out of the first (boolean difference)."
+msgstr "Cut every later selected solid out of the first (boolean difference)."
+
 #: src/print/cutList.ts
 msgid "Cut list"
 msgstr "Cut list"
@@ -2302,8 +2322,8 @@ msgid "Cut list page"
 msgstr "Cut list page"
 
 #: src/palette/registry.ts
-msgid "Cut the second selected solid out of the first (boolean difference)."
-msgstr "Cut the second selected solid out of the first (boolean difference)."
+#~ msgid "Cut the second selected solid out of the first (boolean difference)."
+#~ msgstr "Cut the second selected solid out of the first (boolean difference)."
 
 #: src/shop/PartsSheet.tsx
 msgid "Cutlist"
@@ -3853,6 +3873,10 @@ msgid "Hew's own request to the model kernel carried a malformed selection. If t
 msgstr "Hew's own request to the model kernel carried a malformed selection. If this keeps happening, use Report Bug."
 
 #: src/kernelErrors.ts
+#~ msgid "Hew's own request to the model kernel carried a malformed shape or path. If this keeps happening, use Report Bug."
+#~ msgstr "Hew's own request to the model kernel carried a malformed shape or path. If this keeps happening, use Report Bug."
+
+#: src/kernelErrors.ts
 msgid "Hew's own request to the model kernel carried a malformed snap point. If this keeps happening, use Report Bug."
 msgstr "Hew's own request to the model kernel carried a malformed snap point. If this keeps happening, use Report Bug."
 
@@ -4281,8 +4305,12 @@ msgid "Keep as is"
 msgstr "Keep as is"
 
 #: src/palette/registry.ts
-msgid "Keep only the volume the two selected solids share (boolean intersection)."
-msgstr "Keep only the volume the two selected solids share (boolean intersection)."
+msgid "Keep only the volume all the selected solids share (boolean intersection)."
+msgstr "Keep only the volume all the selected solids share (boolean intersection)."
+
+#: src/palette/registry.ts
+#~ msgid "Keep only the volume the two selected solids share (boolean intersection)."
+#~ msgstr "Keep only the volume the two selected solids share (boolean intersection)."
 
 #: src/health/healthCopy.ts
 msgid "Keep the inside walls"
@@ -4783,8 +4811,12 @@ msgid "merge"
 msgstr "merge"
 
 #: src/palette/registry.ts
-msgid "Merge two selected solids into one (boolean add)."
-msgstr "Merge two selected solids into one (boolean add)."
+msgid "Merge the selected solids into one (boolean add)."
+msgstr "Merge the selected solids into one (boolean add)."
+
+#: src/palette/registry.ts
+#~ msgid "Merge two selected solids into one (boolean add)."
+#~ msgstr "Merge two selected solids into one (boolean add)."
 
 #: src/panels/MaterialPalette.tsx
 msgid "Metallic"
@@ -5361,8 +5393,12 @@ msgid "Nothing was closed."
 msgstr "Nothing was closed."
 
 #: src/kernelErrors.ts
-msgid "Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid."
-msgstr "Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid."
+msgid "Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting."
+msgstr "Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting."
+
+#: src/kernelErrors.ts
+#~ msgid "Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid."
+#~ msgstr "Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid."
 
 #: src/health/healthCopy.ts
 msgid "Nothing was given a thickness."
@@ -7347,6 +7383,10 @@ msgstr "Select at least one object to group."
 #: src/kernelErrors.ts
 msgid "Select at least one object to turn into a component."
 msgstr "Select at least one object to turn into a component."
+
+#: src/kernelErrors.ts
+msgid "Select at least two objects to combine."
+msgstr "Select at least two objects to combine."
 
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Select every instance of this component"

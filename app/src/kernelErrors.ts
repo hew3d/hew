@@ -187,7 +187,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   DegenerateContact:
     msg`The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.`,
   NothingRemoved:
-    msg`Nothing was cut away: the two solids only touch or sit apart. Check that the cutter is the shape you expect, then move it so it passes through the other solid.`,
+    msg`Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting.`,
 
   // ----------------------------------------------------------- slice
   NotSolid: msg`Only a solid can be sliced. To make it solid, select it and choose Object ▸ Make Solid…`,
@@ -234,6 +234,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`Only siblings can be grouped — everything selected must be top-level, or all inside the same group. Move them to one level first.`,
   GroupCycle:
     msg`A group can't be moved into itself or into one of its own members. Pick a different group, or move it out to the top level.`,
+  BooleanNeedsTwo: msg`Select at least two objects to combine.`,
   GroupedOperand:
     msg`This operation can't target an object inside a group. Ungroup it, or leave the group context, first.`,
   BooleanOperandHasInstance:

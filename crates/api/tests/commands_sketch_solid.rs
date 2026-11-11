@@ -980,6 +980,119 @@ fn intersect_combines_two_overlapping_boxes() {
 }
 
 #[test]
+fn union_takes_any_number_of_operands_as_one_undo_step() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let a = build_box(
+        &mut conn,
+        &mut doc,
+        2,
+        [0.0, 0.0, 0.0],
+        [0.2, 0.2, 0.0],
+        0.2,
+    );
+    let b = build_box(
+        &mut conn,
+        &mut doc,
+        3,
+        [0.1, 0.0, 0.0],
+        [0.3, 0.2, 0.0],
+        0.2,
+    );
+    let c = build_box(
+        &mut conn,
+        &mut doc,
+        4,
+        [0.2, 0.0, 0.0],
+        [0.4, 0.2, 0.0],
+        0.2,
+    );
+    let result = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.solid.union",
+        json!({ "operands": [a, b, c] }),
+    ));
+    let result_id = result["result"].as_str().unwrap();
+    assert!(result_id.starts_with("obj_"), "{result}");
+    assert_eq!(doc.visible_object_ids().len(), 1);
+}
+
+#[test]
+fn subtract_with_operands_takes_the_rest_off_the_first() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let bar = build_box(
+        &mut conn,
+        &mut doc,
+        2,
+        [0.0, 0.0, 0.0],
+        [0.6, 0.2, 0.0],
+        0.2,
+    );
+    let k1 = build_box(
+        &mut conn,
+        &mut doc,
+        3,
+        [0.18, -0.1, 0.0],
+        [0.22, 0.3, 0.0],
+        0.4,
+    );
+    let k2 = build_box(
+        &mut conn,
+        &mut doc,
+        4,
+        [0.38, -0.1, 0.0],
+        [0.42, 0.3, 0.0],
+        0.4,
+    );
+    let result = single(call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.solid.subtract",
+        json!({ "operands": [bar, k1, k2] }),
+    ));
+    // Both cutters sever the bar: three pieces, kept together in a group.
+    assert!(
+        result["result"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("grp_")),
+        "{result}"
+    );
+    assert_eq!(doc.visible_object_ids().len(), 3, "{result}");
+}
+
+#[test]
+fn boolean_operands_need_two_and_exclude_a_and_b() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let (a, b) = two_overlapping_boxes(&mut conn, &mut doc);
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.solid.union",
+        json!({ "operands": [a.clone()] }),
+    );
+    assert_eq!(data["refusal"], "boolean_needs_two");
+    // Both spellings at once is a malformed request, not a refusal.
+    let r = call(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.solid.union",
+        json!({ "a": a, "b": b.clone(), "operands": [b] }),
+    );
+    let err = r.error.expect("a and b beside operands is malformed");
+    assert_ne!(err.code, codes::REFUSED);
+}
+
+#[test]
 fn boolean_same_operand_twice_refuses_degenerate_contact() {
     let mut conn = Connection::new(Profile::Core, "test");
     let mut doc = Document::new();

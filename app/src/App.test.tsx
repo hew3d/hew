@@ -2608,7 +2608,7 @@ describe('App — boolean auto-explode failure surfacing (finding 2)', () => {
       // committed real mutations, but the retried boolean still failed.
       const calls = vi.mocked(Viewport).mock.calls
       const { apiRef } = calls[calls.length - 1][0] as unknown as {
-        apiRef?: { current: { runBoolean: (op: number, a: unknown, b: unknown) => unknown } | null }
+        apiRef?: { current: { runBoolean: (op: number, nodes: unknown[]) => unknown } | null }
       }
       act(() => {
         if (apiRef !== undefined) apiRef.current = { runBoolean: vi.fn(() => 'mutated-failed') }
@@ -2627,6 +2627,34 @@ describe('App — boolean auto-explode failure surfacing (finding 2)', () => {
       mockScene.can_scene_undo = priorCanUndo
     }
   })
+
+  it('passes every selected operand, in selection order, to runBoolean (three objects open the gate)', async () => {
+    const priorObjectIds = mockScene.object_ids
+    mockScene.object_ids = vi.fn(() => BigUint64Array.from([1n, 2n, 3n]))
+    try {
+      await renderAndLoad()
+      act(() => window.__hew_test!.selectObjects(['3', '1', '2']))
+      const calls = vi.mocked(Viewport).mock.calls
+      const { apiRef } = calls[calls.length - 1][0] as unknown as {
+        apiRef?: { current: Record<string, unknown> | null }
+      }
+      const runBoolean = vi.fn(() => null)
+      act(() => {
+        if (apiRef !== undefined) apiRef.current = { runBoolean }
+      })
+      fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+      fireEvent.mouseDown(menubar().getByText('Subtract'))
+      expect(runBoolean).toHaveBeenCalledTimes(1)
+      expect(runBoolean).toHaveBeenCalledWith(1, [
+        { kind: 'object', id: 3n },
+        { kind: 'object', id: 1n },
+        { kind: 'object', id: 2n },
+      ])
+    } finally {
+      mockScene.object_ids = priorObjectIds
+    }
+  })
+
 })
 
 describe('App — session-stack menu gating (docs/design/group-session.md)', () => {

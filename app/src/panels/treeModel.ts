@@ -678,9 +678,8 @@ export function canBoolean(
   parentOf: (n: NodeRef) => bigint | undefined,
   isOperand: (n: NodeRef) => boolean,
 ): boolean {
-  if (selected.length !== 2) return false
-  const [a, b] = selected
-  if (nodeKey(a) === nodeKey(b)) return false
+  if (selected.length < 2) return false
+  if (new Set(selected.map(nodeKey)).size !== selected.length) return false
   return selected.every(
     (n) =>
       (n.kind === 'object' || n.kind === 'group' || n.kind === 'instance') &&
@@ -691,9 +690,9 @@ export function canBoolean(
 
 /**
  * Whether the boolean commands apply while editing INSIDE a component
- * instance's own definition (component-edit-parity.md phase A2): exactly two
- * distinct 'object' nodes, both live MEMBERS of the entered definition —
- * `boolean_in_component` requires both operands from the SAME component. A
+ * instance's own definition (component-edit-parity.md phase A2): two or
+ * more distinct 'object' nodes, all live MEMBERS of the entered definition —
+ * `boolean_in_component_many` requires every operand from the SAME component. A
  * definition is flat (no nesting), so there is no "top-level" concept to
  * check here the way `canBoolean` checks it for the world.
  *
@@ -704,9 +703,8 @@ export function canBooleanInComponent(
   selected: NodeRef[],
   isMember: (n: NodeRef) => boolean,
 ): boolean {
-  if (selected.length !== 2) return false
-  const [a, b] = selected
-  if (nodeKey(a) === nodeKey(b)) return false
+  if (selected.length < 2) return false
+  if (new Set(selected.map(nodeKey)).size !== selected.length) return false
   return selected.every((n) => n.kind === 'object' && isMember(n))
 }
 

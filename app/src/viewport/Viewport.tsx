@@ -687,8 +687,8 @@ export interface FlyState {
 }
 
 export interface ViewportApi {
-  /** Combine two nodes — plain solids or whole groups (0=union,
-   * 1=subtract a−b, 2=intersect). Returns the result root (a single object,
+  /** Combine two or more nodes — plain solids or whole groups (0=union,
+   * 1=subtract the first minus the union of the rest, 2=intersect). Returns the result root (a single object,
    * or a result group when the result has disjoint pieces); `null` on a
    * refused op that left the document **completely** untouched (already
    * toasted) — this is only ever true when nothing at all committed yet.
@@ -707,7 +707,7 @@ export interface ViewportApi {
    * toast (naming what committed, what failed, and exactly how many undo
    * steps restore the pre-explode state) is already shown before this
    * returns. */
-  runBoolean: (op: number, a: NodeRef, b: NodeRef) => NodeRef | null | 'mutated-failed'
+  runBoolean: (op: number, nodes: NodeRef[]) => NodeRef | null | 'mutated-failed'
   /** Group the given nodes into a merge group. */
   runGroup: (nodes: NodeRef[]) => bigint | null
   /** Dissolve a group. */
@@ -2007,8 +2007,8 @@ export function applyEditContext(tool: Tool, ctx: EditContext): void {
  * one Object per extruded glyph region) — `group_nodes` folds the pieces
  * into one group so the boolean still sees a single operand (mirroring the
  * existing multi-solid boolean flow: `canBoolean` in treeModel.ts accepts
- * exactly 2 top-level operands, so combining >2 solids always means
- * grouping first).
+ * any number of top-level operands, and the group keeps each instance a
+ * single operand).
  *
  * Each of these is its own committed undo step (no sanctioned
  * single-compound mechanism covers this sequence — `DocAction::Compound` is
@@ -2240,16 +2240,16 @@ export type BooleanCoreOutcome =
       /** Every node now sitting in the document in place of a pre-explode
        *  instance operand — for `onSelectMany`. */
       settledNodes: NodeRef[]
-      /** Total undo steps committed across both operands' auto-explode
+      /** Total undo steps committed across all operands' auto-explode
        *  before the failure — exactly how many undos restore the original
        *  document (delta-review finding 2). */
       committedSteps: number
-      /** True when both operands fully resolved and it was the RETRIED
+      /** True when every operand fully resolved and it was the RETRIED
        *  boolean itself that then failed; false when an operand's own
        *  auto-explode (make_unique/explode_instance/group_nodes) failed
        *  partway — drives which toast lead-in is accurate. */
       retryFailed: boolean
-      /** Only meaningful when `retryFailed` is false: whether the OTHER
+      /** Only meaningful when `retryFailed` is false: whether an EARLIER
        *  operand had already been fully exploded before this one failed —
        *  the worst case (both operands were instances, one fully exploded,
        *  the other then failed), so the toast can honestly say one
@@ -2262,21 +2262,29 @@ export type BooleanCoreOutcome =
 export function runBooleanCore(
   wasmScene: WasmScene,
   op: number,
-  a: NodeRef,
-  b: NodeRef,
+  nodes: NodeRef[],
 ): BooleanCoreOutcome {
   // Operands are plain solids, whole groups, or (transparently exploded
   // below) component instances; the kernel composes group operands and owns
   // every eligibility rule (boolean_nodes, the group-ops design). kind:
-  // 0=object, 1=group, 2=instance.
+  // 0=object, 1=group, 2=instance. Exactly two operands use the original
+  // two-operand call (recorded replay fixtures and older tests depend on
+  // it); any other count goes through the N-way `boolean_nodes_many`.
   const kindNum = (n: NodeRef) => (n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0)
-  const attempt = (opA: NodeRef, opB: NodeRef): NodeRef =>
-    nodeRefFromJs(wasmScene.boolean_nodes(op, kindNum(opA), opA.id, kindNum(opB), opB.id))
+  const attempt = (ops: NodeRef[]): NodeRef =>
+    ops.length === 2
+      ? nodeRefFromJs(wasmScene.boolean_nodes(op, kindNum(ops[0]), ops[0].id, kindNum(ops[1]), ops[1].id))
+      : nodeRefFromJs(
+          wasmScene.boolean_nodes_many(
+            op,
+            Uint8Array.from(ops.map(kindNum)),
+            BigUint64Array.from(ops.map((n) => n.id)),
+          ),
+        )
 
-  let opA = a
-  let opB = b
+  const operands = [...nodes]
   try {
-    const node = attempt(opA, opB)
+    const node = attempt(operands)
     return { kind: 'ok', node, autoExploded: false }
   } catch (err) {
     const code = parseKernelErrorCode(err)
@@ -2285,19 +2293,21 @@ export function runBooleanCore(
       return { kind: 'refused', code: code ?? undefined, message: kernelErrorMessage(code ?? 'Unknown', rawMsg) }
     }
 
-    // Scoped to an operand that IS an instance, not one nested inside a
+    // Scoped to operands that ARE instances, not one nested inside a
     // group operand's subtree (the other way this refusal can fire) —
     // finding 4's auto-explode targets the direct engrave/emboss case.
-    // `committedSteps` tracks "anything committed yet" across BOTH
-    // operands (delta-review finding 1c: opA can fully explode — up to 3
-    // committed steps — before opB's own explode then fails; that is
-    // still a real, partial mutation, never a bare no-op).
+    // `committedSteps` tracks "anything committed yet" across ALL
+    // operands (delta-review finding 1c: an earlier operand can fully
+    // explode — up to 3 committed steps — before a later one's own
+    // explode then fails; that is still a real, partial mutation, never a
+    // bare no-op).
     const settledNodes: NodeRef[] = []
     let committedSteps = 0
-    let aExploded = false
+    let anyExploded = false
 
-    if (opA.kind === 'instance') {
-      const outcome = explodeInstanceOperand(wasmScene, opA)
+    for (let i = 0; i < operands.length; i++) {
+      if (operands[i].kind !== 'instance') continue
+      const outcome = explodeInstanceOperand(wasmScene, operands[i])
       committedSteps += outcome.steps
       if (!outcome.ok) {
         settledNodes.push(...outcome.pieces)
@@ -2309,40 +2319,18 @@ export function runBooleanCore(
           settledNodes,
           committedSteps,
           retryFailed: false,
-          otherOperandExploded: false,
+          otherOperandExploded: anyExploded,
           code: outcome.code,
           message: outcome.message,
         }
       }
-      opA = outcome.node
+      operands[i] = outcome.node
       settledNodes.push(outcome.node)
-      aExploded = true
-    }
-
-    if (opB.kind === 'instance') {
-      const outcome = explodeInstanceOperand(wasmScene, opB)
-      committedSteps += outcome.steps
-      if (!outcome.ok) {
-        settledNodes.push(...outcome.pieces)
-        if (committedSteps === 0) {
-          return { kind: 'refused', code: outcome.code, message: outcome.message }
-        }
-        return {
-          kind: 'mutated-failed',
-          settledNodes,
-          committedSteps,
-          retryFailed: false,
-          otherOperandExploded: aExploded,
-          code: outcome.code,
-          message: outcome.message,
-        }
-      }
-      opB = outcome.node
-      settledNodes.push(outcome.node)
+      anyExploded = true
     }
 
     if (committedSteps === 0) {
-      // Neither operand was a direct instance — the refusal fired for a
+      // No operand was a direct instance — the refusal fired for a
       // reason this auto-explode doesn't cover (e.g. an instance nested
       // inside a group operand's subtree). Nothing committed, clean refusal.
       const rawMsg = err instanceof Error ? err.message : String(err)
@@ -2350,7 +2338,7 @@ export function runBooleanCore(
     }
 
     try {
-      const node = attempt(opA, opB)
+      const node = attempt(operands)
       return { kind: 'ok', node, autoExploded: true }
     } catch (err2) {
       // The explode(s) were committed only so this boolean could run. When
@@ -5156,12 +5144,12 @@ export default function Viewport({
     // into the side effects real usage needs (scene refresh, selection,
     // toast), which is exactly the part testing the accounting itself
     // doesn't need to exercise.
-    function runBoolean(op: number, a: NodeRef, b: NodeRef): NodeRef | null | 'mutated-failed' {
+    function runBoolean(op: number, nodes: NodeRef[]): NodeRef | null | 'mutated-failed' {
       const editCtx = computeEditContext(wasmScene, activeContextRef.current)
       if (editCtx.kind === 'instance') {
         let result: NodeRef
         try {
-          result = { kind: 'object', id: wasmScene.boolean_in_component(editCtx.component, op, a.id, b.id) }
+          result = { kind: 'object', id: wasmScene.boolean_in_component_many(editCtx.component, op, BigUint64Array.from(nodes.map((n) => n.id))) }
         } catch (err) {
           const code = parseKernelErrorCode(err)
           const rawMsg = err instanceof Error ? err.message : String(err)
@@ -5176,7 +5164,7 @@ export default function Viewport({
         return result
       }
 
-      const outcome = runBooleanCore(wasmScene, op, a, b)
+      const outcome = runBooleanCore(wasmScene, op, nodes)
 
       if (outcome.kind === 'refused') {
         if (outcome.rolledBack) {
@@ -5212,16 +5200,27 @@ export default function Viewport({
         scheduleRender()
         const steps = outcome.committedSteps
         const reason = outcome.message
+        const instances = nodes.filter((n) => n.kind === 'instance').length
         const toast = outcome.retryFailed
-          ? plural(steps, {
-              one: `Component exploded to solids, but the boolean then failed: ${reason} — undo once to restore it.`,
-              other: `Component exploded to solids, but the boolean then failed: ${reason} — undo # times to restore it.`,
-            })
-          : outcome.otherOperandExploded
+          ? instances > 1
             ? plural(steps, {
-                one: `One component could not be fully exploded for the boolean (the other was, and is left exploded): ${reason} — undo once to restore it.`,
-                other: `One component could not be fully exploded for the boolean (the other was, and is left exploded): ${reason} — undo # times to restore it.`,
+                one: `Components exploded to solids, but the boolean then failed: ${reason} — undo once to restore it.`,
+                other: `Components exploded to solids, but the boolean then failed: ${reason} — undo # times to restore it.`,
               })
+            : plural(steps, {
+                one: `Component exploded to solids, but the boolean then failed: ${reason} — undo once to restore it.`,
+                other: `Component exploded to solids, but the boolean then failed: ${reason} — undo # times to restore it.`,
+              })
+          : outcome.otherOperandExploded
+            ? instances > 2
+              ? plural(steps, {
+                  one: `One component could not be fully exploded for the boolean (the ones before it were, and are left exploded): ${reason} — undo once to restore it.`,
+                  other: `One component could not be fully exploded for the boolean (the ones before it were, and are left exploded): ${reason} — undo # times to restore it.`,
+                })
+              : plural(steps, {
+                  one: `One component could not be fully exploded for the boolean (the other was, and is left exploded): ${reason} — undo once to restore it.`,
+                  other: `One component could not be fully exploded for the boolean (the other was, and is left exploded): ${reason} — undo # times to restore it.`,
+                })
             : plural(steps, {
                 one: `Component could not be fully exploded for the boolean: ${reason} — undo once to restore it.`,
                 other: `Component could not be fully exploded for the boolean: ${reason} — undo # times to restore it.`,
@@ -5236,7 +5235,11 @@ export default function Viewport({
       onSelectRef.current?.(outcome.node, 'replace')
       scheduleRender()
       if (outcome.autoExploded) {
-        handleToast(t`Component exploded to solids for the boolean.`)
+        handleToast(
+          nodes.filter((n) => n.kind === 'instance').length > 1
+            ? t`Components exploded to solids for the boolean.`
+            : t`Component exploded to solids for the boolean.`,
+        )
       }
       return outcome.node
     }

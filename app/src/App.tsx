@@ -2493,8 +2493,8 @@ export default function App() {
       // node picked in the Outliner must not light the commands up only to
       // be refused on commit. Editing INSIDE a component instance's own
       // definition (component-edit-parity.md phase A2) is the one exception:
-      // two selected members of that SAME definition may boolean together
-      // via `boolean_in_component`, checked with `canBooleanInComponent`.
+      // two or more selected members of that SAME definition may boolean
+      // together via `boolean_in_component_many`, checked with `canBooleanInComponent`.
       canBoolean:
         activeContext.length === 0
           ? canBooleanHelper(selectedIds, parentOf, isBooleanOperand)
@@ -6808,10 +6808,11 @@ export default function App() {
   const canUnique = menuGates?.canMakeUnique ?? false
   const handleBoolean = (op: number) => {
     // Re-check the full gate (the accelerator path dispatches here
-    // unconditionally, like handleGroup): exactly two operands, each a plain
-    // solid or a group, at the top level.
+    // unconditionally, like handleGroup): two or more operands, each a plain
+    // solid, a group or an instance, at the top level, passed in selection
+    // order so the first selected is what a Subtract keeps.
     if (!(menuGates?.canBoolean ?? false)) return
-    const result = viewportApi.current?.runBoolean(op, booleanOperands[0], booleanOperands[1])
+    const result = viewportApi.current?.runBoolean(op, booleanOperands)
     if (result === 'mutated-failed') {
       // The retried boolean failed AFTER auto-explode already committed
       // real mutations (make_unique/explode_instance/group_nodes) —

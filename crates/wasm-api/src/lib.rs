@@ -4603,6 +4603,52 @@ impl Scene {
         Ok(node_js(root))
     }
 
+    /// [`Scene::boolean_nodes`] over any number of nodes (`kinds[i]`,
+    /// `ids[i]`), as one undo step: a Union of all of them, the first minus
+    /// the union of the rest, or the intersection of all. Records
+    /// `BooleanNodesMany`; exactly two nodes are the two-operand call and
+    /// record as it does, so a recording made of pairs stays readable by
+    /// every build that reads `BooleanNodes`.
+    ///
+    /// # Errors
+    /// As [`Scene::boolean_nodes`]; `BooleanNeedsTwo` for fewer than two
+    /// nodes, `BadNodeKind` for a kind outside 0..=2, and `BadNodeList` when
+    /// the two arrays differ in length.
+    pub fn boolean_nodes_many(
+        &mut self,
+        op: u8,
+        kinds: &[u8],
+        ids: &[u64],
+    ) -> Result<NodeJs, ApiError> {
+        let bop = match op {
+            0 => BooleanOp::Union,
+            1 => BooleanOp::Subtract,
+            2 => BooleanOp::Intersect,
+            _ => return Err(ApiError("BadOp: op must be 0, 1, or 2".to_string())),
+        };
+        if kinds.len() != ids.len() {
+            return Err(ApiError(
+                "BadNodeList: kinds and ids must have the same length".to_string(),
+            ));
+        }
+        if let (&[a_kind, b_kind], &[a, b]) = (kinds, ids) {
+            return self.boolean_nodes(op, a_kind, a, b_kind, b);
+        }
+        let nodes: Vec<NodeId> = kinds
+            .iter()
+            .zip(ids)
+            .map(|(&k, &id)| node_id(k, id))
+            .collect::<Result<_, _>>()?;
+        let (root, change) = self.doc.boolean_nodes_many(bop, &nodes).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::BooleanNodesMany {
+            op,
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+        });
+        Ok(node_js(root))
+    }
+
     /// Slice a watertight solid by a plane into two independent watertight
     /// solids. `plane` is 6 floats `[px,py,pz,nx,ny,nz]` — a point on the
     /// cut plane and its (unnormalized) normal. Returns the two new object
@@ -6482,6 +6528,42 @@ impl Scene {
             op,
             a,
             b,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// [`Scene::boolean_in_component`] over any number of members of
+    /// `component`, as one undo step. Records `BooleanInComponentMany`;
+    /// exactly two members are the two-operand call and record as it does.
+    ///
+    /// # Errors
+    /// As [`Scene::boolean_in_component`]; `BooleanNeedsTwo` for fewer than
+    /// two members.
+    pub fn boolean_in_component_many(
+        &mut self,
+        component: u64,
+        op: u8,
+        ids: &[u64],
+    ) -> Result<u64, ApiError> {
+        let bop = match op {
+            0 => BooleanOp::Union,
+            1 => BooleanOp::Subtract,
+            2 => BooleanOp::Intersect,
+            _ => return Err(ApiError("BadOp: op must be 0, 1, or 2".to_string())),
+        };
+        if let &[a, b] = ids {
+            return self.boolean_in_component(component, op, a, b);
+        }
+        let objects: Vec<ObjectId> = ids.iter().map(|&id| object_id(id)).collect();
+        let (id, change) = self
+            .doc
+            .boolean_in_component_many(component_id(component), &objects, bop)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::BooleanInComponentMany {
+            component,
+            op,
+            ids: ids.to_vec(),
         });
         Ok(id.data().as_ffi())
     }
@@ -10706,6 +10788,9 @@ impl Scene {
                     } => {
                         self.boolean_nodes(op, a_kind, a, b_kind, b)?;
                     }
+                    BooleanNodesMany { op, kinds, ids } => {
+                        self.boolean_nodes_many(op, &kinds, &ids)?;
+                    }
                     GroupNodes { kinds, ids } => {
                         self.group_nodes(&kinds, &ids)?;
                     }
@@ -11408,6 +11493,9 @@ impl Scene {
                         b,
                     } => {
                         self.boolean_in_component(component, op, a, b)?;
+                    }
+                    BooleanInComponentMany { component, op, ids } => {
+                        self.boolean_in_component_many(component, op, &ids)?;
                     }
                     SliceDefMember {
                         instance,
@@ -15329,6 +15417,63 @@ mod tests {
             unit(&mut scene, r#"{"format":"skp","units":"m"}"#),
             4,
             "named"
+        );
+    }
+
+    #[test]
+    fn a_pair_through_the_list_boolean_records_the_two_operand_call() {
+        fn row_box(scene: &mut Scene, x0: f64) -> u64 {
+            let sketch = scene
+                .begin_sketch_on_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+                .unwrap();
+            let c = [(x0, 0.0), (x0 + 1.0, 0.0), (x0 + 1.0, 1.0), (x0, 1.0)];
+            for i in 0..4 {
+                let (a, b) = (c[i], c[(i + 1) % 4]);
+                scene
+                    .sketch_add_segment(sketch, a.0, a.1, 0.0, b.0, b.1, 0.0)
+                    .unwrap();
+            }
+            let region = scene.sketch_regions(sketch).unwrap()[0];
+            scene.extrude_region(sketch, region, 1.0).unwrap()
+        }
+        let mut scene = Scene::new();
+        recording::start();
+        let ids: Vec<u64> = [0.0, 0.5, 1.0, 1.5, 2.0]
+            .iter()
+            .map(|&x| row_box(&mut scene, x))
+            .collect();
+        recording::take_calls();
+
+        // Two operands: the call older builds already read.
+        scene
+            .boolean_nodes_many(0, &[0, 0], &ids[..2])
+            .expect("union of a pair");
+        let pair = recording::take_calls();
+        assert!(
+            matches!(
+                pair.as_slice(),
+                [recording::RecordedCall::BooleanNodes { op: 0, a, b, .. }]
+                    if *a == ids[0] && *b == ids[1]
+            ),
+            "a pair records the two-operand call"
+        );
+
+        // Three: the list call.
+        scene
+            .boolean_nodes_many(0, &[0, 0, 0], &ids[2..])
+            .expect("union of three");
+        let three = recording::take_calls();
+        assert!(matches!(
+            three.as_slice(),
+            [recording::RecordedCall::BooleanNodesMany { op: 0, ids: got, .. }] if got == &ids[2..]
+        ));
+        recording::stop();
+
+        assert!(
+            scene
+                .boolean_nodes_many(0, &[0, 0, 0], &ids[..2])
+                .is_err_and(|e| e.0.starts_with("BadNodeList")),
+            "arrays of different lengths are a bad node list"
         );
     }
 

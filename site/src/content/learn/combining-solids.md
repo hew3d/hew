@@ -10,28 +10,30 @@ Combining solids is always a command you issue. [Core concepts](/learn/core-conc
 
 ## Union, Subtract, Intersect
 
-1. With the Select tool, click the first object or group, then **Shift-click** the second.
+1. With the Select tool, click the first object or group, then **Shift-click** each of the others. Select two or more solids.
 2. Choose **Object ▸ Union**, **Object ▸ Subtract**, or **Object ▸ Intersect**.
 
 ![Two overlapping boxes, both selected, ready to combine](/docs/boolean-selection.webp)
 
-**Union** produces one object containing all material from both, and cleans up after itself: where two coplanar faces meet, the seam dissolves and they become a single face. **Subtract** cuts the second selected object away from the first. **Intersect** keeps only the overlapping material.
+**Union** produces one object containing all material from every selected solid, and cleans up after itself: where two coplanar faces meet, the seam dissolves and they become a single face. **Subtract** cuts every other selected object away from the first one in the selection (with Shift-clicks, the first one you clicked), which is the one that stays. **Intersect** keeps only the material all of them share. However many solids you select, the combine is one undo step.
 
 ![The union result: a single watertight object](/docs/boolean-union.webp)
 
-When the result is one connected solid, it's a single new Object. When it comes apart — a Subtract that severs the target, or operands that never touched — each piece is its own watertight solid. The pieces arrive together in a group named after the operands ("Bar − Cutter"), so nothing scatters. Painted materials survive the operation on the faces that survive. Like everything, booleans are undoable in one step.
+When the result is one connected solid, it's a single new Object. When it comes apart — a Subtract that severs the target, or operands that never touched — each piece is its own watertight solid. The pieces arrive together in a group named after all the operands ("Bar − Saw − Saw 2"), so nothing scatters. Painted materials survive the operation on the faces that survive. Like everything, booleans are undoable: the combine is one step, however many solids went in.
 
 If an input isn't solid, the operation is refused and says so. Select the open one (Object Info shows **Open** for it) and choose **Object ▸ Make Solid…** to close it; see [Making imported shapes solid](/learn/import-export/#making-imported-shapes-solid).
 
-A Subtract whose cutter doesn't reach into the first object is refused too: "Nothing was cut away" means the two solids only touch or sit apart, so there was nothing to remove. Both stay where they were. Move the cutter so it passes through the other solid and try again.
+A Subtract whose cutter doesn't reach into the first object is refused too: "Nothing was cut away" means the solids only touch or sit apart, so there was nothing to remove. Both stay where they were. Move the cutter so it passes through the solid you're cutting and try again.
+
+With several cutters, one that misses is simply left where it was, as long as another one cuts. Only when none of them reaches the first object is the Subtract refused.
 
 ### Combining groups
 
-Either side of a boolean can be a whole [group](/learn/groups-and-components/) instead of a single object. You can mix, too — subtract a group of cutters from one solid in a single command. Because you asked for volume algebra, Hew first fuses the solids inside each group operand into one composite (grouping alone never merges anything), then applies the command between the two composites. Every solid under a group operand has to be watertight — one that isn't solid anywhere refuses the whole operation.
+Either side of a boolean can be a whole [group](/learn/groups-and-components/) instead of a single object. You can mix, too — subtract a group of cutters from one solid in a single command. Because you asked for volume algebra, Hew first fuses the solids inside each group operand into one composite (grouping alone never merges anything), then applies the command between the composites. Every solid under a group operand has to be watertight — one that isn't solid anywhere refuses the whole operation.
 
-One thing a boolean won't do is quietly consume a component instance — instances share their geometry with every other copy, and a boolean destroys its inputs. If an operand is (or contains) an instance, the command refuses and tells you so. **Explode** the instance first (or **Make Unique**, then Explode) and combine the result.
+One thing a boolean won't do is quietly consume a component instance — instances share their geometry with every other copy, and a boolean destroys its inputs. A selected instance is made unique and exploded to plain solids for you first, each of those its own undo step, and the toast says so; an instance nested inside a selected group refuses and tells you so. **Explode** it first (or **Make Unique**, then Explode) and combine the result.
 
-Booleans also work between two individual members while a group is open for editing — Union, Subtract, or Intersect them just like top-level objects — and the result folds back in as the group's member when you close it.
+Booleans also work between individual members while a group is open for editing — Union, Subtract, or Intersect them just like top-level objects — and the result folds back in as the group's member when you close it.
 
 ## Slice
 

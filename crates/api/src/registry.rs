@@ -521,21 +521,21 @@ impl Registry {
             M,
             Kernel,
             Req,
-            "Boolean union of two solids.",
+            "Boolean union of two or more solids: the material in any of them.",
         );
         add(
             "hew.solid.subtract",
             M,
             Kernel,
             Req,
-            "Boolean subtraction of two solids.",
+            "Boolean subtraction: the first solid minus every other one.",
         );
         add(
             "hew.solid.intersect",
             M,
             Kernel,
             Req,
-            "Boolean intersection of two solids.",
+            "Boolean intersection of two or more solids: the material in all of them.",
         );
         add(
             "hew.solid.slice",
@@ -4225,10 +4225,15 @@ impl Registry {
             let boolean_params = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "a": { "type": "string", "description": "a node id: obj_/grp_/ins_" },
-                    "b": { "type": "string", "description": "a node id: obj_/grp_/ins_" }
-                },
-                "required": ["a", "b"]
+                    "a": { "type": "string", "description": "the first node: obj_/grp_/ins_ (with b; or give operands)" },
+                    "b": { "type": "string", "description": "the second node (with a; or give operands)" },
+                    "operands": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 2,
+                        "description": "every node in order, two or more, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step"
+                    }
+                }
             });
             let boolean_result = serde_json::json!({
                 "type": "object",
@@ -4237,6 +4242,7 @@ impl Registry {
             });
             let boolean_refusals = || {
                 vec![
+                    "boolean_needs_two",
                     "boolean_operand_has_instance",
                     "boolean_operand_not_solid",
                     "boolean_operand_empty",
