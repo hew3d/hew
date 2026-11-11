@@ -14,7 +14,9 @@ Hew's window has the same layout on the web, macOS, Windows, and Linux. The only
 
 The center of the window is the 3D viewport. A ground grid sits at height zero, and the three world axes cross at the origin: **X is red, Y is green, Z is blue**. Each axis is drawn solid on its positive side and dashed on its negative side. You can hide the axes with **View ▸ Axes** and the grid with **View ▸ Grid**.
 
-The small chip row in the viewport's top-left corner offers an **Orbit** button and one-click **Top / Iso / Front** standard views. A floating readout in the top-right corner shows live measurements — distance, angle, scale factor — while a tool is **mid-gesture**: partway through an operation, after the first click but before the commit. You'll meet that term throughout this manual. Anything you type also appears in this readout.
+A small **view die** sits in the top-right corner of the viewport. It's a cube with its corners cut flat, and it turns with the camera, so it always shows which way you're looking. Click a face (Top, Front, Left, and so on) to look straight at it, click a corner to look at the model from that corner, or drag the die to orbit. Under the die are four small squares called **pips**: red, green, blue, and violet. They show which drawing plane your next click lands on and let you lock it. The Drawing chapter covers them in full. The die appears in the editor only; Shop mode keeps its own Views sheet.
+
+A floating readout in the bottom-right corner shows live measurements — distance, angle, scale factor — while a tool is **mid-gesture**: partway through an operation, after the first click but before the commit. You'll meet that term throughout this manual. Anything you type also appears in this readout.
 
 ## The tool rail
 

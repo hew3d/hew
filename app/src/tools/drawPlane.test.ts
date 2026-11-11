@@ -6,10 +6,17 @@ import {
   pointOnPlane,
   planeKey,
   isGroundPlane,
-  drawPlaneCue,
   drawPlaneThrough,
-  idleHoverCue,
-  PATCH_OVER_FACES,
+  DrawPlaneTracker,
+  pinnedPlaneThrough,
+  FaceLoopCache,
+  idleHoverKind,
+  planePip,
+  pipArrowKey,
+  PIP_AXIS_TOLERANCE_DEG,
+  CUSTOM_CANDIDATE_MS,
+  customPipPlaneFor,
+  pinCustomPlane,
   SketchPickCache,
   rayLandsOnSketch,
   resolveIdleDrawTarget,
@@ -23,6 +30,7 @@ import {
   type CameraView,
 } from './drawPlane'
 import { WORLD_DRAWING_AXES } from './drawingAxes'
+import { PlanePin } from './planePin'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { setPickRenderMode } from './pickPolicy'
 import type { Ray } from '../viewport/math'
@@ -368,77 +376,101 @@ describe('planeKey', () => {
   })
 })
 
-describe('drawPlaneCue', () => {
+describe('DrawPlaneTracker.state — the plane, its hold, and the hover (view-die §3.4)', () => {
   const TILTED: DrawPlane = { origin: [0, 0, 0], normal: [0, -1, 0], u: [1, 0, 0], v: [0, 0, -1], ground: false }
+  const DOWN: Ray = { origin: [3, -2, 5], direction: [0, 0, -1] }
+  const base = { anchored: null, lock: null, pinned: null, lockHover: null, fallback: groundDrawPlane(), frame: WORLD_DRAWING_AXES } as const
 
-  it('null when nothing is anchored and no idle lock is active', () => {
-    expect(drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: null })).toBeNull()
+  it('before any hover: the fallback plane, inferred, no hover', () => {
+    const fallback = axisDrawPlane(1, [0, 0, 0])
+    const state = new DrawPlaneTracker().state({ ...base, fallback })
+    expect(state).toEqual({ plane: fallback, pip: 'green', hold: 'inferred', hover: null })
   })
 
-  it('null when anchored on the GROUND plane (the world grid already covers it)', () => {
-    expect(
-      drawPlaneCue({ anchoredPlane: groundDrawPlane(), anchoredThrough: [1, 2, 0], idleLock: null, idleHover: null }),
-    ).toBeNull()
+  it('anchored on the ground: the ground, held as anchored, the hover at the cursor ray\'s hit', () => {
+    const t = new DrawPlaneTracker()
+    t.move(DOWN)
+    const state = t.state({ ...base, anchored: groundDrawPlane() })
+    expect(state.plane.ground).toBe(true)
+    expect(state.pip).toBe('blue')
+    expect(state.hold).toBe('anchored')
+    expect(state.hover).toEqual({ kind: 'space', point: [3, -2, 0] })
   })
 
-  it('a ground pin through a named point in the air shows the lifted plane the click will use', () => {
-    const cue = drawPlaneCue({ anchoredPlane: groundDrawPlane(), anchoredThrough: [1, 1, 2], idleLock: null, idleHover: null })
-    expect(cue).not.toBeNull()
-    expect(cue?.plane.origin).toEqual([1, 1, 2])
-    expect(cue?.plane.normal).toEqual([0, 0, 1])
-    expect(cue?.plane.ground).toBe(false)
-    expect(cue?.through).toEqual([1, 1, 2])
+  it('anchored on a non-ground plane: that plane, and the hover follows the cursor rather than the anchor', () => {
+    const t = new DrawPlaneTracker()
+    const ray: Ray = { origin: [2, -5, 1], direction: [0, 1, 0] }
+    t.move(ray)
+    const state = t.state({ ...base, anchored: TILTED })
+    expect(state.plane).toBe(TILTED)
+    expect(state.pip).toBe('green')
+    expect(state.hold).toBe('anchored')
+    expect(state.hover).toEqual({ kind: 'space', point: [2, 0, 1] })
   })
 
-  it('a ground pin through a named point back on the ground still shows no cue', () => {
-    expect(
-      drawPlaneCue({ anchoredPlane: groundDrawPlane(), anchoredThrough: [1, 1, 0], idleLock: null, idleHover: null }),
-    ).toBeNull()
+  it('a lock or pin outranks the anchored hold, on the gesture\'s own plane', () => {
+    const t = new DrawPlaneTracker()
+    expect(t.state({ ...base, anchored: TILTED, lock: 1 }).hold).toBe('locked')
+    expect(t.state({ ...base, anchored: TILTED, lock: 1 }).plane).toBe(TILTED)
+    expect(t.state({ ...base, anchored: TILTED, pinned: TILTED }).hold).toBe('pinned')
   })
 
-  it('the frozen plane, through the anchor, when anchored on a NON-ground plane', () => {
-    const cue = drawPlaneCue({ anchoredPlane: TILTED, anchoredThrough: [3, 0, 5], idleLock: null, idleHover: null })
-    expect(cue).toEqual({ plane: TILTED, through: [3, 0, 5] })
+  it('locked with no hover yet: the locked axis plane through the frame origin, no hover', () => {
+    const state = new DrawPlaneTracker().state({ ...base, lock: 0 })
+    expect(state.plane).toEqual(axisDrawPlane(0, [0, 0, 0]))
+    expect(state.pip).toBe('red')
+    expect(state.hold).toBe('locked')
+    expect(state.hover).toBeNull()
   })
 
-  it('anchored takes priority over an idle lock (mutually exclusive in practice, but anchored wins)', () => {
-    const cue = drawPlaneCue({ anchoredPlane: TILTED, anchoredThrough: [3, 0, 5], idleLock: 2, idleHover: [9, 9, 9] })
-    expect(cue).toEqual({ plane: TILTED, through: [3, 0, 5] })
+  it('locked with a hover: the locked axis plane through the tracked hover point, hovered there', () => {
+    const t = new DrawPlaneTracker()
+    t.move(DOWN)
+    const state = t.state({ ...base, lock: 0, lockHover: [4, 5, 6] })
+    expect(state.plane).toEqual(axisDrawPlane(0, [4, 5, 6]))
+    expect(state.hover).toEqual({ kind: 'space', point: [4, 5, 6] })
   })
 
-  it('null when idle-locked but no hover has landed yet', () => {
-    expect(drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: 0, idleHover: null })).toBeNull()
+  it('a blue lock through a z = 0 hover is the ground itself, still held', () => {
+    const t = new DrawPlaneTracker()
+    t.move(DOWN)
+    const state = t.state({ ...base, lock: 2, lockHover: [1, 2, 0] })
+    expect(state.plane.ground).toBe(true)
+    expect(state.pip).toBe('blue')
+    expect(state.hold).toBe('locked')
   })
 
-  it('null when idle and a hover exists but no lock is active', () => {
-    expect(
-      drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: [1, 2, 3] }),
-    ).toBeNull()
+  it('pinned: the pinned plane, the hover at the cursor ray\'s hit on it', () => {
+    const t = new DrawPlaneTracker()
+    t.move({ origin: [1, -4, 2], direction: [0, 1, 0] })
+    const state = t.state({ ...base, pinned: TILTED, lockHover: [9, 9, 9] })
+    expect(state.plane).toBe(TILTED)
+    expect(state.hold).toBe('pinned')
+    expect(state.hover?.point).toEqual([1, 0, 2])
   })
 
-  it('the locked axis plane through the tracked hover point, when idle-locked with a hover', () => {
-    const cue = drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: 0, idleHover: [4, 5, 6] })
-    expect(cue).toEqual({ plane: axisDrawPlane(0, [4, 5, 6]), through: [4, 5, 6] })
+  it('a ground pin through a named point in the air reports the lifted plane the click will use', () => {
+    const pinned = pinnedPlaneThrough(groundDrawPlane(), [1, 1, 2])
+    expect(pinned.origin).toEqual([1, 1, 2])
+    expect(pinned.normal).toEqual([0, 0, 1])
+    expect(pinned.ground).toBe(false)
+    const t = new DrawPlaneTracker()
+    t.move(DOWN)
+    const state = t.state({ ...base, pinned, lockHover: [1, 1, 2] })
+    expect(state.plane).toBe(pinned)
+    expect(state.pip).toBe('blue')
+    expect(state.hold).toBe('pinned')
+    expect(state.hover).toEqual({ kind: 'space', point: [3, -2, 2] })
   })
 
-  it('null when a Z-axis lock through a z=0 hover resolves to the exact ground plane', () => {
-    // axisDrawPlane(2, [x,y,0]) returns groundDrawPlane()'s exact frame — the
-    // same "reuses the ground path" case the click-time commit special-cases
-    // (begin_ground_sketch, not begin_sketch_on_plane). No cue either.
-    expect(
-      drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: 2, idleHover: [1, 2, 0] }),
-    ).toBeNull()
+  it('a ground pin through a point back on the ground stays the ground', () => {
+    const ground = groundDrawPlane()
+    expect(pinnedPlaneThrough(ground, [1, 1, 0])).toBe(ground)
+    expect(pinnedPlaneThrough(ground, null)).toBe(ground)
   })
 
-  it('a Z-axis lock through a hover OFF z=0 does produce a cue (a horizontal plane elevated off ground)', () => {
-    const cue = drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: 2, idleHover: [1, 2, 5] })
-    expect(cue).toEqual({ plane: axisDrawPlane(2, [1, 2, 5]), through: [1, 2, 5] })
-  })
-
-  // ── Movable drawing axes (tool-parity §4): the idle-lock cue must resolve
-  // the CURRENT frame, not world identity — mirrors `resolveClickDrawTarget`'s
-  // own moved-frame coverage above, since the cue must show exactly where a
-  // click through the same hover point would land.
+  // ── Movable drawing axes (tool-parity §4): the lock and the pip follow
+  // the CURRENT frame, so the state names the plane a click would land on.
   const ROTATED_FRAME: DrawingAxes = {
     origin: [5, 0, 0],
     x: [0, 1, 0],
@@ -446,48 +478,77 @@ describe('drawPlaneCue', () => {
     z: [0, 0, 1],
   }
 
-  it('under a moved frame, the cue plane equals what a click at the same point/lock would resolve onto', () => {
-    const cue = drawPlaneCue({
-      anchoredPlane: null,
-      anchoredThrough: null,
-      idleLock: 0,
-      idleHover: [4, 5, 6],
-      frame: ROTATED_FRAME,
-    })
-    const clickPlane = axisDrawPlane(0, [4, 5, 6], ROTATED_FRAME)
-    expect(cue).toEqual({ plane: clickPlane, through: [4, 5, 6] })
-    // Axis 0 (red) of the moved frame is world [0,1,0], not world [1,0,0] —
-    // so the un-fixed bug (defaulting to world identity) would have produced
-    // a different plane here.
-    expect(cue!.plane.normal).toEqual([0, 1, 0])
+  it('under a moved frame, the locked plane equals what a click at the same point and lock resolves onto, and lights red', () => {
+    const t = new DrawPlaneTracker()
+    t.move(DOWN)
+    const state = t.state({ ...base, lock: 0, lockHover: [4, 5, 6], frame: ROTATED_FRAME })
+    expect(state.plane).toEqual(axisDrawPlane(0, [4, 5, 6], ROTATED_FRAME))
+    // The moved frame's red axis is world +Y.
+    expect(state.plane.normal).toEqual([0, 1, 0])
+    expect(state.pip).toBe('red')
   })
 
-  it('the literal-ground suppression only fires at world identity — a moved frame\'s blue axis through z=0 still cues', () => {
-    // The frame's blue axis happens to be world +Z here (same as ground's
-    // normal) and the hover sits at z=0 — but the frame itself is not world
-    // identity, so this must NOT suppress to null (mirrors `axisDrawPlane`'s
-    // own "never ground for a moved frame" rule).
-    const cue = drawPlaneCue({
-      anchoredPlane: null,
-      anchoredThrough: null,
-      idleLock: 2,
-      idleHover: [1, 2, 0],
-      frame: ROTATED_FRAME,
-    })
-    expect(cue).not.toBeNull()
-    expect(cue!.plane.ground).toBe(false)
+  it('a moved frame\'s blue lock through z = 0 is not the literal ground', () => {
+    const t = new DrawPlaneTracker()
+    t.move(DOWN)
+    const state = t.state({ ...base, lock: 2, lockHover: [1, 2, 0], frame: ROTATED_FRAME })
+    expect(state.plane.ground).toBe(false)
+    expect(state.pip).toBe('blue')
+  })
+})
+
+describe('planePip — which pip a plane lights (view-die §3.1)', () => {
+  const tilt = (deg: number): V3 => {
+    const r = (deg * Math.PI) / 180
+    return [Math.sin(r), 0, Math.cos(r)]
+  }
+
+  it('the three axis planes light red, green and blue at any offset and either direction', () => {
+    expect(planePip(axisDrawPlane(0, [7, -3, 2]).normal)).toBe('red')
+    expect(planePip([-1, 0, 0])).toBe('red')
+    expect(planePip(axisDrawPlane(1, [0, 4, 0]).normal)).toBe('green')
+    expect(planePip([0, -1, 0])).toBe('green')
+    expect(planePip(groundDrawPlane().normal)).toBe('blue')
+    expect(planePip(axisDrawPlane(2, [0, 0, 9]).normal)).toBe('blue')
+    expect(planePip([0, 0, -1])).toBe('blue')
   })
 
-  it('omitting `frame` still defaults to world identity (source-compatible with every existing caller)', () => {
-    const withDefault = drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: 0, idleHover: [4, 5, 6] })
-    const withExplicitWorld = drawPlaneCue({
-      anchoredPlane: null,
-      anchoredThrough: null,
-      idleLock: 0,
-      idleHover: [4, 5, 6],
-      frame: { origin: [0, 0, 0], x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] },
-    })
-    expect(withDefault).toEqual(withExplicitWorld)
+  it('a Shift pin on a cube\'s front face lights green whatever its offset', () => {
+    expect(planePip(drawPlaneThrough([0.3, -2, 0.7], [0, -1, 0])!.normal)).toBe('green')
+  })
+
+  it('the tolerance is 0.5° each way', () => {
+    expect(PIP_AXIS_TOLERANCE_DEG).toBe(0.5)
+    expect(planePip(tilt(0.45))).toBe('blue')
+    expect(planePip(tilt(-0.45))).toBe('blue')
+    expect(planePip(tilt(0.6))).toBe('custom')
+  })
+
+  it('a plane rotated 30° is custom', () => {
+    const r = (30 * Math.PI) / 180
+    // A cube's side face after a 30° turn about the blue axis.
+    expect(planePip([Math.cos(r), Math.sin(r), 0])).toBe('custom')
+  })
+
+  it('follows moved drawing axes: the frame\'s own X lights red, world X then lights green', () => {
+    const r = (30 * Math.PI) / 180
+    const frame: DrawingAxes = { origin: [1, 2, 0], x: [Math.cos(r), Math.sin(r), 0], y: [-Math.sin(r), Math.cos(r), 0], z: [0, 0, 1] }
+    expect(planePip([Math.cos(r), Math.sin(r), 0], frame)).toBe('red')
+    expect(planePip([-Math.sin(r), Math.cos(r), 0], frame)).toBe('green')
+    expect(planePip([1, 0, 0], frame)).toBe('custom')
+    expect(planePip([0, 0, 1], frame)).toBe('blue')
+  })
+
+  it('a zero or non-finite normal is custom', () => {
+    expect(planePip([0, 0, 0])).toBe('custom')
+    expect(planePip([Number.NaN, 0, 1])).toBe('custom')
+  })
+
+  it('red, green and blue stand for →, ← and ↑; custom for no arrow', () => {
+    expect(pipArrowKey('red')).toBe('ArrowRight')
+    expect(pipArrowKey('green')).toBe('ArrowLeft')
+    expect(pipArrowKey('blue')).toBe('ArrowUp')
+    expect(pipArrowKey('custom')).toBeNull()
   })
 })
 
@@ -1152,101 +1213,428 @@ describe('resolveClickDrawTarget with a view direction', () => {
   })
 })
 
-describe('drawPlaneCue — the idle hover plane (view-plane §5)', () => {
+describe('DrawPlaneTracker — the idle hover plane (view-plane §5, view-die §3.4)', () => {
   const GREEN = axisDrawPlane(1, [0, 0, 0])
   const ray: Ray = { origin: [0.4, -5, 1], direction: [0, 1, -0.1] }
-  const idle = { anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: null } as const
+  const SCENE = {} as unknown as WasmScene
+  const base = { anchored: null, lock: null, pinned: null, lockHover: null, fallback: groundDrawPlane(), frame: WORLD_DRAWING_AXES } as const
 
-  it('a patch on the inferred plane through the ray\'s hit on it', () => {
-    const cue = drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: null, idleHoverCue: { plane: GREEN, ray } })
-    expect(cue?.plane).toBe(GREEN)
-    expect(cue?.through[0]).toBeCloseTo(0.4, 12)
-    expect(cue?.through[1]).toBeCloseTo(0, 12)
-    expect(cue?.through[2]).toBeCloseTo(0.5, 12)
+  it('the inferred plane over empty space: kind space, through the ray\'s hit on it', () => {
+    const t = new DrawPlaneTracker()
+    t.trackIdle(SCENE, { plane: GREEN, inferredAxis: 1 }, ray, [9, 9, 9], false)
+    const state = t.state(base)
+    expect(state.plane).toBe(GREEN)
+    expect(state.pip).toBe('green')
+    expect(state.hold).toBe('inferred')
+    expect(state.hover?.kind).toBe('space')
+    expect(state.hover?.point[0]).toBeCloseTo(0.4, 12)
+    expect(state.hover?.point[1]).toBeCloseTo(0, 12)
+    expect(state.hover?.point[2]).toBeCloseTo(0.5, 12)
   })
 
-  it('null for the ground (the world grid is the cue)', () => {
+  it('the ground over nothing: kind ground', () => {
+    const t = new DrawPlaneTracker()
     const down: Ray = { origin: [0, -5, 3], direction: [0, 1, -1] }
-    expect(drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: null, idleHoverCue: { plane: groundDrawPlane(), ray: down } })).toBeNull()
+    t.trackIdle(SCENE, { plane: groundDrawPlane() }, down, [0, 0, 0], false)
+    expect(t.state(base).hover?.kind).toBe('ground')
+    expect(t.state(base).pip).toBe('blue')
   })
 
-  it('a moved frame\'s blue plane does cue (D1)', () => {
+  it('a moved frame\'s blue plane over nothing is space, not ground (D1)', () => {
     const raised = inferredAxisPlane({ ...WORLD_DRAWING_AXES, origin: [0, 0, 0.75] }, HOME_VIEW)
     const down: Ray = { origin: [0, -5, 3], direction: [0, 1, -1] }
-    expect(drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: null, idleHoverCue: { plane: raised, ray: down } })?.through[2]).toBeCloseTo(0.75, 12)
+    const t = new DrawPlaneTracker()
+    t.trackIdle(SCENE, { plane: raised, inferredAxis: 2 }, down, [0, 0, 0], false)
+    expect(t.state(base).hover?.kind).toBe('space')
+    expect(t.state(base).hover?.point[2]).toBeCloseTo(0.75, 12)
   })
 
   it('an active arrow lock beats it, with or without a hover', () => {
-    expect(drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: 0, idleHover: null, idleHoverCue: { plane: GREEN, ray } })).toBeNull()
-    const locked = drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: 0, idleHover: [1, 2, 3], idleHoverCue: { plane: GREEN, ray } })
-    expect(locked?.plane.normal).toEqual([1, 0, 0])
+    const t = new DrawPlaneTracker()
+    t.trackIdle(SCENE, { plane: GREEN, inferredAxis: 1 }, ray, [0, 0, 0], false)
+    expect(t.state({ ...base, lock: 0 }).plane.normal).toEqual([1, 0, 0])
+    expect(t.state({ ...base, lock: 0, lockHover: [1, 2, 3] }).plane).toEqual(axisDrawPlane(0, [1, 2, 3]))
   })
 
   it('an anchored gesture beats it', () => {
     const anchored = axisDrawPlane(0, [1, 1, 1])
-    expect(drawPlaneCue({ anchoredPlane: anchored, anchoredThrough: [1, 1, 1], idleLock: null, idleHover: null, idleHoverCue: { plane: GREEN, ray } })?.plane).toBe(anchored)
+    const t = new DrawPlaneTracker()
+    t.trackIdle(SCENE, { plane: GREEN, inferredAxis: 1 }, ray, [0, 0, 0], false)
+    expect(t.state({ ...base, anchored }).plane).toBe(anchored)
   })
 
-  it('null when the ray never reaches the plane (parallel, or pointing away)', () => {
+  it('a ray that never reaches the plane falls back to the snapped point', () => {
     const parallel: Ray = { origin: [0, -5, 1], direction: [1, 0, 0] }
-    const away: Ray = { origin: [0, -5, 1], direction: [0, -1, 0] }
-    expect(drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: null, idleHoverCue: { plane: GREEN, ray: parallel } })).toBeNull()
-    expect(drawPlaneCue({ anchoredPlane: null, anchoredThrough: null, idleLock: null, idleHover: null, idleHoverCue: { plane: GREEN, ray: away } })).toBeNull()
+    const t = new DrawPlaneTracker()
+    t.trackIdle(SCENE, { plane: GREEN, inferredAxis: 1 }, parallel, [2, 0, 1], false)
+    expect(t.state(base).hover?.point).toEqual([2, 0, 1])
   })
-  it('a hovered sketch\'s plane (+X through the origin): a patch through the ray\'s foot at x = 0, on the plane passed in', () => {
+
+  it('a hovered sketch\'s plane (+X through the origin): kind sketch, through the ray\'s foot at x = 0', () => {
     const red = drawPlaneThrough([0, 0, 0], [1, 0, 0])!
     const crossing: Ray = { origin: [3, -3, 0.5], direction: [-3, 3.9, -0.13] }
-    const cue = drawPlaneCue({ ...idle, idleHoverCue: { plane: red, ray: crossing } })
-    expect(cue?.plane).toBe(red)
-    expect(cue?.through[0]).toBeCloseTo(0, 12)
-    expect(cue?.through[1]).toBeCloseTo(0.9, 12)
-    expect(cue?.through[2]).toBeCloseTo(0.37, 12)
+    const t = new DrawPlaneTracker()
+    t.trackIdle(SCENE, { plane: red, target: { kind: 'existing', handle: 11n, instance: null } }, crossing, [0, 0, 0], false)
+    const state = t.state(base)
+    expect(state.plane).toBe(red)
+    expect(state.pip).toBe('red')
+    expect(state.hover?.kind).toBe('sketch')
+    expect(state.hover?.point[0]).toBeCloseTo(0, 12)
+    expect(state.hover?.point[1]).toBeCloseTo(0.9, 12)
+    expect(state.hover?.point[2]).toBeCloseTo(0.37, 12)
   })
 
-  it('an arrow lock wins over a hovered sketch\'s plane', () => {
-    const red = drawPlaneThrough([0, 0, 0], [1, 0, 0])!
-    const locked = drawPlaneCue({ ...idle, idleLock: 1, idleHover: [1, 2, 3], idleHoverCue: { plane: red, ray } })
-    expect(locked?.plane.normal).toEqual([0, 1, 0])
-    expect(locked?.through).toEqual([1, 2, 3])
-  })
-
-  it('a tilted plane (a sloped face) still shows a patch, through the ray\'s foot on it', () => {
+  it('a tilted face lights the custom pip', () => {
     const tilted = drawPlaneThrough([0, 0, 0], [0, -Math.SQRT1_2, Math.SQRT1_2])!
-    const cue = drawPlaneCue({ ...idle, idleHoverCue: { plane: tilted, ray } })
-    expect(cue?.plane).toBe(tilted)
-    // On the plane: y = z.
-    expect(cue!.through[1]).toBeCloseTo(cue!.through[2], 12)
-    expect(cue!.through[0]).toBeCloseTo(0.4, 12)
+    const t = new DrawPlaneTracker()
+    t.trackIdle(SCENE, { plane: tilted, onFace: true }, ray, [0, 0, 0], false)
+    expect(t.state(base).pip).toBe('custom')
+    expect(t.state(base).hover?.kind).toBe('face')
+  })
+
+  it('inside an entered object only a face of it is a hover: a click off it lands nowhere', () => {
+    const t = new DrawPlaneTracker()
+    t.trackIdle(SCENE, { plane: GREEN, inferredAxis: 1 }, ray, [0, 0, 0], true)
+    expect(t.state(base).hover).toBeNull()
+    t.trackIdle(SCENE, { plane: GREEN, onFace: true }, ray, [0, 0, 0], true)
+    expect(t.state(base).hover?.kind).toBe('face')
+  })
+
+  it('the pointer leaving the canvas drops the hover but keeps the tracked plane on the pip', () => {
+    const t = new DrawPlaneTracker()
+    t.trackIdle(SCENE, { plane: GREEN, inferredAxis: 1 }, ray, [0, 0, 0], false)
+    t.leave()
+    const off = t.state(base)
+    expect(off.hover).toBeNull()
+    expect(off.plane).toBe(GREEN)
+    expect(off.pip).toBe('green')
+    expect(off.hold).toBe('inferred')
+    // A lock made off the canvas (a pip click) shows at once, and so does
+    // its release back to the tracked plane.
+    expect(t.state({ ...base, lock: 2 }).hold).toBe('locked')
+    expect(t.state(base).plane).toBe(GREEN)
+    // The next hover brings it back (a bare ray, before the picker has
+    // resolved anything, does not).
+    t.move(ray)
+    expect(t.state(base).hover).toBeNull()
+    t.trackIdle(SCENE, { plane: GREEN, inferredAxis: 1 }, ray, [0, 0, 0], false)
+    expect(t.state(base).hover?.kind).toBe('space')
+  })
+
+  it('an idle hover that resolves to nothing (no snap) keeps the plane but drops the hover, so no cue lingers', () => {
+    const t = new DrawPlaneTracker()
+    t.trackIdle(SCENE, { plane: GREEN, inferredAxis: 1 }, ray, [0, 0, 0], false)
+    t.clearHover()
+    expect(t.state(base).hover).toBeNull()
+    expect(t.state(base).plane).toBe(GREEN)
+    t.trackIdle(SCENE, { plane: GREEN, inferredAxis: 1 }, ray, [0, 0, 0], false)
+    expect(t.state(base).hover?.kind).toBe('space')
+  })
+
+  it('clearIdle forgets the tracked plane; the fallback answers again', () => {
+    const t = new DrawPlaneTracker()
+    t.trackIdle(SCENE, { plane: GREEN, inferredAxis: 1 }, ray, [0, 0, 0], false)
+    t.clearIdle()
+    expect(t.state(base).plane).toEqual(groundDrawPlane())
   })
 })
 
-describe('idleHoverCue — which idle hovers show a patch (view-plane §5)', () => {
-  const ray: Ray = { origin: [0, -5, 1], direction: [0, 1, 0] }
+describe('DrawPlaneTracker — the custom pip\'s candidate (view-die §3.3, D4)', () => {
+  const r = (30 * Math.PI) / 180
+  const TURNED = drawPlaneThrough([0, 0, 0], [Math.cos(r), Math.sin(r), 0])!
+  const GROUND = groundDrawPlane()
+  const RAY: Ray = { origin: [5, 1, 0.5], direction: [-1, 0, 0] }
+  const DOWN: Ray = { origin: [3, -2, 5], direction: [0, 0, -1] }
+
+  /** A scene whose revision, axes and open sessions the test can change. */
+  function world() {
+    const state = { gen: 1n, frame: [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1], sessions: [] as { kind: string; id: bigint }[] }
+    const scene = {
+      history_generation: () => state.gen,
+      axes: () => new Float64Array(state.frame),
+      session_stack: () => state.sessions.map((n) => ({ ...n, free: () => undefined })),
+    } as unknown as WasmScene
+    return { scene, state }
+  }
+  function setup() {
+    let t = 1000
+    const clock = { advance: (ms: number) => { t += ms } }
+    const tracker = new DrawPlaneTracker(() => t)
+    const { scene, state } = world()
+    const overTurned = () => tracker.trackIdle(scene, { plane: TURNED, onFace: true }, RAY, [0, 1, 0.5], false)
+    const overGround = () => tracker.trackIdle(scene, { plane: GROUND }, DOWN, [3, -2, 0], false)
+    return { tracker, scene, state, clock, overTurned, overGround }
+  }
+
+  it('set by a hover over a custom plane, through the ray\'s hit; an axis-plane hover leaves it alone', () => {
+    const { tracker, scene, overTurned, overGround } = setup()
+    expect(tracker.customCandidate(scene)).toBeNull()
+    overTurned()
+    overGround()
+    const c = tracker.customCandidate(scene)
+    expect(c?.plane).toBe(TURNED)
+    // On the turned plane, where the ray met it.
+    const p = c!.through
+    expect(p[0] * Math.cos(r) + p[1] * Math.sin(r)).toBeCloseTo(0, 9)
+    expect(p[1]).toBeCloseTo(1, 9)
+  })
+
+  it('live while the cursor is over it, however long; expires 2000 ms after that hover ends', () => {
+    const { tracker, scene, clock, overTurned, overGround } = setup()
+    expect(CUSTOM_CANDIDATE_MS).toBe(2000)
+    overTurned()
+    clock.advance(5000) // resting on the face
+    expect(tracker.customCandidate(scene)).not.toBeNull()
+    expect(tracker.customCandidateTtl()).toBeNull() // no expiry while hovered
+    overGround() // the hover ends now
+    expect(tracker.customCandidateTtl()).toBe(2000)
+    clock.advance(1500)
+    overGround()
+    expect(tracker.customCandidateTtl()).toBe(500)
+    clock.advance(500)
+    expect(tracker.customCandidate(scene)).not.toBeNull()
+    clock.advance(1)
+    expect(tracker.customCandidate(scene)).toBeNull()
+    expect(tracker.customCandidateTtl()).toBeNull()
+  })
+
+  it('resting on the face, then straight off the canvas: still live at the pip', () => {
+    const { tracker, scene, clock, overTurned } = setup()
+    overTurned()
+    clock.advance(5000)
+    tracker.leave()
+    clock.advance(5000)
+    expect(tracker.customCandidate(scene)?.plane).toBe(TURNED)
+  })
+
+  it('live at the pointer leaving the canvas: no timeout until the pointer moves on the canvas again', () => {
+    const { tracker, scene, clock, overTurned, overGround } = setup()
+    overTurned()
+    clock.advance(800)
+    overGround()
+    tracker.leave()
+    expect(tracker.customCandidateTtl()).toBeNull() // latched: nothing to wait for
+    clock.advance(60_000)
+    expect(tracker.customCandidate(scene)?.plane).toBe(TURNED)
+    // Back on the canvas: the window counts from the original hover again.
+    tracker.move(DOWN)
+    expect(tracker.customCandidate(scene)).toBeNull()
+  })
+
+  it('back on the canvas inside the window, it stays live until the window closes', () => {
+    const { tracker, scene, clock, overTurned } = setup()
+    overTurned()
+    tracker.leave()
+    clock.advance(500)
+    tracker.move(DOWN)
+    expect(tracker.customCandidate(scene)).not.toBeNull()
+    clock.advance(1501)
+    expect(tracker.customCandidate(scene)).toBeNull()
+  })
+
+  it('expired before the leave: dead, and it stays dead off the canvas (D5)', () => {
+    const { tracker, scene, clock, overTurned, overGround } = setup()
+    overTurned()
+    overGround()
+    clock.advance(2001)
+    tracker.leave()
+    expect(tracker.customCandidate(scene)).toBeNull()
+    tracker.move(DOWN)
+    expect(tracker.customCandidate(scene)).toBeNull()
+  })
+
+  it('cleared by clearCandidate, clearIdle (a cancel) and reset', () => {
+    for (const clear of ['clearCandidate', 'clearIdle', 'reset'] as const) {
+      const { tracker, scene, overTurned } = setup()
+      overTurned()
+      tracker.leave()
+      tracker[clear]()
+      expect(tracker.customCandidate(scene)).toBeNull()
+    }
+  })
+
+  it('stale after a document change (an edit, undo or redo), a drawing-axes move, or a session entered or left', () => {
+    const change: ((s: ReturnType<typeof world>['state']) => void)[] = [
+      (s) => { s.gen = 2n },
+      (s) => { s.frame = [1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1] },
+      (s) => { s.sessions = [{ kind: 'group', id: 4n }] },
+    ]
+    for (const apply of change) {
+      const { tracker, scene, state, overTurned } = setup()
+      overTurned()
+      tracker.leave()
+      apply(state)
+      expect(tracker.customCandidate(scene)).toBeNull()
+    }
+  })
+
+  it('a camera move does not clear it (a new fallback plane is no hover)', () => {
+    const { tracker, scene, overTurned } = setup()
+    overTurned()
+    tracker.leave()
+    tracker.state({ anchored: null, lock: null, pinned: null, lockHover: null, fallback: axisDrawPlane(1, [0, 0, 0]), frame: WORLD_DRAWING_AXES })
+    expect(tracker.customCandidate(scene)).not.toBeNull()
+  })
+
+  it('the custom pip acts on a custom pin or the live candidate; its click pins the candidate, not the tracked ground', () => {
+    const { tracker, scene, overTurned, overGround } = setup()
+    const pin = new PlanePin()
+    expect(customPipPlaneFor(scene, pin, tracker)).toBeNull()
+    // A tracked hover alone counts for nothing: it carries no invalidation.
+    pin.trackHover(TURNED, [0, 1, 0.5])
+    expect(customPipPlaneFor(scene, pin, tracker)).toBeNull()
+    expect(pinCustomPlane(scene, pin, tracker)).toBe(false)
+    overTurned()
+    expect(customPipPlaneFor(scene, pin, tracker)).toBe(TURNED) // under the cursor
+    pin.trackHover(GROUND, [3, -2, 0]) // the pointer crossed the ground
+    overGround()
+    tracker.leave()
+    expect(customPipPlaneFor(scene, pin, tracker)).toBe(TURNED) // the candidate
+    expect(pinCustomPlane(scene, pin, tracker)).toBe(true)
+    expect(pin.current?.plane).toBe(TURNED)
+    expect(customPipPlaneFor(scene, pin, tracker)).toBe(TURNED) // pinned: a click releases
+    expect(pinCustomPlane(scene, pin, tracker)).toBe(true)
+    expect(pin.current).toBeNull()
+  })
+
+  it('an undo with the pointer on the die disables the pip and pins nothing stale, even with the face still tracked', () => {
+    const { tracker, scene, state, overTurned } = setup()
+    const pin = new PlanePin()
+    pin.trackHover(TURNED, [0, 1, 0.5])
+    overTurned()
+    tracker.leave()
+    expect(customPipPlaneFor(scene, pin, tracker)).toBe(TURNED)
+    state.gen = 2n // undo
+    expect(customPipPlaneFor(scene, pin, tracker)).toBeNull()
+    expect(pinCustomPlane(scene, pin, tracker)).toBe(false)
+    expect(pin.current).toBeNull()
+  })
+
+  it('a pinned axis plane gives the custom pip nothing to act on', () => {
+    const { tracker, scene } = setup()
+    const pin = new PlanePin()
+    pin.pinPlane({ plane: GROUND, through: [0, 0, 0] })
+    expect(customPipPlaneFor(scene, pin, tracker)).toBeNull()
+  })
+})
+
+describe('idleHoverKind — what the cursor is over (view-die §4)', () => {
   const GREEN = axisDrawPlane(1, [0, 0, 0])
+  const face = (boundary: boolean, offObject: boolean) => ({ object: 7n, face: 2n, instance: null, boundary, offObject })
 
-  it('a face shows a patch while PATCH_OVER_FACES is on', () => {
-    expect(PATCH_OVER_FACES).toBe(true)
-    expect(idleHoverCue({ plane: GREEN, onFace: true }, ray, false)).toEqual({ plane: GREEN, ray })
+  it('a face under the plain ray is face; a boundary lean onto one is lean, off the object leanExtended', () => {
+    expect(idleHoverKind({ plane: GREEN, onFace: true, face: face(false, false) })).toBe('face')
+    expect(idleHoverKind({ plane: GREEN, onFace: true, face: face(true, false) })).toBe('lean')
+    expect(idleHoverKind({ plane: GREEN, onFace: true, face: face(true, true) })).toBe('leanExtended')
+    expect(idleHoverKind({ plane: GREEN, onFace: true })).toBe('face')
   })
 
-  it('a sketch or the inferred plane shows a patch at the top level', () => {
-    expect(idleHoverCue({ plane: GREEN }, ray, false)).toEqual({ plane: GREEN, ray })
+  it('a moved frame\'s blue plane that coincides with the ground is the ground', () => {
+    const shifted = axisDrawPlane(2, [2, 3, 0], { origin: [2, 3, 0], x: [0, 1, 0], y: [-1, 0, 0], z: [0, 0, 1] })
+    expect(idleHoverKind({ plane: shifted, inferredAxis: 2 })).toBe('ground')
+    expect(idleHoverKind({ plane: axisDrawPlane(2, [0, 0, 0.75], { ...WORLD_DRAWING_AXES, origin: [0, 0, 0.75] }), inferredAxis: 2 })).toBe('space')
   })
 
-  it('inside an entered object only a face of it does: a click off it lands nowhere', () => {
-    expect(idleHoverCue({ plane: GREEN }, ray, true)).toBeNull()
-    expect(idleHoverCue({ plane: GREEN, onFace: true }, ray, true)).toEqual({ plane: GREEN, ray })
+  it('a sketch, the inferred plane, and the ground', () => {
+    expect(idleHoverKind({ plane: GREEN, target: { kind: 'existing', handle: 3n, instance: null } })).toBe('sketch')
+    expect(idleHoverKind({ plane: GREEN, inferredAxis: 1, target: { kind: 'plane', plane: GREEN, instance: null } })).toBe('space')
+    expect(idleHoverKind({ plane: groundDrawPlane(), target: { kind: 'plane', plane: groundDrawPlane(), instance: null } })).toBe('ground')
   })
 
-  it('resolveIdleDrawTarget flags only an ineligible face as onFace', () => {
+  it('resolveIdleDrawTarget flags only an ineligible face as onFace, and carries the face that decided it', () => {
+    const ray: Ray = { origin: [0, -5, 1], direction: [0, 1, 0] }
     const scene = {
       pick_sketch: vi.fn(() => undefined),
       pick_sketch_region: vi.fn(() => undefined),
       axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     } as unknown as WasmScene
-    const face = () => ({ point: [0, 0, 0.3] as V3, normal: [0, 0, 1] as V3, depth: 4 })
-    expect(resolveIdleDrawTarget(scene, new SketchPickCache(), ray, TOP, face, '', FRONT_VIEW).onFace).toBe(true)
+    const ref = { object: 4n, face: 9n, instance: 6n, boundary: true, offObject: false }
+    const hit = () => ({ point: [0, 0, 0.3] as V3, normal: [0, 0, 1] as V3, depth: 4, face: ref })
+    const resolved = resolveIdleDrawTarget(scene, new SketchPickCache(), ray, TOP, hit, '', FRONT_VIEW)
+    expect(resolved.onFace).toBe(true)
+    expect(resolved.face).toEqual(ref)
+    expect(idleHoverKind(resolved)).toBe('lean')
     expect(resolveIdleDrawTarget(scene, new SketchPickCache(), ray, TOP, undefined, '', FRONT_VIEW).onFace).toBeUndefined()
+  })
+})
+
+describe('FaceLoopCache — the leaned-to face\'s outline in world space (view-die §4)', () => {
+  /** A square face's outer loop in its object's own frame, and a mesh whose
+   *  vertex normals are flat (all +Z) unless `curved`. */
+  function loopScene(opts: { curved?: boolean; pose?: number[]; gen?: () => bigint } = {}) {
+    const square = new Float32Array([0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1])
+    const flat = [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]
+    const bent = [1, 0, 0, 1, 0, 0, 0.9, 0.4359, 0, 0.9, 0.4359, 0]
+    const mesh = { normals: vi.fn(() => new Float32Array(opts.curved === true ? bent : flat)), free: vi.fn() }
+    const scene = {
+      history_generation: vi.fn(opts.gen ?? (() => 1n)),
+      face_boundary: vi.fn(() => square),
+      object_mesh: vi.fn(() => mesh),
+      face_mesh_range: vi.fn(() => new Uint32Array([0, 4])),
+      instance_pose: vi.fn(() => (opts.pose === undefined ? undefined : new Float64Array(opts.pose))),
+    }
+    return { scene: scene as unknown as WasmScene, raw: scene, mesh }
+  }
+  const ref = (instance: bigint | null = null) => ({ object: 7n, face: 2n, instance, boundary: true, offObject: false })
+
+  it('a world face\'s loop as stored', () => {
+    const { scene } = loopScene()
+    expect(new FaceLoopCache().loopFor(scene, ref())).toEqual([[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]])
+  })
+
+  it('a face inside an instance is posed through that instance into world space', () => {
+    // Translate by (10, 0, 0) and turn 90° about Z: (x, y, z) → (10 − y, x, z).
+    const pose = [0, -1, 0, 10, 1, 0, 0, 0, 0, 0, 1, 0]
+    const { scene } = loopScene({ pose })
+    const loop = new FaceLoopCache().loopFor(scene, ref(5n))!
+    expect(loop.map((p) => p.map((c) => Math.round(c * 1e9) / 1e9))).toEqual([[10, 0, 1], [10, 1, 1], [9, 1, 1], [9, 0, 1]])
+  })
+
+  it('an instance with no pose gives no loop', () => {
+    const { scene } = loopScene()
+    expect(new FaceLoopCache().loopFor(scene, ref(5n))).toBeNull()
+  })
+
+  it('a curved face (a chord facet of a wall) gives no loop: the cue shows the patch instead', () => {
+    const { scene, mesh } = loopScene({ curved: true })
+    expect(new FaceLoopCache().loopFor(scene, ref())).toBeNull()
+    expect(mesh.free).toHaveBeenCalled()
+  })
+
+  it('fails closed to curved (no loop, so the patch) when flatness cannot be read', () => {
+    const throwing = loopScene()
+    throwing.raw.object_mesh.mockImplementation(() => { throw new Error('UnknownObject') })
+    expect(new FaceLoopCache().loopFor(throwing.scene, ref())).toBeNull()
+    const noRange = loopScene()
+    noRange.raw.face_mesh_range.mockImplementation(() => undefined as unknown as Uint32Array<ArrayBuffer>)
+    expect(new FaceLoopCache().loopFor(noRange.scene, ref())).toBeNull()
+    const short = loopScene()
+    short.raw.face_mesh_range.mockImplementation(() => new Uint32Array([0]))
+    expect(new FaceLoopCache().loopFor(short.scene, ref())).toBeNull()
+    const past = loopScene()
+    past.raw.face_mesh_range.mockImplementation(() => new Uint32Array([2, 4])) // runs past the 4 normals
+    expect(new FaceLoopCache().loopFor(past.scene, ref())).toBeNull()
+    const missing = loopScene()
+    delete (missing.raw as Partial<typeof missing.raw>).object_mesh
+    expect(new FaceLoopCache().loopFor(missing.scene, ref())).toBeNull()
+  })
+
+  it('a stale face gives no loop', () => {
+    const { scene, raw } = loopScene()
+    raw.face_boundary.mockImplementation(() => { throw new Error('UnknownFace') })
+    expect(new FaceLoopCache().loopFor(scene, ref())).toBeNull()
+  })
+
+  it('memoized per document revision: one tessellation per edit', () => {
+    let gen = 1n
+    const { scene, raw } = loopScene({ gen: () => gen })
+    const cache = new FaceLoopCache()
+    cache.loopFor(scene, ref())
+    cache.loopFor(scene, ref())
+    expect(raw.object_mesh).toHaveBeenCalledTimes(1)
+    gen = 2n
+    cache.loopFor(scene, ref())
+    expect(raw.object_mesh).toHaveBeenCalledTimes(2)
   })
 })
 

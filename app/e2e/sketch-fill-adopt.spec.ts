@@ -96,7 +96,13 @@ function along(list: Awaited<ReturnType<typeof sketches>>, axis: number) {
   return s
 }
 
-const cue = (page: Page) => page.evaluate(() => window.__hew_test!.getDrawPlaneCue())
+/** The plane the tool would draw on at the pointer (the die's pips, ring and
+ *  chip all read this): its unit normal, or null when no draw tool is armed. */
+const cue = (page: Page) =>
+  page.evaluate(() => {
+    const s = window.__hew_test!.getDrawPlaneState()
+    return s === null ? null : { normal: s.normal }
+  })
 
 function expectNormalAlong(c: { normal: V3 } | null, axis: number): void {
   expect(c).not.toBeNull()
@@ -186,9 +192,9 @@ test('a hover inside a sketch fill adopts its plane: the patch, the Shift pin an
   expectNormalAlong(await cue(page), 1)
   await expect(hint(page, /Facing the green plane/)).toBeVisible()
   // Inside the ground rectangle, on its fill and clear of its edges and
-  // their named points: the ground, no patch, no Facing line.
+  // their named points: the ground (blue, normal along Z), no Facing line.
   await hover(page, GROUND_FILL)
-  expect(await cue(page)).toBeNull()
+  expectNormalAlong(await cue(page), 2)
   await expect(hint(page, /Facing/)).toHaveCount(0)
 
   await page.keyboard.press('Shift')

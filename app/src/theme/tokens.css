@@ -163,6 +163,11 @@
   --axis-red: #e85a60;
   --axis-green: #5fce80;
   --axis-blue: #5f96eb;
+  /* View die pip for any plane that is not one of the three axis planes. */
+  --plane-custom: #c77dff;
+  /* View die: axis wash strength on its faces, and the padlock glyph on a filled pip. */
+  --die-wash-alpha: 0.07;
+  --die-pip-glyph: #10141a;
 
   /* ---- Push/Pull preview tints (orange vs blue: safe for red-green color
      blindness, and the blue is darker so they differ in lightness too) -- */
@@ -311,6 +316,9 @@
   --axis-red: #d6454b;
   --axis-green: #28a055;
   --axis-blue: #2d78e1;
+  --plane-custom: #9d4edd;
+  --die-wash-alpha: 0.12;
+  --die-pip-glyph: #ffffff;
 
   /* Push/Pull preview tints, deepened for the light viewport. */
   --preview-pushpull: #d97800;

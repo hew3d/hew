@@ -42,8 +42,10 @@ import type { Scene as WasmScene, DocChangeJs } from '../wasm/loader'
 import type { HealthOverlay } from '../health/healthReport'
 import { CueLayer } from './CueLayer'
 import { SiblingPreviewMirror } from './siblingPreview'
-import { DrawPlaneCueLayer } from './DrawPlaneCueLayer'
-import type { DrawPlane } from '../tools/drawPlane'
+import { DrawPlaneCueLayer, planeCueFor, type PlaneCueSpec } from './DrawPlaneCueLayer'
+import { pipArrowKey, type DrawPlaneState, type PlanePip } from '../tools/drawPlane'
+import { viewTurnEye, viewTurnRotation } from './viewTurn'
+import { PLANE_PIPS, cursorPlaneOf, pipClickAction, pipEnabledFor, pipWillReleaseFor, type PipContext } from './drawPlanePips'
 import { SnapService } from './snapService'
 import { SceneRenderer, type AnnotationDrawing, type RefreshTouched, type RenderMode } from './SceneRenderer'
 import { expandByVisibleObject } from './visibleBounds'
@@ -324,6 +326,16 @@ export interface InferenceInfo {
    *  what is hovered (`Tool.hoverHint`) — Push/Pull over a component face
    *  outside its edit session. Shown as the chip's own line. */
   hint?: string
+  /** A draw tool's drawing plane (`Tool.drawPlaneState`, view-die design
+   *  §4): the snap dot's ring and the chip's plane word. Absent for a tool
+   *  that draws on no plane. */
+  plane?: InferencePlane
+}
+
+/** The drawing plane as the cursor cues show it: its pip and its hold. */
+export interface InferencePlane {
+  pip: PlanePip
+  hold: DrawPlaneState['hold']
 }
 
 interface Props {
@@ -630,6 +642,11 @@ export type StandardView = 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right
  */
 const POLE_TILT = 0.001
 
+/** The camera tweens' ease: cubic in-out. */
+function easeCameraTween(t: number): number {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
+}
+
 /**
  * Eye direction (target→camera) for each standard view, in the Z-up world (X
  * red, Y green, Z blue). Every view keeps world-up +Z (see {@link POLE_TILT});
@@ -935,6 +952,27 @@ export interface ViewportApi {
    */
   setStandardView: (view: StandardView) => void
   /**
+   * Turn the camera to look along `eye` (target to camera) about the current
+   * orbit target, keeping distance and orthographic zoom, up +Z (the view
+   * die, docs/design/view-die.md §2.3). Never re-frames. `tween` (default
+   * true) eases over 200 ms through `tweenCameraState`; reduced motion is
+   * instant. An eye within the pole tilt of ±Z gets the standard pole tilt.
+   */
+  setViewDirection: (eye: [number, number, number], opts?: { tween?: boolean }) => void
+  /**
+   * Orbit by a screen-space drag delta in css px, through OrbitControls'
+   * own rotate path (a die drag). Pair with `endOrbitDrag`.
+   */
+  orbitDrag: (dxPx: number, dyPx: number) => void
+  /** Ends a die-driven orbit drag started by `orbitDrag` (idempotent). */
+  endOrbitDrag: () => void
+  /**
+   * Subscribe to the live camera orientation (`[x, y, z, w]`, camera to
+   * world). Called once at subscription and then after every rendered
+   * frame in which the orientation changed.
+   */
+  subscribeCameraOrientation: (cb: (q: [number, number, number, number]) => void) => () => void
+  /**
    * Pin the camera to an explicit pose ( `__hew_test.setCamera`): position,
    * orbit target, up, vertical FOV (deg). Deterministic framing for E2E / pixel
    * tests; mirrors the recorded `camera` input shape and  `PINNED_CAMERA`.
@@ -1043,9 +1081,56 @@ export interface ViewportApi {
    */
   worldToScreen: (world: [number, number, number]) => { x: number; y: number; behind: boolean }
 
-  /** Test-only: the drawing-plane patch as the cue layer shows it right now
-   *  (`DrawPlaneCueLayer.current`), or null when none shows. */
-  getDrawPlaneCue: () => { normal: [number, number, number]; through: [number, number, number] } | null
+  /** Test-only: the drawing-plane cue as the cue layer shows it right now
+   *  (`DrawPlaneCueLayer.current`: a face outline or the small patch), or
+   *  null when none shows. */
+  getDrawPlaneCue: () => { kind: 'outline' | 'patch'; normal: [number, number, number]; through: [number, number, number]; held: boolean } | null
+
+  /**
+   * The active tool's drawing-plane state (`Tool.drawPlaneState`, the
+   * view-die design §3.4): the plane the next click or the gesture under way
+   * uses, its pip, its hold, and the hover. Null for a tool that draws on no
+   * plane. Read from the tool, never from the cue layer, so a lock made by a
+   * pip click shows while the pointer is still on the pip.
+   */
+  getDrawPlaneState: () => DrawPlaneState | null
+
+  /**
+   * A pip click (view-die design §3.3), the mouse form of the plane keys:
+   * red, green and blue reach the active tool's arrow-key handler exactly
+   * as →, ← and ↑ do at the tool's current stage (lock or release while
+   * idle, releasing a Shift pin first; the stage's own arrow meaning during
+   * a gesture). A click on the pip of the active Shift pin releases it. The
+   * custom pip toggles the Shift pin as a Shift press would. Does nothing
+   * for a disabled pip (`pipEnabled`) or a tool that draws on no plane.
+   * Takes no keyboard focus and never ends a gesture.
+   */
+  pipClick: (pip: PlanePip) => void
+
+  /**
+   * Whether a pip click does anything right now: false for every pip with a
+   * tool that draws on no plane; for the custom pip, true only while idle
+   * with a custom plane tracked under the cursor or pinned.
+   */
+  pipEnabled: (pip: PlanePip) => boolean
+
+  /**
+   * Whether a click on `pip` would release the held plane right now — the
+   * pip tooltip starts with "Release" only then (view-die design §3.3): the
+   * locked pip while the same arrow would release it (not Line mid-chain,
+   * where an arrow locks the segment's axis), the pinned pip of a Shift pin,
+   * the custom pip of a pinned custom plane. False for a disabled pip.
+   */
+  pipWillRelease: (pip: PlanePip) => boolean
+
+  /**
+   * Subscribe to the drawing-plane state. Called once at subscription, then
+   * whenever the plane, pip, hold, the custom pip's enablement, or any
+   * pip's `pipWillRelease` changed:
+   * checked after every rendered frame and after a pip click (cheap: one
+   * state build and a string compare per frame). Returns the unsubscribe.
+   */
+  subscribeDrawPlaneState: (cb: (state: DrawPlaneState | null) => void) => () => void
 
   /** Test-only: the world ray the pointer at canvas-relative CSS pixel
    *  (`x`, `y`) casts for the camera as it is now, built exactly as the
@@ -2410,6 +2495,15 @@ export default function Viewport({
   onRescaleArmedRef.current = onRescaleArmed
   const onCameraDragChangeRef = useRef(onCameraDragChange)
   onCameraDragChangeRef.current = onCameraDragChange
+  // View die (docs/design/view-die.md): listeners for the live camera
+  // orientation. Component-level so they outlive the big effect's re-runs.
+  const cameraOrientationListenersRef = useRef(new Set<(q: [number, number, number, number]) => void>())
+  const cameraOrientationRef = useRef<[number, number, number, number]>([0, 0, 0, 1])
+  // The pips' listeners for the drawing-plane state, and the signature last
+  // published to them (`notifyDrawPlaneState`). Component-level for the same
+  // reason as the orientation listeners.
+  const drawPlaneStateListenersRef = useRef(new Set<(state: DrawPlaneState | null) => void>())
+  const drawPlaneStateKeyRef = useRef<string | null>(null)
   const onHoverSketchRegionChangeRef = useRef(onHoverSketchRegionChange)
   onHoverSketchRegionChangeRef.current = onHoverSketchRegionChange
   const onProjectionChangeRef = useRef(onProjectionChange)
@@ -2859,8 +2953,8 @@ export default function Viewport({
     const cueLayer = new CueLayer()
     threeScene.add(cueLayer.group)
 
-    // Drawing-plane cue (sketches on any plane, Phase 4 — design §6 bullet
-    // 1): a subtle grid patch on a draw tool's active non-ground plane.
+    // Drawing-plane cue at the cursor (view-die design §4): a leaned-to
+    // face's outline or the small patch, from the draw tool's plane state.
     // Purely visual — see DrawPlaneCueLayer.ts's module doc.
     const drawPlaneCueLayer = new DrawPlaneCueLayer()
     threeScene.add(drawPlaneCueLayer.group)
@@ -2870,13 +2964,107 @@ export default function Viewport({
     let mutationReplayQueued = false
     let mutationReplayDisposed = false
 
-    // Duck-typed like `snapConstraint` — only the four draw tools implement
-    // this. Called after the active tool's own state update (`onPointerMove`
-    // / `onKey`) so a just-changed idle-lock or hover is reflected.
-    function queryDrawPlaneCue(tool: object): { plane: DrawPlane; through: [number, number, number] } | null {
-      return 'activeDrawPlaneCue' in tool
-        ? (tool as { activeDrawPlaneCue(): { plane: DrawPlane; through: [number, number, number] } | null }).activeDrawPlaneCue()
-        : null
+    // The cursor cue for a tool's plane state (view-die design §4): only the
+    // five draw tools report one (`Tool.drawPlaneState`). Called after the
+    // active tool's own state update (`onPointerMove` / `onKey`) so a
+    // just-changed lock, pin or hover is reflected.
+    function queryDrawPlaneCue(tool: Tool): PlaneCueSpec | null {
+      return planeCueFor(tool.drawPlaneState?.() ?? null)
+    }
+
+    // ---- The view die's pips (view-die design §3): state, clicks, changes.
+    function getDrawPlaneState(): DrawPlaneState | null {
+      return toolController.activeTool.drawPlaneState?.() ?? null
+    }
+    /** Whether the key router would hand `key` to the tool's capturing
+     *  branch (a gesture under way) rather than the idle fallthrough. */
+    function toolCapturesKey(tool: Tool, key: string): boolean {
+      return 'capturesKey' in tool
+        ? (tool as { capturesKey(key: string): boolean }).capturesKey(key)
+        : 'capturingInput' in tool && (tool as { capturingInput(): boolean }).capturingInput()
+    }
+    function pipContext(tool: Tool, pip: PlanePip): PipContext {
+      const key = pipArrowKey(pip)
+      return {
+        state: tool.drawPlaneState?.() ?? null,
+        pinnable: tool.pinnablePlane?.() ?? null,
+        customPlane: tool.customPipPlane?.() ?? null,
+        capturing: key !== null && toolCapturesKey(tool, key),
+        frame: getDrawingAxes(wasmScene),
+        readOnly: readOnlyRef.current,
+        arrowReleases: key !== null && (tool.planeKeyReleases?.(key) ?? false),
+      }
+    }
+    function pipEnabled(pip: PlanePip): boolean {
+      return pipEnabledFor(pip, pipContext(toolController.activeTool, pip))
+    }
+    function pipWillRelease(pip: PlanePip): boolean {
+      return pipWillReleaseFor(pip, pipContext(toolController.activeTool, pip))
+    }
+    function pipClick(pip: PlanePip): void {
+      const tool = toolController.activeTool
+      const ctx = pipContext(tool, pip)
+      const action = pipClickAction(pip, ctx)
+      if (action.kind === 'none') return
+      if (action.kind === 'togglePin') {
+        // The pinned pip: release, as a Shift press would.
+        tool.togglePlanePin?.()
+      } else if (action.kind === 'pinCustom') {
+        // Pin the custom candidate, or release the pin.
+        tool.pinCustomCandidate?.()
+      } else {
+        // The arrow key's own handler, at whatever stage the tool is in (the
+        // key router's `activeTool.onKey`). The event is built, never
+        // dispatched: nothing else on the page sees a key, and focus stays
+        // where it is.
+        tool.onKey(new KeyboardEvent('keydown', { key: action.key }))
+      }
+      const capturing = ctx.capturing
+      // The refresh the key router does after the same key. The pointer is
+      // on the pip, off the canvas, so there is no hover to replay: the
+      // held-pointer replay declines, and a gesture's preview follows on the
+      // pointer's return.
+      if (!capturing && followsViewPlane(tool)) reResolveAtHeldPointer()
+      drawPlaneCueLayer.update(queryDrawPlaneCue(tool))
+      reportToolHint()
+      scheduleRender()
+      notifyDrawPlaneState()
+    }
+    function drawPlaneStateSignature(state: DrawPlaneState | null): string {
+      if (state === null) return 'none'
+      const n = state.plane.normal.map((c) => c.toFixed(6)).join(',')
+      const releases = PLANE_PIPS.map((pip) => (pipWillRelease(pip) ? 1 : 0)).join('')
+      return `${state.pip}|${state.hold}|${n}|${pipEnabled('custom') ? 1 : 0}|${releases}`
+    }
+    // One refresh when the custom pip's candidate expires, so a pointer
+    // resting on the pip does not leave it looking clickable.
+    let customPipExpiryTimer: ReturnType<typeof setTimeout> | null = null
+    function scheduleCustomPipExpiry(): void {
+      if (customPipExpiryTimer !== null) clearTimeout(customPipExpiryTimer)
+      customPipExpiryTimer = null
+      const ttl = toolController.activeTool.customPipTtl?.() ?? null
+      if (ttl === null) return
+      customPipExpiryTimer = setTimeout(() => {
+        customPipExpiryTimer = null
+        notifyDrawPlaneState()
+      }, ttl + 1)
+    }
+    function notifyDrawPlaneState(): void {
+      const listeners = drawPlaneStateListenersRef.current
+      if (listeners.size === 0) return
+      scheduleCustomPipExpiry()
+      const state = getDrawPlaneState()
+      const key = drawPlaneStateSignature(state)
+      if (key === drawPlaneStateKeyRef.current) return
+      drawPlaneStateKeyRef.current = key
+      for (const cb of listeners) cb(state)
+    }
+    function subscribeDrawPlaneState(cb: (state: DrawPlaneState | null) => void): () => void {
+      drawPlaneStateListenersRef.current.add(cb)
+      const state = getDrawPlaneState()
+      drawPlaneStateKeyRef.current = drawPlaneStateSignature(state)
+      cb(state)
+      return () => { drawPlaneStateListenersRef.current.delete(cb) }
     }
 
     // Preview group shared by tools
@@ -5727,6 +5915,8 @@ export default function Viewport({
     }
 
     function zoomExtents(): void {
+      // An in-flight die turn would keep re-posing the camera over the framing.
+      if (viewTurn !== null) cancelCameraTween()
       // Compute the world bounding box over all rendered model geometry:
       // objects, instances, AND sketches — a document that is only a drawn
       // rectangle must frame correctly too. Guides are deliberately
@@ -5861,6 +6051,27 @@ export default function Viewport({
       scheduleRender()
     }
 
+    /**
+     * The visible model's bounds (like zoomExtents, same group set —
+     * sketches count as model geometry, guides stay excluded, hidden
+     * geometry is skipped), with the world-length view limits resynced from
+     * its fit distance exactly like `zoomExtents`, so a rescale+undo does
+     * not leave stale clamps. Null for an empty scene (no fit distance to
+     * resync against, like `zoomExtents`' own early return).
+     */
+    function resyncViewLimitsToVisibleModel(): { box: THREE.Box3; radius: number; fitDistance: number } | null {
+      const box = new THREE.Box3()
+      expandByVisibleObject(box, sceneRenderer.objectsGroup)
+      expandByVisibleObject(box, sceneRenderer.instancesGroup)
+      expandByVisibleObject(box, sceneRenderer.sketchGroup)
+      if (box.isEmpty()) return null
+      const radius = box.getBoundingSphere(new THREE.Sphere()).radius
+      const fitDistance = rig.perspectiveFramingDistance(radius, 1.2)
+      const limits = zoomExtentsViewLimits(fitDistance)
+      syncWorldLengthViewState(limits.far / worldLimits.far)
+      return { box, radius, fitDistance }
+    }
+
     function setStandardView(view: StandardView): void {
       // Eye direction (target → camera) in the Z-up world. Up is always world-up
       // +Z so orbit keeps pivoting around Z (Top/Bottom dodge the gimbal via a
@@ -5871,39 +6082,23 @@ export default function Viewport({
       // and land on the scene's pose, silently losing this click.
       cancelCameraTween()
 
-      // The visible bounds (like zoomExtents, same group set — sketches count
-      // as model geometry, guides stay excluded, hidden geometry is skipped)
-      // serve two purposes. Every view uses them to resync the world-length
-      // view limits (delta-review Finding 2). Only Iso also re-frames from
-      // them; the six axis views just turn the camera about the current orbit
-      // target and keep the distance and the orthographic zoom, so the
-      // on-screen scale never changes (#52).
-      const box = new THREE.Box3()
-      expandByVisibleObject(box, sceneRenderer.objectsGroup)
-      expandByVisibleObject(box, sceneRenderer.instancesGroup)
-      expandByVisibleObject(box, sceneRenderer.sketchGroup)
-      const reframe = view === 'iso' && !box.isEmpty()
+      // The visible bounds serve two purposes. Every view uses them to
+      // resync the world-length view limits (delta-review Finding 2). Only
+      // Iso also re-frames from them; the six axis views just turn the
+      // camera about the current orbit target and keep the distance and the
+      // orthographic zoom, so the on-screen scale never changes (#52). An
+      // empty scene keeps the current target and distance.
+      const fit = resyncViewLimitsToVisibleModel()
+      const reframe = view === 'iso' && fit !== null
 
       const center = new THREE.Vector3()
       let distance: number
       let radius = 0
-      if (!box.isEmpty()) {
-        // Resync the limits from the model's fit distance, exactly like
-        // `zoomExtents`, so a rescale+undo does not leave stale clamps.
-        radius = box.getBoundingSphere(new THREE.Sphere()).radius
-        const fitDistance = rig.perspectiveFramingDistance(radius, 1.2)
-        const limits = zoomExtentsViewLimits(fitDistance)
-        syncWorldLengthViewState(limits.far / worldLimits.far)
-        if (reframe) {
-          box.getCenter(center)
-          distance = fitDistance
-        } else {
-          center.copy(controls.target)
-          distance = controls.getDistance()
-        }
+      if (fit !== null && reframe) {
+        radius = fit.radius
+        fit.box.getCenter(center)
+        distance = fit.fitDistance
       } else {
-        // Empty scene: no fit distance to resync against (like `zoomExtents`'
-        // own early return), so keep the current target and distance.
         center.copy(controls.target)
         distance = controls.getDistance()
       }
@@ -5920,6 +6115,143 @@ export default function Viewport({
       camera.updateProjectionMatrix()
       controls.update()
       scheduleRender()
+    }
+
+    // ---- View die (docs/design/view-die.md §2.3) ----
+    // The orbit target and distance of the in-flight die turn. A die turn
+    // orbits that fixed target at that fixed distance (`tweenViewTurn`), so
+    // a second click during a turn starts from the same sphere, and other
+    // camera commands (Zoom Extents, a projection toggle, fly) cancel it
+    // first. Cleared when the tween ends, is superseded, or is cancelled.
+    let viewTurn: { target: THREE.Vector3; distance: number } | null = null
+    function setViewDirection(eyeDir: [number, number, number], opts: { tween?: boolean } = {}): void {
+      const dir = new THREE.Vector3(eyeDir[0], eyeDir[1], eyeDir[2])
+      if (dir.lengthSq() < 1e-12) return
+      dir.normalize()
+      // Looking along ±Z with world-up +Z is degenerate; use the shared tilt.
+      if (Math.hypot(dir.x, dir.y) < POLE_TILT) dir.set(0, -POLE_TILT, dir.z >= 0 ? 1 : -1).normalize()
+      const live = getCameraState()
+      const pending = viewTurn
+      const target = pending !== null ? pending.target.clone() : new THREE.Vector3(live.target[0], live.target[1], live.target[2])
+      const distance = pending !== null
+        ? pending.distance
+        : new THREE.Vector3(live.eye[0], live.eye[1], live.eye[2]).distanceTo(target)
+      const eye = target.clone().addScaledVector(dir, distance)
+      // Resync the world-length view limits as a standard view does.
+      resyncViewLimitsToVisibleModel()
+      const mine = { target, distance }
+      viewTurn = mine
+      tweenViewTurn(
+        target,
+        distance,
+        dir,
+        {
+          projection: live.projection,
+          fovDeg: live.fovDeg,
+          parallelHeight: live.parallelHeight,
+          eye: [eye.x, eye.y, eye.z],
+          target: [target.x, target.y, target.z],
+          up: [0, 0, 1],
+        },
+        opts.tween === false ? 0 : 200,
+        () => { if (viewTurn === mine) viewTurn = null },
+      )
+    }
+
+    /**
+     * A die turn's tween (view-die design §2.3): the eye orbits the FIXED
+     * `target` at the FIXED `distance`, its direction rotating from where it
+     * is to `dir` (`viewTurn.ts`: no straight-line eye lerp, so a flip never
+     * passes through the target and the pivot never drifts), up world +Z,
+     * fov and parallel height held, then lands exactly on `final`. Shares
+     * the camera tween slot, so any camera input that cancels a tween
+     * cancels this one with `controls.target` already the true target.
+     */
+    function tweenViewTurn(
+      target: THREE.Vector3,
+      distance: number,
+      dir: THREE.Vector3,
+      final: Parameters<typeof applyCameraState>[0],
+      durationMs: number,
+      onDone?: (completed: boolean) => void,
+    ): void {
+      cancelCameraTween()
+      const live = getCameraState()
+      const start = new THREE.Vector3(live.eye[0], live.eye[1], live.eye[2]).sub(target)
+      if (!shouldAnimateCamera(durationMs, prefersReducedMotion(), getSmoothCamera()) || start.lengthSq() < 1e-18) {
+        applyCameraState(final)
+        noteCameraMoved()
+        onDone?.(true)
+        return
+      }
+      start.normalize()
+      const from: V3 = [start.x, start.y, start.z]
+      const rotation = viewTurnRotation(from, [dir.x, dir.y, dir.z])
+      const center: V3 = [target.x, target.y, target.z]
+      const height = live.parallelHeight
+      const t0 = performance.now()
+      const eye = new THREE.Vector3()
+      const up = new THREE.Vector3(0, 0, 1)
+      const step = (): void => {
+        const raw = Math.min(1, (performance.now() - t0) / durationMs)
+        const at = viewTurnEye(center, distance, from, rotation, easeCameraTween(raw))
+        eye.set(at[0], at[1], at[2])
+        rig.applyPose(eye, target, up, live.fovDeg)
+        if (rig.projection === 'parallel' && height !== undefined) rig.setParallelHeight(height)
+        controls.target.copy(target)
+        controls.update()
+        scheduleRender()
+        if (raw < 1) {
+          cameraTween = { raf: requestAnimationFrame(step), onDone }
+          return
+        }
+        cameraTween = null
+        applyCameraState(final)
+        noteCameraMoved()
+        onDone?.(true)
+      }
+      cameraTween = { raf: requestAnimationFrame(step), onDone }
+    }
+
+    // A die drag orbits through OrbitControls' own rotate (`rotateLeft`/
+    // `rotateUp`, the same `_rotateLeft`/`_rotateUp` its pointer path calls),
+    // so damping, the polar clamp and the change events behave exactly like
+    // the Orbit tool. The die keeps its own pointer capture, so no
+    // OrbitControls pointer state exists to get stuck; 'start'/'end' are
+    // dispatched by hand so the tween cancels and the dock fades like any drag.
+    let dieOrbiting = false
+    function orbitDrag(dxPx: number, dyPx: number): void {
+      if (!controls.enabled) return
+      if (!dieOrbiting) {
+        dieOrbiting = true
+        controls.dispatchEvent({ type: 'start' })
+      }
+      const h = el.clientHeight > 0 ? el.clientHeight : 1
+      controls.rotateLeft((2 * Math.PI * dxPx) / h)
+      controls.rotateUp((2 * Math.PI * dyPx) / h)
+      scheduleRender()
+    }
+    function endOrbitDrag(): void {
+      if (!dieOrbiting) return
+      dieOrbiting = false
+      controls.dispatchEvent({ type: 'end' })
+    }
+    function notifyCameraOrientation(): void {
+      const listeners = cameraOrientationListenersRef.current
+      if (listeners.size === 0) return
+      const q = camera.quaternion
+      const last = cameraOrientationRef.current
+      if (q.x === last[0] && q.y === last[1] && q.z === last[2] && q.w === last[3]) return
+      const next: [number, number, number, number] = [q.x, q.y, q.z, q.w]
+      cameraOrientationRef.current = next
+      for (const cb of listeners) cb(next)
+    }
+    function subscribeCameraOrientation(cb: (q: [number, number, number, number]) => void): () => void {
+      cameraOrientationListenersRef.current.add(cb)
+      const q = camera.quaternion
+      cameraOrientationRef.current = [q.x, q.y, q.z, q.w]
+      cb(cameraOrientationRef.current)
+      return () => { cameraOrientationListenersRef.current.delete(cb) }
     }
 
     function setCamera(
@@ -6346,7 +6678,7 @@ export default function Viewport({
       const h0 = start.parallelHeight
       const h1 = state.parallelHeight ?? 2 * dist1 * tanHalfFovRad(fov1)
       const t0 = performance.now()
-      const ease = (t: number): number => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
+      const ease = easeCameraTween
       const q = new THREE.Quaternion()
       const eye = new THREE.Vector3()
       const forward = new THREE.Vector3()
@@ -6921,7 +7253,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setViewDirection, orbitDrag, endOrbitDrag, subscribeCameraOrientation, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -8386,6 +8718,7 @@ export default function Viewport({
      * (docs/design/camera.md §1: `CameraRig.toggleProjection`).
      */
     function toggleProjection(): void {
+      if (viewTurn !== null) cancelCameraTween()
       rig.toggleProjection(controls.target)
       rebindControlsForProjectionChange()
       scheduleRender()
@@ -8456,7 +8789,7 @@ export default function Viewport({
           reResolveAtHeldPointer()
         } else {
           reportToolHint()
-          drawPlaneCueLayer.update(queryDrawPlaneCue(at), getDrawingAxes(wasmScene))
+          drawPlaneCueLayer.update(queryDrawPlaneCue(at))
           scheduleRender()
         }
       }
@@ -8679,7 +9012,7 @@ export default function Viewport({
         if (ev.altKey) return
         (armedTool as { toggleDetached(): void }).toggleDetached()
         reportToolHint()
-        drawPlaneCueLayer.update(queryDrawPlaneCue(armedTool), getDrawingAxes(wasmScene))
+        drawPlaneCueLayer.update(queryDrawPlaneCue(armedTool))
         scheduleRender()
       }
     }
@@ -8913,7 +9246,7 @@ export default function Viewport({
       activeTool.onPointerMove(snap, ray)
       const cueSnap = toolSnapForCues(snap, activeTool)
       cueLayer.update(cueSnap, readOnlyRef.current, getDrawingAxes(wasmScene))
-      drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
+      drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
       publishSnapCues(cueSnap, activeTool)
     }
     function onPrecisionKey(ev: KeyboardEvent): void {
@@ -9110,6 +9443,10 @@ export default function Viewport({
         if (statsActive) {
           recordRender(renderer.info, performance.now() - renderStart)
         }
+        // The view die follows the camera frame for frame.
+        notifyCameraOrientation()
+        // …and its pips follow the active tool's drawing plane.
+        notifyDrawPlaneState()
         // Tape loupe copy (finding 4): MUST run synchronously right here,
         // immediately after `renderer.render()` and still inside this same
         // `render()` call — see `copyLoupeSource`'s own doc for why (no
@@ -9524,7 +9861,7 @@ export default function Viewport({
       // leaving the snap — and therefore its SnapDot/tooltip — intact).
       const cueSnap = toolSnapForCues(snap, activeTool)
       cueLayer.update(cueSnap, readOnlyRef.current, getDrawingAxes(wasmScene))
-      drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
+      drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
       scheduleRender()
 
       publishSnapCues(cueSnap, activeTool, ev.buttons)
@@ -9613,6 +9950,12 @@ export default function Viewport({
           direction: snap.direction,
           frame: getDrawingAxes(wasmScene),
           projected: activeTool.snapProjected?.() ?? false,
+          // A draw tool's drawing plane (view-die design §4): the ring
+          // around the dot and the plane word on the chip.
+          ...((): { plane?: InferencePlane } => {
+            const plane = cursorPlaneOf(activeTool.drawPlaneState?.() ?? null)
+            return plane === undefined ? {} : { plane }
+          })(),
           // A tool's own hover guidance (Tool.hoverHint): the refusal a
           // click would toast, shown beside the cursor before the click.
           ...((): { hint?: string } => {
@@ -10277,6 +10620,10 @@ export default function Viewport({
         const activeTool = toolController.activeTool
         if (toolHasArmedGesture(activeTool)) {
           activeTool.onKey(ev)
+          // A draw tool's plane may have changed under a still cursor: replay
+          // its hover so the cue, the snap dot's ring and the chip's plane
+          // word follow at once, as after any idle key.
+          if (followsViewPlane(activeTool)) reResolveAtHeldPointer()
           drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
           scheduleRender()
           return
@@ -10294,6 +10641,10 @@ export default function Viewport({
         const activeTool = toolController.activeTool
         if (toolHasArmedGesture(activeTool)) {
           activeTool.onKey(ev)
+          // A draw tool's plane may have changed under a still cursor: replay
+          // its hover so the cue, the snap dot's ring and the chip's plane
+          // word follow at once, as after any idle key.
+          if (followsViewPlane(activeTool)) reResolveAtHeldPointer()
           drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
           scheduleRender()
           return
@@ -10335,8 +10686,13 @@ export default function Viewport({
             // has none) — `suppressAxisLine` keeps its on-axis snap fully
             // functional while hiding the incoherent guide line, same as
             // the pointer-move path.
-            cueLayer.update(toolSnapForCues(snap, activeTool), readOnlyRef.current, getDrawingAxes(wasmScene))
-            drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
+            const cueSnap = toolSnapForCues(snap, activeTool)
+            cueLayer.update(cueSnap, readOnlyRef.current, getDrawingAxes(wasmScene))
+            drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
+            // The snap dot's ring and the chip's plane word follow a re-lock
+            // at once — while the pointer is still over the canvas (off it,
+            // the chip is gone and a stale ray must not bring it back).
+            if (pointerInsideCanvas) publishSnapCues(cueSnap, activeTool)
           }
           return
         }
@@ -10428,7 +10784,7 @@ export default function Viewport({
         if (followsViewPlane(activeTool)) {
           reResolveAtHeldPointer()
         } else {
-          drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
+          drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
         }
         // A tool may have restyled its gizmo in response (e.g. Rotate /
         // Protractor / Slice locking the axis with Shift or an arrow during
@@ -10588,7 +10944,7 @@ export default function Viewport({
           // A delivered drag is never half of a double-click, whatever the
           // multi-click tracker's own (wider, for touch) slop made of it.
           multiClick.reset()
-          drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
+          drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool))
           scheduleRender()
         }
         return
@@ -10730,7 +11086,7 @@ export default function Viewport({
       const leftTool = toolController.activeTool
       leftTool.onPointerLeave?.()
       reportToolHint()
-      drawPlaneCueLayer.update(queryDrawPlaneCue(leftTool), getDrawingAxes(wasmScene))
+      drawPlaneCueLayer.update(queryDrawPlaneCue(leftTool))
       scheduleRender()
       onInferenceChangeRef.current?.(null)
     }
@@ -10981,6 +11337,7 @@ export default function Viewport({
      * (§3.5 — flight along the view direction is invisible under parallel,
      * and nothing is restored on exit), OrbitControls off, pose seeded. */
     function flyBegin(): void {
+      if (viewTurn !== null) cancelCameraTween()
       if (rig.projection === 'parallel') toggleProjection()
       controls.enabled = false
       flySeedFromCamera()
@@ -11457,6 +11814,7 @@ export default function Viewport({
       switchToolRef.current = null
       sceneRendererRef.current = null
       drawPlaneCueLayerRef.current = null
+      if (customPipExpiryTimer !== null) clearTimeout(customPipExpiryTimer)
       if (apiRefRef.current !== undefined) {
         apiRefRef.current.current = null
       }

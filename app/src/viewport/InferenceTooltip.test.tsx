@@ -149,3 +149,41 @@ describe('InferenceTooltip hover detail line', () => {
     expect(screen.queryByTestId('inference-tip-detail')).toBeNull()
   })
 })
+
+describe('InferenceTooltip — the drawing plane word (view-die §4)', () => {
+  it('appends the plane, tinted: "On Plane · green", "Endpoint · blue"', () => {
+    const { unmount } = render(<InferenceTooltip info={{ kind: 'plane', screenX: 10, screenY: 20, plane: { pip: 'green', hold: 'inferred' } }} />)
+    expect(screen.getByText('On Plane')).toBeInTheDocument()
+    const word = screen.getByTestId('inference-tip-plane')
+    expect(word).toHaveTextContent('· green')
+    expect(word.style.color).toBe('var(--axis-green)')
+    unmount()
+    render(<InferenceTooltip info={{ kind: 'endpoint', screenX: 10, screenY: 20, plane: { pip: 'blue', hold: 'anchored' } }} />)
+    expect(screen.getByTestId('inference-tip-plane')).toHaveTextContent('· blue')
+  })
+
+  it('a custom plane reads "· face plane" in the violet token', () => {
+    render(<InferenceTooltip info={{ kind: 'on-face', screenX: 10, screenY: 20, plane: { pip: 'custom', hold: 'inferred' } }} />)
+    const word = screen.getByTestId('inference-tip-plane')
+    expect(word).toHaveTextContent('· face plane')
+    expect(word.style.color).toContain('--plane-custom')
+  })
+
+  it('a padlock for a locked or pinned plane, none for an inferred or anchored one', () => {
+    for (const hold of ['locked', 'pinned'] as const) {
+      const { unmount } = render(<InferenceTooltip info={{ kind: 'endpoint', screenX: 10, screenY: 20, plane: { pip: 'red', hold } }} />)
+      expect(screen.getByTestId('inference-tip-padlock')).toBeInTheDocument()
+      unmount()
+    }
+    for (const hold of ['inferred', 'anchored'] as const) {
+      const { unmount } = render(<InferenceTooltip info={{ kind: 'endpoint', screenX: 10, screenY: 20, plane: { pip: 'red', hold } }} />)
+      expect(screen.queryByTestId('inference-tip-padlock')).toBeNull()
+      unmount()
+    }
+  })
+
+  it('no plane word for a tool that draws on no plane', () => {
+    render(<InferenceTooltip info={{ kind: 'endpoint', screenX: 10, screenY: 20 }} />)
+    expect(screen.queryByTestId('inference-tip-plane')).toBeNull()
+  })
+})

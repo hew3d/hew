@@ -76,6 +76,16 @@ export class PlanePin {
     }
     if (this.shiftDown) return false // keydown autorepeat
     this.shiftDown = true
+    return this.toggle()
+  }
+
+  /**
+   * What one Shift press does, without the autorepeat guard: pin the
+   * tracked hover plane, or release the active pin. The view die's custom
+   * pip calls this through the tool (a click has no physical Shift to
+   * guard). Returns whether the pin state changed.
+   */
+  toggle(): boolean {
     if (this.pinned !== null) {
       this.pinned = null
       this.hover = null
@@ -84,6 +94,18 @@ export class PlanePin {
     if (this.hover === null) return false
     this.pinned = this.hover
     return true
+  }
+
+  /** Pin `plane` outright (the view die's custom pip pins its candidate,
+   *  which need not be the tracked hover). */
+  pinPlane(plane: PinnedPlane): void {
+    this.pinned = plane
+  }
+
+  /** The plane a Shift press would pin right now (the last tracked hover),
+   *  or null before any hover, under a pin, or after a release. */
+  get tracked(): PinnedPlane | null {
+    return this.hover
   }
 
   /**

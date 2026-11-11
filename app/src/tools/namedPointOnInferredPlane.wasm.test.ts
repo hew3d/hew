@@ -19,6 +19,7 @@ import { SnapService } from '../viewport/snapService'
 import type { ApertureBasis, Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Snap, SnapConstraint } from './types'
+import type { DrawPlaneState } from './drawPlane'
 import { LineTool } from './LineTool'
 import { RectangleTool } from './RectangleTool'
 import { CircleTool } from './CircleTool'
@@ -89,7 +90,7 @@ interface Under {
   onKey(ev: KeyboardEvent): void
   setShiftHeld(held: boolean): void
   snapProjected(): boolean
-  activeDrawPlaneCue(): { plane: { normal: V3; ground: boolean }; through: V3 } | null
+  drawPlaneState(): DrawPlaneState
 }
 
 const noop = vi.fn()
@@ -166,11 +167,14 @@ describe.each(TOOLS)('$name — named points of a ground Rectangle on the inferr
       expect(snap?.kind).toBe('endpoint')
       expectVec([snap!.x, snap!.y, snap!.z], at)
       expect(tool.snapProjected()).toBe(false)
-      // The patch passes through the corner and has the inferred orientation.
-      const cue = tool.activeDrawPlaneCue()
-      expect(cue).not.toBeNull()
-      expect(axisOf(cue!.plane.normal)).toBe(axis)
-      expectVec(cue!.through, at)
+      // The plane state passes through the corner and has the inferred
+      // orientation.
+      const state = tool.drawPlaneState()
+      expect(state.hover).not.toBeNull()
+      expect(axisOf(state.plane.normal)).toBe(axis)
+      const o = state.plane.origin
+      const n = state.plane.normal
+      expect((at[0] - o[0]) * n[0] + (at[1] - o[1]) * n[1] + (at[2] - o[2]) * n[2]).toBeCloseTo(0, 6)
       tool.onPointerDown(snap, ray)
       const stage = stageOf(tool)
       expect(stage.started).toBe(true)

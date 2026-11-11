@@ -22,7 +22,8 @@ import { pickPolicyGeneration } from './pickPolicy'
 import { detachedSketchIds } from './planeUnits'
 import type { SketchTarget } from './sketchGesture'
 import type { EditContext, Snap } from './types'
-import { distanceOffPlane, FACE_PLANE_EPS_M } from './faceDraw'
+import { distanceOffPlane, FACE_PLANE_EPS_M, type HoverFaceRef } from './faceDraw'
+import type { PinnedPlane, PlanePin } from './planePin'
 
 /** A drawing plane: any point on it, its unit normal, and a right-handed
  *  in-plane basis (u, v) with `cross(u, v) === normal`. */
@@ -307,122 +308,6 @@ export function planeKey(plane: DrawPlane): string {
 }
 
 /**
- * The drawing-plane cue a draw tool should show RIGHT NOW (design §6 bullet
- * 1): a subtle finite grid patch on the active plane, so the user sees where
- * a non-ground gesture is about to land. Three cases produce a cue;
- * everything else is `null` (the world grid already covers the ground plane):
- *
- * - Anchored on a NON-ground plane (face mode or plane/sketch mode): the
- *   frozen plane, through the gesture's anchor point.
- * - Idle with an active arrow-key plane lock AND a tracked hover point: the
- *   locked axis plane through that hover point (so the cue previews where
- *   the plane would land if the user clicked now).
- * - Idle and unlocked, when the plane the next click would land on is NOT
- *   the ground (view-plane design §5): the inferred axis plane over nothing
- *   (picker step 7), a hovered sketch's plane — edge or fill (step 4) — or
- *   a hovered or leaned-toward face's plane, eligible or not (steps 3, 5,
- *   6; see `PATCH_OVER_FACES`). Drawn through the hover RAY's hit on that
- *   plane, not the snap point: an X-ray see-through snap or a fallback
- *   plane can put the snap off the plane. An active lock beats it, as it
- *   beats every inference; no hit (the ray runs parallel to the plane or
- *   points away from it) shows no patch.
- *
- * Each tool calls this from its own `activeDrawPlaneCue()`, passing its own
- * anchored-plane/anchor pair (or nulls when not anchored) and idle state —
- * the draw tools share this one implementation instead of reimplementing
- * the same dispatch in each.
- */
-export function drawPlaneCue(params: {
-  /** The frozen plane of whichever stage (face or plane mode) is anchored, or null if neither is. */
-  anchoredPlane: DrawPlane | null
-  /** The anchor point paired with `anchoredPlane` (ignored when that's null). */
-  anchoredThrough: V3 | null
-  /** The idle arrow-key plane lock's axis, or null if unlocked. */
-  idleLock: 0 | 1 | 2 | null
-  /** The last-tracked hover point while idle-locked, or null before any hover. */
-  idleHover: V3 | null
-  /**
-   * The current drawing-axes frame (tool-parity design §4), read ONLY by the
-   * idle-lock case below — mirrors `resolveClickDrawTarget`, which threads
-   * this same frame into its own `axisDrawPlane` call so the idle-lock
-   * PREVIEW resolves `idleLock`'s axis against the CURRENT frame instead of
-   * literal world X/Y/Z, landing on the exact plane a click would resolve
-   * onto. Defaults to `WORLD_DRAWING_AXES` so the anchored-plane branch
-   * (which never reads it — it already has a fully resolved `DrawPlane`)
-   * doesn't need to pass anything.
-   */
-  frame?: DrawingAxes
-  /**
-   * The plane the next idle click would land on at the current hover (the
-   * tool's `_idleHoverPlane`, gated by `idleHoverCue`) and the ray it was
-   * resolved for. Only read while idle and unlocked (`idleLock === null`);
-   * pass null (or omit) under a pin, or when the hover shows no patch. A
-   * ground plane gives no cue.
-   */
-  idleHoverCue?: { plane: DrawPlane; ray: Ray } | null
-}): { plane: DrawPlane; through: V3 } | null {
-  if (params.anchoredPlane !== null && params.anchoredThrough !== null) {
-    // A Shift pin holds the plane's orientation, not its height: a first
-    // click through a named point off it starts the shape at that point
-    // (planePin `pointPlane`), so the patch shows that lifted plane, and a
-    // ground pin lifted off the ground is no longer the ground.
-    const through = params.anchoredThrough
-    const off = Math.abs(distanceOffPlane(through, params.anchoredPlane.origin, params.anchoredPlane.normal)) > FACE_PLANE_EPS_M
-    const plane: DrawPlane = off
-      ? { ...params.anchoredPlane, origin: through, ground: isGroundPlane(through, params.anchoredPlane.normal) }
-      : params.anchoredPlane
-    return plane.ground ? null : { plane, through }
-  }
-  if (params.idleLock !== null) {
-    if (params.idleHover === null) return null
-    const plane = axisDrawPlane(params.idleLock, params.idleHover, params.frame ?? WORLD_DRAWING_AXES)
-    // A Z lock through a hover point that happens to sit at z=0 resolves to
-    // the exact ground plane (mirrors the click-time `begin_ground_sketch`
-    // fast path) — still no cue; the world grid already covers it. Only
-    // reachable at world identity: a moved frame's blue axis is never THE
-    // ground plane, per `axisDrawPlane`'s doc comment.
-    return plane.ground ? null : { plane, through: params.idleHover }
-  }
-  const hover = params.idleHoverCue ?? null
-  if (hover !== null && !hover.plane.ground) {
-    const through = pointOnPlane(hover.ray, hover.plane)
-    return through === null ? null : { plane: hover.plane, through }
-  }
-  return null
-}
-
-/**
- * Whether the idle plane patch shows over a hovered face (view-plane design
- * §5): an eligible face under the cursor (picker step 3), the face the
- * cursor leans toward at an object's edge or corner (step 5), or an
- * ineligible group or component face at the top level (step 6). The rule is
- * "the patch shows the plane the next click would land on, whenever that
- * plane is not the ground"; this one switch drops the face half of it if
- * the patch over faces reads as noise, leaving sketches and the inferred
- * plane untouched.
- */
-export const PATCH_OVER_FACES = true
-
-/**
- * The idle hover cue a draw tool hands `drawPlaneCue` as `idleHoverCue`:
- * `hover` is the tool's `_idleHoverResolution` (the plane the next click
- * would land on, `onFace` set when a face decided it), `ray` the hover ray.
- * `inObjectContext` is true inside an entered object, where a click off
- * the object's faces does nothing (the tools stay in face mode there), so
- * only a face of it shows a patch.
- */
-export function idleHoverCue(
-  hover: { plane: DrawPlane; onFace?: true },
-  ray: Ray,
-  inObjectContext: boolean,
-): { plane: DrawPlane; ray: Ray } | null {
-  // Faces (steps 3, 5, 6): the one face branch, behind PATCH_OVER_FACES.
-  if (hover.onFace === true) return PATCH_OVER_FACES ? { plane: hover.plane, ray } : null
-  if (inObjectContext) return null
-  return { plane: hover.plane, ray }
-}
-
-/**
  * Memoizes the sketch-mode resolution for the CURRENT pointer event —
  * mirrors `FacePickCache` in faceDraw.ts. Keyed by reference equality on the
  * `Ray` passed in (the Viewport builds one Ray object per event); a miss
@@ -680,9 +565,12 @@ export interface IdleDrawTarget {
    */
   inferredAxis?: 0 | 1 | 2
   /** Set only when an ineligible face decided the plane (picker step 6),
-   *  so the idle plane patch can tell a face from a sketch or the
-   *  inferred plane (`idleHoverCue`, `PATCH_OVER_FACES`). */
+   *  so the plane state can tell a face from a sketch or the inferred
+   *  plane (`DrawPlaneTracker`). */
   onFace?: true
+  /** The face that decided the plane (step 6), for the cursor cue's
+   *  outline (view-die design §4). */
+  face?: HoverFaceRef
 }
 
 /**
@@ -744,7 +632,7 @@ export function resolveIdleDrawTarget(
   sketchPickCache: SketchPickCache,
   ray: Ray,
   editContext: EditContext,
-  foreignFace?: () => { point: V3; normal: V3; depth: number } | null,
+  foreignFace?: () => { point: V3; normal: V3; depth: number; face?: HoverFaceRef } | null,
   foreignKey = '',
   view: CameraView | null = null,
   snap: Snap | null = null,
@@ -761,7 +649,7 @@ function resolveIdleDrawTargetAt(
   sketchPickCache: SketchPickCache,
   ray: Ray,
   editContext: EditContext,
-  foreignFace: (() => { point: V3; normal: V3; depth: number } | null) | undefined,
+  foreignFace: (() => { point: V3; normal: V3; depth: number; face?: HoverFaceRef } | null) | undefined,
   foreignKey: string,
   view: CameraView | null,
 ): IdleDrawTarget {
@@ -838,7 +726,10 @@ function resolveIdleDrawTargetAt(
       const ff = foreignFace()
       if (ff !== null) {
         const facePlane = drawPlaneThrough(ff.point, ff.normal)
-        if (facePlane !== null) return { plane: facePlane, target: { kind: 'plane', plane: facePlane, instance: null }, onFace: true }
+        if (facePlane !== null) {
+          const target: SketchTarget = { kind: 'plane', plane: facePlane, instance: null }
+          return ff.face === undefined ? { plane: facePlane, target, onFace: true } : { plane: facePlane, target, onFace: true, face: ff.face }
+        }
       }
     }
     if (frame === null || axis === null) {
@@ -968,7 +859,7 @@ export function resolveClickDrawTarget(
   snap: Snap | null,
   ray: Ray,
   editContext: EditContext,
-  foreignFace?: () => { point: V3; normal: V3; depth: number } | null,
+  foreignFace?: () => { point: V3; normal: V3; depth: number; face?: HoverFaceRef } | null,
   foreignKey = '',
   view: CameraView | null = null,
 ): IdleDrawTarget | null {
@@ -1091,4 +982,540 @@ export function groundNaturalTarget(
     ? axisDrawPlane(2, anchor, WORLD_DRAWING_AXES)
     : axisDrawPlane(inferredAxis(frame, view), anchor, frame)
   return { plane, target: { kind: 'plane', plane, instance: instanceOf(editContext) } }
+}
+
+/**
+ * What the view die, its pips and the cursor cue read from a plane-drawing
+ * tool (view-die design §3.4): one derived value the five draw tools build
+ * with `DrawPlaneTracker` below, so the widget and the cue never read the
+ * cue layer and agree with the plane a click lands on.
+ */
+export interface DrawPlaneState {
+  /** The plane the next click (idle) or the current gesture (anchored) uses. */
+  plane: DrawPlane
+  /** Pip that represents it. */
+  pip: PlanePip
+  hold: 'inferred' | 'locked' | 'pinned' | 'anchored'
+  /** What the cursor is over; drives the cursor cue (§4). Null off-canvas.
+   *  Under a hold (lock, pin, gesture) the tool runs no face or sketch pick,
+   *  so the kind there is always `'space'` and `point` is the cursor ray's
+   *  hit on the held plane (the patch sits at the cursor). */
+  hover: null | {
+    kind: DrawPlaneHoverKind
+    /** Ray hit on the plane. */
+    point: V3
+    /** World-space outer loop of the leaned-to face, when planar. */
+    faceLoop?: V3[]
+  }
+}
+
+/** The four pips under the view die: the drawing axes' red, green and blue
+ *  planes, and any other plane. */
+export type PlanePip = 'red' | 'green' | 'blue' | 'custom'
+
+/** What the cursor is over, for the cursor cue (view-die design §4). */
+export type DrawPlaneHoverKind = 'space' | 'ground' | 'face' | 'sketch' | 'lean' | 'leanExtended'
+
+/** How far (degrees) a plane's normal may sit off a drawing axis and still
+ *  light that axis's pip (view-die design §3.1), either direction. */
+export const PIP_AXIS_TOLERANCE_DEG = 0.5
+const PIP_AXIS_TOL_COS = Math.cos((PIP_AXIS_TOLERANCE_DEG * Math.PI) / 180)
+
+/**
+ * The pip a plane with `normal` lights: red, green or blue when the normal
+ * is parallel to `frame`'s X, Y or Z within `PIP_AXIS_TOLERANCE_DEG`,
+ * either direction, else custom. The offset never matters: a Shift pin on a
+ * cube's front face lights green. Follows a moved drawing-axes frame, as the
+ * arrow locks do. A zero or non-finite normal is custom.
+ */
+export function planePip(normal: V3, frame: DrawingAxes = WORLD_DRAWING_AXES): PlanePip {
+  const len = Math.hypot(normal[0], normal[1], normal[2])
+  if (!(len > 1e-12) || !Number.isFinite(len)) return 'custom'
+  const along = (a: V3): number => Math.abs(normal[0] * a[0] + normal[1] * a[1] + normal[2] * a[2]) / len
+  if (along(frame.x) >= PIP_AXIS_TOL_COS) return 'red'
+  if (along(frame.y) >= PIP_AXIS_TOL_COS) return 'green'
+  if (along(frame.z) >= PIP_AXIS_TOL_COS) return 'blue'
+  return 'custom'
+}
+
+/** The arrow key a red, green or blue pip stands for (→ red, ← green, ↑
+ *  blue), or null for the custom pip. */
+export function pipArrowKey(pip: PlanePip): 'ArrowRight' | 'ArrowLeft' | 'ArrowUp' | null {
+  /* oxlint-disable lingui/no-unlocalized-strings -- key values are identifiers */
+  switch (pip) {
+    case 'red': return 'ArrowRight'
+    case 'green': return 'ArrowLeft'
+    case 'blue': return 'ArrowUp'
+    case 'custom': return null
+  }
+  /* oxlint-enable lingui/no-unlocalized-strings */
+}
+
+/** How a draw tool's idle picker decided the plane at a hover: the shape
+ *  each tool's `_idleHoverResolution` answers. `face` is the deciding face
+ *  (steps 3, 5, 6), `target` the sketch target when the picker adopted a
+ *  sketch (step 4), `inferredAxis` the empty-space inference (step 7). */
+export interface IdleHoverResolution {
+  plane: DrawPlane
+  inferredAxis?: 0 | 1 | 2
+  onFace?: true
+  face?: HoverFaceRef
+  target?: SketchTarget
+}
+
+/** What the cursor was over at an idle hover, from how the picker decided
+ *  the plane (`IdleHoverResolution`). */
+export function idleHoverKind(resolution: IdleHoverResolution): DrawPlaneHoverKind {
+  const face = resolution.face
+  if (face !== undefined) {
+    if (!face.boundary) return 'face'
+    return face.offObject ? 'leanExtended' : 'lean'
+  }
+  if (resolution.onFace === true) return 'face'
+  if (resolution.target?.kind === 'existing') return 'sketch'
+  // The ground as a point set, whatever built it: a moved frame's blue plane
+  // only translated within the ground or turned about blue IS the ground
+  // the world grid already shows.
+  if (resolution.plane.ground || isGroundPlane(resolution.plane.origin, resolution.plane.normal)) return 'ground'
+  return 'space'
+}
+
+/** How far apart (in the face's own frame) two tessellated vertex normals
+ *  of one face may be and the face still count as flat. A planar face's
+ *  tessellation writes the exact plane normal at every corner; a chord facet
+ *  of a curved wall carries the wall's varying normals. */
+const FLAT_FACE_NORMAL_EPS = 1e-4
+
+/**
+ * The world-space outer loops of hovered faces, for the cursor cue's
+ * outline (view-die design §4), with a memo per document revision.
+ *
+ * `face_boundary` answers in the object's own frame, which is world space
+ * for a world object or a group member (groups bake their transforms) and
+ * definition space for a component member, so a face struck through an
+ * instance is posed forward through that instance (`applyAffine3x4`), the
+ * mapping `worldFacePlane` uses for its point. A curved face (a chord facet
+ * of a cylinder wall) gets no loop: its outline would be a sliver of the
+ * wall, so the cue shows the small patch instead. Flatness is read off the
+ * object's tessellated normals (`object_mesh` + `face_mesh_range`), cached
+ * per object and document revision (`history_generation`), so the cost is
+ * one tessellation of the leaned-on object per edit, paid only on a lean.
+ * When flatness cannot be read the face counts as curved (fail closed).
+ */
+export class FaceLoopCache {
+  private gen: string | null = null
+  private loops = new Map<string, V3[] | null>()
+  private normals: { object: bigint; normals: Float32Array } | null = null
+
+  /** The world-space outer loop of `face`, or null when it is curved,
+   *  stale, degenerate, or its instance has no pose. */
+  loopFor(wasmScene: WasmScene, face: HoverFaceRef): V3[] | null {
+    const gen = typeof wasmScene.history_generation === 'function' ? String(wasmScene.history_generation()) : ''
+    if (gen !== this.gen) {
+      this.gen = gen
+      this.loops.clear()
+      this.normals = null
+    }
+    const key = `${face.object}:${face.face}`
+    let local = this.loops.get(key)
+    if (local === undefined) {
+      local = this.localLoop(wasmScene, face.object, face.face)
+      this.loops.set(key, local)
+    }
+    if (local === null) return null
+    if (face.instance === null) return local
+    const pose = wasmScene.instance_pose(face.instance)
+    if (pose === undefined) return null
+    return local.map((p) => applyAffine3x4(pose, p))
+  }
+
+  clear(): void {
+    this.gen = null
+    this.loops.clear()
+    this.normals = null
+  }
+
+  private localLoop(wasmScene: WasmScene, object: bigint, face: bigint): V3[] | null {
+    if (typeof wasmScene.face_boundary !== 'function') return null
+    let flat: ArrayLike<number>
+    try {
+      flat = wasmScene.face_boundary(object, face)
+    } catch {
+      return null // a stale handle: nothing to outline
+    }
+    if (flat.length < 9) return null
+    if (this.isCurved(wasmScene, object, face)) return null
+    const out: V3[] = []
+    for (let i = 0; i + 2 < flat.length; i += 3) out.push([flat[i], flat[i + 1], flat[i + 2]])
+    return out
+  }
+
+  /** Whether `face` is a chord facet of a curved wall: the kernel's own
+   *  answer (`face_is_curved`), else, for a scene without that accessor,
+   *  the tessellated normals. Fails closed: a
+   *  face whose flatness cannot be read (no mesh call, a throw, a missing
+   *  or short range) counts as curved, so the cue falls back to the small
+   *  patch rather than outline a sliver. */
+  private isCurved(wasmScene: WasmScene, object: bigint, face: bigint): boolean {
+    if (typeof wasmScene.face_is_curved === 'function') {
+      try {
+        return wasmScene.face_is_curved(object, face)
+      } catch {
+        return true
+      }
+    }
+    if (typeof wasmScene.object_mesh !== 'function' || typeof wasmScene.face_mesh_range !== 'function') return true
+    try {
+      if (this.normals === null || this.normals.object !== object) {
+        const mesh = wasmScene.object_mesh(object)
+        try {
+          this.normals = { object, normals: mesh.normals() }
+        } finally {
+          mesh.free()
+        }
+      }
+      const range = wasmScene.face_mesh_range(object, face)
+      if (range === undefined || range.length < 2 || range[1] < 1) return true
+      const n = this.normals.normals
+      const base = range[0] * 3
+      const end = (range[0] + range[1]) * 3
+      if (end > n.length) return true
+      for (let i = base + 3; i + 2 < end; i += 3) {
+        if (
+          Math.abs(n[i] - n[base]) > FLAT_FACE_NORMAL_EPS ||
+          Math.abs(n[i + 1] - n[base + 1]) > FLAT_FACE_NORMAL_EPS ||
+          Math.abs(n[i + 2] - n[base + 2]) > FLAT_FACE_NORMAL_EPS
+        ) {
+          return true
+        }
+      }
+      return false
+    } catch {
+      return true
+    }
+  }
+}
+
+/** How long (ms) after the last hover over a custom plane the custom pip
+ *  still acts on it (view-die design §3.3: the pointer has to cross the
+ *  canvas to reach the pip). */
+export const CUSTOM_CANDIDATE_MS = 2000
+
+/** The custom pip's candidate plane: where the last custom hover was, when,
+ *  and the document state it belongs to. */
+interface CustomCandidate {
+  plane: DrawPlane
+  through: V3
+  at: number
+  /** `candidateKey` when set: a later edit, undo, axes move or session
+   *  change makes it stale. */
+  key: string
+  /** The pointer left the canvas while it was live: no timeout until the
+   *  pointer's next canvas move. */
+  latched: boolean
+}
+
+/** The document's drawing axes, or world identity for a host that cannot
+ *  answer (a test double without `axes`). */
+function drawingAxesOf(wasmScene: WasmScene): DrawingAxes {
+  return typeof wasmScene.axes === 'function' ? getDrawingAxes(wasmScene) : WORLD_DRAWING_AXES
+}
+
+function candidateKey(wasmScene: WasmScene, frame: DrawingAxes): string {
+  const gen = typeof wasmScene.history_generation === 'function' ? String(wasmScene.history_generation()) : ''
+  // The open session frames: entering or leaving one changes what a click
+  // can draw on, whether or not the kernel counts it as an edit.
+  let sessions = ''
+  if (typeof wasmScene.session_stack === 'function') {
+    for (const node of wasmScene.session_stack()) {
+      sessions += `${node.kind}:${node.id};`
+      node.free()
+    }
+  }
+  return `${gen}|${sessions}|${frame.origin.join(',')}|${frame.x.join(',')}|${frame.y.join(',')}`
+}
+
+/**
+ * What the custom pip acts on for a tool with `pin` and `tracker` — the ONE
+ * order both `customPipPlaneFor` and `pinCustomPlane` use: an active pin
+ * (a click releases it; the pip is enabled only when the pinned plane is
+ * custom), else the live custom candidate, which already covers a custom
+ * plane under the cursor and carries every invalidation (the 2 s window,
+ * an edit, undo or redo, an axes move, a session change). The tracked
+ * hover (`PlanePin.tracked`) is deliberately not consulted: it has none of
+ * those checks.
+ */
+function customPipTarget(
+  wasmScene: WasmScene,
+  pin: PlanePin,
+  tracker: DrawPlaneTracker,
+): { release: true; plane: DrawPlane } | { release: false; target: PinnedPlane } | null {
+  const pinned = pin.current
+  if (pinned !== null) return planePip(pinned.plane.normal, drawingAxesOf(wasmScene)) === 'custom' ? { release: true, plane: pinned.plane } : null
+  const candidate = tracker.customCandidate(wasmScene)
+  return candidate === null ? null : { release: false, target: candidate }
+}
+
+/**
+ * The plane the custom pip acts on, or null (the pip is disabled): a
+ * pinned custom plane, else the live custom candidate (`customPipTarget`).
+ * Callers return null mid-gesture themselves.
+ */
+export function customPipPlaneFor(wasmScene: WasmScene, pin: PlanePin, tracker: DrawPlaneTracker): DrawPlane | null {
+  const t = customPipTarget(wasmScene, pin, tracker)
+  return t === null ? null : t.release ? t.plane : t.target.plane
+}
+
+/**
+ * The custom pip's click: release the pin, else pin the live candidate (the
+ * last custom plane hovered, which the tracked hover may have moved on
+ * from), in `customPipTarget`'s order. Returns whether the pin changed.
+ * Shift keeps pinning the tracked hover (`PlanePin.setShiftHeld`).
+ */
+export function pinCustomPlane(wasmScene: WasmScene, pin: PlanePin, tracker: DrawPlaneTracker): boolean {
+  if (pin.current !== null) return pin.toggle()
+  const t = customPipTarget(wasmScene, pin, tracker)
+  if (t === null || t.release) return false
+  pin.pinPlane(t.target)
+  return true
+}
+
+/** The last idle hover a draw tool resolved while no lock or pin decided
+ *  the plane. `inert` marks a hover inside an entered object over anything
+ *  but that object's faces, where a click does nothing. */
+interface IdleHoverTrack {
+  plane: DrawPlane
+  kind: DrawPlaneHoverKind
+  point: V3
+  faceLoop?: V3[]
+  inert: boolean
+}
+
+/**
+ * The per-tool bookkeeping behind `Tool.drawPlaneState()` (view-die design
+ * §3.4), shared by the five draw tools. Each tool feeds it the cursor ray on
+ * every pointer move (`move`), the idle hover's resolution whenever no lock
+ * or pin decided the plane (`trackIdle`), and `leave` when the pointer
+ * leaves the canvas; `state` then folds in the tool's own gesture, lock and
+ * pin. The last idle hover survives `leave`, so an inferred plane stays on
+ * the pips while the pointer travels to them.
+ */
+export class DrawPlaneTracker {
+  private idle: IdleHoverTrack | null = null
+  private ray: Ray | null = null
+  private readonly loops = new FaceLoopCache()
+  private candidate: CustomCandidate | null = null
+
+  /** `now` is the clock the custom candidate's window runs on (ms). */
+  constructor(private readonly now: () => number = () => performance.now()) {}
+
+  /** The cursor ray of a pointer move (any stage). The first move back on
+   *  the canvas ends a custom candidate's latch: its window counts from its
+   *  own last hover again. */
+  move(ray: Ray): void {
+    if (this.ray === null && this.candidate !== null) this.candidate.latched = false
+    this.ray = ray
+  }
+
+  /** The pointer left the canvas: no hover until the next move. A custom
+   *  candidate still live now (under the cursor, or within its window)
+   *  stays live, with no timeout, until the pointer comes back (it is on
+   *  its way to the custom pip); one already expired is dropped. */
+  leave(): void {
+    this.endCandidateHover()
+    // The tracked plane stays for the pips; it is no longer a live hover.
+    if (this.idle !== null) this.idle = { ...this.idle, inert: true }
+    this.ray = null
+    const c = this.candidate
+    if (c !== null) {
+      if (c.latched || this.now() - c.at <= CUSTOM_CANDIDATE_MS) c.latched = true
+      else this.candidate = null
+    }
+  }
+
+  /** Whether the cursor is over the candidate's plane right now: the live
+   *  idle hover is the very plane the candidate was taken from. */
+  private hoveringCandidate(): boolean {
+    const c = this.candidate
+    const idle = this.idle
+    return c !== null && this.ray !== null && idle !== null && !idle.inert && idle.plane === c.plane
+  }
+
+  /** The hover over the candidate's plane is ending (the cursor moves on,
+   *  resolves to nothing, or leaves): its window counts from now. */
+  private endCandidateHover(): void {
+    if (this.hoveringCandidate()) this.candidate!.at = this.now()
+  }
+
+  /** Record an idle hover the picker resolved without a lock or pin.
+   *  `snapPoint` stands in for the ray's hit when the ray misses the plane.
+   *  `inObjectContext`: inside an entered object only its faces take a
+   *  click, so anything else there is no hover at all. */
+  trackIdle(wasmScene: WasmScene, resolution: IdleHoverResolution, ray: Ray, snapPoint: V3, inObjectContext: boolean): void {
+    this.ray = ray
+    const kind = idleHoverKind(resolution)
+    const point = pointOnPlane(ray, resolution.plane) ?? snapPoint
+    const track: IdleHoverTrack = {
+      plane: resolution.plane,
+      kind,
+      point,
+      inert: inObjectContext && resolution.face === undefined && resolution.onFace !== true,
+    }
+    if (kind === 'lean' && resolution.face !== undefined) {
+      const loop = this.loops.loopFor(wasmScene, resolution.face)
+      if (loop !== null) track.faceLoop = loop
+    }
+    this.endCandidateHover()
+    this.idle = track
+    // A custom plane the next click would use becomes the custom pip's
+    // candidate; any other hover leaves the candidate alone, so the pointer
+    // can cross the ground or empty space on its way to the pip.
+    if (!track.inert) {
+      const frame = drawingAxesOf(wasmScene)
+      if (planePip(track.plane.normal, frame) === 'custom') {
+        this.candidate = { plane: track.plane, through: point, at: this.now(), key: candidateKey(wasmScene, frame), latched: false }
+      }
+    }
+  }
+
+  /**
+   * The custom pip's candidate (view-die design §3.3), or null: the last
+   * custom plane an idle hover tracked, live while the cursor is over it
+   * and for `CUSTOM_CANDIDATE_MS` after that hover ends, and without a
+   * timeout while the pointer is off the canvas if it was live when the
+   * pointer left. Dead once the document, its drawing axes or the open
+   * session changed since.
+   */
+  customCandidate(wasmScene: WasmScene): PinnedPlane | null {
+    const c = this.candidate
+    if (c === null) return null
+    if (c.key !== candidateKey(wasmScene, drawingAxesOf(wasmScene))) return null
+    if (!c.latched && !this.hoveringCandidate() && this.now() - c.at > CUSTOM_CANDIDATE_MS) return null
+    return { plane: c.plane, through: c.through }
+  }
+
+  /** Milliseconds until a live, unlatched candidate expires, or null when
+   *  there is no timed expiry to wait for (the host schedules one refresh
+   *  then, so a resting pointer does not leave the pip looking enabled). */
+  customCandidateTtl(): number | null {
+    const c = this.candidate
+    if (c === null || c.latched || this.hoveringCandidate()) return null
+    const left = c.at + CUSTOM_CANDIDATE_MS - this.now()
+    return left >= 0 ? left : null
+  }
+
+  /** Drop the custom candidate: a pin made or released, an arrow lock set,
+   *  a gesture started, a session entered or left. */
+  clearCandidate(): void {
+    this.candidate = null
+  }
+
+  /** The idle hover resolved to nothing this time (no snap): keep the
+   *  tracked plane for the pips but drop the hover, so no cue lingers at
+   *  the last point. A `trackIdle` in the same event replaces it. */
+  clearHover(): void {
+    this.endCandidateHover()
+    if (this.idle !== null) this.idle = { ...this.idle, inert: true }
+  }
+
+  /** Forget the idle hover and the custom candidate (a cancel, a context
+   *  change, a tool switch). */
+  clearIdle(): void {
+    this.idle = null
+    this.candidate = null
+  }
+
+  /** Drop everything, including the face-loop memo (a new document). */
+  reset(): void {
+    this.idle = null
+    this.ray = null
+    this.candidate = null
+    this.loops.clear()
+  }
+
+  /**
+   * The tool's `DrawPlaneState` from its own stage: `anchored`, the plane a
+   * gesture under way uses (null when idle); `lock`, the arrow-key plane
+   * lock; `pinned`, the Shift-pinned plane; `lockHover`, the last idle hover
+   * point (the lock's plane passes through it); `fallback`, the plane an
+   * idle click would use before any hover was tracked (the view's inferred
+   * plane, or the ground); `frame`, the current drawing axes.
+   *
+   * Hold: a lock or pin outranks the gesture, since both survive it and a
+   * pip click or key releases them (`locked` and `pinned` show a padlock);
+   * an unlocked gesture is `anchored`; otherwise `inferred`.
+   */
+  state(p: {
+    anchored: DrawPlane | null
+    lock: 0 | 1 | 2 | null
+    pinned: DrawPlane | null
+    lockHover: V3 | null
+    fallback: DrawPlane
+    frame: DrawingAxes
+  }): DrawPlaneState {
+    const ray = this.ray
+    const held = (plane: DrawPlane, at: V3 | null): DrawPlaneState['hover'] => {
+      if (ray === null) return null
+      const point = pointOnPlane(ray, plane) ?? at
+      return point === null ? null : { kind: 'space', point }
+    }
+    let plane: DrawPlane
+    let hold: DrawPlaneState['hold']
+    let hover: DrawPlaneState['hover']
+    if (p.anchored !== null) {
+      plane = p.anchored
+      hold = p.lock !== null ? 'locked' : p.pinned !== null ? 'pinned' : 'anchored'
+      hover = held(plane, null)
+    } else if (p.pinned !== null) {
+      plane = p.pinned
+      hold = 'pinned'
+      hover = held(plane, p.lockHover)
+    } else if (p.lock !== null) {
+      plane = axisDrawPlane(p.lock, p.lockHover ?? [p.frame.origin[0], p.frame.origin[1], p.frame.origin[2]], p.frame)
+      hold = 'locked'
+      hover = ray === null || p.lockHover === null ? null : { kind: 'space', point: p.lockHover }
+    } else {
+      const idle = this.idle
+      plane = idle?.plane ?? p.fallback
+      hold = 'inferred'
+      hover = ray === null || idle === null || idle.inert
+        ? null
+        : idle.faceLoop === undefined
+          ? { kind: idle.kind, point: idle.point }
+          : { kind: idle.kind, point: idle.point, faceLoop: idle.faceLoop }
+    }
+    return { plane, pip: planePip(plane.normal, p.frame), hold, hover }
+  }
+}
+
+/** A face-mode gesture's frozen plane (its plane point and unit normal) as
+ *  a `DrawPlane`, or null for a degenerate normal; `ground` set exactly when
+ *  the face lies on the ground plane. */
+export function faceStageDrawPlane(planePoint: V3, normal: V3): DrawPlane | null {
+  const basis = facePlaneBasis(normal)
+  if (basis === null) return null
+  return { origin: planePoint, normal, u: basis.u, v: basis.v, ground: isGroundPlane(planePoint, normal) }
+}
+
+/** The plane an idle draw tool reports before any hover was tracked: the
+ *  axis plane the view faces (`inferredAxisPlane`) once a camera has been
+ *  fed, else the ground. */
+export function idleFallbackPlane(frame: DrawingAxes, view: CameraView | null): DrawPlane {
+  return view === null ? groundDrawPlane() : inferredAxisPlane(frame, view)
+}
+
+/**
+ * The plane a Shift pin reports while idle (`DrawPlaneState`'s pinned
+ * plane): `pinned` itself, or, when the hover point `through` sits off it,
+ * `pinned`'s orientation through that point. A pin holds the plane's
+ * orientation, not its height: under a pin the cursor stays on the plane
+ * except at a named point off it (`PlanePin.constraint`'s `offPlanePoints`),
+ * where a first click starts the shape at that point (`PlanePin.pointPlane`),
+ * so the state shows that lifted plane, and a ground pin lifted off the
+ * ground is no longer the ground.
+ */
+export function pinnedPlaneThrough(pinned: DrawPlane, through: V3 | null): DrawPlane {
+  if (through === null) return pinned
+  if (Math.abs(distanceOffPlane(through, pinned.origin, pinned.normal)) <= FACE_PLANE_EPS_M) return pinned
+  return { ...pinned, origin: through, ground: isGroundPlane(through, pinned.normal) }
 }

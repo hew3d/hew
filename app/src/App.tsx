@@ -10,7 +10,6 @@ import { loadKernel, type Scene } from './wasm/loader'
 import Viewport, {
   type ViewportApi,
   type InferenceInfo,
-  type StandardView,
   type RescaleConfirmInfo,
   type FlyState,
 } from './viewport/Viewport'
@@ -19,7 +18,7 @@ import { InferenceTooltip } from './viewport/InferenceTooltip'
 import { AnnotationEditor } from './viewport/AnnotationEditor'
 import { SnapDot } from './viewport/SnapDot'
 import { MeasurementBox } from './viewport/MeasurementBox'
-import { ViewportHUD } from './viewport/ViewportHUD'
+import { ViewDie } from './viewport/ViewDie'
 import { GeoReferenceInfo } from './panels/GeoReferenceInfo'
 import { DocumentTree } from './panels/DocumentTree'
 import { MaterialPalette } from './panels/MaterialPalette'
@@ -523,7 +522,7 @@ export default function App() {
    * re-application of an explicit reselect, not to paper over any drift. */
   const [toolActivationSeq, setToolActivationSeq] = useState(0)
   /** The one entry point every camera-tool selection (Camera menu, native
-   * menu, keyboard shortcut, the ViewportHUD orbit button) should go
+   * menu, keyboard shortcut) should go
    * through — see `toolActivationSeq`'s doc comment. Scoped to the camera
    * group: forcing every tool to re-apply on a same-name reselect would
    * also reset in-progress non-camera gestures (e.g. a multi-click Line
@@ -7509,10 +7508,7 @@ export default function App() {
             ) : (
               <MeasurementBox toolName={toolName} value={measurement} frozen={measurementFrozen} position={measurementsPosition} />
             )}
-            <ViewportHUD
-              onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}
-              onOrbit={() => activateTool('Orbit')}
-            />
+            <ViewDie apiRef={viewportApi} />
           </div>
 
           {/* Selection path (docs/design/selection-path.md): where you are

@@ -235,6 +235,35 @@ describe('FacePickCache.faceThrough (boundary-click face resolution)', () => {
     expect(result).toEqual({ object: 7n, face: 3n, point: [0, 0, 0], normal: [0, 0, 1] })
   })
 
+  it('throughDetail: the cursor ray off the object (it struck nothing) marks the lean as extended; world geometry has no instance', () => {
+    const scene = makeScene(
+      { object: 7n, face: 3n },
+      new Map([['7:3', { point: [0, 0, 0], normal: [0, 0, 1] }]]),
+    )
+    const cache = new FacePickCache()
+    const result = cache.faceThrough(scene, RAY, eligible, null, [[0, 0, 0]])!
+    expect(cache.throughDetail(result)).toEqual({ instance: null, offObject: true })
+  })
+
+  it('throughDetail: the cursor ray on the chosen face\'s object is a lean onto it, posed through the active instance', () => {
+    const planes = new Map([['7:3', { point: [0, 0, 0] as V3, normal: [0, 0, 1] as V3 }]])
+    const scene = makeScene({ object: 7n, face: 3n }, planes) as unknown as { pick_face: ReturnType<typeof vi.fn>; instance_pose: unknown }
+    // Every probe, the exact ray included, strikes object 7 through instance 4.
+    scene.pick_face.mockImplementation(() => ({ object: () => 7n, instance: () => 4n, face: () => 3n, depth: () => 0, free: vi.fn() }))
+    scene.instance_pose = vi.fn(() => new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]))
+    const cache = new FacePickCache()
+    const result = cache.faceThrough(scene as unknown as WasmScene, RAY, eligible, 4n, [[0, 0, 0]])!
+    expect(cache.throughDetail(result)).toEqual({ instance: 4n, offObject: false })
+    // Another copy of the same component under the cursor is another object.
+    scene.pick_face.mockImplementation((_ox: number, _oy: number, _oz: number, dx: number, dy: number, dz: number) => {
+      const exact = dx === 0 && dy === 0 && dz === -1
+      return { object: () => 7n, instance: () => (exact ? 9n : 4n), face: () => exact ? 8n : 3n, depth: () => 0, free: vi.fn() }
+    })
+    const other = new FacePickCache()
+    const leaned = other.faceThrough(scene as unknown as WasmScene, { ...RAY }, (_o, i) => i === 4n, 4n, [[0, 0, 0]])!
+    expect(other.throughDetail(leaned)?.offObject).toBe(true)
+  })
+
   it('a ring hit whose plane does NOT contain the through point is rejected', () => {
     const scene = makeScene(
       { object: 7n, face: 3n },

@@ -11,6 +11,26 @@ msgstr ""
 msgid ".hew, or import SketchUp, COLLADA, glTF, or STL."
 msgstr ""
 
+#. Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · blue"
+#: src/viewport/InferenceTooltip.tsx
+msgid "· blue"
+msgstr ""
+
+#. Snap tooltip suffix for a drawing plane that lies along no axis (a tilted face's plane), as in "Endpoint · face plane"
+#: src/viewport/InferenceTooltip.tsx
+msgid "· face plane"
+msgstr ""
+
+#. Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · green"
+#: src/viewport/InferenceTooltip.tsx
+msgid "· green"
+msgstr ""
+
+#. Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · red"
+#: src/viewport/InferenceTooltip.tsx
+msgid "· red"
+msgstr ""
+
 #: src/App.tsx
 msgid "\"{matDeleteName}\" — used on {matDeleteUsage, plural, one {# face} other {# faces}} — delete and unpaint them?"
 msgstr ""
@@ -1162,6 +1182,7 @@ msgstr ""
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
 #: src/settings/FluentSettingsPage.tsx
+#: src/viewport/ViewDie.tsx
 msgid "Back"
 msgstr ""
 
@@ -1203,6 +1224,7 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
+#: src/viewport/ViewDie.tsx
 msgid "Bottom"
 msgstr ""
 
@@ -3373,7 +3395,7 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
-#: src/viewport/ViewportHUD.tsx
+#: src/viewport/ViewDie.tsx
 msgid "Front"
 msgstr ""
 
@@ -4103,13 +4125,44 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Iso"
 msgstr ""
 
 #: src/shop/ViewsSheet.tsx
 msgctxt "view"
 msgid "ISO"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · back left"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · back right"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · from below, back left"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · from below, back right"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · from below, front left"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · from below, front right"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · front left"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · front right"
 msgstr ""
 
 #: src/shop/ShopApp.tsx
@@ -4286,6 +4339,7 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
+#: src/viewport/ViewDie.tsx
 msgid "Left"
 msgstr ""
 
@@ -4453,6 +4507,18 @@ msgstr ""
 #: src/panels/LibraryDialog.tsx
 #: src/settings/FluentSettingsPage.tsx
 msgid "Loading…"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Lock blue plane  ↑"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Lock green plane  ←"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Lock red plane  →"
 msgstr ""
 
 #: src/tools/PlaceImageTool.ts
@@ -5692,7 +5758,6 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/shop/ShopApp.tsx
 #: src/tools/toolRegistry.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Orbit"
 msgstr ""
 
@@ -5942,6 +6007,10 @@ msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Piece of a split shape"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Pin the plane under the cursor  Shift"
 msgstr ""
 
 #: src/tools/ArcTool.ts
@@ -6432,6 +6501,22 @@ msgstr ""
 msgid "Release"
 msgstr ""
 
+#: src/viewport/ViewDie.tsx
+msgid "Release blue plane  ↑"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Release green plane  ←"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Release red plane  →"
+msgstr ""
+
+#: src/viewport/ViewDie.tsx
+msgid "Release the pinned plane  Shift"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "reload"
 msgstr ""
@@ -6730,6 +6815,7 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
+#: src/viewport/ViewDie.tsx
 msgid "Right"
 msgstr ""
 
@@ -7716,12 +7802,10 @@ msgid "Standard View: Bottom"
 msgstr ""
 
 #: src/palette/registry.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Standard View: Front"
 msgstr ""
 
 #: src/palette/registry.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Standard View: Iso"
 msgstr ""
 
@@ -7734,7 +7818,6 @@ msgid "Standard View: Right"
 msgstr ""
 
 #: src/palette/registry.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Standard View: Top"
 msgstr ""
 
@@ -8990,7 +9073,7 @@ msgstr ""
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
-#: src/viewport/ViewportHUD.tsx
+#: src/viewport/ViewDie.tsx
 msgid "Top"
 msgstr ""
 

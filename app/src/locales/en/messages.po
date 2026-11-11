@@ -11,6 +11,26 @@ msgstr ""
 msgid ".hew, or import SketchUp, COLLADA, glTF, or STL."
 msgstr ".hew, or import SketchUp, COLLADA, glTF, or STL."
 
+#. Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · blue"
+#: src/viewport/InferenceTooltip.tsx
+msgid "· blue"
+msgstr "· blue"
+
+#. Snap tooltip suffix for a drawing plane that lies along no axis (a tilted face's plane), as in "Endpoint · face plane"
+#: src/viewport/InferenceTooltip.tsx
+msgid "· face plane"
+msgstr "· face plane"
+
+#. Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · green"
+#: src/viewport/InferenceTooltip.tsx
+msgid "· green"
+msgstr "· green"
+
+#. Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · red"
+#: src/viewport/InferenceTooltip.tsx
+msgid "· red"
+msgstr "· red"
+
 #: src/App.tsx
 msgid "\"{matDeleteName}\" — used on {matDeleteUsage, plural, one {# face} other {# faces}} — delete and unpaint them?"
 msgstr "\"{matDeleteName}\" — used on {matDeleteUsage, plural, one {# face} other {# faces}} — delete and unpaint them?"
@@ -1162,6 +1182,7 @@ msgstr "axis"
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
 #: src/settings/FluentSettingsPage.tsx
+#: src/viewport/ViewDie.tsx
 msgid "Back"
 msgstr "Back"
 
@@ -1203,6 +1224,7 @@ msgstr "boolean"
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
+#: src/viewport/ViewDie.tsx
 msgid "Bottom"
 msgstr "Bottom"
 
@@ -3373,7 +3395,7 @@ msgstr "From your desktop…"
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
-#: src/viewport/ViewportHUD.tsx
+#: src/viewport/ViewDie.tsx
 msgid "Front"
 msgstr "Front"
 
@@ -4105,7 +4127,6 @@ msgstr "Invert Selection"
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Iso"
 msgstr "Iso"
 
@@ -4113,6 +4134,38 @@ msgstr "Iso"
 msgctxt "view"
 msgid "ISO"
 msgstr "ISO"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · back left"
+msgstr "Iso · back left"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · back right"
+msgstr "Iso · back right"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · from below, back left"
+msgstr "Iso · from below, back left"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · from below, back right"
+msgstr "Iso · from below, back right"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · from below, front left"
+msgstr "Iso · from below, front left"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · from below, front right"
+msgstr "Iso · from below, front right"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · front left"
+msgstr "Iso · front left"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · front right"
+msgstr "Iso · front right"
 
 #: src/shop/ShopApp.tsx
 msgid "Isolated"
@@ -4288,6 +4341,7 @@ msgstr "Leave this as it is and hide it from this list"
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
+#: src/viewport/ViewDie.tsx
 msgid "Left"
 msgstr "Left"
 
@@ -4456,6 +4510,18 @@ msgstr "Loading system fonts…"
 #: src/settings/FluentSettingsPage.tsx
 msgid "Loading…"
 msgstr "Loading…"
+
+#: src/viewport/ViewDie.tsx
+msgid "Lock blue plane  ↑"
+msgstr "Lock blue plane  ↑"
+
+#: src/viewport/ViewDie.tsx
+msgid "Lock green plane  ←"
+msgstr "Lock green plane  ←"
+
+#: src/viewport/ViewDie.tsx
+msgid "Lock red plane  →"
+msgstr "Lock red plane  →"
 
 #: src/tools/PlaceImageTool.ts
 msgid "Locked to the {axis} plane — click the first corner; same arrow or Esc unlocks."
@@ -5694,7 +5760,6 @@ msgstr "Or scan the QR with your camera app instead."
 #: src/i18n/nativeMenu.ts
 #: src/shop/ShopApp.tsx
 #: src/tools/toolRegistry.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Orbit"
 msgstr "Orbit"
 
@@ -5945,6 +6010,10 @@ msgstr "Pie"
 #: src/health/healthCopy.ts
 msgid "Piece of a split shape"
 msgstr "Piece of a split shape"
+
+#: src/viewport/ViewDie.tsx
+msgid "Pin the plane under the cursor  Shift"
+msgstr "Pin the plane under the cursor  Shift"
 
 #: src/tools/ArcTool.ts
 #: src/tools/CircleTool.ts
@@ -6434,6 +6503,22 @@ msgstr "Rejoin the pieces and remove the inside walls"
 msgid "Release"
 msgstr "Release"
 
+#: src/viewport/ViewDie.tsx
+msgid "Release blue plane  ↑"
+msgstr "Release blue plane  ↑"
+
+#: src/viewport/ViewDie.tsx
+msgid "Release green plane  ←"
+msgstr "Release green plane  ←"
+
+#: src/viewport/ViewDie.tsx
+msgid "Release red plane  →"
+msgstr "Release red plane  →"
+
+#: src/viewport/ViewDie.tsx
+msgid "Release the pinned plane  Shift"
+msgstr "Release the pinned plane  Shift"
+
 #: src/palette/registry.ts
 msgid "reload"
 msgstr "reload"
@@ -6732,6 +6817,7 @@ msgstr "revolve"
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
+#: src/viewport/ViewDie.tsx
 msgid "Right"
 msgstr "Right"
 
@@ -7718,12 +7804,10 @@ msgid "Standard View: Bottom"
 msgstr "Standard View: Bottom"
 
 #: src/palette/registry.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Standard View: Front"
 msgstr "Standard View: Front"
 
 #: src/palette/registry.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Standard View: Iso"
 msgstr "Standard View: Iso"
 
@@ -7736,7 +7820,6 @@ msgid "Standard View: Right"
 msgstr "Standard View: Right"
 
 #: src/palette/registry.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Standard View: Top"
 msgstr "Standard View: Top"
 
@@ -8994,7 +9077,7 @@ msgstr "Tools"
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
-#: src/viewport/ViewportHUD.tsx
+#: src/viewport/ViewDie.tsx
 msgid "Top"
 msgstr "Top"
 

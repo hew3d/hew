@@ -6859,6 +6859,24 @@ impl Scene {
         Ok(vec![p.x, p.y, p.z, n.x, n.y, n.z])
     }
 
+    /// Whether an Object face is a chord facet of a curved wall (it carries
+    /// an analytic surface reference, the same stamp the tessellator smooths
+    /// by). `false` for every plane-true face. The drawing-plane cue reads
+    /// this to outline only faces that are really flat, without tessellating
+    /// the object to find out.
+    pub fn face_is_curved(&self, object: u64, face: u64) -> Result<bool, ApiError> {
+        let object = self
+            .doc
+            .object(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let fid = FaceId::from(KeyData::from_ffi(face));
+        let face = object
+            .faces()
+            .get(fid)
+            .ok_or_else(|| stale("UnknownFace", "face"))?;
+        Ok(face.surface.is_some())
+    }
+
     /// A world Object edge's two endpoint positions in world space, as
     /// `[ax,ay,az, bx,by,bz]` — the geometry the Tape Measure tool needs to
     /// build a parallel guide line. `undefined` if `object` isn't a live world
@@ -15193,6 +15211,19 @@ mod tests {
 
         scene.scene_redo().unwrap();
         assert_eq!(scene.face_uv_frame(object, face), Some(frame));
+    }
+
+    /// `face_is_curved` is false for a box face and true for a cylinder
+    /// wall facet; a stale handle is refused.
+    #[test]
+    fn face_is_curved_tells_walls_from_planes() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        assert_eq!(pick.object(), a);
+        assert!(!scene.face_is_curved(pick.object(), pick.face()).unwrap());
+        assert!(scene.face_is_curved(u64::MAX, pick.face()).is_err());
     }
 
     /// `face_mesh_range` gives a `[base, count]` vertex range that actually

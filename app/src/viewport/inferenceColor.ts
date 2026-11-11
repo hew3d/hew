@@ -53,3 +53,11 @@ export function inferenceCssColor(info: InferenceInfo): string {
   }
   return KIND_CSS_COLOR[info.kind] ?? 'var(--text-faint)'
 }
+
+/** The CSS color of a drawing-plane pip (view-die design §3.1, §4): the
+ *  `--axis-*` token for red, green and blue, the `--plane-custom` violet
+ *  otherwise. */
+export function planePipCssColor(pip: 'red' | 'green' | 'blue' | 'custom'): string {
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS values
+  return pip === 'custom' ? 'var(--plane-custom, #c77dff)' : `var(--axis-${pip})`
+}

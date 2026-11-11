@@ -223,6 +223,58 @@ export interface Tool {
   readonly followsViewPlane?: boolean
 
   /**
+   * (optional) The plane state the view die, pips and cursor cue read
+   * (docs/design/view-die.md §3.4). Null / absent when the tool is not a
+   * plane-drawing tool. Implemented by the five `followsViewPlane` draw tools.
+   */
+  drawPlaneState?(): import('./drawPlane').DrawPlaneState | null
+
+  /**
+   * (optional) Toggle the Shift plane pin as one fresh Shift press would
+   * while idle — the view die's custom pip (docs/design/view-die.md §3.3).
+   * A no-op mid-gesture. Paired with `pinnablePlane`.
+   */
+  togglePlanePin?(): void
+
+  /**
+   * (optional) The plane `togglePlanePin` acts on right now: the pinned
+   * plane, else the tracked hover plane a pin would take; null mid-gesture
+   * or with nothing to pin.
+   */
+  pinnablePlane?(): import('./drawPlane').DrawPlane | null
+
+  /**
+   * (optional) The plane the view die's custom pip acts on: a pinned custom
+   * plane, a custom tracked hover plane, or the live custom candidate (the
+   * last custom plane hovered, kept for 2 s and while the pointer is off
+   * the canvas on its way to the pip); null mid-gesture or with none, which
+   * disables the pip (docs/design/view-die.md §3.3).
+   */
+  customPipPlane?(): import('./drawPlane').DrawPlane | null
+
+  /**
+   * (optional) The custom pip's click: release an active pin, else pin the
+   * custom candidate's plane. A no-op mid-gesture.
+   */
+  pinCustomCandidate?(): void
+
+  /**
+   * (optional) Milliseconds until the custom candidate's window closes, or
+   * null with no timed expiry pending — the host schedules one pip refresh
+   * then.
+   */
+  customPipTtl?(): number | null
+
+  /**
+   * (optional) Whether the arrow `key` at the tool's current stage would
+   * release the held plane lock rather than set one — so the view die's
+   * pip tooltip reads "Release" only when a click would release
+   * (docs/design/view-die.md §3.3). Line mid-chain answers false: its
+   * arrows lock the segment's axis there.
+   */
+  planeKeyReleases?(key: string): boolean
+
+  /**
    * (optional) True when the snap most recently handed to `onPointerMove` was
    * PROJECTED onto the tool's drawing plane rather than used as-is — i.e. the
    * point the gesture will actually commit is not the point the inference

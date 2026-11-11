@@ -37,7 +37,10 @@ below.
   first click lands on the axis plane that faces the camera: the ground
   unless a vertical plane of the drawing axes faces the view clearly more
   (about 20 degrees above level, square-on to a wall), through the axes'
-  origin, with a tinted plane patch and a status-bar line naming it; Shift
+  origin, shown by a plane-colored ring on the snap dot, the plane's name on
+  the inference chip, and a status-bar line (a small patch in empty space
+  or while a plane is held, a face outline when leaning onto a corner or
+  edge; the older 4 m grid patch is gone); Shift
   pins the inferred plane and the arrow keys still override it (Place
   Image takes the same inference). In face mode the shape's later points honour the
   snap the inference chip names (an endpoint IS the corner, not the ray's
@@ -449,6 +452,16 @@ below.
   face translated far enough can pass through a disjoint shell of the
   same Object); the generalized-push/pull effort builds them for its
   stretch path, and translate mode follows at that integration
+- View die (view-die.md §2-§6): a corner-cut die in the editor viewport's
+  top right that turns with the camera (click a face or corner for a
+  standard view or corner view, drag to orbit), with four plane pips under
+  it (red, green, blue, custom). A pip shows the inferred plane when
+  filled and a locked or pinned plane with a padlock; a click is the mouse
+  form of the arrow-key lock, and the custom pip pins the tracked hover
+  plane like Shift. Each draw tool exposes a `DrawPlaneState` from
+  `drawPlane.ts` that the die reads. The Orbit/Top/Iso/Front chips
+  (`ViewportHUD`) are removed; the measurement box defaults to
+  bottom-right. Not shown in Shop mode.
 - Standard camera views (Top, Front, Iso, etc.), orbit/pan/zoom navigation,
   and a Parallel Projection toggle (true orthographic, not a narrowed
   field of view) that keeps every screen-constant widget (transform grips,

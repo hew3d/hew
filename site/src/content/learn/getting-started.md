@@ -76,11 +76,11 @@ Navigation is always available, whatever tool is active. Drag the **middle mouse
 
 No mouse wheel? Press `O`, `H`, or `Z` for Orbit, Pan, and Zoom and drag with the left button.
 
-The **Top / Iso / Front** buttons above the viewport jump to standard views, and **Camera ▸ Zoom Extents** frames everything visible.
+The **view die** in the top-right corner of the viewport jumps to standard views (click a face to look straight at it, or a corner for an isometric-style view), and **Camera ▸ Zoom Extents** frames everything visible.
 
-Try it out! **Orbit** and **Pan** around the model to get a feel for how the camera changes when you move around. To "reset" your view, just click the **Iso** button and it'll reset the camera to a "standard" view. The **Top** and **Front** buttons are similar - they show standardized views of the model that will be extremely handy at certain times.
+Try it out! **Orbit** and **Pan** around the model to get a feel for how the camera changes when you move around. To get back to a known view, click a corner of the die for a three-quarter view of the model. The **Top** and **Front** faces of the die are similar - they show standardized views of the model that will be extremely handy at certain times.
 
-But yeah, just get used to clicking the **Iso** button since that does a camera reset plus "Zoom Extents" in one fell swoop.
+But yeah, when you get lost, **Camera ▸ Standard Views ▸ Iso** does a camera reset plus "Zoom Extents" in one fell swoop.
 
 There's more in [Viewing your model](/learn/viewing/).
 
@@ -101,7 +101,7 @@ Drawing a shape on a solid and then pushing into the solid is a very common way 
 
 So far, all of our work has happened on parts on the "ground". This is the "blue" plane (or *Z-plane*) that crosses the origin. Blue planes can be anywhere up and down the Z-axis, though. There are two other planes - the "red" plane ("X-plane") and "green" plane ("Y-plane"). Likewise, they can move anywhere on the X-axis or Y-axis, resp.
 
-There are several ways to switch to another plane. The three primary ways are to orbit until the plane you want faces you (a Front or Side standard view does it in one click), so that shapes drawn in empty space land on it; to hover over a face that is already on your intended plane and press the **Shift** key to lock the cursor into that plane; or to use the arrow keys to **lock** onto a particular axis. This is all pretty abstract, so let's make this concrete.
+There are several ways to switch to another plane. The three primary ways are to orbit until the plane you want faces you (a Front or Side standard view does it in one click), so that shapes drawn in empty space land on it; to hover over a face that is already on your intended plane and press the **Shift** key to lock the cursor into that plane; or to use the arrow keys to **lock** onto a particular axis. While a drawing tool is active, the four pips under the view die in the top-right corner show which plane your next click lands on: the filled one. A padlock on a pip means the plane is locked. Clicking the red, green, or blue pip is the mouse version of the `→`, `←`, and `↑` keys. This is all pretty abstract, so let's make this concrete.
 
 Start by creating a hollow box for use as our parts bin. We will try one new tool to help hollow out the rectangle.
 

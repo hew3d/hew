@@ -23,7 +23,8 @@
  * cursor, a gesture caught mid-drag, and inference cues this harness can't
  * stage. Anything captured that way must NOT get a scene here, or the next run
  * silently overwrites it; that is why the desk-organizer scenes and the export
- * dialog are gone.
+ * dialog are gone. Those live-session shots can be regenerated unattended with
+ * capture-guide-shots.mjs, which drives real mouse and keyboard events.
  */
 import { chromium } from '@playwright/test'
 import { mkdirSync, rmSync } from 'node:fs'
@@ -237,7 +238,7 @@ async function shot(page, name, opts = {}) {
   // opacity screenshot shows genuine UI interaction, not a scripted value.
   await page.getByTitle('Slate', { exact: true }).click()
   await settle(page, 150)
-  const slider = page.getByRole('slider')
+  const slider = page.getByRole('slider', { name: 'Opacity for Slate' })
   const sliderBox = await slider.boundingBox()
   await page.mouse.move(sliderBox.x + sliderBox.width - 2, sliderBox.y + sliderBox.height / 2)
   await page.mouse.down()
@@ -262,7 +263,7 @@ async function shot(page, name, opts = {}) {
     h.drawBox([1.8, 0, 0], [3.2, 1.4, 0], 1)
     h.selectObjects(h.getObjectIds())
   }, CAM)
-  await page.getByRole('button', { name: 'Edit', exact: true }).click()
+  await page.getByRole('button', { name: 'Object', exact: true }).click()
   await settle(page, 200)
   await page.getByTestId('menu-bar').getByText('Group', { exact: true }).click()
   await settle(page, 400)
@@ -624,7 +625,7 @@ async function shot(page, name, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// 17. Viewing: the bracket scene through the real Top and Front buttons.
+// 17. Viewing: the bracket scene through the view die's real Top and Front faces.
 // ---------------------------------------------------------------------------
 {
   const page = await freshPage()
@@ -638,9 +639,19 @@ async function shot(page, name, opts = {}) {
     h.paintObject(base, h.addMaterial('Slate', 90, 103, 118, 255))
     h.paintObject(upright, h.addMaterial('Terracotta', 193, 104, 79, 255))
   }, CAM)
-  await page.getByRole('button', { name: 'Top', exact: true }).click()
+  // The die is an SVG; its faces are polygons tagged data-face. Click with a
+  // real mouse (move, down, up) at the polygon's center, then park the cursor
+  // away from the die so no hover tint lands in the shot.
+  const clickDieFace = async (id) => {
+    const b = await page.locator(`[data-testid="view-die-svg"] [data-face="${id}"]`).boundingBox()
+    await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 3 })
+    await page.mouse.down()
+    await page.mouse.up()
+    await page.mouse.move(700, 890)
+  }
+  await clickDieFace('top')
   await shot(page, 'views-top')
-  await page.getByRole('button', { name: 'Front', exact: true }).click()
+  await clickDieFace('front')
   await shot(page, 'views-front')
   await page.close()
 }

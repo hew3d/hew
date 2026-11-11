@@ -17,6 +17,7 @@ import { PolygonTool } from './PolygonTool'
 import { ArcTool } from './ArcTool'
 import { draftMock } from './draftMock'
 import type { Snap } from './types'
+import type { DrawPlaneState } from './drawPlane'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 
@@ -230,7 +231,7 @@ interface ToolUnderTest {
   onPointerDown(snap: Snap | null, ray: Ray): void
   onKey(ev: KeyboardEvent): void
   snapProjected(): boolean
-  activeDrawPlaneCue(): { plane: { origin: V3; normal: V3; ground: boolean }; through: V3 } | null
+  drawPlaneState(): DrawPlaneState
 }
 
 describe.each(FIRST_CLICK_TOOLS)('$name — the first click on a named point in the air', ({ make }) => {
@@ -246,20 +247,22 @@ describe.each(FIRST_CLICK_TOOLS)('$name — the first click on a named point in 
     const ray = rayThrough(APEX)
     tool.snapConstraint(ray)
     tool.onPointerMove(snap(APEX), ray)
-    const cue = tool.activeDrawPlaneCue()
-    expect(cue).not.toBeNull()
-    expect(cue!.plane.normal).toEqual([0, 0, 1])
-    expect(cue!.plane.origin[2]).toBe(1)
-    expect(cue!.plane.ground).toBe(false)
+    const state = tool.drawPlaneState()
+    expect(state.hold).toBe('inferred')
+    expect(state.plane.normal).toEqual([0, 0, 1])
+    expect(state.plane.origin[2]).toBe(1)
+    expect(state.plane.ground).toBe(false)
   })
 
   it('starts there: the gesture lies on the parallel plane through the point', () => {
     const tool = fresh()
     click(tool, snap(APEX))
-    const cue = tool.activeDrawPlaneCue()
-    expect(cue).not.toBeNull()
-    expect(cue!.plane.origin[2]).toBe(1)
-    expect(cue!.through).toEqual(APEX)
+    const state = tool.drawPlaneState()
+    expect(state.hold).toBe('anchored')
+    expect(state.plane.origin[2]).toBe(1)
+    expect(state.plane.ground).toBe(false)
+    // The cursor ray through the point meets the gesture's plane at the point.
+    for (let i = 0; i < 3; i++) expect(state.hover!.point[i]).toBeCloseTo(APEX[i], 9)
     const constraint = tool.snapConstraint(rayThrough([2, 2, 1]))
     if (constraint !== null && constraint.constraintPlane !== undefined) {
       expect(constraint.constraintPlane.point[2]).toBe(1)
@@ -270,7 +273,9 @@ describe.each(FIRST_CLICK_TOOLS)('$name — the first click on a named point in 
   it('a point on the picked plane changes nothing: a ground corner anchors on the ground', () => {
     const tool = fresh()
     click(tool, snap(CORNER))
-    expect(tool.activeDrawPlaneCue()).toBeNull() // the ground gives no patch
+    const state = tool.drawPlaneState()
+    expect(state.hold).toBe('anchored')
+    expect(state.plane.ground).toBe(true)
   })
 })
 
@@ -387,9 +392,9 @@ describe.each(FIRST_CLICK_TOOLS)('$name — a face gives way to a named point in
     tool.onPointerMove(snap(IN_FRONT), ray)
     expect(tool.snapProjected()).toBe(false)
     tool.onPointerDown(snap(IN_FRONT), ray)
-    const cue = tool.activeDrawPlaneCue()
-    expect(cue!.plane.normal).toEqual([0, 0, 1])
-    expect(cue!.plane.origin[2]).toBe(2)
+    const state = tool.drawPlaneState()
+    expect(state.plane.normal).toEqual([0, 0, 1])
+    expect(state.plane.origin[2]).toBe(2)
   })
 
   it('a point behind the face stays face mode and says projected', () => {
@@ -398,7 +403,7 @@ describe.each(FIRST_CLICK_TOOLS)('$name — a face gives way to a named point in
     tool.onPointerMove(snap(BEHIND), ray)
     expect(tool.snapProjected()).toBe(true)
     tool.onPointerDown(snap(BEHIND), ray)
-    expect(tool.activeDrawPlaneCue()!.plane.origin[2]).toBe(1)
+    expect(tool.drawPlaneState().plane.origin[2]).toBe(1)
   })
 
   it('inside an entered Object it stays face mode and the point drops, disclosed', () => {
@@ -408,7 +413,7 @@ describe.each(FIRST_CLICK_TOOLS)('$name — a face gives way to a named point in
     tool.onPointerMove(snap(IN_FRONT), ray)
     expect(tool.snapProjected()).toBe(true)
     tool.onPointerDown(snap(IN_FRONT), ray)
-    expect(tool.activeDrawPlaneCue()!.plane.origin[2]).toBe(1)
+    expect(tool.drawPlaneState().plane.origin[2]).toBe(1)
   })
 
   it('a pinned idle constraint keeps named points off the plane (R18 c), and Shift over a lifted hover pins the lifted plane', () => {
@@ -419,6 +424,6 @@ describe.each(FIRST_CLICK_TOOLS)('$name — a face gives way to a named point in
     const constraint = tool.snapConstraint(ray)
     expect(constraint?.constraintPlane?.point[2]).toBe(2)
     expect(constraint?.offPlanePoints).toBe(true)
-    expect(tool.activeDrawPlaneCue()!.plane.origin[2]).toBe(2)
+    expect(tool.drawPlaneState().plane.origin[2]).toBe(2)
   })
 })

@@ -21,6 +21,35 @@
 import { i18n } from '@lingui/core'
 import type { MessageDescriptor } from '@lingui/core'
 import { msg, t } from '@lingui/core/macro'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+
+/** Bottom of the view die and its pips, from the viewport's top edge
+ *  (ViewDie.tsx: 16 px inset + 76 px die + 6 px gap + 16 px pips). */
+export const DIE_STACK_BOTTOM_PX = 16 + 76 + 6 + 16
+/** Gap between the box and the die stack (top-right) or the dock (bottom-right). */
+export const MEASUREMENT_BOX_GAP_PX = 10
+/** Smallest clear gap the box keeps from the contextual dock before it lifts. */
+export const MEASUREMENT_DOCK_CLEARANCE_PX = 12
+/** Where the editor box sits under the die when docked top-right. */
+export const MEASUREMENT_BOX_TOP_PX = DIE_STACK_BOTTOM_PX + MEASUREMENT_BOX_GAP_PX
+const BOX_EDGE_PX = 16
+
+interface Rect { left: number; right: number; top: number; bottom: number }
+
+/**
+ * The `bottom` offset (css px) for a bottom-right box: the normal 16 px, or
+ * lifted to sit 12 px above the contextual dock when the sideways gap
+ * between the box and the dock would be under 12 px (design §5). `box` is
+ * the box's rect at its normal spot.
+ */
+export function measurementBoxBottomPx(box: Rect, dock: Rect | null, container: Rect): number {
+  if (dock === null) return BOX_EDGE_PX
+  const c = MEASUREMENT_DOCK_CLEARANCE_PX
+  const horizontalGap = box.left - dock.right
+  const verticalOverlap = box.top < dock.bottom + c && dock.top < box.bottom + c
+  if (horizontalGap >= c || !verticalOverlap) return BOX_EDGE_PX
+  return Math.max(BOX_EDGE_PX, container.bottom - dock.top + c)
+}
 const VCB_LABEL: Record<string, MessageDescriptor> = {
   'Move': msg`Distance`,
   'Push/Pull': msg`Push depth`,
@@ -39,9 +68,10 @@ const VCB_LABEL: Record<string, MessageDescriptor> = {
 export interface MeasurementBoxProps {
   /**
    * Editor variant only: which right-hand corner the box docks to
-   * (Settings ▸ View ▸ Measurements box). Defaults to `'top-right'`, the
-   * long-standing spot. `'bottom-right'` lifts it clear of the status bar's
-   * edge and the Viewport HUD. Ignored by the `'shop'` variant, which has
+   * (Settings ▸ View ▸ Measurements box). Defaults to `'bottom-right'`;
+   * `'top-right'` docks it under the view die and its pips, right-aligned
+   * with them. A bottom-right box lifts above the contextual dock when the
+   * two would come within 12 px. Ignored by the `'shop'` variant, which has
    * its own placement.
    */
   position?: 'top-right' | 'bottom-right'
@@ -124,8 +154,48 @@ export function MeasurementBox({
   variant = 'editor',
   bottomOffsetPx = 0,
   orientation = 'portrait',
-  position = 'top-right',
+  position = 'bottom-right',
 }: MeasurementBoxProps) {
+  const boxRef = useRef<HTMLDivElement>(null)
+  const [lift, setLift] = useState(BOX_EDGE_PX)
+  const bottomDocked = variant === 'editor' && position === 'bottom-right' && value !== ''
+  // Re-measure against the contextual dock on every render, on resize, and
+  // when the dock itself resizes or appears.
+  const measure = (): void => {
+    const box = boxRef.current
+    const container = box?.offsetParent
+    if (box === null || !(container instanceof HTMLElement)) return
+    const dockEl = container.querySelector('[data-testid="contextual-dock"]')
+    const r = (e: Element): Rect => {
+      const b = e.getBoundingClientRect()
+      return { left: b.left, right: b.right, top: b.top, bottom: b.bottom }
+    }
+    const cr = r(container)
+    const own = r(box)
+    // The rect at the normal 16 px spot, whatever lift is applied now.
+    const shift = (box.style.bottom === '' ? BOX_EDGE_PX : parseFloat(box.style.bottom)) - BOX_EDGE_PX
+    const atRest: Rect = { ...own, top: own.top + shift, bottom: own.bottom + shift }
+    const next = measurementBoxBottomPx(atRest, dockEl === null ? null : r(dockEl), cr)
+    setLift((prev) => (prev === next ? prev : next))
+  }
+  useLayoutEffect(() => {
+    if (bottomDocked) measure()
+  })
+  useEffect(() => {
+    if (!bottomDocked) return
+    const container = boxRef.current?.offsetParent
+    window.addEventListener('resize', measure)
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    if (container instanceof HTMLElement) {
+      ro?.observe(container)
+      const dockEl = container.querySelector('[data-testid="contextual-dock"]')
+      if (dockEl !== null) ro?.observe(dockEl)
+    }
+    return () => {
+      window.removeEventListener('resize', measure)
+      ro?.disconnect()
+    }
+  }, [bottomDocked])
   if (value === '') return null
   const toolLabel = VCB_LABEL[toolName]
   const label = labelOverride ?? (toolLabel !== undefined ? i18n._(toolLabel) : t`Value`)
@@ -190,10 +260,11 @@ export function MeasurementBox({
 
   return (
     <div
+      ref={boxRef}
       data-testid="measurement-box"
       style={{
         position: 'absolute',
-        ...(position === 'bottom-right' ? { bottom: '16px' } : { top: '16px' }),
+        ...(position === 'bottom-right' ? { bottom: `${lift}px` } : { top: `${MEASUREMENT_BOX_TOP_PX}px` }),
         right: '16px',
         display: 'flex',
         alignItems: 'center',

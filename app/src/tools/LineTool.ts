@@ -103,7 +103,7 @@ import type { SketchTarget } from './sketchGesture'
 import { DetachedMode, type OnDetachedChange } from './detachedMode'
 import { runDraft, addDraftSegment, refreshAfterDraft, draftClosedLoop, draftTargetFromSketchTarget, type DraftTarget } from './draftCommit'
 import { cameraView } from './viewPlaneInference'
-import { namedPointLeavesPlane, isNamedPointSnap, pointOnPlane, drawPlaneCue, idleHoverCue, drawPlaneThrough, isGroundPlane, isPointOnDrawPlane, planeKey, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane, type IdleDrawTarget, type CameraView } from './drawPlane'
+import { namedPointLeavesPlane, isNamedPointSnap, pointOnPlane, drawPlaneThrough, isGroundPlane, isPointOnDrawPlane, planeKey, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, DrawPlaneTracker, pinnedPlaneThrough, faceStageDrawPlane, idleFallbackPlane, customPipPlaneFor, pinCustomPlane, type DrawPlane, type IdleDrawTarget, type CameraView, type DrawPlaneState, type IdleHoverResolution } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
 import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick, cursorOnFrozenPlane, firstPointOnFace, FACE_PLANE_EPS_M } from './faceDraw'
 import { pickRenderMode } from './pickPolicy'
@@ -302,7 +302,7 @@ export class LineTool implements Tool {
    *  lock, a pin and an anchored gesture are choices, not hover, and stay;
    *  the next move (or a held-pointer replay) rebuilds the hover. */
   onPointerLeave(): void {
-    this._idleHoverCue = null
+    this._planeTracker.leave()
     this._idleInferred = null
     this._idleProjected = false
   }
@@ -531,7 +531,7 @@ export class LineTool implements Tool {
   private idlePlaneLock: 0 | 1 | 2 | null = null
 
   /** The last hover point seen while idle-locked (design §6 bullet 1) — feeds
-   *  `activeDrawPlaneCue()`'s idle-locked case. Reset to null whenever the
+   *  `drawPlaneState()`'s locked plane. Reset to null whenever the
    *  lock itself changes (a fresh lock has no hover yet) and by `cancel()`. */
   private _lastIdleHoverPoint: V3 | null = null
 
@@ -544,14 +544,12 @@ export class LineTool implements Tool {
    *  the axis plane facing the camera) with the ray it was resolved for, or
    *  null when the ground, a face, a sketch, a lock or a pin decided
    *  instead. Drives, for a vertical plane, the inference line of the
-   *  status hint (the patch reads `_idleHoverCue`). */
+   *  status hint (the cursor cue reads `drawPlaneState()`). */
   private _idleInferred: { axis: 0 | 1 | 2; plane: DrawPlane; ray: Ray } | null = null
-  /** The plane the next idle click would land on at the last hover, with
-   *  the ray it was resolved for, whenever no lock or pin decided instead
-   *  (`idleHoverCue`): the inferred plane, a hovered sketch's, or a hovered
-   *  or leaned-toward face's. Drives the idle plane patch only; the status
-   *  hint's inference line keys on `_idleInferred`. */
-  private _idleHoverCue: { plane: DrawPlane; ray: Ray } | null = null
+  /** What `drawPlaneState()` reads: the cursor ray, and the plane the last
+   *  idle hover resolved when no lock or pin decided it (view-die design
+   *  §3.4). */
+  private readonly _planeTracker = new DrawPlaneTracker()
 
   /** Shift-pinned drawing plane (GitHub issue 14) — see planePin.ts and
    *  RectangleTool's identical field. Idle-only; a pin displaces an arrow
@@ -774,7 +772,7 @@ export class LineTool implements Tool {
    *  only when nothing was under the cursor and the plane is the axis
    *  plane the view faces (picker step 7, `resolveIdleDrawTarget`);
    *  `onFace` only when a face decided it (steps 3, 5, 6). */
-  private _idleHoverResolution(ray: Ray, snap: Snap | null = null): { plane: DrawPlane; inferredAxis?: 0 | 1 | 2; onFace?: true } {
+  private _idleHoverResolution(ray: Ray, snap: Snap | null = null): IdleHoverResolution {
     // Hovering an object's edge or corner: the plain ray pick misses there
     // (strict at the boundary), so the ranked boundary pick answers which
     // face the point belongs to — a Shift press over a wall's edge
@@ -783,7 +781,14 @@ export class LineTool implements Tool {
       const through = this._facePickAt(snap, ray)
       if (through !== null) {
         const drawPlane = drawPlaneThrough(through.point, through.normal)
-        if (drawPlane !== null) return { plane: drawPlane, onFace: true }
+        const detail = this._pickCache.throughDetail(through)
+        if (drawPlane !== null) {
+          return {
+            plane: drawPlane,
+            onFace: true,
+            face: { object: through.object, face: through.face, instance: detail?.instance ?? this._activeInstance, boundary: true, offObject: detail?.offObject ?? false },
+          }
+        }
       }
     }
     const eligible = this._eligiblePickFor(ray)
@@ -791,7 +796,9 @@ export class LineTool implements Tool {
       const plane = this._worldFacePlane(eligible.object, eligible.face)
       if (plane !== null) {
         const drawPlane = drawPlaneThrough(plane.point, plane.normal)
-        if (drawPlane !== null) return { plane: drawPlane, onFace: true }
+        if (drawPlane !== null) {
+          return { plane: drawPlane, onFace: true, face: { object: eligible.object, face: eligible.face, instance: this._activeInstance, boundary: false, offObject: false } }
+        }
       }
     }
     return this._resolveIdleTarget(ray, snap)
@@ -828,7 +835,7 @@ export class LineTool implements Tool {
     this._snapProjected = false
     this._idleProjected = false
     this._idleInferred = null
-    this._idleHoverCue = null
+    this._planeTracker.clearHover()
     // A lock or pin skips every face pick below (it beats face mode), yet
     // the boundary pick's hover memory (`FacePickCache`, view-plane design
     // §4.2 rule 2) must keep following the cursor, or a release at a corner
@@ -852,64 +859,97 @@ export class LineTool implements Tool {
     this._lastIdleHoverPoint = through
     if (this.idlePlaneLock === null) this.pin.trackHover(this._idleHoverPlane(ray, snap), through)
     this._idleInferred = this.idlePlaneLock === null && this.pin.current === null ? this._inferredAt(ray, snap) : null
-    this._idleHoverCue = this.idlePlaneLock === null && this.pin.current === null ? idleHoverCue(this._idleHoverResolution(ray, snap), ray, this._activeContext !== null) : null
+    if (this.idlePlaneLock === null && this.pin.current === null) this._planeTracker.trackIdle(this.wasmScene, this._idleHoverResolution(ray, snap), ray, through, this._activeContext !== null)
     this.lastSnap = this._currentMode(ray, snap) === 'face' ? null : (this._idleReferenceAt(snap, ray)?.snap ?? null)
   }
 
   /**
-   * The drawing-plane cue the Viewport should render right now (design §6
-   * bullet 1) — a grid patch on the active NON-ground plane, or null (ground
-   * is covered by the world grid already). See `drawPlaneCue` in
-   * `drawPlane.ts` for the cases (anchored non-ground, idle-locked with a
-   * tracked hover, idle over a non-ground plane the next click would land
-   * on); a Shift pin draws through the hover like an anchored plane.
+   * The plane state the view die, its pips and the cursor cue read
+   * (`Tool.drawPlaneState`, view-die design §3.4): the gesture's frozen
+   * plane while one is under way, else the pin, the arrow lock, or the
+   * plane the last idle hover resolved (kept while the pointer is off the
+   * canvas). See `DrawPlaneTracker.state`.
    */
-  activeDrawPlaneCue(): { plane: DrawPlane; through: V3 } | null {
-    if (this.faceStage.kind === 'anchored') {
-      const basis = facePlaneBasis(this.faceStage.normal)
-      if (basis === null) return null
-      const anchoredPlane: DrawPlane = {
-        origin: this.faceStage.planePoint,
-        normal: this.faceStage.normal,
-        u: basis.u,
-        v: basis.v,
-        ground: isGroundPlane(this.faceStage.planePoint, this.faceStage.normal),
-      }
-      return drawPlaneCue({
-        anchoredPlane,
-        anchoredThrough: this.faceStage.planePoint,
-        idleLock: null,
-        idleHover: null,
-      })
-    }
-    if (this.planeStage.kind === 'anchored') {
-      return drawPlaneCue({
-        anchoredPlane: this.planeStage.plane,
-        anchoredThrough: this.planeStage.anchor,
-        idleLock: null,
-        idleHover: null,
-      })
-    }
-    const pinned = this.pin.current
-    if (pinned !== null) {
-      // The pinned plane through wherever the cursor is now (its foot on
-      // the plane — the snap is constrained to it), so the patch follows
-      // the hover exactly as the arrow-lock preview does.
-      return drawPlaneCue({
-        anchoredPlane: pinned.plane,
-        anchoredThrough: this._lastIdleHoverPoint ?? pinned.through,
-        idleLock: null,
-        idleHover: null,
-      })
-    }
-    return drawPlaneCue({
-      anchoredPlane: null,
-      anchoredThrough: null,
-      idleLock: this.idlePlaneLock,
-      idleHover: this._lastIdleHoverPoint,
-      frame: getDrawingAxes(this.wasmScene),
-      idleHoverCue: this._idleHoverCue,
+  drawPlaneState(): DrawPlaneState {
+    const frame = getDrawingAxes(this.wasmScene)
+    let anchored: DrawPlane | null = null
+    if (!this._dragDone && this.faceStage.kind === 'anchored') anchored = faceStageDrawPlane(this.faceStage.planePoint, this.faceStage.normal)
+    else if (!this._dragDone && this.planeStage.kind === 'anchored') anchored = this.planeStage.plane
+    return this._planeTracker.state({
+      anchored,
+      lock: this.idlePlaneLock,
+      // A pin through a named point off it reports the lifted plane a
+      // first click there starts on (`pinnedPlaneThrough`).
+      pinned: this.pin.current === null ? null : pinnedPlaneThrough(this.pin.current.plane, this._lastIdleHoverPoint ?? this.pin.current.through),
+      lockHover: this._lastIdleHoverPoint,
+      fallback: idleFallbackPlane(frame, this._view),
+      frame,
     })
+  }
+
+  /**
+   * Toggle the Shift pin exactly as a fresh Shift press would while idle
+   * (the custom pip's click, view-die design §3.3): pins the tracked hover
+   * plane, or releases the pin. Ignores the physical-Shift autorepeat guard,
+   * which a click has nothing to do with. Does nothing mid-gesture.
+   */
+  togglePlanePin(): void {
+    if (this.capturingInput() && !this._dragDone) return
+    if (this.pin.toggle()) this._onPinChanged()
+  }
+
+  /** The plane `togglePlanePin` acts on right now: the pinned plane (it
+   *  releases it), else the tracked hover plane (it pins it); null
+   *  mid-gesture or before any hover. The custom pip is clickable only when
+   *  this is a custom plane (view-die design §3.3). */
+  pinnablePlane(): DrawPlane | null {
+    if (this.capturingInput() && !this._dragDone) return null
+    return this.pin.current?.plane ?? this.pin.tracked?.plane ?? null
+  }
+
+  /**
+   * Whether `key` (an arrow) at the tool's current stage would RELEASE the
+   * held plane lock rather than set one (the view die's pip tooltip says
+   * "Release" only then, view-die design §3.3): the same arrow as the
+   * active lock.
+   */
+  planeKeyReleases(key: string): boolean {
+    const axis = arrowToAxis(key)
+    if (axis === null || this.idlePlaneLock !== axis) return false
+    if (!this.capturingInput() || this._dragDone) return true
+    // Mid-chain an arrow locks the next segment's AXIS, never the plane.
+    return false
+  }
+
+  /** The plane the view die's custom pip acts on (`customPipPlaneFor`):
+   *  a pinned custom plane, a custom tracked hover, or the live custom
+   *  candidate the pointer left on its way to the pip; null mid-gesture. */
+  customPipPlane(): DrawPlane | null {
+    if (this.capturingInput() && !this._dragDone) return null
+    return customPipPlaneFor(this.wasmScene, this.pin, this._planeTracker)
+  }
+
+  /** Milliseconds until the custom pip's candidate expires, or null with
+   *  no timed expiry pending: the host refreshes the pips then. */
+  customPipTtl(): number | null {
+    return this._planeTracker.customCandidateTtl()
+  }
+
+  /** The custom pip's click (`pinCustomPlane`): release the pin, else pin
+   *  the custom candidate. Does nothing mid-gesture. */
+  pinCustomCandidate(): void {
+    if (this.capturingInput() && !this._dragDone) return
+    if (pinCustomPlane(this.wasmScene, this.pin, this._planeTracker)) this._onPinChanged()
+  }
+
+  /** A pin set or released: it displaces an arrow lock (two shapes of the
+   *  same choice), and the hover tracked under the old choice is stale, as
+   *  is the custom pip's candidate. */
+  private _onPinChanged(): void {
+    this._planeTracker.clearCandidate()
+    this.idlePlaneLock = null
+    this._lastIdleHoverPoint = null
+    this._idleInferred = null
   }
 
   /** The last placed point of whichever chain is currently anchored, or null. */
@@ -1162,6 +1202,7 @@ export class LineTool implements Tool {
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
+    this._planeTracker.move(ray)
     // A move along the very ray of the last press or move is no move: the
     // Viewport replays the hover at a parked pointer after the document
     // changes (the loop a click just closed included), and that replay
@@ -1412,6 +1453,9 @@ export class LineTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    // A press starts (or continues) a gesture: the custom pip's candidate
+    // is spent.
+    this._planeTracker.clearCandidate()
     // After a dragged line every press starts a new one.
     this._dropDragDone()
     this._lastRayDir = ray.direction
@@ -1485,7 +1529,6 @@ export class LineTool implements Tool {
         this.pin.clear()
         this._lastIdleHoverPoint = null
         this._idleInferred = null
-        this._idleHoverCue = null
         return
       }
       this._onEscape()
@@ -1505,10 +1548,10 @@ export class LineTool implements Tool {
       if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
         this.idlePlaneLock = nextIdlePlaneLock(this.idlePlaneLock, ev.key)
         this.pin.clear() // an arrow lock displaces a Shift pin, and vice versa
+        this._planeTracker.clearCandidate() // and ends the custom pip's candidate
         // A fresh/changed lock has no tracked hover yet (design §6 bullet 1).
         this._lastIdleHoverPoint = null
         this._idleInferred = null
-        this._idleHoverCue = null
       }
       return
     }
@@ -1629,12 +1672,7 @@ export class LineTool implements Tool {
       // the plane the last hover recorded becomes the chain's drawing
       // plane until Shift is pressed again or Escape releases it. A pin
       // displaces an arrow-key lock (two shapes of the same choice).
-      if (this.pin.setShiftHeld(held)) {
-        this.idlePlaneLock = null
-        this._lastIdleHoverPoint = null
-        this._idleInferred = null
-        this._idleHoverCue = null
-      }
+      if (this.pin.setShiftHeld(held)) this._onPinChanged()
       return
     }
     this.pin.markShift(held) // keep the autorepeat guard honest, never toggle
@@ -1833,6 +1871,7 @@ export class LineTool implements Tool {
   }
 
   cancel(): void {
+    this._planeTracker.clearIdle()
     this._dragDone = false
     this.retype.close()
     this._closedByClick = false
@@ -1853,7 +1892,6 @@ export class LineTool implements Tool {
     this.pin.clear()
     this._lastIdleHoverPoint = null
     this._idleInferred = null
-    this._idleHoverCue = null
     this._clearPreview()
     this.onMeasurementCb('')
     this.wasmScene.clear_transient_segments()
@@ -1873,6 +1911,7 @@ export class LineTool implements Tool {
    * clears the stale handles.
    */
   onDocumentReset(): void {
+    this._planeTracker.reset()
     this.cancel()
     this.refs.clearRing()
     this.sep.reset()
