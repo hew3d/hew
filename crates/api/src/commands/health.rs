@@ -17,6 +17,7 @@ pub fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.doc.health" => health,
         "hew.solid.cap" => cap,
+        "hew.solid.mend" => mend,
         "hew.solid.delete_faces" => delete_faces,
         "hew.solid.mark_surface" => mark_surface,
         "hew.solid.thicken" => thicken,
@@ -102,6 +103,30 @@ fn cap(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         "closed": report.closed,
         "reversed": report.reversed,
     }))
+}
+
+/// `hew.solid.mend`: Model Health's Mend (merge nearby points, remove
+/// zero-width folds, separate pinched parts, fill small gaps) as one undo
+/// entry. Omitted fields give the one-click Mend
+/// ([`crate::health::mend_plan_from_json`]); pieces the split cuts loose
+/// are new objects, returned by id.
+fn mend(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let public = params
+        .get("object")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CmdError::Params("missing 'object'".into()))?
+        .to_string();
+    let object = resolve_object(ctx, &public)?;
+    let obj = ctx.doc.object(object).expect("resolved above");
+    let plan = crate::health::mend_plan_from_json(params, obj).map_err(CmdError::Params)?;
+    let (report, pieces, _change) = ctx.doc.mend(object, &plan)?;
+    let ids: Vec<String> = pieces
+        .iter()
+        .map(|&o| public_id(ctx, EntityRef::Object(o)))
+        .collect();
+    let mut out = crate::health::mend_report_json(&report, ids);
+    out["object_id"] = json!(public);
+    Ok(out)
 }
 
 fn delete_faces(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {

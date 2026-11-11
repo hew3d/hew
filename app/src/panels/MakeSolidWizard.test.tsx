@@ -206,7 +206,7 @@ describe('MakeSolidWizard — Use recommended choices', () => {
     expect(screen.getByText("1 shape can't be closed:")).toBeInTheDocument()
     const still = document.querySelector('[data-wizard-list="still-open"]') as HTMLElement
     expect(within(still).getByText('Knot')).toBeInTheDocument()
-    expect(within(still).getByText('Open edges branch')).toBeInTheDocument()
+    expect(within(still).getByText('Openings tangled together')).toBeInTheDocument()
   })
 
   it('Done closes the window', async () => {
@@ -272,7 +272,7 @@ describe('MakeSolidWizard — step by step', () => {
     expect(screen.getByRole('heading', { name: "Can't be closed" })).toBeInTheDocument()
     expect(screen.queryByRole('radio')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Choose for each item' })).not.toBeInTheDocument()
-    expect(screen.getByText('Open edges branch')).toBeInTheDocument()
+    expect(screen.getByText('Openings tangled together')).toBeInTheDocument()
     fireEvent.click(btn('Accept'))
     expect(page()).toBe('ready')
     expect(screen.getByRole('heading', { name: 'Ready' })).toBeInTheDocument()
@@ -489,7 +489,7 @@ describe('MakeSolidWizard — isolation and open edges', () => {
     expect(lastOverlay(props)).toEqual({ ids: [], warnIds: [7n], current: null, rev: 0, capPreview: null })
     const callout = document.querySelector('[data-wizard-reason-callout]') as HTMLElement
     expect(callout).toHaveTextContent(
-      "The highlighted edges are open. They branch or stop short, so Hew can't tell where each opening ends. Shapes like this are usually open on purpose, like a pipe fitting or an electrical box, and work as they are.",
+      "The highlighted edges are open. Several openings run together or stop short, so Hew can't tell where each one ends. Shapes like this are usually open on purpose, like a pipe fitting or an electrical box, and work as they are.",
     )
   })
 
@@ -772,5 +772,97 @@ describe('MakeSolidWizard — freshness', () => {
     expect(props.onClose).not.toHaveBeenCalled()
     rerender(<MakeSolidWizard {...props} docGeneration={5} />)
     expect(props.onClose).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('MakeSolidWizard — Needs mending', () => {
+  const WIRE = {
+    weld: 0.000002,
+    weld_vertices: 312,
+    weld_max_gap: 0,
+    folds: 0,
+    branching_vertices: 2,
+    islands: 1,
+    hole_rims: 7,
+    hole_rims_planar: 3,
+    hole_rims_warped: 4,
+    outer_rims: 0,
+    fill_rims: [0, 1, 2, 3, 4, 5, 6],
+    filled_rims: 7,
+    fill_curved: 4,
+    pieces: 0,
+  }
+  function mendSetup(onBusy?: (message: string, work: () => void) => boolean) {
+    const made = makeScene()
+    const scene = made.scene as typeof made.scene & { mend_census_json: ReturnType<typeof vi.fn> }
+    scene.mend_census_json = vi.fn(() => JSON.stringify(WIRE))
+    const props = {
+      scene,
+      scope: 'model' as const,
+      onClose: vi.fn(),
+      onIsolate: vi.fn(),
+      onClearIsolation: vi.fn(),
+      onHealthOverlay: vi.fn(),
+      onGeometryChanged: vi.fn(),
+      onToast: vi.fn(),
+      onBusy,
+    }
+    render(<MakeSolidWizard {...props} />)
+    return { ...made, props }
+  }
+
+  it('the page offers Mend, on by default, with what it will do for each item', () => {
+    mendSetup()
+    expect(screen.getByText(/1 shape needs mending/)).toBeInTheDocument()
+    fireEvent.click(btn('Go step by step'))
+    while (page() !== 'closerLook') fireEvent.click(btn('Accept'))
+    expect(screen.getByRole('heading', { name: 'Needs mending' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: "Can't be closed" })).not.toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /Mend what can be mended/ })).toBeChecked()
+    expect(screen.getByRole('radio', { name: /Leave them as they are/ })).not.toBeChecked()
+    expect(document.querySelector('[data-wizard-detail]')!.textContent).toBe(
+      'Merge 312 nearby points, separate 2 spots where parts touch at a single point and fill 7 small gaps (3 flat, 4 curved)',
+    )
+    fireEvent.click(btn('Knot'))
+    expect(document.querySelector('[data-wizard-reason-callout]')!.textContent).toContain('Mend can merge nearby points')
+    fireEvent.click(btn('Accept'))
+    expect(page()).toBe('ready')
+    expect(within(document.querySelector('[data-wizard-ready]') as HTMLElement).getByText('Mend 1 object.')).toBeInTheDocument()
+  })
+
+  it('Use recommended choices mends inside the one transaction, behind the busy card', async () => {
+    const onBusy = vi.fn((_m: string, work: () => void) => {
+      work()
+      return true
+    })
+    const { transacts, props } = mendSetup(onBusy)
+    fireEvent.click(btn('Use recommended choices'))
+    await waitFor(() => expect(page()).toBe('done'))
+    expect(onBusy).toHaveBeenCalledWith('Mending…', expect.any(Function))
+    expect(transacts()).toHaveLength(1)
+    expect(transacts()[0].params.label).toBe('Make Solid')
+    expect(transacts()[0].params.commands).toEqual([
+      { method: 'hew.solid.mend', params: { object: 'obj_7', weld: true, folds: true, split: true, fill: 'holes' } },
+    ])
+    expect(props.onGeometryChanged).toHaveBeenCalled()
+  })
+
+  it('says so, and runs nothing, when the busy card is taken', () => {
+    const { transacts, props } = mendSetup(() => false)
+    fireEvent.click(btn('Use recommended choices'))
+    expect(props.onToast).toHaveBeenCalledWith('Another change is still running. Press Enter or click again when it finishes.')
+    expect(transacts()).toHaveLength(0)
+    expect(page()).toBe('overview')
+    expect(btn('Use recommended choices')).toBeEnabled()
+  })
+
+  it('choosing to leave them writes nothing', async () => {
+    const { transacts } = mendSetup(() => true)
+    fireEvent.click(btn('Go step by step'))
+    while (page() !== 'closerLook') fireEvent.click(btn('Accept'))
+    fireEvent.click(screen.getByRole('radio', { name: /Leave them as they are/ }))
+    fireEvent.click(btn('Accept'))
+    expect(within(document.querySelector('[data-wizard-ready]') as HTMLElement).getByText('Nothing will change. Go back to make a choice, or close this window.')).toBeInTheDocument()
+    expect(transacts()).toHaveLength(0)
   })
 })

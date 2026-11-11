@@ -1002,6 +1002,19 @@ Semantics notes, normative:
   minus the union of the rest, the intersection of all. `operands` with
   fewer than two refuses `boolean_needs_two`; `a` without `b`, or both
   spellings at once, is a malformed request.
+- `hew.solid.mend {object, weld?, folds?, split?, fill?, require_solid?}`
+  is Model Health's Mend: merge points closer than `weld` meters (omitted
+  or `true` = the object's default distance, `false`/`null` = none), remove
+  zero-width folds, separate pinched parts (`split`; islands become objects
+  of their own), and fill small gaps (`fill`: `"holes"`, a list of
+  `hew.doc.health` rim indices, or `false`), as one undo step. It does what
+  it can: a gap it cannot close is left open and listed in `skipped_rims`
+  with its refusal code as the reason, and the result reports `closed`.
+  `require_solid` refuses `still_open` instead of committing a result that
+  is not watertight. Pieces carry the object's name and tags. It refuses
+  rather than leave the object worse (a solid opened at a narrow neck, a
+  thin part pressed flat, a face turned over) and with `nothing_to_mend`
+  when no step has work; a refusal leaves the document untouched.
 - **Editable imprints** (kept for compatibility; implemented over the
   drafting engine's plane units — `hew.sketch.units`, `move`, `rotate`,
   `scale`, `delete` are the general form and take plane and unit keys):

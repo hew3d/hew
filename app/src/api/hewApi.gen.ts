@@ -1589,6 +1589,55 @@ export interface SolidMarkSurfaceResult {
 }
 
 /**
+ * `hew.solid.mend` (v1) — Mend an open object: merge nearby points, remove zero-width folds, separate pinched parts and fill small gaps, as one undo step.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_component, unknown_entity, explode_session_scope, invalid, unknown_rim, nothing_to_mend, weld_distance_out_of_range, weld_folds_faces, weld_collapses_object, fill_crosses_faces, fill_rim_too_small, cap_would_be_coplanar, still_open, fold_removal_pinches, weld_flips_faces, mend_opens_object, weld_flattens_object, non_manifold_rim, rim_not_planar
+ */
+export interface SolidMendParams {
+  /** "holes" (default) fills every gap that is a hole; an array of hew.doc.health rim indices fills those; false or null fills none */
+  fill?: "holes" | number[] | false | null
+  /** remove zero-width folds at open edges (default true) */
+  folds?: boolean
+  /** obj_ id (a world object or a component member) */
+  object: string
+  /** refuse still_open instead of committing a result that is not watertight (default false) */
+  require_solid?: boolean
+  /** separate pinched parts; islands become objects of their own (default true) */
+  split?: boolean
+  /** merge points closer than this many meters; omitted or true = the object's default distance, false or null = no merge */
+  weld?: number | boolean | null
+}
+
+export interface SolidMendResult {
+  /** the object is now a solid */
+  closed: boolean
+  /** faces the merge collapsed, dropped */
+  collapsed_faces?: number
+  fill_triangles?: number
+  filled_rims: number
+  /** zero-width folds removed */
+  folds_removed?: number
+  object_id: string
+  /** obj_ ids of the parts cut loose */
+  pieces: string[]
+  pieces_closed?: number
+  reversed?: boolean
+  /** zero-width doublings-back cut out of faces while stitching seams */
+  seam_folds?: number
+  skipped_rims: ({ object?: number; reason?: string; rim?: number | null })[]
+  /** edges the Mend left between faces on one plane, made soft so it adds no drawing */
+  soft_seams?: number
+  split_edges?: number
+  split_vertices?: number
+  /** of filled_rims, seams closed by stitching */
+  stitched_rims?: number
+  /** farthest a merged point moved (m) */
+  weld_max_move?: number
+  /** points merged away */
+  welded_vertices: number
+}
+
+/**
  * `hew.solid.move_imprint` (v1) — Kept for compatibility: slide a drawn shape (sub-face or chord island) in its plane; hew.sketch.move is the general form.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: not_in_plane, not_an_imprint, draft_boundary_edge_touched, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale
@@ -2090,6 +2139,7 @@ export class HewApiClient {
     imprints: (params: SolidImprintsParams): Promise<SolidImprintsResult> => this.call('hew.solid.imprints', params),
     intersect: (params: SolidIntersectParams): Promise<SolidIntersectResult> => this.mutate('hew.solid.intersect', params),
     markSurface: (params: SolidMarkSurfaceParams): Promise<SolidMarkSurfaceResult> => this.mutate('hew.solid.mark_surface', params),
+    mend: (params: SolidMendParams): Promise<SolidMendResult> => this.mutate('hew.solid.mend', params),
     moveImprint: (params: SolidMoveImprintParams): Promise<SolidMoveImprintResult> => this.mutate('hew.solid.move_imprint', params),
     pushPull: (params: SolidPushPullParams): Promise<SolidPushPullResult> => this.mutate('hew.solid.push_pull', params),
     rotateImprint: (params: SolidRotateImprintParams): Promise<SolidRotateImprintResult> => this.mutate('hew.solid.rotate_imprint', params),

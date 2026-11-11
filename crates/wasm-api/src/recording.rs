@@ -866,6 +866,10 @@ pub enum RecordedCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rims: Option<Vec<u32>>,
     },
+    /// `mend(object, plan_json)` — Model Health's Mend (the mesh-repair
+    /// design). Additive variant: old recordings replay unchanged; one
+    /// that mends fails to parse on older builds — loudly.
+    Mend { object: u64, plan_json: String },
     /// `delete_faces(object, faces)` — Model Health's face removal (R2).
     DeleteFaces { object: u64, faces: Vec<u64> },
     /// `set_accepted_surface(object, accepted)` — Model Health's mark (R3).

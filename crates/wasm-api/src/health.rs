@@ -141,29 +141,82 @@ pub(crate) fn rim_segments(
     doc: &Document,
     ids: &[ObjectId],
     only: Option<(ObjectId, usize)>,
+    cache: &RimCache,
 ) -> Vec<f32> {
-    let placed = placements(doc);
+    let members = ids.iter().any(|&o| !doc.is_world_object(o));
+    let placed = if members {
+        placements(doc)
+    } else {
+        BTreeMap::new()
+    };
     let mut out = Vec::new();
     for &id in ids {
         if only.is_some_and(|(o, _)| o != id) {
             continue;
         }
-        let Some(obj) = doc.object(id) else { continue };
-        let d = kernel::health::diagnose(obj);
-        let he = obj.half_edges();
-        let pos = |h: kernel::HalfEdgeId| obj.vertices()[he[h].origin].position;
+        let Some(rims) = object_rims(doc, id, cache) else {
+            continue;
+        };
         let poses = poses(doc, &placed, id);
-        for (ri, rim) in d.rims.iter().enumerate() {
+        for (ri, rim) in rims.iter().enumerate() {
             if only.is_some_and(|(_, r)| r != ri) {
                 continue;
             }
-            for &h in &rim.half_edges {
-                let (a, b) = (pos(h), pos(he[h].next));
+            for &(a, b) in rim {
                 for t in &poses {
                     push(&mut out, t.apply_point(a));
                     push(&mut out, t.apply_point(b));
                 }
             }
+        }
+    }
+    out
+}
+
+/// Each object's rims as local segments, in [`kernel::health::diagnose`]
+/// order, kept between edits (the Scene drops an object's entry whenever a
+/// change touches it): the overlay asks for one rim at a time, and each
+/// ask diagnosed the whole object again (seconds on a dense scan).
+pub(crate) type RimCache = std::cell::RefCell<BTreeMap<ObjectId, std::rc::Rc<Rims>>>;
+
+/// An object's rims as local segments, in diagnose order.
+pub(crate) type Rims = Vec<Vec<(Point3, Point3)>>;
+
+fn object_rims(doc: &Document, id: ObjectId, cache: &RimCache) -> Option<std::rc::Rc<Rims>> {
+    let obj = doc.object(id)?;
+    if let Some(r) = cache.borrow().get(&id) {
+        return Some(r.clone());
+    }
+    let d = kernel::health::diagnose(obj);
+    let he = obj.half_edges();
+    let pos = |h: kernel::HalfEdgeId| obj.vertices()[he[h].origin].position;
+    let rims: Rims = d
+        .rims
+        .iter()
+        .map(|rim| {
+            rim.half_edges
+                .iter()
+                .map(|&h| (pos(h), pos(he[h].next)))
+                .collect()
+        })
+        .collect();
+    let rims = std::rc::Rc::new(rims);
+    cache.borrow_mut().insert(id, rims.clone());
+    Some(rims)
+}
+
+/// `points` of object `id` at every placement of it, world-space (see
+/// [`crate::Scene::mend_census_points`]).
+pub(crate) fn points_at_placements(doc: &Document, id: ObjectId, points: &[Point3]) -> Vec<f32> {
+    let placed = if doc.is_world_object(id) {
+        BTreeMap::new()
+    } else {
+        placements(doc)
+    };
+    let mut out = Vec::with_capacity(points.len() * 3);
+    for t in poses(doc, &placed, id) {
+        for &p in points {
+            push(&mut out, t.apply_point(p));
         }
     }
     out
@@ -307,6 +360,28 @@ mod tests {
     }
 
     #[test]
+    fn census_points_are_drawn_at_every_placement() {
+        let place = |x: f64| ImportNode::Instance {
+            def: 0,
+            pose: Transform::translation(Vec3::new(x, 0.0, 0.0)),
+            name: None,
+            tags: Vec::new(),
+            hidden: false,
+            key: None,
+        };
+        let doc = doc_with(
+            vec![place(0.0), place(10.0)],
+            vec![DefRecipe {
+                name: Some("Tray".into()),
+                children: vec![ImportNode::Mesh(open_tray(0.0))],
+            }],
+        );
+        let member = doc.live_object_ids()[0];
+        let pts = points_at_placements(&doc, member, &[Point3::new(1.0, 0.0, 1.0)]);
+        assert_eq!(pts, vec![1.0, 0.0, 1.0, 11.0, 0.0, 1.0]);
+    }
+
+    #[test]
     fn a_definitions_rim_is_drawn_at_every_placement() {
         let place = |x: f64| ImportNode::Instance {
             def: 0,
@@ -324,7 +399,7 @@ mod tests {
             }],
         );
         let ids = doc.live_object_ids();
-        let segs = rim_segments(&doc, &ids, None);
+        let segs = rim_segments(&doc, &ids, None, &RimCache::default());
         // 4 rim edges × 2 placements × 2 points × 3 floats.
         assert_eq!(segs.len(), 4 * 2 * 2 * 3);
         let xs: Vec<f32> = segs.chunks(3).map(|p| p[0]).collect();
@@ -344,8 +419,8 @@ mod tests {
         assert_eq!(v["rows"][0]["instances"].as_array().unwrap().len(), 2);
         assert_eq!(v["rows"][0]["definition_name"], "Tray");
         // One rim of one object narrows to that rim.
-        let one = rim_segments(&doc, &ids, Some((ids[0], 0)));
+        let one = rim_segments(&doc, &ids, Some((ids[0], 0)), &RimCache::default());
         assert_eq!(one.len(), segs.len());
-        assert!(rim_segments(&doc, &ids, Some((ids[0], 1))).is_empty());
+        assert!(rim_segments(&doc, &ids, Some((ids[0], 1)), &RimCache::default()).is_empty());
     }
 }

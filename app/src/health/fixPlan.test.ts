@@ -333,7 +333,7 @@ describe('families that are not split shapes', () => {
       report([row({ object: '1', family: 0, verdict: { kind: 'non_manifold' }, branching_vertices: 1 }), row({ object: '2', family: 0, ...WALL })], fam),
     )
     expect(plan.items.closerLook).toHaveLength(1)
-    expect(itemDetail(plan.items.closerLook[0])).toBe('Open edges branch')
+    expect(itemDetail(plan.items.closerLook[0])).toBe('Openings tangled together')
   })
 
   it('a piece with a shared rim makes a split shape; its seams are capped and the wall deleted', () => {
@@ -370,5 +370,70 @@ describe('freshness helpers', () => {
     )
     const out = carryPerItem(before, after, ticks([['1', true], ['family-0', false]]))
     expect([...out]).toEqual([['family-3', false]])
+  })
+})
+
+describe('needs mending (Mend)', () => {
+  const CENSUS = {
+    weld: 0.000002,
+    weldVertices: 312,
+    weldMaxGap: 0,
+    folds: 0,
+    branchingVertices: 2,
+    islands: 1,
+    pieces: 0,
+    fillRims: 7,
+    fillFlat: 3,
+    fillCurved: 4,
+    skippedRims: 0,
+  }
+  const NOTHING = { ...CENSUS, weldVertices: 0, branchingVertices: 0, fillRims: 0 }
+  const rows = [
+    row({ object: '1', name: 'Knot', verdict: { kind: 'non_manifold' }, branching_vertices: 2 }),
+    row({ object: '2', name: 'Sock', verdict: { kind: 'holes', planar: 0, warped: 1 }, rims: [WARPED] }),
+    row({ object: '3', name: 'Pipe fitting', verdict: { kind: 'non_manifold' }, branching_vertices: 1 }),
+  ]
+  const census = (r: { object: bigint }) => (r.object === 3n ? NOTHING : CENSUS)
+  const plan = buildPlan(report(rows), census)
+
+  it('items with something to mend carry the census; the rest do not', () => {
+    expect(plan.items.closerLook.map((i) => [i.name, i.mend !== null])).toEqual([
+      ['Knot', true],
+      ['Sock', true],
+      ['Pipe fitting', false],
+    ])
+  })
+
+  it('Mend is on by default and writes one mend op per item with something to mend, in the one transaction', () => {
+    expect(defaultChoices().mend).toBe('mend')
+    const r = planCommands(plan, defaultChoices())
+    expect(methods(r)).toEqual([
+      ['hew.solid.mend', 1n, { weld: true, folds: true, split: true, fill: 'holes' }],
+      ['hew.solid.mend', 2n, { weld: true, folds: true, split: true, fill: 'holes' }],
+    ])
+    expect(readySentences(plan, defaultChoices())).toEqual(['Mend 2 objects.', 'Leave 1 object as it is.'])
+  })
+
+  it('leaving them writes nothing; a tick on one item wins over the page', () => {
+    expect(methods(planCommands(plan, choices({ mend: 'leave' })))).toEqual([])
+    const one = choices({ mend: 'leave', perItem: ticks([['2', true]]) })
+    expect(methods(planCommands(plan, one)).map((m) => m[1])).toEqual([2n])
+    const off = choices({ perItem: ticks([['1', false]]) })
+    expect(methods(planCommands(plan, off)).map((m) => m[1])).toEqual([2n])
+  })
+
+  it('an item with nothing to mend never acts, whatever its tick', () => {
+    expect(itemActs(plan.items.closerLook[2], choices({ perItem: ticks([['3', true]]) }))).toBe(false)
+  })
+
+  it('"left as you chose" counts the mendable items left alone', () => {
+    expect(leftByChoice(plan, defaultChoices())).toBe(0)
+    expect(leftByChoice(plan, choices({ mend: 'leave' }))).toBe(2)
+  })
+
+  it('without a census every item stays as before and nothing mends', () => {
+    const bare = buildPlan(report(rows))
+    expect(bare.items.closerLook.every((i) => i.mend === null)).toBe(true)
+    expect(methods(planCommands(bare, defaultChoices()))).toEqual([])
   })
 })

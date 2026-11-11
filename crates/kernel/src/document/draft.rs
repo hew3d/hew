@@ -1044,15 +1044,25 @@ impl Document {
         let mut circles: Vec<(CurveGeom, Vec<(Point3, Point3)>)> = Vec::new();
         let mut poly_edges: Vec<(CurveGeom, Point3, Point3)> = Vec::new();
         let mut plain: Vec<(Point3, Point3)> = Vec::new();
+        // Each claim by its edge (the first one listed wins, as a scan in
+        // order found it): a lookup per stored edge, not a scan of every
+        // claim.
+        let mut claim_at: BTreeMap<SegKey, CurveGeom> = BTreeMap::new();
+        for c in &claimed {
+            claim_at.entry(seg_key(c.0, c.1)).or_insert(c.2);
+        }
+        let mut poly_at: BTreeMap<SegKey, CurveGeom> = BTreeMap::new();
+        for c in &poly_claimed {
+            poly_at.entry(seg_key(c.0, c.1)).or_insert(c.2);
+        }
         for e in &stored {
             let key = seg_key(e.a, e.b);
-            if let Some(&(_, _, g)) = claimed.iter().find(|c| seg_key(c.0, c.1) == key) {
+            if let Some(&g) = claim_at.get(&key) {
                 match circles.iter_mut().find(|(h, _)| *h == g) {
                     Some((_, segs)) => segs.push((e.a, e.b)),
                     None => circles.push((g, vec![(e.a, e.b)])),
                 }
-            } else if let Some(&(_, _, g)) = poly_claimed.iter().find(|c| seg_key(c.0, c.1) == key)
-            {
+            } else if let Some(&g) = poly_at.get(&key) {
                 // A regular polygon's sides: one polygon chain, as drawn
                 // (grouped below).
                 poly_edges.push((g, e.a, e.b));
@@ -1096,6 +1106,10 @@ impl Document {
                 (longest, pairs)
             })
             .collect();
+        // The plain edges no circle takes, in order, through the grid in
+        // one batch: exactly what adding them one by one builds
+        // (`Sketch::add_segments`), without a scan of the sketch per edge.
+        let mut loose: Vec<(Point3, Point3)> = Vec::new();
         for &(a, b) in &plain {
             let home = circles
                 .iter()
@@ -1115,11 +1129,10 @@ impl Document {
                 });
             match home {
                 Some(i) => circles[i].1.push((a, b)),
-                None => {
-                    work.add_segment(a, b).map_err(DocumentError::Sketch)?;
-                }
+                None => loose.push((a, b)),
             }
         }
+        work.add_segments(&loose).map_err(DocumentError::Sketch)?;
         for (g, segs) in circles {
             work.begin_curve_with(g).map_err(DocumentError::Sketch)?;
             let r = segs
@@ -4547,6 +4560,23 @@ impl Document {
             .collect();
         units.sort_by_key(|u| u.key);
 
+        // Each taking part object's faces on the plane, in face order, found
+        // once: the first that holds a region's sample is the one a scan of
+        // every face would find (`face_holding`), at the cost of the plane's
+        // faces rather than the object's.
+        let on_plane: Vec<(ObjectId, Vec<FaceId>)> = lifted
+            .objects
+            .iter()
+            .map(|&o| {
+                let obj = &self.objects[o].object;
+                let faces = obj
+                    .faces()
+                    .keys()
+                    .filter(|&f| face_on_plane(obj, f, &plane))
+                    .collect();
+                (o, faces)
+            })
+            .collect();
         let mut regions = Vec::new();
         for (_, r) in w.regions().iter() {
             let outer: Vec<Point3> = r.outer.iter().map(|&v| pos(v)).collect();
@@ -4561,8 +4591,13 @@ impl Document {
             let Some(sample) = interior_point_of_loops(&outer, &holes, plane.normal()) else {
                 continue;
             };
-            let holder = lifted.objects.iter().copied().find_map(|o| {
-                face_holding(&self.objects[o].object, &plane, sample).map(|f| (o, f))
+            let holder = on_plane.iter().find_map(|(o, faces)| {
+                let obj = &self.objects[*o].object;
+                faces
+                    .iter()
+                    .copied()
+                    .find(|&f| obj.face_contains_point(f, sample))
+                    .map(|f| (*o, f))
             });
             let (over, extrude) = match holder {
                 Some((o, f)) => {

@@ -10,6 +10,7 @@ import {
   rowClass,
   rowDisplayName,
   openReason,
+  canCloseRow,
   segmentBounds,
   summarize,
   rowDetailText,
@@ -71,7 +72,7 @@ describe('words', () => {
     expect(rowDetailText(one({ verdict: { kind: 'flat_sheet', holes: 0 }, rims: [] }))).toBe('Flat panel')
     expect(rowDetailText(one({ verdict: { kind: 'flat_sheet', holes: 0 }, rims: [], accepted: true }))).toBe('Flat panel, kept')
     expect(rowDetailText(one({ verdict: { kind: 'bent_sheet' }, rims: [] }))).toBe('Curved sheet')
-    expect(rowDetailText(one({ verdict: { kind: 'non_manifold' }, branching_vertices: 2 }))).toBe('Open edges branch')
+    expect(rowDetailText(one({ verdict: { kind: 'non_manifold' }, branching_vertices: 2 }))).toBe('Openings tangled together')
     expect(rowDetailText(one({ family: 0 }))).toBe('Piece of a split shape')
   })
 
@@ -213,7 +214,7 @@ describe('grouping', () => {
     expect(g.groups.map((x) => [x.label, x.rows.length])).toEqual([
       ['Has openings', 2],
       ['Flat panels', 1],
-      ["Can't be closed", 1],
+      ["Needs mending", 1],
     ])
     expect(g.families).toEqual([])
   })
@@ -241,5 +242,28 @@ describe('segmentBounds', () => {
   it('bounds a segment list; null when empty', () => {
     expect(segmentBounds(new Float32Array([0, 1, 2, 3, -1, 5]))).toEqual({ min: [0, -1, 2], max: [3, 1, 5] })
     expect(segmentBounds(new Float32Array([]))).toBeNull()
+  })
+})
+
+describe('canCloseRow', () => {
+  const one = (over: Record<string, unknown>): HealthRow => report([row(over)]).rows[0]
+  const WARPED = { ...RIM, planar: false, cappable: false }
+
+  it('offers Close when some opening can take a face', () => {
+    expect(canCloseRow(one({}))).toBe(true)
+    expect(canCloseRow(one({ verdict: { kind: 'mixed' }, rims: [RIM, WARPED] }))).toBe(true)
+  })
+
+  it('does not offer Close when every opening is warped', () => {
+    expect(canCloseRow(one({ verdict: { kind: 'mixed' }, rims: [WARPED] }))).toBe(false)
+    expect(canCloseRow(one({ verdict: { kind: 'holes', planar: 1 }, rims: [WARPED, WARPED] }))).toBe(false)
+  })
+
+  it('keeps the verdict answer when the report left the rims out', () => {
+    expect(canCloseRow(one({ rims: [] }))).toBe(true)
+  })
+
+  it('never offers Close for other verdicts', () => {
+    expect(canCloseRow(one({ verdict: { kind: 'non_manifold' } }))).toBe(false)
   })
 })

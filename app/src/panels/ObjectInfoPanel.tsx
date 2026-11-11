@@ -69,7 +69,8 @@ import {
   rowPlacements,
   type HealthRow,
 } from '../health/healthReport'
-import { ACTION, TOOLTIP, geometryLine } from '../health/healthCopy'
+import { ACTION, MEND, TOOLTIP, geometryLine } from '../health/healthCopy'
+import { hasMendWork, hasWarpedHoles, mendCandidate, readMendCensus } from '../health/mend'
 import { batchLabel, failureLine, runBatch, thickenOp } from '../health/healthBatch'
 import { ThickenDialog } from './ThickenDialog'
 import { worldBoundsForSelection, boundsExtents, type Bounds } from './objectBounds'
@@ -465,6 +466,18 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene, docRev, selectedIds, t])
   const instanceCount = nodeInfo?.instanceIds.length ?? 0
+
+  // Whether Mend has something to do for the selected open object: the
+  // Geometry line then says where to find it (the census is cached per
+  // history generation).
+  const mendHint = useMemo(() => {
+    const row = nodeInfo?.health ?? null
+    if (nodeInfo === null || nodeInfo.kind !== 'object' || row === null || nodeInfo.solid === true) return false
+    if (!(mendCandidate(row, false) || hasWarpedHoles(row))) return false
+    const census = readMendCensus(scene, nodeInfo.id as bigint, undefined, docRev)
+    return census !== null && hasMendWork(census)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scene, docRev, nodeInfo])
 
   // --------------------------------------------------------------------------
   // Selection path: where the selected object/group/instance sits, outermost
@@ -1283,6 +1296,11 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
               >
                 {ACTION.showInList}
               </button>
+            )}
+            {mendHint && (
+              <span data-object-mend-hint style={{ fontWeight: 'normal', color: 'var(--text-faint)', flexBasis: '100%' }}>
+                {MEND.hint}
+              </span>
             )}
           </div>
         </div>

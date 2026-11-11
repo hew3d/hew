@@ -569,3 +569,180 @@ fn deleting_a_member_inside_a_group_within_its_definition_works() {
             .all(|r| r["name"] != "Pane")
     );
 }
+
+/// A unit box at `x0` whose six faces keep private corners, one copy of
+/// each nudged a micron: an STL that was never welded.
+fn unwelded_box(name: &str, x0: f64) -> MeshRecipe {
+    let c = |x: f64, y: f64, z: f64| Point3::new(x0 + x, y, z);
+    let corners = [
+        c(0.0, 0.0, 0.0),
+        c(1.0, 0.0, 0.0),
+        c(1.0, 1.0, 0.0),
+        c(0.0, 1.0, 0.0),
+        c(0.0, 0.0, 1.0),
+        c(1.0, 0.0, 1.0),
+        c(1.0, 1.0, 1.0),
+        c(0.0, 1.0, 1.0),
+    ];
+    let faces = [
+        [0, 3, 2, 1],
+        [4, 5, 6, 7],
+        [0, 1, 5, 4],
+        [1, 2, 6, 5],
+        [2, 3, 7, 6],
+        [3, 0, 4, 7],
+    ];
+    let mut positions = Vec::new();
+    let mut rings = Vec::new();
+    for (f, face) in faces.iter().enumerate() {
+        let mut ring = Vec::new();
+        for &v in face {
+            ring.push(positions.len());
+            let nudge = if f == 0 { 1e-6 } else { 0.0 };
+            positions.push(Point3::new(
+                corners[v].x + nudge,
+                corners[v].y,
+                corners[v].z,
+            ));
+        }
+        rings.push(ring);
+    }
+    mesh(name, positions, rings)
+}
+
+#[test]
+fn mend_welds_an_unwelded_box_into_a_solid_in_one_undo_entry() {
+    let mut doc = doc_with(
+        vec![ImportNode::Mesh(unwelded_box("Crate", 0.0))],
+        Vec::new(),
+    );
+    let mut conn = attach(&mut doc);
+    let health = ok(&mut conn, &mut doc, "hew.doc.health", json!({}));
+    let object = row(&health, "Crate")["object"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let depth = doc.content_depth();
+    let r = ok(
+        &mut conn,
+        &mut doc,
+        "hew.solid.mend",
+        json!({ "object": object }),
+    );
+    assert_eq!(r["object_id"], object);
+    assert_eq!(r["welded_vertices"], 16);
+    assert_eq!(r["closed"], true);
+    assert_eq!(r["pieces"], json!([]));
+    assert_eq!(doc.content_depth(), depth + 1);
+    let entity = ok(
+        &mut conn,
+        &mut doc,
+        "hew.query.entity",
+        json!({ "id": object }),
+    );
+    assert_eq!(entity["health"], "solid");
+    // Again: nothing left to mend.
+    assert_eq!(
+        refusal(
+            &mut conn,
+            &mut doc,
+            "hew.solid.mend",
+            json!({ "object": object })
+        ),
+        "nothing_to_mend"
+    );
+}
+
+#[test]
+fn mend_refuses_a_bad_distance_and_a_transaction_with_a_refusing_member_changes_nothing() {
+    let mut doc = doc_with(
+        vec![
+            ImportNode::Mesh(unwelded_box("Crate", 0.0)),
+            ImportNode::Mesh(pane(3.0)),
+        ],
+        Vec::new(),
+    );
+    let mut conn = attach(&mut doc);
+    let health = ok(&mut conn, &mut doc, "hew.doc.health", json!({}));
+    let crate_id = row(&health, "Crate")["object"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let pane_id = row(&health, "Pane")["object"].as_str().unwrap().to_string();
+    assert_eq!(
+        refusal(
+            &mut conn,
+            &mut doc,
+            "hew.solid.mend",
+            json!({ "object": crate_id, "weld": 0.5 })
+        ),
+        "weld_distance_out_of_range"
+    );
+    let depth = doc.content_depth();
+    let before = doc.state_hash();
+    // The pane is a flat sheet: its edge is not a hole, so it refuses and
+    // the whole frame rolls back.
+    assert_eq!(
+        refusal(
+            &mut conn,
+            &mut doc,
+            "hew.doc.transact",
+            json!({ "commands": [
+                { "method": "hew.solid.mend", "params": { "object": crate_id } },
+                { "method": "hew.solid.mend", "params": { "object": pane_id, "weld": false } }
+            ]}),
+        ),
+        "nothing_to_mend"
+    );
+    assert_eq!((doc.content_depth(), doc.state_hash()), (depth, before));
+    // Without the refusing member the batch goes through.
+    ok(
+        &mut conn,
+        &mut doc,
+        "hew.doc.transact",
+        json!({ "commands": [
+            { "method": "hew.solid.mend", "params": { "object": crate_id, "split": false, "fill": false } }
+        ]}),
+    );
+    assert_eq!(doc.content_depth(), depth + 1);
+}
+
+/// A gap Mend left open names its reason by the refusal code the API
+/// uses everywhere else (`fill_crosses_faces`), not the kernel's
+/// variant name.
+#[test]
+fn a_skipped_rims_reason_is_its_refusal_code() {
+    use kernel::repair::{MendReport, RepairError, SkippedRim};
+    let report = MendReport {
+        welded_vertices: 0,
+        weld_max_move: 0.0,
+        collapsed_faces: 0,
+        folds_removed: 0,
+        seam_folds: 0,
+        soft_seams: 0,
+        split_vertices: 0,
+        split_edges: 0,
+        pieces: 0,
+        filled_rims: 1,
+        stitched_rims: 0,
+        fill_triangles: 0,
+        skipped_rims: vec![
+            SkippedRim {
+                object: 0,
+                rim: Some(0),
+                reason: RepairError::FillCrossesFaces,
+            },
+            SkippedRim {
+                object: 0,
+                rim: None,
+                reason: RepairError::NonManifoldRim,
+            },
+        ],
+        reversed: false,
+        closed: false,
+        pieces_closed: 0,
+    };
+    let json = api::health::mend_report_json(&report, Vec::new());
+    assert_eq!(json["skipped_rims"][0]["reason"], "fill_crosses_faces");
+    assert_eq!(json["skipped_rims"][1]["reason"], "non_manifold_rim");
+}

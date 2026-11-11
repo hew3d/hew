@@ -24,6 +24,13 @@ export const BANNED_WORDS = [
   'fix model',
   'closer look',
   'watertight',
+  'weld',
+  'welded',
+  'welding',
+  'vertex',
+  'vertices',
+  'triangulate',
+  'triangulation',
 ] as const
 
 /** Matches a banned word as a whole word, also inside "non-manifold". */

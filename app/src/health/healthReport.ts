@@ -173,11 +173,14 @@ export function verdictClass(kind: VerdictKind, accepted = false): HealthClass {
   return kind === 'flat_sheet' || kind === 'bent_sheet' ? 'surface' : 'open'
 }
 
-/** Stage 2 repairs: rows whose flat openings can take a face. Non-manifold
+/** Stage 2 repairs: rows with an opening that can take a face. Non-manifold
  *  rows are refused by the kernel and surfaces are Stage 3, so neither offers it. */
 export function canCloseRow(row: HealthRow): boolean {
   const v = row.verdict
-  return v.kind === 'cappable' || v.kind === 'mixed' || (v.kind === 'holes' && (v.planar ?? 0) > 0)
+  const flatKind = v.kind === 'cappable' || v.kind === 'mixed' || (v.kind === 'holes' && (v.planar ?? 0) > 0)
+  // A flat kind with no rim the kernel can cap (every opening warped) has
+  // nothing for Close to do. An empty list means the report left rims out.
+  return flatKind && (row.rims.length === 0 || row.rims.some((r) => r.cappable))
 }
 
 export function rowClass(row: HealthRow): HealthClass {
@@ -441,6 +444,11 @@ export function groupedRows(g: GroupedHealth): HealthRow[] {
 
 let wholeCache: { scene: WasmScene; docRev: number; report: HealthReport } | null = null
 
+/** Test hook: forget the whole-model report read for a shared test scene. */
+export function resetHealthReportCache(): void {
+  wholeCache = null
+}
+
 /**
  * Read a report from the scene. The whole-document read (the panel's Whole
  * document scope) is cached per `docRev`. Only the panel reads reports; the
@@ -504,6 +512,10 @@ export interface HealthOverlay {
    *  edges of faces Make Solid could not close (rim color) and the edges of
    *  closed loops that lie on no one plane (warn color). Wireframe faces §6. */
   segments?: { open: Float32Array; warn: Float32Array }
+  /** While the pointer / focus is on a Mend button: the points it would
+   *  merge and split (world `[x, y, z, …]`); the rims it would fill ride in
+   *  `capPreview`. */
+  mendPoints?: { merge: Float32Array; split: Float32Array } | null
 }
 
 /** The rims a Close on `rows` would cap: those the kernel flags `cappable`

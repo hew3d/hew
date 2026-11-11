@@ -833,6 +833,7 @@ pub fn render_history_label(kind: &HistoryKind) -> String {
         }
         "delete-faces" => format!("Delete {}", count_label(count("count"), "face")),
         "add-thickness" => "Add thickness".to_string(),
+        "mend" => "Mend object".to_string(),
         "transform" => format!("{verb} {}", count_label(count("count"), text("noun"))),
         "transform-sketch" => format!("{verb} sketch"),
         "transform-instance" => format!("{verb} instance"),
@@ -945,6 +946,15 @@ enum RepairKind {
     DeleteFaces { faces: usize },
     /// [`Document::thicken_sheet`] pulled a flat sheet into a solid.
     Thicken,
+    /// [`Document::mend`] merged `welded` points, split `split` points,
+    /// filled `filled` gaps and cut `pieces` islands loose.
+    #[allow(dead_code)] // the counts are for a richer label later
+    Mend {
+        welded: usize,
+        split: usize,
+        filled: usize,
+        pieces: usize,
+    },
 }
 
 /// One document-level step on the undo stack.
@@ -13674,6 +13684,68 @@ impl Document {
         Ok((split_off, change))
     }
 
+    /// Mend a visible object (Model Health, the mesh-repair design;
+    /// [`Object::mend`] has the geometry): merge nearby points, separate
+    /// pinched parts and fill small gaps as `plan` names. The object keeps
+    /// its handle and its largest island; every other island becomes an
+    /// object of its own beside it (same group or definition, name and
+    /// tags), whose ids are returned. A definition member's mend reaches
+    /// every instance. One undo step ("Mend object").
+    ///
+    /// # Errors
+    /// As [`Document::cap_rims`], with the Mend refusals
+    /// ([`crate::repair::RepairError::NothingToMend`],
+    /// [`crate::repair::RepairError::WeldDistanceOutOfRange`],
+    /// [`crate::repair::RepairError::WeldFoldsFaces`],
+    /// [`crate::repair::RepairError::WeldFlipsFaces`],
+    /// [`crate::repair::RepairError::WeldCollapsesObject`],
+    /// [`crate::repair::RepairError::WeldFlattensObject`],
+    /// [`crate::repair::RepairError::MendOpensObject`],
+    /// [`crate::repair::RepairError::StillOpen`]). On `Err` the document is
+    /// untouched.
+    pub fn mend(
+        &mut self,
+        object: ObjectId,
+        plan: &crate::repair::MendPlan,
+    ) -> Result<(crate::repair::MendReport, Vec<ObjectId>, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "mend");
+        self.repair_target(object)?;
+        let mut after = self.objects[object].object.clone();
+        let (report, pieces) = after.mend(plan).map_err(DocumentError::Repair)?;
+        let kind = RepairKind::Mend {
+            welded: report.welded_vertices,
+            split: report.split_vertices + report.split_edges,
+            filled: report.filled_rims,
+            pieces: report.pieces,
+        };
+        let change = self.commit_repair(object, kind, after, pieces);
+        let split_off = change.objects_touched[1..].to_vec();
+        Ok((report, split_off, change))
+    }
+
+    /// What [`Document::mend`] would find to do on a visible object (the
+    /// preview). Pure.
+    ///
+    /// # Errors
+    /// The refusals [`Document::mend`] meets on the way: the target checks
+    /// (`UnknownObject`, `UnknownComponent`, `ExplodeSessionScope`), the
+    /// plan's (`WeldDistanceOutOfRange`, `UnknownRim`) and every step's
+    /// (the census runs the Mend itself on a copy), so a preview never
+    /// promises what the commit refuses. Only `StillOpen` and
+    /// `NothingToMend`, which judge the counts the census returns, are
+    /// left to the commit.
+    pub fn mend_census(
+        &self,
+        object: ObjectId,
+        plan: &crate::repair::MendPlan,
+    ) -> Result<crate::repair::MendCensus, DocumentError> {
+        self.repair_target(object)?;
+        self.objects[object]
+            .object
+            .mend_census(plan)
+            .map_err(DocumentError::Repair)
+    }
+
     /// The checks every repair makes before touching `object`: live, and
     /// either a world object inside any open edit session or a member of a
     /// live definition.
@@ -19745,6 +19817,7 @@ impl Document {
                 RepairKind::Cap { rims } => k("close-openings").count("count", rims),
                 RepairKind::DeleteFaces { faces } => k("delete-faces").count("count", faces),
                 RepairKind::Thicken => k("add-thickness"),
+                RepairKind::Mend { .. } => k("mend"),
             },
             DocAction::Transform {
                 objects, forward, ..

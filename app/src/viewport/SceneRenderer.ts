@@ -37,10 +37,9 @@ import { makeFatSegments, disposeFatSegments } from './fatLine'
 import {
   ctxOfObjectPlane,
   objectDrawingPlanes,
-  parsePlaneUnits,
   ringAllDrawn,
 } from '../tools/planeUnits'
-import { invalidatePlaneUnits } from '../tools/planeUnits'
+import { invalidatePlaneUnits, readPlaneUnits } from '../tools/planeUnits'
 import { readPreviewTint } from '../tools/previewTint'
 import { DEPTH_BIAS } from './depthPolicy'
 import type { HealthOverlay } from '../health/healthReport'
@@ -837,6 +836,8 @@ export class SceneRenderer {
   private healthRimLines: LineSegments2[] = []
   /** (b) the current finding + Close preview — rebuilt alone on each step / hover. */
   private healthFocusLines: LineSegments2[] = []
+  /** (c) Mend preview dots (points that would merge / split), with (b). */
+  private healthPointClouds: THREE.Points[] = []
   /** Last known watertight state per object */
   private watertightMap: Map<bigint, boolean> = new Map()
   /** Currently selected object ids (ordered; may include non-object entities,
@@ -2375,12 +2376,10 @@ export class SceneRenderer {
     const lines: number[] = []
     for (const plane of planes) {
       const ctx = ctxOfObjectPlane(plane, objectId)
-      let pu
-      try {
-        pu = parsePlaneUnits(ctx, this.wasmScene.plane_units_json(ctx))
-      } catch {
-        continue
-      }
+      // Through the per-revision cache the tools read too: the listing of a
+      // dense mesh's plane is costly, and one refresh asks for it again.
+      const pu = readPlaneUnits(this.wasmScene, ctx)
+      if (pu === null) continue
       for (const u of pu.units) {
         for (const e of u.edges) {
           if (e.store.kind !== 'topology') continue
@@ -2562,8 +2561,31 @@ export class SceneRenderer {
     }
   }
 
+  private _clearHealthPoints(): void {
+    for (const cloud of this.healthPointClouds) {
+      cloud.geometry.dispose()
+      ;(cloud.material as THREE.Material).dispose()
+      this.sketchGroup.remove(cloud)
+    }
+    this.healthPointClouds.length = 0
+  }
+
+  /** Dots at `positions` (`[x, y, z, …]`), a fixed size on screen. */
+  private _addHealthPoints(positions: ArrayLike<number>, color: number): void {
+    if (positions.length < 3) return
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(positions), 3))
+    const material = new THREE.PointsMaterial({ color, size: 7, sizeAttenuation: false, depthTest: false, transparent: true })
+    const cloud = new THREE.Points(geometry, material)
+    cloud.renderOrder = 993
+    cloud.frustumCulled = false
+    this.sketchGroup.add(cloud)
+    this.healthPointClouds.push(cloud)
+  }
+
   private _rebuildHealthFocus(): void {
     this._clearHealthLines(this.healthFocusLines)
+    this._clearHealthPoints()
     const overlay = this.healthOverlay
     if (overlay === null) return
     const dark = getResolvedTheme() === 'dark'
@@ -2575,6 +2597,13 @@ export class SceneRenderer {
         5,
         991,
       )
+    }
+    // Mend preview: points that would merge in the rim red, points that
+    // would split in blue (the warning gold vanishes on the orange selection
+    // fill).
+    if (overlay.mendPoints != null) {
+      this._addHealthPoints(overlay.mendPoints.merge, dark ? 0xe0714f : 0xc4543f)
+      this._addHealthPoints(overlay.mendPoints.split, dark ? 0x79b8ff : 0x1f6feb)
     }
     // Close-button preview: the rims that will gain a face, in the solid color.
     for (const { id, rim } of overlay.capPreview ?? []) {
@@ -4248,6 +4277,7 @@ export class SceneRenderer {
     hideObj(this.hoverGroup)
     for (const line of this.healthRimLines) hideObj(line)
     for (const line of this.healthFocusLines) hideObj(line)
+    for (const cloud of this.healthPointClouds) hideObj(cloud)
     if (!opts.includeGuides) hideObj(this.guidesGroup)
 
     if (opts.sketchLineWidthPx !== undefined) {

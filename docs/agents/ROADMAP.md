@@ -1097,7 +1097,20 @@ below.
   Push/Pull on a flat panel makes it a slab. The same is in the API
   (`hew.doc.health` with per-rim `cappable` / `shared` / `sheet_edge`,
   `hew.solid.cap` / `thicken` / `delete_faces` / `mark_surface`, `health`
-  in `hew.query`), so a script can repair a file. Make Solid also takes
+  in `hew.query`), so a script can repair a file. **Mend**
+  (`kernel::repair::mend`, `hew.solid.mend`) is the repair for imported
+  and scanned meshes Close can't finish: it merges points closer than a
+  merge distance, removes paper-thin overlaps, separates parts that touch
+  at a single point (each piece keeps the name and tags), stitches narrow
+  seams and fills small gaps, as one undo step, behind a busy card. It
+  does what it can and lists each gap that stayed open with the reason;
+  it refuses, changing nothing, when the result would be worse than the
+  start. The Model Health row and group (**Mend**, **Mend all**, "Choose
+  what to mend" with an editable merge distance) and the Make Solid wizard
+  ("Needs mending") preview it exactly, counts and "N gaps will stay open"
+  included, by running the Mend on a copy; hovering shows the points
+  merged (red) and split (blue) and the gaps filled (green). A row whose
+  every opening is warped offers Mend, not Close. Make Solid also takes
   selected **sketches**: it runs the close pass over every line of the
   selection, then the closed-faces search (see Drawing) seeded by every
   face of the selection and every face the pass made, which covers files

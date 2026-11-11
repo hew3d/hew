@@ -84,6 +84,23 @@ If the shapes don't close, nothing changes. Hew draws the gaps in the view inste
 
 Scripts can do the same with `hew.solid.from_faces`; see [the API guide](https://github.com/hew3d/hew/blob/main/docs/API_GUIDE.md).
 
+## Mending imported meshes
+
+Meshes from scans, STL files, and some exporters are often *almost* closed: points that should be one point sit a hair apart, two parts touch at a single point, there's a small hole, or a sliver of face has no real width. Make Solid can't close these, because its flat faces need clean open edges to land on. **Mend** repairs the mesh itself.
+
+Open **Object ▸ Model Health…**. An object Mend can work on has a **Mend** button, and the heading over the list has **Mend all**. Mend does these things, each of which you can switch off:
+
+- **Merge nearby points.** Points closer together than a distance become one. The distance starts at a value Hew picks for the object; type another in the **Closer than** box to change it. If the number is out of range, the box tells you the range.
+- **Separate parts that touch at a point.** A shape pinched at one point is split into the separate parts it really is.
+- **Fill small gaps.** Holes in the surface are filled with flat or curved patches.
+- **Remove paper-thin overlaps.** Faces with no real width, folded on top of each other, are taken out so the surface can close along the seam.
+
+Choose **Choose what to mend** under the button to tick or untick steps. Before you commit, a line reads what Mend will do, such as "Mend will merge 312 nearby points, separate 2 spots where parts touch at a single point and fill 7 small gaps (3 flat, 4 curved)." If some gaps are too big or too tangled to fill, the line adds how many: "1 gap will stay open." Hover the Mend button and the model shows the points it would merge in red, the points it would separate in blue, and the holes it would fill in green. If there's nothing to do with the steps you ticked, the line says so: "Nothing to mend here."
+
+Mend never runs on its own. Click it and the work happens as one undo step, so **Edit ▸ Undo** puts the object back exactly. **Mend all** does every object in the list in one step, using each object's own merge distance unless you typed one. Mend does what it can. A gap that would cut through other faces, or is too tangled to fill, stays open: afterward Mend lists each gap that stayed open with the reason ("Filling this gap would cut through other faces, so it was left open."), and the preview tells you beforehand how many gaps will stay open. One **Undo** takes the whole Mend back. If merging that far would fold faces onto each other, Hew tells you to turn on separating parts that touch at a point too.
+
+Objects that need this are listed under **Needs mending**, in the panel and in the Make Solid wizard, where the choice is **Mend what can be mended** or **Leave them as they are**.
+
 ## Exporting
 
 **File ▸ Export…** shows the system save dialog with a **Format** list in it; a format with options of its own (STL's curve resolution, SVG's view and scale) shows them under the list while it's the one chosen. The next export starts on the format you used last. In the browser, whose save dialog has no format list, Hew shows its own Export dialog first, with the same formats and options:

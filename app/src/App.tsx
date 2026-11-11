@@ -120,7 +120,7 @@ import { listRecents, recordRecent, type RecentEntry } from './io/recents'
 import { ImportReportDialog } from './panels/ImportReportDialog'
 import { SaveFormatDialog, type SaveFormatAnswer } from './panels/SaveFormatDialog'
 import { SkpLossNotice, type SkpLossNoticeData } from './panels/SkpLossNotice'
-import { ImportingOverlay, type OpenProgress, ensureSpinnerKeyframes } from './panels/ImportingOverlay'
+import { BusyOverlay, ImportingOverlay, type OpenProgress, ensureSpinnerKeyframes } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
 import { WelcomeScreen, type SampleEntry } from './panels/WelcomeScreen'
 import { getShowWelcome, setShowWelcome } from './settings/welcomeScreen'
@@ -790,6 +790,40 @@ export default function App() {
   const [openProgress, setOpenProgress] = useState<OpenProgress | null>(null)
   /** Display name of the file being imported (shown in the overlay). */
   const [importingName, setImportingName] = useState('')
+  /** The busy card's line while a long edit runs (`runBusy`), else null. */
+  const [busyNote, setBusyNote] = useState<string | null>(null)
+  /** Show the busy card, let it paint, then run `work` — a long synchronous
+   *  edit holds the main thread, so the card must be on screen first. */
+  const busyRef = useRef(false)
+  const runBusy = useCallback((message: string, work: () => void): boolean => {
+    // One at a time, and no keys while the card paints: a second command or
+    // an Undo in those frames would run against objects the first consumes.
+    // A refused one is the caller's to tell (false).
+    if (busyRef.current) return false
+    busyRef.current = true
+    // Keys pressed while the work freezes the main thread queue up and
+    // fire once it returns, so the listener outlives the work and drops
+    // every key stamped before the work ended.
+    let endedAt = Infinity
+    const swallow = (ev: KeyboardEvent) => {
+      if (ev.timeStamp > endedAt) return
+      ev.preventDefault()
+      ev.stopImmediatePropagation()
+    }
+    window.addEventListener('keydown', swallow, true)
+    flushSync(() => setBusyNote(message))
+    void nextPaint().then(() => {
+      try {
+        work()
+      } finally {
+        endedAt = performance.now()
+        window.setTimeout(() => window.removeEventListener('keydown', swallow, true), 100)
+        busyRef.current = false
+        setBusyNote(null)
+      }
+    })
+    return true
+  }, [])
   /** STL units-chooser modal: the picked file's name, or null when closed. */
   const [pendingStlImport, setPendingStlImport] = useState<{ name: string } | null>(null)
   /** Tape Measure "resize the model?" confirmation (design tool-parity §3,
@@ -7289,6 +7323,7 @@ export default function App() {
               escapeBusy={wizardEscapeBusy}
               onGeometryChanged={refreshAfterPanelMutation}
               onToast={handleToast}
+              onBusy={runBusy}
               onWidthChange={setFixWizardWidth}
             />
           )}
@@ -7338,6 +7373,7 @@ export default function App() {
                 onOverlayChange={handleHealthOverlay}
                 onGeometryChanged={refreshAfterPanelMutation}
                 onToast={handleToast}
+                onBusy={runBusy}
               />
             </FloatingWindow>
           )}
@@ -7840,6 +7876,7 @@ export default function App() {
           importDocument; runOpenSkp settles it on every way out, so a
           thrown error or a refused blank load never leaves it stuck. */}
       {isImporting && <ImportingOverlay fileName={importingName} opening={reportOpened} progress={openProgress} />}
+      {busyNote !== null && <BusyOverlay message={busyNote} />}
 
       {/* STL units-chooser — shown before the overlay above, since STL
           carries no unit information (see promptStlUnits). */}

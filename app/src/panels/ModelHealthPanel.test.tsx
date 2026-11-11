@@ -114,7 +114,7 @@ describe('ModelHealthPanel — grouping', () => {
     expect(headers).toEqual([
       '▾Has openings (4)',
       '▾Flat panels (1)',
-      "▾Can't be closed (1)",
+      "▾Needs mending (1)",
     ])
     // No curved-sheet group: the only curved sheet is kept, so it is hidden.
     expect(screen.queryByText(/Curved sheets/)).not.toBeInTheDocument()
@@ -161,7 +161,7 @@ describe('ModelHealthPanel — filters', () => {
     await search('roo')
     expect(rowEl('1')).not.toBeNull()
     expect(rowEl('2')).toBeNull()
-    expect(screen.queryByText(/Can't be closed/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Needs mending/)).not.toBeInTheDocument()
   })
 
   it('search matches the detail text', async () => {
@@ -406,11 +406,19 @@ describe('ModelHealthPanel — Stage 2 repairs', () => {
     expect(lastOverlay(props.onOverlayChange)!.current).toEqual({ id: 1n, rim: 0 })
   })
 
-  it('offers Close this opening only for a planar closed rim', () => {
+  it('offers Close this opening only for a planar closed rim, and no Close when every opening is warped', () => {
     const warped = { ...RIM, planar: false, cappable: false }
     setup({ scene: makeScene([row({ object: '1', rims: [warped] })]) as never })
     fireEvent.click(rowEl('1'))
     expect(screen.queryByRole('button', { name: 'Close this opening' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Close' })).not.toBeInTheDocument()
+    expect(btn('Keep as is')).toBeInTheDocument()
+  })
+
+  it('a row with one flat opening and one warped one still offers Close', () => {
+    const warped = { ...RIM, planar: false, cappable: false }
+    setup({ scene: makeScene([row({ object: '1', rims: [RIM, warped] })]) as never })
+    fireEvent.click(rowEl('1'))
     expect(btn('Close')).toBeInTheDocument()
   })
 
@@ -921,7 +929,7 @@ describe('ModelHealthPanel — repeated names and families that are not split sh
     setup({ scene })
     expect(screen.queryByText(/Split shapes/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /Flat panels \(1\)/ })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Can't be closed \(1\)/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Needs mending \(1\)/ })).toBeInTheDocument()
   })
 })
 
@@ -929,11 +937,11 @@ describe("ModelHealthPanel — reasons for items that can't be closed", () => {
   it('the row shows the short reason, and the selected row also shows the sentence and why it is usually fine', () => {
     setup()
     // Knot: branching open edges.
-    expect(within(rowEl('5')).getByText('Open edges branch')).toBeInTheDocument()
+    expect(within(rowEl('5')).getByText('Openings tangled together')).toBeInTheDocument()
     expect(rowEl('5').querySelector('[data-health-reason]')).toBeNull()
     fireEvent.click(rowEl('5'))
     expect(rowEl('5').querySelector('[data-health-reason]')).toHaveTextContent(
-      "The highlighted edges are open. They branch or stop short, so Hew can't tell where each opening ends. Shapes like this are usually open on purpose, like a pipe fitting or an electrical box, and work as they are.",
+      "The highlighted edges are open. Several openings run together or stop short, so Hew can't tell where each one ends. Shapes like this are usually open on purpose, like a pipe fitting or an electrical box, and work as they are.",
     )
     // A row that can be closed has no such line.
     fireEvent.click(rowEl('2'))
@@ -947,5 +955,430 @@ describe("ModelHealthPanel — reasons for items that can't be closed", () => {
     expect(within(rowEl('9')).getByText('Open edges run along a lip')).toBeInTheDocument()
     fireEvent.click(rowEl('9'))
     expect(rowEl('9').querySelector('[data-health-reason]')).toHaveTextContent('They run along a flat lip')
+  })
+})
+
+describe('ModelHealthPanel — Mend', () => {
+  const WIRE = {
+    weld: 0.000002,
+    weld_pairs: 400,
+    weld_vertices: 312,
+    weld_max_gap: 0.000001,
+    folds: 0,
+    branching_vertices: 2,
+    islands: 1,
+    hole_rims: 7,
+    hole_rims_planar: 3,
+    hole_rims_warped: 4,
+    outer_rims: 0,
+    fill_rims: [0, 1, 2, 3, 4, 5, 6],
+    filled_rims: 7,
+    fill_curved: 4,
+    pieces: 0,
+  }
+  const KNOT = row({ object: '5', name: 'Knot', verdict: { kind: 'non_manifold' }, branching_vertices: 2 })
+  const SOCK = row({ object: '6', name: 'Sock', verdict: { kind: 'holes', planar: 0, warped: 2 }, rims: [{ ...RIM, planar: false, cappable: false, role: 'hole' }] })
+  const PIPE = row({ object: '4', name: 'Pipe', verdict: { kind: 'holes', planar: 2, warped: 0 }, rims: [RIM, RIM] })
+
+  interface Sent {
+    method: string
+    params: { label?: string; commands?: Array<{ method: string; params: Record<string, unknown> }> }
+  }
+
+  function mendScene(opts: { census?: (id: bigint, plan: string) => unknown; mendResult?: unknown; refuse?: string } = {}) {
+    const sent: Sent[] = []
+    const rows = [KNOT, SOCK, PIPE]
+    const scene = makeScene(rows, {
+      health_report_json: vi.fn(() => JSON.stringify({ rows, families: [], counts: COUNTS })),
+      mend_census_json: vi.fn((id: bigint, plan: string) => JSON.stringify(opts.census?.(id, plan) ?? WIRE)),
+      mend_census_points: vi.fn((_id: bigint, _plan: string, kind: number) => new Float32Array(kind === 0 ? [1, 2, 3] : [4, 5, 6])),
+      weld_range: vi.fn(() => new Float64Array([1e-9, 1e-4])),
+      default_weld_distance: vi.fn(() => 0.0000019),
+      history_generation: vi.fn(() => 1n),
+      api_connection_open: vi.fn(() => 3),
+      api_connection_close: vi.fn(),
+      object_public_ids: vi.fn((ids: BigUint64Array) => Array.from(ids, (id) => `obj_${id}`)),
+      api_dispatch: vi.fn((_c: number, raw: string) => {
+        const req = JSON.parse(raw) as { id: number } & Sent
+        sent.push(req)
+        if (req.method !== 'hew.doc.transact') return JSON.stringify({ jsonrpc: '2.0', id: req.id, result: {} })
+        if (opts.refuse !== undefined) {
+          return JSON.stringify({
+            jsonrpc: '2.0',
+            id: req.id,
+            error: { code: -32000, message: 'refused', data: { refusal: opts.refuse, failed_index: 0, explanation: 'no' } },
+          })
+        }
+        const n = req.params.commands?.length ?? 0
+        return JSON.stringify({
+          jsonrpc: '2.0',
+          id: req.id,
+          result: { results: Array.from({ length: n }, () => opts.mendResult ?? { welded_vertices: 312, split_vertices: 2, filled_rims: 7, closed: true, skipped_rims: [] }) },
+        })
+      }),
+    })
+    return { scene, sent, transacts: () => sent.filter((s) => s.method === 'hew.doc.transact') }
+  }
+
+  const select = (id: string): void => {
+    fireEvent.click(rowEl(id))
+  }
+
+  it('the group is named "Needs mending"', () => {
+    setup({ scene: mendScene().scene })
+    expect(screen.getByRole('button', { name: /Needs mending \(2\)/ })).toBeInTheDocument()
+  })
+
+  it('a selected row shows Mend and a live preview line from the census', () => {
+    const { scene } = mendScene()
+    setup({ scene })
+    expect(screen.queryByRole('button', { name: 'Mend' })).not.toBeInTheDocument()
+    select('5')
+    expect(screen.getByRole('button', { name: 'Mend' })).toBeEnabled()
+    expect(document.querySelector('[data-health-mend-preview]')!.textContent).toBe(
+      'Mend will merge 312 nearby points, separate 2 spots where parts touch at a single point and fill 7 small gaps (3 flat, 4 curved).',
+    )
+    // The reason sentence gains the Mend line; the "usually on purpose" line stays.
+    expect(document.querySelector('[data-health-reason]')!.textContent).toContain(
+      'Mend can merge nearby points, separate parts that touch at a single point and fill small gaps.',
+    )
+    // Asked once for this generation, however often the row re-renders.
+    const censusCalls = scene.mend_census_json as unknown as ReturnType<typeof vi.fn>
+    const callsBefore = censusCalls.mock.calls.length
+    select('5')
+    expect(censusCalls.mock.calls.length).toBe(callsBefore)
+  })
+
+  it('offers no Mend (not a disabled one) on a row the census finds nothing on', () => {
+    const { scene } = mendScene({
+      census: () => ({ ...WIRE, weld_vertices: 0, branching_vertices: 0, filled_rims: 0, folds: 0, islands: 1 }),
+    })
+    setup({ scene })
+    select('5')
+    expect(screen.queryByRole('button', { name: 'Mend' })).not.toBeInTheDocument()
+    expect(document.querySelector('[data-health-mend-preview]')).toBeNull()
+    expect(document.querySelector('[data-health-reason]')!.textContent).toContain('usually open on purpose')
+    expect(document.querySelector('[data-health-reason]')!.textContent).not.toContain('Mend can')
+  })
+
+  it('a row whose openings Close can finish gets no Mend', () => {
+    setup({ scene: mendScene().scene })
+    select('4')
+    expect(screen.queryByRole('button', { name: 'Mend' })).not.toBeInTheDocument()
+  })
+
+  it('a row with warped holes gets Mend beside Close', () => {
+    setup({ scene: mendScene().scene })
+    select('6')
+    expect(screen.getByRole('button', { name: 'Mend' })).toBeInTheDocument()
+  })
+
+  it('hovering Mend highlights the points it merges and splits and the rims it fills; leaving clears them', () => {
+    const { scene } = mendScene()
+    const { props } = setup({ scene: scene })
+    select('6')
+    const mend = screen.getByRole('button', { name: 'Mend' })
+    fireEvent.mouseEnter(mend)
+    expect(scene.mend_census_points).toHaveBeenCalledWith(6n, expect.stringContaining('"weld":true'), 0)
+    expect(scene.mend_census_points).toHaveBeenCalledWith(6n, expect.stringContaining('"weld":true'), 1)
+    const on = lastOverlay(props.onOverlayChange)!
+    expect(Array.from(on.mendPoints!.merge)).toEqual([1, 2, 3])
+    expect(Array.from(on.mendPoints!.split)).toEqual([4, 5, 6])
+    expect(on.capPreview).toEqual([{ id: 6n, rim: 0 }])
+    fireEvent.mouseLeave(mend)
+    const off = lastOverlay(props.onOverlayChange)!
+    expect(off.mendPoints).toBeNull()
+    expect(off.capPreview).toBeNull()
+  })
+
+  it('"Choose what to mend" turns steps off and the preview and the command follow', async () => {
+    const { scene, transacts } = mendScene()
+    setup({ scene })
+    select('5')
+    fireEvent.click(document.querySelector('[data-health-mend-choose]')!)
+    for (const name of ['Merge nearby points', 'Separate parts that touch at a point', 'Fill small gaps', 'Remove paper-thin overlaps']) {
+      expect(screen.getByRole('checkbox', { name })).toBeChecked()
+    }
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Merge nearby points' }))
+    expect(screen.queryByRole('textbox', { name: 'Closer than' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Separate parts that touch at a point' }))
+    expect(document.querySelector('[data-health-mend-preview]')!.textContent).toBe('Mend will fill 7 small gaps (3 flat, 4 curved).')
+    fireEvent.click(screen.getByRole('button', { name: 'Mend' }))
+    await waitFor(() => expect(transacts()).toHaveLength(1))
+    expect(transacts()[0].params.commands![0].params).toMatchObject({ weld: false, split: false, fill: 'holes', folds: true })
+  })
+
+  it('validates the merge distance against the kernel range and passes a valid one through', async () => {
+    const { scene, transacts } = mendScene()
+    setup({ scene })
+    select('5')
+    fireEvent.click(document.querySelector('[data-health-mend-choose]')!)
+    const field = screen.getByRole('textbox', { name: 'Closer than' })
+    expect(field).toHaveValue('0.0019 mm')
+    fireEvent.change(field, { target: { value: '5 mm' } })
+    // The preview waits for typing to pause; the error shows even with the chooser closed.
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Enter a distance between 0.000001 mm and 0.1 mm.'))
+    expect(screen.getByRole('button', { name: 'Mend' })).toBeDisabled()
+    fireEvent.click(document.querySelector('[data-health-mend-choose]')!)
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    fireEvent.click(document.querySelector('[data-health-mend-choose]')!)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Closer than' }), { target: { value: '0.003 mm' } })
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Mend' }))
+    await waitFor(() => expect(transacts()).toHaveLength(1))
+    expect(transacts()[0].params.commands![0].params.weld).toBeCloseTo(0.000003, 12)
+  })
+
+  it('does not ask the census on every keystroke', async () => {
+    const { scene } = mendScene()
+    setup({ scene })
+    select('5')
+    fireEvent.click(document.querySelector('[data-health-mend-choose]')!)
+    const census = scene.mend_census_json as unknown as ReturnType<typeof vi.fn>
+    const before = census.mock.calls.length
+    const field = screen.getByRole('textbox', { name: 'Closer than' })
+    for (const v of ['0.001 mm', '0.0012 mm', '0.00125 mm']) fireEvent.change(field, { target: { value: v } })
+    expect(census.mock.calls.length).toBe(before)
+    // Mend all's group reads the same typed distance once typing pauses.
+    await waitFor(() => expect(census.mock.calls.length).toBeGreaterThan(before))
+    expect(census.mock.calls.length - before).toBeLessThanOrEqual(3)
+  })
+
+  it('a typed distance does not follow the selection to another object', async () => {
+    const { scene } = mendScene()
+    setup({ scene })
+    select('5')
+    fireEvent.click(document.querySelector('[data-health-mend-choose]')!)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Closer than' }), { target: { value: '5 mm' } })
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+    select('6')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Mend' })).toBeEnabled()
+  })
+
+  it('Mend all uses a typed distance where it fits and says so', async () => {
+    const { scene, transacts } = mendScene()
+    ;(scene.weld_range as unknown as ReturnType<typeof vi.fn>).mockImplementation((id: bigint) =>
+      id === 6n ? new Float64Array([1e-9, 1e-6]) : new Float64Array([1e-9, 1e-4]),
+    )
+    setup({ scene })
+    select('5')
+    fireEvent.click(document.querySelector('[data-health-mend-choose]')!)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Closer than' }), { target: { value: '0.003 mm' } })
+    const header = document.querySelector('[data-health-group="closerLook"]') as HTMLElement
+    await waitFor(() => expect(within(header).getByRole('button', { name: 'Mend all' }).getAttribute('title')).toContain('used where it fits'))
+    fireEvent.click(within(header).getByRole('button', { name: 'Mend all' }))
+    await waitFor(() => expect(transacts()).toHaveLength(1))
+    const welds = Object.fromEntries(transacts()[0].params.commands!.map((c) => [c.params.object, c.params.weld]))
+    expect(welds.obj_5).toBeCloseTo(0.000003, 12)
+    expect(welds.obj_6).toBe(true)
+  })
+
+  it('Mend runs behind the busy card as one undo step and toasts the counts', async () => {
+    const { scene, transacts } = mendScene()
+    const { props } = setup({ scene })
+    const onBusy = vi.fn((_m: string, work: () => void) => {
+      work()
+      return true
+    })
+    // Re-render with the busy card wired in.
+    const utils = render(<ModelHealthPanel {...props} onBusy={onBusy} />)
+    const mine = utils.container
+    fireEvent.click(within(mine).getByText('Knot'))
+    fireEvent.click(within(mine).getByRole('button', { name: 'Mend' }))
+    expect(onBusy).toHaveBeenCalledWith('Mending…', expect.any(Function))
+    expect(transacts()).toHaveLength(1)
+    expect(transacts()[0].params.label).toBe('Mend 1 object')
+    expect(transacts()[0].params.commands![0].method).toBe('hew.solid.mend')
+    expect(props.onToast).toHaveBeenCalledWith("Merged 312 points, separated 2 spots where parts touched at a single point, filled 7 gaps. It's solid now.")
+    expect(props.onGeometryChanged).toHaveBeenCalled()
+  })
+
+  it('a refused busy card is said out loud and nothing runs', () => {
+    const { scene, transacts } = mendScene()
+    const { props } = setup({ scene })
+    const utils = render(<ModelHealthPanel {...props} onBusy={() => false} />)
+    fireEvent.click(within(utils.container).getByText('Knot'))
+    fireEvent.click(within(utils.container).getByRole('button', { name: 'Mend' }))
+    expect(props.onToast).toHaveBeenCalledWith('Another change is still running. Press Enter or click again when it finishes.')
+    expect(transacts()).toHaveLength(0)
+    expect(within(utils.container).getByRole('button', { name: 'Mend' })).toBeEnabled()
+  })
+
+  it('shows what stayed open under the row, in plain words', async () => {
+    const { scene } = mendScene({
+      mendResult: {
+        welded_vertices: 312,
+        split_vertices: 0,
+        filled_rims: 4,
+        closed: false,
+        skipped_rims: [
+          { object: 0, rim: 0, reason: 'fill_crosses_faces' },
+          { object: 0, rim: 1, reason: 'fill_crosses_faces' },
+          { object: 0, rim: 2, reason: 'fill_crosses_faces' },
+        ],
+      },
+    })
+    const { props } = setup({ scene })
+    select('5')
+    fireEvent.click(screen.getByRole('button', { name: 'Mend' }))
+    await waitFor(() => expect(document.querySelector('[data-health-warning]')).not.toBeNull())
+    expect(document.querySelector('[data-health-warning]')!.textContent).toBe(
+      '3 gaps stayed open. Filling this gap would cut through other faces, so it was left open.',
+    )
+    expect(props.onToast).toHaveBeenCalledWith("Merged 312 points, filled 4 gaps. 3 gaps couldn't be filled; see the list.")
+  })
+
+  it('a typed refusal is shown with the plain copy on the row', async () => {
+    const { scene } = mendScene({ refuse: 'nothing_to_mend' })
+    const { props } = setup({ scene })
+    select('5')
+    fireEvent.click(screen.getByRole('button', { name: 'Mend' }))
+    await waitFor(() => expect(document.querySelector('[data-health-warning]')).not.toBeNull())
+    expect(document.querySelector('[data-health-warning]')!.textContent).toBe(
+      "Couldn't mend: Nothing to mend here: no nearby points, touching parts or small gaps.",
+    )
+    expect(props.onToast).toHaveBeenCalledWith("Nothing was mended. 1 couldn't be mended; see the list.")
+  })
+
+  it('Mend all in the group header mends every row with something to mend in one transaction', async () => {
+    const { scene, transacts } = mendScene()
+    setup({ scene })
+    const header = document.querySelector('[data-health-group="closerLook"]') as HTMLElement
+    const all = within(header).getByRole('button', { name: 'Mend all' })
+    expect(all).toHaveAttribute('title', 'Mend 2 objects in one step')
+    fireEvent.click(all)
+    await waitFor(() => expect(transacts()).toHaveLength(1))
+    expect(transacts()[0].params.label).toBe('Mend 2 objects')
+    expect(transacts()[0].params.commands!.map((c) => c.method)).toEqual(['hew.solid.mend', 'hew.solid.mend'])
+  })
+
+  it('shows the plain copy when the census is refused, without a crash', () => {
+    const { scene } = mendScene({
+      census: () => {
+        throw new Error('UnknownObject: gone')
+      },
+    })
+    setup({ scene })
+    select('5')
+    expect(screen.queryByRole('button', { name: 'Mend' })).not.toBeInTheDocument()
+    const line = document.querySelector('[data-health-mend-preview]')!.textContent!
+    expect(line).not.toMatch(/UnknownObject|Error/)
+    expect(line.length).toBeGreaterThan(10)
+  })
+
+  it('with only a step that has no work ticked, says what is true and keeps Mend off', () => {
+    const { scene } = mendScene({ census: () => ({ ...WIRE, weld_vertices: 0, weld: null }) })
+    setup({ scene })
+    select('5')
+    fireEvent.click(document.querySelector('[data-health-mend-choose]')!)
+    for (const name of ['Separate parts that touch at a point', 'Fill small gaps', 'Remove paper-thin overlaps']) {
+      fireEvent.click(screen.getByRole('checkbox', { name }))
+    }
+    expect(document.querySelector('[data-health-mend-preview]')!.textContent).toBe('Nothing to merge here. Tick another step.')
+    expect(screen.getByRole('button', { name: 'Mend' })).toBeDisabled()
+  })
+
+  it('Mend all counts, filters and runs at the same per-object distance', async () => {
+    // The sock has nothing to merge at its default distance, but does at a typed one.
+    const { scene, transacts } = mendScene({
+      census: (id, plan) => {
+        const typed = typeof (JSON.parse(plan) as { weld: unknown }).weld === 'number'
+        return id === 6n
+          ? { ...WIRE, weld_vertices: typed ? 9 : 0, branching_vertices: 0, filled_rims: 0, folds: 0 }
+          : WIRE
+      },
+    })
+    setup({ scene })
+    const header = document.querySelector('[data-health-group="closerLook"]') as HTMLElement
+    expect(within(header).getByRole('button', { name: 'Mend all' }).getAttribute('title')).toBe('Mend 1 object in one step')
+    select('5')
+    fireEvent.click(document.querySelector('[data-health-mend-choose]')!)
+    fireEvent.change(screen.getByRole('textbox', { name: 'Closer than' }), { target: { value: '0.003 mm' } })
+    await waitFor(() => expect(within(header).getByRole('button', { name: 'Mend all' }).getAttribute('title')).toContain('Mend 2 objects in one step'))
+    fireEvent.click(within(header).getByRole('button', { name: 'Mend all' }))
+    await waitFor(() => expect(transacts()).toHaveLength(1))
+    const welds = Object.fromEntries(transacts()[0].params.commands!.map((c) => [c.params.object, c.params.weld]))
+    expect(welds.obj_5).toBeCloseTo(0.000003, 12)
+    expect(welds.obj_6).toBeCloseTo(0.000003, 12)
+  })
+
+  it('Mend all is off while a typed distance is still settling', async () => {
+    const { scene } = mendScene()
+    setup({ scene })
+    select('5')
+    fireEvent.click(document.querySelector('[data-health-mend-choose]')!)
+    const header = document.querySelector('[data-health-group="closerLook"]') as HTMLElement
+    fireEvent.change(screen.getByRole('textbox', { name: 'Closer than' }), { target: { value: '0.004 mm' } })
+    expect(within(header).getByRole('button', { name: 'Mend all' })).toBeDisabled()
+    await waitFor(() => expect(within(header).getByRole('button', { name: 'Mend all' })).toBeEnabled())
+  })
+
+  it('Mend all refuses a typed distance it cannot read, and one that fits no object, in the row\'s words', async () => {
+    const { scene, transacts } = mendScene()
+    setup({ scene })
+    select('5')
+    fireEvent.click(document.querySelector('[data-health-mend-choose]')!)
+    const header = document.querySelector('[data-health-group="closerLook"]') as HTMLElement
+    const mendAll = () => within(header).getByRole('button', { name: 'Mend all' })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Closer than' }), { target: { value: 'abc' } })
+    await waitFor(() => expect(header.querySelector('[data-health-mend-all-error]')).not.toBeNull())
+    expect(header.querySelector('[data-health-mend-all-error]')!.textContent).toBe('Enter a distance, such as 0.002 mm.')
+    expect(mendAll()).toBeDisabled()
+    expect(mendAll()).toHaveAttribute('title', 'Enter a distance, such as 0.002 mm.')
+    fireEvent.click(mendAll())
+    // Past every object's range: the same refusal, with the range.
+    fireEvent.change(screen.getByRole('textbox', { name: 'Closer than' }), { target: { value: '5 mm' } })
+    await waitFor(() =>
+      expect(header.querySelector('[data-health-mend-all-error]')!.textContent).toBe('Enter a distance between 0.000001 mm and 0.1 mm.'),
+    )
+    expect(mendAll()).toBeDisabled()
+    // A distance that fits clears it.
+    fireEvent.change(screen.getByRole('textbox', { name: 'Closer than' }), { target: { value: '0.003' } })
+    await waitFor(() => expect(header.querySelector('[data-health-mend-all-error]')).toBeNull())
+    expect(mendAll()).toBeEnabled()
+    fireEvent.click(mendAll())
+    await waitFor(() => expect(transacts()).toHaveLength(1))
+    // A bare number is millimeters, as the field shows.
+    expect(transacts()[0].params.commands![0].params.weld).toBeCloseTo(0.000003, 12)
+  })
+
+  it('the toast says how many loose parts became objects of their own', async () => {
+    const { scene } = mendScene({
+      mendResult: { welded_vertices: 0, split_vertices: 1, pieces: ['obj_9', 'obj_10'], filled_rims: 0, closed: true, skipped_rims: [] },
+    })
+    const { props } = setup({ scene })
+    select('5')
+    fireEvent.click(screen.getByRole('button', { name: 'Mend' }))
+    await waitFor(() =>
+      expect(props.onToast).toHaveBeenCalledWith(
+        "Separated 1 spot where parts touched at a single point, separated 2 loose parts. It's solid now.",
+      ),
+    )
+  })
+
+  it('reads only a budget of censuses while a big group renders and the rest when Mend all is pressed', async () => {
+    const rows = Array.from({ length: 40 }, (_, n) =>
+      row({ object: String(100 + n), name: `Knot ${n}`, verdict: { kind: 'non_manifold' }, branching_vertices: 1 }),
+    )
+    const { scene, transacts } = mendScene()
+    ;(scene.health_report_json as unknown as ReturnType<typeof vi.fn>).mockImplementation(() =>
+      JSON.stringify({ rows, families: [], counts: COUNTS }),
+    )
+    setup({ scene })
+    const census = scene.mend_census_json as unknown as ReturnType<typeof vi.fn>
+    const header = document.querySelector('[data-health-group="closerLook"]') as HTMLElement
+    const all = within(header).getByRole('button', { name: 'Mend all' })
+    expect(census.mock.calls.length).toBeLessThanOrEqual(25)
+    expect(all.getAttribute('title')).toBe('Mend up to 40 objects in one step')
+    fireEvent.click(all)
+    await waitFor(() => expect(transacts()).toHaveLength(1))
+    expect(transacts()[0].params.commands).toHaveLength(40)
+  })
+
+  it('has no Mend all when the group has nothing to mend', () => {
+    const { scene } = mendScene({ census: () => ({ ...WIRE, weld_vertices: 0, branching_vertices: 0, filled_rims: 0, folds: 0 }) })
+    setup({ scene })
+    expect(screen.queryByRole('button', { name: 'Mend all' })).not.toBeInTheDocument()
   })
 })

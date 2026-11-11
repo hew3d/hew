@@ -20,7 +20,8 @@ import { describedErrorCodes, kernelErrorMessage } from '../kernelErrors'
 /** One repair: an API command on one object. */
 export interface BatchOp {
   object: bigint
-  /** `hew.solid.cap` | `hew.solid.thicken` | `hew.solid.mark_surface` | `hew.solid.delete_faces`. */
+  /** `hew.solid.cap` | `hew.solid.thicken` | `hew.solid.mark_surface` | `hew.solid.delete_faces`
+   *  | `hew.solid.mend`. */
   method: string
   /** The command's params besides `object`. */
   params?: Record<string, unknown>
@@ -35,6 +36,8 @@ export interface BatchFailure {
 export interface BatchResult {
   done: BatchOp[]
   failed: BatchFailure[]
+  /** What each finished command returned (a Mend's report). */
+  results?: Map<BatchOp, unknown>
 }
 
 export interface BatchOptions {
@@ -48,7 +51,7 @@ export const STALE_OBJECT_EXPLANATION = msg`This object is no longer in the mode
 let frameId = 0
 
 interface Reply {
-  result?: unknown
+  result?: { results?: unknown[] } & Record<string, unknown>
   error?: {
     code?: number
     message?: string
@@ -91,6 +94,7 @@ export function runBatch(
 ): BatchResult {
   const done: BatchOp[] = []
   const failed: BatchFailure[] = []
+  const results = new Map<BatchOp, unknown>()
   if (ops.length === 0) return { done, failed }
   const conn = scene.api_connection_open()
   try {
@@ -125,6 +129,10 @@ export function runBatch(
         })),
       })
       if (reply.error === undefined) {
+        const per = reply.result?.results
+        remaining.forEach((op, i) => {
+          if (Array.isArray(per)) results.set(op, per[i])
+        })
         done.push(...remaining)
         remaining = []
         break
@@ -151,14 +159,14 @@ export function runBatch(
   } finally {
     scene.api_connection_close(conn)
   }
-  return { done, failed }
+  return results.size > 0 ? { done, failed, results } : { done, failed }
 }
 
 // ---------------------------------------------------------------------------
 // Plans: which ops a header button runs
 // ---------------------------------------------------------------------------
 
-export type BatchKind = 'close' | 'mark' | 'thicken' | 'repair'
+export type BatchKind = 'close' | 'mark' | 'thicken' | 'repair' | 'mend'
 
 /** Undo-entry label for each batch kind. */
 export function batchLabel(kind: BatchKind, n: number): string {
@@ -171,14 +179,17 @@ export function batchLabel(kind: BatchKind, n: number): string {
       return UNDO_LABEL.thicken(n)
     case 'repair':
       return UNDO_LABEL.rejoin(n)
+    case 'mend':
+      return UNDO_LABEL.mend(n)
   }
 }
 
-const ACTION_ROW: Record<BatchKind, 'close' | 'thicken' | 'keep'> = {
+const ACTION_ROW: Record<BatchKind, 'close' | 'thicken' | 'keep' | 'mend'> = {
   close: 'close',
   mark: 'keep',
   thicken: 'thicken',
   repair: 'close',
+  mend: 'mend',
 }
 
 /** The warning line under a row a batch refused. */

@@ -82,6 +82,24 @@ impl Object {
         )
     }
 
+    /// [`Object::from_polygons_with_holes_import`] with no holes, materials
+    /// or UV frames, for the executable specs (an imported mesh built at
+    /// [`tol::IMPORT_PLANE_DIST`]). Test support only.
+    #[doc(hidden)]
+    pub fn from_polygons_import_for_test(
+        positions: &[Point3],
+        faces: &[Vec<usize>],
+    ) -> Result<Object, TopologyError> {
+        let n = faces.len();
+        Object::from_polygons_with_holes_import(
+            positions,
+            faces,
+            &vec![Vec::new(); n],
+            &vec![None; n],
+            &vec![None; n],
+        )
+    }
+
     /// Import path for faces that may carry holes: `holes[i]` is face `i`'s list
     /// of inner-loop index lists (empty = no holes). Validated exactly like the
     /// hole-free import path (manifold edges incl. hole edges, planarity of outer
@@ -123,6 +141,30 @@ impl Object {
             None,
             None,
             tol::PLANE_DIST,
+            Some(holes),
+        )
+    }
+
+    /// The builder with every column and a caller-chosen planarity gate:
+    /// what Mend rebuilds an object's polygon soup through
+    /// (`repair::mend`), at the object's own `planarity_tol`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_polygons_full(
+        positions: &[Point3],
+        faces: &[Vec<usize>],
+        holes: &[Vec<Vec<usize>>],
+        materials: &[FaceMaterial],
+        uv_frames: &[Option<UvFrame>],
+        surfaces: &[Option<SurfaceRef>],
+        plane_tol: f64,
+    ) -> Result<Object, TopologyError> {
+        Object::from_polygons_impl(
+            positions,
+            faces,
+            Some(materials),
+            Some(uv_frames),
+            Some(surfaces),
+            plane_tol,
             Some(holes),
         )
     }

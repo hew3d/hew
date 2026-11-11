@@ -697,7 +697,7 @@ describe('ObjectInfoPanel', () => {
     expect(screen.getByText("Open edges don't lie flat")).toBeInTheDocument()
     fourth.unmount()
     const fifth = renderOpen(healthJson({ kind: 'non_manifold' }, { branching_vertices: 2 }))
-    expect(screen.getByText('Open edges branch')).toBeInTheDocument()
+    expect(screen.getByText('Openings tangled together')).toBeInTheDocument()
     fifth.unmount()
     renderOpen(
       healthJson({ kind: 'holes', planar: 1, warped: 0 }, { rims: [{ role: 'outer', planar: true, closed: true, cappable: false, sheet_edge: true, perimeter: 4, extent: 1, edges: 4 }] }),
@@ -725,6 +725,39 @@ describe('ObjectInfoPanel', () => {
       expect(text).toMatch(/Geometry/)
       unmount()
     }
+  })
+
+  it('points an object Mend can act on at Model Health, and only then', () => {
+    const census = (n: number) =>
+      JSON.stringify({ weld: 0.000002, weld_vertices: n, weld_max_gap: 0, folds: 0, branching_vertices: 0, islands: 1, hole_rims: 0, hole_rims_planar: 0, hole_rims_warped: 0, outer_rims: 0, fill_rims: [], filled_rims: 0, fill_curved: 0, pieces: 0 })
+    const render1 = (n: number | null) =>
+      render(
+        <ObjectInfoPanel
+          scene={makeScene({
+            object_name: () => undefined,
+            node_tags: () => [],
+            object_solid: () => false,
+            health_report_json: () => healthJson({ kind: 'non_manifold' }, { branching_vertices: 2 }),
+            ...(n === null ? {} : { mend_census_json: () => census(n) }),
+          })}
+          docRev={0}
+          selectedIds={[{ kind: 'object', id: 1n }]}
+          onNameChanged={vi.fn()}
+          onGeometryChanged={vi.fn()}
+          onTagsChanged={vi.fn()}
+          onSelectMany={vi.fn()}
+        />,
+      )
+    const first = render1(12)
+    expect(screen.getByText('Openings tangled together')).toBeInTheDocument()
+    expect(screen.getByText('Mend it from Model Health')).toBeInTheDocument()
+    expect(readableText(first.container)).not.toMatch(BANNED_RE)
+    first.unmount()
+    const second = render1(0)
+    expect(screen.queryByText('Mend it from Model Health')).not.toBeInTheDocument()
+    second.unmount()
+    render1(null)
+    expect(screen.queryByText('Mend it from Model Health')).not.toBeInTheDocument()
   })
 
   it('a kept panel reads as kept', () => {

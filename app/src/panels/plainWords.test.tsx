@@ -68,6 +68,12 @@ function makeScene(refuse = false) {
     last_import_object_ids: vi.fn(() => new BigUint64Array([1n])),
     group_members: () => [],
     instance_expanded_members: vi.fn(() => new BigUint64Array()),
+    mend_census_json: vi.fn(() =>
+      JSON.stringify({ weld: 0.000002, weld_vertices: 312, weld_max_gap: 0, folds: 4, branching_vertices: 2, islands: 1, hole_rims: 7, hole_rims_planar: 3, hole_rims_warped: 4, outer_rims: 0, fill_rims: [0, 1, 2, 3, 4, 5, 6], filled_rims: 7, fill_curved: 4, pieces: 0 }),
+    ),
+    mend_census_points: vi.fn(() => new Float32Array([0, 0, 0])),
+    weld_range: vi.fn(() => new Float64Array([1e-9, 1e-4])),
+    default_weld_distance: vi.fn(() => 0.0000019),
     api_connection_open: vi.fn(() => 3),
     api_connection_close: vi.fn(),
     object_public_ids: vi.fn((ids: BigUint64Array) => Array.from(ids, (id) => `obj_${id}`)),
@@ -119,6 +125,16 @@ describe('plain words on screen', () => {
     fireEvent.click(document.querySelector('[data-health-row="6"]') as HTMLElement)
     noBanned(container)
     fireEvent.click(document.querySelector('[data-health-row="3"]') as HTMLElement)
+    noBanned(container)
+    // A row Mend can act on: the button, the preview line, the reason, and the choices.
+    fireEvent.click(document.querySelector('[data-health-row="5"]') as HTMLElement)
+    expect(screen.getByRole('button', { name: 'Mend' })).toBeInTheDocument()
+    expect(document.querySelector('[data-health-mend-preview]')).not.toBeNull()
+    noBanned(container)
+    fireEvent.click(document.querySelector('[data-health-mend-choose]') as HTMLElement)
+    expect(document.querySelector('[data-health-mend-options]')).not.toBeNull()
+    noBanned(container)
+    fireEvent.mouseEnter(screen.getByRole('button', { name: 'Mend' }))
     noBanned(container)
     // The scope menu.
     noBanned(screen.getByRole('combobox', { name: 'Scope' }))

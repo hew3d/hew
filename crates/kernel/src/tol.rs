@@ -169,3 +169,15 @@ pub const SCENE_CAMERA_FOV_DEG: f64 = 1e-2;
 /// normal originates in the app's double-precision normalization of a face
 /// normal, not in exact kernel construction.
 pub const SECTION_NORMAL_UNIT: f64 = 1e-6;
+
+/// Mend's default weld distance as a fraction of the object's diameter
+/// (dimensionless; `repair::mend`): about 2 µm on a 63 mm print — past
+/// the 1 µm grid an STL written to three decimals of a millimeter sits
+/// on, so the points such a file meant as one meet, and far below any
+/// printed feature (a 0.5 mm stroke is 250 times wider).
+pub const WELD_DEFAULT_REL: f64 = 3e-5;
+
+/// The shortest weld distance Mend accepts (meters; [`POINT_MERGE`] × 10):
+/// anything closer is already one point to the kernel. An object whose
+/// planarity tolerance is tighter (native geometry) welds at most that far.
+pub const WELD_MIN: f64 = POINT_MERGE * 10.0;

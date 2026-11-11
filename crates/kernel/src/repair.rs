@@ -11,6 +11,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod mend;
+pub use mend::{
+    FILL_DIHEDRAL_WEIGHT, FILL_MWT_MAX_EDGES, FillScope, MendCensus, MendPlan, MendReport,
+    SkippedRim, default_weld_distance, weld_range,
+};
+
 use crate::error::TopologyError;
 use crate::geom2d::{boundaries_contact, point_inside_polygon, polygon_is_simple};
 use crate::health::{Finding, Rim, diagnose};
@@ -66,6 +72,37 @@ pub enum RepairError {
     /// The result failed validation (the violation is logged). A kernel
     /// bug, surfaced instead of committed.
     Invalid,
+    /// Mend found nothing to do: no points to merge, nothing pinched, one
+    /// island, no gap it could fill.
+    NothingToMend,
+    /// The weld distance is not a finite length within the object's range
+    /// ([`mend::weld_range`]).
+    WeldDistanceOutOfRange,
+    /// Merging the points would leave an edge shared by more than two
+    /// faces, or by two running the same way; separating pinched parts
+    /// (the split) cuts those apart.
+    WeldFoldsFaces,
+    /// Merging the points would collapse every face.
+    WeldCollapsesObject,
+    /// A fill would touch or cross the object's faces.
+    FillCrossesFaces,
+    /// The gap is too small or too thin to take a face.
+    FillRimTooSmall,
+    /// Asked for a solid, the Mend would leave an object open.
+    StillOpen,
+    /// Removing the zero-width folds would leave parts touching at a
+    /// point; separating pinched parts (the split) takes them apart.
+    FoldRemovalPinches,
+    /// Merging the points would turn a face over (a point merged across
+    /// the face's opposite edge).
+    WeldFlipsFaces,
+    /// The Mend would leave the object more open than it was: a solid
+    /// that would not stay one, or edges left open that were not (a weld
+    /// pinching a narrow part shut).
+    MendOpensObject,
+    /// Merging the points would press opposite sides of a thin part
+    /// together, leaving a shell around no volume.
+    WeldFlattensObject,
 }
 
 impl std::fmt::Display for RepairError {
@@ -90,6 +127,34 @@ impl std::fmt::Display for RepairError {
                 write!(f, "the surface has a seam whose faces do not share edges")
             }
             RepairError::Invalid => write!(f, "the repair produced invalid topology"),
+            RepairError::NothingToMend => write!(f, "there is nothing to mend"),
+            RepairError::WeldDistanceOutOfRange => {
+                write!(f, "the distance for merging points is out of range")
+            }
+            RepairError::WeldFoldsFaces => write!(
+                f,
+                "merging those points would fold faces onto each other; separate pinched parts too"
+            ),
+            RepairError::WeldCollapsesObject => {
+                write!(f, "merging those points would collapse every face")
+            }
+            RepairError::FillCrossesFaces => write!(f, "filling the gap would cross other faces"),
+            RepairError::FillRimTooSmall => write!(f, "the gap is too small to fill"),
+            RepairError::StillOpen => write!(f, "the result would still be open"),
+            RepairError::FoldRemovalPinches => write!(
+                f,
+                "removing those folds would leave parts touching at a point; separate pinched parts too"
+            ),
+            RepairError::WeldFlipsFaces => {
+                write!(f, "merging those points would turn a face over")
+            }
+            RepairError::MendOpensObject => {
+                write!(f, "the mend would leave the object more open than it is")
+            }
+            RepairError::WeldFlattensObject => write!(
+                f,
+                "merging those points would press opposite sides together"
+            ),
         }
     }
 }

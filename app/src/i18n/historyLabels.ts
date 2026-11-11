@@ -58,6 +58,7 @@ const SIMPLE: Record<string, MessageDescriptor> = {
   slice: msg`Slice`,
   'push-through': msg`Push/Pull through`,
   'add-thickness': msg`Add thickness`,
+  mend: msg`Mend object`,
   'detach-sketch': msg`Move sketch off its plane`,
   'copy-sketch': msg`Copy sketch`,
   'attach-sketch': msg`Attach sketch`,

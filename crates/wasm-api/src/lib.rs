@@ -236,6 +236,15 @@ fn api_err(code_source: &dyn std::fmt::Debug, message: &dyn std::fmt::Display) -
     ApiError(format!("{code}: {message}"))
 }
 
+/// One cached Mend preview ([`Scene::mend_census_json`]).
+struct CensusEntry {
+    object: u64,
+    plan: String,
+    generation: u64,
+    weld: Option<f64>,
+    census: std::rc::Rc<kernel::repair::MendCensus>,
+}
+
 fn stale(code: &str, what: &str) -> ApiError {
     ApiError(format!("{code}: stale or unknown {what} handle"))
 }
@@ -2365,6 +2374,13 @@ pub struct Scene {
     /// dropped for every object a change touches (`reconcile`) and all at
     /// once when a document loads.
     health_cache: std::collections::BTreeMap<ObjectId, kernel::health::Verdict>,
+    /// Each object's rims for the health overlay, dropped with
+    /// `health_cache` ([`health::RimCache`]).
+    rim_cache: health::RimCache,
+    /// The last Mend preview: `(object, plan JSON, history generation)` and
+    /// its census, so the preview line and the hover's highlight points
+    /// share one census. Dropped on every reconcile.
+    census_cache: std::cell::RefCell<Option<CensusEntry>>,
     /// The app's display length format, as the live bridge last reported
     /// it ([`Scene::set_display_units`]): what an API `.skp` export opens in.
     api_display_units: Option<String>,
@@ -2441,6 +2457,8 @@ impl Scene {
         for &id in &change.objects_touched {
             self.face_range_cache.remove(id);
             self.health_cache.remove(&id);
+            self.rim_cache.borrow_mut().remove(&id);
+            self.census_cache.borrow_mut().take();
             // A user-hidden object stays out of inference even when a mutation
             // touches it, so snap/pick never resurrect hidden candidates.
             if self.doc.is_world_object(id) && !self.hidden_objects.contains(&id) {
@@ -2852,6 +2870,8 @@ impl Scene {
             next_draft_handle: 0,
             last_import_objects: Vec::new(),
             health_cache: std::collections::BTreeMap::new(),
+            rim_cache: Default::default(),
+            census_cache: Default::default(),
             api_display_units: None,
             skp_source: None,
             pending_skp_source: None,
@@ -3106,6 +3126,8 @@ impl Scene {
     fn full_resync(&mut self) {
         self.face_range_cache = SecondaryMap::new();
         self.health_cache.clear();
+        self.rim_cache.borrow_mut().clear();
+        self.census_cache.borrow_mut().take();
         self.inference = self.fresh_inference();
         self.inference.set_axes_frame(self.doc.axes());
         for id in self.doc.visible_object_ids() {
@@ -6096,7 +6118,7 @@ impl Scene {
     /// rim overlay.
     pub fn health_rim_segments(&self, ids: Vec<u64>) -> Vec<f32> {
         let ids: Vec<ObjectId> = ids.into_iter().map(object_id).collect();
-        health::rim_segments(&self.doc, &ids, None)
+        health::rim_segments(&self.doc, &ids, None, &self.rim_cache)
     }
 
     /// World bounds of objects at their placements, as one box `[minx,
@@ -6148,7 +6170,7 @@ impl Scene {
     /// the panel's current finding.
     pub fn health_rim_highlight(&self, id: u64, rim: u32) -> Vec<f32> {
         let id = object_id(id);
-        health::rim_segments(&self.doc, &[id], Some((id, rim as usize)))
+        health::rim_segments(&self.doc, &[id], Some((id, rim as usize)), &self.rim_cache)
     }
 
     /// The Hew API's public ids (`obj_…`) for object handles, in order —
@@ -6196,6 +6218,146 @@ impl Scene {
             "reversed": report.reversed,
         })
         .to_string())
+    }
+
+    /// Mend an object — a world object or a definition member, whose
+    /// repair every instance shows — as one undo step: Model Health's Mend
+    /// ([`kernel::Document::mend`]). `plan_json` is
+    /// `{"weld": number|false|null, "folds": bool, "split": bool, "fill":
+    /// "holes"|[rim, …]|false|null, "require_solid": bool}`; an omitted
+    /// field takes the one-click value (the default weld distance, folds,
+    /// split and fill holes on). Returns the report as JSON
+    /// (`welded_vertices`, `weld_max_move`, `collapsed_faces`,
+    /// `folds_removed`, `split_vertices`, `split_edges`, `pieces` (handles
+    /// of the parts cut loose), `filled_rims`, `stitched_rims`,
+    /// `fill_triangles`, `skipped_rims` (`{object, rim, reason}`, `reason`
+    /// the refusal's snake_case code), `reversed`, `closed`,
+    /// `pieces_closed`).
+    ///
+    /// # Errors
+    /// `UnknownObject`, `UnknownComponent`, `BadMendPlan` (the JSON), or a
+    /// refusal: `NothingToMend`, `WeldDistanceOutOfRange`,
+    /// `WeldFoldsFaces`, `WeldFlipsFaces`, `WeldCollapsesObject`,
+    /// `WeldFlattensObject`, `MendOpensObject`, `UnknownRim`, `StillOpen`,
+    /// `FoldRemovalPinches`, `Invalid`.
+    pub fn mend(&mut self, object: u64, plan_json: &str) -> Result<String, ApiError> {
+        let plan = self.mend_plan(object, plan_json)?;
+        let (report, pieces, change) = self.doc.mend(object_id(object), &plan).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::Mend {
+            object,
+            plan_json: plan_json.to_string(),
+        });
+        let handles: Vec<String> = pieces
+            .iter()
+            .map(|o| o.data().as_ffi().to_string())
+            .collect();
+        Ok(api::health::mend_report_json(&report, handles).to_string())
+    }
+
+    /// What [`Scene::mend`] would do under `plan_json` (the same form),
+    /// counted by running the Mend on a copy: JSON `{weld, weld_pairs,
+    /// weld_vertices, weld_max_gap, folds, collapsed_faces, split_edges,
+    /// branching_vertices, islands, pieces, hole_rims, hole_rims_planar,
+    /// hole_rims_warped, outer_rims, fill_rims, filled_rims, fill_curved,
+    /// skipped_rims}` (`weld` the distance the plan resolved to, or null;
+    /// `filled_rims` and `skipped_rims` counts the result's). Pure.
+    ///
+    /// # Errors
+    /// What [`Scene::mend`] would refuse, except `NothingToMend` and
+    /// `StillOpen` (they judge these counts): `UnknownObject`,
+    /// `UnknownComponent`, `ExplodeSessionScope`, `BadMendPlan`, and the
+    /// Mend's own refusals.
+    pub fn mend_census_json(&self, object: u64, plan_json: &str) -> Result<String, ApiError> {
+        let (census, weld) = self.mend_census_cached(object, plan_json)?;
+        Ok(api::health::mend_census_json(&census, weld).to_string())
+    }
+
+    /// The census for `(object, plan_json)` at this history generation,
+    /// computed once and shared by [`Scene::mend_census_json`] and
+    /// [`Scene::mend_census_points`].
+    fn mend_census_cached(
+        &self,
+        object: u64,
+        plan_json: &str,
+    ) -> Result<(std::rc::Rc<kernel::repair::MendCensus>, Option<f64>), ApiError> {
+        let generation = self.doc.history_generation();
+        if let Some(e) = self.census_cache.borrow().as_ref()
+            && e.object == object
+            && e.plan == plan_json
+            && e.generation == generation
+        {
+            return Ok((e.census.clone(), e.weld));
+        }
+        let plan = self.mend_plan(object, plan_json)?;
+        let census = std::rc::Rc::new(
+            self.doc
+                .mend_census(object_id(object), &plan)
+                .map_err(doc_err)?,
+        );
+        *self.census_cache.borrow_mut() = Some(CensusEntry {
+            object,
+            plan: plan_json.to_string(),
+            generation,
+            weld: plan.weld,
+            census: census.clone(),
+        });
+        Ok((census, plan.weld))
+    }
+
+    /// The points [`Scene::mend_census_json`] counts, world-space at every
+    /// placement of the object (`[x, y, z, …]`): `kind` 0 the points that
+    /// would merge, 1 the points that would split. Empty for a stale
+    /// handle, a bad plan or another kind.
+    pub fn mend_census_points(&self, object: u64, plan_json: &str, kind: u32) -> Vec<f32> {
+        let Ok((census, _)) = self.mend_census_cached(object, plan_json) else {
+            return Vec::new();
+        };
+        let points = match kind {
+            0 => &census.weld_points,
+            1 => &census.split_points,
+            _ => return Vec::new(),
+        };
+        health::points_at_placements(&self.doc, object_id(object), points)
+    }
+
+    /// Mend's default weld distance for an object (meters;
+    /// [`kernel::repair::default_weld_distance`]); 0 for a stale handle.
+    pub fn default_weld_distance(&self, object: u64) -> f64 {
+        self.doc
+            .object(object_id(object))
+            .map(kernel::repair::default_weld_distance)
+            .unwrap_or(0.0)
+    }
+
+    /// The weld distances Mend accepts for an object, `[min, max]` meters
+    /// ([`kernel::repair::weld_range`]); empty for a stale handle.
+    pub fn weld_range(&self, object: u64) -> Vec<f64> {
+        self.doc
+            .object(object_id(object))
+            .map(|o| {
+                let (lo, hi) = kernel::repair::weld_range(o);
+                vec![lo, hi]
+            })
+            .unwrap_or_default()
+    }
+
+    fn mend_plan(
+        &self,
+        object: u64,
+        plan_json: &str,
+    ) -> Result<kernel::repair::MendPlan, ApiError> {
+        let obj = self
+            .doc
+            .object(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let v: serde_json::Value = if plan_json.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(plan_json)
+                .map_err(|e| ApiError(format!("BadMendPlan: the Mend plan is not JSON: {e}")))?
+        };
+        api::health::mend_plan_from_json(&v, obj).map_err(|e| ApiError(format!("BadMendPlan: {e}")))
     }
 
     /// Remove `faces` (face handles) from an open object: Model Health's
@@ -10975,6 +11137,9 @@ impl Scene {
                     MakeSolidFromSketches { sketches } => {
                         self.make_solid_from_sketches(sketches)?;
                     }
+                    Mend { object, plan_json } => {
+                        self.mend(object, &plan_json)?;
+                    }
                     DeleteFaces { object, faces } => {
                         self.delete_faces(object, faces)?;
                     }
@@ -11781,6 +11946,8 @@ impl Scene {
         // whatever the new one put in those slots.
         self.last_import_objects.clear();
         self.health_cache.clear();
+        self.rim_cache.borrow_mut().clear();
+        self.census_cache.borrow_mut().take();
         self.face_range_cache = SecondaryMap::new();
         self.inference = self.fresh_inference();
         // Hidden sets key by dense ids the new document reuses; drop them so a
@@ -15026,6 +15193,153 @@ mod tests {
             "replaying a byte-embedding session reproduces the golden state_hash"
         );
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// A binary STL (millimeters) of a 1 × 1 × 5 box standing on its
+    /// base, its top left out: a hole small against the box.
+    fn bottle_stl() -> Vec<u8> {
+        let c = |x: f32, y: f32, z: f32| [x, y, z];
+        let v = [
+            c(0.0, 0.0, 0.0),
+            c(1.0, 0.0, 0.0),
+            c(1.0, 1.0, 0.0),
+            c(0.0, 1.0, 0.0),
+            c(0.0, 0.0, 5.0),
+            c(1.0, 0.0, 5.0),
+            c(1.0, 1.0, 5.0),
+            c(0.0, 1.0, 5.0),
+        ];
+        let quads = [
+            [0, 3, 2, 1],
+            [0, 1, 5, 4],
+            [1, 2, 6, 5],
+            [2, 3, 7, 6],
+            [3, 0, 4, 7],
+        ];
+        let mut tris = Vec::new();
+        for q in quads {
+            tris.push([v[q[0]], v[q[1]], v[q[2]]]);
+            tris.push([v[q[0]], v[q[2]], v[q[3]]]);
+        }
+        let mut out = vec![0u8; 80];
+        out.extend((tris.len() as u32).to_le_bytes());
+        for t in &tris {
+            out.extend([0f32; 3].iter().flat_map(|x| x.to_le_bytes()));
+            for p in t {
+                out.extend(p.iter().flat_map(|x| x.to_le_bytes()));
+            }
+            out.extend([0u8; 2]);
+        }
+        out
+    }
+
+    /// `RecordedCall::Mend`: a recorded one-click Mend replays to the same
+    /// document, and its report and preview read as the kernel's.
+    /// The rim overlay's per-object cache follows edits: a rim drawn before
+    /// a Mend is gone after it, and back on undo.
+    #[test]
+    fn the_rim_highlight_follows_mend_and_undo() {
+        let mut scene = Scene::new();
+        scene
+            .import_stl_core(&bottle_stl(), 0.001, Some("bottle".into()))
+            .expect("the bottle imports");
+        let id = scene.object_ids()[0];
+        let before = scene.health_rim_highlight(id, 0);
+        assert_eq!(before.len(), 4 * 6, "the open top's four edges");
+        assert_eq!(scene.health_rim_highlight(id, 0), before, "cached");
+        scene.mend(id, "{}").unwrap();
+        assert!(scene.health_rim_highlight(id, 0).is_empty());
+        assert!(scene.health_rim_segments(vec![id]).is_empty());
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.health_rim_highlight(id, 0), before);
+    }
+
+    /// One census serves the preview line and the hover points, and an
+    /// edit retires it.
+    #[test]
+    fn the_mend_preview_is_computed_once_per_revision() {
+        let mut scene = Scene::new();
+        scene
+            .import_stl_core(&bottle_stl(), 0.001, Some("bottle".into()))
+            .expect("the bottle imports");
+        let id = scene.object_ids()[0];
+        let first = scene.mend_census_json(id, "{}").unwrap();
+        let cached = scene
+            .census_cache
+            .borrow()
+            .as_ref()
+            .map(|e| e.census.clone())
+            .unwrap();
+        let _ = scene.mend_census_points(id, "{}", 0);
+        let again = scene
+            .census_cache
+            .borrow()
+            .as_ref()
+            .map(|e| e.census.clone())
+            .unwrap();
+        assert!(
+            std::rc::Rc::ptr_eq(&cached, &again),
+            "the points reuse the census"
+        );
+        assert_eq!(scene.mend_census_json(id, "{}").unwrap(), first);
+        scene.mend(id, "{}").unwrap();
+        assert!(scene.census_cache.borrow().is_none(), "the Mend retires it");
+        assert!(scene.mend_census_json(id, "{}").is_ok());
+    }
+
+    #[test]
+    fn record_then_replay_covers_mend() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        scene
+            .import_stl_core(&bottle_stl(), 0.001, Some("bottle".into()))
+            .expect("the bottle imports");
+        let id = scene.object_ids()[0];
+        let census: serde_json::Value =
+            serde_json::from_str(&scene.mend_census_json(id, "{}").unwrap()).unwrap();
+        assert_eq!(census["fill_rims"], serde_json::json!([0]));
+        assert!(census["weld"].as_f64().unwrap() > 0.0);
+        let range = scene.weld_range(id);
+        assert_eq!(range.len(), 2);
+        let d = scene.default_weld_distance(id);
+        assert!(range[0] <= d && d <= range[1]);
+        let report: serde_json::Value =
+            serde_json::from_str(&scene.mend(id, "{}").unwrap()).unwrap();
+        assert_eq!(report["closed"], true);
+        assert_eq!(report["filled_rims"], 1);
+        assert_eq!(census["filled_rims"], report["filled_rims"]);
+        assert_eq!(census["skipped_rims"], 0);
+        assert!(
+            scene
+                .mend(id, r#"{"weld": 1.0}"#)
+                .unwrap_err()
+                .0
+                .starts_with("WeldDistanceOutOfRange:")
+        );
+        assert!(
+            scene
+                .mend(id, "{\"split\": 3}")
+                .unwrap_err()
+                .0
+                .starts_with("BadMendPlan:")
+        );
+        assert!(
+            scene
+                .mend(id, "{}")
+                .unwrap_err()
+                .0
+                .starts_with("NothingToMend:")
+        );
+        let artifact = scene.take_recording();
+        scene.stop_recording();
+        assert!(
+            artifact.contains(r#""method":"mend""#),
+            "the Mend is recorded"
+        );
+        let golden = scene.state_hash();
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&artifact).expect("replay succeeds"), golden);
     }
 
     /// `RecordedCall::ImportStl` — the merge hazard the STL importer's design

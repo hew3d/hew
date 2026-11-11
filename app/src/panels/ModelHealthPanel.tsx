@@ -46,7 +46,7 @@ import {
   type HealthRow,
   type HealthScope,
 } from '../health/healthReport'
-import { ACTION, KIND_NAME, PANEL, REASON_ON_PURPOSE, REASON_SENTENCE, TOOLTIP, UNDO_LABEL, distinctLabels, type KindKey } from '../health/healthCopy'
+import { ACTION, KIND_NAME, MEND, PANEL, REASON_MEND_LINE, REASON_ON_PURPOSE, REASON_SENTENCE, TOOLTIP, UNDO_LABEL, distinctLabels, type KindKey } from '../health/healthCopy'
 import {
   batchLabel,
   batchSummary,
@@ -64,6 +64,29 @@ import {
   type BatchOp,
   type BatchOptions,
 } from '../health/healthBatch'
+import {
+  formatMergeDistance,
+  hasWarpedHoles,
+  mendCandidate,
+  mendIdleLine,
+  mendOp,
+  mendOutcomes,
+  mendPreviewLine,
+  mendToast,
+  mendableRows,
+  mendableScan,
+  parseMergeDistance,
+  readDefaultWeld,
+  readMendCensus,
+  readMendCensusResult,
+  DEFAULT_MEND_PLAN,
+  concatPoints,
+  readMendPoints,
+  readWeldRange,
+  skippedLine,
+  type MendPlan,
+} from '../health/mend'
+import { BUSY_REFUSED } from '../busyCard'
 import { ThickenDialog } from './ThickenDialog'
 import { collectLeafIds, nodeRefFromJs, type NodeRef } from './treeModel'
 import { worldBoundsForSelection } from './objectBounds'
@@ -97,11 +120,39 @@ interface Props {
   /** After a repair: re-tessellate and bump `docRev` (App's refreshAfterPanelMutation). */
   onGeometryChanged: () => void
   onToast?: (message: string, code?: string) => void
+  /** App's busy card: show `message`, let it paint, run `work`. False when
+   *  another long change is still running (the caller says so). */
+  onBusy?: (message: string, work: () => void) => boolean
+}
+
+/** What "Choose what to mend" holds: the steps on or off. */
+interface MendChoice {
+  weld: boolean
+  split: boolean
+  fill: boolean
+  folds: boolean
+}
+const MEND_ALL_ON: MendChoice = { weld: true, split: true, fill: true, folds: true }
+
+/** What a hovered Mend button draws: the rims it fills and the points it merges / splits. */
+interface MendPreview {
+  rims: { id: bigint; rim: number }[]
+  merge: Float32Array
+  split: Float32Array
 }
 
 /** The search box waits this long after the last keystroke before it changes
  *  the listed set (and so the viewport overlay). */
 const SEARCH_DEBOUNCE_MS = 150
+
+/** The merge-distance field waits this long before the preview follows it. */
+const DISTANCE_DEBOUNCE_MS = 300
+
+/** Mend all's hover draws points for this many objects at most. */
+const MEND_ALL_POINTS_ROWS = 20
+
+/** Mend all reads this many fresh censuses while the group renders. */
+const MEND_ALL_CENSUS_ROWS = 25
 
 /** Groups with more rows than this start collapsed (keeps a 1000-row import
  *  from mounting a thousand rows at once). */
@@ -207,6 +258,7 @@ export function ModelHealthPanel({
   onOverlayChange,
   onGeometryChanged,
   onToast,
+  onBusy,
 }: Props) {
   const { t } = useLingui()
   const [query, setQuery] = useState('')
@@ -223,6 +275,19 @@ export function ModelHealthPanel({
   const [current, setCurrent] = useState<{ object: bigint; rim: number } | null>(null)
   /** The rims a hovered / focused Close button will cap (viewport preview). */
   const [preview, setPreview] = useState<{ id: bigint; rim: number }[] | null>(null)
+  /** "Choose what to mend" and the merge distance the person typed (null = the default). */
+  const [mendChoice, setMendChoice] = useState<MendChoice>(MEND_ALL_ON)
+  const [distanceText, setDistanceText] = useState<string | null>(null)
+  /** `distanceText` once typing pauses: the census is not re-asked on every keystroke. */
+  const [distanceSettled, setDistanceSettled] = useState<string | null>(null)
+  useEffect(() => {
+    if (distanceText === distanceSettled) return
+    const t = setTimeout(() => setDistanceSettled(distanceText), DISTANCE_DEBOUNCE_MS)
+    return () => clearTimeout(t)
+  }, [distanceText, distanceSettled])
+  const [mendOpen, setMendOpen] = useState(false)
+  /** The points and rims a hovered / focused Mend button previews. */
+  const [mendPreview, setMendPreview] = useState<MendPreview | null>(null)
   /** Which batch button is running (disables the rest). */
   const [busy, setBusy] = useState<string | null>(null)
   /** Per-row warning lines from the last batch's refusals. */
@@ -290,9 +355,10 @@ export function ModelHealthPanel({
       warnIds: listedIds.warnIds,
       rev: docRev,
       current: currentRow !== null && currentRow.rims.length > 0 ? { id: currentRow.object, rim: currentRim } : null,
-      capPreview: preview,
+      capPreview: preview ?? mendPreview?.rims ?? null,
+      mendPoints: mendPreview === null ? null : { merge: mendPreview.merge, split: mendPreview.split },
     }),
-    [listedIds, docRev, currentRow, currentRim, preview],
+    [listedIds, docRev, currentRow, currentRim, preview, mendPreview],
   )
   useEffect(() => {
     onOverlayChange(overlay)
@@ -322,6 +388,7 @@ export function ModelHealthPanel({
       return next.size === prev.size ? prev : next
     })
     setPreview(null)
+    setMendPreview(null)
   }, [report])
 
   const frameRow = (row: HealthRow): void => {
@@ -334,6 +401,11 @@ export function ModelHealthPanel({
   }
 
   const selectRow = (row: HealthRow): void => {
+    // A typed merge distance belongs to the object it was typed for.
+    if (currentRow !== row) {
+      setDistanceText(null)
+      setDistanceSettled(null)
+    }
     setCurrent({ object: row.object, rim: 0 })
     const node = rowNode(row, selectedIds)
     onSelectNode(node)
@@ -406,6 +478,90 @@ export function ModelHealthPanel({
     }, 0)
   }
 
+  /** The plan the Mend button of `row` runs: the steps chosen, the typed
+   *  distance checked against the object's range. */
+  const mendPlanFor = (row: HealthRow, choice: MendChoice = mendChoice): { plan: MendPlan; error: string | null } => {
+    const base = { folds: choice.folds, split: choice.split, fill: choice.fill }
+    if (!choice.weld) return { plan: { ...base, weld: false }, error: null }
+    if (distanceSettled === null) return { plan: { ...base, weld: true }, error: null }
+    const parsed = parseMergeDistance(distanceSettled, readWeldRange(scene, row.object))
+    return parsed.ok
+      ? { plan: { ...base, weld: parsed.meters }, error: null }
+      : { plan: { ...base, weld: true }, error: parsed.error }
+  }
+
+  /** Whether Mend is offered for `row` at all (before the census). */
+  const mendEligible = (row: HealthRow): boolean =>
+    !row.accepted && (mendCandidate(row, inSplit(row)) || hasWarpedHoles(row))
+
+  /** Hovering a Mend button: dots for the points it merges and splits, and the rims it fills. */
+  const showMendPreview = (rows: readonly HealthRow[], planOf: MendPlan | ((row: HealthRow) => MendPlan)): void => {
+    const merge: Float32Array[] = []
+    const split: Float32Array[] = []
+    const rims: { id: bigint; rim: number }[] = []
+    rows.forEach((r, n) => {
+      const plan = typeof planOf === 'function' ? planOf(r) : planOf
+      const dots = n < MEND_ALL_POINTS_ROWS
+      if (dots && plan.weld !== false) merge.push(readMendPoints(scene, r.object, plan, 0, docRev))
+      if (dots && plan.split) split.push(readMendPoints(scene, r.object, plan, 1, docRev))
+      if (plan.fill) r.rims.forEach((rim, i) => { if (rim.role === 'hole' && rim.closed) rims.push({ id: r.object, rim: i }) })
+    })
+    setMendPreview({ rims, merge: concatPoints(merge), split: concatPoints(split) })
+  }
+  const mendPreviewProps = (rows: readonly HealthRow[], plan: MendPlan | ((row: HealthRow) => MendPlan)) => ({
+    onMouseEnter: () => showMendPreview(rows, plan),
+    onMouseLeave: () => setMendPreview(null),
+    onFocus: () => showMendPreview(rows, plan),
+    onBlur: () => setMendPreview(null),
+  })
+
+  /** Run Mend on `ops` as one undo step behind the busy card. */
+  const executeMend = (opsOf: BatchOp[] | (() => BatchOp[]), busyKey: string): void => {
+    if ((Array.isArray(opsOf) && opsOf.length === 0) || busy !== null) return
+    setBusy(busyKey)
+    setWarnings(new Map())
+    setPreview(null)
+    setMendPreview(null)
+    const work = (): void => {
+      try {
+        // Mend all reads every census here, behind the busy card, not while rendering.
+        const ops = Array.isArray(opsOf) ? opsOf : opsOf()
+        if (ops.length === 0) {
+          onToast?.(MEND.nothingToMend)
+          return
+        }
+        const result = runBatch(scene, (n) => batchLabel('mend', n), ops)
+        const lines = new Map<bigint, string>()
+        for (const [op, outcome] of mendOutcomes(result)) {
+          const note = skippedLine(outcome.skipped)
+          if (note !== null) lines.set(op.object, note)
+        }
+        for (const f of result.failed) lines.set(f.object, failureLine('mend', f.explanation))
+        setWarnings(lines)
+        if (result.done.length > 0) {
+          setCurrent(null)
+          // A distance typed for one pass does not carry into the next.
+          setDistanceText(null)
+          setDistanceSettled(null)
+          onGeometryChanged()
+        }
+        onToast?.(mendToast(result))
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const raw = err instanceof Error ? err.message : String(err)
+        onToast?.(code !== null ? kernelErrorMessage(code, raw) : raw, code ?? undefined)
+      } finally {
+        setBusy(null)
+      }
+    }
+    if (onBusy === undefined) {
+      setTimeout(work, 0)
+    } else if (!onBusy(MEND.busy, work)) {
+      setBusy(null)
+      onToast?.(i18n._(BUSY_REFUSED))
+    }
+  }
+
   const closeRow = (row: HealthRow, rims: number[] | null): void => {
     setPreview(null)
     const done = repair(
@@ -450,6 +606,16 @@ export function ModelHealthPanel({
     const members = row.definition !== null && row.placements > 1
     const rim = row.rims[currentRim]
     const thisRimClosable = selected && canCloseRow(row) && rim !== undefined && rim.cappable
+    const mendChoiceNow = selected && mendEligible(row) ? mendPlanFor(row) : null
+    const censusRead =
+      mendChoiceNow === null ? null : readMendCensusResult(scene, row.object, mendChoiceNow.plan, docRev)
+    const mendCensus = censusRead?.census ?? null
+    const censusError = censusRead?.error ?? null
+    const mendLine = mendCensus === null || mendChoiceNow === null ? null : mendPreviewLine(mendCensus, mendChoiceNow.plan)
+    // The default plan decides whether the row has anything to mend at all:
+    // switching every step off must not hide the controls to switch them on.
+    const mendDefault = mendChoiceNow === null ? null : readMendCensus(scene, row.object, DEFAULT_MEND_PLAN, docRev)
+    const mendAvailable = mendDefault !== null && mendPreviewLine(mendDefault) !== null
     return (
       <div
         key={row.object.toString()}
@@ -487,6 +653,22 @@ export function ModelHealthPanel({
             {canCloseRow(row) && (
               <button type="button" title={TOOLTIP.close(rowPlacements(row))} style={ACTION_BUTTON_STYLE} {...previewProps([row])} onClick={(e) => { e.stopPropagation(); closeRow(row, null) }}>
                 {ACTION.close}
+              </button>
+            )}
+            {mendAvailable && mendChoiceNow !== null && (
+              <button
+                type="button"
+                data-health-mend
+                title={TOOLTIP.mend(rowPlacements(row))}
+                style={ACTION_BUTTON_STYLE}
+                disabled={busy !== null || mendChoiceNow.error !== null || mendLine === null || censusError !== null || distanceText !== distanceSettled}
+                {...mendPreviewProps([row], mendChoiceNow.plan)}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  executeMend([mendOp(row, mendChoiceNow.plan)], `mend:${row.object}`)
+                }}
+              >
+                {busy === `mend:${row.object}` ? PANEL.working : ACTION.mend}
               </button>
             )}
             {classifyRow(row, inSplit(row)) === 'flatPanels' && (
@@ -556,8 +738,30 @@ export function ModelHealthPanel({
         )}
         {selected && classifyRow(row, inSplit(row)) === 'closerLook' && (
           <span data-health-reason style={{ flexBasis: '100%', fontSize: '11px', whiteSpace: 'normal', color: 'var(--text-secondary, #ccc)' }}>
-            {REASON_SENTENCE[openReason(row)]} {i18n._(REASON_ON_PURPOSE)}
+            {REASON_SENTENCE[openReason(row)]} {mendAvailable ? `${i18n._(REASON_MEND_LINE)} ` : ''}{i18n._(REASON_ON_PURPOSE)}
           </span>
+        )}
+        {selected && (mendAvailable || censusError !== null) && mendChoiceNow !== null && (
+          <div
+            data-health-mend-panel
+            style={{ flexBasis: '100%', fontSize: '11px', whiteSpace: 'normal', color: 'var(--text-secondary, #ccc)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div data-health-mend-preview>{censusError ?? mendLine ?? mendIdleLine(mendChoiceNow.plan)}</div>
+            {mendChoiceNow.error !== null && (
+              <div role="alert" style={{ color: 'var(--status-warning, #e8c84a)' }}>{mendChoiceNow.error}</div>
+            )}
+            <button
+              type="button"
+              aria-expanded={mendOpen}
+              data-health-mend-choose
+              style={{ ...STEP_BUTTON_STYLE, textDecoration: 'underline', padding: 0, marginTop: '2px' }}
+              onClick={() => setMendOpen((o) => !o)}
+            >
+              {mendOpen ? '▾' : '▸'} {MEND.choose}
+            </button>
+            {mendOpen && mendChooser(row)}
+          </div>
         )}
         {warnings.has(row.object) && (
           <span
@@ -572,6 +776,42 @@ export function ModelHealthPanel({
     )
   }
 
+  /** The "Choose what to mend" checkboxes and the merge distance. */
+  const mendChooser = (row: HealthRow): React.ReactNode => {
+    const box = (key: keyof MendChoice, label: string): React.ReactNode => (
+      <label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+        <input
+          type="checkbox"
+          checked={mendChoice[key]}
+          onChange={(e) => setMendChoice((c) => ({ ...c, [key]: e.target.checked }))}
+        />
+        {label}
+      </label>
+    )
+    return (
+      <div data-health-mend-options style={{ display: 'flex', flexDirection: 'column', gap: '3px', margin: '4px 0 2px 10px' }}>
+        {box('weld', MEND.mergeLabel)}
+        {mendChoice.weld && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', marginLeft: '18px' }}>
+            {MEND.mergeDistance}
+            <input
+              type="text"
+              aria-label={MEND.mergeDistance}
+              value={distanceText ?? formatMergeDistance(readDefaultWeld(scene, row.object))}
+              spellCheck={false}
+              onChange={(e) => setDistanceText(e.target.value)}
+              onFocus={(e) => e.currentTarget.select()}
+              style={{ ...CONTROL_STYLE, width: '90px' }}
+            />
+          </label>
+        )}
+        {box('split', MEND.separateLabel)}
+        {box('fill', MEND.fillLabel)}
+        {box('folds', MEND.foldsLabel)}
+      </div>
+    )
+  }
+
   const batchButton = (
     busyKey: string,
     label: string,
@@ -580,13 +820,13 @@ export function ModelHealthPanel({
     extra: React.ButtonHTMLAttributes<HTMLButtonElement> = {},
   ): React.ReactNode => (
     <button
+      {...extra}
       type="button"
       title={title}
       data-health-batch={busyKey}
       style={ACTION_BUTTON_STYLE}
       disabled={busy !== null || extra.disabled === true}
       onClick={onClick}
-      {...extra}
     >
       {busy === busyKey ? PANEL.working : label}
     </button>
@@ -597,8 +837,58 @@ export function ModelHealthPanel({
     const buttons = groupBatchButtons(kind)
     const closable = closableRows(rows)
     const markable = markableRows(rows)
+    // Mend all takes the steps chosen, at each object's own default distance.
+    const mendAllPlan: MendPlan = { weld: mendChoice.weld, folds: mendChoice.folds, split: mendChoice.split, fill: mendChoice.fill }
+    // The census runs for each listed row once its group is open.
+    // A distance typed in the chooser applies to each object it fits; the rest
+    // keep their own default (the tooltip says so).
+    const typedDistance = mendAllPlan.weld !== false && distanceSettled !== null
+    // A typed distance that cannot be read, or that fits none of these
+    // objects, stops Mend all with the words the row shows, rather than
+    // mending everything at the default distance unasked.
+    const distanceReads = typedDistance
+      ? rows.filter(mendEligible).map((row) => parseMergeDistance(distanceSettled as string, readWeldRange(scene, row.object)))
+      : []
+    const firstRefusal = distanceReads.find((p) => !p.ok)
+    const distanceError =
+      firstRefusal !== undefined && !firstRefusal.ok && distanceReads.every((p) => !p.ok) ? firstRefusal.error : null
+    const planWithDistance = (row: HealthRow): MendPlan => {
+      if (!typedDistance) return mendAllPlan
+      const parsed = parseMergeDistance(distanceSettled as string, readWeldRange(scene, row.object))
+      return parsed.ok ? { ...mendAllPlan, weld: parsed.meters } : mendAllPlan
+    }
+    // The census runs for the first rows only (a budget, so opening a group of
+    // hundreds of imports stays quick); the rest are read when the button is
+    // pressed, behind the busy card. Reads made earlier cost nothing.
+    const scan =
+      kind === 'closerLook' && !isCollapsed(key, rows.length)
+        ? mendableScan(scene, rows, inSplit, docRev, planWithDistance, MEND_ALL_CENSUS_ROWS)
+        : { found: [], unread: 0 }
+    const mendable = scan.found
     return (
       <>
+        {(mendable.length > 0 || scan.unread > 0) &&
+          batchButton(
+            `mend:${key}`,
+            ACTION.mendAll,
+            distanceError ?? TOOLTIP.mendAll(mendable.length + scan.unread, typedDistance, scan.unread > 0),
+            () => {
+              if (distanceError !== null) return
+              executeMend(
+                () => mendableRows(scene, rows, inSplit, docRev, planWithDistance).map(({ row, plan }) => mendOp(row, plan)),
+                `mend:${key}`,
+              )
+            },
+            {
+              ...mendPreviewProps(mendable.map(({ row }) => row), planWithDistance),
+              disabled: distanceText !== distanceSettled || distanceError !== null,
+            },
+          )}
+        {(mendable.length > 0 || scan.unread > 0) && distanceError !== null && (
+          <span role="status" data-health-mend-all-error style={{ fontSize: '11px', color: 'var(--status-warning, #e8c84a)' }}>
+            {distanceError}
+          </span>
+        )}
         {buttons.close && closable.length > 0 &&
           batchButton(
             `close:${key}`,

@@ -333,7 +333,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "UnknownRim" => "That opening is already closed. Check the list again for what is left.",
         "RimNotPlanar" => {
-            "This opening isn't flat, so one face can't close it. Draw faces across it by hand."
+            "This opening isn't flat, so one face can't close it. Mend in Model Health can fill small ones; otherwise draw faces across it by hand."
         }
         "RimSelfIntersecting" => {
             "The edge of this opening crosses itself, so one face can't close it. Draw faces across it by hand."
@@ -523,6 +523,34 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "REPLAY" => {
             "This recorded session couldn't be replayed. If this keeps happening, use Report Bug."
         }
+        "NothingToMend" => "Nothing to mend here: no nearby points, touching parts or small gaps.",
+        "WeldDistanceOutOfRange" => {
+            "That distance for merging points is out of range. Try a distance nearer the one first shown."
+        }
+        "WeldFoldsFaces" => {
+            "Merging those points would fold faces onto each other. Turn on Separate parts that touch at a point too."
+        }
+        "WeldCollapsesObject" => {
+            "Merging points that far apart would leave nothing. Try a smaller distance."
+        }
+        "FillCrossesFaces" => {
+            "Filling this gap would cut through other faces, so it was left open."
+        }
+        "FillRimTooSmall" => "This gap is too small or thin to fill.",
+        "StillOpen" => "Mend would leave this object open, so nothing was changed.",
+        "FoldRemovalPinches" => {
+            "Removing those overlaps would leave parts touching at one point. Turn on Separate parts that touch at a point too."
+        }
+        "WeldFlipsFaces" => {
+            "Merging points that far apart would turn a thin face over onto its neighbor. Try a smaller distance."
+        }
+        "MendOpensObject" => {
+            "Mend would leave this object more open than it is now, so nothing was changed. Try a smaller distance."
+        }
+        "WeldFlattensObject" => {
+            "Merging points that far apart would press the sides of a thin part together. Try a smaller distance."
+        }
+        "BadMendPlan" => "Couldn't read those Mend settings.",
         _ => return None,
     })
 }

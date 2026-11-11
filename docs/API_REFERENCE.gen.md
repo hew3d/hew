@@ -7604,7 +7604,7 @@ Close an open object's flat openings with faces; an object closed all round beco
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
 - `unknown_rim` — That opening is already closed. Check the list again for what is left.
-- `rim_not_planar` — This opening isn't flat, so one face can't close it. Draw faces across it by hand.
+- `rim_not_planar` — This opening isn't flat, so one face can't close it. Mend in Model Health can fill small ones; otherwise draw faces across it by hand.
 - `rim_self_intersecting` — The edge of this opening crosses itself, so one face can't close it. Draw faces across it by hand.
 - `cap_would_be_coplanar` — This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid.
 - `non_manifold_rim` — The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first.
@@ -8255,6 +8255,203 @@ Mark an open object as a surface on purpose (or clear the mark); hew.doc.health 
 
 - `object_is_solid` — This is already solid, so there's nothing to close. Use Push/Pull to change its shape.
 - `unknown_entity`
+
+### `hew.solid.mend`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Mend an open object: merge nearby points, remove zero-width folds, separate pinched parts and fill small gaps, as one undo step.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "fill": {
+      "description": "\"holes\" (default) fills every gap that is a hole; an array of hew.doc.health rim indices fills those; false or null fills none",
+      "oneOf": [
+        {
+          "enum": [
+            "holes"
+          ],
+          "type": "string"
+        },
+        {
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        {
+          "enum": [
+            false
+          ],
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "folds": {
+      "description": "remove zero-width folds at open edges (default true)",
+      "type": "boolean"
+    },
+    "object": {
+      "description": "obj_ id (a world object or a component member)",
+      "type": "string"
+    },
+    "require_solid": {
+      "description": "refuse still_open instead of committing a result that is not watertight (default false)",
+      "type": "boolean"
+    },
+    "split": {
+      "description": "separate pinched parts; islands become objects of their own (default true)",
+      "type": "boolean"
+    },
+    "weld": {
+      "description": "merge points closer than this many meters; omitted or true = the object's default distance, false or null = no merge",
+      "type": [
+        "number",
+        "boolean",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "object"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "closed": {
+      "description": "the object is now a solid",
+      "type": "boolean"
+    },
+    "collapsed_faces": {
+      "description": "faces the merge collapsed, dropped",
+      "type": "integer"
+    },
+    "fill_triangles": {
+      "type": "integer"
+    },
+    "filled_rims": {
+      "type": "integer"
+    },
+    "folds_removed": {
+      "description": "zero-width folds removed",
+      "type": "integer"
+    },
+    "object_id": {
+      "type": "string"
+    },
+    "pieces": {
+      "description": "obj_ ids of the parts cut loose",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "pieces_closed": {
+      "type": "integer"
+    },
+    "reversed": {
+      "type": "boolean"
+    },
+    "seam_folds": {
+      "description": "zero-width doublings-back cut out of faces while stitching seams",
+      "type": "integer"
+    },
+    "skipped_rims": {
+      "items": {
+        "properties": {
+          "object": {
+            "description": "0 the mended object, i+1 piece i",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "why the rim was left open: a refusal code such as fill_crosses_faces",
+            "type": "string"
+          },
+          "rim": {
+            "description": "that object's hew.doc.health rim index after the Mend; null when no open rim passes there",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "soft_seams": {
+      "description": "edges the Mend left between faces on one plane, made soft so it adds no drawing",
+      "type": "integer"
+    },
+    "split_edges": {
+      "type": "integer"
+    },
+    "split_vertices": {
+      "type": "integer"
+    },
+    "stitched_rims": {
+      "description": "of filled_rims, seams closed by stitching",
+      "type": "integer"
+    },
+    "weld_max_move": {
+      "description": "farthest a merged point moved (m)",
+      "type": "number"
+    },
+    "welded_vertices": {
+      "description": "points merged away",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "object_id",
+    "welded_vertices",
+    "pieces",
+    "filled_rims",
+    "skipped_rims",
+    "closed"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
+- `unknown_rim` — That opening is already closed. Check the list again for what is left.
+- `nothing_to_mend` — Nothing to mend here: no nearby points, touching parts or small gaps.
+- `weld_distance_out_of_range` — That distance for merging points is out of range. Try a distance nearer the one first shown.
+- `weld_folds_faces` — Merging those points would fold faces onto each other. Turn on Separate parts that touch at a point too.
+- `weld_collapses_object` — Merging points that far apart would leave nothing. Try a smaller distance.
+- `fill_crosses_faces` — Filling this gap would cut through other faces, so it was left open.
+- `fill_rim_too_small` — This gap is too small or thin to fill.
+- `cap_would_be_coplanar` — This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid.
+- `still_open` — Mend would leave this object open, so nothing was changed.
+- `fold_removal_pinches` — Removing those overlaps would leave parts touching at one point. Turn on Separate parts that touch at a point too.
+- `weld_flips_faces` — Merging points that far apart would turn a thin face over onto its neighbor. Try a smaller distance.
+- `mend_opens_object` — Mend would leave this object more open than it is now, so nothing was changed. Try a smaller distance.
+- `weld_flattens_object` — Merging points that far apart would press the sides of a thin part together. Try a smaller distance.
+- `non_manifold_rim` — The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first.
+- `rim_not_planar` — This opening isn't flat, so one face can't close it. Mend in Model Health can fill small ones; otherwise draw faces across it by hand.
 
 ### `hew.solid.move_imprint`
 

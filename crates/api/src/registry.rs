@@ -489,6 +489,13 @@ impl Registry {
             "Close an open object's flat openings with faces; an object closed all round becomes a solid.",
         );
         add(
+            "hew.solid.mend",
+            M,
+            Kernel,
+            Std,
+            "Mend an open object: merge nearby points, remove zero-width folds, separate pinched parts and fill small gaps, as one undo step.",
+        );
+        add(
             "hew.solid.delete_faces",
             M,
             Kernel,
@@ -1702,6 +1709,66 @@ impl Registry {
                 "non_manifold_rim",
                 "caps_overlap",
             ]);
+
+            let cmd = commands.get_mut("hew.solid.mend").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "obj_ id (a world object or a component member)" },
+                    "weld": { "type": ["number", "boolean", "null"], "description": "merge points closer than this many meters; omitted or true = the object's default distance, false or null = no merge" },
+                    "folds": { "type": "boolean", "description": "remove zero-width folds at open edges (default true)" },
+                    "split": { "type": "boolean", "description": "separate pinched parts; islands become objects of their own (default true)" },
+                    "fill": { "description": "\"holes\" (default) fills every gap that is a hole; an array of hew.doc.health rim indices fills those; false or null fills none", "oneOf": [ { "type": "string", "enum": ["holes"] }, { "type": "array", "items": { "type": "integer", "minimum": 0 } }, { "type": "boolean", "enum": [false] }, { "type": "null" } ] },
+                    "require_solid": { "type": "boolean", "description": "refuse still_open instead of committing a result that is not watertight (default false)" }
+                },
+                "required": ["object"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "string" },
+                    "welded_vertices": { "type": "integer", "description": "points merged away" },
+                    "weld_max_move": { "type": "number", "description": "farthest a merged point moved (m)" },
+                    "collapsed_faces": { "type": "integer", "description": "faces the merge collapsed, dropped" },
+                    "folds_removed": { "type": "integer", "description": "zero-width folds removed" },
+                    "seam_folds": { "type": "integer", "description": "zero-width doublings-back cut out of faces while stitching seams" },
+                    "soft_seams": { "type": "integer", "description": "edges the Mend left between faces on one plane, made soft so it adds no drawing" },
+                    "split_vertices": { "type": "integer" },
+                    "split_edges": { "type": "integer" },
+                    "pieces": { "type": "array", "items": { "type": "string" }, "description": "obj_ ids of the parts cut loose" },
+                    "filled_rims": { "type": "integer" },
+                    "stitched_rims": { "type": "integer", "description": "of filled_rims, seams closed by stitching" },
+                    "fill_triangles": { "type": "integer" },
+                    "skipped_rims": { "type": "array", "items": { "type": "object", "properties": { "object": { "type": "integer", "description": "0 the mended object, i+1 piece i" }, "rim": { "type": ["integer", "null"], "description": "that object's hew.doc.health rim index after the Mend; null when no open rim passes there" }, "reason": { "type": "string", "description": "why the rim was left open: a refusal code such as fill_crosses_faces" } } } },
+                    "reversed": { "type": "boolean" },
+                    "closed": { "type": "boolean", "description": "the object is now a solid" },
+                    "pieces_closed": { "type": "integer" }
+                },
+                "required": ["object_id", "welded_vertices", "pieces", "filled_rims", "skipped_rims", "closed"]
+            });
+            cmd.refusals = vec![
+                "unknown_component",
+                "unknown_entity",
+                "explode_session_scope",
+                "invalid",
+                "unknown_rim",
+                "nothing_to_mend",
+                "weld_distance_out_of_range",
+                "weld_folds_faces",
+                "weld_collapses_object",
+                "fill_crosses_faces",
+                "fill_rim_too_small",
+                "cap_would_be_coplanar",
+                "still_open",
+                "fold_removal_pinches",
+                "weld_flips_faces",
+                "mend_opens_object",
+                "weld_flattens_object",
+                "non_manifold_rim",
+                "rim_not_planar",
+            ];
 
             let cmd = commands
                 .get_mut("hew.solid.delete_faces")

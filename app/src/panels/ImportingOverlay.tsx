@@ -269,3 +269,18 @@ export function ImportingOverlay({ fileName, opening = false, progress = null }:
     </div>
   )
 }
+
+/** The same card for a long edit (a Mend) on a large object: painted
+ *  before the blocking call so the pause reads as work, not a hang. */
+export function BusyOverlay({ message }: { message: string }) {
+  ensureSpinnerKeyframes()
+  return (
+    <div style={OVERLAY_STYLE} aria-live="assertive" aria-label={message}>
+      <div style={CARD_STYLE} role="status" aria-busy="true">
+        <div style={SPINNER_STYLE} aria-hidden="true" />
+        <div style={MESSAGE_STYLE}>{message}</div>
+        <div style={HINT_STYLE}><Trans>This can take a while on a large object.</Trans></div>
+      </div>
+    </div>
+  )
+}

@@ -25,6 +25,8 @@ import { useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { openReason, readHealthReportFresh, type HealthOverlay } from '../health/healthReport'
 import { runBatch, type BatchFailure } from '../health/healthBatch'
+import { BUSY_REFUSED } from '../busyCard'
+import { DEFAULT_MEND_PLAN, mendItemLine, mendOutcomes, readMendCensus, skippedLine } from '../health/mend'
 import {
   buildPlan,
   carryPerItem,
@@ -42,6 +44,8 @@ import {
 } from '../health/fixPlan'
 import {
   KIND_NAME,
+  MEND,
+  REASON_MEND_LINE,
   REASON_ON_PURPOSE,
   REASON_SENTENCE,
   THICKNESS,
@@ -79,6 +83,9 @@ interface Props {
   /** After Make Solid: re-tessellate and bump the document revision. */
   onGeometryChanged: () => void
   onToast?: (message: string, code?: string) => void
+  /** App's busy card: show `message`, let it paint, run `work`. False when
+   *  another long change is still running. Mend always runs behind it. */
+  onBusy?: (message: string, work: () => void) => boolean
   /** Bumped by the app whenever isolation ends or something else isolates:
    *  whatever this window had isolated is gone, so it forgets its selection. */
   isolationLost?: number
@@ -86,6 +93,8 @@ interface Props {
    *  a modal dialog): the window then leaves Escape alone. */
   escapeBusy?: () => boolean
 }
+
+const capitalized = (text: string): string => `${text.charAt(0).toUpperCase()}${text.slice(1)}`
 
 type Page = 'overview' | KindKey | 'ready' | 'done'
 
@@ -244,15 +253,18 @@ interface Outcome {
   refused: { item: FixItem; reason: string }[]
   /** Items Hew can't close on its own. */
   closer: FixItem[]
+  /** A note under an item a Mend left gaps open on, by object. */
+  notes?: ReadonlyMap<bigint, string>
 }
 
 // --------------------------------------------------------------- component
 
-export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGeneration = 0, onClose, onWidthChange, onIsolate, onClearIsolation, onHealthOverlay, onGeometryChanged, onToast, isolationLost = 0, escapeBusy }: Props) {
+export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGeneration = 0, onClose, onWidthChange, onIsolate, onClearIsolation, onHealthOverlay, onGeometryChanged, onToast, onBusy, isolationLost = 0, escapeBusy }: Props) {
   const { t } = useLingui()
   const readScopeIds = (): bigint[] | null =>
     scope === 'import' ? Array.from(scene.last_import_object_ids()) : scopeIsPicked(scope) ? [...(objectIds ?? [])] : null
-  const readPlan = (): FixPlan => buildPlan(readHealthReportFresh(scene, readScopeIds()))
+  const readPlan = (): FixPlan =>
+    buildPlan(readHealthReportFresh(scene, readScopeIds()), (row) => readMendCensus(scene, row.object, DEFAULT_MEND_PLAN, docRev))
   // The plan is what the person reviews and what Make Solid applies. It is
   // read again when the document changes (the window is non-modal) and right
   // before Make Solid builds its commands.
@@ -450,11 +462,12 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
     }
     setError(null)
     setWorking(true)
-    // Let "Fixing…" paint before the synchronous run.
-    timerRef.current = setTimeout(() => {
-      timerRef.current = null
+    const run = (): void => {
       // Cancelled before anything was sent: nothing changes.
-      if (cancelledRef.current) return
+      if (cancelledRef.current) {
+        setWorking(false)
+        return
+      }
       try {
         // Read the model again right before building the commands.
         const fresh = readPlan()
@@ -476,6 +489,12 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
           seen.add(item)
           refused.push({ item, reason: f.explanation })
         }
+        const mended = mendOutcomes(result)
+        const notes = new Map<bigint, string>()
+        for (const [op, outcome] of mended) {
+          const note = skippedLine(outcome.skipped)
+          if (note !== null) notes.set(op.object, note)
+        }
         let solidNow = 0
         appliedRef.current = true
         if (result.done.length > 0) {
@@ -487,7 +506,10 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
           solidNow,
           left: leftByChoice(fresh, chosen),
           refused,
-          closer: fresh.items.closerLook,
+          // After a Mend, what still needs mending is read again: the mended
+          // are solid now and a split may have left new pieces.
+          closer: mended.size > 0 ? readPlan().items.closerLook : fresh.items.closerLook,
+          notes,
         })
         clearIsolation()
         setPage('done')
@@ -499,6 +521,20 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
       } finally {
         setWorking(false)
       }
+    }
+    // Mend runs behind the busy card, whatever the size; the rest keeps its
+    // own "Working…" label.
+    if (first.ops.some((op) => op.method === 'hew.solid.mend') && onBusy !== undefined) {
+      if (!onBusy(MEND.busy, run)) {
+        setWorking(false)
+        onToast?.(i18n._(BUSY_REFUSED))
+      }
+      return
+    }
+    // Let "Fixing…" paint before the synchronous run.
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null
+      run()
     }, 0)
   }
 
@@ -537,12 +573,15 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
     })
   }
   /** A page's radio changed: its items follow the page again. */
-  const setPageChoice = <K extends 'openings' | 'split' | 'flatPanels'>(kind: K, value: FixChoices[K]): void => {
+  const setPageChoice = <K extends 'openings' | 'split' | 'flatPanels' | 'closerLook'>(
+    kind: K,
+    value: K extends 'closerLook' ? FixChoices['mend'] : FixChoices[Exclude<K, 'closerLook'>],
+  ): void => {
     setError(null)
     setChoices((c) => {
       const mine = new Set(plan.items[kind].map((i) => i.key))
       const next = new Map([...c.perItem].filter(([k]) => !mine.has(k)))
-      return { ...c, [kind]: value, perItem: next }
+      return { ...c, [kind === 'closerLook' ? 'mend' : kind]: value, perItem: next }
     })
   }
 
@@ -564,7 +603,7 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
         style={{ margin: '8px 0 0', padding: '6px 10px', fontSize: '12px', border: '1px solid var(--border-strong)', borderRadius: '4px' }}
       >
         <p style={{ margin: 0 }}>
-          {REASON_SENTENCE[openReason(activeItem.rows[0])]} {i18n._(REASON_ON_PURPOSE)}
+          {REASON_SENTENCE[openReason(activeItem.rows[0])]} {activeItem.mend !== null ? `${i18n._(REASON_MEND_LINE)} ` : ''}{i18n._(REASON_ON_PURPOSE)}
         </p>
       </div>
     )
@@ -573,7 +612,7 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
     const items = itemsOf(kind)
     const limit = shown[kind] ?? LIST_CHUNK
     const each = chooseEach[kind] === true
-    const canChoose = kind === 'openings' || kind === 'split' || kind === 'flatPanels'
+    const canChoose = kind === 'openings' || kind === 'split' || kind === 'flatPanels' || (kind === 'closerLook' && items.some((i) => i.mend !== null))
     const labels = distinctLabels(items.map((i) => i.name))
     return (
       <div style={{ margin: '12px 0 4px' }}>
@@ -599,7 +638,7 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
                 role="listitem"
                 style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '3px 8px', background: on ? 'var(--surface-row-selected, rgba(80,140,255,0.18))' : 'transparent' }}
               >
-                {each && (
+                {each && (kind !== 'closerLook' || item.mend !== null) && (
                   <input
                     type="checkbox"
                     aria-label={`${WIZARD.makeThisSolid} ${labels[index]}`}
@@ -618,7 +657,7 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
                 </button>
                 {kind === 'closerLook' && (
                   <span data-wizard-detail style={{ color: 'var(--text-faint)', fontSize: '12px', flexShrink: 0 }}>
-                    {itemDetail(item)}
+                    {item.mend !== null ? capitalized(mendItemLine(item.mend)) : itemDetail(item)}
                   </span>
                 )}
                 {copies !== '' && <span style={{ color: 'var(--text-faint)', fontSize: '12px', flexShrink: 0 }}>{copies}</span>}
@@ -725,8 +764,18 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
             {radio('wz-sheets', WIZARD.sheetsKeep, true, () => undefined, true)}
           </>
         )
-      case 'closerLook':
-        return <p>{WIZARD.closerBody}</p>
+      case 'closerLook': {
+        const mendable = plan.items.closerLook.some((i) => i.mend !== null)
+        return mendable ? (
+          <>
+            <p>{WIZARD.closerMendBody}</p>
+            {radio('wz-mend', MEND.wizardChoice, choices.mend === 'mend', () => setPageChoice('closerLook', 'mend'), true)}
+            {radio('wz-mend', MEND.wizardLeave, choices.mend === 'leave', () => setPageChoice('closerLook', 'leave'), false)}
+          </>
+        ) : (
+          <p>{WIZARD.closerBody}</p>
+        )
+      }
       default:
         return null
     }
@@ -745,7 +794,7 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
       case 'curvedSheets':
         return WIZARD.sheetsTitle
       case 'closerLook':
-        return WIZARD.closerTitle
+        return plan.items.closerLook.some((i) => i.mend !== null) ? WIZARD.closerTitle : WIZARD.closerTitleNoMend
       case 'ready':
         return WIZARD.readyTitle
       case 'done':
@@ -772,7 +821,9 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
                 <li key={k}>
                   {k === 'openings'
                     ? WIZARD.overviewLine.openings(itemsOf(k).length, defaultChoices(scope).openings === 'close')
-                    : WIZARD.overviewLine[k](itemsOf(k).length)}
+                    : k === 'closerLook'
+                      ? WIZARD.overviewLine.closerLook(itemsOf(k).length, itemsOf(k).filter((i) => i.mend !== null).length)
+                      : WIZARD.overviewLine[k](itemsOf(k).length)}
                 </li>
               ))}
             </ul>
@@ -840,7 +891,7 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
           {o.closer.length > 0 && (
             <>
               <p style={{ marginBottom: '4px' }}>{WIZARD.stillOpen(o.closer.length)}</p>
-              {list('still-open', o.closer.map((item) => ({ item, reason: itemDetail(item) })))}
+              {list('still-open', o.closer.map((item) => ({ item, reason: o.notes?.get(item.rows[0].object) ?? itemDetail(item) })))}
               {reasonCallout()}
             </>
           )}

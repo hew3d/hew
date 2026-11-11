@@ -255,7 +255,8 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   // ------------------------------------------------ Model Health repairs
   ObjectIsSolid: msg`This is already solid, so there's nothing to close. Use Push/Pull to change its shape.`,
   UnknownRim: msg`That opening is already closed. Check the list again for what is left.`,
-  RimNotPlanar: msg`This opening isn't flat, so one face can't close it. Draw faces across it by hand.`,
+  RimNotPlanar:
+    msg`This opening isn't flat, so one face can't close it. Mend in Model Health can fill small ones; otherwise draw faces across it by hand.`,
   RimSelfIntersecting:
     msg`The edge of this opening crosses itself, so one face can't close it. Draw faces across it by hand.`,
   CapWouldBeCoplanar:
@@ -414,6 +415,20 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   BadRenderMode:
     msg`The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug.`,
   REPLAY: msg`This recorded session couldn't be replayed. If this keeps happening, use Report Bug.`,
+
+  // ------------------------------------------------------------- mend
+  NothingToMend: msg`Nothing to mend here: no nearby points, touching parts or small gaps.`,
+  WeldDistanceOutOfRange: msg`That distance for merging points is out of range. Try a distance nearer the one first shown.`,
+  WeldFoldsFaces: msg`Merging those points would fold faces onto each other. Turn on Separate parts that touch at a point too.`,
+  WeldCollapsesObject: msg`Merging points that far apart would leave nothing. Try a smaller distance.`,
+  FillCrossesFaces: msg`Filling this gap would cut through other faces, so it was left open.`,
+  FillRimTooSmall: msg`This gap is too small or thin to fill.`,
+  StillOpen: msg`Mend would leave this object open, so nothing was changed.`,
+  FoldRemovalPinches: msg`Removing those overlaps would leave parts touching at one point. Turn on Separate parts that touch at a point too.`,
+  WeldFlipsFaces: msg`Merging points that far apart would turn a thin face over onto its neighbor. Try a smaller distance.`,
+  MendOpensObject: msg`Mend would leave this object more open than it is now, so nothing was changed. Try a smaller distance.`,
+  WeldFlattensObject: msg`Merging points that far apart would press the sides of a thin part together. Try a smaller distance.`,
+  BadMendPlan: msg`Couldn't read those Mend settings.`,
 }
 
 /**

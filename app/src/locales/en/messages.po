@@ -40,6 +40,11 @@ msgstr "\"{matDeleteName}\" — used on {matDeleteUsage, plural, one {# face} ot
 msgid "{0, plural, one {# material} other {# materials}}"
 msgstr "{0, plural, one {# material} other {# materials}}"
 
+#. placeholder {0}: shapes - mendable
+#: src/health/healthCopy.ts
+msgid "{0, plural, one {# other shape can't be closed with flat faces.} other {# other shapes can't be closed with flat faces.}}"
+msgstr "{0, plural, one {# other shape can't be closed with flat faces.} other {# other shapes can't be closed with flat faces.}}"
+
 #. placeholder {0}: entry.partCount
 #: src/shop/RecentsList.tsx
 msgid "{0, plural, one {# part} other {# parts}}"
@@ -54,6 +59,10 @@ msgstr "{0, plural, one {# solid} other {# solids}}"
 #: src/panels/MakeSolidSketches.tsx
 msgid "{0, plural, one {Not closed yet. # open edge is marked in red.} other {Not closed yet. # open edges are marked in red.}}"
 msgstr "{0, plural, one {Not closed yet. # open edge is marked in red.} other {Not closed yet. # open edges are marked in red.}}"
+
+#: src/health/healthCopy.ts
+msgid "{base}. The distance you typed is used where it fits; other objects use their own."
+msgstr "{base}. The distance you typed is used where it fits; other objects use their own."
 
 #: src/library/libraryModel.ts
 msgid "{bytes} B"
@@ -199,6 +208,10 @@ msgid "{failed, plural, one {# couldn't be kept; see the list.} other {# couldn'
 msgstr "{failed, plural, one {# couldn't be kept; see the list.} other {# couldn't be kept; see the list.}}"
 
 #: src/health/healthCopy.ts
+msgid "{failed, plural, one {# couldn't be mended; see the list.} other {# couldn't be mended; see the list.}}"
+msgstr "{failed, plural, one {# couldn't be mended; see the list.} other {# couldn't be mended; see the list.}}"
+
+#: src/health/healthCopy.ts
 msgid "{failed, plural, one {# couldn't be rejoined; see the list.} other {# couldn't be rejoined; see the list.}}"
 msgstr "{failed, plural, one {# couldn't be rejoined; see the list.} other {# couldn't be rejoined; see the list.}}"
 
@@ -206,13 +219,41 @@ msgstr "{failed, plural, one {# couldn't be rejoined; see the list.} other {# co
 msgid "{family} style"
 msgstr "{family} style"
 
+#: src/health/healthCopy.ts
+msgid "{fill} ({curved} curved)"
+msgstr "{fill} ({curved} curved)"
+
+#: src/health/healthCopy.ts
+msgid "{fill} ({flat} flat, {curved} curved)"
+msgstr "{fill} ({flat} flat, {curved} curved)"
+
+#: src/health/healthCopy.ts
+msgid "{fill} ({flat} flat)"
+msgstr "{fill} ({flat} flat)"
+
 #: src/log/RenderStatsReadout.tsx
 msgid "{fps} fps"
 msgstr "{fps} fps"
 
+#: src/health/healthCopy.ts
+msgid "{gaps, plural, one {# gap couldn't be filled; see the list.} other {# gaps couldn't be filled; see the list.}}"
+msgstr "{gaps, plural, one {# gap couldn't be filled; see the list.} other {# gaps couldn't be filled; see the list.}}"
+
+#: src/health/healthCopy.ts
+msgid "{gaps, plural, one {# gap stayed open.} other {# gaps stayed open.}}"
+msgstr "{gaps, plural, one {# gap stayed open.} other {# gaps stayed open.}}"
+
 #: src/panels/ImportingOverlay.tsx
 msgid "{gb} GB"
 msgstr "{gb} GB"
+
+#: src/health/healthCopy.ts
+msgid "{head} and {last}"
+msgstr "{head} and {last}"
+
+#: src/health/healthCopy.ts
+msgid "{head} or {last}"
+msgstr "{head} or {last}"
 
 #: src/panels/TextDialog.tsx
 msgid "{hiddenCount, plural, one {+# more — refine your search} other {+# more — refine your search}}"
@@ -268,6 +309,10 @@ msgstr "{maxMb} MB max"
 msgid "{mb} MB"
 msgstr "{mb} MB"
 
+#: src/health/healthCopy.ts
+msgid "{mendable, plural, one {# shape needs} other {# shapes need}}"
+msgstr "{mendable, plural, one {# shape needs} other {# shapes need}}"
+
 #: src/panels/UnsavedChangesDialog.tsx
 msgid "{more, plural, one {and # more (undone)} other {and # more (undone)}}"
 msgstr "{more, plural, one {and # more (undone)} other {and # more (undone)}}"
@@ -300,6 +345,10 @@ msgstr "{n, plural, one {# byte} other {# bytes}}"
 msgid "{n, plural, one {# captured object no longer exists.} other {# captured objects no longer exist.}}"
 msgstr "{n, plural, one {# captured object no longer exists.} other {# captured objects no longer exist.}}"
 
+#: src/health/healthCopy.ts
+msgid "{n, plural, one {# gap will stay open.} other {# gaps will stay open.}}"
+msgstr "{n, plural, one {# gap will stay open.} other {# gaps will stay open.}}"
+
 #: src/panels/LibraryDialog.tsx
 msgid "{n, plural, one {# item} other {# items}}"
 msgstr "{n, plural, one {# item} other {# items}}"
@@ -328,13 +377,57 @@ msgstr "{n, plural, one {Delete # guide} other {Delete # guides}}"
 msgid "{n, plural, one {Delete # tag} other {Delete # tags}}"
 msgstr "{n, plural, one {Delete # tag} other {Delete # tags}}"
 
+#: src/health/healthCopy.ts
+msgid "{n, plural, one {fill # small gap} other {fill # small gaps}}"
+msgstr "{n, plural, one {fill # small gap} other {fill # small gaps}}"
+
+#: src/health/healthCopy.ts
+msgid "{n, plural, one {filled # gap} other {filled # gaps}}"
+msgstr "{n, plural, one {filled # gap} other {filled # gaps}}"
+
 #: src/i18n/historyLabels.ts
 msgid "{n, plural, one {Import # item} other {Import # items}}"
 msgstr "{n, plural, one {Import # item} other {Import # items}}"
 
+#: src/health/healthCopy.ts
+msgid "{n, plural, one {merge # nearby point} other {merge # nearby points}}"
+msgstr "{n, plural, one {merge # nearby point} other {merge # nearby points}}"
+
+#: src/health/healthCopy.ts
+msgid "{n, plural, one {merged # point} other {merged # points}}"
+msgstr "{n, plural, one {merged # point} other {merged # points}}"
+
+#: src/health/healthCopy.ts
+msgid "{n, plural, one {remove up to # paper-thin overlap} other {remove up to # paper-thin overlaps}}"
+msgstr "{n, plural, one {remove up to # paper-thin overlap} other {remove up to # paper-thin overlaps}}"
+
+#: src/health/healthCopy.ts
+msgid "{n, plural, one {removed # paper-thin overlap} other {removed # paper-thin overlaps}}"
+msgstr "{n, plural, one {removed # paper-thin overlap} other {removed # paper-thin overlaps}}"
+
 #: src/i18n/historyLabels.ts
 msgid "{n, plural, one {Replace material on # face} other {Replace material on # faces}}"
 msgstr "{n, plural, one {Replace material on # face} other {Replace material on # faces}}"
+
+#: src/health/healthCopy.ts
+msgid "{n, plural, one {separate # loose part} other {separate # loose parts}}"
+msgstr "{n, plural, one {separate # loose part} other {separate # loose parts}}"
+
+#: src/health/healthCopy.ts
+msgid "{n, plural, one {separate # spot where parts touch at a single point} other {separate # spots where parts touch at a single point}}"
+msgstr "{n, plural, one {separate # spot where parts touch at a single point} other {separate # spots where parts touch at a single point}}"
+
+#: src/health/healthCopy.ts
+msgid "{n, plural, one {separated # edge where parts touched} other {separated # edges where parts touched}}"
+msgstr "{n, plural, one {separated # edge where parts touched} other {separated # edges where parts touched}}"
+
+#: src/health/healthCopy.ts
+msgid "{n, plural, one {separated # loose part} other {separated # loose parts}}"
+msgstr "{n, plural, one {separated # loose part} other {separated # loose parts}}"
+
+#: src/health/healthCopy.ts
+msgid "{n, plural, one {separated # spot where parts touched at a single point} other {separated # spots where parts touched at a single point}}"
+msgstr "{n, plural, one {separated # spot where parts touched at a single point} other {separated # spots where parts touched at a single point}}"
 
 #: src/log/reportBundle.ts
 #: src/panels/ReportBugDialog.tsx
@@ -358,6 +451,10 @@ msgstr "{name} · in {parentLabel}"
 #: src/health/healthCopy.ts
 msgid "{name} ({copy})"
 msgstr "{name} ({copy})"
+
+#: src/health/healthCopy.ts
+msgid "{needing} mending: Mend can merge points, separate parts and fill gaps."
+msgstr "{needing} mending: Mend can merge points, separate parts and fill gaps."
 
 #: src/log/reportBundle.ts
 msgid "{objectCount, plural, one {# object} other {# objects}}"
@@ -416,6 +513,22 @@ msgid "{objects, plural, one {Leave # object as it is.} other {Leave # objects a
 msgstr "{objects, plural, one {Leave # object as it is.} other {Leave # objects as they are.}}"
 
 #: src/health/healthCopy.ts
+msgid "{objects, plural, one {Mend # object in one step} other {Mend # objects in one step}}"
+msgstr "{objects, plural, one {Mend # object in one step} other {Mend # objects in one step}}"
+
+#: src/health/healthCopy.ts
+msgid "{objects, plural, one {Mend # object.} other {Mend # objects.}}"
+msgstr "{objects, plural, one {Mend # object.} other {Mend # objects.}}"
+
+#: src/health/healthCopy.ts
+msgid "{objects, plural, one {Mend # object} other {Mend # objects}}"
+msgstr "{objects, plural, one {Mend # object} other {Mend # objects}}"
+
+#: src/health/healthCopy.ts
+msgid "{objects, plural, one {Mend up to # object in one step} other {Mend up to # objects in one step}}"
+msgstr "{objects, plural, one {Mend up to # object in one step} other {Mend up to # objects in one step}}"
+
+#: src/health/healthCopy.ts
 msgid "{objects, plural, one {Opened {objects} object.} other {Opened {objects} objects.}}"
 msgstr "{objects, plural, one {Opened {objects} object.} other {Opened {objects} objects.}}"
 
@@ -434,6 +547,10 @@ msgstr "{ok, plural, one {Closed # object.} other {Closed # objects.}}"
 #: src/health/healthCopy.ts
 msgid "{ok, plural, one {Kept # object.} other {Kept # objects.}}"
 msgstr "{ok, plural, one {Kept # object.} other {Kept # objects.}}"
+
+#: src/health/healthCopy.ts
+msgid "{ok, plural, one {Mended # object.} other {Mended # objects.}}"
+msgstr "{ok, plural, one {Mended # object.} other {Mended # objects.}}"
 
 #: src/health/healthCopy.ts
 msgid "{ok, plural, one {Rejoined # object.} other {Rejoined # objects.}}"
@@ -520,6 +637,10 @@ msgstr "{placements, plural, one {Leave this as it is and hide it from this list
 #: src/health/healthCopy.ts
 msgid "{placements, plural, one {List this again in all # copy} other {List this again in all # copies}}"
 msgstr "{placements, plural, one {List this again in all # copy} other {List this again in all # copies}}"
+
+#: src/health/healthCopy.ts
+msgid "{placements, plural, one {Merge nearby points, separate parts that touch at a single point, and fill small gaps in one step in all # copy} other {Merge nearby points, separate parts that touch at a single point, and fill small gaps in one step in all # copies}}"
+msgstr "{placements, plural, one {Merge nearby points, separate parts that touch at a single point, and fill small gaps in one step in all # copy} other {Merge nearby points, separate parts that touch at a single point, and fill small gaps in one step in all # copies}}"
 
 #: src/App.tsx
 msgid "{purgeDefinitionCount, plural, one {# definition} other {# definitions}}: {purgeDefinitionList}"
@@ -1074,6 +1195,10 @@ msgstr "annotation"
 msgid "Annotation"
 msgstr "Annotation"
 
+#: src/busyCard.ts
+msgid "Another change is still running. Press Enter or click again when it finishes."
+msgstr "Another change is still running. Press Enter or click again when it finishes."
+
 #: src/kernelErrors.ts
 msgid "Another drawing step is still in progress. Finish or cancel it first."
 msgstr "Another drawing step is still in progress. Finish or cancel it first."
@@ -1455,6 +1580,10 @@ msgstr "Choose a file to attach"
 msgid "Choose an image file first."
 msgstr "Choose an image file first."
 
+#: src/health/healthCopy.ts
+msgid "Choose at least one step."
+msgstr "Choose at least one step."
+
 #: src/panels/MaterialPalette.tsx
 msgid "Choose color"
 msgstr "Choose color"
@@ -1470,6 +1599,10 @@ msgstr "Choose for each item"
 #: src/i18n/nativeMenu.ts
 msgid "Choose Library Folder"
 msgstr "Choose Library Folder"
+
+#: src/health/healthCopy.ts
+msgid "Choose what to mend"
+msgstr "Choose what to mend"
 
 #: src/i18n/nativeMenu.ts
 #: src/tools/CircleTool.ts
@@ -1842,6 +1975,10 @@ msgstr "Close Window"
 msgid "Closed"
 msgstr "Closed"
 
+#: src/health/healthCopy.ts
+msgid "Closer than"
+msgstr "Closer than"
+
 #: src/palette/registry.ts
 msgid "cnc"
 msgstr "cnc"
@@ -2142,6 +2279,10 @@ msgstr "Couldn't load \"{fileName}\" as a font: {errorText}"
 msgid "Couldn't load the selected font: {errorText}"
 msgstr "Couldn't load the selected font: {errorText}"
 
+#: src/health/healthCopy.ts
+msgid "Couldn't mend: {reason}"
+msgstr "Couldn't mend: {reason}"
+
 #: src/tools/AxesTool.ts
 msgid "Couldn't move the drawing axes: {raw}"
 msgstr "Couldn't move the drawing axes: {raw}"
@@ -2201,6 +2342,10 @@ msgstr "Couldn't read that picture. Check that the file is still there, then pic
 #: src/panels/LibraryDialog.tsx
 msgid "Couldn’t read the library: {loadError}"
 msgstr "Couldn’t read the library: {loadError}"
+
+#: src/kernelErrors.ts
+msgid "Couldn't read those Mend settings."
+msgstr "Couldn't read those Mend settings."
 
 #: src/tools/TapeMeasureTool.ts
 msgid "Couldn't resize {scopeLabel}: {raw}"
@@ -2994,6 +3139,14 @@ msgstr "Endpoint"
 msgid "engrave"
 msgstr "engrave"
 
+#: src/health/healthCopy.ts
+msgid "Enter a distance between {min} and {max}."
+msgstr "Enter a distance between {min} and {max}."
+
+#: src/health/healthCopy.ts
+msgid "Enter a distance, such as 0.002 mm."
+msgstr "Enter a distance, such as 0.002 mm."
+
 #: src/print/usePrintController.ts
 msgid "Enter a length like “1 cm”, “1in” or “3/8″”."
 msgstr "Enter a length like “1 cm”, “1in” or “3/8″”."
@@ -3236,9 +3389,21 @@ msgstr "File format"
 msgid "File that didn’t open"
 msgstr "File that didn’t open"
 
+#: src/health/healthCopy.ts
+msgid "fill"
+msgstr "fill"
+
+#: src/health/healthCopy.ts
+msgid "Fill small gaps"
+msgstr "Fill small gaps"
+
 #: src/panels/PrintDialog.tsx
 msgid "Fill the page with the model"
 msgstr "Fill the page with the model"
+
+#: src/kernelErrors.ts
+msgid "Filling this gap would cut through other faces, so it was left open."
+msgstr "Filling this gap would cut through other faces, so it was left open."
 
 #: src/panels/ComponentsPanel.tsx
 msgid "Filter components"
@@ -3768,6 +3933,10 @@ msgstr "Hew found an autosaved version of <0>{firstName}</0> from {firstTime} th
 msgid "Hew found autosaved versions of these documents that weren't saved before the app closed. Recover opens each one in its own window."
 msgstr "Hew found autosaved versions of these documents that weren't saved before the app closed. Recover opens each one in its own window."
 
+#: src/health/healthCopy.ts
+msgid "Hew found nothing to mend in these."
+msgstr "Hew found nothing to mend in these."
+
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
 #: src/panels/MenuBar.tsx
@@ -4079,6 +4248,10 @@ msgstr "Imported {quoted}"
 msgid "Imported files"
 msgstr "Imported files"
 
+#: src/health/healthCopy.ts
+msgid "Imported meshes often have points that miss each other by a hair, parts that touch at a single point, or small gaps. Mend repairs those. Click one to see what it will do."
+msgstr "Imported meshes often have points that miss each other by a hair, parts that touch at a single point, or small gaps. Mend repairs those. Click one to see what it will do."
+
 #: src/panels/ImportingOverlay.tsx
 msgid "Importing <0>“{fileName}”</0>…"
 msgstr "Importing <0>“{fileName}”</0>…"
@@ -4255,9 +4428,17 @@ msgstr "Isolated · {label}"
 msgid "It is solid."
 msgstr "It is solid."
 
+#: src/health/healthCopy.ts
+msgid "It was left open."
+msgstr "It was left open."
+
 #: src/tools/FollowMeTool.ts
 msgid "It will land at the top level, not inside the group you’re editing."
 msgstr "It will land at the top level, not inside the group you’re editing."
+
+#: src/health/healthCopy.ts
+msgid "It's solid now."
+msgstr "It's solid now."
 
 #: src/App.tsx
 msgid "Item"
@@ -4806,9 +4987,58 @@ msgstr "Measuring only; no guide will be created."
 msgid "Measuring the compressed size…"
 msgstr "Measuring the compressed size…"
 
+#: src/health/healthCopy.ts
+msgid "Mend"
+msgstr "Mend"
+
+#: src/health/healthCopy.ts
+msgid "Mend all"
+msgstr "Mend all"
+
+#: src/health/healthCopy.ts
+msgid "Mend can merge nearby points, separate parts that touch at a single point and fill small gaps."
+msgstr "Mend can merge nearby points, separate parts that touch at a single point and fill small gaps."
+
+#: src/health/healthCopy.ts
+msgid "Mend it from Model Health"
+msgstr "Mend it from Model Health"
+
+#: src/i18n/historyLabels.ts
+msgid "Mend object"
+msgstr "Mend object"
+
+#: src/health/healthCopy.ts
+msgid "Mend what can be mended"
+msgstr "Mend what can be mended"
+
+#: src/health/healthCopy.ts
+msgid "Mend will {clauses}."
+msgstr "Mend will {clauses}."
+
+#: src/kernelErrors.ts
+msgid "Mend would leave this object more open than it is now, so nothing was changed. Try a smaller distance."
+msgstr "Mend would leave this object more open than it is now, so nothing was changed. Try a smaller distance."
+
+#: src/kernelErrors.ts
+msgid "Mend would leave this object open, so nothing was changed."
+msgstr "Mend would leave this object open, so nothing was changed."
+
+#: src/health/healthCopy.ts
+msgid "Mending…"
+msgstr "Mending…"
+
+#: src/health/healthCopy.ts
 #: src/palette/registry.ts
 msgid "merge"
 msgstr "merge"
+
+#: src/health/healthCopy.ts
+msgid "Merge nearby points"
+msgstr "Merge nearby points"
+
+#: src/health/healthCopy.ts
+msgid "Merge nearby points, separate parts that touch at a single point, and fill small gaps in one step"
+msgstr "Merge nearby points, separate parts that touch at a single point, and fill small gaps in one step"
 
 #: src/palette/registry.ts
 msgid "Merge the selected solids into one (boolean add)."
@@ -4817,6 +5047,22 @@ msgstr "Merge the selected solids into one (boolean add)."
 #: src/palette/registry.ts
 #~ msgid "Merge two selected solids into one (boolean add)."
 #~ msgstr "Merge two selected solids into one (boolean add)."
+
+#: src/kernelErrors.ts
+msgid "Merging points that far apart would leave nothing. Try a smaller distance."
+msgstr "Merging points that far apart would leave nothing. Try a smaller distance."
+
+#: src/kernelErrors.ts
+msgid "Merging points that far apart would press the sides of a thin part together. Try a smaller distance."
+msgstr "Merging points that far apart would press the sides of a thin part together. Try a smaller distance."
+
+#: src/kernelErrors.ts
+msgid "Merging points that far apart would turn a thin face over onto its neighbor. Try a smaller distance."
+msgstr "Merging points that far apart would turn a thin face over onto its neighbor. Try a smaller distance."
+
+#: src/kernelErrors.ts
+msgid "Merging those points would fold faces onto each other. Turn on Separate parts that touch at a point too."
+msgstr "Merging those points would fold faces onto each other. Turn on Separate parts that touch at a point too."
 
 #: src/panels/MaterialPalette.tsx
 msgid "Metallic"
@@ -5111,6 +5357,10 @@ msgstr "needs a selection"
 msgid "Needs at least {DESCRIPTION_MIN} characters ({trimmedLength} so far)"
 msgstr "Needs at least {DESCRIPTION_MIN} characters ({trimmedLength} so far)"
 
+#: src/health/healthCopy.ts
+msgid "Needs mending"
+msgstr "Needs mending"
+
 #: src/panels/SentReportsDialog.tsx
 msgid "Needs your help"
 msgstr "Needs your help"
@@ -5341,6 +5591,10 @@ msgstr "Nothing is selected."
 msgid "Nothing matches your search."
 msgstr "Nothing matches your search."
 
+#: src/health/healthCopy.ts
+msgid "Nothing to {steps} here. Tick another step."
+msgstr "Nothing to {steps} here. Tick another step."
+
 #: src/App.tsx
 #: src/shop/ShopApp.tsx
 msgid "Nothing to export — the model has no solids."
@@ -5349,6 +5603,14 @@ msgstr "Nothing to export — the model has no solids."
 #: src/App.tsx
 msgid "Nothing to export — the model has nothing visible."
 msgstr "Nothing to export — the model has nothing visible."
+
+#: src/kernelErrors.ts
+msgid "Nothing to mend here: no nearby points, touching parts or small gaps."
+msgstr "Nothing to mend here: no nearby points, touching parts or small gaps."
+
+#: src/health/healthCopy.ts
+msgid "Nothing to mend here."
+msgstr "Nothing to mend here."
 
 #: src/App.tsx
 #: src/tools/TextPlaceTool.ts
@@ -5407,6 +5669,10 @@ msgstr "Nothing was given a thickness."
 #: src/health/healthCopy.ts
 msgid "Nothing was kept."
 msgstr "Nothing was kept."
+
+#: src/health/healthCopy.ts
+msgid "Nothing was mended."
+msgstr "Nothing was mended."
 
 #: src/health/healthCopy.ts
 msgid "Nothing was rejoined."
@@ -5682,8 +5948,8 @@ msgid "Open Complete"
 msgstr "Open Complete"
 
 #: src/health/healthCopy.ts
-msgid "Open edges branch"
-msgstr "Open edges branch"
+#~ msgid "Open edges branch"
+#~ msgstr "Open edges branch"
 
 #: src/health/healthCopy.ts
 msgid "Open edges don't lie flat"
@@ -5805,6 +6071,10 @@ msgstr "openings"
 #: src/health/healthCopy.ts
 msgid "Openings"
 msgstr "Openings"
+
+#: src/health/healthCopy.ts
+msgid "Openings tangled together"
+msgstr "Openings tangled together"
 
 #: src/io/savePanel.ts
 msgid "opens in SketchUp {release} and later"
@@ -6633,6 +6903,7 @@ msgstr "Reload"
 msgid "Reload Hew"
 msgstr "Reload Hew"
 
+#: src/health/healthCopy.ts
 #: src/palette/registry.ts
 msgid "remove"
 msgstr "remove"
@@ -6652,6 +6923,10 @@ msgstr "Remove every construction guide."
 #: src/panels/library/LibraryDetailPane.tsx
 msgid "Remove keyword {kw}"
 msgstr "Remove keyword {kw}"
+
+#: src/health/healthCopy.ts
+msgid "Remove paper-thin overlaps"
+msgstr "Remove paper-thin overlaps"
 
 #: src/panels/library/LibraryDetailPane.tsx
 #: src/panels/library/LibraryMenu.tsx
@@ -6674,6 +6949,10 @@ msgstr "Remove tag {tagPath} from all selected"
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Remove tag failed: {errorText}"
 msgstr "Remove tag failed: {errorText}"
+
+#: src/kernelErrors.ts
+msgid "Removing those overlaps would leave parts touching at one point. Turn on Separate parts that touch at a point too."
+msgstr "Removing those overlaps would leave parts touching at one point. Turn on Separate parts that touch at a point too."
 
 #: src/i18n/historyLabels.ts
 #: src/panels/library/LibraryMenu.tsx
@@ -7492,6 +7771,14 @@ msgstr "Sent Reports ({sentReportsNew} new)…"
 msgid "Sent Reports…"
 msgstr "Sent Reports…"
 
+#: src/health/healthCopy.ts
+msgid "separate"
+msgstr "separate"
+
+#: src/health/healthCopy.ts
+msgid "Separate parts that touch at a point"
+msgstr "Separate parts that touch at a point"
+
 #: src/settings/AdvancedPane.tsx
 #: src/settings/FluentSettingsPage.tsx
 msgid "Server"
@@ -8219,6 +8506,10 @@ msgid "That direction is too short to work with. Pick points further apart."
 msgstr "That direction is too short to work with. Pick points further apart."
 
 #: src/kernelErrors.ts
+msgid "That distance for merging points is out of range. Try a distance nearer the one first shown."
+msgstr "That distance for merging points is out of range. Try a distance nearer the one first shown."
+
+#: src/kernelErrors.ts
 msgid "That distance is too small to build anything. Drag further, or type an exact length."
 msgstr "That distance is too small to build anything. Drag further, or type an exact length."
 
@@ -8523,8 +8814,12 @@ msgid "The guide needs a definite direction. Drag a little further before droppi
 msgstr "The guide needs a definite direction. Drag a little further before dropping it."
 
 #: src/health/healthCopy.ts
-msgid "The highlighted edges are open. They branch or stop short, so Hew can't tell where each opening ends."
-msgstr "The highlighted edges are open. They branch or stop short, so Hew can't tell where each opening ends."
+msgid "The highlighted edges are open. Several openings run together or stop short, so Hew can't tell where each one ends."
+msgstr "The highlighted edges are open. Several openings run together or stop short, so Hew can't tell where each one ends."
+
+#: src/health/healthCopy.ts
+#~ msgid "The highlighted edges are open. They branch or stop short, so Hew can't tell where each opening ends."
+#~ msgstr "The highlighted edges are open. They branch or stop short, so Hew can't tell where each opening ends."
 
 #: src/health/healthCopy.ts
 msgid "The highlighted edges are open. They don't lie flat, so one flat face can't close them."
@@ -8829,6 +9124,10 @@ msgstr "This build can’t send reports directly. Save the file below and attach
 msgid "This build can’t send reports, so there is nothing to follow."
 msgstr "This build can’t send reports, so there is nothing to follow."
 
+#: src/panels/ImportingOverlay.tsx
+msgid "This can take a while on a large object."
+msgstr "This can take a while on a large object."
+
 #: src/panels/PhoneShareDialog.tsx
 msgid "This code expired — reopen to try again."
 msgstr "This code expired — reopen to try again."
@@ -8888,6 +9187,10 @@ msgstr "This file needs a newer version of Hew than this one. Update Hew and try
 #: src/kernelErrors.ts
 msgid "This file's geometry data is damaged and can't be opened."
 msgstr "This file's geometry data is damaged and can't be opened."
+
+#: src/kernelErrors.ts
+msgid "This gap is too small or thin to fill."
+msgstr "This gap is too small or thin to fill."
 
 #: src/kernelErrors.ts
 msgid "This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one."
@@ -8962,8 +9265,12 @@ msgid "This object isn't solid, so it can't be pushed or pulled. To make it soli
 msgstr "This object isn't solid, so it can't be pushed or pulled. To make it solid, select it and choose Object ▸ Make Solid…"
 
 #: src/kernelErrors.ts
-msgid "This opening isn't flat, so one face can't close it. Draw faces across it by hand."
-msgstr "This opening isn't flat, so one face can't close it. Draw faces across it by hand."
+#~ msgid "This opening isn't flat, so one face can't close it. Draw faces across it by hand."
+#~ msgstr "This opening isn't flat, so one face can't close it. Draw faces across it by hand."
+
+#: src/kernelErrors.ts
+msgid "This opening isn't flat, so one face can't close it. Mend in Model Health can fill small ones; otherwise draw faces across it by hand."
+msgstr "This opening isn't flat, so one face can't close it. Mend in Model Health can fill small ones; otherwise draw faces across it by hand."
 
 #: src/kernelErrors.ts
 msgid "This operation can't target an object inside a group. Ungroup it, or leave the group context, first."

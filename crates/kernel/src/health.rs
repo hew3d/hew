@@ -451,30 +451,48 @@ fn face_components(obj: &Object) -> (BTreeMap<crate::ids::FaceId, usize>, usize)
     (out, label.len())
 }
 
-/// How far across the points are, the same however they are turned: the
-/// farthest point from the first, then the farthest from that one, and the
-/// distance between the two (two sweeps, linear time). Exact for a box or
-/// a rectangle, and never more than the true diameter; an axis-aligned
-/// bounding box would grow and shrink as the object turns.
+/// How far across the points are, the same however they are turned or
+/// listed: the farthest point from their centroid, then the farthest from
+/// that one, and the distance between the two (linear time). Exact for a
+/// box or a rectangle, and never more than the true diameter; an
+/// axis-aligned bounding box would grow and shrink as the object turns.
+/// (Starting from the centroid rather than the first point keeps the
+/// answer from depending on the order the points come in.)
 pub fn diameter(points: &[Point3]) -> f64 {
-    let Some(&first) = points.first() else {
+    if points.is_empty() {
         return 0.0;
+    }
+    // Each axis summed in sorted order, so the centroid is the same to the
+    // bit however the points are listed.
+    let axis = |f: fn(&Point3) -> f64| {
+        let mut c: Vec<f64> = points.iter().map(f).collect();
+        c.sort_by(f64::total_cmp);
+        c.iter().sum::<f64>() / c.len() as f64
     };
+    let center = Point3::new(axis(|p| p.x), axis(|p| p.y), axis(|p| p.z));
+    // Ties go to the lowest point, so the listing order never decides.
     let farthest = |from: Point3| {
         points
             .iter()
             .copied()
-            .max_by(|a, b| (*a - from).length().total_cmp(&(*b - from).length()))
+            .max_by(|a, b| {
+                (*a - from)
+                    .length()
+                    .total_cmp(&(*b - from).length())
+                    .then(b.x.total_cmp(&a.x))
+                    .then(b.y.total_cmp(&a.y))
+                    .then(b.z.total_cmp(&a.z))
+            })
             .unwrap_or(from)
     };
-    let a = farthest(first);
+    let a = farthest(center);
     let b = farthest(a);
     (b - a).length()
 }
 
 /// The points' Newell plane through their centroid, when every point lies
 /// within `tol` of it.
-fn planar_fit(points: &[Point3], tol: f64) -> Option<Plane> {
+pub(crate) fn planar_fit(points: &[Point3], tol: f64) -> Option<Plane> {
     if points.len() < 3 {
         return None;
     }

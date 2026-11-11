@@ -20,6 +20,7 @@
  * against the in-memory Storage polyfill provided by src/test/setup.ts.
  */
 
+import { resetHealthReportCache } from './health/healthReport'
 import { BANNED_RE, readableText } from './health/bannedWords'
 import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
@@ -459,6 +460,119 @@ describe('App — Make Solid entry points', () => {
     fireEvent.click(badge)
     expect(await screen.findByRole('dialog', { name: 'Model Health' })).toBeInTheDocument()
     expect(screen.queryByRole('dialog', { name: 'Make Solid' })).not.toBeInTheDocument()
+  })
+
+  it('Mend shows the busy card and lets it paint before the kernel call starts', async () => {
+    report.mockImplementation(() =>
+      JSON.stringify({
+        rows: [{ ...OPEN_ROW, verdict: { kind: 'non_manifold' }, branching_vertices: 2 }],
+        families: [],
+        counts: { objects: 4, solids: 3, flat_sheets: 0, bent_sheets: 0, cappable: 0, holes: 0, mixed: 0, non_manifold: 1 },
+      }),
+    )
+    m.mend_census_json = () =>
+      JSON.stringify({ weld: 0.000002, weld_vertices: 12, folds: 0, branching_vertices: 2, islands: 1, filled_rims: 0 })
+    resetHealthReportCache()
+    let cardWhenKernelRan: boolean | null = null
+    m.api_connection_open = vi.fn(() => {
+      // runBatch's first call: the card must already be on screen.
+      cardWhenKernelRan = document.body.textContent?.includes('Mending…') ?? false
+      throw new Error('stop here')
+    })
+    try {
+      await renderAndLoad()
+      const badge = await waitFor(() => {
+        const el = document.querySelector('[data-health-badge="open"]')
+        if (el === null) throw new Error('no badge yet')
+        return el as HTMLElement
+      })
+      fireEvent.click(badge)
+      await screen.findByRole('dialog', { name: 'Model Health' })
+      fireEvent.click(document.querySelector('[data-health-row="4"]') as HTMLElement)
+      fireEvent.click(await screen.findByRole('button', { name: 'Mend' }))
+      // Card is up, kernel not yet touched.
+      expect(screen.getByText('Mending…')).toBeTruthy()
+      expect(m.api_connection_open).not.toHaveBeenCalled()
+      await waitFor(() => expect(m.api_connection_open).toHaveBeenCalledTimes(1))
+      expect(cardWhenKernelRan).toBe(true)
+      await waitFor(() => expect(screen.queryByText('Mending…')).toBeNull())
+    } finally {
+      delete m.mend_census_json
+      delete m.api_connection_open
+      resetHealthReportCache()
+    }
+  })
+
+  it('Mend drops a key pressed during the work even though it is delivered after, and keeps keys pressed later', async () => {
+    report.mockImplementation(() =>
+      JSON.stringify({
+        rows: [{ ...OPEN_ROW, verdict: { kind: 'non_manifold' }, branching_vertices: 2 }],
+        families: [],
+        counts: { objects: 4, solids: 3, flat_sheets: 0, bent_sheets: 0, cappable: 0, holes: 0, mixed: 0, non_manifold: 1 },
+      }),
+    )
+    m.mend_census_json = () =>
+      JSON.stringify({ weld: 0.000002, weld_vertices: 12, folds: 0, branching_vertices: 2, islands: 1, filled_rims: 0 })
+    resetHealthReportCache()
+    let pressedDuringWork = 0
+    m.api_connection_open = vi.fn(() => {
+      // A key the user pressed while the main thread was frozen: its
+      // stamp precedes the end of the work.
+      pressedDuringWork = performance.now()
+      throw new Error('stop here')
+    })
+    const undos: number[] = []
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'z' && ev.ctrlKey) undos.push(ev.timeStamp)
+    }
+    const keyAt = (timeStamp: number) => {
+      const ev = new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true })
+      Object.defineProperty(ev, 'timeStamp', { value: timeStamp })
+      document.body.dispatchEvent(ev)
+    }
+    window.addEventListener('keydown', onKey)
+    // Hold the swallower's 100 ms removal so a slow machine can't run it
+    // between the work ending and this test's dispatches.
+    const held: Array<() => void> = []
+    const realSetTimeout = window.setTimeout.bind(window)
+    const timerSpy = vi.spyOn(window, 'setTimeout').mockImplementation(((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      if (ms === 100 && String(fn).includes('removeEventListener')) {
+        held.push(fn)
+        return 0
+      }
+      return realSetTimeout(fn, ms, ...rest)
+    }) as typeof window.setTimeout)
+    try {
+      await renderAndLoad()
+      const badge = await waitFor(() => {
+        const el = document.querySelector('[data-health-badge="open"]')
+        if (el === null) throw new Error('no badge yet')
+        return el as HTMLElement
+      })
+      fireEvent.click(badge)
+      await screen.findByRole('dialog', { name: 'Model Health' })
+      fireEvent.click(document.querySelector('[data-health-row="4"]') as HTMLElement)
+      fireEvent.click(await screen.findByRole('button', { name: 'Mend' }))
+      await waitFor(() => expect(m.api_connection_open).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(screen.queryByText('Mending…')).toBeNull())
+      // The queued key arrives after the work finished: still swallowed.
+      keyAt(pressedDuringWork)
+      expect(undos).toEqual([])
+      // A key pressed after the work ended goes through.
+      keyAt(performance.now() + 1)
+      expect(undos).toHaveLength(1)
+      // Once the window closes, even a stale stamp gets through.
+      expect(held).toHaveLength(1)
+      held[0]()
+      keyAt(pressedDuringWork)
+      expect(undos).toHaveLength(2)
+    } finally {
+      timerSpy.mockRestore()
+      window.removeEventListener('keydown', onKey)
+      delete m.mend_census_json
+      delete m.api_connection_open
+      resetHealthReportCache()
+    }
   })
 
   it('the badge with every object solid is plain and neutral, not a button', async () => {

@@ -8203,7 +8203,7 @@ fn cylinder_claim_holds(quad: &[Point3], plane: &Plane, surface: &crate::topo::S
 /// shared vertex or shared edge is legitimate (that is exactly how adjacent
 /// faces of a manifold touch). Grazing contact between unrelated faces
 /// (tangencies) refuses conservatively — the kernel cannot prove it safe.
-fn faces_improperly_contact(obj: &Object, a: FaceId, b: FaceId) -> bool {
+pub(crate) fn faces_improperly_contact(obj: &Object, a: FaceId, b: FaceId) -> bool {
     let verts_of = |f: FaceId| -> std::collections::BTreeSet<VertexId> {
         std::iter::once(obj.faces[f].outer_loop)
             .chain(obj.faces[f].inner_loops.iter().copied())
