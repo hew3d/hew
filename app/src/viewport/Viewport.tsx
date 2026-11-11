@@ -3755,10 +3755,16 @@ export default function Viewport({
     refreshAcquireHoverRef.current = refreshAcquireHover
     /** A fresh ray at the pointer's last position for the current camera.
      * Not `lastRayRef`: that ray was built for the camera of the last pointer
-     * move, and a wheel zoom, a Scene tween or Fly may have moved it since. */
+     * move, and a wheel zoom, a Scene tween or Fly may have moved it since.
+     * Undefined when that position no longer shows the canvas: a dock or
+     * panel inside the canvas's bounds, or an overlay come up over it, is
+     * there instead (`pointerInsideCanvas` only knows about the bounds). */
     function heldPointerRay(): Ray | undefined {
       const ndc = lastPointerNdcRef.current
-      return ndc === null ? undefined : makeWorldRay(ndc.ndcX, ndc.ndcY, camera)
+      if (ndc === null) return undefined
+      const at = document.elementFromPoint(pointerRestClient.x, pointerRestClient.y)
+      if (at === null || !renderer.domElement.contains(at)) return undefined
+      return makeWorldRay(ndc.ndcX, ndc.ndcY, camera)
     }
     /** Drop the hover highlight — a camera gesture or a held button owns the
      * pointer, so no click is about to land. */
