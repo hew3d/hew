@@ -81,7 +81,7 @@
 import { formatNumber } from '../i18n/format'
 import { plural, t } from '@lingui/core/macro'
 import * as THREE from 'three'
-import type { Tool, Snap, EditContext, SnapConstraint } from './types'
+import type { ClickAcquire, Tool, Snap, EditContext, SnapConstraint } from './types'
 import { editContextEq } from './types'
 import { allFree, isDraftRef, planeOfCtx } from './planeUnits'
 import { worldFacePlane } from './faceDraw'
@@ -114,6 +114,7 @@ import { isSketchScopedKind, nodeKindToNumber, nodeRefFromJs } from '../panels/t
 import { displayedLength, isFreePick } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { isMac, COPY_MODIFIER_LABEL } from '../platform'
+import { DashedLink } from './dashedLink'
 
 export type OnMoveCommit = (nodes: NodeRef[]) => void
 export type OnToast = (message: string, code?: string) => void
@@ -161,6 +162,18 @@ export class MoveTool implements Tool {
   readonly name = 'Move'
   /** Click-drag-release works as well as click-click (Tool.dragCommits). */
   readonly dragCommits = true
+
+  /** Hover highlight (types.ts `ClickAcquire`), mirroring `onPointerDown`'s
+   * idle branch: with no nodes selected a click takes a guide under it; with
+   * no guide selected either it takes the node under it. A selected guide
+   * with no guide under the click is moved from there — nothing to highlight
+   * but the guide already selected. */
+  clickAcquire(): ClickAcquire | null {
+    if (this.stage.kind !== 'idle' || this.selection.length > 0) return null
+    const guides = this.guides.canAcquire
+    const nodes = this.guides.selected === null && this.acquireSelection !== null
+    return guides || nodes ? { guides, nodes } : null
+  }
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
@@ -237,6 +250,9 @@ export class MoveTool implements Tool {
 
   /** THREE.js LineSegments for the axis guide drawn in the preview group */
   private guideLine: THREE.LineSegments | null = null
+  /** SketchUp's dashed line from the base point to the destination, live
+   * while a move runs (`_setLink`). Null when not shown. */
+  private link: DashedLink | null = null
 
   /** The full selection at tool activation (set by Viewport from selectedIds). */
   private selection: NodeRef[] = []
@@ -245,10 +261,24 @@ export class MoveTool implements Tool {
    * pick + context-resolve the node under the cursor, lift it into the app
    * selection, and return it — or null on a miss. Lets a click on an object
    * with an empty selection select AND start moving it in one gesture.
+   *
+   * The selection a click takes lasts only for the gesture, as SketchUp's
+   * Move on a pre-highlighted entity: once the move lands, is cancelled, or
+   * is refused, `release` empties the app selection again — after a copy
+   * or an ×N / /N array too: the array refines from the gesture's own
+   * sources, not from the selection. A selection made beforehand is kept
+   * (copies become it, so a follow-up move chains off them).
    */
   private acquireSelection: ((ray: Ray) => NodeRef[] | null) | null = null
-  setSelectionAcquirer(acquire: ((ray: Ray) => NodeRef[] | null) | null): void {
+  private releaseSelection: (() => void) | null = null
+  /** The gesture's nodes were taken by its click (`acquireSelection`). */
+  private nodesAcquired = false
+  setSelectionAcquirer(
+    acquire: ((ray: Ray) => NodeRef[] | null) | null,
+    release: (() => void) | null = null,
+  ): void {
     this.acquireSelection = acquire
+    this.releaseSelection = release
   }
 
   /** The construction guide this tool acts on instead of nodes (see
@@ -286,6 +316,8 @@ export class MoveTool implements Tool {
    */
   setSelection(nodes: NodeRef[]): void {
     this.selection = nodes
+    // Something else selected between gestures: no longer ours to release.
+    if (this.stage.kind === 'idle' && nodes.length > 0) this.nodesAcquired = false
   }
   /** THREE.js object group from the SceneRenderer (read-only reference for cloning). */
   private objectsGroup: THREE.Group | null = null
@@ -525,6 +557,7 @@ export class MoveTool implements Tool {
 
     const dest: [number, number, number] = [snap.x, snap.y, snap.z]
     this.stage.dest = dest
+    this._setLink(base, dest)
 
     if (previewMesh !== null) {
       const dx = snap.x - base[0]
@@ -555,6 +588,7 @@ export class MoveTool implements Tool {
       // With nodes selected the click is their base point, a guide's snap
       // included.
       const guide = this.guides.start(ray, nodes.length === 0, true)
+      this.nodesAcquired = false
       if (nodes.length === 0 && guide === null && this.acquireSelection !== null) {
         // Empty selection: auto-select whatever the click landed on and
         // start the move on it in the same gesture (no separate Select step).
@@ -562,6 +596,7 @@ export class MoveTool implements Tool {
         if (acquired !== null && acquired.length > 0) {
           this.selection = acquired
           nodes = acquired
+          this.nodesAcquired = true
         }
       }
       if (nodes.length === 0 && guide === null) {
@@ -581,6 +616,7 @@ export class MoveTool implements Tool {
       }
 
       this.stage = { kind: 'base', nodes, guide, base, previewMesh, dest: [...base] }
+      this._setLink(base, base)
       this._updateGuideLine()
     } else if (this.stage.kind === 'base') {
       const { nodes, guide, base } = this.stage
@@ -592,6 +628,7 @@ export class MoveTool implements Tool {
       if (Math.abs(tx) < 1e-9 && Math.abs(ty) < 1e-9 && Math.abs(tz) < 1e-9) {
         this._resetToIdle()
         this.guides.ended()
+        this._releaseAcquiredNodes()
         return
       }
 
@@ -710,7 +747,30 @@ export class MoveTool implements Tool {
   cancel(): void {
     const live = this.stage.kind === 'base'
     this._resetToIdle()
-    if (live) this.guides.ended()
+    if (live) {
+      this.guides.ended()
+      this._releaseAcquiredNodes()
+    }
+  }
+
+  /** A gesture on click-taken nodes ended (landed, cancelled, or refused):
+   *  give the selection back to empty, what it was before the click. */
+  private _releaseAcquiredNodes(): void {
+    if (!this.nodesAcquired) return
+    this.nodesAcquired = false
+    this.selection = []
+    this.releaseSelection?.()
+  }
+
+  /** A transform or copy landed (moved nodes, copies, an ×N / /N array, a
+   *  retyped value): click-taken nodes were selected for the gesture only,
+   *  so the selection empties again, copies included — SketchUp's rule.
+   *  The flag stays set while the post-commit windows are open, since a
+   *  retype or an array re-lands on the same click-taken source. */
+  private _landedOnAcquired(): void {
+    if (!this.nodesAcquired) return
+    this.selection = []
+    this.releaseSelection?.()
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────────
@@ -752,7 +812,10 @@ export class MoveTool implements Tool {
     if (Math.abs(tx) < 1e-9 && Math.abs(ty) < 1e-9 && Math.abs(tz) < 1e-9) {
       // A distance typed before the cursor left the base point has no
       // direction to go in; say so rather than silently doing nothing.
+      // The gesture ends here, like every other exit from a live one.
       this._resetToIdle()
+      this.guides.ended()
+      this._releaseAcquiredNodes()
       if (dist !== 0) {
         this.onToast(t`Move the cursor the way it should go, or lock an axis with an arrow key, then type the distance.`)
       }
@@ -772,6 +835,7 @@ export class MoveTool implements Tool {
     this.arrayTyped = ''
     clearPreview(this.preview)
     this.guideLine = null   // clearPreview removed it
+    this.link = null        // and disposed this one
     this.onMeasurementCb('')
   }
 
@@ -827,6 +891,7 @@ export class MoveTool implements Tool {
           if (committed.length > 0) {
             this.selection = committed
             this.onCommit(committed)
+            this._landedOnAcquired()
           }
         }
         surfaceSketchTransformReports((m) => this.onToast(m))
@@ -837,6 +902,7 @@ export class MoveTool implements Tool {
         const committed = commitSelectionTransform(this.wasmScene, allNodes, affineF64, this._activeInstance)
         this.onCommit(committed)
         surfaceSketchTransformReports((m) => this.onToast(m))
+        this._landedOnAcquired()
         // The window is armed with the PRE-commit `nodes`, not `committed`:
         // its apply() undoes the commit first, which restores the drawing
         // with its ORIGINAL unit keys (they are geometry hashes), and an
@@ -848,6 +914,11 @@ export class MoveTool implements Tool {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      // A refused first landing ends the gesture. A refused retype does not:
+      // the window survives on the landing already made (whose selection was
+      // already given back), and a later retype that lands must give it back
+      // again, so the click-taken flag stays.
+      if (!this.retype.isOpen) this._releaseAcquiredNodes()
       return false
     }
   }
@@ -1033,7 +1104,8 @@ export class MoveTool implements Tool {
     }
   }
 
-  /** Hand an array's copies to the host: node copies become the selection,
+  /** Hand an array's copies to the host: node copies become the selection
+   *  (none when the click took the source, `_landedOnAcquired`),
    *  a guide's last copy the selected guide. */
   private _landArray(landed: ArrayLanding): void {
     if ('guide' in landed) {
@@ -1042,6 +1114,7 @@ export class MoveTool implements Tool {
       this.selection = landed.nodes
       this.onArrayCommit(landed.nodes)
       surfaceSketchTransformReports((m) => this.onToast(m))
+      this._landedOnAcquired()
     }
   }
 
@@ -1164,6 +1237,22 @@ export class MoveTool implements Tool {
   /** Prefix a "Copy" tag onto the readout while the copy toggle is on. */
   private _decorate(text: string): string {
     return this.copyMode ? t({ comment: 'Measurements box readout while the Copy toggle is on, followed by the measured value', message: `Copy · ${text}` }) : text
+  }
+
+  /** Run the base→destination dashed line, creating it on first use
+   * (`_resetToIdle` clears it with the rest of the preview). */
+  private _setLink(from: readonly [number, number, number], to: readonly [number, number, number]): void {
+    if (this.link === null) {
+      this.link = new DashedLink(() => getDrawingAxes(this.wasmScene))
+      this.preview.add(this.link.line)
+    }
+    this.link.set(from, to)
+  }
+
+  /** Keep the dashed line's dash a constant on-screen size — the render
+   * loop's per-frame screen-constant hook (Tool.updateDiskScale). */
+  updateDiskScale(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void {
+    this.link?.fitDash(camera, worldPerPixel)
   }
 
   /**

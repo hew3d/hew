@@ -10,6 +10,7 @@ import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
 import { SiblingPreviewMirror } from '../viewport/siblingPreview'
 import { isSessionGhost } from './transformPreview'
 import { noteSketchTransformReport, setDraftSolidSelector } from './draftCommit'
+import { LINK_COLOR } from './dashedLink'
 
 /** `updateGripScale` now takes a `worldPerPixel` callback (the CameraRig
  * form, docs/design/camera.md §1) instead of a raw `(camera, viewportH)`
@@ -45,6 +46,8 @@ function makeSnap(overrides: Partial<Snap> = {}): Snap {
 function makeWasmScene() {
   return {
     history_generation: vi.fn(() => 1n),
+    // World drawing axes (the dashed grip→anchor line is colored against them).
+    axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     transform_selection: vi.fn(),
     transform_def_member: vi.fn(),
     transform_def_selection: vi.fn(),
@@ -124,13 +127,18 @@ describe('ScaleTool — auto-select on click', () => {
     expect(tool.capturingInput()).toBe(false) // gizmo reveal only — not a grab
   })
 
-  it('empty selection, click auto-selects AND lands on a grip of the freshly-revealed box: the same click starts dragging', () => {
+  it('empty selection, click auto-selects and lands on a grip of the freshly-revealed box: it only selects, the next click grabs', () => {
     const objectsGroup = makeBoxObjectsGroup(9n, [0, 0, 0], [2, 2, 1])
     const { tool } = makeTool([], objectsGroup)
     const acquire = vi.fn(() => [{ kind: 'object', id: 9n } as NodeRef])
     tool.setSelectionAcquirer(acquire)
 
     tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1])) // the +Z face grip
+    expect(acquire).toHaveBeenCalledTimes(1)
+    expect(tool.capturingInput()).toBe(false)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1]))
+    expect(acquire).toHaveBeenCalledTimes(1) // on a grip: no re-target
     expect(tool.capturingInput()).toBe(true)
   })
 
@@ -145,7 +153,7 @@ describe('ScaleTool — auto-select on click', () => {
   it('idle status hint matches the selection state', () => {
     expect(makeTool([]).tool.statusHint()).toBe('Click the object you want to scale.')
     expect(makeTool([{ kind: 'object', id: 1n }]).tool.statusHint()).toBe(
-      'Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center.',
+      'Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center. Click another object to scale it instead.',
     )
   })
 })
@@ -962,5 +970,209 @@ describe('ScaleTool — the drag ghost is session geometry, mirrored onto siblin
     tool.onKey({ key: 'Escape' } as KeyboardEvent)
     mirror.sync()
     expect(mirror.mirrorCount).toBe(0)
+  })
+})
+
+describe('ScaleTool — the hot pair (hovered grip and the point it scales about)', () => {
+  const ID = 9n
+  const MIN: [number, number, number] = [0, 0, 0]
+  const MAX: [number, number, number] = [2, 2, 1]
+  const FACE_PZ: [number, number, number] = [1, 1, 1] // +Z face grip; opposite (1,1,0)
+
+  function makeBoxTool() {
+    return makeTool([{ kind: 'object', id: ID } as NodeRef], makeBoxObjectsGroup(ID, MIN, MAX))
+  }
+
+  /** [grip, anchor] marker positions and the joining line's color, or null. */
+  function hotPair(preview: THREE.Group): { grip: number[]; anchor: number[]; lineColor: number } | null {
+    const group = preview.getObjectByName('ScaleHotGrips')
+    if (group === undefined) return null
+    const [grip, anchor] = group.children.filter((c) => c instanceof THREE.Mesh) as THREE.Mesh[]
+    const line = group.children.find((c) => c instanceof THREE.LineSegments) as THREE.LineSegments
+    return {
+      grip: grip.position.toArray(),
+      anchor: anchor.position.toArray(),
+      lineColor: (line.material as THREE.LineDashedMaterial).color.getHex(),
+    }
+  }
+
+  it('hovering a grip lights it and its opposite, joined by a line in the axis color; off the grips, nothing', () => {
+    const { tool, preview } = makeBoxTool()
+    tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
+    const pair = hotPair(preview)!
+    expect(pair.grip).toEqual([1, 1, 1])
+    expect(pair.anchor).toEqual([1, 1, 0])
+    expect(pair.lineColor).not.toBe(new THREE.Color(LINK_COLOR).getHex()) // on the Z axis: blue
+
+    tool.onPointerMove(makeSnap(), rayThrough(10, 10))
+    expect(hotPair(preview)).toBeNull()
+  })
+
+  it('a corner grip\'s line runs diagonally, in the guides\' gray', () => {
+    const { tool, preview } = makeBoxTool()
+    tool.onPointerMove(makeSnap(), rayAt([2, 2, 1]))
+    const pair = hotPair(preview)!
+    expect(pair.anchor).toEqual([0, 0, 0])
+    expect(pair.lineColor).toBe(new THREE.Color(LINK_COLOR).getHex())
+  })
+
+  it('colors the line by the WORLD axes the grips sit on, not moved drawing axes', () => {
+    const { tool, preview, wasmScene } = makeBoxTool()
+    // Drawing axes turned 45° about Z: a world X line is off their axes.
+    const s2 = Math.SQRT1_2
+    wasmScene.axes.mockReturnValue(new Float64Array([0, 0, 0, s2, s2, 0, -s2, s2, 0, 0, 0, 1]))
+    tool.onPointerMove(makeSnap(), rayAt([2, 1, 0.5])) // the +X face grip
+    const pair = hotPair(preview)!
+    expect(pair.anchor).toEqual([0, 1, 0.5])
+    expect(pair.lineColor).not.toBe(new THREE.Color(LINK_COLOR).getHex())
+  })
+
+  it('Ctrl\'s center anchor moves the second point to the box center at once', () => {
+    const { tool, preview } = makeBoxTool()
+    tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
+    tool.toggleCenterAnchor()
+    expect(hotPair(preview)!.anchor).toEqual([1, 1, 0.5])
+  })
+
+  it('stays through the drag — the grip riding the scale, the anchor fixed — and lights the new box\'s grip after', () => {
+    const objects = makeBoxObjectsGroup(ID, MIN, MAX)
+    const { tool, preview, onCommit } = makeTool([{ kind: 'object', id: ID } as NodeRef], objects)
+    // The commit rebuilds the object the way the app does: twice as tall.
+    onCommit.mockImplementation(() => {
+      objects.remove(objects.children[0])
+      objects.add(makeBoxObjectsGroup(ID, MIN, [2, 2, 2]).children[0])
+    })
+    tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt(FACE_PZ)) // grab
+    expect(preview.getObjectByName('ScaleGizmo')).toBeUndefined()
+
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: 2 }), rayAt([1, 1, 2]))
+    const pair = hotPair(preview)!
+    expect(pair.grip[2]).toBeCloseTo(2)
+    expect(pair.anchor).toEqual([1, 1, 0])
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 2 }), rayAt([1, 1, 2])) // commit
+    expect(tool.capturingInput()).toBe(false)
+    // The cursor rests on the new box's top grip: lit with no further move.
+    expect(hotPair(preview)!.grip).toEqual([1, 1, 2])
+    expect(hotPair(preview)!.anchor).toEqual([1, 1, 0])
+    // And again after the app's selection echo redraws the gizmo.
+    tool.setSelection([{ kind: 'object', id: ID } as NodeRef])
+    expect(hotPair(preview)!.grip).toEqual([1, 1, 2])
+  })
+
+  it('comes back at once when the gizmo is redrawn under a parked cursor (the app\'s selection echo)', () => {
+    const { tool, preview } = makeBoxTool()
+    tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
+    expect(hotPair(preview)).not.toBeNull()
+    tool.setSelection([{ kind: 'object', id: ID } as NodeRef])
+    expect(hotPair(preview)!.grip).toEqual([1, 1, 1])
+  })
+
+  it('once the pointer has left the canvas, a redraw lights nothing', () => {
+    const { tool, preview } = makeBoxTool()
+    tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
+    tool.onPointerLeave()
+    expect(hotPair(preview)).toBeNull()
+    tool.setSelection([{ kind: 'object', id: ID } as NodeRef])
+    expect(hotPair(preview)).toBeNull()
+    tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
+    expect(hotPair(preview)!.grip).toEqual([1, 1, 1])
+  })
+
+  it('Esc clears it with the rest of the preview', () => {
+    const { tool, preview } = makeBoxTool()
+    tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
+    tool.onKey({ key: 'Escape', repeat: false, preventDefault: () => { /* no-op */ } } as KeyboardEvent)
+    expect(hotPair(preview)).toBeNull()
+  })
+})
+
+describe('ScaleTool — a click off the grips re-targets (better than SketchUp)', () => {
+  const ID = 9n
+  const OTHER = 8n
+
+  function makeTwoBoxTool() {
+    const objectsGroup = makeBoxObjectsGroup(ID, [0, 0, 0], [2, 2, 1])
+    objectsGroup.add(makeBoxObjectsGroup(OTHER, [5, 5, 0], [6, 6, 1]).children[0])
+    const t = makeTool([{ kind: 'object', id: ID } as NodeRef], objectsGroup)
+    // The render loop's first tick hands over the screen-constant pick size.
+    t.tool.updateGripScale(new THREE.PerspectiveCamera(50, 1, 0.01, 100), wppPerspective(50, 800))
+    const release = vi.fn()
+    return { ...t, release }
+  }
+
+  it('on another object: selects it and moves the gizmo there, grabbing nothing', () => {
+    const t = makeTwoBoxTool()
+    const acquire = vi.fn(() => [{ kind: 'object', id: OTHER } as NodeRef])
+    t.tool.setSelectionAcquirer(acquire, t.release)
+
+    t.tool.onPointerDown(makeSnap({ x: 5.5, y: 5.2, z: 1 }), rayThrough(5.5, 5.2))
+    expect(acquire).toHaveBeenCalledTimes(1)
+    expect(t.tool.capturingInput()).toBe(false)
+    expect(t.release).not.toHaveBeenCalled()
+
+    // The gizmo is the other box's now: its +Z face grip grabs.
+    t.tool.onPointerDown(makeSnap({ x: 5.5, y: 5.5, z: 1 }), rayAt([5.5, 5.5, 1]))
+    expect(t.tool.capturingInput()).toBe(true)
+  })
+
+  it('on nothing: clears the selection and the gizmo', () => {
+    const t = makeTwoBoxTool()
+    t.tool.setSelectionAcquirer(() => null, t.release)
+    t.tool.onPointerDown(makeSnap({ x: 20, y: 20, z: 0 }), rayThrough(20, 20))
+    expect(t.release).toHaveBeenCalledTimes(1)
+    expect(t.preview.getObjectByName('ScaleGizmo')).toBeUndefined()
+    expect(t.tool.statusHint()).toBe('Click the object you want to scale.')
+  })
+
+  it('on empty space with no snap: still clears (it picks along the ray)', () => {
+    const t = makeTwoBoxTool()
+    t.tool.setSelectionAcquirer(() => null, t.release)
+    t.tool.onPointerDown(null, rayThrough(20, 20))
+    expect(t.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('before the render loop hands over the pick size, a click off the grips neither re-targets nor clears', () => {
+    const objectsGroup = makeBoxObjectsGroup(ID, [0, 0, 0], [2, 2, 1])
+    const t = makeTool([{ kind: 'object', id: ID } as NodeRef], objectsGroup)
+    const acquire = vi.fn(() => null)
+    const release = vi.fn()
+    t.tool.setSelectionAcquirer(acquire, release)
+    t.tool.onPointerDown(makeSnap({ x: 20, y: 20, z: 0 }), rayThrough(20, 20))
+    expect(acquire).not.toHaveBeenCalled()
+    expect(release).not.toHaveBeenCalled()
+    expect(t.preview.getObjectByName('ScaleGizmo')).toBeDefined()
+  })
+
+  it('the pick size is handed over even before any gizmo is up', () => {
+    const objectsGroup = makeBoxObjectsGroup(ID, [0, 0, 0], [2, 2, 1])
+    const t = makeTool([], objectsGroup)
+    t.tool.updateGripScale(new THREE.PerspectiveCamera(50, 1, 0.01, 100), wppPerspective(50, 800))
+    const release = vi.fn()
+    t.tool.setSelectionAcquirer(() => null, release)
+    t.tool.setSelection([{ kind: 'object', id: ID } as NodeRef])
+    t.tool.onPointerDown(makeSnap({ x: 20, y: 20, z: 0 }), rayThrough(20, 20))
+    expect(release).toHaveBeenCalledTimes(1)
+  })
+
+  it('on a grip it grabs, never re-targets', () => {
+    const t = makeTwoBoxTool()
+    const acquire = vi.fn(() => [{ kind: 'object', id: OTHER } as NodeRef])
+    t.tool.setSelectionAcquirer(acquire, t.release)
+    t.tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1]))
+    expect(acquire).not.toHaveBeenCalled()
+    expect(t.tool.capturingInput()).toBe(true)
+  })
+
+  it('what a click would take (clickAcquire): a node off the grips, nothing over one or mid-drag', () => {
+    const t = makeTwoBoxTool()
+    t.tool.setSelectionAcquirer(() => null, t.release)
+    t.tool.onPointerMove(makeSnap(), rayThrough(20, 20))
+    expect(t.tool.clickAcquire()).toEqual({ guides: false, nodes: true })
+    t.tool.onPointerMove(makeSnap(), rayAt([1, 1, 1]))
+    expect(t.tool.clickAcquire()).toBeNull()
+    t.tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1]))
+    expect(t.tool.clickAcquire()).toBeNull()
   })
 })

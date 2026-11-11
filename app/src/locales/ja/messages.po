@@ -2690,7 +2690,11 @@ msgid "Drag a corner pin, or type the absolute skew/V-scale (blue): degrees, or 
 msgstr ""
 
 #: src/tools/ScaleTool.ts
-msgid "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center."
+#~ msgid "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center."
+#~ msgstr ""
+
+#: src/tools/ScaleTool.ts
+msgid "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center. Click another object to scale it instead."
 msgstr ""
 
 #: src/palette/registry.ts

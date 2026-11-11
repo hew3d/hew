@@ -20,6 +20,7 @@
 
 import { plural, t } from '@lingui/core/macro'
 import { isComposingKey, shortcutLetter } from '../input/keyboard'
+import { isTextFieldFocused } from '../clipboard/textFieldPaste'
 import { shownAnnotationIds } from './shownAnnotations'
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import * as THREE from 'three'
@@ -152,6 +153,7 @@ import {
 } from './zoomWindowDrag'
 import { CleanModifierTap } from './cleanModifierTap'
 import { MultiClickTracker } from './multiClick'
+import { highlightSetsFor, type HighlightDeps } from './highlightSets'
 import { resolveSelectableRef, selectionScopeActive, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
 import {
   draftRef,
@@ -1131,6 +1133,10 @@ export interface ViewportApi {
    * state build and a string compare per frame). Returns the unsubscribe.
    */
   subscribeDrawPlaneState: (cb: (state: DrawPlaneState | null) => void) => () => void
+
+  /** Test-only: what the transform tools' hover highlight covers right now
+   *  (`SceneRenderer.getHoverHighlight`), or null when nothing is highlighted. */
+  getHoverHighlight: () => { objects: bigint[]; instances: bigint[]; guide: bigint | null } | null
 
   /** Test-only: the world ray the pointer at canvas-relative CSS pixel
    *  (`x`, `y`) casts for the camera as it is now, built exactly as the
@@ -2150,6 +2156,22 @@ export function computeLitInstances(wasmScene: WasmScene, activeContext: NodeRef
   return lit.size > 0 ? lit : null
 }
 
+/** The live document's answers `highlightSetsFor` needs. */
+function highlightDeps(wasmScene: WasmScene): HighlightDeps {
+  return {
+    groupMembers: (groupId) => wasmScene.group_members(groupId).map(nodeRefFromJs),
+    draftGeometry: (node) => geometryOf(wasmScene, node),
+  }
+}
+
+/** The component placement being edited in place, if the deepest open
+ * context is one: its members highlight inside it, and sketches inside it
+ * are drawn through its pose. */
+function activeInstanceOf(activeContext: readonly NodeRef[]): bigint | null {
+  const deepest = activeContext.length > 0 ? activeContext[activeContext.length - 1] : null
+  return deepest?.kind === 'instance' ? deepest.id : null
+}
+
 /**
  * Flattens a session's direct-member list (any node kind — a group frame's
  * members can be objects, nested groups, or instances; a component frame's
@@ -2591,6 +2613,9 @@ export default function Viewport({
   activeToolPropRef.current = activeToolProp
 
   const toolControllerRef = useRef<ToolController | null>(null)
+  /** Re-evaluate the transform tools' hover highlight (`refreshAcquireHover`
+   *  in the setup effect) — for the selection effects outside it. */
+  const refreshAcquireHoverRef = useRef<((ray?: Ray, force?: boolean) => void) | null>(null)
   const wasmSceneRef = useRef<WasmScene>(wasmScene)
   wasmSceneRef.current = wasmScene
 
@@ -2960,7 +2985,8 @@ export default function Viewport({
     threeScene.add(drawPlaneCueLayer.group)
     drawPlaneCueLayerRef.current = drawPlaneCueLayer
     // The held-pointer replay after a document mutation (`queueMutationReplay`):
-    // one queued at a time, none after teardown.
+    // one queued at a time, none after teardown (`queueHoverRepick` shares
+    // the teardown flag).
     let mutationReplayQueued = false
     let mutationReplayDisposed = false
 
@@ -3232,7 +3258,10 @@ export default function Viewport({
         onToolHintRef.current?.(hint)
       }
     }
-    toolController.onToolChange(() => reportToolHint())
+    toolController.onToolChange(() => {
+      reportToolHint()
+      refreshAcquireHover()
+    })
     reportToolHint()
 
     // ------------------------------------------------- select-all + marquee
@@ -3809,6 +3838,13 @@ export default function Viewport({
       return [node]
     }
 
+    /** Undo `acquireTransformTargets` once the gesture it served is over:
+     * the click-taken selection empties again. */
+    function releaseTransformTargets(): void {
+      onSelectManyRef.current?.([], 'replace')
+      scheduleRender()
+    }
+
     /**
      * Guide auto-select for Move and Rotate (guideTarget.ts): the guide
      * under the first click is selected and transformed — the Select click's
@@ -3816,6 +3852,17 @@ export default function Viewport({
      * still wins and is left to `acquireTransformTargets`.
      */
     function acquireGuideTarget(ray: Ray): bigint | null {
+      const g = pickGuideTarget(ray)
+      if (g === null) return null
+      onSelectGuideRef.current?.(g)
+      scheduleRender()
+      return g
+    }
+
+    /** The guide a Move or Rotate click at `ray` would take
+     * (`acquireGuideTarget`), without selecting it — shared with the hover
+     * highlight. */
+    function pickGuideTarget(ray: Ray): bigint | null {
       // Any point along the ray projects to the clicked pixel, in either
       // projection.
       const ndc = new THREE.Vector3(...ray.origin)
@@ -3829,8 +3876,6 @@ export default function Viewport({
       )
       const under = resolveSelectableRef(snap, ray, selectionDeps())
       if (under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve')) return null
-      onSelectGuideRef.current?.(g)
-      scheduleRender()
       return g
     }
 
@@ -3839,6 +3884,98 @@ export default function Viewport({
     function landGuideTransform(guide: bigint | null): void {
       sceneRenderer.refreshGuides()
       onSelectGuideRef.current?.(guide)
+      scheduleRender()
+    }
+
+    // ------------------------------------------------------------------ click-acquire hover
+    /** Identity of what the hover highlight currently shows (null: nothing),
+     * so a pointer move over the same target rebuilds nothing. */
+    let acquireHoverKey: string | null = null
+
+    /**
+     * Highlight what a click would pick up right now (types.ts
+     * `ClickAcquire`): the active tool says whether it would take a guide
+     * and/or a node from under the cursor, and the SAME pickers its click
+     * runs (`pickGuideTarget`, `pickTransformableUnderCursor`) say which — so
+     * the hover never shows something other than what the click takes.
+     * `ray` is the pointer move's own; without one (a press, a key, the
+     * camera or the selection changing under a parked cursor) it is rebuilt
+     * at the pointer's last position against the camera as it is now, as
+     * the click itself is (`heldPointerRay`). With the pointer outside the
+     * canvas, mid-camera-gesture, or a button held, nothing is highlighted.
+     * `force` rebuilds even an unchanged target (its geometry may have
+     * changed under it).
+     */
+    function refreshAcquireHover(ray?: Ray, force = false): void {
+      const spec = toolControllerRef.current?.activeTool.clickAcquire?.() ?? null
+      const at = ray ?? heldPointerRay()
+      let guide: bigint | null = null
+      let node: NodeRef | null = null
+      if (spec !== null && at !== undefined && pointerInsideCanvas && heldButtons === 0 && !cameraModeRef.current && !readOnlyRef.current) {
+        if (spec.guides) guide = pickGuideTarget(at)
+        if (guide === null && spec.nodes) node = pickTransformableUnderCursor(at)
+      }
+      const activeInstance = activeInstanceOf(activeContextRef.current)
+      const key = guide !== null
+        ? `guide:${guide}`
+        : node !== null ? `${nodeKey(node)}@${activeInstance ?? ''}` : null
+      if (key === acquireHoverKey && !force) return
+      acquireHoverKey = key
+      if (key === null) {
+        sceneRenderer.setHoverHighlight(null)
+      } else {
+        const sets = highlightSetsFor(node !== null ? [node] : [], highlightDeps(wasmScene))
+        sceneRenderer.setHoverHighlight({
+          objects: activeInstance === null ? sets.objects : [],
+          instances: sets.instances,
+          member: activeInstance !== null && sets.objects.length > 0
+            ? { instance: activeInstance, memberIds: sets.objects }
+            : null,
+          sketches: sets.sketches,
+          sketchInstance: activeInstance,
+          draftSegments: sets.draftSegments,
+          guide,
+        })
+      }
+      scheduleRender()
+    }
+    refreshAcquireHoverRef.current = refreshAcquireHover
+    let hoverRepickQueued = false
+    /**
+     * `refreshAcquireHover` with a rebuild, once the current task is done: a
+     * hide, show or isolation reaches this viewport first and the kernel's
+     * snap/pick registration only after (`App.pushUnionHidden`,
+     * `syncKernelHidden`), in the same task, and a re-pick in between would
+     * still miss a solid just shown.
+     */
+    function queueHoverRepick(): void {
+      if (hoverRepickQueued) return
+      hoverRepickQueued = true
+      queueMicrotask(() => {
+        hoverRepickQueued = false
+        if (mutationReplayDisposed) return
+        refreshAcquireHover(undefined, true)
+      })
+    }
+    /** A fresh ray at the pointer's last position for the current camera.
+     * Not `lastRayRef`: that ray was built for the camera of the last pointer
+     * move, and a wheel zoom, a Scene tween or Fly may have moved it since.
+     * Undefined when that position no longer shows the canvas: a dock or
+     * panel inside the canvas's bounds, or an overlay come up over it, is
+     * there instead (`pointerInsideCanvas` only knows about the bounds). */
+    function heldPointerRay(): Ray | undefined {
+      const ndc = lastPointerNdcRef.current
+      if (ndc === null) return undefined
+      const at = document.elementFromPoint(pointerRestClient.x, pointerRestClient.y)
+      if (at === null || !renderer.domElement.contains(at)) return undefined
+      return makeWorldRay(ndc.ndcX, ndc.ndcY, camera)
+    }
+    /** Drop the hover highlight — a camera gesture or a held button owns the
+     * pointer, so no click is about to land. */
+    function clearAcquireHover(): void {
+      if (acquireHoverKey === null) return
+      acquireHoverKey = null
+      sceneRenderer.setHoverHighlight(null)
       scheduleRender()
     }
 
@@ -4915,6 +5052,8 @@ export default function Viewport({
       // doesn't leave the contextual dock showing a stale context (see
       // `reevaluateHoverNow`'s doc comment).
       reevaluateHoverNow()
+      // The hovered target's geometry may have changed, or it may be gone.
+      refreshAcquireHover(undefined, true)
       queueMutationReplay()
     }
 
@@ -6399,7 +6538,15 @@ export default function Viewport({
       // The sibling mirrors too: a capture between a tool's `clearPreview`
       // and the next loop frame must not draw clones of disposed geometry.
       siblingPreview.sync()
-      renderer.render(threeScene, camera)
+      // The transform tools' hover highlight is pre-click feedback, not the
+      // model: a Scene thumbnail or an API capture leaves it out.
+      const hoverWasVisible = sceneRenderer.hoverGroup.visible
+      sceneRenderer.hoverGroup.visible = false
+      try {
+        renderer.render(threeScene, camera)
+      } finally {
+        sceneRenderer.hoverGroup.visible = hoverWasVisible
+      }
       const gl = renderer.getContext()
       const width = gl.drawingBufferWidth
       const height = gl.drawingBufferHeight
@@ -6618,6 +6765,10 @@ export default function Viewport({
     // Debounced "camera settled" notification for drift detection.
     let cameraSettledTimer: ReturnType<typeof setTimeout> | null = null
     function noteCameraMoved(): void {
+      // What sits under a parked cursor changed with the view (a wheel
+      // zoom, a Scene tween, Fly): the hover highlight follows at once, so
+      // it never shows other than what a click would take now.
+      refreshAcquireHover()
       if (cameraSettledTimer !== null) clearTimeout(cameraSettledTimer)
       cameraSettledTimer = setTimeout(() => {
         cameraSettledTimer = null
@@ -6790,6 +6941,8 @@ export default function Viewport({
       } else {
         sceneRenderer.setHidden(eff.objects, eff.instances)
       }
+      // A hovered target hidden (or one shown) under a parked cursor: re-pick.
+      queueHoverRepick()
       scheduleRender()
     }
 
@@ -6930,6 +7083,8 @@ export default function Viewport({
       sceneRenderer.setGuidesVisible(visible)
       // Hidden guides must not snap or flash a cue — gate inference too.
       wasmScene.set_guides_snappable(visible)
+      // A hovered guide hidden under a parked cursor must not stay drawn.
+      refreshAcquireHover(undefined, true)
       scheduleRender()
     }
 
@@ -7253,7 +7408,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setViewDirection, orbitDrag, endOrbitDrag, subscribeCameraOrientation, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setViewDirection, orbitDrag, endOrbitDrag, subscribeCameraOrientation, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -7604,7 +7759,7 @@ export default function Viewport({
           else onSelectManyRef.current?.(nodes, 'replace')
         },
       )
-      tool.setSelectionAcquirer(acquireTransformTargets)
+      tool.setSelectionAcquirer(acquireTransformTargets, releaseTransformTargets)
       // A guide is a Move target too. A drag-move hands over nodes, never
       // a guide, so only a plain tool switch carries the selected one in.
       if (selection === undefined) tool.setGuideTarget(selectedGuideRef.current)
@@ -7674,7 +7829,7 @@ export default function Viewport({
           else onSelectManyRef.current?.(nodes, 'replace')
         },
       )
-      tool.setSelectionAcquirer(acquireTransformTargets)
+      tool.setSelectionAcquirer(acquireTransformTargets, releaseTransformTargets)
       tool.setGuideTarget(selectedGuideRef.current)
       tool.setGuideHooks(acquireGuideTarget, landGuideTransform)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
@@ -7692,12 +7847,17 @@ export default function Viewport({
           // Rebuild sketch buffers so a scaled sketch's lines follow (see
           // makeMoveTool).
           sceneRenderer.refreshAllSketches()
+          // Select the committed nodes: a scaled drawn shape is re-found by
+          // its new geometry, so the old ref no longer names it and the
+          // selection would otherwise be pruned to nothing.
+          if (nodes.length === 1) onSelectRef.current?.(nodes[0], 'replace')
+          else if (nodes.length > 1) onSelectManyRef.current?.(nodes, 'replace')
         },
         handleToast,
         (id: bigint) => sceneRenderer.getInstanceGroup(id),
         (text: string) => { onMeasurementRef.current?.(text) },
       )
-      tool.setSelectionAcquirer(acquireTransformTargets)
+      tool.setSelectionAcquirer(acquireTransformTargets, releaseTransformTargets)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }
@@ -8381,6 +8541,10 @@ export default function Viewport({
     // canvas's bounds then shows there instead of the canvas). Kept apart
     // from `lastPointerClient`, the mid-drag switch's origin.
     const pointerRestClient = { x: 0, y: 0 }
+    // The buttons held as of the last pointer event on the canvas
+    // (`PointerEvent.buttons`): a press owns the pointer, so the transform
+    // tools' hover highlight stays off until every button is up.
+    let heldButtons = 0
     function configureControls(c: OrbitControls): void {
       // RIGHT is null, not PAN: the right button is Fly's (docs/design/
       // fly-navigation.md §3.1, §5 — "configureControls sets RIGHT: null so
@@ -9663,6 +9827,7 @@ export default function Viewport({
       pointerInsideCanvas = true
       pointerRestClient.x = ev.clientX
       pointerRestClient.y = ev.clientY
+      heldButtons = ev.buttons
 
       // Shift-fov drag owns the pointer for its whole gesture — armed at
       // pointerdown by onFovDragPointerDownCapture (camera-playtest2.md §3).
@@ -9693,6 +9858,7 @@ export default function Viewport({
       // In camera-nav mode, OrbitControls owns left-drag — skip geometry routing.
       if (cameraModeRef.current) {
         if (ev.buttons !== 0) hideTipForButton()
+        clearAcquireHover()
         return
       }
 
@@ -9788,6 +9954,7 @@ export default function Viewport({
         // Orbit, pan, or a press-and-drag in flight: the tip describes a
         // hover that is no longer true, so hide it (once) until the next hover.
         hideTipForButton()
+        clearAcquireHover()
         return
       }
 
@@ -9840,6 +10007,7 @@ export default function Viewport({
       // full on-axis snap here and only loses the rendered guide LINE below.
       const snap = toolController.activeToolName === 'Select' ? excludeAxisSnapForSelect(rawSnap) : rawSnap
       activeTool.onPointerMove(snap, ray)
+      refreshAcquireHover(ray)
       if (isRawDragTool) {
         const [rawX, rawY] = canvasPoint(ev)
         ;(activeTool as {
@@ -11030,6 +11198,7 @@ export default function Viewport({
     }
     function onPointerCancel(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
+      heldButtons = 0
       // A real pointer-capture loss (OS gesture interruption, etc.) — abort
       // the fov drag exactly like Escape/focus-loss (camera-playtest2.md
       // §3), scoped to the arming pointer (findings 1+2, camera-playtest2
@@ -11064,10 +11233,28 @@ export default function Viewport({
     // wrap the handlers so the status-bar hint is re-polled after every one,
     // whichever early-return path the handler took.
     const onPointerMoveTracked = (ev: PointerEvent) => { onPointerMove(ev); reportToolHint() }
-    const onPointerDownTracked = (ev: PointerEvent) => { onPointerDown(ev); reportToolHint() }
-    const onPointerUpTracked = (ev: PointerEvent) => { onPointerUp(ev); reportToolHint() }
+    // A press or release (and a key, below) can also start or end the
+    // gesture, or change the selection, that decides what a click would
+    // pick up — re-poll the hover highlight too.
+    const onPointerDownTracked = (ev: PointerEvent) => {
+      // A press with no move before it (a touch tap) is where the pointer
+      // now is: the hover re-poll after it must ask there.
+      const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
+      lastPointerNdcRef.current = { ndcX, ndcY }
+      heldButtons = ev.buttons
+      onPointerDown(ev)
+      reportToolHint()
+      refreshAcquireHover()
+    }
+    const onPointerUpTracked = (ev: PointerEvent) => { heldButtons = ev.buttons; onPointerUp(ev); reportToolHint(); refreshAcquireHover() }
     const onDoubleClickTracked = (ev: MouseEvent) => { onDoubleClick(ev); reportToolHint() }
-    const onKeyDownTracked = (ev: KeyboardEvent) => { onKeyDown(ev); reportToolHint() }
+    const onKeyDownTracked = (ev: KeyboardEvent) => {
+      onKeyDown(ev)
+      reportToolHint()
+      // Typing in a dock or panel field is not a viewport key: no re-pick
+      // per keystroke (whatever it commits re-polls through the selection).
+      if (!isTextFieldFocused()) refreshAcquireHover()
+    }
     renderer.domElement.addEventListener('pointermove', onPointerMoveTracked)
     // Pointer presence for the held-pointer replay (`pointerInsideCanvas`).
     const onCanvasPointerEnter = (ev: PointerEvent) => {
@@ -11089,6 +11276,7 @@ export default function Viewport({
       drawPlaneCueLayer.update(queryDrawPlaneCue(leftTool))
       scheduleRender()
       onInferenceChangeRef.current?.(null)
+      refreshAcquireHover()
     }
     renderer.domElement.addEventListener('pointerenter', onCanvasPointerEnter)
     renderer.domElement.addEventListener('pointerleave', onCanvasPointerLeave)
@@ -11957,51 +12145,27 @@ export default function Viewport({
     if (activeToolForSelection !== undefined && 'setSelection' in activeToolForSelection) {
       (activeToolForSelection as { setSelection(nodes: NodeRef[]): void }).setSelection([...selectedIds])
     }
-    // Collect leaf object ids, instance ids, and sketch ids for highlighting.
-    // Groups recurse via collectLeafIds/group_members so a group selection
-    // (e.g. an imported component's outermost group) highlights every leaf
-    // object and instance it contains, however deeply nested.
-    const leafIds: bigint[] = []
-    const instanceIds: bigint[] = []
-    const sketchIds: bigint[] = []
-    const draftSegments: Float32Array[] = []
-    const getGroupMembers = (groupId: bigint): NodeRef[] =>
-      wasmSceneRef.current.group_members(groupId).map((m) => ({ kind: m.kind as NodeRef['kind'], id: m.id }))
-    for (const node of selectedIds) {
-      if (node.kind === 'sketch') {
-        sketchIds.push(node.id)
-        continue
-      }
-      if (isDraftKind(node.kind)) {
-        // A drawn shape, curve, line, or region highlights as its own line
-        // work (world coordinates, from the plane-unit listing).
-        draftSegments.push(geometryOf(wasmSceneRef.current, node))
-        continue
-      }
-      const { objectIds, instanceIds: leafInstanceIds } = collectLeafIds(node, getGroupMembers)
-      leafIds.push(...objectIds)
-      instanceIds.push(...leafInstanceIds)
-    }
-    const deepest = activeContext.length > 0 ? activeContext[activeContext.length - 1] : null
-    const activeInstance = deepest?.kind === 'instance' ? deepest.id : null
-    sceneRendererRef.current?.setSelected(activeInstance === null ? leafIds : [])
-    sceneRendererRef.current?.setSelectedInstances(instanceIds)
+    // Collect leaf object ids, instance ids, and sketch ids for highlighting
+    // (`highlightSetsFor`, shared with the transform tools' hover highlight).
+    // Groups recurse via group_members so a group selection (e.g. an
+    // imported component's outermost group) highlights every leaf object and
+    // instance it contains, however deeply nested.
+    const sets = highlightSetsFor(selectedIds, highlightDeps(wasmSceneRef.current))
+    const activeInstance = activeInstanceOf(activeContext)
+    sceneRendererRef.current?.setSelected(activeInstance === null ? sets.objects : [])
+    sceneRendererRef.current?.setSelectedInstances(sets.instances)
     sceneRendererRef.current?.setSelectedInstanceMembers(
       activeInstance,
-      activeInstance === null ? [] : leafIds,
+      activeInstance === null ? [] : sets.objects,
     )
-    sceneRendererRef.current?.setSelectedSketches(sketchIds)
-    const draftTotal = draftSegments.reduce((n, a) => n + a.length, 0)
-    const draftAll = new Float32Array(draftTotal)
-    let draftAt = 0
-    for (const a of draftSegments) {
-      draftAll.set(a, draftAt)
-      draftAt += a.length
-    }
-    sceneRendererRef.current?.setSelectedDraft(draftAll)
+    sceneRendererRef.current?.setSelectedSketches(sets.sketches)
+    sceneRendererRef.current?.setSelectedDraft(sets.draftSegments)
     sceneRendererRef.current?.setSelectedSketchInstance(
       activeInstance,
     )
+    // A selection now present ends the transform tools' hover; one cleared
+    // brings it back under a resting cursor.
+    refreshAcquireHoverRef.current?.()
     scheduleRenderRef.current()
   }, [selectedIds, activeContext])
 
@@ -12014,6 +12178,7 @@ export default function Viewport({
       (activeTool as { setGuideTarget(guide: bigint | null): void }).setGuideTarget(selectedGuide)
     }
     sceneRendererRef.current?.setSelectedGuide(selectedGuide)
+    refreshAcquireHoverRef.current?.()
     scheduleRenderRef.current()
   }, [selectedGuide])
 

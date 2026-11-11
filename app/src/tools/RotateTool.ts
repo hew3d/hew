@@ -108,7 +108,7 @@
 import { formatNumber } from '../i18n/format'
 import { plural, t } from '@lingui/core/macro'
 import * as THREE from 'three'
-import type { Tool, Snap, EditContext } from './types'
+import type { ClickAcquire, Tool, Snap, EditContext } from './types'
 import { displayedAngleDeg } from './displayedValue'
 import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
@@ -157,6 +157,7 @@ import { getResolvedTheme } from '../settings/theme'
 import type { NodeRef } from '../panels/treeModel'
 import { isSketchScopedKind, nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
 import { isMac, COPY_MODIFIER_LABEL } from '../platform'
+import { DashedLink } from './dashedLink'
 
 export type OnRotateCommit = (nodes: NodeRef[]) => void
 export type OnToast = (message: string, code?: string) => void
@@ -246,6 +247,17 @@ export class RotateTool implements Tool {
   /** Click-drag-release works as well as click-click (Tool.dragCommits). */
   readonly dragCommits = true
 
+  /** Hover highlight (types.ts `ClickAcquire`), mirroring `onPointerDown`'s
+   * idle branch: with nothing selected a click takes the guide under it,
+   * else the node under it. A selected guide rotates about wherever the
+   * click lands, another guide included — nothing to highlight. */
+  clickAcquire(): ClickAcquire | null {
+    if (this.stage.kind !== 'idle' || this.selection.length > 0 || this.guides.selected !== null) return null
+    const guides = this.guides.canAcquire
+    const nodes = this.acquireSelection !== null
+    return guides || nodes ? { guides, nodes } : null
+  }
+
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.stage.kind === 'idle') {
@@ -286,8 +298,38 @@ export class RotateTool implements Tool {
 
   /** Auto-select fallback, injected by the Viewport (see MoveTool's). */
   private acquireSelection: ((ray: Ray) => NodeRef[] | null) | null = null
-  setSelectionAcquirer(acquire: ((ray: Ray) => NodeRef[] | null) | null): void {
+  setSelectionAcquirer(
+    acquire: ((ray: Ray) => NodeRef[] | null) | null,
+    release: (() => void) | null = null,
+  ): void {
     this.acquireSelection = acquire
+    this.releaseSelection = release
+  }
+  /** Empties the app selection again once a gesture on click-taken nodes is
+   *  over (MoveTool's `acquireSelection` doc: SketchUp's pre-highlight
+   *  rule, copies and arrays included). */
+  private releaseSelection: (() => void) | null = null
+  /** The gesture's nodes were taken by its click (`acquireSelection`). */
+  private nodesAcquired = false
+
+  /** A gesture on click-taken nodes ended (landed, cancelled, or refused):
+   *  give the selection back to empty, what it was before the click. */
+  private _releaseAcquiredNodes(): void {
+    if (!this.nodesAcquired) return
+    this.nodesAcquired = false
+    this.selection = []
+    this.releaseSelection?.()
+  }
+
+  /** A transform or copy landed (moved nodes, copies, an ×N / /N array, a
+   *  retyped value): click-taken nodes were selected for the gesture only,
+   *  so the selection empties again, copies included — SketchUp's rule.
+   *  The flag stays set while the post-commit windows are open, since a
+   *  retype or an array re-lands on the same click-taken source. */
+  private _landedOnAcquired(): void {
+    if (!this.nodesAcquired) return
+    this.selection = []
+    this.releaseSelection?.()
   }
 
   /** The current editing context (component-edit-parity.md phase A1). When
@@ -308,6 +350,8 @@ export class RotateTool implements Tool {
    * handles after an undo/redo prune. */
   setSelection(nodes: NodeRef[]): void {
     this.selection = nodes
+    // Something else selected between gestures: no longer ours to release.
+    if (this.stage.kind === 'idle' && nodes.length > 0) this.nodesAcquired = false
   }
 
   /** The construction guide this tool acts on instead of nodes (see
@@ -332,6 +376,10 @@ export class RotateTool implements Tool {
   private lastSnapPoint: Vec3 | null = null
   /** The protractor widget (ring + optional lock tick + optional arms). */
   private previewDisk: THREE.Group | null = null
+  /** SketchUp's dashed line from the center to the first point: to the
+   * cursor while the first point is being chosen, then held at that point
+   * through the sweep (`_setRefLink`). Null when not shown. */
+  private refLink: DashedLink | null = null
   /** VCB buffer — raw string being typed by the user. */
   private typed: string = ''
 
@@ -539,6 +587,7 @@ export class RotateTool implements Tool {
    * closes. No-op when no disk is shown.
    */
   updateDiskScale(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void {
+    this.refLink?.fitDash(camera, worldPerPixel)
     if (this.previewDisk === null) return
     const dist = camera.position.distanceTo(this.previewDisk.position)
     const scale = screenConstantWorldHalfFromWorldPerPixel(DISK_SCREEN_PX, worldPerPixel(dist))
@@ -594,8 +643,45 @@ export class RotateTool implements Tool {
     if (this.stage.kind === 'idle') {
       this.lastSnapPoint = [snap.x, snap.y, snap.z]
       this.candidateNormal = this._resolveAxis(snap, ray)
+    } else {
+      // Choosing the first point: the line runs from the center to where
+      // the click would put it (`_refPointFor`), so it does not jump there
+      // on the click.
+      const pivot = this.stage.pivot
+      this._setRefLink(pivot, this._refPointFor(pivot, [snap.x, snap.y, snap.z]) ?? [snap.x, snap.y, snap.z])
     }
     this._refreshDisk()
+  }
+
+  /**
+   * The first (0°) point a click at `rawRef` sets, or null when it lies on
+   * the axis through `pivot` (no baseline direction). When locked, the
+   * point projected INTO the rotation plane: `snapConstraint()` already
+   * asked the resolver to keep the snap in-plane, but this is the
+   * defensive/exact form regardless of what the resolved snap actually
+   * carried, so the drawn baseline arm passes through precisely the point
+   * the cursor confirmed. Unlocked rotation keeps the raw snap.
+   */
+  private _refPointFor(pivot: Vec3, rawRef: Vec3): Vec3 | null {
+    const effAxis = this._effectiveAxis()
+    const offset = projectOntoPlane(
+      rawRef[0] - pivot[0], rawRef[1] - pivot[1], rawRef[2] - pivot[2],
+      effAxis[0], effAxis[1], effAxis[2],
+    )
+    if (normalize3(offset) === null) return null
+    return this.lockedNormal !== null
+      ? [pivot[0] + offset[0], pivot[1] + offset[1], pivot[2] + offset[2]]
+      : rawRef
+  }
+
+  /** Run the center→first-point dashed line from `pivot` to `to`, creating
+   * it on first use (`_resetToIdle` clears it with the rest of the preview). */
+  private _setRefLink(pivot: Vec3, to: Vec3): void {
+    if (this.refLink === null) {
+      this.refLink = new DashedLink(() => getDrawingAxes(this.wasmScene))
+      this.preview.add(this.refLink.line)
+    }
+    this.refLink.set(pivot, to)
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
@@ -609,6 +695,7 @@ export class RotateTool implements Tool {
       // its pivot wherever it lands (on another guide too); with none
       // selected, a guide under the click is taken for this gesture.
       const guide = this.guides.start(ray, nodes.length === 0, false)
+      this.nodesAcquired = false
       if (nodes.length === 0 && guide === null && this.acquireSelection !== null) {
         // Empty selection: auto-select whatever the click landed on and
         // start the rotation on it in the same gesture.
@@ -616,6 +703,7 @@ export class RotateTool implements Tool {
         if (acquired !== null && acquired.length > 0) {
           this.selection = acquired
           nodes = acquired
+          this.nodesAcquired = true
         }
       }
       if (nodes.length === 0 && guide === null) {
@@ -642,27 +730,14 @@ export class RotateTool implements Tool {
       // Ignore a reference that coincides with the pivot, or lies on the axis
       // through it: its projection into the rotation plane is ~zero, which would
       // freeze the sweep at 0° with no feedback. Wait for a usable reference.
-      const effAxis = this._effectiveAxis()
-      const offset = projectOntoPlane(
-        rawRef[0] - pivot[0], rawRef[1] - pivot[1], rawRef[2] - pivot[2],
-        effAxis[0], effAxis[1], effAxis[2],
-      )
-      const baseline = normalize3(offset)
-      if (baseline === null) return
-      // When locked, store the reference point projected INTO the rotation
-      // plane — `snapConstraint()` already asked the resolver to keep the
-      // snap in-plane, but this is the defensive/exact form regardless of
-      // what the resolved snap actually carried, so the drawn baseline arm
-      // passes through precisely the point the cursor confirmed. Unlocked
-      // rotation keeps the raw snap (unconstrained, as before).
-      const refPoint: Vec3 = this.lockedNormal !== null
-        ? [pivot[0] + offset[0], pivot[1] + offset[1], pivot[2] + offset[2]]
-        : rawRef
+      const refPoint = this._refPointFor(pivot, rawRef)
+      if (refPoint === null) return
       const previewMesh = guide !== null ? buildGuidePreview(this.wasmScene, guide) : this._buildPreview(nodes)
       if (previewMesh !== null) {
         this.preview.add(previewMesh)
       }
       this.stage = { kind: 'ref', nodes, guide, pivot, axis, refPoint, previewMesh, lastDelta: 0 }
+      this._setRefLink(pivot, refPoint)
       this.typed = ''
       this._refreshDisk()
       this.onMeasurementCb(this._decorate('0.0°'))
@@ -679,6 +754,7 @@ export class RotateTool implements Tool {
       if (Math.abs(delta) < 1e-9) {
         // No-op rotation
         this.guides.ended()
+        this._releaseAcquiredNodes()
         return
       }
 
@@ -787,6 +863,7 @@ export class RotateTool implements Tool {
           this._commit(nodes, guide, pivot, axis, theta)
         } else {
           this.guides.ended()
+          this._releaseAcquiredNodes()
         }
       }
       return
@@ -806,7 +883,10 @@ export class RotateTool implements Tool {
   cancel(): void {
     const live = this.stage.kind !== 'idle'
     this._resetToIdle()
-    if (live) this.guides.ended()
+    if (live) {
+      this.guides.ended()
+      this._releaseAcquiredNodes()
+    }
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────────
@@ -1035,6 +1115,7 @@ export class RotateTool implements Tool {
           if (committed.length > 0) {
             this.selection = committed
             this.onCommit(committed)
+            this._landedOnAcquired()
           }
         }
         surfaceSketchTransformReports((m) => this.onToast(m))
@@ -1045,6 +1126,7 @@ export class RotateTool implements Tool {
         const committed = commitSelectionTransform(this.wasmScene, allNodes, affineF64, this._activeInstance, t({ context: 'tool', message: 'Rotate' }))
         this.onCommit(committed)
         surfaceSketchTransformReports((m) => this.onToast(m))
+        this._landedOnAcquired()
         // Armed with the PRE-commit `nodes`: the window's undo restores the
         // original unit keys (geometry hashes), which the re-resolved
         // `committed` refs of an arranging landing do not name.
@@ -1055,6 +1137,11 @@ export class RotateTool implements Tool {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      // A refused first landing ends the gesture. A refused retype does not:
+      // the window survives on the landing already made (whose selection was
+      // already given back), and a later retype that lands must give it back
+      // again, so the click-taken flag stays.
+      if (!this.retype.isOpen) this._releaseAcquiredNodes()
       return false
     }
   }
@@ -1095,7 +1182,8 @@ export class RotateTool implements Tool {
     }
   }
 
-  /** Hand an array's copies to the host: node copies become the selection,
+  /** Hand an array's copies to the host: node copies become the selection
+   *  (none when the click took the source, `_landedOnAcquired`),
    *  a guide's last copy lands as guideTarget.ts says. */
   private _landArray(landed: ArrayLanding): void {
     if ('guide' in landed) {
@@ -1104,6 +1192,7 @@ export class RotateTool implements Tool {
       this.selection = landed.nodes
       this.onArrayCommit(landed.nodes)
       surfaceSketchTransformReports((m) => this.onToast(m))
+      this._landedOnAcquired()
     }
   }
 
@@ -1335,6 +1424,7 @@ export class RotateTool implements Tool {
     this.arrayTyped = ''
     this._clearDisk()
     clearPreview(this.preview)
+    this.refLink = null // disposed with the preview
     this.onMeasurementCb('')
   }
 

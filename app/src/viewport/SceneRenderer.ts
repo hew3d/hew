@@ -411,6 +411,20 @@ export interface RefreshTouched {
 }
 
 /** Disposable group for one object's faces + edges */
+/** What the transform tools' hover highlight covers (`setHoverHighlight`). */
+export interface HoverHighlight {
+  objects: bigint[]
+  instances: bigint[]
+  /** Members of the placement being edited in place, by member object id. */
+  member: { instance: bigint; memberIds: bigint[] } | null
+  sketches: bigint[]
+  /** Pose source for definition-owned sketches (see `setSelectedSketchInstance`). */
+  sketchInstance: bigint | null
+  /** Flat world segment endpoints of drawn shapes. */
+  draftSegments: Float32Array
+  guide: bigint | null
+}
+
 interface ObjectMeshGroup {
   objectId: bigint
   facesMesh: THREE.Mesh
@@ -832,6 +846,13 @@ export class SceneRenderer {
   private selectedInstanceIds: bigint[] = []
   private selectedMemberInstance: bigint | null = null
   private selectedMemberIds: bigint[] = []
+  /** The transform tools' hover highlight (`setHoverHighlight`) and the
+   *  overlay group it draws into; the shared edge material is rebuilt with it.
+   *  The group is readable so `captureFrame` can leave the pre-click
+   *  feedback out, as the print pass does. */
+  private hover: HoverHighlight | null = null
+  readonly hoverGroup: THREE.Group
+  private hoverEdgeMaterial: THREE.LineBasicMaterial | null = null
   /**
    * Active lit set for isolation: null = top level (nothing dimmed);
    * Set<bigint> = the leaf object ids that stay fully lit; all others dim.
@@ -936,6 +957,10 @@ export class SceneRenderer {
     this.annotationsGroup = new THREE.Group()
     this.annotationsGroup.name = 'Annotations'
     threeScene.add(this.annotationsGroup)
+
+    this.hoverGroup = new THREE.Group()
+    this.hoverGroup.name = 'Hover'
+    threeScene.add(this.hoverGroup)
   }
 
   /** Rebuild all object geometry from the WASM scene. Returns watertight map. */
@@ -3685,33 +3710,7 @@ export class SceneRenderer {
     }
     if (this.selectedSketchIds.length === 0) return
 
-    const positions: number[] = []
-    const pose = this.selectedSketchInstance !== null
-      ? this.wasmScene.instance_pose(this.selectedSketchInstance)
-      : undefined
-    const pushLines = (lines: Float32Array | number[]): void => {
-      for (let i = 0; i + 2 < lines.length; i += 3) {
-        const x = lines[i], y = lines[i + 1], z = lines[i + 2]
-        if (pose === undefined) {
-          positions.push(x, y, z)
-        } else {
-          positions.push(
-            pose[0] * x + pose[1] * y + pose[2] * z + pose[3],
-            pose[4] * x + pose[5] * y + pose[6] * z + pose[7],
-            pose[8] * x + pose[9] * y + pose[10] * z + pose[11],
-          )
-        }
-      }
-    }
-    for (const id of this.selectedSketchIds) {
-      let linePositions: Float32Array | number[]
-      try {
-        linePositions = this.wasmScene.sketch_lines(id)
-      } catch {
-        continue // stale/deleted handle — simply contributes nothing
-      }
-      pushLines(linePositions)
-    }
+    const positions = this._sketchLinePositions(this.selectedSketchIds, this.selectedSketchInstance)
     if (positions.length === 0) return
 
     // Fat line (LineSegments2), like the base sketch lines — a plain
@@ -3726,6 +3725,145 @@ export class SceneRenderer {
     })
     this.sketchHighlight.renderOrder = 999
     this.sketchGroup.add(this.sketchHighlight)
+  }
+
+  /** World line positions of the given sketches; `instance`'s pose maps
+   * definition-owned sketch geometry into world space (null: world sketches).
+   * A stale or deleted handle simply contributes nothing. */
+  private _sketchLinePositions(sketchIds: readonly bigint[], instance: bigint | null): number[] {
+    const positions: number[] = []
+    const pose = instance !== null ? this.wasmScene.instance_pose(instance) : undefined
+    for (const id of sketchIds) {
+      let lines: Float32Array | number[]
+      try {
+        lines = this.wasmScene.sketch_lines(id)
+      } catch {
+        continue
+      }
+      for (let i = 0; i + 2 < lines.length; i += 3) {
+        const x = lines[i], y = lines[i + 1], z = lines[i + 2]
+        if (pose === undefined) {
+          positions.push(x, y, z)
+        } else {
+          positions.push(
+            pose[0] * x + pose[1] * y + pose[2] * z + pose[3],
+            pose[4] * x + pose[5] * y + pose[6] * z + pose[7],
+            pose[8] * x + pose[9] * y + pose[10] * z + pose[11],
+          )
+        }
+      }
+    }
+    return positions
+  }
+
+  /** The hover highlight shown now (`setHoverHighlight`), null when none. */
+  getHoverHighlight(): HoverHighlight | null {
+    return this.hover
+  }
+
+  /**
+   * Highlight what a click would pick up — the transform tools' hover
+   * (Move/Rotate/Scale with nothing selected), SketchUp's pre-selection
+   * highlight. It looks exactly like the selection highlight would once the
+   * click selects it, but it is a separate overlay: the selection state,
+   * instance batching, and materialization are untouched. A solid's edges are
+   * redrawn in the selection color over its own edges (same positions, same
+   * depth, drawn later); sketches, drawn shapes, and guides get the same
+   * on-top overlay their selection uses. `null` clears it. Ids that no longer
+   * render are skipped. The caller schedules the render.
+   */
+  setHoverHighlight(hover: HoverHighlight | null): void {
+    this.hover = hover
+    this._rebuildHoverHighlight()
+  }
+
+  private _clearHoverHighlight(): void {
+    for (const child of [...this.hoverGroup.children]) {
+      if (child instanceof LineSegments2) {
+        disposeFatSegments(child)
+      } else if (child instanceof THREE.LineSegments) {
+        child.geometry.dispose()
+        if (child.material !== this.hoverEdgeMaterial) (child.material as THREE.Material).dispose()
+      }
+      this.hoverGroup.remove(child)
+    }
+    this.hoverEdgeMaterial?.dispose()
+    this.hoverEdgeMaterial = null
+  }
+
+  private _rebuildHoverHighlight(): void {
+    this._clearHoverHighlight()
+    const hover = this.hover
+    if (hover === null) return
+
+    const plane = this.sectionClipPlane
+    const edgeMaterial = new THREE.LineBasicMaterial({
+      color: EDGE_COLOR_SELECTED,
+      clippingPlanes: plane !== null ? [plane] : null,
+    })
+    this.hoverEdgeMaterial = edgeMaterial
+    const addEdges = (positions: ArrayLike<number>, matrixWorld: THREE.Matrix4): void => {
+      if (positions.length === 0) return
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(positions as Float32Array, 3))
+      const lines = new THREE.LineSegments(geo, edgeMaterial)
+      lines.matrixAutoUpdate = false
+      lines.matrix.copy(matrixWorld)
+      lines.matrixWorldNeedsUpdate = true
+      // Same positions and depth as the object's own edges: drawn after them,
+      // the default less-or-equal depth test lets the overlay win.
+      lines.renderOrder = 1
+      this.hoverGroup.add(lines)
+    }
+
+    for (const id of hover.objects) {
+      const g = this.objectGroups.get(id)
+      if (g === undefined || !g.group.visible) continue
+      g.edgesLines.updateWorldMatrix(true, false)
+      addEdges(g.edgesLines.geometry.getAttribute('position').array, g.edgesLines.matrixWorld)
+    }
+    this.instancesGroup.updateWorldMatrix(true, false)
+    const addPlacements = (instanceId: bigint, only: ReadonlySet<bigint> | null): void => {
+      const rec = this.instanceRecords.get(instanceId)
+      if (rec === undefined || this.hiddenInstanceIds.has(instanceId)) return
+      for (const placement of rec.placements) {
+        if (!placement.shown) continue
+        if (only !== null && !only.has(placement.memberId)) continue
+        const world = new THREE.Matrix4()
+          .multiplyMatrices(this.instancesGroup.matrixWorld, rec.matrix)
+          .multiply(placement.localMatrix)
+        addEdges(this._getMemberGeometry(placement.memberId).edgePositions, world)
+      }
+    }
+    for (const id of hover.instances) addPlacements(id, null)
+    if (hover.member !== null) addPlacements(hover.member.instance, new Set(hover.member.memberIds))
+
+    const addOnTop = (positions: ArrayLike<number>): void => {
+      if (positions.length === 0) return
+      const lines = makeFatSegments(new Float32Array(positions), {
+        color: EDGE_COLOR_SELECTED,
+        widthPx: SKETCH_HIGHLIGHT_WIDTH_PX,
+        depthTest: false,
+      })
+      lines.renderOrder = 999
+      this.hoverGroup.add(lines)
+    }
+    if (hover.sketches.length > 0) addOnTop(this._sketchLinePositions(hover.sketches, hover.sketchInstance))
+    addOnTop(hover.draftSegments)
+
+    if (hover.guide !== null) {
+      const kind = this.wasmScene.guide_kind(hover.guide)
+      const geometry = this.wasmScene.guide_geometry(hover.guide)
+      const pts = kind !== undefined && geometry !== undefined ? guideOverlayPositions(kind, geometry) : null
+      if (pts !== null) {
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3))
+        const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: EDGE_COLOR_SELECTED, depthTest: false }))
+        lines.renderOrder = 999
+        lines.visible = this.guidesGroup.visible
+        this.hoverGroup.add(lines)
+      }
+    }
   }
 
   /**
@@ -4107,6 +4245,7 @@ export class SceneRenderer {
     hideObj(this.annotationHighlight)
     hideObj(this.sketchHighlight)
     hideObj(this.imprintHighlight)
+    hideObj(this.hoverGroup)
     for (const line of this.healthRimLines) hideObj(line)
     for (const line of this.healthFocusLines) hideObj(line)
     if (!opts.includeGuides) hideObj(this.guidesGroup)
@@ -4712,6 +4851,7 @@ export class SceneRenderer {
         (m as THREE.MeshPhongMaterial).side = plane !== null ? THREE.DoubleSide : naturalSide
       }
     })
+    if (this.hoverEdgeMaterial !== null) this.hoverEdgeMaterial.clippingPlanes = planes
   }
 
   /** Rebuild the cut outlines before the next frame (see `sectionCutDirty`). */
@@ -5691,6 +5831,8 @@ export class SceneRenderer {
 
   /** Dispose all GPU resources */
   dispose(): void {
+    this.hover = null
+    this._clearHoverHighlight()
     this._clearSectionCut()
     for (const id of [...this.objectGroups.keys()]) {
       this._removeObjectGroup(id)

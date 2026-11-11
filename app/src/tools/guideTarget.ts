@@ -26,6 +26,12 @@ export class GuideTarget {
    *  selected before it (null: none), restored once the gesture is over. */
   private restore: { to: bigint | null } | null = null
 
+  /** A click can take a guide from under the cursor (`setHooks` gave a
+   *  picker) — what the tools' hover highlight asks. */
+  get canAcquire(): boolean {
+    return this.acquire !== null
+  }
+
   /** `acquire` picks the guide under the click ray, selects it in the app,
    *  and returns it (null: none there). */
   setHooks(acquire: ((ray: Ray) => bigint | null) | null, onCommit: OnGuideCommit): void {

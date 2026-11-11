@@ -424,7 +424,12 @@ below.
   — about a chosen anchor (the grabbed grip's opposite by default, the box
   center with a durable Ctrl toggle), with typed exact factors or target
   dimensions. Dragging a grip past its anchor clamps rather than reflects
-  (mirroring is a separate future tool). Move, Rotate, and Scale all extend
+  (mirroring is a separate future tool). The grip under the cursor lights
+  together with the point it scales about (its opposite, or the center
+  with Ctrl), joined by a dashed line, and the pair stays through the drag.
+  Move (base point to destination) and Rotate (center to the first point)
+  draw the same dashed line, in the construction guides' gray or in the
+  color of the drawing axis it lies on. Move, Rotate, and Scale all extend
   to a whole mixed selection — one Object, a Group, a component instance,
   or any combination — as one shared transform and one undo step; a scaled
   component instance carries the (possibly non-uniform) scale in its own
@@ -1187,7 +1192,18 @@ below.
   that section open, and a field mid-edit inside a closing section or tray
   commits first
 - One-gesture object interaction: with an empty selection, Move / Rotate /
-  Scale act on whatever the first click lands on; the Select tool drags
+  Scale act on whatever the first click lands on, and hovering highlights
+  it beforehand (SketchUp's pre-selection highlight — the object, group,
+  instance, or drawn shape the click would take, and for Move and Rotate a
+  guide, in the selection color, through the same resolver the click
+  runs). A selection Move or
+  Rotate took this way lasts only for the gesture: once the move or
+  rotation lands — copies and ×N / /N arrays included — or is cancelled or
+  refused, nothing is selected again; a selection made beforehand is kept.
+  Scale's first click only selects and shows the grips; after that a click
+  off the grips re-targets (better than SketchUp, whose Scale stays on its
+  selection): on another object it selects that one, on nothing it clears
+  the selection. The Select tool drags
   objects directly (a threshold-gated one-shot Move — full snapping, axis
   locks, Alt-copy, typed distances — that springs back to Select on
   release); and every draw tool imprints a plain object's face at the top

@@ -903,6 +903,8 @@ function makeSnapSel(overrides: Partial<Snap> = {}): Snap {
 function makeWasmSceneSel() {
   return {
     history_generation: vi.fn(() => 1n),
+    // World drawing axes (the dashed base→destination line is colored against them).
+    axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     transform_selection: vi.fn(),
   }
 }
@@ -1539,5 +1541,182 @@ describe('MoveTool — the drag ghost is session geometry, mirrored onto sibling
     mirror.sync()
     expect(preview.children.filter(isSessionGhost)).toHaveLength(0)
     expect(mirror.mirrorCount).toBe(0)
+  })
+})
+
+describe('MoveTool — a click-taken selection lasts only for the gesture (SketchUp pre-highlight rule)', () => {
+  const NODE: NodeRef = { kind: 'object', id: 7n }
+
+  /** A tool with nothing selected whose click takes NODE. */
+  function makeAcquiring() {
+    const t = makeTool([])
+    const acquire = vi.fn(() => [NODE])
+    const release = vi.fn()
+    t.tool.setSelectionAcquirer(acquire, release)
+    return { ...t, acquire, release }
+  }
+
+  /** Click NODE at the origin, then click 2 m along X. */
+  function moveTwoAlongX(tool: MoveTool): void {
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    tool.onPointerMove(makeSnap(2, 0, 0), rayThrough(2, 0))
+    tool.onPointerDown(makeSnap(2, 0, 0), rayThrough(2, 0))
+  }
+
+  it('a landed move empties the selection again', () => {
+    const t = makeAcquiring()
+    moveTwoAlongX(t.tool)
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(t.release).toHaveBeenCalledTimes(1)
+    // The tool's own cache is empty too: the next click takes again.
+    t.tool.onPointerDown(makeSnap(5, 0, 0), rayThrough(5, 0))
+    expect(t.acquire).toHaveBeenCalledTimes(2)
+  })
+
+  it('Esc mid-gesture, and a click in place, give the selection back', () => {
+    const esc = makeAcquiring()
+    esc.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    esc.tool.onKey(makeKeyEvent('Escape'))
+    expect(esc.release).toHaveBeenCalledTimes(1)
+
+    const inPlace = makeAcquiring()
+    inPlace.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    inPlace.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(inPlace.scene.transform_selection).not.toHaveBeenCalled()
+    expect(inPlace.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('a refused move gives the selection back', () => {
+    const t = makeAcquiring()
+    t.scene.transform_selection.mockImplementationOnce(() => { throw new Error('InvalidTransform: refused') })
+    moveTwoAlongX(t.tool)
+    expect(t.onToast).toHaveBeenCalled()
+    expect(t.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('a distance typed before the cursor left the base point gives the selection back', () => {
+    const t = makeAcquiring()
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.transform_selection).not.toHaveBeenCalled()
+    expect(t.tool.capturingInput()).toBe(false)
+    expect(t.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('a refused retype leaves the gesture\'s release to the retype that lands', () => {
+    const t = makeAcquiring()
+    moveTwoAlongX(t.tool)
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    t.scene.transform_selection.mockImplementationOnce(() => { throw new Error('InvalidTransform: refused') })
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.onToast).toHaveBeenCalled()
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    typeKeys(t.tool, '4')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(3)
+    expect(t.release).toHaveBeenCalledTimes(2)
+  })
+
+  it('a copy, and its ×N array, leave nothing selected either — the array still fans from the source', () => {
+    const t = makeAcquiring()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    moveTwoAlongX(t.tool)
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    typeKeys(t.tool, '3x')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    const [, ids, , count] = t.scene.duplicate_selection_array.mock.calls.at(-1)!
+    expect(Array.from(ids as BigUint64Array)).toEqual([7n])
+    expect(count).toBe(3)
+    expect(t.release).toHaveBeenCalledTimes(2)
+  })
+
+  it('a selection made beforehand is kept, and copies become it', () => {
+    const t = makeTool([NODE])
+    const release = vi.fn()
+    t.tool.setSelectionAcquirer(() => [{ kind: 'object', id: 99n }], release)
+    moveTwoAlongX(t.tool)
+    expect(release).not.toHaveBeenCalled()
+
+    t.tool.onKey(makeKeyEvent('Alt'))
+    moveTwoAlongX(t.tool)
+    expect(release).not.toHaveBeenCalled()
+    expect(t.onCommit).toHaveBeenLastCalledWith([{ kind: 'object', id: expect.any(BigInt) }])
+  })
+
+  it('a retyped distance re-lands with nothing selected; once something else is selected, it is left alone', () => {
+    const t = makeAcquiring()
+    moveTwoAlongX(t.tool)
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(2)
+    expect(t.release).toHaveBeenCalledTimes(2)
+
+    t.tool.setSelection([{ kind: 'object', id: 3n }]) // picked in the Outliner
+    typeKeys(t.tool, '4')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(3)
+    expect(t.release).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('MoveTool — what a click would take (clickAcquire, the hover highlight)', () => {
+  it('idle with nothing selected: a node under the cursor', () => {
+    const t = makeTool([])
+    t.tool.setSelectionAcquirer(() => null)
+    expect(t.tool.clickAcquire()).toEqual({ guides: false, nodes: true })
+  })
+
+  it('a guide first when guides can be taken; with a guide selected, only another guide', () => {
+    const t = makeTool([])
+    t.tool.setSelectionAcquirer(() => null)
+    t.tool.setGuideHooks(() => null, vi.fn())
+    expect(t.tool.clickAcquire()).toEqual({ guides: true, nodes: true })
+    t.tool.setGuideTarget(5n)
+    expect(t.tool.clickAcquire()).toEqual({ guides: true, nodes: false })
+  })
+
+  it('nothing with a selection, or mid-gesture', () => {
+    const selected = makeTool([{ kind: 'object', id: 1n }])
+    selected.tool.setSelectionAcquirer(() => null)
+    expect(selected.tool.clickAcquire()).toBeNull()
+
+    const t = makeTool([])
+    t.tool.setSelectionAcquirer(() => [{ kind: 'object', id: 7n }])
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(t.tool.clickAcquire()).toBeNull()
+  })
+})
+
+describe('MoveTool — dashed line from the base point to the destination', () => {
+  function dashedLines(preview: THREE.Object3D): THREE.LineSegments[] {
+    const out: THREE.LineSegments[] = []
+    preview.traverse((o) => {
+      if (o instanceof THREE.LineSegments && o.material instanceof THREE.LineDashedMaterial) out.push(o)
+    })
+    return out
+  }
+
+  it('follows the destination while the move runs and goes with the commit', () => {
+    const preview = new THREE.Group()
+    const { scene } = makeWasmScene()
+    const tool = new MoveTool(scene as never, preview, null, [{ kind: 'object', id: 1n }], vi.fn(), vi.fn(), vi.fn(), null)
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    tool.onPointerMove(makeSnap(2, 3, 0), rayThrough(2, 3))
+
+    const [line] = dashedLines(preview)
+    expect(line).toBeDefined()
+    const pos = line.geometry.getAttribute('position')
+    expect([pos.getX(0), pos.getY(0), pos.getX(1), pos.getY(1)]).toEqual([0, 0, 2, 3])
+
+    tool.onPointerDown(makeSnap(2, 3, 0), rayThrough(2, 3))
+    expect(dashedLines(preview)).toHaveLength(0)
   })
 })
