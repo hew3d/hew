@@ -1116,6 +1116,11 @@ export interface HewTestHarness {
    *  and the point it is drawn through), or null when none shows. */
   getDrawPlaneCue(): { normal: Vec3; through: Vec3 } | null
 
+  /** What the transform tools' hover highlight (Move/Rotate/Scale with
+   *  nothing selected) covers right now, ids as decimal strings, or null
+   *  when nothing is highlighted. */
+  getHoverHighlight(): { objects: string[]; instances: string[]; guide: string | null } | null
+
   /** The world ray the pointer at canvas-relative CSS pixel (`x`, `y`)
    *  casts for the camera as it is now. */
   rayAtCanvasPoint(x: number, y: number): { origin: Vec3; direction: Vec3 }
@@ -2405,6 +2410,18 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       return api.getDrawPlaneCue()
+    },
+
+    getHoverHighlight: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      const h = api.getHoverHighlight()
+      if (h === null) return null
+      return {
+        objects: h.objects.map(String),
+        instances: h.instances.map(String),
+        guide: h.guide === null ? null : String(h.guide),
+      }
     },
 
     rayAtCanvasPoint: (x, y) => {

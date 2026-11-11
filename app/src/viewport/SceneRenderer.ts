@@ -3738,6 +3738,11 @@ export class SceneRenderer {
     return positions
   }
 
+  /** The hover highlight shown now (`setHoverHighlight`), null when none. */
+  getHoverHighlight(): HoverHighlight | null {
+    return this.hover
+  }
+
   /**
    * Highlight what a click would pick up — the transform tools' hover
    * (Move/Rotate/Scale with nothing selected), SketchUp's pre-selection

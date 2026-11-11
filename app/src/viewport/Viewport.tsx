@@ -1048,6 +1048,10 @@ export interface ViewportApi {
    *  (`DrawPlaneCueLayer.current`), or null when none shows. */
   getDrawPlaneCue: () => { normal: [number, number, number]; through: [number, number, number] } | null
 
+  /** Test-only: what the transform tools' hover highlight covers right now
+   *  (`SceneRenderer.getHoverHighlight`), or null when nothing is highlighted. */
+  getHoverHighlight: () => { objects: bigint[]; instances: bigint[]; guide: bigint | null } | null
+
   /** Test-only: the world ray the pointer at canvas-relative CSS pixel
    *  (`x`, `y`) casts for the camera as it is now, built exactly as the
    *  pointer-move path builds it (`makeWorldRay`). */
@@ -3704,7 +3708,10 @@ export default function Viewport({
      * and/or a node from under the cursor, and the SAME pickers its click
      * runs (`pickGuideTarget`, `pickTransformableUnderCursor`) say which — so
      * the hover never shows something other than what the click takes.
-     * `ray` defaults to the last pointer ray; with the pointer outside the
+     * `ray` is the pointer move's own; without one (a press, a key, the
+     * camera or the selection changing under a parked cursor) it is rebuilt
+     * at the pointer's last position against the camera as it is now, as
+     * the click itself is (`heldPointerRay`). With the pointer outside the
      * canvas, mid-camera-gesture, or a button held, nothing is highlighted.
      * `force` rebuilds even an unchanged target (its geometry may have
      * changed under it).
@@ -3714,7 +3721,7 @@ export default function Viewport({
       const spec = activeTool !== undefined && 'clickAcquire' in activeTool
         ? (activeTool as { clickAcquire(): ClickAcquire | null }).clickAcquire()
         : null
-      const at = ray ?? lastRayRef.current?.ray
+      const at = ray ?? heldPointerRay()
       let guide: bigint | null = null
       let node: NodeRef | null = null
       if (spec !== null && at !== undefined && pointerInsideCanvas && !cameraModeRef.current && !readOnlyRef.current) {
@@ -3746,6 +3753,13 @@ export default function Viewport({
       scheduleRender()
     }
     refreshAcquireHoverRef.current = refreshAcquireHover
+    /** A fresh ray at the pointer's last position for the current camera.
+     * Not `lastRayRef`: that ray was built for the camera of the last pointer
+     * move, and a wheel zoom, a Scene tween or Fly may have moved it since. */
+    function heldPointerRay(): Ray | undefined {
+      const ndc = lastPointerNdcRef.current
+      return ndc === null ? undefined : makeWorldRay(ndc.ndcX, ndc.ndcY, camera)
+    }
     /** Drop the hover highlight — a camera gesture or a held button owns the
      * pointer, so no click is about to land. */
     function clearAcquireHover(): void {
@@ -6382,6 +6396,10 @@ export default function Viewport({
     // Debounced "camera settled" notification for drift detection.
     let cameraSettledTimer: ReturnType<typeof setTimeout> | null = null
     function noteCameraMoved(): void {
+      // What sits under a parked cursor changed with the view (a wheel
+      // zoom, a Scene tween, Fly): the hover highlight follows at once, so
+      // it never shows other than what a click would take now.
+      refreshAcquireHover()
       if (cameraSettledTimer !== null) clearTimeout(cameraSettledTimer)
       cameraSettledTimer = setTimeout(() => {
         cameraSettledTimer = null
@@ -7017,7 +7035,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -10815,7 +10833,15 @@ export default function Viewport({
     // A press or release (and a key, below) can also start or end the
     // gesture, or change the selection, that decides what a click would
     // pick up — re-poll the hover highlight too.
-    const onPointerDownTracked = (ev: PointerEvent) => { onPointerDown(ev); reportToolHint(); refreshAcquireHover() }
+    const onPointerDownTracked = (ev: PointerEvent) => {
+      // A press with no move before it (a touch tap) is where the pointer
+      // now is: the hover re-poll after it must ask there.
+      const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
+      lastPointerNdcRef.current = { ndcX, ndcY }
+      onPointerDown(ev)
+      reportToolHint()
+      refreshAcquireHover()
+    }
     const onPointerUpTracked = (ev: PointerEvent) => { onPointerUp(ev); reportToolHint(); refreshAcquireHover() }
     const onDoubleClickTracked = (ev: MouseEvent) => { onDoubleClick(ev); reportToolHint() }
     const onKeyDownTracked = (ev: KeyboardEvent) => { onKeyDown(ev); reportToolHint(); refreshAcquireHover() }
