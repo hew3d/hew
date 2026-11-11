@@ -1102,8 +1102,9 @@ below.
 - One-gesture object interaction: with an empty selection, Move / Rotate /
   Scale act on whatever the first click lands on, and hovering highlights
   it beforehand (SketchUp's pre-selection highlight — the object, group,
-  instance, drawn shape, or guide the click would take, in the selection
-  color, through the same resolver the click runs). A selection Move or
+  instance, or drawn shape the click would take, and for Move and Rotate a
+  guide, in the selection color, through the same resolver the click
+  runs). A selection Move or
   Rotate took this way lasts only for the gesture: once the move or
   rotation lands — copies and ×N / /N arrays included — or is cancelled or
   refused, nothing is selected again; a selection made beforehand is kept.

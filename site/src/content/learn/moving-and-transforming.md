@@ -4,7 +4,7 @@ description: "Move, Rotate, or Scale with full snapping, axis locks, and typed v
 order: 9
 ---
 
-Move, Rotate, and Scale all work on the current selection — but they don't demand one. With nothing selected, hovering highlights what a click would take — an object, a group, a component, a drawn shape, or (Move and Rotate) a guide — and clicking it selects it and starts the gesture in the same click, so moving something is one fluid motion, not Select-then-Move. That selection lasts only for the gesture: once a Move or Rotate lands (or you press `Esc`), nothing is selected again, ready for the next object. With a selection already made, the click places the first reference point as usual, and the selection stays.
+Move, Rotate, and Scale all work on the current selection — but they don't demand one. With nothing selected, hovering highlights what a click would take — an object, a group, a component, a drawn shape, or (Move and Rotate) a guide. With Move and Rotate, clicking it selects it and starts the gesture in the same click, so moving something is one fluid motion, not Select-then-Move. That selection lasts only for the gesture: once a Move or Rotate lands (or you press `Esc`), nothing is selected again, ready for the next object. With a selection already made, their click places the first reference point as usual, and the selection stays. Scale's first click only selects and shows the grips to drag (see Scale below).
 
 <docs-video theme="dark" slug="moving-and-transforming" label="moving and transforming demonstration"></docs-video>
 
