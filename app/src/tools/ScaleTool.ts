@@ -73,7 +73,7 @@ import { displayedFactor, isFreePick } from './displayedValue'
 import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import { screenConstantWorldHalfFromWorldPerPixel } from '../viewport/math'
-import { getDrawingAxes } from './drawingAxes'
+import { WORLD_DRAWING_AXES } from './drawingAxes'
 import { DashedLink, LINK_COLOR } from './dashedLink'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { nonUniformScaleAboutPivot, affineToFloat64 } from './transformMath'
@@ -1031,7 +1031,9 @@ export class ScaleTool implements Tool {
     const meshes: [THREE.Mesh, THREE.Mesh] = [make(), make()]
     // The dashed line from grip to anchor, under the markers; endpoints and
     // dash set by `_refreshHotMarkers` and `updateGripScale`.
-    const line = new DashedLink(() => getDrawingAxes(this.wasmScene))
+    // Colored against the WORLD axes, not the drawing axes: the grips sit on
+    // the world-aligned box, so a world axis is what a grip pair drives.
+    const line = new DashedLink(() => WORLD_DRAWING_AXES)
     line.line.renderOrder = 1
     group.add(line.line)
     this.preview.add(group)

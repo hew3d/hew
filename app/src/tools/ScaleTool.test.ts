@@ -995,6 +995,17 @@ describe('ScaleTool — the hot pair (hovered grip and the point it scales about
     expect(pair.lineColor).toBe(new THREE.Color(LINK_COLOR).getHex())
   })
 
+  it('colors the line by the WORLD axes the grips sit on, not moved drawing axes', () => {
+    const { tool, preview, wasmScene } = makeBoxTool()
+    // Drawing axes turned 45° about Z: a world X line is off their axes.
+    const s2 = Math.SQRT1_2
+    wasmScene.axes.mockReturnValue(new Float64Array([0, 0, 0, s2, s2, 0, -s2, s2, 0, 0, 0, 1]))
+    tool.onPointerMove(makeSnap(), rayAt([2, 1, 0.5])) // the +X face grip
+    const pair = hotPair(preview)!
+    expect(pair.anchor).toEqual([0, 1, 0.5])
+    expect(pair.lineColor).not.toBe(new THREE.Color(LINK_COLOR).getHex())
+  })
+
   it('Ctrl\'s center anchor moves the second point to the box center at once', () => {
     const { tool, preview } = makeBoxTool()
     tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
