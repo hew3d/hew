@@ -911,7 +911,11 @@ export class MoveTool implements Tool {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
-      this._releaseAcquiredNodes()
+      // A refused first landing ends the gesture. A refused retype does not:
+      // the window survives on the landing already made (whose selection was
+      // already given back), and a later retype that lands must give it back
+      // again, so the click-taken flag stays.
+      if (!this.retype.isOpen) this._releaseAcquiredNodes()
       return false
     }
   }

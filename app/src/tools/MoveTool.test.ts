@@ -1600,6 +1600,23 @@ describe('MoveTool — a click-taken selection lasts only for the gesture (Sketc
     expect(t.release).toHaveBeenCalledTimes(1)
   })
 
+  it('a refused retype leaves the gesture\'s release to the retype that lands', () => {
+    const t = makeAcquiring()
+    moveTwoAlongX(t.tool)
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    t.scene.transform_selection.mockImplementationOnce(() => { throw new Error('InvalidTransform: refused') })
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.onToast).toHaveBeenCalled()
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    typeKeys(t.tool, '4')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(3)
+    expect(t.release).toHaveBeenCalledTimes(2)
+  })
+
   it('a copy, and its ×N array, leave nothing selected either — the array still fans from the source', () => {
     const t = makeAcquiring()
     t.tool.onKey(makeKeyEvent('Alt'))

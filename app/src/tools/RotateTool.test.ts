@@ -1758,6 +1758,23 @@ describe('RotateTool — a click-taken selection lasts only for the gesture (as 
     expect(t.release).toHaveBeenCalledTimes(1)
   })
 
+  it('a refused retype leaves the gesture\'s release to the retype that lands', () => {
+    const t = makeAcquiring()
+    runNinetyDegreeGesture(t.tool)
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    t.wasmScene.transform_selection.mockImplementationOnce(() => { throw new Error('InvalidTransform: refused') })
+    typeKeys(t.tool, '45')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.onToast).toHaveBeenCalled()
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    typeKeys(t.tool, '30')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(3)
+    expect(t.release).toHaveBeenCalledTimes(2)
+  })
+
   it('a copy and its ×N array leave nothing selected — the array still fans from the source', () => {
     const t = makeAcquiring()
     t.tool.onKey(makeKeyEvent('Alt'))
