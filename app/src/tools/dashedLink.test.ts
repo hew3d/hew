@@ -1,11 +1,12 @@
 /**
  * DashedLink — the dashed line Move, Rotate, and Scale draw between their
- * two working points: black, or the color of the drawing axis it lies on.
+ * two working points: the guides' gray, or the color of the drawing axis it lies on.
  */
 
 import { describe, expect, it } from 'vitest'
 import * as THREE from 'three'
 import { DashedLink, LINK_COLOR } from './dashedLink'
+import { GUIDE_COLOR } from '../viewport/guideColors'
 import { WORLD_DRAWING_AXES, type DrawingAxes } from './drawingAxes'
 import { axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
@@ -26,7 +27,7 @@ describe('DashedLink', () => {
     expect((link.line.material as THREE.Material).depthTest).toBe(false)
   })
 
-  it('is black off the axes', () => {
+  it('is the guides\' gray off the axes', () => {
     const link = new DashedLink(() => WORLD_DRAWING_AXES)
     link.set([0, 0, 0], [1, 1, 0])
     expect(colorOf(link)).toBe(LINK_COLOR)
@@ -42,7 +43,7 @@ describe('DashedLink', () => {
     expect(colorOf(link)).toBe(axisColor(2))
   })
 
-  it('only ON the axis: a line merely close to it stays black', () => {
+  it('only ON the axis: a line merely close to it stays gray', () => {
     const link = new DashedLink(() => WORLD_DRAWING_AXES)
     link.set([0, 0, 0], [10, 0.01, 0]) // ~0.06° off X
     expect(colorOf(link)).toBe(LINK_COLOR)
@@ -56,6 +57,10 @@ describe('DashedLink', () => {
     expect(colorOf(link)).toBe(axisColor(0))
     link.set([0, 0, 0], [2, 0, 0]) // world X, off the turned frame
     expect(colorOf(link)).toBe(LINK_COLOR)
+  })
+
+  it('off the axes, it is the construction guides\' own gray', () => {
+    expect(LINK_COLOR).toBe(GUIDE_COLOR)
   })
 
   it('holds its dash a constant size on screen: farther away, longer in world units', () => {

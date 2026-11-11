@@ -146,8 +146,8 @@ const GRIP_PICK_MULTIPLIER = 3
  * the size of a plain grip, drawn over the grip beneath. */
 const GRIP_HOT_COLOR = 0xffaa00
 const GRIP_HOT_SCALE = 1
-/** The hot pair's outline: black, like the dashed line joining them
- * (dashedLink.ts), as SketchUp draws them. */
+/** The hot pair's outline: the gray of the dashed line joining them
+ * (dashedLink.ts). */
 const GRIP_HOT_INK = LINK_COLOR
 /** Neutral color for the 8 uniform (corner) grips — face/edge grips are
  * colored by the axis (axes) they drive instead. */
@@ -1016,7 +1016,8 @@ export class ScaleTool implements Tool {
       const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: GRIP_HOT_COLOR, depthTest: false }))
       mesh.scale.setScalar(FALLBACK_GRIP_HALF_M * GRIP_HOT_SCALE)
       // Always on top: over the dashed line's ends and the plain grip it
-      // sits on, its black outline over it (a child, so it scales along).
+      // sits on, its outline in the dashed line's gray over it (a child, so it
+      // scales along).
       mesh.renderOrder = 2
       const outline = new THREE.LineSegments(
         outlineGeo,

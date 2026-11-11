@@ -382,8 +382,8 @@ below.
   together with the point it scales about (its opposite, or the center
   with Ctrl), joined by a dashed line, and the pair stays through the drag.
   Move (base point to destination) and Rotate (center to the first point)
-  draw the same dashed line, black or in the color of the drawing axis it
-  lies on. Move, Rotate, and Scale all extend
+  draw the same dashed line, in the construction guides' gray or in the
+  color of the drawing axis it lies on. Move, Rotate, and Scale all extend
   to a whole mixed selection — one Object, a Group, a component instance,
   or any combination — as one shared transform and one undo step; a scaled
   component instance carries the (possibly non-uniform) scale in its own

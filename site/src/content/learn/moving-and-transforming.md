@@ -37,7 +37,7 @@ Beyond clicking and dragging, **Edit ▸ Select All** (`⌘A` / `Ctrl+A`) select
 ## Move (`M`)
 
 1. Click a **base point**. Pick a meaningful one, like a corner you want to land somewhere. (With nothing selected, this click also selects the object under the cursor.)
-2. Click the **destination**. The base point lands exactly there, snapping to anything the inference engine finds. A dashed line runs from the base point to the cursor, black, or in the axis color when it lies along an axis.
+2. Click the **destination**. The base point lands exactly there, snapping to anything the inference engine finds. A dashed line runs from the base point to the cursor, gray like a guide, or in the axis color when it lies along an axis.
 
 Move, Rotate, and Scale also take a drag: press on the first point (Move's base point, Rotate's pivot, a Scale grip), drag, and let go where the second click would go; a short press is still a click, and a value typed right after you let go applies just as it would after a click.
 

@@ -9,6 +9,7 @@ import { ctxGround, draftRef } from './planeUnits'
 import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
 import { SiblingPreviewMirror } from '../viewport/siblingPreview'
 import { isSessionGhost } from './transformPreview'
+import { LINK_COLOR } from './dashedLink'
 
 /** `updateGripScale` now takes a `worldPerPixel` callback (the CameraRig
  * form, docs/design/camera.md §1) instead of a raw `(camera, viewportH)`
@@ -980,18 +981,18 @@ describe('ScaleTool — the hot pair (hovered grip and the point it scales about
     const pair = hotPair(preview)!
     expect(pair.grip).toEqual([1, 1, 1])
     expect(pair.anchor).toEqual([1, 1, 0])
-    expect(pair.lineColor).not.toBe(0x000000) // on the Z axis: blue
+    expect(pair.lineColor).not.toBe(new THREE.Color(LINK_COLOR).getHex()) // on the Z axis: blue
 
     tool.onPointerMove(makeSnap(), rayThrough(10, 10))
     expect(hotPair(preview)).toBeNull()
   })
 
-  it('a corner grip\'s line runs diagonally, in black', () => {
+  it('a corner grip\'s line runs diagonally, in the guides\' gray', () => {
     const { tool, preview } = makeBoxTool()
     tool.onPointerMove(makeSnap(), rayAt([2, 2, 1]))
     const pair = hotPair(preview)!
     expect(pair.anchor).toEqual([0, 0, 0])
-    expect(pair.lineColor).toBe(0x000000)
+    expect(pair.lineColor).toBe(new THREE.Color(LINK_COLOR).getHex())
   })
 
   it('Ctrl\'s center anchor moves the second point to the box center at once', () => {

@@ -2,8 +2,9 @@
  * dashedLink — the thin dashed line SketchUp draws between two points a
  * transform tool is working with: Scale's grabbed grip and the point it
  * scales about, Rotate's center and its first (0°) point, Move's base point
- * and destination. Black — or, lying along a drawing axis, that axis's
- * color, as the inference shows an on-axis line — always on top, with a
+ * and destination. In the construction guides' gray (`GUIDE_COLOR`, read on
+ * both canvases and over faces) — or, lying along a drawing axis, that
+ * axis's color, as the inference shows an on-axis line — always on top, with a
  * constant on-screen dash denser than a guide's (the guides' screen-constant
  * dashing, `axisDashGapWorldFromWorldPerPixel`).
  */
@@ -12,13 +13,16 @@ import * as THREE from 'three'
 import { axisDashGapWorldFromWorldPerPixel } from '../viewport/math'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
+import { GUIDE_COLOR } from '../viewport/guideColors'
 import type { DrawingAxes } from './drawingAxes'
 
 /** On-screen dash and gap, in CSS pixels — denser than a guide's 9/5. */
 const LINK_DASH_PX = 5
 const LINK_GAP_PX = 3
 const LINK_MIN_WORLD = 1e-5
-export const LINK_COLOR = 0x000000
+/** The off-axis color: the guides' gray, the same in both themes (black,
+ * SketchUp's, all but vanishes on the dark canvas). */
+export const LINK_COLOR = GUIDE_COLOR
 /** How parallel to an axis the line must be to take its color: on the axis,
  * as an axis inference or lock puts it (0.01°, float noise only) — not
  * merely close to it. */
@@ -42,7 +46,7 @@ export class DashedLink {
   }
 
   /** Run the line from `a` to `b`, in the color of the drawing axis it lies
-   * along, else black. */
+   * along, else `LINK_COLOR`. */
   set(a: Vec3, b: Vec3): void {
     const match = axisColorForDirection(
       [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
