@@ -337,6 +337,10 @@ export class ScaleTool implements Tool {
   private _pickWorldPerPixel: ((dist: number) => number) | null = null
   /** The idle grip under the cursor (`_updateHotGrip`), null when none. */
   private hotGrip: Grip | null = null
+  /** The pointer's latest ray (a move or a press), null once it left the
+   * canvas: a gizmo redrawn under a parked cursor (the app's selection echo
+   * after a click or a commit) lights the grip beneath it again at once. */
+  private lastRay: Ray | null = null
   /** The hot pair's markers (`_refreshHotMarkers`): [grip, anchor], in their
    * own group in the preview — apart from the gizmo, which hides while a
    * drag runs, so the pair stays up through the drag. Null when not shown. */
@@ -422,6 +426,7 @@ export class ScaleTool implements Tool {
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
+    this.lastRay = ray
     if (this.stage.kind === 'idle') {
       // Bring the gizmo back on the next pointer move if a prior cancel()
       // cleared it (Esc aborting a drag empties the shared preview group — see
@@ -440,9 +445,16 @@ export class ScaleTool implements Tool {
     this._renderDrag()
   }
 
+  /** The pointer left the canvas: a gizmo redrawn now has no cursor over
+   * it to light a grip under. */
+  onPointerLeave(): void {
+    this.lastRay = null
+  }
+
   onPointerDown(snap: Snap | null, ray: Ray): void {
     // Any pointer action ends the retype window — the next scale begins.
     this.disarmRetype()
+    this.lastRay = ray
     if (snap === null) return
 
     if (this.stage.kind === 'idle') {
@@ -811,8 +823,9 @@ export class ScaleTool implements Tool {
   /** (Re)compute the box + grips for `nodes` and redraw the idle gizmo. */
   private _showGizmo(nodes: NodeRef[]): void {
     this._hideGizmo()
-    // The old box's grips are gone; the next pointer move picks a new one. A
-    // drag's pair is the drag's own (its grip and pivot), so it stays.
+    // The old box's grips are gone; the new box's grip under the cursor, if
+    // any, lights below. A drag's pair is the drag's own (its grip and
+    // pivot), so it stays.
     this.hotGrip = null
     if (this.stage.kind === 'idle') this._hideHotMarkers()
     const box = this._selectionBox(nodes)
@@ -830,6 +843,7 @@ export class ScaleTool implements Tool {
     this._gizmoCenter = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2]
     this.gizmoGrips = gripsFromBox(min, max, INCLUDE_EDGE_GRIPS)
     this._drawGizmo(min, max, this.gizmoGrips)
+    if (this.stage.kind === 'idle' && this.lastRay !== null) this._updateHotGrip(this.lastRay)
   }
 
   private _drawGizmo(min: Vec3, max: Vec3, grips: Grip[]): void {

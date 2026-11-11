@@ -1002,7 +1002,13 @@ describe('ScaleTool — the hot pair (hovered grip and the point it scales about
   })
 
   it('stays through the drag — the grip riding the scale, the anchor fixed — and lights the new box\'s grip after', () => {
-    const { tool, preview } = makeBoxTool()
+    const objects = makeBoxObjectsGroup(ID, MIN, MAX)
+    const { tool, preview, onCommit } = makeTool([{ kind: 'object', id: ID } as NodeRef], objects)
+    // The commit rebuilds the object the way the app does: twice as tall.
+    onCommit.mockImplementation(() => {
+      objects.remove(objects.children[0])
+      objects.add(makeBoxObjectsGroup(ID, MIN, [2, 2, 2]).children[0])
+    })
     tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
     tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt(FACE_PZ)) // grab
     expect(preview.getObjectByName('ScaleGizmo')).toBeUndefined()
@@ -1014,8 +1020,27 @@ describe('ScaleTool — the hot pair (hovered grip and the point it scales about
 
     tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 2 }), rayAt([1, 1, 2])) // commit
     expect(tool.capturingInput()).toBe(false)
-    // The test's objects group is not rebuilt by the mock commit, so the
-    // redrawn box is the old one: the cursor at (1,1,2) is off its grips.
+    // The cursor rests on the new box's top grip: lit with no further move.
+    expect(hotPair(preview)!.grip).toEqual([1, 1, 2])
+    expect(hotPair(preview)!.anchor).toEqual([1, 1, 0])
+    // And again after the app's selection echo redraws the gizmo.
+    tool.setSelection([{ kind: 'object', id: ID } as NodeRef])
+    expect(hotPair(preview)!.grip).toEqual([1, 1, 2])
+  })
+
+  it('comes back at once when the gizmo is redrawn under a parked cursor (the app\'s selection echo)', () => {
+    const { tool, preview } = makeBoxTool()
+    tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
+    expect(hotPair(preview)).not.toBeNull()
+    tool.setSelection([{ kind: 'object', id: ID } as NodeRef])
+    expect(hotPair(preview)!.grip).toEqual([1, 1, 1])
+  })
+
+  it('once the pointer has left the canvas, a redraw lights nothing', () => {
+    const { tool, preview } = makeBoxTool()
+    tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
+    tool.onPointerLeave()
+    tool.setSelection([{ kind: 'object', id: ID } as NodeRef])
     expect(hotPair(preview)).toBeNull()
     tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
     expect(hotPair(preview)!.grip).toEqual([1, 1, 1])
