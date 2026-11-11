@@ -843,9 +843,11 @@ export class SceneRenderer {
   private selectedMemberInstance: bigint | null = null
   private selectedMemberIds: bigint[] = []
   /** The transform tools' hover highlight (`setHoverHighlight`) and the
-   *  overlay group it draws into; the shared edge material is rebuilt with it. */
+   *  overlay group it draws into; the shared edge material is rebuilt with it.
+   *  The group is readable so `captureFrame` can leave the pre-click
+   *  feedback out, as the print pass does. */
   private hover: HoverHighlight | null = null
-  private readonly hoverGroup: THREE.Group
+  readonly hoverGroup: THREE.Group
   private hoverEdgeMaterial: THREE.LineBasicMaterial | null = null
   /**
    * Active lit set for isolation: null = top level (nothing dimmed);
@@ -4227,6 +4229,7 @@ export class SceneRenderer {
     hideObj(this.annotationHighlight)
     hideObj(this.sketchHighlight)
     hideObj(this.imprintHighlight)
+    hideObj(this.hoverGroup)
     for (const line of this.healthRimLines) hideObj(line)
     for (const line of this.healthFocusLines) hideObj(line)
     if (!opts.includeGuides) hideObj(this.guidesGroup)

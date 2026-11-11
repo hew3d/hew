@@ -3124,6 +3124,18 @@ describe('SceneRenderer — hover highlight (setHoverHighlight)', () => {
     expect(hoverGroup(threeScene).children).toHaveLength(0)
   })
 
+  it('a print pass leaves it out, and it is back after', () => {
+    const threeScene = new THREE.Scene()
+    const renderer = new SceneRenderer(threeScene, makeScene({ objects: { '1': true } }))
+    renderer.refresh()
+    renderer.setHoverHighlight({ ...NONE, objects: [1n] })
+    renderer.beginPrintPass({ style: 'shaded', restrictTo: null, includeGuides: true })
+    expect(hoverGroup(threeScene).visible).toBe(false)
+    renderer.endPrintPass()
+    expect(hoverGroup(threeScene).visible).toBe(true)
+    expect(hoverGroup(threeScene).children).toHaveLength(1)
+  })
+
   it('a batched instance is outlined at its pose without materializing it', () => {
     const threeScene = new THREE.Scene()
     const renderer = new SceneRenderer(threeScene, makeScene({

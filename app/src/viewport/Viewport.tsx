@@ -6177,7 +6177,15 @@ export default function Viewport({
       // The sibling mirrors too: a capture between a tool's `clearPreview`
       // and the next loop frame must not draw clones of disposed geometry.
       siblingPreview.sync()
-      renderer.render(threeScene, camera)
+      // The transform tools' hover highlight is pre-click feedback, not the
+      // model: a Scene thumbnail or an API capture leaves it out.
+      const hoverWasVisible = sceneRenderer.hoverGroup.visible
+      sceneRenderer.hoverGroup.visible = false
+      try {
+        renderer.render(threeScene, camera)
+      } finally {
+        sceneRenderer.hoverGroup.visible = hoverWasVisible
+      }
       const gl = renderer.getContext()
       const width = gl.drawingBufferWidth
       const height = gl.drawingBufferHeight
