@@ -639,7 +639,12 @@ export class RotateTool implements Tool {
 
     // idle / pivot: keep the protractor centered under the cursor (idle) or at
     // the pivot (pivot), oriented to the inferred/locked axis.
-    if (snap === null) return
+    if (snap === null) {
+      // No point to run the center→first-point line to (a ray parallel to the
+      // plane): hide it rather than leave it at the last point it had.
+      if (this.refLink !== null) this.refLink.line.visible = false
+      return
+    }
     if (this.stage.kind === 'idle') {
       this.lastSnapPoint = [snap.x, snap.y, snap.z]
       this.candidateNormal = this._resolveAxis(snap, ray)
@@ -681,6 +686,7 @@ export class RotateTool implements Tool {
       this.refLink = new DashedLink(() => getDrawingAxes(this.wasmScene))
       this.preview.add(this.refLink.line)
     }
+    this.refLink.line.visible = true
     this.refLink.set(pivot, to)
   }
 

@@ -3968,6 +3968,8 @@ export default function Viewport({
       if (ndc === null) return undefined
       const at = document.elementFromPoint(pointerRestClient.x, pointerRestClient.y)
       if (at === null || !renderer.domElement.contains(at)) return undefined
+      // A pose set by `lookAt`/the controls reaches `matrixWorld` only at render.
+      camera.updateMatrixWorld()
       return makeWorldRay(ndc.ndcX, ndc.ndcY, camera)
     }
     /** Drop the hover highlight — a camera gesture or a held button owns the
@@ -6768,7 +6770,13 @@ export default function Viewport({
       // What sits under a parked cursor changed with the view (a wheel
       // zoom, a Scene tween, Fly): the hover highlight follows at once, so
       // it never shows other than what a click would take now.
-      refreshAcquireHover()
+      // One ray for both: the tool's own hover (Scale's grip) re-aims first,
+      // so the highlight below sees whether a grip is hot now. No ray while a
+      // button is held or a panel covers the pointer.
+      const viewRay = heldButtons === 0 ? heldPointerRay() : undefined
+      const viewTool = toolControllerRef.current?.activeTool
+      if (viewTool?.onViewChanged !== undefined) viewTool.onViewChanged(viewRay)
+      refreshAcquireHover(viewRay)
       if (cameraSettledTimer !== null) clearTimeout(cameraSettledTimer)
       cameraSettledTimer = setTimeout(() => {
         cameraSettledTimer = null

@@ -321,6 +321,15 @@ export interface Tool {
   hoverHint?(): string | null
 
   /**
+   * (optional) The camera moved (a wheel zoom, a Scene tween, Fly) while the
+   * pointer rests on the canvas: `ray` is the ray at the pointer's position
+   * for the camera as it is now, undefined when no cursor is over the canvas
+   * to aim one (a button held, a panel covering it). A tool that lights
+   * something under the cursor re-aims it here, as a pointer move would.
+   */
+  onViewChanged?(ray: Ray | undefined): void
+
+  /**
    * (optional) The pointer left the canvas. A tool that memoizes anything
    * about what is hovered (`hoverHint`'s refusal line, a draw tool's idle
    * plane patch) drops it here, so the status bar and the drawing-plane cue

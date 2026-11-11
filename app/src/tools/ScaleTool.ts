@@ -448,6 +448,19 @@ export class ScaleTool implements Tool {
     this._renderDrag()
   }
 
+  /** The view moved under a parked cursor: the grip under it is another one
+   * now (or none). */
+  onViewChanged(ray: Ray | undefined): void {
+    this.lastRay = ray ?? null
+    if (this.stage.kind !== 'idle') return
+    if (ray === undefined) {
+      this.hotGrip = null
+      this._hideHotMarkers()
+    } else {
+      this._updateHotGrip(ray)
+    }
+  }
+
   /** The pointer left the canvas (or something came up over it): a gizmo
    * redrawn now has no cursor over it to light a grip under. */
   onPointerLeave(): void {

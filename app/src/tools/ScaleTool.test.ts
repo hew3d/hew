@@ -1008,6 +1008,22 @@ describe('ScaleTool — the hot pair (hovered grip and the point it scales about
     expect(hotPair(preview)).toBeNull()
   })
 
+  it('the view moving under a parked cursor re-aims the hot grip: another grip, or none', () => {
+    const { tool, preview } = makeBoxTool()
+    tool.onPointerMove(makeSnap(), rayAt(FACE_PZ))
+    expect(hotPair(preview)!.grip).toEqual([1, 1, 1])
+    // The view changed: the ray at the same cursor now passes through the -Z face grip.
+    tool.onViewChanged(rayAt([1, 1, 0]))
+    expect(hotPair(preview)!.grip).toEqual([1, 1, 0])
+    // And one that hits no grip, or no ray at all (a button held), lights nothing.
+    tool.onViewChanged(rayThrough(10, 10))
+    expect(hotPair(preview)).toBeNull()
+    tool.onViewChanged(rayAt(FACE_PZ))
+    expect(hotPair(preview)).not.toBeNull()
+    tool.onViewChanged(undefined)
+    expect(hotPair(preview)).toBeNull()
+  })
+
   it('a corner grip\'s line runs diagonally, in the guides\' gray', () => {
     const { tool, preview } = makeBoxTool()
     tool.onPointerMove(makeSnap(), rayAt([2, 2, 1]))

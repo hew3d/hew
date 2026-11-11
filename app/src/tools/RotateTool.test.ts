@@ -621,6 +621,21 @@ describe('RotateTool — the center-to-first-point dashed line', () => {
   })
 })
 
+describe('RotateTool — the center-to-first-point line with no snap', () => {
+  it('is hidden while the pointer has no snap, and returns with the next one', () => {
+    const { tool, preview } = makeTool()
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // center
+    tool.onPointerMove(makeSnap({ x: 2, y: 1, z: 0 }), rayThrough(2, 1))
+    let line: THREE.LineSegments | undefined
+    preview.traverse((o) => { if (o instanceof THREE.LineSegments && o.material instanceof THREE.LineDashedMaterial) line = o })
+    expect(line!.visible).toBe(true)
+    tool.onPointerMove(null, rayThrough(5, 5)) // a ray with no snap (parallel to the plane)
+    expect(line!.visible).toBe(false)
+    tool.onPointerMove(makeSnap({ x: 1, y: 2, z: 0 }), rayThrough(1, 2))
+    expect(line!.visible).toBe(true)
+  })
+})
+
 describe('RotateTool — locked sweep consumes the constrained snap', () => {
   it('the live sweep target is the resolved snap point (not a raw ray∩plane recompute) once locked', () => {
     const { tool, onMeasurement, wasmScene } = makeTool()
