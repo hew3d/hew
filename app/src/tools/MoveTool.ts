@@ -811,7 +811,10 @@ export class MoveTool implements Tool {
     if (Math.abs(tx) < 1e-9 && Math.abs(ty) < 1e-9 && Math.abs(tz) < 1e-9) {
       // A distance typed before the cursor left the base point has no
       // direction to go in; say so rather than silently doing nothing.
+      // The gesture ends here, like every other exit from a live one.
       this._resetToIdle()
+      this.guides.ended()
+      this._releaseAcquiredNodes()
       if (dist !== 0) {
         this.onToast(t`Move the cursor the way it should go, or lock an axis with an arrow key, then type the distance.`)
       }

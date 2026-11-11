@@ -1590,6 +1590,16 @@ describe('MoveTool — a click-taken selection lasts only for the gesture (Sketc
     expect(t.release).toHaveBeenCalledTimes(1)
   })
 
+  it('a distance typed before the cursor left the base point gives the selection back', () => {
+    const t = makeAcquiring()
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.transform_selection).not.toHaveBeenCalled()
+    expect(t.tool.capturingInput()).toBe(false)
+    expect(t.release).toHaveBeenCalledTimes(1)
+  })
+
   it('a copy, and its ×N array, leave nothing selected either — the array still fans from the source', () => {
     const t = makeAcquiring()
     t.tool.onKey(makeKeyEvent('Alt'))
