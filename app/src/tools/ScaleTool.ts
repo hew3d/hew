@@ -332,8 +332,9 @@ export class ScaleTool implements Tool {
    * — cached so `_pickGrip` (which only has a ray, not the camera/rig) can
    * reproduce the SAME on-screen size for pick tolerance, in either
    * projection (docs/design/camera.md §1). Null before the first tick (unit
-   * tests never drive a real render loop) — `_pickToleranceAt` falls back to
-   * a fixed reasonable tolerance then. */
+   * tests never drive a real render loop, the app only for the first frame
+   * after activation) — `_pickToleranceAt` falls back to a fixed reasonable
+   * tolerance then. */
   private _pickWorldPerPixel: ((dist: number) => number) | null = null
   /** The idle grip under the cursor (`_updateHotGrip`), null when none. */
   private hotGrip: Grip | null = null
@@ -459,7 +460,11 @@ export class ScaleTool implements Tool {
 
     if (this.stage.kind === 'idle') {
       let nodes = this.selection
-      if (nodes.length > 0 && this._offGrips(ray)) {
+      // Until the render loop has handed over the screen-constant pick size
+      // (`updateGripScale`), the fixed fallback tolerance could call a near
+      // miss "off the grips" and clear the selection, so a click then only
+      // looks for a grip.
+      if (nodes.length > 0 && this._pickWorldPerPixel !== null && this._offGrips(ray)) {
         // A click off the grips re-targets (better than SketchUp, whose Scale
         // stays on the selection): on an object it selects THAT one and moves
         // the gizmo to it, ready for a grip; on nothing it clears the
@@ -943,8 +948,10 @@ export class ScaleTool implements Tool {
    * widgets share this same helper.
    */
   updateGripScale(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void {
-    if (this.gizmoGripMeshes === null && this.hotMeshes === null) return
+    // Kept even with no gizmo up, so the first click on a gizmo revealed
+    // later already picks at the size it renders.
     this._pickWorldPerPixel = worldPerPixel
+    if (this.gizmoGripMeshes === null && this.hotMeshes === null) return
     const fit = (mesh: THREE.Mesh, factor: number): void => {
       const dist = camera.position.distanceTo(mesh.position)
       const half = screenConstantWorldHalfFromWorldPerPixel(GRIP_SCREEN_PX, worldPerPixel(dist), MIN_GRIP_WORLD_HALF)
@@ -1067,10 +1074,10 @@ export class ScaleTool implements Tool {
    * clip plane, ~1 cm from the eye — negligible next to any real grip
    * distance). Falls back to a fixed placeholder tolerance before the first
    * tick ever runs — in unit tests (jsdom never drives a real render loop),
-   * and in one narrow real-app path: the session's FIRST Scale click when it
-   * auto-selects and probes the just-revealed gizmo synchronously, before any
-   * render tick has cached the callback (safe — the fallback is close to the
-   * old fixed clamp). */
+   * and in the app only for a click within the first frame after the tool
+   * is activated (`updateGripScale` caches the callback from that frame on,
+   * gizmo or not). A click off the grips does not re-target or clear the
+   * selection on the fallback (`onPointerDown`). */
   private _pickToleranceAt(ray: Ray, pos: Vec3): number {
     if (this._pickWorldPerPixel === null) {
       return FALLBACK_GRIP_HALF_M * GRIP_PICK_MULTIPLIER

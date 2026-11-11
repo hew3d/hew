@@ -1074,6 +1074,8 @@ describe('ScaleTool — a click off the grips re-targets (better than SketchUp)'
     const objectsGroup = makeBoxObjectsGroup(ID, [0, 0, 0], [2, 2, 1])
     objectsGroup.add(makeBoxObjectsGroup(OTHER, [5, 5, 0], [6, 6, 1]).children[0])
     const t = makeTool([{ kind: 'object', id: ID } as NodeRef], objectsGroup)
+    // The render loop's first tick hands over the screen-constant pick size.
+    t.tool.updateGripScale(new THREE.PerspectiveCamera(50, 1, 0.01, 100), wppPerspective(50, 800))
     const release = vi.fn()
     return { ...t, release }
   }
@@ -1100,6 +1102,29 @@ describe('ScaleTool — a click off the grips re-targets (better than SketchUp)'
     expect(t.release).toHaveBeenCalledTimes(1)
     expect(t.preview.getObjectByName('ScaleGizmo')).toBeUndefined()
     expect(t.tool.statusHint()).toBe('Click the object you want to scale.')
+  })
+
+  it('before the render loop hands over the pick size, a click off the grips neither re-targets nor clears', () => {
+    const objectsGroup = makeBoxObjectsGroup(ID, [0, 0, 0], [2, 2, 1])
+    const t = makeTool([{ kind: 'object', id: ID } as NodeRef], objectsGroup)
+    const acquire = vi.fn(() => null)
+    const release = vi.fn()
+    t.tool.setSelectionAcquirer(acquire, release)
+    t.tool.onPointerDown(makeSnap({ x: 20, y: 20, z: 0 }), rayThrough(20, 20))
+    expect(acquire).not.toHaveBeenCalled()
+    expect(release).not.toHaveBeenCalled()
+    expect(t.preview.getObjectByName('ScaleGizmo')).toBeDefined()
+  })
+
+  it('the pick size is handed over even before any gizmo is up', () => {
+    const objectsGroup = makeBoxObjectsGroup(ID, [0, 0, 0], [2, 2, 1])
+    const t = makeTool([], objectsGroup)
+    t.tool.updateGripScale(new THREE.PerspectiveCamera(50, 1, 0.01, 100), wppPerspective(50, 800))
+    const release = vi.fn()
+    t.tool.setSelectionAcquirer(() => null, release)
+    t.tool.setSelection([{ kind: 'object', id: ID } as NodeRef])
+    t.tool.onPointerDown(makeSnap({ x: 20, y: 20, z: 0 }), rayThrough(20, 20))
+    expect(release).toHaveBeenCalledTimes(1)
   })
 
   it('on a grip it grabs, never re-targets', () => {
