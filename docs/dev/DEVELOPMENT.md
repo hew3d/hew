@@ -187,7 +187,7 @@ tag's history: if the release is cut from a release branch rather than
 **The beta web app** (beta.hew3d.com) is a second Cloudflare Pages project,
 `hew-app-beta`, separate from the release app at app.hew3d.com. The
 `deploy-beta` job in `.github/workflows/ci.yml` deploys it on every push to
-`main`, once the gate jobs (`verify`, `relay-contract`, `bug-intake-tests`)
+`main`, once the gate jobs (`rust`, `web`, `tauri`, `replay`, `e2e-chromium`, `e2e-visual`, `relay-contract`, `bug-intake-tests`)
 are green. Builds that deploy there set `HEW_BETA_SHA`, which stamps the
 version as `<version>+beta.<sha>` and switches on the in-app beta cues and
 the "Hew Beta" PWA name. Releases, local builds, E2E builds and the

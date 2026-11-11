@@ -6,7 +6,7 @@
 # of failures (Playwright E2E, the replay gate) that only surface in CI.
 #
 # This script closes most of that gap: it runs verify.sh AND the blocking lanes
-# of the CI `verify` job (.github/workflows/ci.yml) that CAN run off the runner,
+# of the CI lanes (.github/workflows/ci.yml) that CAN run off the runner,
 # in the same order. Run it before pushing. A green run here predicts a green CI
 # run except for the visual goldens — see below, and take that exception
 # seriously if you touched the render path.

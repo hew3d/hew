@@ -6,6 +6,24 @@ export PATH="$HOME/.cargo/bin:$PATH"
 # Change to repo root
 cd "$(dirname "$0")/.."
 
+# Lanes. With no argument this runs the whole gate in order, as it always has.
+# CI runs the same lanes as separate parallel jobs (.github/workflows/ci.yml),
+# so each lane here is the single source of truth for what that job checks:
+#
+#   rust    packaging tests, cargo fmt, clippy, cargo test
+#   wasm    build the kernel to WASM for the web app (wasm-pack, optimized;
+#           CI builds it as the `wasm-release` job, and the test lanes use
+#           an unoptimized build from the `wasm` job instead)
+#   web     typecheck, lint, i18n, vitest, app + site builds (needs the wasm
+#           package at app/src/wasm/pkg)
+#   tauri   Tauri host crate fmt + clippy (needs app/dist from the web lane)
+LANE="${1:-all}"
+case "$LANE" in
+  all|rust|wasm|web|tauri) ;;
+  *) echo "usage: scripts/verify.sh [rust|wasm|web|tauri]" >&2; exit 2 ;;
+esac
+lane() { [ "$LANE" = "all" ] || [ "$LANE" = "$1" ]; }
+
 # ---------------------------------------------------------------------------
 # Toolchain drift guard.
 #
@@ -15,77 +33,85 @@ cd "$(dirname "$0")/.."
 # the pinned one means this gate is not testing what CI will. Offline: a
 # version string comparison, no network.
 # ---------------------------------------------------------------------------
-echo "=== wasm-pack version (pinned) ==="
-WANT_WASM_PACK="$(sed -n 's/^WASM_PACK_VERSION="\(.*\)"$/\1/p' scripts/install-wasm-pack.sh)"
-HAVE_WASM_PACK="$(wasm-pack --version 2>/dev/null | awk '{print $2}' || true)"
-if [ "$HAVE_WASM_PACK" != "$WANT_WASM_PACK" ]; then
-  echo "verify: FAILED — wasm-pack is '${HAVE_WASM_PACK:-not installed}', pinned is '$WANT_WASM_PACK'."
-  echo "A different wasm-pack builds a different kernel than CI will. Fix with:"
-  echo "  scripts/install-wasm-pack.sh"
-  exit 1
-fi
-echo "wasm-pack $HAVE_WASM_PACK"
-
-echo "=== Flatpak packaging command tests ==="
-python3 -B -m unittest discover -s packaging/tests -v
-
-echo "=== cargo fmt --check ==="
-cargo fmt --check
-
-echo "=== cargo clippy --workspace --all-targets -- -D warnings ==="
-cargo clippy --workspace --all-targets -- -D warnings
-
-echo "=== cargo test --workspace ==="
-cargo test --workspace
-
-echo "=== wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg ==="
-wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
-
-# One command per line, no && lists: a && list's failure was observed once
-# being carried past under set -e (typecheck errors logged, gate still
-# printed "all green" — cause not reproduced). Separate simple commands
-# leave errexit nothing to misjudge, and each step gets its own header.
-echo "=== pnpm --dir app typecheck ==="
-pnpm --dir app typecheck
-
-echo "=== pnpm --dir app typecheck:test ==="
-pnpm --dir app typecheck:test
-
-echo "=== pnpm --dir app lint ==="
-pnpm --dir app lint
-
-# Localization (docs/LOCALIZATION.md): the committed catalogs must match the
-# source — a wrapped string with no catalog entry, or a stale entry, fails
-# here rather than reaching a translator — and every SHIPPED locale's
-# catalog must be complete.
-echo "=== pnpm --dir app i18n:extract (catalogs in sync) ==="
-pnpm --dir app i18n:extract
-# `git diff` sees modified tracked files; the second test catches a catalog
-# extract just CREATED (a new locale's .po), which `git diff` never reports.
-if ! git diff --quiet --exit-code -- app/src/locales || git status --porcelain --untracked-files=all -- app/src/locales | grep -q '^??'; then
-  echo "verify: FAILED — message catalogs are out of date. Commit the result of:"
-  echo "  pnpm --dir app i18n:extract"
-  git --no-pager diff --stat -- app/src/locales
-  exit 1
+if lane wasm; then
+  echo "=== wasm-pack version (pinned) ==="
+  WANT_WASM_PACK="$(sed -n 's/^WASM_PACK_VERSION="\(.*\)"$/\1/p' scripts/install-wasm-pack.sh)"
+  HAVE_WASM_PACK="$(wasm-pack --version 2>/dev/null | awk '{print $2}' || true)"
+  if [ "$HAVE_WASM_PACK" != "$WANT_WASM_PACK" ]; then
+    echo "verify: FAILED — wasm-pack is '${HAVE_WASM_PACK:-not installed}', pinned is '$WANT_WASM_PACK'."
+    echo "A different wasm-pack builds a different kernel than CI will. Fix with:"
+    echo "  scripts/install-wasm-pack.sh"
+    exit 1
+  fi
+  echo "wasm-pack $HAVE_WASM_PACK"
 fi
 
-echo "=== pnpm --dir app i18n:check (shipped catalogs complete) ==="
-pnpm --dir app i18n:check
+if lane rust; then
+  echo "=== Flatpak packaging command tests ==="
+  python3 -B -m unittest discover -s packaging/tests -v
 
-echo "=== pnpm --dir app i18n:menus --check (native menu labels current) ==="
-pnpm --dir app i18n:menus --check
+  echo "=== cargo fmt --check ==="
+  cargo fmt --check
 
-echo "=== pnpm --dir app test ==="
-pnpm --dir app test
+  echo "=== cargo clippy --workspace --all-targets -- -D warnings ==="
+  cargo clippy --workspace --all-targets -- -D warnings
 
-echo "=== pnpm --dir app build ==="
-pnpm --dir app build
+  echo "=== cargo test --workspace ==="
+  cargo test --workspace
+fi
 
-echo "=== pnpm --dir site check ==="
-pnpm --dir site check
+if lane wasm; then
+  echo "=== wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg ==="
+  wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
+fi
 
-echo "=== pnpm --dir site build ==="
-pnpm --dir site build
+if lane web; then
+  # One command per line, no && lists: a && list's failure was observed once
+  # being carried past under set -e (typecheck errors logged, gate still
+  # printed "all green" — cause not reproduced). Separate simple commands
+  # leave errexit nothing to misjudge, and each step gets its own header.
+  echo "=== pnpm --dir app typecheck ==="
+  pnpm --dir app typecheck
+
+  echo "=== pnpm --dir app typecheck:test ==="
+  pnpm --dir app typecheck:test
+
+  echo "=== pnpm --dir app lint ==="
+  pnpm --dir app lint
+
+  # Localization (docs/LOCALIZATION.md): the committed catalogs must match the
+  # source — a wrapped string with no catalog entry, or a stale entry, fails
+  # here rather than reaching a translator — and every SHIPPED locale's
+  # catalog must be complete.
+  echo "=== pnpm --dir app i18n:extract (catalogs in sync) ==="
+  pnpm --dir app i18n:extract
+  # `git diff` sees modified tracked files; the second test catches a catalog
+  # extract just CREATED (a new locale's .po), which `git diff` never reports.
+  if ! git diff --quiet --exit-code -- app/src/locales || git status --porcelain --untracked-files=all -- app/src/locales | grep -q '^??'; then
+    echo "verify: FAILED — message catalogs are out of date. Commit the result of:"
+    echo "  pnpm --dir app i18n:extract"
+    git --no-pager diff --stat -- app/src/locales
+    exit 1
+  fi
+
+  echo "=== pnpm --dir app i18n:check (shipped catalogs complete) ==="
+  pnpm --dir app i18n:check
+
+  echo "=== pnpm --dir app i18n:menus --check (native menu labels current) ==="
+  pnpm --dir app i18n:menus --check
+
+  echo "=== pnpm --dir app test ==="
+  pnpm --dir app test
+
+  echo "=== pnpm --dir app build ==="
+  pnpm --dir app build
+
+  echo "=== pnpm --dir site check ==="
+  pnpm --dir site check
+
+  echo "=== pnpm --dir site build ==="
+  pnpm --dir site build
+fi
 
 # ---------------------------------------------------------------------------
 # Desktop shell (Tauri host crate).
@@ -103,19 +129,21 @@ pnpm --dir site build
 # build script validates tauri.conf.json + capabilities/*.json on the way
 # through. A clean clippy here therefore also means the config is well-formed.
 # ---------------------------------------------------------------------------
-TAURI_MANIFEST="shells/tauri/src-tauri/Cargo.toml"
+if lane tauri; then
+  TAURI_MANIFEST="shells/tauri/src-tauri/Cargo.toml"
 
-# tauri.conf.json declares bundle.externalBin (the hew-cli sidecar), which
-# makes tauri-build's build script hard-fail the moment this crate is
-# compiled — not just bundled — if the matching binaries/hew-cli-<host
-# triple> file isn't already on disk. Stage it before the fmt/clippy below.
-echo "=== Stage hew-cli sidecar ==="
-node shells/tauri/scripts/stage-cli-sidecar.mjs
+  # tauri.conf.json declares bundle.externalBin (the hew-cli sidecar), which
+  # makes tauri-build's build script hard-fail the moment this crate is
+  # compiled — not just bundled — if the matching binaries/hew-cli-<host
+  # triple> file isn't already on disk. Stage it before the fmt/clippy below.
+  echo "=== Stage hew-cli sidecar ==="
+  node shells/tauri/scripts/stage-cli-sidecar.mjs
 
-echo "=== cargo fmt --check (tauri shell) ==="
-cargo fmt --check --manifest-path "$TAURI_MANIFEST"
+  echo "=== cargo fmt --check (tauri shell) ==="
+  cargo fmt --check --manifest-path "$TAURI_MANIFEST"
 
-echo "=== cargo clippy --all-targets -- -D warnings (tauri shell) ==="
-cargo clippy --manifest-path "$TAURI_MANIFEST" --all-targets -- -D warnings
+  echo "=== cargo clippy --all-targets -- -D warnings (tauri shell) ==="
+  cargo clippy --manifest-path "$TAURI_MANIFEST" --all-targets -- -D warnings
+fi
 
-echo "verify: all green"
+echo "verify: all green ($LANE)"
