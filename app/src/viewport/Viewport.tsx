@@ -2890,7 +2890,8 @@ export default function Viewport({
     threeScene.add(drawPlaneCueLayer.group)
     drawPlaneCueLayerRef.current = drawPlaneCueLayer
     // The held-pointer replay after a document mutation (`queueMutationReplay`):
-    // one queued at a time, none after teardown.
+    // one queued at a time, none after teardown (`queueHoverRepick` shares
+    // the teardown flag).
     let mutationReplayQueued = false
     let mutationReplayDisposed = false
 
@@ -3753,6 +3754,23 @@ export default function Viewport({
       scheduleRender()
     }
     refreshAcquireHoverRef.current = refreshAcquireHover
+    let hoverRepickQueued = false
+    /**
+     * `refreshAcquireHover` with a rebuild, once the current task is done: a
+     * hide, show or isolation reaches this viewport first and the kernel's
+     * snap/pick registration only after (`App.pushUnionHidden`,
+     * `syncKernelHidden`), in the same task, and a re-pick in between would
+     * still miss a solid just shown.
+     */
+    function queueHoverRepick(): void {
+      if (hoverRepickQueued) return
+      hoverRepickQueued = true
+      queueMicrotask(() => {
+        hoverRepickQueued = false
+        if (mutationReplayDisposed) return
+        refreshAcquireHover(undefined, true)
+      })
+    }
     /** A fresh ray at the pointer's last position for the current camera.
      * Not `lastRayRef`: that ray was built for the camera of the last pointer
      * move, and a wheel zoom, a Scene tween or Fly may have moved it since.
@@ -6586,6 +6604,8 @@ export default function Viewport({
       } else {
         sceneRenderer.setHidden(eff.objects, eff.instances)
       }
+      // A hovered target hidden (or one shown) under a parked cursor: re-pick.
+      queueHoverRepick()
       scheduleRender()
     }
 
@@ -6726,6 +6746,8 @@ export default function Viewport({
       sceneRenderer.setGuidesVisible(visible)
       // Hidden guides must not snap or flash a cue — gate inference too.
       wasmScene.set_guides_snappable(visible)
+      // A hovered guide hidden under a parked cursor must not stay drawn.
+      refreshAcquireHover(undefined, true)
       scheduleRender()
     }
 
