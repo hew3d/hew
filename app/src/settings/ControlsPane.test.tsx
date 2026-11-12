@@ -2,6 +2,7 @@ import { render, screen, fireEvent, within, act } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { ControlsPane } from './ControlsPane'
 import { SettingsWindow } from './SettingsWindow'
+import { FluentSettingsPage } from './FluentSettingsPage'
 import { chordsFor, commandForChord, overrides, resetAllChords, setChords, isRecordingChord } from '../keymap/keymap'
 
 beforeEach(() => resetAllChords())
@@ -64,6 +65,17 @@ describe('ControlsPane', () => {
     expect(reached).toBe(false)
   })
 
+  it('leaves typing in the search box alone while listening', () => {
+    render(<ControlsPane />)
+    fireEvent.click(within(row('Dimension')).getByRole('button', { name: 'Add a shortcut to Dimension' }))
+    const search = screen.getByRole('searchbox', { name: 'Search commands' })
+    const ev = new KeyboardEvent('keydown', { key: 'q', code: 'KeyQ', bubbles: true, cancelable: true })
+    act(() => { search.dispatchEvent(ev) })
+    expect(ev.defaultPrevented).toBe(false)
+    expect(chordsFor('tool-dimension')).toEqual([])
+    expect(within(row('Dimension')).getByText('Press a key…')).toBeInTheDocument()
+  })
+
   it('Esc cancels the recording', () => {
     render(<ControlsPane />)
     fireEvent.click(within(row('Dimension')).getByRole('button', { name: 'Add a shortcut to Dimension' }))
@@ -116,5 +128,67 @@ describe('ControlsPane', () => {
     fireEvent.click(resetAll)
     expect(overrides()).toEqual({})
     expect(screen.getByRole('button', { name: 'Reset All' })).toBeDisabled()
+  })
+
+  describe('while a conflict or refusal is being answered', () => {
+    function startConflict() {
+      render(<ControlsPane />)
+      fireEvent.click(within(row('Dimension')).getByRole('button', { name: 'Add a shortcut to Dimension' }))
+      press({ key: 'o', code: 'KeyO' })
+    }
+
+    it('keeps keys away from the app but leaves their default action to the buttons', () => {
+      let reached = 0
+      const spy = () => { reached++ }
+      window.addEventListener('keydown', spy)
+      startConflict()
+      const reassign = within(row('Dimension')).getByRole('button', { name: 'Reassign' })
+      for (const key of [' ', 'Enter', 'Tab', 'Delete', 'z']) {
+        const ev = new KeyboardEvent('keydown', { key, code: key === ' ' ? 'Space' : key, bubbles: true, cancelable: true })
+        act(() => { reassign.dispatchEvent(ev) })
+        // Not prevented: Space and Enter still press the focused button.
+        expect(ev.defaultPrevented, key).toBe(false)
+      }
+      window.removeEventListener('keydown', spy)
+      expect(reached).toBe(0)
+      // The prompt is still open and unchanged.
+      expect(commandForChord('O')).toBe('tool-orbit')
+      fireEvent.click(reassign)
+      expect(commandForChord('O')).toBe('tool-dimension')
+    })
+
+    it('Esc cancels the prompt without reaching the app or closing the page', () => {
+      let reached = false
+      const spy = () => { reached = true }
+      window.addEventListener('keydown', spy)
+      startConflict()
+      expect(isRecordingChord()).toBe(true)
+      press({ key: 'Escape', code: 'Escape' })
+      window.removeEventListener('keydown', spy)
+      expect(reached).toBe(false)
+      expect(within(row('Dimension')).queryByRole('button', { name: 'Reassign' })).toBeNull()
+      expect(commandForChord('O')).toBe('tool-orbit')
+      expect(isRecordingChord()).toBe(false)
+    })
+
+    it('a refusal swallows keys the same way', () => {
+      let reached = false
+      const spy = () => { reached = true }
+      window.addEventListener('keydown', spy)
+      render(<ControlsPane />)
+      fireEvent.click(within(row('Dimension')).getByRole('button', { name: 'Add a shortcut to Dimension' }))
+      press({ key: 'ArrowUp', code: 'ArrowUp' })
+      press({ key: 'Delete', code: 'Delete' })
+      window.removeEventListener('keydown', spy)
+      expect(reached).toBe(false)
+      expect(within(row('Dimension')).getByRole('button', { name: 'Try Another' })).toBeInTheDocument()
+    })
+  })
+})
+
+describe('FluentSettingsPage', () => {
+  it('is a labelled modal dialog', () => {
+    render(<FluentSettingsPage onBack={() => {}} />)
+    expect(screen.getByRole('dialog', { name: 'Settings' })).toHaveAttribute('aria-modal', 'true')
   })
 })

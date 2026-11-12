@@ -77,6 +77,22 @@ describe('chordFromEvent', () => {
     expect(chordToString(chordFromEvent(key({ key: '4', code: 'Numpad4' }), false)!)).toBe('4')
   })
 
+  it('does not read a numpad navigation key (NumLock off) as a digit', () => {
+    const names: [string, string][] = [
+      ['ArrowDown', 'Numpad2'], ['ArrowLeft', 'Numpad4'], ['ArrowRight', 'Numpad6'], ['ArrowUp', 'Numpad8'],
+      ['End', 'Numpad1'], ['PageDown', 'Numpad3'], ['Clear', 'Numpad5'], ['Home', 'Numpad7'],
+      ['PageUp', 'Numpad9'], ['Insert', 'Numpad0'],
+    ]
+    for (const [k, code] of names) expect(chordToString(chordFromEvent(key({ key: k, code }), false)!)).toBe(k)
+    expect(chordToString(chordFromEvent(key({ key: 'Delete', code: 'NumpadDecimal' }), false)!)).toBe('Delete')
+  })
+
+  it('still reads the physical digit key under a dead, unidentified or IME key', () => {
+    for (const k of ['Dead', 'Unidentified', 'Process']) {
+      expect(chordToString(chordFromEvent(key({ key: k, code: 'Digit3' }), false)!), k).toBe('3')
+    }
+  })
+
   it('names Space and other keys by KeyboardEvent.key', () => {
     expect(chordToString(chordFromEvent(key({ key: ' ', code: 'Space' }), false)!)).toBe('Space')
     expect(chordToString(chordFromEvent(key({ key: 'PageDown', code: 'PageDown' }), false)!)).toBe('PageDown')

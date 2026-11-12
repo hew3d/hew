@@ -37,6 +37,30 @@ export const JS_FIRST: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * The chords the fixed native accelerators of the `JS_FIRST` Edit items
+ * carry, by command (the standard Cmd+Z/X/C/V/A and their Shift variants).
+ * The shell never moves them (`set_menu_accelerators` skips `JS_FIRST`), so
+ * on the macOS desktop they are pinned: another command cannot take one (two
+ * native items would share a key), and the command itself cannot lose it
+ * (the menu would keep firing it). `nativeMenuParity.test.ts` checks the
+ * table against main.rs.
+ */
+export const PINNED_NATIVE_CHORDS: Readonly<Record<string, string>> = {
+  'undo': 'Meta+Z',
+  'redo': 'Shift+Meta+Z',
+  'edit-cut': 'Meta+X',
+  'edit-copy': 'Meta+C',
+  'edit-paste': 'Meta+V',
+  'edit-paste-in-place': 'Shift+Meta+V',
+  'edit-select-all': 'Meta+A',
+  'edit-select-none': 'Shift+Meta+A',
+}
+
+/** macOS system chords (Quit, Hide, Hide Others, Minimize) that AppKit's predefined key
+ *  equivalents already own; no command may take them on a Mac. */
+export const MAC_SYSTEM_CHORDS: ReadonlySet<string> = new Set(['Meta+Q', 'Meta+H', 'Alt+Meta+H', 'Meta+M'])
+
+/**
  * The commands the native menu dispatches (`on_menu_event`'s match arms in
  * main.rs, kept in step by `nativeMenuParity.test.ts`). A command outside
  * this set has no native item, so even a Cmd-combo of it runs in the page.
@@ -101,6 +125,9 @@ export function nativeAccelerators(
   isMac: boolean,
 ): Record<string, string | null> {
   const out: Record<string, string | null> = {}
+  // A native command with no chord at all has no entry in `bindings`, yet its
+  // item may still carry a key it had earlier: clear it explicitly.
+  for (const id of NATIVE_COMMANDS) out[id] = null
   for (const [id, chords] of Object.entries(bindings)) {
     if (JS_FIRST.has(id)) continue
     const native = nativeChordFor(chords, isMac)
@@ -108,6 +135,7 @@ export function nativeAccelerators(
     const accel = chord === null ? null : chordToAccelerator(chord)
     out[NATIVE_ALIASES[id] ?? id] = accel
   }
+  for (const id of JS_FIRST) delete out[id]
   return out
 }
 
@@ -151,11 +179,11 @@ export function startNativeMenuSync(deps: {
     deps.invoke(accelerators).then((applied) => {
       if (gen !== generation) return
       const took = new Set(applied)
-      for (const [id, chords] of Object.entries(bindings)) {
-        if (JS_FIRST.has(id)) continue
-        const nativeId = NATIVE_ALIASES[id] ?? id
-        if (!(nativeId in accelerators)) continue
-        const chord = nativeChordFor(chords, deps.isMac)
+      const keymapIds = new Map<string, string>()
+      for (const [alias, native] of Object.entries(NATIVE_ALIASES)) keymapIds.set(native, alias)
+      for (const nativeId of Object.keys(accelerators)) {
+        const id = keymapIds.get(nativeId) ?? nativeId
+        const chord = nativeChordFor(bindings[id] ?? [], deps.isMac)
         if (took.has(nativeId) && chord !== null) carried.set(id, chord)
         else carried.delete(id)
       }

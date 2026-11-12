@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { TOOL_REGISTRY, TOOLS, RAIL_GROUPS, toolSpec, shortcutFor, toolsInGroup, isToolAction } from './toolRegistry'
+import { TOOL_REGISTRY, TOOLS, RAIL_GROUPS, toolSpec, toolsInGroup, isToolAction } from './toolRegistry'
 
 describe('toolRegistry', () => {
   it('TOOLS matches TOOL_REGISTRY order and length', () => {
@@ -44,26 +44,5 @@ describe('toolRegistry', () => {
     expect(isToolAction('edit-undo')).toBe(false)
     expect(isToolAction('toggle-parallel-projection')).toBe(false)
     expect(isToolAction('tool-')).toBe(false)
-  })
-
-  describe('shortcutFor', () => {
-    // The keys themselves live in the keymap (keymap/defaults.ts, tested per
-    // platform in defaults.test.ts); shortcutFor shows the effective one.
-    // The test environment is neither macOS nor the desktop shell.
-    it('shows the SketchUp bare-letter key of a tool', () => {
-      expect(shortcutFor('Select')).toBe('Spc')
-      expect(shortcutFor('Line')).toBe('L')
-      expect(shortcutFor('Rectangle')).toBe('R')
-      expect(shortcutFor('Arc')).toBe('A')
-      expect(shortcutFor('Push/Pull')).toBe('P')
-      expect(shortcutFor('Orbit')).toBe('O')
-      expect(shortcutFor('Zoom')).toBe('Z')
-    })
-
-    it('is empty for a tool with no key', () => {
-      for (const name of ['Follow Me', 'Polygon', 'Protractor', 'Slice', 'Section Plane', 'Edit Vertex', 'Dimension', 'Text'] as const) {
-        expect(shortcutFor(name)).toBe('')
-      }
-    })
   })
 })

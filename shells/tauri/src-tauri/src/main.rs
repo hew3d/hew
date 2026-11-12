@@ -1504,8 +1504,60 @@ fn set_menu_accelerators(
     if let Some(menu) = app.menu() {
         let items = menu.items().map_err(|e| e.to_string())?;
         apply_menu_accelerators(items, &accelerators, &mut applied);
+        #[cfg(target_os = "macos")]
+        if let (Some(mtm), Ok(items)) = (objc2::MainThreadMarker::new(), menu.items()) {
+            if let Some(main_menu) = objc2_app_kit::NSApplication::sharedApplication(mtm).mainMenu()
+            {
+                clear_native_accelerators(&items, &main_menu, &accelerators);
+            }
+        }
     }
     Ok(applied)
+}
+
+/// Takes the key equivalent off every native item whose command now has no
+/// accelerator. The menu library only records a removed accelerator: its
+/// macOS `set_accelerator(None)` leaves the `NSMenuItem` untouched, so the
+/// old key would keep showing in the menu and firing the item. `ns_menu`
+/// mirrors `items` index for index; an item whose title differs from the
+/// Tauri item's is left alone rather than risk clearing the wrong one.
+#[cfg(target_os = "macos")]
+fn clear_native_accelerators(
+    items: &[MenuItemKind<tauri::Wry>],
+    ns_menu: &objc2_app_kit::NSMenu,
+    accelerators: &HashMap<String, Option<String>>,
+) {
+    use objc2_app_kit::NSEventModifierFlags;
+    use objc2_foundation::ns_string;
+    for (index, item) in items.iter().enumerate() {
+        let Some(ns_item) = ns_menu.itemAtIndex(index as isize) else {
+            return;
+        };
+        let (action, text) = match item {
+            MenuItemKind::MenuItem(i) => (menu_action_for(i.id().as_ref()), i.text()),
+            MenuItemKind::Check(i) => (menu_action_for(i.id().as_ref()), i.text()),
+            MenuItemKind::Submenu(sub) => {
+                if let (Some(ns_sub), Ok(children)) = (ns_item.submenu(), sub.items()) {
+                    clear_native_accelerators(&children, &ns_sub, accelerators);
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        let Some(action) = action else {
+            continue;
+        };
+        if !matches!(accelerators.get(action), Some(None)) {
+            continue;
+        }
+        let same_item = text
+            .map(|t| t.replace('&', "") == ns_item.title().to_string())
+            .unwrap_or(false);
+        if same_item {
+            ns_item.setKeyEquivalent(ns_string!(""));
+            ns_item.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
+        }
+    }
 }
 
 fn apply_menu_accelerators(

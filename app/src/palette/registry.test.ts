@@ -1,6 +1,11 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+
+// Pin the platform: the keys shown depend on it, and this suite may run on a Mac.
+vi.mock('../platform', async (orig) => ({ ...(await orig<typeof import('../platform')>()), isMac: false }))
+vi.mock('../io/fileHost', async (orig) => ({ ...(await orig<typeof import('../io/fileHost')>()), isTauri: false }))
+
 import { paletteEntries, paletteShortcut, PALETTE_EXCLUDED_ACTION_IDS } from './registry'
 import { TOOLS } from '../tools/toolRegistry'
 

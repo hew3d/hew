@@ -12,14 +12,13 @@
  * Keyboard shortcuts live in the keymap (`keymap/`), keyed by each tool's
  * `actionId`: the defaults follow SketchUp's bare-letter scheme
  * (`keymap/defaults.ts`) and the person can change them in Settings ▸
- * Controls. `shortcutFor` reads the effective binding for display.
+ * Controls. Display code reads the effective binding with `shortcutLabel`.
  */
 
 import { i18n } from '@lingui/core'
 import { msg } from '@lingui/core/macro'
 import type { MessageDescriptor } from '@lingui/core'
 import type { ToolName } from './toolIcons'
-import { shortcutLabel } from '../keymap/keymap'
 
 export type { ToolName }
 
@@ -105,12 +104,6 @@ const ACTION_IDS: ReadonlySet<string> = new Set(TOOL_REGISTRY.map((t) => t.actio
 /** Whether command `id` selects a tool. */
 export function isToolAction(id: string): boolean {
   return ACTION_IDS.has(id)
-}
-
-/** The shortcut to display for `name`: the first key of its command in the
- * keymap (the person's own binding, or the default), '' when it has none. */
-export function shortcutFor(name: ToolName): string {
-  return shortcutLabel(toolSpec(name).actionId)
 }
 
 /** Tools grouped for the rail, in `03_tool_rail.md`'s Draw/Modify/Inspect order. */

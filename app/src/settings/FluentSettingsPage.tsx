@@ -494,7 +494,7 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
   }
 
   return (
-    <div style={pageStyle} role="region" aria-label={t`Settings`}>
+    <div style={pageStyle} role="dialog" aria-modal="true" aria-label={t`Settings`}>
       <div style={headerStyle}>
         <button
           style={backBtnStyle}

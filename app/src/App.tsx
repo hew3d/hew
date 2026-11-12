@@ -5568,6 +5568,9 @@ export default function App() {
       case 'edit-select-all':
         // oxlint-disable-next-line lingui/no-unlocalized-strings -- editing command name
         if (forwardToTextField('selectAll')) break
+        // The welcome screen is modal: on the macOS desktop AppKit runs the
+        // native Select All key equivalent before the page can swallow it.
+        if (welcomeOpenRef.current) break
         viewportApi.current?.selectAll()
         break
       // Select None / Invert Selection have no text-field analog: like
@@ -5576,7 +5579,7 @@ export default function App() {
       // does nothing rather than changing the scene selection out from
       // under an in-progress rename.
       case 'edit-select-none':
-        if (isTextFieldFocused()) break
+        if (isTextFieldFocused() || welcomeOpenRef.current) break
         handleSelectNone()
         break
       case 'edit-invert-selection':
@@ -8278,6 +8281,9 @@ export default function App() {
           }}
         >
           <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={t`Settings`}
             onClick={(e) => e.stopPropagation()}
             style={{
               position: 'relative',

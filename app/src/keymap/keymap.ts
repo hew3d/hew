@@ -17,8 +17,9 @@
 import { isTauri } from '../io/fileHost'
 import { isMac } from '../platform'
 import { makeSetting } from '../settings/view'
-import { formatChordString, normalizeChord } from './chord'
+import { formatChordString, hasCommandModifier, normalizeChord, parseChord } from './chord'
 import { defaultBindings, type Bindings, type KeymapPlatform } from './defaults'
+import { MAC_SYSTEM_CHORDS, PINNED_NATIVE_CHORDS } from './nativeMenu'
 
 export type Overrides = Readonly<Record<string, readonly string[]>>
 
@@ -31,9 +32,31 @@ export function isReservedChord(chord: string): boolean {
   if (key === 'Escape' || key === 'Enter' || key === 'Tab') return true
   if (key.startsWith('Arrow')) {
     // Ctrl/Alt/Cmd + arrow is free; bare and Shift+arrow are the axis locks.
-    return !/(^|\+)(Ctrl|Alt|Meta)\+/.test(chord)
+    const parsed = parseChord(chord, true)
+    return parsed === null || !hasCommandModifier(parsed)
   }
   return false
+}
+
+/**
+ * The command whose fixed native accelerator carries `chord`, when it is
+ * pinned: on the macOS desktop only (`nativeMenu.ts` PINNED_NATIVE_CHORDS).
+ */
+export function pinnedOwner(chord: string, env: KeymapPlatform = platform): string | undefined {
+  if (!env.isMac || !env.isDesktop) return undefined
+  return Object.keys(PINNED_NATIVE_CHORDS).find((id) => PINNED_NATIVE_CHORDS[id] === chord)
+}
+
+/** True when `chord` is the fixed native chord of `id` itself, which must
+ *  stay on it (macOS desktop). */
+export function isPinnedTo(id: string, chord: string, env: KeymapPlatform = platform): boolean {
+  return pinnedOwner(chord, env) === id
+}
+
+/** True for a macOS system chord (Cmd+Q, Cmd+H, Cmd+M) on a Mac, desktop or
+ *  browser: the system owns it. */
+export function isMacSystemChord(chord: string, env: KeymapPlatform = platform): boolean {
+  return env.isMac && MAC_SYSTEM_CHORDS.has(chord)
 }
 
 export interface Keymap {
@@ -46,8 +69,11 @@ export interface Keymap {
 /**
  * Lays `overrides` over `defaults`. Chords are normalized; malformed or
  * reserved ones are dropped. A chord claimed by an override wins over the
- * same chord in another command's defaults (the editor reassigns on
- * conflict, so this only matters for stale or hand-edited storage).
+ * same chord in another command's defaults, and between two overrides the
+ * later one in `overrides` wins (`setChords` writes the command it just
+ * edited last). So taking a chord stores only the taker's override: the
+ * previous owner loses the chord here, at build time, and gets it back when
+ * the taker's override goes away.
  */
 export function buildKeymap(defaults: Bindings, overrides: Overrides, isMacPlatform: boolean): Keymap {
   const clean = (chords: readonly string[]): string[] => {
@@ -66,7 +92,7 @@ export function buildKeymap(defaults: Bindings, overrides: Overrides, isMacPlatf
   for (const [id, chords] of Object.entries(overrides)) overridden[id] = clean(chords)
 
   const byChord = new Map<string, string>()
-  for (const [id, chords] of Object.entries(overridden)) {
+  for (const [id, chords] of Object.entries(overridden).reverse()) {
     for (const c of chords) if (!byChord.has(c)) byChord.set(c, id)
   }
   for (const [id, chords] of Object.entries(bindings)) {
@@ -165,7 +191,10 @@ export function shortcutLabel(id: string): string {
  *  tool rail shows (⇧L for the Library, while the menus show ⇧⌘L). */
 export function railShortcutLabel(id: string): string {
   const chords = chordsFor(id)
-  const bare = chords.find((c) => !/(^|\+)(Ctrl|Alt|Meta)\+/.test(c)) ?? chords[0]
+  const bare = chords.find((c) => {
+    const parsed = parseChord(c, isMac)
+    return parsed !== null && !hasCommandModifier(parsed)
+  }) ?? chords[0]
   return bare === undefined ? '' : formatChordString(bare, isMac)
 }
 
@@ -179,31 +208,52 @@ export function boundCommandIds(): string[] {
   return Object.keys(currentKeymap().bindings)
 }
 
-/** Replaces a command's chords. Chords already bound elsewhere are taken
- *  from that command (the editor asks first). Matching the defaults again
+/** Replaces a command's chords. A chord bound to another command moves to
+ *  this one (the editor asks first): only this command's override is
+ *  stored, and `buildKeymap` takes the chord from its previous owner, so
+ *  resetting this command gives the chord back. Matching the defaults again
  *  clears the override. */
 export function setChords(id: string, chords: readonly string[]): void {
   const normalized = chords.map((c) => normalizeChord(c, isMac)).filter((c): c is string => c !== null)
-  const next: Record<string, readonly string[]> = { ...overridesSetting.get() }
-  for (const c of normalized) {
+  const current = overridesSetting.get()
+  const taken = (c: string): boolean => {
     const owner = commandForChord(c)
-    if (owner !== undefined && owner !== id) {
-      next[owner] = chordsFor(owner).filter((x) => x !== c)
+    return owner !== undefined && owner !== id
+  }
+  // The editor passes the effective chords, which omit any chord another
+  // command took from this one. Keep those in the stored list, so the chord
+  // comes back here when the taker lets go.
+  const base = Object.prototype.hasOwnProperty.call(current, id) ? current[id] : defaultChordsFor(id)
+  const lost = base.filter((c) => taken(c) && !normalized.includes(c))
+  const stored = [...normalized, ...lost]
+  // A steal goes last, so it wins the chord against the older overrides;
+  // any other edit goes first and loses every tie.
+  const steals = normalized.some(taken)
+  const rest = Object.entries(current).filter(([key]) => key !== id)
+  const next: Record<string, readonly string[]> = Object.fromEntries(
+    steals ? [...rest, [id, stored]] : [[id, stored], ...rest],
+  )
+  if (sameChords(stored, defaultChordsFor(id))) {
+    // Back on the defaults the override is dropped below, and defaults lose
+    // to every override: take these chords out of the others' overrides.
+    for (const key of Object.keys(next)) {
+      if (key !== id) next[key] = next[key].filter((c) => !stored.includes(c))
     }
   }
-  next[id] = normalized
   // An override identical to the defaults is no override: dropping it keeps
-  // the stored map minimal. (The defaults never conflict among themselves,
-  // and every other override was just stripped of these chords, so the
-  // effective keymap is unchanged by the drop.)
+  // the stored map minimal. Kept when another override still names one of
+  // its chords, since dropping it would hand that chord to the other.
   for (const key of Object.keys(next)) {
-    if (sameChords(next[key], defaultChordsFor(key))) delete next[key]
+    const mine = next[key]
+    if (!sameChords(mine, defaultChordsFor(key))) continue
+    const contested = Object.keys(next).some((other) => other !== key && next[other].some((c) => mine.includes(c)))
+    if (!contested) delete next[key]
   }
   overridesSetting.set(next)
 }
 
 /** Restores one command's default chords (and takes them back from any
- *  command they were reassigned to). */
+ *  command that took them). */
 export function resetChords(id: string): void {
   setChords(id, defaultChordsFor(id))
 }

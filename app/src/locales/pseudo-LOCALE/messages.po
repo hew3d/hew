@@ -69,7 +69,15 @@ msgid "{chordLabel} belongs to the tools and can’t be a shortcut."
 msgstr ""
 
 #: src/settings/ControlsPane.tsx
+msgid "{chordLabel} is reserved by macOS and can’t be a shortcut."
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
 msgid "{chordLabel} is used by {ownerLabel}."
+msgstr ""
+
+#: src/settings/ControlsPane.tsx
+msgid "{chordLabel} stays with {ownerLabel} on this Mac and can’t be a shortcut."
 msgstr ""
 
 #: src/App.tsx
@@ -7467,6 +7475,7 @@ msgstr ""
 msgid "Set geo-location"
 msgstr ""
 
+#: src/App.tsx
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/settings/FluentSettingsPage.tsx

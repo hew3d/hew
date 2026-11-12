@@ -43,6 +43,36 @@ describe('nativeAccelerators', () => {
   })
 })
 
+describe('a native command with no chord at all', () => {
+  it('is cleared too, not left with the key it carried before', () => {
+    // X-ray has no default; once its Cmd chord is removed it has no entry in
+    // the keymap, yet its menu item still carries the key it was given.
+    const bindings = macKeymap()
+    expect('toggle-xray' in bindings).toBe(false)
+    const a = nativeAccelerators(bindings, true)
+    expect(a['toggle-xray']).toBeNull()
+    expect(a['zoom-extents']).toBeNull()
+  })
+
+  it('stops the page ignoring a chord the menu no longer carries', async () => {
+    let bindings = macKeymap({ 'toggle-xray': ['Meta+E'] })
+    let listener: () => void = () => {}
+    startNativeMenuSync({
+      isMac: true,
+      defaults: macKeymap(),
+      current: () => bindings,
+      subscribe: (cb) => { listener = cb; return () => {} },
+      invoke: async (accelerators) => Object.keys(accelerators).filter((id) => accelerators[id] !== null),
+    })
+    await Promise.resolve(); await Promise.resolve()
+    expect(nativeChord('toggle-xray')).toBe('Meta+E')
+    bindings = macKeymap()
+    listener()
+    await Promise.resolve(); await Promise.resolve()
+    expect(nativeChord('toggle-xray')).toBeNull()
+  })
+})
+
 describe('startNativeMenuSync', () => {
   it('records which chords the menu took, so the page runs the rest', async () => {
     let bindings = macKeymap()

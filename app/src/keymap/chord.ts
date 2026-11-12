@@ -72,11 +72,7 @@ export function parseChord(text: string, isMac: boolean): Chord | null {
       case 'ctrl': case 'control': chord.ctrl = true; break
       case 'alt': case 'option': chord.alt = true; break
       case 'shift': chord.shift = true; break
-      case 'meta': case 'cmd': case 'command':
-        if (isMac) chord.meta = true
-        else chord.ctrl = true
-        break
-      case 'mod':
+      case 'meta': case 'cmd': case 'command': case 'mod':
         if (isMac) chord.meta = true
         else chord.ctrl = true
         break
@@ -121,7 +117,13 @@ export function chordFromEvent(
   } else if (/^[0-9]$/.test(ev.key)) {
     key = ev.key
   } else {
-    const digit = /^(?:Digit|Numpad)([0-9])$/.exec(ev.code ?? '')
+    // A named key (ArrowDown, End, PageDown, Clear...) is never a digit: with
+    // NumLock off the numpad reports code "Numpad2" for the Down arrow. A
+    // dead, unidentified or IME-processed key has no name of its own, so its
+    // physical digit key still stands in.
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- KeyboardEvent.key identifiers
+    const unnamed = ev.key === 'Dead' || ev.key === 'Unidentified' || ev.key === 'Process'
+    const digit = ev.key.length === 1 || unnamed ? /^(?:Digit|Numpad)([0-9])$/.exec(ev.code ?? '') : null
     if (digit !== null) {
       key = digit[1]
     } else {

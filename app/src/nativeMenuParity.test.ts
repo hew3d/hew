@@ -27,7 +27,8 @@ import { dockVerbsFor } from './panels/dockLogic'
 import { paletteEntries } from './palette/registry'
 import { NATIVE_MENU_LABELS } from './i18n/nativeMenu'
 import { PSEUDO_LOCALE, SHIPPED_LOCALES } from './i18n/locales'
-import { NATIVE_ALIASES, NATIVE_COMMANDS } from './keymap/nativeMenu'
+import { NATIVE_ALIASES, NATIVE_COMMANDS, JS_FIRST, PINNED_NATIVE_CHORDS } from './keymap/nativeMenu'
+import { chordToAccelerator, parseChord } from './keymap/chord'
 
 const MAIN_RS = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -584,6 +585,27 @@ describe('native menu ↔ keymap', () => {
 
   it('every native alias names a command the menu dispatches', () => {
     for (const nativeId of Object.values(NATIVE_ALIASES)) expect(arms).toContain(nativeId)
+  })
+
+  it('PINNED_NATIVE_CHORDS matches the fixed accelerators the shell builds for the JS_FIRST items', () => {
+    // The accelerator is the first string after the item's label, whether
+    // the item is built by gated_item, edit_item or accel(MenuItemBuilder…).
+    for (const id of JS_FIRST) {
+      const nativeId = /"([a-z-]+)" => "([a-z-]+)"/g
+      let native: string | undefined
+      for (const m of source.matchAll(nativeId)) if (m[2] === id) native = m[1]
+      expect(native, `no menu id dispatches ${id}`).toBeDefined()
+      const built = new RegExp(`lbl!\\("${native}"\\)\\)?,\\s*(?:Some\\()?"([^"]+)"`).exec(source)
+      const pinned = PINNED_NATIVE_CHORDS[id]
+      if (built === null) {
+        expect(pinned, `${id} has no fixed accelerator, so no pinned chord`).toBeUndefined()
+      } else {
+        expect(pinned, `${id} carries ${built[1]}`).toBeDefined()
+        const accel = chordToAccelerator(parseChord(pinned, true)!)
+        expect(accel).toBe(built[1])
+      }
+    }
+    for (const id of Object.keys(PINNED_NATIVE_CHORDS)) expect(JS_FIRST.has(id), id).toBe(true)
   })
 
   it('on_menu_event and set_menu_accelerators both go through menu_action_for', () => {

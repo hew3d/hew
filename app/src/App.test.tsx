@@ -3352,6 +3352,40 @@ describe('App — welcome screen', () => {
     const rectangleItem = menubar().getByText('Rectangle').closest('div')
     expect(rectangleItem?.textContent).not.toContain('✓')
   })
+
+  it('Select All does nothing while open (the native key equivalent runs before the page)', async () => {
+    setShowWelcome(true)
+    await renderAndLoad()
+    await screen.findByRole('dialog', { name: /welcome to hew/i })
+    const selectAll = vi.fn()
+    const calls = vi.mocked(Viewport).mock.calls
+    const { apiRef } = calls[calls.length - 1][0] as { apiRef?: { current: { selectAll: () => void } | null } }
+    act(() => {
+      if (apiRef !== undefined) apiRef.current = { selectAll }
+    })
+    fireEvent.click(menubar().getByRole('button', { name: /^edit$/i }))
+    fireEvent.mouseDown(menubar().getByText('Select All'))
+    expect(selectAll).not.toHaveBeenCalled()
+
+    // Once the welcome screen is gone the same command selects.
+    fireEvent.click(screen.getByRole('button', { name: /start modeling/i }))
+    fireEvent.click(menubar().getByRole('button', { name: /^edit$/i }))
+    fireEvent.mouseDown(menubar().getByText('Select All'))
+    expect(selectAll).toHaveBeenCalledOnce()
+  })
+})
+
+describe('App — web settings modal', () => {
+  it('is a labelled modal dialog, so the keymap\'s open-dialog guard covers it', async () => {
+    await renderAndLoad()
+    fireEvent.keyDown(document, { key: ',', code: 'Comma', ctrlKey: true })
+    const dialog = await screen.findByRole('dialog', { name: 'Settings' })
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
+    // A bare key (Space = Select tool) stays out of the commands behind it:
+    // the dispatcher would have claimed (preventDefault-ed) it otherwise.
+    const notClaimed = fireEvent.keyDown(within(dialog).getByRole('tab', { name: 'Controls' }), { key: ' ', code: 'Space' })
+    expect(notClaimed).toBe(true)
+  })
 })
 
 describe('App — document changes prune dead handles from the selection', () => {

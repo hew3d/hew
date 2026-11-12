@@ -8,7 +8,9 @@
  * "+" records a new chord: the next keystroke with a real key is taken, Esc
  * cancels. A chord another command already uses asks before moving it
  * across; Esc, Enter, Tab and the arrows are refused (the tools' own
- * gesture keys). A command whose keys differ from the defaults is marked and
+ * gesture keys), as are the macOS system chords (Cmd+Q, H, M) and, on the
+ * macOS desktop, the fixed native Edit chords (Cmd+Z, X, C, V, A and their
+ * Shift variants), which also cannot be removed from their own command. A command whose keys differ from the defaults is marked and
  * gets a Reset; Reset All restores every default.
  *
  * Changes apply at once and reach every window: the keymap persists through
@@ -33,7 +35,10 @@ import {
   chordsFor,
   commandForChord,
   isCustomized,
+  isMacSystemChord,
+  isPinnedTo,
   isReservedChord,
+  pinnedOwner,
   resetAllChords,
   resetChords,
   setChords,
@@ -121,7 +126,7 @@ function RowIcon({ entry }: { entry: PaletteEntry }) {
 type Capture =
   | { id: string; phase: 'listening' }
   | { id: string; phase: 'conflict'; chord: string; owner: string }
-  | { id: string; phase: 'refused'; chord: string }
+  | { id: string; phase: 'refused'; chord: string; reason: 'tools' | 'system' | 'pinned'; owner?: string }
 
 export function ControlsPane() {
   const { t, i18n } = useLingui()
@@ -144,19 +149,40 @@ export function ControlsPane() {
 
   // While listening, the next real keystroke is the new chord. Capture phase
   // on window, and stopped there, so no shortcut (the app's dispatcher in the
-  // web build's modal) and no tool ever sees it.
+  // web build's modal) and no tool ever sees it. While a conflict or refusal
+  // is being answered the keys stay out of the app as well (Space on the
+  // focused Reassign button must not reach the Select tool, nor Delete the
+  // selection behind the pane); they are left their default action, so
+  // Tab moves between the prompt's buttons and Space or Enter presses one.
   const captureRef = useRef(capture)
   captureRef.current = capture
+  const phase = capture?.phase
   useEffect(() => {
-    if (capture?.phase !== 'listening') return
+    if (phase === undefined) return
     const onKeyDown = (ev: KeyboardEvent) => {
       if (isComposingKey(ev)) return
+      const cur = captureRef.current
+      if (cur === null) return
+      // The search box keeps its typing in every phase.
+      const target = ev.target as HTMLElement | null
+      if (target !== null && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable === true)) return
+      const plainEscape =
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- KeyboardEvent.key identifier
+        ev.key === 'Escape' && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && !ev.metaKey
+      if (cur.phase !== 'listening') {
+        ev.stopImmediatePropagation()
+        const el = ev.target as HTMLElement | null
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- KeyboardEvent.key identifier
+        if (ev.key === 'Backspace' && el?.tagName !== 'INPUT' && el?.tagName !== 'TEXTAREA') ev.preventDefault()
+        if (plainEscape) {
+          ev.preventDefault()
+          setCapture(null)
+        }
+        return
+      }
       ev.preventDefault()
       ev.stopImmediatePropagation()
-      const cur = captureRef.current
-      if (cur === null || cur.phase !== 'listening') return
-      // oxlint-disable-next-line lingui/no-unlocalized-strings -- KeyboardEvent.key identifier
-      if (ev.key === 'Escape' && !ev.ctrlKey && !ev.altKey && !ev.shiftKey && !ev.metaKey) {
+      if (plainEscape) {
         setCapture(null)
         return
       }
@@ -164,7 +190,17 @@ export function ControlsPane() {
       if (chord === null) return // a modifier on its own: keep listening
       const text = chordToString(chord)
       if (isReservedChord(text)) {
-        setCapture({ id: cur.id, phase: 'refused', chord: text })
+        setCapture({ id: cur.id, phase: 'refused', chord: text, reason: 'tools' })
+        return
+      }
+      if (isMacSystemChord(text)) {
+        setCapture({ id: cur.id, phase: 'refused', chord: text, reason: 'system' })
+        return
+      }
+      // A fixed native menu accelerator (macOS desktop) stays with its item.
+      const pinned = pinnedOwner(text)
+      if (pinned !== undefined && pinned !== cur.id) {
+        setCapture({ id: cur.id, phase: 'refused', chord: text, reason: 'pinned', owner: pinned })
         return
       }
       const owner = commandForChord(text)
@@ -185,7 +221,7 @@ export function ControlsPane() {
       window.removeEventListener('keydown', onKeyDown, true)
       setRecordingChord(false)
     }
-  }, [capture?.phase])
+  }, [phase])
 
   const groups = [
     // oxlint-disable-next-line lingui/no-unlocalized-strings -- group ids
@@ -248,7 +284,13 @@ export function ControlsPane() {
                   key={entry.id}
                   entry={entry}
                   capture={capture?.id === entry.id ? capture : null}
-                  ownerLabel={capture?.id === entry.id && capture.phase === 'conflict' ? labelOf(capture.owner) : ''}
+                  ownerLabel={
+                    capture?.id === entry.id && capture.phase === 'conflict'
+                      ? labelOf(capture.owner)
+                      : capture?.id === entry.id && capture.phase === 'refused' && capture.owner !== undefined
+                        ? labelOf(capture.owner)
+                        : ''
+                  }
                   onListen={() => setCapture({ id: entry.id, phase: 'listening' })}
                   onCancel={() => setCapture(null)}
                 />
@@ -349,18 +391,23 @@ function ShortcutRow({
         <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {chords.map((c) => {
             const shown = formatChordString(c, isMac)
+            // The fixed native chord of this command (macOS desktop) cannot
+            // be removed: the menu item would keep firing it.
+            const pinned = isPinnedTo(entry.id, c)
             return (
               <span key={c} style={kbdStyle}>
                 {shown}
-                <button
-                  type="button"
-                  aria-label={t`Remove ${shown} from ${label}`}
-                  title={t`Remove`}
-                  onClick={() => setChords(entry.id, chords.filter((x) => x !== c))}
-                  style={{ ...iconButtonStyle, display: showControls ? 'inline' : 'none' }}
-                >
-                  ×
-                </button>
+                {!pinned && (
+                  <button
+                    type="button"
+                    aria-label={t`Remove ${shown} from ${label}`}
+                    title={t`Remove`}
+                    onClick={() => setChords(entry.id, chords.filter((x) => x !== c))}
+                    style={{ ...iconButtonStyle, display: showControls ? 'inline' : 'none' }}
+                  >
+                    ×
+                  </button>
+                )}
               </span>
             )
           })}
@@ -416,9 +463,19 @@ function ShortcutRow({
       {capture?.phase === 'refused' && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', paddingLeft: '27px', fontSize: '12px' }}>
           <span style={{ color: 'var(--text-secondary, #ddd)' }}>
-            <Trans>
-              {chordLabel} belongs to the tools and can’t be a shortcut.
-            </Trans>
+            {capture.reason === 'system' ? (
+              <Trans>
+                {chordLabel} is reserved by macOS and can’t be a shortcut.
+              </Trans>
+            ) : capture.reason === 'pinned' ? (
+              <Trans>
+                {chordLabel} stays with {ownerLabel} on this Mac and can’t be a shortcut.
+              </Trans>
+            ) : (
+              <Trans>
+                {chordLabel} belongs to the tools and can’t be a shortcut.
+              </Trans>
+            )}
           </span>
           <button type="button" autoFocus onClick={onListen} style={textButtonStyle}>
             <Trans>Try Another</Trans>

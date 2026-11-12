@@ -293,7 +293,7 @@ function ToolRow({
  * `ToolRow`, but keyed on `active`/`onSelect` directly rather than a
  * `ToolName` — the Library dialog is a viewport-level modal, not a
  * registry-driven tool, so it can't reuse `ToolRow`'s `TOOL_ICON_SVG` lookup
- * or `shortcutFor`. */
+ * or the registry's `actionId` shortcut. */
 function LibraryRow({ active, narrow, onSelect }: { active: boolean; narrow: boolean; onSelect: () => void }) {
   const { t } = useLingui()
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- command id
