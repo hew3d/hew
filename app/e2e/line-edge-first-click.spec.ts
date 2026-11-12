@@ -29,7 +29,9 @@ test('a first click on any top-edge point keeps the chain on the top face', asyn
     t.setAxesVisible(false)
     t.drawBox([0, 0, 0], [1, 1, 0], 0.5)
   })
-  await page.getByRole('button', { name: 'Iso', exact: true }).click()
+  await page.getByRole('button', { name: 'Camera' }).click()
+  await page.getByText('Standard Views', { exact: true }).hover()
+  await page.getByText('Iso', { exact: true }).first().click()
   await page.getByRole('button', { name: 'Camera' }).click()
   await page.getByText('Zoom Extents', { exact: true }).click()
   await page.evaluate(
