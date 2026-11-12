@@ -101,6 +101,10 @@ jobs:
       - name: Freshen kernel package mtimes
         run: find app/src/wasm/pkg -type f -exec touch {} +
       - name: Web gate
+        env:
+          # This lane builds against the unoptimized test kernel; see the
+          # precache ceiling in app/vite.config.ts.
+          HEW_UNOPTIMIZED_WASM: '1'
         run: scripts/verify.sh web
 
       - name: Upload built web app

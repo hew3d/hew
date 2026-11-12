@@ -1122,7 +1122,7 @@ export interface HewTestHarness {
    *  ('red' | 'green' | 'blue' | 'custom'), its hold ('inferred' | 'locked'
    *  | 'pinned' | 'anchored'), the plane's normal, and the hover kind (null
    *  off the canvas); null for a tool that draws on no plane. */
-  getDrawPlaneState(): { pip: string; hold: string; normal: Vec3; hover: string | null } | null
+  getDrawPlaneState(): { pip: string; hold: string; normal: Vec3; origin: Vec3; hover: string | null } | null
 
   /** Whether a click on the view die's `pip` would do anything right now
    *  (`ViewportApi.pipEnabled`), read live rather than off the widget. */
@@ -2429,7 +2429,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       if (api === null) throw new Error('__hew_test: viewport not ready')
       const state = api.getDrawPlaneState()
       if (state === null) return null
-      return { pip: state.pip, hold: state.hold, normal: [...state.plane.normal], hover: state.hover?.kind ?? null }
+      return { pip: state.pip, hold: state.hold, normal: [...state.plane.normal], origin: [...state.plane.origin], hover: state.hover?.kind ?? null }
     },
 
     pipEnabled: (pip) => {

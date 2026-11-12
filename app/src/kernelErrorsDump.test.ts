@@ -109,7 +109,9 @@ describe('refusal_copy.gen.rs', () => {
       committed,
       `crates/api/src/refusal_copy.gen.rs is out of date with app/src/kernelErrors.ts — regenerate with: ${REGEN_COMMAND}`,
     ).toBe(fresh)
-  })
+    // rustfmt shares the runner with the whole parallel suite, so a loaded CI
+    // box can take well past vitest's 5 s default.
+  }, 60_000)
 
   it('covers a large, plausible-sized inventory (guards against the scrape silently regressing)', () => {
     // Mirrors kernelErrors.test.ts's own floor on DERIVED_KERNEL_ERROR_CODES:
