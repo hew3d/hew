@@ -165,7 +165,9 @@ commit; nothing changes about how you write them. `site-live` is a pointer,
 never a branch anyone commits to: the release workflow moves it to each
 `vX.Y.Z` tag, and only forward, judged by the version in
 `site/src/data/releases.json`, so an out-of-order or re-run release never
-rewinds it. The job runs from the workflow file at the tagged commit, so a
+rewinds it. A `vX.Y.Z-pre.LABEL` pre-release tag (a build of an effort
+that has not shipped, cut from that effort's integration branch) builds
+every package but never moves it. The job runs from the workflow file at the tagged commit, so a
 patch tag cut from an older release branch moves the pointer only if that
 branch carries the job. With Pages' default preview setting, a push to `main`
 only produces a preview deployment at `https://main.<pages-project>.pages.dev`
