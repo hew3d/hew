@@ -1911,9 +1911,11 @@ fn same_region(a: &[Vec<Point3>], b: &[Vec<Point3>]) -> bool {
 ///    edge's curve kind and circle, and no new edge;
 /// 3. every part it lost lay on an old edge of D bounding no region of D,
 ///    lies along edges of regions in F, and lay in P;
-/// 4. every edge of a region in F lying along a loose old edge of a sketch
-///    in S is no longer held there (a take that copied and left the line
-///    is no take);
+/// 4. every part of an edge of a region in F that the gesture did not draw
+///    itself, lying along a loose old edge of a sketch in S, is no longer
+///    held there (a take that copied and left the line is no take; a side
+///    the gesture drew over another sketch's line is a deliberate copy,
+///    R24, R32);
 /// 5. missing: in S, held no faced region, and every old edge was lost as
 ///    (3) allows;
 ///
@@ -2120,7 +2122,7 @@ fn check_detached_take(
             lost
         );
     }
-    // ---- (4) the converse: a face's edge along a loose linked line left home ----
+    // ---- (4) the converse: a taken face edge along a loose linked line left home ----
     for (d, old) in before {
         if Some(*d) == target || !in_s.contains(d) {
             continue;
@@ -2135,7 +2137,17 @@ fn check_detached_take(
             if !is_loose {
                 continue;
             }
-            for &(a, b) in f_segs.iter().filter(|&&(a, b)| seg_along(a, b, c, e)) {
+            // Only the parts of a face edge the gesture did not draw itself:
+            // a drawn side laid over another sketch's line is a deliberate
+            // copy (detached sketches on one plane never arrange together,
+            // §16 R6; side-sharing shapes each keep their side, R24, R32),
+            // while a take moves the lines the draft gathered.
+            let materialized: Vec<Seg> = f_segs
+                .iter()
+                .filter(|&&(a, b)| seg_along(a, b, c, e))
+                .flat_map(|&(a, b)| gaps(a, b, &g.segs))
+                .collect();
+            for (a, b) in materialized {
                 // No positive-length part of a–b is still held by D.
                 let still: Vec<Seg> = now_segs
                     .iter()
