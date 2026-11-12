@@ -76,6 +76,14 @@ The last page lists what will happen; **Make Solid** does it as one step, so **E
 
 To work through objects one at a time instead, choose **Object ▸ Model Health…**. It opens a window over the view that lists every object that isn't solid, grouped the same way, with **Close**, **Add thickness…**, and **Keep as is** (which hides it from the list) on each one. Drag the window by its title to move it out of the way, or by its bottom-right corner to resize it; Hew opens it there next time. When it frames an object, the object lands in the part of the view the window doesn't cover. Object Info has the same buttons for the selected object. Pushing or pulling a flat panel with the [Push/Pull](/learn/push-pull/) tool also turns it into a solid. Scripts can do the same through the Hew API; see [the API guide](https://github.com/hew3d/hew/blob/main/docs/API_GUIDE.md).
 
+## Making drawn shapes solid
+
+Shapes you draw yourself become solids on their own when their faces close a space (see [Faces and solids from lines](/learn/drawing/#faces-and-solids-from-lines)). **Object ▸ Make Solid…** also works on drawing. Select the shapes (the faces of a half-built box, say) and choose it. Hew first fills any faces the selected lines can close, then looks for a space they enclose, and if it finds one, makes it a solid, all as one step called "Make Solid". If the shapes touch a solid's face and close against it, that solid grows. This is also the way to close drawing that was made before faces closed automatically, or a shape whose last edit wasn't drawing, such as a move.
+
+If the shapes don't close, nothing changes. Hew draws the gaps in the view instead: open edges in red, and loops of lines that don't lie on one plane in the warning color. The window says how many edges are open, for example "Not closed yet. 6 open edges are marked in red." Draw the missing faces or lines and run it again, or let the automatic rule do it when the last one lands. Three Rectangles meeting at a corner, a floor and two walls, show six open edges. When the open edges form a loop that doesn't lie flat, the window adds that a single face can't close them and suggests trying a line across the opening to split it into flat faces.
+
+Scripts can do the same with `hew.solid.from_faces`; see [the API guide](https://github.com/hew3d/hew/blob/main/docs/API_GUIDE.md).
+
 ## Exporting
 
 **File ▸ Export…** shows the system save dialog with a **Format** list in it; a format with options of its own (STL's curve resolution, SVG's view and scale) shows them under the list while it's the one chosen. The next export starts on the format you used last. In the browser, whose save dialog has no format list, Hew shows its own Export dialog first, with the same formats and options:

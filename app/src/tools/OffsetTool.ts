@@ -708,6 +708,7 @@ export class OffsetTool implements Tool {
         this.wasmScene.draft_offset_region(d, keyToId(target.regionKey), distance)
       })
       refreshAfterDraft(report, {
+        onToast: (m) => this.onToast(m),
         onObject: (o) => this.onFaceImprint(o),
         onSketch: () => this.onCommit(target),
       })

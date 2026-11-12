@@ -153,3 +153,48 @@ describe.each(TOOLS)('$name — Front view over a cube at (3, 2, 0) (real kernel
     scene.free()
   })
 })
+
+/** A 1 m cube at (3, 2, 0) and a free vertical Line 2 m tall standing in
+ *  front of it at (3.4, 1.5), drawn on the plane y = 1.5. From a high camera
+ *  the Line's top end, in the air at z = 2, lies on screen over the cube's
+ *  top face (z = 1). A drawn Line, not a solid post: a solid's corner is a
+ *  point of the solid's own faces, so the tool's boundary pick takes one of
+ *  those faces and none ever gives way. */
+function sceneWithCubeAndLine(): Scene {
+  const scene = sceneWithCube()
+  const sketch = scene.begin_sketch_on_plane(3.4, 1.5, 0, 0, -1, 0)
+  scene.sketch_begin_gesture(sketch)
+  scene.sketch_add_segment(sketch, 3.4, 1.5, 0, 3.4, 1.5, 2)
+  scene.sketch_end_gesture(sketch)
+  return scene
+}
+
+function highCamera(): THREE.PerspectiveCamera {
+  const cam = new THREE.PerspectiveCamera(FOV, W / H, 0.1, 1000)
+  cam.position.set(3.5, -1, 6)
+  cam.up.set(0, 0, 1)
+  cam.lookAt(3.5, 2.5, 0.5)
+  cam.updateMatrixWorld(true)
+  cam.updateProjectionMatrix()
+  return cam
+}
+
+// Ruling R1 against the real engine; the guards below say so loudly if the
+// fixture geometry is off.
+describe.each(TOOLS)('$name — a face gives way to a named point in front of it (real kernel)', ({ make }) => {
+  it("a hover on the cube's top face snapped to a Line's top end goes to plane mode", () => {
+    const scene = sceneWithCubeAndLine()
+    const tool = make(scene as unknown as WasmScene)
+    const svc = new SnapService(scene as unknown as WasmScene)
+    const cam = highCamera()
+    tool.updateCamera(cam)
+    const [cx, cy] = toPixel(cam, [3.4, 1.5, 2])
+    // Nudge toward the cube, inside the snap radius of the Line's end.
+    const ray = rayAtPixel(cam, cx + 2, cy + 2)
+    const snap = hoverAt(tool, svc, ray)
+    expect(snap).not.toBeNull()
+    expect(snap!.z).toBeCloseTo(2, 6)
+    expect(tool._currentMode(ray, snap)).toBe('plane')
+    scene.free()
+  })
+})

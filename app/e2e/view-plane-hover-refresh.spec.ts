@@ -3,14 +3,15 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 /**
- * The idle plane patch is hover (docs/design/view-plane-inference.md §5), so
+ * The idle plane cue is hover (docs/design/view-plane-inference.md §5), so
  * it follows the hover when no pointer move does:
  *
  * - The pointer leaving the canvas takes the patch and the "Facing" line
- *   with it; coming back brings them back.
+ *   with it; coming back brings them back. A held lock keeps its plane but
+ *   its patch goes too.
  * - A document change under a parked pointer (Delete, undo) re-resolves
- *   the hover there, so the patch shows what a click would now do instead
- *   of a sketch that is gone.
+ *   the hover there, so the tool's plane shows what a click would now do
+ *   instead of a sketch that is gone.
  *
  * Fixture `sketch-planes.hew` (see sketch-fill-adopt.spec.ts): three
  * sketches through the origin; the red one (normal +X, x = 0) is a
@@ -80,6 +81,15 @@ async function leaveCanvas(page: Page): Promise<void> {
 const cue = (page: Page) => page.evaluate(() => window.__hew_test!.getDrawPlaneCue())
 const facing = (page: Page) => page.getByText(/Facing the/).first()
 
+const planeState = (page: Page) => page.evaluate(() => window.__hew_test!.getDrawPlaneState())
+
+/** The tool's plane (its normal along `axis`) and what the pointer is over. */
+function expectPlane(s: { normal: V3; hover: string | null } | null, axis: number, hover: string | null): void {
+  expect(s).not.toBeNull()
+  expect(Math.abs(s!.normal[axis])).toBeCloseTo(1, 6)
+  expect(s!.hover).toBe(hover)
+}
+
 function expectNormalAlong(c: { normal: V3 } | null, axis: number): void {
   expect(c).not.toBeNull()
   expect(Math.abs(c!.normal[axis])).toBeCloseTo(1, 6)
@@ -107,28 +117,39 @@ test('leaving the canvas takes the inferred plane\'s patch and Facing line; comi
   await expect(facing(page)).toBeVisible()
 })
 
-test('leaving the canvas takes a hovered sketch\'s patch; an arrow lock\'s patch stays', async ({ page }) => {
+test('leaving the canvas clears the hover; an arrow lock keeps its plane but its patch goes with the pointer', async ({ page }) => {
   await setup(page, true)
   await aim(page, [3.5, 0.9, 2.0], [0, 0.935, 0.37])
   await page.keyboard.press('r')
   await page.waitForTimeout(100)
   const at = await toPage(page, RED_CENTER)
+  // Over a sketch the plane is the sketch's, and the cue is none: the die's
+  // pip and the chip name it instead of a patch.
   await hoverAt(page, at.x, at.y)
-  expectNormalAlong(await cue(page), 0)
+  expectPlane(await planeState(page), 0, 'sketch')
+  expect(await cue(page)).toBeNull()
   await leaveCanvas(page)
+  expect((await planeState(page))?.hover).toBeNull()
   expect(await cue(page)).toBeNull()
 
-  // A lock is a choice, not hover: it keeps its patch off the canvas.
+  // A lock is a choice, not hover: the plane stays locked off the canvas,
+  // and its held patch shows while the pointer is on it.
   await hoverAt(page, at.x, at.y)
   await page.keyboard.press('ArrowLeft') // green lock
   await hoverAt(page, at.x, at.y)
-  expectNormalAlong(await cue(page), 1)
+  const locked = await cue(page)
+  expectNormalAlong(locked, 1)
+  expect(locked!.held).toBe(true)
   await leaveCanvas(page)
-  expectNormalAlong(await cue(page), 1)
+  const away = await planeState(page)
+  expect(away?.hold).toBe('locked')
+  expect(Math.abs(away!.normal[1])).toBeCloseTo(1, 6)
+  expect(away?.hover).toBeNull()
+  expect(await cue(page)).toBeNull()
   await expect(page.getByText(/Locked to the green plane/).first()).toBeVisible()
 })
 
-test('Delete and undo under a parked pointer re-resolve the patch to what a click would now do', async ({ page }) => {
+test('Delete and undo under a parked pointer re-resolve the hover to what a click would now do', async ({ page }) => {
   await setup(page, true)
   // From the +X side, about 25° up: over empty space the ground decides
   // (no patch).
@@ -145,23 +166,24 @@ test('Delete and undo under a parked pointer re-resolve the patch to what a clic
   // Parked inside the red rectangle: its plane.
   const at = await toPage(page, RED_CENTER)
   await hoverAt(page, at.x, at.y)
-  expectNormalAlong(await cue(page), 0)
+  expectPlane(await planeState(page), 0, 'sketch')
 
   // Delete it (from the Rectangle tool) with the pointer still: the ray
   // now reaches the empty ground, so a click would draw on the ground.
   await page.keyboard.press('Delete')
   await page.waitForTimeout(100)
   expect(await page.evaluate((id) => window.__hew_test!.getSketchIds().includes(id), red)).toBe(false)
+  expect((await planeState(page))?.hover).not.toBe('sketch')
   expect(await cue(page)).toBeNull()
   await expect(facing(page)).toHaveCount(0)
 
-  // Undo brings the sketch back under the same parked pointer: its patch too.
+  // Undo brings the sketch back under the same parked pointer: its plane too.
   await page.keyboard.press('ControlOrMeta+z')
   await page.waitForTimeout(100)
   expect(await page.evaluate(() => window.__hew_test!.getSketchIds().length)).toBe(3)
-  expectNormalAlong(await cue(page), 0)
+  expectPlane(await planeState(page), 0, 'sketch')
 
-  // And the click there lands in the red sketch, as the patch said.
+  // And the click there lands in the red sketch, as the plane said.
   await page.mouse.down()
   await page.mouse.up()
   await page.waitForTimeout(80)

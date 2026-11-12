@@ -266,6 +266,21 @@ pub(crate) fn point_on_region(
 
 /// True if `p` lies within `tol` of the closed segment `[a, b]`.
 pub(crate) fn point_near_segment(p: Point3, a: Point3, b: Point3, tol: f64) -> bool {
+    // A point farther than `tol` from the segment's bounding box is farther
+    // than `tol` from the segment. The box is grown by twice `tol`, so a
+    // nearest point that rounding puts a hair outside the box never turns
+    // an answer: this only skips the arithmetic below for far points, which
+    // the scans over every edge of a large plane are made of.
+    let m = 2.0 * tol;
+    if p.x < a.x.min(b.x) - m
+        || p.x > a.x.max(b.x) + m
+        || p.y < a.y.min(b.y) - m
+        || p.y > a.y.max(b.y) + m
+        || p.z < a.z.min(b.z) - m
+        || p.z > a.z.max(b.z) + m
+    {
+        return false;
+    }
     let ab = b - a;
     let len_sq = ab.length_squared();
     let t = if len_sq <= tol * tol {

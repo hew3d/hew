@@ -171,7 +171,7 @@ describe('plain words on screen', () => {
   })
 
   it('the overview and Done page reached with Use recommended choices, per scope', async () => {
-    for (const scope of ['import', 'selection', 'model'] as const) {
+    for (const scope of ['import', 'selection', 'export', 'model'] as const) {
       const props = { onClose: vi.fn(), onIsolate: vi.fn(), onClearIsolation: vi.fn(), onHealthOverlay: vi.fn(), onGeometryChanged: vi.fn() }
       const { container, unmount } = render(<MakeSolidWizard scene={makeScene()} scope={scope} objectIds={[1n]} {...props} />)
       noBanned(container)

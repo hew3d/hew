@@ -76,7 +76,7 @@ import {
   unitsAtSegments,
   type PlaneEdge,
 } from './planeUnits'
-import { runDraft } from './draftCommit'
+import { runDraft, noteSketchTransformReport, resetSketchTransformReports, type DraftReport } from './draftCommit'
 import { applyAffine3x4, invertAffine3x4 } from '../viewport/geoHelpers'
 import { t } from '@lingui/core/macro'
 
@@ -432,9 +432,10 @@ function redrawCaptured(
   affines: readonly Float64Array[],
   label: string,
 ): void {
-  runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, label, (d) => {
+  const { report } = runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, label, (d) => {
     for (const affine of affines) drawCaptured(wasmScene, d, g.ctx, cap, affine)
   })
+  noteSketchTransformReport(report)
 }
 
 /** The free islands a pure-void group detaches, per store sketch, found by
@@ -565,6 +566,23 @@ export function commitSelectionTransform(
   activeInstance?: bigint | null,
   label = t({ context: 'tool', message: 'Move' }),
 ): NodeRef[] {
+  try {
+    return commitSelectionTransformInner(wasmScene, selection, affineF64, activeInstance, label)
+  } catch (err) {
+    // A failed commit rolled back: its held reports name nothing that exists.
+    resetSketchTransformReports()
+    throw err
+  }
+}
+
+function commitSelectionTransformInner(
+  wasmScene: WasmScene,
+  selection: readonly NodeRef[],
+  affineF64: Float64Array,
+  activeInstance: bigint | null | undefined,
+  label: string,
+): NodeRef[] {
+  resetSketchTransformReports()
   const committed: NodeRef[] = [...selection]
   const groups = planDraftTransforms(wasmScene, selection)
   // Classify and validate EVERY group before anything lands: in-plane groups
@@ -634,9 +652,10 @@ export function commitSelectionTransform(
         })
       }
       for (const g of pureDrafts) {
-        runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, label, (d) => {
+        const { report } = runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, label, (d) => {
           wasmScene.draft_transform_edges(d, keysToArray(g.edges.map((e) => e.key)), affineF64)
         })
+        noteSketchTransformReport(report)
       }
       // (b) The owners (and detaching shapes) transform.
       if (activeInstance != null) {
@@ -653,7 +672,9 @@ export function commitSelectionTransform(
         if (ids.length > 0 || sketches.length > 0 || islands.length > 0) defMove(ids, sketches, islands)
       } else {
         for (const group of islands) {
-          wasmScene.transform_sketch_islands(group.sketch, new BigUint64Array(group.islands), affineF64)
+          noteSketchTransformReport(
+            wasmScene.transform_sketch_islands(group.sketch, new BigUint64Array(group.islands), affineF64),
+          )
         }
         if (kinds.length > 0 || sketches.length > 0) {
           wasmScene.transform_selection(
@@ -679,7 +700,9 @@ export function commitSelectionTransform(
         }
       } else {
         for (const group of post.islands) {
-          wasmScene.transform_sketch_islands(group.sketch, new BigUint64Array(group.islands), affineF64)
+          noteSketchTransformReport(
+            wasmScene.transform_sketch_islands(group.sketch, new BigUint64Array(group.islands), affineF64),
+          )
         }
         if (post.sketches.length > 0) {
           wasmScene.transform_selection(new Uint8Array(0), new BigUint64Array(0), new BigUint64Array(post.sketches), affineF64)
@@ -778,6 +801,22 @@ export function copyOwnersAndDrawing(
   affines: readonly Float64Array[],
   copyOwners: () => NodeRef[],
 ): NodeRef[] {
+  try {
+    return copyOwnersAndDrawingInner(wasmScene, owners, drawn, affines, copyOwners)
+  } catch (err) {
+    resetSketchTransformReports() // the failed copy rolled back
+    throw err
+  }
+}
+
+function copyOwnersAndDrawingInner(
+  wasmScene: WasmScene,
+  owners: readonly NodeRef[],
+  drawn: readonly NodeRef[],
+  affines: readonly Float64Array[],
+  copyOwners: () => NodeRef[],
+): NodeRef[] {
+  resetSketchTransformReports()
   if (drawn.length === 0) return owners.length > 0 ? copyOwners() : []
   if (owners.length === 0) return duplicateSketchSelectionByAffineArray(wasmScene, drawn, affines)
   return inHistoryBracket(wasmScene, t`Copy`, () => {
@@ -786,6 +825,13 @@ export function copyOwnersAndDrawing(
     const ownerCopies = copyOwners()
     return [...whole, ...copyMixedDrawing(wasmScene, plan, affines), ...ownerCopies]
   })
+}
+
+/** The new sketch a `copy_sketch_islands` report names (its `sketches[0]`). */
+function copiedSketchOf(report: DraftReport): bigint {
+  const copy = report.sketches[0]
+  if (copy === undefined) throw new Error('StaleReference: the copy made no sketch; nothing was changed')
+  return copy
 }
 
 /** What a copy of a selection's drawing does, decided before anything lands. */
@@ -849,7 +895,9 @@ function copyDetachedShapes(wasmScene: WasmScene, g: DraftGroup, affines: readon
   }
   const out: NodeRef[] = []
   for (const affine of affines) {
-    const copy = wasmScene.copy_sketch_islands(sketch, new BigUint64Array(islands), affine)
+    const copy = copiedSketchOf(
+      noteSketchTransformReport(wasmScene.copy_sketch_islands(sketch, new BigUint64Array(islands), affine)),
+    )
     const ctx = ctxOfSketchOnly(copy)
     for (const u of readPlaneUnits(wasmScene, ctx)?.units ?? []) out.push(draftRef('draft-island', ctx, u.key))
   }
@@ -878,9 +926,10 @@ function copyWholeDrawing(wasmScene: WasmScene, plan: CopyPlan, affines: readonl
     // each, re-finding the originals by geometry between reps.
     const original = g.edges.map((e) => e.key)
     try {
-      runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, t`Copy`, (d) => {
+      const { report } = runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, t`Copy`, (d) => {
         for (const affine of affines) wasmScene.draft_copy_edges(d, keysToArray(original), affine)
       })
+      noteSketchTransformReport(report)
       for (const affine of affines) addRefs(affine)
       continue
     } catch (err) {
@@ -892,9 +941,10 @@ function copyWholeDrawing(wasmScene: WasmScene, plan: CopyPlan, affines: readonl
       const anchors = g.edges.map((e) => [e.a, e.b] as [V3, V3])
       const keys = unitsAtSegments(pu, anchors).flatMap((u) => u.edges.map((e) => e.key))
       if (keys.length === 0) continue
-      runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, t`Copy`, (d) => {
+      const { report } = runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, t`Copy`, (d) => {
         wasmScene.draft_copy_edges(d, keysToArray(keys), affine)
       })
+      noteSketchTransformReport(report)
       addRefs(affine)
     }
   }
@@ -1130,6 +1180,20 @@ export function duplicateSketchSelectionByAffineArray(
   selection: readonly NodeRef[],
   affines: readonly Float64Array[],
 ): NodeRef[] {
+  try {
+    return duplicateSketchSelectionByAffineArrayInner(wasmScene, selection, affines)
+  } catch (err) {
+    resetSketchTransformReports() // the failed copy rolled back
+    throw err
+  }
+}
+
+function duplicateSketchSelectionByAffineArrayInner(
+  wasmScene: WasmScene,
+  selection: readonly NodeRef[],
+  affines: readonly Float64Array[],
+): NodeRef[] {
+  resetSketchTransformReports()
   const plan = planCopy(wasmScene, selection, affines)
   const sketchPart = plan.wholeSketchSources.length > 0 || plan.detachIslands.length > 0
   const steps =
@@ -1417,10 +1481,10 @@ function duplicateWholeSketchesByAffineArray(
   for (const [sketch, islandIds] of copyBySketch) {
     if (islandIds.length === 0) continue
     for (const affineF64 of affines) {
-      const copySketch = wasmScene.copy_sketch_islands(
-        sketch,
-        new BigUint64Array(islandIds),
-        affineF64,
+      const copySketch = copiedSketchOf(
+        noteSketchTransformReport(
+          wasmScene.copy_sketch_islands(sketch, new BigUint64Array(islandIds), affineF64),
+        ),
       )
       for (const copyIsland of wasmScene.sketch_island_ids(copySketch)) {
         const ref = draftRefOfSketchIsland(wasmScene, copySketch, copyIsland)

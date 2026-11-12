@@ -12,9 +12,9 @@ import { test, expect, type Page } from '@playwright/test'
  * the drawing-axes origin) is the inferred plane. Real pointer, wheel and
  * key events throughout; the patch is read from the cue layer as drawn.
  *
- * The last test hovers a cube's faces instead: the patch shows the plane
- * the next click would land on whenever it is not the ground (§5), so a
- * hovered face shows its own plane before any key.
+ * The last test hovers a cube's faces instead: a hovered face draws no
+ * patch (the plane is named by the die's pip), but the tool's
+ * plane state already holds the face's own plane before any key.
  */
 
 declare global {
@@ -202,13 +202,17 @@ test('hovering a face shows its plane before the click: a cube\'s front face, th
   await page.evaluate(() => window.__hew_test!.drawBox([-0.5, 0.5, 0], [0.5, 1.5, 0], 1))
   await frames(page)
 
-  // Front view: the front face's middle.
+  // Front view: the front face's middle. A hovered face is named by the
+  // tool's plane (the die's pip and the chip), not drawn as a patch.
+  const state = () => page.evaluate(() => window.__hew_test!.getDrawPlaneState())
   const front = await pageAt(page, canvas, [0.1, 0.5, 0.45])
   await hover(page, front.x, front.y)
-  let cue = await page.evaluate(() => window.__hew_test!.getDrawPlaneCue())
-  expect(cue).not.toBeNull()
-  expect(Math.abs(cue!.normal[1])).toBeCloseTo(1, 6)
-  expect(cue!.through[1]).toBeCloseTo(0.5, 4)
+  let st = await state()
+  expect(st).not.toBeNull()
+  expect(st!.hover).toBe('face')
+  expect(Math.abs(st!.normal[1])).toBeCloseTo(1, 6)
+  expect(st!.origin[1]).toBeCloseTo(0.5, 4)
+  expect(await page.evaluate(() => window.__hew_test!.getDrawPlaneCue())).toBeNull()
   await expect(page.getByText(/Facing/)).toHaveCount(0)
 
   // From above at three-quarters: the top face at z = 1.
@@ -218,9 +222,10 @@ test('hovering a face shows its plane before the click: a cube\'s front face, th
   await page.waitForTimeout(400) // past the camera-settle replay
   const top = await pageAt(page, canvas, [0.1, 1.05, 1])
   await hover(page, top.x, top.y)
-  cue = await page.evaluate(() => window.__hew_test!.getDrawPlaneCue())
-  expect(cue).not.toBeNull()
-  expect(Math.abs(cue!.normal[2])).toBeCloseTo(1, 6)
-  expect(cue!.through[2]).toBeCloseTo(1, 4)
+  st = await state()
+  expect(st).not.toBeNull()
+  expect(st!.hover).toBe('face')
+  expect(Math.abs(st!.normal[2])).toBeCloseTo(1, 6)
+  expect(st!.origin[2]).toBeCloseTo(1, 4)
   expect(await page.evaluate(() => window.__hew_test!.getLastError())).toBeNull()
 })

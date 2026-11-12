@@ -646,7 +646,9 @@ describe('App — Make Solid entry points', () => {
       fireEvent.click(within(warning).getByRole('button', { name: 'Make Solid…' }))
       expect(await screen.findByRole('dialog', { name: 'Make Solid' })).toBeInTheDocument()
       expect(screen.queryByRole('dialog', { name: /export stl warning/i })).not.toBeInTheDocument()
-      expect(screen.getByRole('heading', { name: 'Make the selection solid' })).toBeInTheDocument()
+      // KB-6: the objects were never selected, so the window must not say so.
+      expect(screen.getByRole('heading', { name: 'Make these objects solid' })).toBeInTheDocument()
+      expect(screen.queryByText(/you selected/)).not.toBeInTheDocument()
       expect(report).toHaveBeenLastCalledWith(BigUint64Array.from([4n, 5n]))
     } finally {
       mockScene.object_ids = defaults.ids

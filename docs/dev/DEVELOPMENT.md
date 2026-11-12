@@ -165,7 +165,9 @@ commit; nothing changes about how you write them. `site-live` is a pointer,
 never a branch anyone commits to: the release workflow moves it to each
 `vX.Y.Z` tag, and only forward, judged by the version in
 `site/src/data/releases.json`, so an out-of-order or re-run release never
-rewinds it. The job runs from the workflow file at the tagged commit, so a
+rewinds it. A `vX.Y.Z-pre.LABEL` pre-release tag (a build of an effort
+that has not shipped, cut from that effort's integration branch) builds
+every package but never moves it. The job runs from the workflow file at the tagged commit, so a
 patch tag cut from an older release branch moves the pointer only if that
 branch carries the job. With Pages' default preview setting, a push to `main`
 only produces a preview deployment at `https://main.<pages-project>.pages.dev`
@@ -187,7 +189,7 @@ tag's history: if the release is cut from a release branch rather than
 **The beta web app** (beta.hew3d.com) is a second Cloudflare Pages project,
 `hew-app-beta`, separate from the release app at app.hew3d.com. The
 `deploy-beta` job in `.github/workflows/ci.yml` deploys it on every push to
-`main`, once the gate jobs (`verify`, `relay-contract`, `bug-intake-tests`)
+`main`, once the gate jobs (`rust`, `web`, `tauri`, `replay`, `e2e-chromium`, `e2e-visual`, `relay-contract`, `bug-intake-tests`)
 are green. Builds that deploy there set `HEW_BETA_SHA`, which stamps the
 version as `<version>+beta.<sha>` and switches on the in-app beta cues and
 the "Hew Beta" PWA name. Releases, local builds, E2E builds and the

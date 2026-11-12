@@ -48,6 +48,7 @@ import {
   UNDO_LABEL,
   WIZARD,
   distinctLabels,
+  scopeIsPicked,
   type KindKey,
   type WizardScope,
 } from '../health/healthCopy'
@@ -60,7 +61,7 @@ interface Props {
   scene: WasmScene
   /** Where the wizard was opened from: the last import, the selection, or the model. */
   scope: WizardScope
-  /** The object ids a `'selection'` scope covers (ignored by the other scopes). */
+  /** The object ids a `'selection'` scope covers (`'export'` too; ignored by the other scopes). */
   objectIds?: readonly bigint[]
   /** The document revision: the plan is read again whenever it changes. */
   docRev?: number
@@ -112,7 +113,7 @@ export const LIST_CHUNK = 200
 
 // ------------------------------------------------------------------- styles
 
-const WINDOW_STYLE: React.CSSProperties = {
+export const WINDOW_STYLE: React.CSSProperties = {
   position: 'absolute',
   top: 0,
   right: 0,
@@ -128,7 +129,7 @@ const WINDOW_STYLE: React.CSSProperties = {
   boxSizing: 'border-box',
 }
 
-const HANDLE_STYLE: React.CSSProperties = {
+export const HANDLE_STYLE: React.CSSProperties = {
   position: 'absolute',
   left: -3,
   top: 0,
@@ -138,14 +139,14 @@ const HANDLE_STYLE: React.CSSProperties = {
   touchAction: 'none',
 }
 
-const HEADER_STYLE: React.CSSProperties = {
+export const HEADER_STYLE: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: '8px',
   padding: '14px 16px 8px 20px',
 }
 
-const BODY_STYLE: React.CSSProperties = {
+export const BODY_STYLE: React.CSSProperties = {
   flex: '1 1 auto',
   overflowY: 'auto',
   padding: '4px 20px 12px',
@@ -153,7 +154,7 @@ const BODY_STYLE: React.CSSProperties = {
   lineHeight: 1.5,
 }
 
-const FOOTER_STYLE: React.CSSProperties = {
+export const FOOTER_STYLE: React.CSSProperties = {
   display: 'flex',
   justifyContent: 'flex-end',
   gap: '8px',
@@ -161,7 +162,7 @@ const FOOTER_STYLE: React.CSSProperties = {
   borderTop: '1px solid var(--border-strong)',
 }
 
-const BUTTON_STYLE: React.CSSProperties = {
+export const BUTTON_STYLE: React.CSSProperties = {
   padding: '6px 18px',
   background: 'transparent',
   color: 'var(--text-secondary)',
@@ -172,14 +173,14 @@ const BUTTON_STYLE: React.CSSProperties = {
   cursor: 'pointer',
 }
 
-const PRIMARY_STYLE: React.CSSProperties = {
+export const PRIMARY_STYLE: React.CSSProperties = {
   ...BUTTON_STYLE,
   background: 'var(--accent-base)',
   color: '#fff',
   border: 'none',
 }
 
-const LINK_STYLE: React.CSSProperties = {
+export const LINK_STYLE: React.CSSProperties = {
   background: 'none',
   border: 'none',
   padding: 0,
@@ -204,7 +205,7 @@ const TEXT_INPUT_STYLE: React.CSSProperties = {
 
 // ---------------------------------------------------------------- helpers
 
-function isTextField(el: EventTarget | null): boolean {
+export function isTextField(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false
   return el.tagName === 'TEXTAREA' || el.isContentEditable || (el.tagName === 'INPUT' && !['radio', 'checkbox', 'button'].includes((el as HTMLInputElement).type))
 }
@@ -250,7 +251,7 @@ interface Outcome {
 export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGeneration = 0, onClose, onWidthChange, onIsolate, onClearIsolation, onHealthOverlay, onGeometryChanged, onToast, isolationLost = 0, escapeBusy }: Props) {
   const { t } = useLingui()
   const readScopeIds = (): bigint[] | null =>
-    scope === 'import' ? Array.from(scene.last_import_object_ids()) : scope === 'selection' ? [...(objectIds ?? [])] : null
+    scope === 'import' ? Array.from(scene.last_import_object_ids()) : scopeIsPicked(scope) ? [...(objectIds ?? [])] : null
   const readPlan = (): FixPlan => buildPlan(readHealthReportFresh(scene, readScopeIds()))
   // The plan is what the person reviews and what Make Solid applies. It is
   // read again when the document changes (the window is non-modal) and right
@@ -666,13 +667,13 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
         return (
           <>
             <p>{WIZARD.openingsBody}</p>
-            {(scope === 'selection'
+            {(scopeIsPicked(scope)
               ? ['close', 'leave']
               : ['leave', 'close']
             ).map((v) =>
               v === 'close'
-                ? radio('wz-openings', WIZARD.openingsClose, choices.openings === 'close', () => setPageChoice('openings', 'close'), scope === 'selection')
-                : radio('wz-openings', WIZARD.openingsLeave, choices.openings === 'leave', () => setPageChoice('openings', 'leave'), scope !== 'selection'),
+                ? radio('wz-openings', WIZARD.openingsClose, choices.openings === 'close', () => setPageChoice('openings', 'close'), scopeIsPicked(scope))
+                : radio('wz-openings', WIZARD.openingsLeave, choices.openings === 'leave', () => setPageChoice('openings', 'leave'), !scopeIsPicked(scope)),
             )}
           </>
         )

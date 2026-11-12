@@ -238,7 +238,46 @@ export async function startCapture({ out, headless = true, units = 'Centimeters'
       if (holdMs) await page.waitForTimeout(holdMs);
     },
     async showMark() { await page.evaluate(() => window.__cap.showMark()); },
-    async iso() { await page.getByRole('button', { name: 'Iso', exact: true }).click(); await page.waitForTimeout(900); },
+    // Camera > Standard Views > Iso: the one view the die cannot reach in
+    // a way that re-frames the model (a die corner only turns the camera).
+    async iso() {
+      await page.getByTestId('menu-bar').getByRole('button', { name: 'Camera' }).click();
+      await page.getByText('Standard Views', { exact: true }).click();
+      await page.getByText('Iso', { exact: true }).last().click();
+      await page.waitForTimeout(900);
+    },
+    // Glide to a face of the view die (top|bottom|front|back|left|right)
+    // and click it. A face the camera cannot see (edge-on, or on the far
+    // side) is not drawn on the die, so click the front-right-top corner
+    // facet first (always in view from a face view) and then the face.
+    async dieFace(name, ms = 380) {
+      // already looking straight at it: the die would flip to the far side
+      if (await page.getByTestId('view-die').getAttribute('data-view') === name) return;
+      const loc = page.locator(`[data-testid="view-die-svg"] [data-face="${name}"] polygon`).first();
+      let b = await loc.boundingBox().catch(() => null);
+      if (!(b && b.width > 10 && b.height > 10)) {
+        await h.dieFacet('1,-1,1', ms);
+        b = await loc.boundingBox();
+      }
+      await h.glide(b.x + b.width / 2, b.y + b.height / 2, ms);
+      await h.click();
+      await page.waitForTimeout(900);
+    },
+    // Glide to a corner facet of the die ('1,-1,1' = front-right-top) and
+    // click it: turns to that corner view, keeping zoom and target.
+    async dieFacet(corner, ms = 380) {
+      const loc = page.locator(`[data-testid="view-die-svg"] [data-facet="${corner}"] polygon`).first();
+      const b = await loc.boundingBox();
+      await h.glide(b.x + b.width / 2, b.y + b.height / 2, ms);
+      await h.click();
+      await page.waitForTimeout(900);
+    },
+    // Glide to one of the die's pips (red|green|blue|custom) and click it.
+    async diePip(name, ms = 380) {
+      const b = await page.getByTestId(`view-die-pip-${name}`).boundingBox();
+      await h.glide(b.x + b.width / 2, b.y + b.height / 2, ms);
+      await h.click();
+    },
     // glide the visible cursor to a tool-rail entry and click it (rail
     // entries are role=radio, and the on-camera cursor travel reads well)
     async clickRail(label) {

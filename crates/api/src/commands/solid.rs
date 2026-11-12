@@ -62,6 +62,7 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.solid.rotate_imprint" => rotate_imprint,
         "hew.solid.scale_imprint" => scale_imprint,
         "hew.solid.delete_imprint" => delete_imprint,
+        "hew.solid.from_faces" => from_faces,
         _ => return None,
     })
 }
@@ -371,6 +372,153 @@ pub(super) fn slice(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         "positive": public_id_of(ctx, EntityRef::Object(positive)),
         "negative": public_id_of(ctx, EntityRef::Object(negative)),
     }))
+}
+
+/// How many open edges a `faces_not_closed` / `loop_not_planar` refusal
+/// samples in its detail.
+const OPEN_EDGE_SAMPLES: usize = 8;
+
+/// `hew.solid.from_faces { sketches }` — Make Solid from drawn faces
+/// (wireframe faces §6, §16 R26/R27): it first fills the faces the named
+/// free sketches' lines can close (the close pass, as a draw runs it), then
+/// runs the cells search seeded by every faced region of those sketches and
+/// of the faces so filled ([`kernel::Document::make_solid_from_sketches`]),
+/// one undo step; when no solid forms, nothing is kept. The first solid it makes answers `{object_id, grew}`
+/// (`grew`: the shape closed against a solid and that solid grew; its new
+/// id is `object_id`). Nothing made refuses, the document untouched:
+/// `loop_not_planar` when a gap's rim is a closed loop off one plane,
+/// else `faces_not_closed` with the open-edge count and up to eight sample
+/// segments, else `faces_not_solid` (the faces close but build no solid:
+/// `detail.reason` says why; for `overlapping_faces`, `detail.segments`
+/// samples the edges two faces lie over each other along). Faces with the
+/// same loop on one plane are one face (§16 R22), not an overlap.
+pub(super) fn from_faces(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        sketches: Vec<String>,
+    }
+    let p: P = parse_params(params)?;
+    if p.sketches.is_empty() {
+        return Err(CmdError::Params("sketches needs at least one id".into()));
+    }
+    let resolver = ctx.resolver();
+    let mut ids = Vec::with_capacity(p.sketches.len());
+    for public in &p.sketches {
+        match resolver.resolve(public) {
+            Some(EntityRef::Sketch(s)) if ctx.doc.sketch(s).is_some() => ids.push(s),
+            _ => return Err(unknown_entity(public)),
+        }
+    }
+    let (outcomes, _change) = ctx
+        .doc
+        .make_solid_from_sketches(&ids)
+        .map_err(|e| match e {
+            DocumentError::UnknownSketch => unknown_entity(&p.sketches.join(", ")),
+            other => CmdError::from(other),
+        })?;
+    if let Some(solid) = super::solid_of(ctx, &outcomes) {
+        return Ok(solid);
+    }
+    // Nothing was made: say what is missing.
+    let missing = ctx.doc.faces_open_edges(&ids);
+    let samples: Vec<Value> = missing
+        .open_edges
+        .iter()
+        .take(OPEN_EDGE_SAMPLES)
+        .map(|&(a, b)| json!([point_json(a), point_json(b)]))
+        .collect();
+    let n = missing.count();
+    // Faces lying over each other elsewhere in the same faces (§16 R22):
+    // named beside the open edges or loops, so the caller learns of them
+    // before those are drawn (`reason` and `overlapping_segments`, added to
+    // the detail only when there are any).
+    let overlap = |mut detail: Value| -> Value {
+        if !missing.overlapping_edges.is_empty() {
+            detail["reason"] = json!("overlapping_faces");
+            detail["overlapping_segments"] = Value::Array(
+                missing
+                    .overlapping_edges
+                    .iter()
+                    .take(OPEN_EDGE_SAMPLES)
+                    .map(|&(a, b)| json!([point_json(a), point_json(b)]))
+                    .collect(),
+            );
+        }
+        detail
+    };
+    if !missing.non_planar_loops.is_empty() {
+        let loops: Vec<Value> = missing
+            .non_planar_loops
+            .iter()
+            .map(|l| Value::Array(l.iter().map(|&q| point_json(q)).collect()))
+            .collect();
+        return Err(CmdError::Refusal(
+            Refusal::api(
+                "loop_not_planar",
+                "The faces leave a gap whose edges do not lie on one plane, so no face can fill it. Draw a line across the gap so each part is flat, then try again.",
+            )
+            .with_detail(overlap(json!({
+                "loops": loops,
+                "open_edges": n,
+                "segments": samples,
+            }))),
+        ));
+    }
+    let reason = outcomes.iter().find_map(|c| match c {
+        kernel::CellOutcome::Declined(d) => match d.reason {
+            kernel::CellDeclineReason::NotClosed => None,
+            kernel::CellDeclineReason::OverlappingFaces => Some("overlapping_faces"),
+            kernel::CellDeclineReason::InsideSolid(_) => Some("inside_solid"),
+            kernel::CellDeclineReason::SelfTouching => Some("self_touching"),
+            kernel::CellDeclineReason::Invalid(_) => Some("invalid"),
+        },
+        _ => None,
+    });
+    match reason {
+        Some(reason) if n == 0 => {
+            // Where faces lie over each other (§16 R22): up to eight
+            // sample edges, as `faces_not_closed` gives its open edges.
+            let mut detail = json!({ "reason": reason });
+            if reason == "overlapping_faces" {
+                detail["segments"] = Value::Array(
+                    missing
+                        .overlapping_edges
+                        .iter()
+                        .take(OPEN_EDGE_SAMPLES)
+                        .map(|&(a, b)| json!([point_json(a), point_json(b)]))
+                        .collect(),
+                );
+            }
+            Err(CmdError::Refusal(
+                Refusal::api(
+                    "faces_not_solid",
+                    match reason {
+                        "overlapping_faces" => "Two faces lie on top of each other along the edges in detail.segments, so they enclose no single space. Erase one of them, then try again.",
+                        "inside_solid" => "The closed shape lies inside the solid it was drawn against, so nothing is made from it.",
+                        "self_touching" => "The faces enclose a space that touches itself across one face, so it builds no solid.",
+                        _ => "The faces close, but they build no valid solid.",
+                    },
+                )
+                .with_detail(detail),
+            ))
+        }
+        _ => Err(CmdError::Refusal(
+            Refusal::api(
+                "faces_not_closed",
+                &if n == 0 {
+                    "These sketches hold no faces that enclose a space. Draw closed shapes that meet edge to edge, then try again.".to_string()
+                } else {
+                    format!(
+                        "Not closed yet: {n} open edge{} remain{}. Draw the missing faces or lines, then try again.",
+                        if n == 1 { "" } else { "s" },
+                        if n == 1 { "s" } else { "" }
+                    )
+                },
+            )
+            .with_detail(overlap(json!({ "open_edges": n, "segments": samples }))),
+        )),
+    }
 }
 
 /// Follow Me has no definition-scoped kernel path yet (`follow_me_face`

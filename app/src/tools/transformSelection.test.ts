@@ -24,6 +24,7 @@ import {
   buildSelectionPreview,
 } from './transformSelection'
 import { isSessionGhost } from './transformPreview'
+import { setDraftSolidSelector, surfaceSketchTransformReports } from './draftCommit'
 import { affineToFloat64, applyAffineToPoint, rotateAboutPivotAxis, translationAffine } from './transformMath'
 import { ctxGround, ctxOfPlane, ctxOfSketchOnly, draftRef } from './planeUnits'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -295,6 +296,7 @@ function makeScene(opts: FakeOpts = {}) {
     transform_sketch_islands: vi.fn((...args: unknown[]) => {
       calls.push({ name: 'transform_sketch_islands', args })
       opts.onTransformIslands?.()
+      return '{"objects":[],"sketches":[],"kept_as_sketch":[],"faces_closed":[],"cells":[]}'
     }),
     scene_undo: vi.fn(() => ({ free: () => undefined })),
     transform_selection: vi.fn((...args: unknown[]) => {
@@ -542,6 +544,33 @@ describe('commitSelectionTransform', () => {
     })
     const after = commitSelectionTransform(scene, [di(40n), di(50n, CTX_UP)], AFFINE)
     expect(after).toEqual([di(40n)])
+  })
+
+  it('surfaces a move that closed faces and formed a solid: one toast, the solid selected (R20)', () => {
+    const listing: Record<string, FakeUnit[]> = {
+      [CTX]: [chain(40n, [7n]), chain(41n, [8n], [0, 5, 0])],
+    }
+    const { scene, raw } = makeScene({
+      listing,
+      islands: { '3': [40n, 41n] },
+      onTransformIslands: () => {
+        listing[CTX] = [chain(41n, [8n], [0, 5, 0])]
+        listing[CTX_UP] = [chain(60n, [70n], [0, 0, 1])]
+      },
+    })
+    raw.transform_sketch_islands.mockImplementation(() => {
+      listing[CTX] = [chain(41n, [8n], [0, 5, 0])]
+      listing[CTX_UP] = [chain(60n, [70n], [0, 0, 1])]
+      return JSON.stringify({ objects: [], sketches: [3], kept_as_sketch: [], faces_closed: [3], cells: [{ grew: { from: 1, to: 9 } }] })
+    })
+    const selected: bigint[] = []
+    setDraftSolidSelector((o) => selected.push(o))
+    commitSelectionTransform(scene, [di(40n)], AFFINE_UP)
+    const toasts: string[] = []
+    surfaceSketchTransformReports((m) => toasts.push(m))
+    setDraftSolidSelector(null)
+    expect(toasts).toEqual(['The closed shape joined the solid it was drawn on.'])
+    expect(selected).toEqual([9n])
   })
 
   it('an out-of-plane move of a shape drawn entirely over the void DETACHES it and re-points at the moved unit', () => {
@@ -1134,7 +1163,7 @@ function makeReplayScene(opts: { failAfterAdds?: number; failDraftCopyAt?: numbe
       copyIslands.set(copySketch, copyIslandIds)
       undoStack.push({ sketch: copySketch, before }) // hide-the-copy undo
       generation += 1n
-      return copySketch
+      return JSON.stringify({ objects: [], sketches: [Number(copySketch)], kept_as_sketch: [], faces_closed: [], cells: [] })
     }),
   }
   return {
@@ -1266,7 +1295,7 @@ describe('duplicateSketchSelection', () => {
       s: bigint,
       islands: BigUint64Array,
       affine: Float64Array,
-    ) => bigint
+    ) => string
     let calls = 0
     raw.copy_sketch_islands.mockImplementation((s: bigint, islands: BigUint64Array, a: Float64Array) => {
       calls += 1
@@ -1510,7 +1539,7 @@ describe('duplicateSketchSelectionByAffine — data-driven plane routing', () =>
         const b = applyAffineToPoint(affine, [1, 0, 0])
         copied.set(nextEdge++, [...a, ...b])
         gen += 1n
-        return 900n
+        return '{"objects":[],"sketches":[900],"kept_as_sketch":[],"faces_closed":[],"cells":[]}'
       }),
       draft_begin_ctx: vi.fn((_ctx: string, _label: string) => 1n),
       draft_copy_edges: vi.fn((_d: bigint, keys: BigUint64Array, affine: Float64Array) => {
@@ -2274,7 +2303,7 @@ describe('detached shapes', () => {
     const extra = {
       sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
       sketch_unit_keys: vi.fn(() => JSON.stringify({ edges: [], islands: [[40, hex(40n)], [41, hex(41n)]], curves: [], regions: [] })),
-      copy_sketch_islands: vi.fn(() => 6n),
+      copy_sketch_islands: vi.fn(() => '{"objects":[],"sketches":[6],"kept_as_sketch":[],"faces_closed":[],"cells":[]}'),
     }
     Object.assign(m.raw, extra)
     return { ...m, extra }
@@ -2323,5 +2352,67 @@ describe('detached shapes', () => {
     raw.plane_units_json.mockImplementation(() => listingJson([disk(40n, [7n, 8n])]))
     duplicateSketchSelectionByAffineArray(scene, [di(40n, SCTX)], [AFFINE, AFFINE_UP, AFFINE])
     expect(extra.copy_sketch_islands).toHaveBeenCalledTimes(3)
+  })
+
+  // Wireframe faces R20: a copy that closes a solid reports like a draw.
+  it('surfaces a copy that formed a solid: one toast, the solid selected', () => {
+    const { scene, extra } = sepScene()
+    ;(scene as unknown as { plane_units_json: unknown }).plane_units_json = vi.fn(() => listingJson([disk(40n, [7n, 8n])]))
+    extra.copy_sketch_islands.mockImplementation(() =>
+      JSON.stringify({ objects: [], sketches: [6], kept_as_sketch: [], faces_closed: [6], cells: [{ created: 77 }] }),
+    )
+    const selected: bigint[] = []
+    setDraftSolidSelector((o) => selected.push(o))
+    duplicateSketchSelectionByAffineArray(scene, [di(40n, SCTX)], [AFFINE_UP])
+    const toasts: string[] = []
+    surfaceSketchTransformReports((m) => toasts.push(m))
+    setDraftSolidSelector(null)
+    expect(toasts).toEqual(['The closed shape is now a solid.'])
+    expect(selected).toEqual([77n])
+  })
+
+  it('a copy that fails after a solid formed leaves no held report behind', () => {
+    const { scene, extra } = sepScene()
+    ;(scene as unknown as { plane_units_json: unknown }).plane_units_json = vi.fn(() => listingJson([disk(40n, [7n, 8n])]))
+    extra.copy_sketch_islands
+      .mockImplementationOnce(() =>
+        JSON.stringify({ objects: [], sketches: [6], kept_as_sketch: [], faces_closed: [6], cells: [{ created: 77 }] }),
+      )
+      .mockImplementationOnce(() => {
+        throw new Error('StaleReference: the second copy failed')
+      })
+    const selected: bigint[] = []
+    setDraftSolidSelector((o) => selected.push(o))
+    expect(() => duplicateSketchSelectionByAffineArray(scene, [di(40n, SCTX)], [AFFINE_UP, AFFINE_UP])).toThrow()
+    const toasts: string[] = []
+    surfaceSketchTransformReports((m) => toasts.push(m))
+    setDraftSolidSelector(null)
+    expect(toasts).toEqual([])
+    expect(selected).toEqual([])
+  })
+
+  it('a move that fails after a solid formed leaves no held report behind', () => {
+    const listing: Record<string, FakeUnit[]> = {
+      [CTX]: [chain(40n, [7n]), chain(41n, [8n], [0, 5, 0])],
+    }
+    const { scene, raw } = makeScene({ listing, islands: { '3': [40n, 41n] } })
+    raw.transform_sketch_islands.mockImplementation(() =>
+      JSON.stringify({ objects: [], sketches: [3], kept_as_sketch: [], faces_closed: [3], cells: [{ created: 9 }] }),
+    )
+    ;(raw as unknown as { transform_selection: () => void }).transform_selection = () => {
+      throw new Error('StaleReference: the move failed')
+    }
+    const selected: bigint[] = []
+    setDraftSolidSelector((o) => selected.push(o))
+    try {
+      commitSelectionTransform(scene, [di(40n), { kind: 'object', id: 9n }], AFFINE_UP)
+    } catch {
+      /* the failure is the point */
+    }
+    const toasts: string[] = []
+    surfaceSketchTransformReports((m) => toasts.push(m))
+    setDraftSolidSelector(null)
+    expect(toasts).toEqual([])
+    expect(selected).toEqual([])
   })
 })

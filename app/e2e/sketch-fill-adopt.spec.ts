@@ -96,7 +96,13 @@ function along(list: Awaited<ReturnType<typeof sketches>>, axis: number) {
   return s
 }
 
-const cue = (page: Page) => page.evaluate(() => window.__hew_test!.getDrawPlaneCue())
+/** The plane the tool would draw on at the pointer (the die's pips, ring and
+ *  chip all read this): its unit normal, or null when no draw tool is armed. */
+const cue = (page: Page) =>
+  page.evaluate(() => {
+    const s = window.__hew_test!.getDrawPlaneState()
+    return s === null ? null : { normal: s.normal }
+  })
 
 function expectNormalAlong(c: { normal: V3 } | null, axis: number): void {
   expect(c).not.toBeNull()
@@ -109,7 +115,7 @@ const hint = (page: Page, re: RegExp) => page.getByText(re).first()
 const GREEN_CENTER: V3 = [-0.5335, 0, 0.3108]
 const GREEN_TOP_EDGE: V3 = [-0.5, 0, 0.4838]
 const RED_CENTER: V3 = [0, 0.935, 0.371]
-const GROUND_CENTER: V3 = [0.47, 0.476, 0]
+const GROUND_FILL: V3 = [0.4, 0.4, 0]
 
 test('a hover inside a sketch fill adopts its plane: the patch, the Shift pin and the click all land on the sketch', async ({ page }) => {
   await setup(page)
@@ -127,6 +133,12 @@ test('a hover inside a sketch fill adopts its plane: the patch, the Shift pin an
   await hover(page, GREEN_TOP_EDGE)
   expectNormalAlong(await cue(page), 1)
   await expect(hint(page, /Facing/)).toHaveCount(0)
+  // Resting on the edge's named point (a dwell) put it in the reference ring,
+  // and its blue vertical line passes within the snap radius of the fill's
+  // centre: by design (wireframe-faces-and-solids.md §3.2 source 3, §3.3) that
+  // From Point snap replaces the weak On Face one in the chip. Esc from idle
+  // clears the ring (§3.2), so the chip reports the adopted face again.
+  await page.keyboard.press('Escape')
   // Inside it: the fill adopts the same plane, patch up before any key.
   await hover(page, GREEN_CENTER)
   expectNormalAlong(await cue(page), 1)
@@ -151,6 +163,7 @@ test('a hover inside a sketch fill adopts its plane: the patch, the Shift pin an
 
   // (2) From the +X side, inside the red rectangle.
   await aim(page, [3.5, 0.9, 2.0], [0, 0.935, 0.37])
+  await page.keyboard.press('Escape') // clear the dwell ring (§3.2), as above
   await hover(page, RED_CENTER)
   expectNormalAlong(await cue(page), 0)
   expect(await chip(page)).toContain('On Face')
@@ -169,14 +182,19 @@ test('a hover inside a sketch fill adopts its plane: the patch, the Shift pin an
   await page.keyboard.press('Escape') // close the retype window
 
   // (3) A low camera (about 14°) facing the green plane.
-  await aim(page, [0.47, -6, 1.6], [0.47, 0.476, 0])
+  // Close in (the same angle at half the distance). A named point under the
+  // cursor (a corner or midpoint of the ground shape) starts the plane the
+  // view faces THROUGH it by design (R18), so the fill is hovered where
+  // none is near.
+  await aim(page, [0.47, -3, 0.8], [0.47, 0.476, 0])
   // Empty ground beside the ground rectangle: the green plane the view faces.
   await hover(page, [1.3, 0.476, 0])
   expectNormalAlong(await cue(page), 1)
   await expect(hint(page, /Facing the green plane/)).toBeVisible()
-  // Inside the ground rectangle: the ground, no patch, no Facing line.
-  await hover(page, GROUND_CENTER)
-  expect(await cue(page)).toBeNull()
+  // Inside the ground rectangle, on its fill and clear of its edges and
+  // their named points: the ground (blue, normal along Z), no Facing line.
+  await hover(page, GROUND_FILL)
+  expectNormalAlong(await cue(page), 2)
   await expect(hint(page, /Facing/)).toHaveCount(0)
 
   await page.keyboard.press('Shift')

@@ -31,6 +31,10 @@
 #              docs describe the release people can download rather than
 #              whatever main says today (see docs/dev/DEVELOPMENT.md §2)
 #
+# A `vX.Y.Z-pre.LABEL` tag is a pre-release of an effort that has not
+# shipped: it builds every package, but deploys the web app to the effort's
+# own preview branch, skips :latest, and never moves `site-live`.
+#
 # Releases stay DRAFTS. Publishing is a deliberate human act after smoke
 # installs.
 #
@@ -76,8 +80,8 @@ jobs:
       - name: Parse and guard the tag
         id: version
         run: |
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Tag '$TAG' is not vMAJOR.MINOR.PATCH — refusing to release."
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-pre\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))?$ ]]; then
+            echo "::error::Tag '$TAG' is not vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-pre.LABEL (a number or a name such as plugin-m1) — refusing to release."
             exit 1
           fi
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
@@ -523,8 +527,31 @@ jobs:
             exit 0
           fi
           cp shells/web/_headers shells/web/dist/_headers
+          # A pre-release tag must never replace production. Each effort
+          # that cuts pre-releases deploys to its own Pages branch, which
+          # Pages serves at its own URL and which a custom domain can be
+          # pointed at. Separate hosts keep the efforts' browser storage
+          # apart, since their document formats differ. A pre-release tag
+          # of an unknown effort deploys nowhere.
+          case "$TAG" in
+            *-pre.plugin-*) branch=preview-plugins ;;
+            *-pre.curves-*) branch=preview-curves ;;
+            *-pre.*)
+              echo "::warning::No preview branch is mapped for $TAG; skipping the web deploy."
+              exit 0
+              ;;
+            *) branch=main ;;
+          esac
           npx wrangler@4 pages deploy shells/web/dist \
-            --project-name=hew-app --branch=main --commit-dirty=true
+            --project-name=hew-app --branch="$branch" --commit-dirty=true
+          if [ "$branch" != main ]; then
+            {
+              echo "### Pre-release web preview"
+              echo
+              echo "Deployed to the Pages \`$branch\` branch, not production:"
+              echo "https://$branch.hew3d.com (custom domain), also https://$branch.hew-app.pages.dev"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # The self-hostable relay: a static musl binary per Linux architecture,
   # each built NATIVELY (the arm64 leg on the arm64 runner, as the desktop
@@ -637,12 +664,16 @@ jobs:
           IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/hew-relay"
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker buildx create --use --name hew-relay-builder
+          # A pre-release gets only its own version tag, never :latest.
+          TAG_ARGS=(--tag "$IMAGE:$VERSION")
+          if [[ "$TAG" != *-pre.* ]]; then
+            TAG_ARGS+=(--tag "$IMAGE:latest")
+          fi
           # COPY-only Dockerfile: both platforms build without emulation.
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --file crates/hew-relay/Dockerfile \
-            --tag "$IMAGE:$VERSION" \
-            --tag "$IMAGE:latest" \
+            "${TAG_ARGS[@]}" \
             --push \
             .
 
@@ -759,6 +790,24 @@ jobs:
           # Capture the body first: `gh | grep -q` under pipefail can report
           # SIGPIPE as failure on an early match, reading "table present" as
           # "table absent" — exactly the clobber this guard exists to stop.
+          # The publisher reminder goes out first so it also appears on a
+          # re-run that finds the table already written.
+          if [[ "$TAG" == *-pre.* ]]; then
+            LEAD="_Pre-release: not for general use._"
+            {
+              echo "### Publish as a pre-release"
+              echo
+              echo "Tick **Set as a pre-release** when publishing \`$TAG\`."
+              echo "Leaving it unticked marks this build as the latest release,"
+              echo "which the updater and the package channels would pick up."
+              echo
+              echo "Cut pre-release tags from the effort's integration branch;"
+              echo "\`main\` is for real releases only."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            LEAD="_Draft: replace this line with release highlights before publishing._"
+          fi
+
           body="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq '.body')"
           if grep -q '## Downloads' <<<"$body"; then
             echo "::notice::Body already carries a download table — leaving it untouched."
@@ -795,7 +844,7 @@ jobs:
           fi
 
           cat > body.md <<EOF
-          _Draft: replace this line with release highlights before publishing._
+          $LEAD
 
           ## Downloads
 
@@ -864,8 +913,12 @@ jobs:
   # tags whose runs finish out of order, cannot rewind it; and a re-run of
   # this tag's own run leaves alone any hotfix cherry-picked onto the branch
   # since. The lease makes the push atomic against another run's move.
+  #
+  # Pre-release tags (vX.Y.Z-pre.LABEL) never move it: they are builds of
+  # work that has not shipped, and the site must only describe a release.
   site-live:
     needs: [create-release, web]
+    if: ${{ !contains(github.ref_name, '-pre.') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

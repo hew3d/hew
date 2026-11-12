@@ -308,6 +308,8 @@ export interface IneligibleFacePlane {
   point: V3
   normal: V3
   depth: number
+  /** The face that gave the plane, for the cursor cue's outline. */
+  face?: HoverFaceRef
 }
 
 /** The world plane of the face under `ray` when it was hit but is NOT
@@ -330,7 +332,13 @@ export function ineligibleFacePlane(
     if (cache.faceThrough(wasmScene, ray, isEligible, null, [p]) !== null) return null
     const through = cache.faceThrough(wasmScene, ray, isEligible, null, [p], true)
     if (through !== null) {
-      return { point: through.point, normal: through.normal, depth: Math.hypot(p[0] - ray.origin[0], p[1] - ray.origin[1], p[2] - ray.origin[2]) }
+      const detail = cache.throughDetail(through)
+      return {
+        point: through.point,
+        normal: through.normal,
+        depth: Math.hypot(p[0] - ray.origin[0], p[1] - ray.origin[1], p[2] - ray.origin[2]),
+        face: { object: through.object, face: through.face, instance: detail?.instance ?? null, boundary: true, offObject: detail?.offObject ?? false },
+      }
     }
   }
   if (cache.pickFor(wasmScene, ray, isEligible) !== null) return null
@@ -338,7 +346,12 @@ export function ineligibleFacePlane(
   if (raw === null) return null
   const plane = worldFacePlane(wasmScene, raw.object, raw.face, raw.instance ?? null)
   if (plane === null) return null
-  return { point: plane.point, normal: plane.normal, depth: raw.depth }
+  return {
+    point: plane.point,
+    normal: plane.normal,
+    depth: raw.depth,
+    face: { object: raw.object, face: raw.face, instance: raw.instance ?? null, boundary: false, offObject: false },
+  }
 }
 
 /** Angular nudge of the boundary probes in `FacePickCache.faceThrough`
@@ -456,6 +469,31 @@ export interface FaceThroughPick extends EligibleFacePick {
   normal: V3
 }
 
+/** What `FacePickCache.throughDetail` adds to a `faceThrough` answer: the
+ *  instance the chosen face's plane was mapped through (the active instance
+ *  for an eligible face, the struck instance for an ineligible one; null for
+ *  world geometry), and whether the plain cursor ray missed the chosen
+ *  face's object, so the cursor sits off the solid and the face's plane is
+ *  extended past it (view-plane design §4.2 rule 1, the view-die design's
+ *  "extended lean"). */
+export interface FaceThroughDetail {
+  instance: bigint | null
+  offObject: boolean
+}
+
+/** Which face decided a draw tool's idle plane, for the cursor cue
+ *  (view-die design §4): its handles, the instance its geometry is posed
+ *  through (null for world geometry), whether a boundary snap leaned onto
+ *  it (`faceThrough`) rather than the plain ray striking it, and, for a
+ *  lean, whether the cursor sits off the object. */
+export interface HoverFaceRef {
+  object: bigint
+  face: bigint
+  instance: bigint | null
+  boundary: boolean
+  offObject: boolean
+}
+
 /**
  * Memoizes the single `pick_face` raycast for the CURRENT pointer event.
  * Keyed by reference equality on the `Ray` passed in (the Viewport builds one
@@ -466,6 +504,8 @@ export interface FaceThroughPick extends EligibleFacePick {
 export class FacePickCache {
   private cache: { ray: Ray; gen: number; raw: RawFacePick | null; eligible: EligibleFacePick | null } | null = null
   private throughCache: { ray: Ray; gen: number; key: string; pick: FaceThroughPick | null } | null = null
+  /** `throughDetail`'s answers, keyed by the pick `faceThrough` returned. */
+  private readonly details = new WeakMap<FaceThroughPick, FaceThroughDetail>()
   /**
    * The hover memory of the view-plane design §4.2 rule 2 ("came from"):
    * the face the cursor was over on the most recent pointer event that was
@@ -589,20 +629,24 @@ export class FacePickCache {
     }
     const rejected = new Set<string>()
     const indexOf = new Map<string, number>()
-    const candidates: { pick: FaceThroughPick; facing: number }[] = []
+    const candidates: { pick: FaceThroughPick; facing: number; instance: bigint | null; struckThrough: bigint | undefined }[] = []
+    /** The plain cursor ray's own pick, for `throughDetail`'s `offObject`. */
+    const cursor: { raw: RawFacePick | null } = { raw: null }
     /** Candidate index each ring probe struck (undefined: no candidate). */
     const ringHit: (number | undefined)[] = []
     let cursorHit: number | undefined
     const dirLen = Math.hypot(ray.direction[0], ray.direction[1], ray.direction[2])
     const consider = (raw: RawFacePick | null, probe: number | 'cursor') => {
+      if (probe === 'cursor') cursor.raw ??= raw
       if (raw === null) return
       const id = faceId(raw)
       if (rejected.has(id)) return
       let index = indexOf.get(id)
       if (index === undefined) {
+        const posedThrough = ineligible ? (raw.instance ?? null) : activeInstance
         const plane = isEligible(raw.object, raw.instance) === ineligible
           ? null
-          : worldFacePlane(wasmScene, raw.object, raw.face, ineligible ? (raw.instance ?? null) : activeInstance)
+          : worldFacePlane(wasmScene, raw.object, raw.face, posedThrough)
         if (plane === null || through.some((p) => Math.abs(distanceOffPlane(p, plane.point, plane.normal)) > FACE_PLANE_EPS_M)) {
           rejected.add(id)
           return
@@ -612,7 +656,7 @@ export class FacePickCache {
           : -(plane.normal[0] * ray.direction[0] + plane.normal[1] * ray.direction[1] + plane.normal[2] * ray.direction[2]) / dirLen
         index = candidates.length
         indexOf.set(id, index)
-        candidates.push({ pick: { object: raw.object, face: raw.face, point: plane.point, normal: plane.normal }, facing })
+        candidates.push({ pick: { object: raw.object, face: raw.face, point: plane.point, normal: plane.normal }, facing, instance: posedThrough, struckThrough: raw.instance })
       }
       if (probe === 'cursor') cursorHit ??= index
       else ringHit[probe] ??= index
@@ -654,11 +698,25 @@ export class FacePickCache {
       restart(ray.direction, 'cursor')
       ring.forEach((d, k) => restart(d, k))
     }
-    const pick = candidates.length === 0
+    const chosen = candidates.length === 0
       ? null
-      : candidates[this.chooseCandidate(candidates, frame, ray, nudge, cursorHit, ringHit, indexOf)].pick
+      : candidates[this.chooseCandidate(candidates, frame, ray, nudge, cursorHit, ringHit, indexOf)]
+    const pick = chosen === null ? null : chosen.pick
+    if (chosen !== null) {
+      // Off the object: the cursor ray struck nothing, or another object
+      // (another copy of the same component counts as another object).
+      const struck = cursor.raw
+      const offObject = struck === null || struck.object !== chosen.pick.object || struck.instance !== chosen.struckThrough
+      this.details.set(chosen.pick, { instance: chosen.instance, offObject })
+    }
     this.throughCache = { ray, gen: pickPolicyGeneration(), key, pick }
     return pick
+  }
+
+  /** The instance and off-object verdict (`FaceThroughDetail`) for a pick
+   *  `faceThrough` returned, or null for one it did not. */
+  throughDetail(pick: FaceThroughPick): FaceThroughDetail | null {
+    return this.details.get(pick) ?? null
   }
 
   /** `faceThrough`'s rules 1-3 over a non-empty candidate list; returns the

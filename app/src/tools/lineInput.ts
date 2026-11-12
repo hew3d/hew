@@ -133,6 +133,10 @@ const FROM_POINT_DEGENERATE_EPS = 1e-9
  *  point the real lines never meet at. */
 const FROM_POINT_PLANE_EPS = 1e-9
 
+function sub(a: V3, b: V3): V3 {
+  return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
 /**
  * The from-point closing-inference candidate (LineTool's module doc —
  * SketchUp's classic "draw three sides of a square, the fourth snaps
@@ -207,11 +211,13 @@ export function fromPointCandidate(
     if (s <= epsilon) return null // must close FORWARD from segStart
     resultUv = [sUv[0] + s * uUv[0], sUv[1] + s * uUv[1]]
   } else {
-    const cUv = toUv(cursor)
-    const wx = cUv[0] - pUv[0]
-    const wy = cUv[1] - pUv[1]
-    const t = (wx * dUv[0] + wy * dUv[1]) / (dUv[0] * dUv[0] + dUv[1] * dUv[1])
-    resultUv = [pUv[0] + t * dUv[0], pUv[1] + t * dUv[1]]
+    // The foot of the perpendicular, built as `p + t * axisDir` in 3-D (the
+    // guards above put `p` and `axisDir` in the plane, so this is the same
+    // point the 2-D solve names): a coordinate the line holds constant
+    // comes back as `p`'s own bits, which a snap that must equal an
+    // existing corner exactly depends on.
+    const t = dotV3(sub(cursor, p), axisDir) / dotV3(axisDir, axisDir)
+    return [p[0] + t * axisDir[0], p[1] + t * axisDir[1], p[2] + t * axisDir[2]]
   }
 
   return [

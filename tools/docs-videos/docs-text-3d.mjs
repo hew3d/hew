@@ -91,6 +91,11 @@ h.mark('placed');
   }
 }
 await shot(5);
+// The Text tool stays armed after a placement (status bar still reads
+// "Text", and a ghost copy follows the cursor, even over the dock). Space
+// returns to Select so Explode and the later Push/Pull start clean.
+await page.keyboard.press('Space');
+await page.waitForTimeout(400);
 
 // beat 4 — explode reveals the real, separate watertight solids underneath
 // (docs/text-3d.md's "Booleans with text" section: this is the same
@@ -102,28 +107,30 @@ await shot(6);
 await h.caption('Explode reveals it: separate, watertight solids, one per letter.');
 await clickButton('Explode');
 h.mark('exploded');
-await h.expectBadge('3 objects', 'exploded');
+// Badge reads 6, not 3: the 3 exploded letters plus the 3 solids still held
+// by the now-unused "3D Text" definition (purged only via Purge Unused).
+await h.expectBadge('6 objects', 'exploded');
 await page.waitForTimeout(1300);
 await shot(7);
 
 // beat 5 — push/pull a letter face, exactly like any other solid. Top view
 // first: straight down on the letters' top faces is a huge, unambiguous
-// click target (the iso angle forshortens them into thin, edge-crowded
+// click target (the iso angle foreshortens them into thin, edge-crowded
 // strips where a click reliably lands on a neighboring edge instead of the
 // face — verified by probing every candidate point in each view).
 await h.caption('Push/Pull still works on any face — the same geometry as anything else you model.');
-await page.getByRole('button', { name: 'Top', exact: true }).click();
+await h.dieFace('top');
 await page.waitForTimeout(500);
 await page.keyboard.press('p');
 await page.waitForTimeout(250);
 await shot('pp-armed');
-await h.glide(522, 550, 350);
+await h.glide(990, 520, 350);
 await h.click();
-await h.glide(522, 530, 400);
+await h.glide(990, 495, 400);
 await h.typeSlow('4');
 await page.keyboard.press('Enter');
 h.mark('pushed');
-await h.expectBadge('3 objects', 'pushed');
+await h.expectBadge('6 objects', 'pushed');
 await page.waitForTimeout(600);
 await shot(8);
 

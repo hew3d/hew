@@ -17,6 +17,8 @@ import { draftMock } from './draftMock'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import type { DrawPlaneState } from './drawPlane'
+import { planeCueFor } from '../viewport/DrawPlaneCueLayer'
 
 type V3 = [number, number, number]
 
@@ -42,7 +44,7 @@ interface Under {
   onPointerDown(snap: Snap | null, ray: Ray): void
   onKey(ev: KeyboardEvent): void
   setShiftHeld(held: boolean): void
-  activeDrawPlaneCue(): { plane: { normal: V3 }; through: V3 } | null
+  drawPlaneState(): DrawPlaneState
   statusHint(): string
   snapConstraint(ray: Ray): { constraintPlane?: { point: V3; normal: V3 }; fallbackPlane?: { point: V3; normal: V3 } } | null
 }
@@ -123,7 +125,8 @@ describe.each(MAKERS)('$name — view-plane inference', ({ make, clause }) => {
     const ray = hover(tool, eye, [1, 8, -1])
     expect(tool.statusHint()).not.toContain('Facing')
     expect(tool.snapConstraint(ray)).toBeNull()
-    expect(tool.activeDrawPlaneCue()).toBeNull()
+    expect(planeCueFor(tool.drawPlaneState())).toBeNull()
+    expect(tool.drawPlaneState().pip).toBe('blue')
   })
 
   it('names the red plane from a Right view', () => {
@@ -137,15 +140,18 @@ describe.each(MAKERS)('$name — view-plane inference', ({ make, clause }) => {
     const tool = make(makeScene())
     tool.updateCamera(cameraAt(FRONT))
     hover(tool, FRONT, [1, 0, 1])
-    const cue = tool.activeDrawPlaneCue()
-    expect(cue).not.toBeNull()
-    expect(Math.abs(cue!.plane.normal[1])).toBeCloseTo(1, 9)
-    expect(cue!.through[0]).toBeCloseTo(1, 9)
-    expect(cue!.through[1]).toBeCloseTo(0, 9)
-    expect(cue!.through[2]).toBeCloseTo(1, 9)
+    const cue = planeCueFor(tool.drawPlaneState())
+    expect(cue?.kind).toBe('patch')
+    if (cue?.kind !== 'patch') return
+    expect(cue.pip).toBe('green')
+    expect(cue.held).toBe(false)
+    expect(Math.abs(cue.plane.normal[1])).toBeCloseTo(1, 9)
+    expect(cue.through[0]).toBeCloseTo(1, 9)
+    expect(cue.through[1]).toBeCloseTo(0, 9)
+    expect(cue.through[2]).toBeCloseTo(1, 9)
     tool.updateCamera(cameraAt(HOME))
     hover(tool, HOME, [1, 1, 0])
-    expect(tool.activeDrawPlaneCue()).toBeNull()
+    expect(planeCueFor(tool.drawPlaneState())).toBeNull()
   })
 
   it('stays on the ground from the home view', () => {

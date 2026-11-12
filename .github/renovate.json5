@@ -39,7 +39,7 @@
   // immediately, before CI has run. Renovate's own automerge polls the
   // branch's check status and merges only once it is green, which is the
   // behavior this policy assumes everywhere below. Do not flip this to true
-  // without adding a ruleset that requires the `verify` check.
+  // without adding a ruleset that requires the CI checks (`rust`, `web`, `e2e-chromium`, …).
   platformAutomerge: false,
 
   // Longer than pnpm's own minimumReleaseAge (which defaults to 1 day in
@@ -146,7 +146,7 @@
     // by the `/^tauri/` exclusion at the bottom of this list and lands in the
     // 'tauri' group instead. That is correct rather than accidental — it
     // drives the Desktop E2E suite, which never runs on a pull request, so a
-    // green `verify` proves nothing about it.
+    // green CI proves nothing about it.
     {
       matchManagers: ['rust-toolchain', 'nodenv'],
       matchUpdateTypes: ['patch', 'minor'],
@@ -196,7 +196,7 @@
     // an update that can break something no BLOCKING lane of the gate looks
     // at, so that a green CI run is not evidence the update is good.
     // The Desktop E2E workflow runs only on push to `main`, never on a pull
-    // request, so a Tauri bump would automerge on a `verify` run that never
+    // request, so a Tauri bump would automerge on a CI run that never
     // launched the desktop binary and only fail AFTER landing.
     //
     // `/^tauri/` is a prefix regex and is meant to be read as one: beyond the

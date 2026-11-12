@@ -1112,9 +1112,26 @@ export interface HewTestHarness {
    * hard-coded pixel). `behind` true = the point is behind the camera. */
   worldToScreen(world: Vec3): { x: number; y: number; behind: boolean }
 
-  /** The drawing-plane patch the viewport shows right now (its plane normal
-   *  and the point it is drawn through), or null when none shows. */
-  getDrawPlaneCue(): { normal: Vec3; through: Vec3 } | null
+  /** The drawing-plane cue the viewport shows right now: a face outline or
+   *  the small patch, its plane normal, a point it is drawn through (the
+   *  patch's center, the outline's centroid), and whether it is drawn at
+   *  held weight; null when none shows. */
+  getDrawPlaneCue(): { kind: 'outline' | 'patch'; normal: Vec3; through: Vec3; held: boolean } | null
+
+  /** The active draw tool's drawing-plane state (view die): its pip
+   *  ('red' | 'green' | 'blue' | 'custom'), its hold ('inferred' | 'locked'
+   *  | 'pinned' | 'anchored'), the plane's normal, and the hover kind (null
+   *  off the canvas); null for a tool that draws on no plane. */
+  getDrawPlaneState(): { pip: string; hold: string; normal: Vec3; origin: Vec3; hover: string | null } | null
+
+  /** Whether a click on the view die's `pip` would do anything right now
+   *  (`ViewportApi.pipEnabled`), read live rather than off the widget. */
+  pipEnabled(pip: 'red' | 'green' | 'blue' | 'custom'): boolean
+
+  /** What the transform tools' hover highlight (Move/Rotate/Scale with
+   *  nothing selected) covers right now, ids as decimal strings, or null
+   *  when nothing is highlighted. */
+  getHoverHighlight(): { objects: string[]; instances: string[]; guide: string | null } | null
 
   /** The world ray the pointer at canvas-relative CSS pixel (`x`, `y`)
    *  casts for the camera as it is now. */
@@ -2405,6 +2422,32 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       return api.getDrawPlaneCue()
+    },
+
+    getDrawPlaneState: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      const state = api.getDrawPlaneState()
+      if (state === null) return null
+      return { pip: state.pip, hold: state.hold, normal: [...state.plane.normal], origin: [...state.plane.origin], hover: state.hover?.kind ?? null }
+    },
+
+    pipEnabled: (pip) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.pipEnabled(pip)
+    },
+
+    getHoverHighlight: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      const h = api.getHoverHighlight()
+      if (h === null) return null
+      return {
+        objects: h.objects.map(String),
+        instances: h.instances.map(String),
+        guide: h.guide === null ? null : String(h.guide),
+      }
     },
 
     rayAtCanvasPoint: (x, y) => {

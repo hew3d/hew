@@ -13,9 +13,26 @@
  *
  * The pulse + halo are CSS (`.hew-snap-dot` in index.css) so
  * `prefers-reduced-motion` can drop the animation to a static dot.
+ *
+ * With a draw tool active (`info.plane`), the soft halo becomes the plane
+ * ring (view-die design §4): a ring in the drawing plane's color around the
+ * dot, 2 px, 3.5 px when the plane is held (locked, pinned, or a gesture
+ * under way), at the token's full alpha so it reads on the dark canvas.
  */
-import { inferenceCssColor } from './inferenceColor'
+import { inferenceCssColor, planePipCssColor } from './inferenceColor'
 import type { InferenceInfo } from './Viewport'
+
+/** The plane ring's width (px) around the snap dot: inferred, then held. */
+export const PLANE_RING_PX = 2
+export const PLANE_RING_HELD_PX = 3.5
+
+/** The dot's `box-shadow`: the plane ring when a drawing plane is known,
+ *  else the soft halo in the snap's own color. */
+export function snapDotShadow(info: InferenceInfo, color: string): string {
+  if (info.plane === undefined) return `0 0 0 3px color-mix(in srgb, ${color} 22%, transparent)`
+  const width = info.plane.hold === 'inferred' ? PLANE_RING_PX : PLANE_RING_HELD_PX
+  return `0 0 0 ${width}px ${planePipCssColor(info.plane.pip)}`
+}
 
 export function SnapDot({ info }: { info: InferenceInfo | null }) {
   if (info === null) return null
@@ -32,9 +49,10 @@ export function SnapDot({ info }: { info: InferenceInfo | null }) {
         height: 10,
         borderRadius: '50%',
         background: color,
-        // White ring for contrast on any material/background; soft tinted halo.
+        // White ring for contrast on any material/background; outside it the
+        // plane ring, or a soft tinted halo without a drawing plane.
         border: '1.25px solid rgba(255, 255, 255, 0.92)',
-        boxShadow: `0 0 0 3px color-mix(in srgb, ${color} 22%, transparent)`,
+        boxShadow: snapDotShadow(info, color),
         pointerEvents: 'none',
         // Below the tooltip chip (z 20) — they never overlap (the chip is
         // offset +16,+16), but keep the label on top if they ever do.

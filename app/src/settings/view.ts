@@ -233,7 +233,7 @@ function parsePosition(raw: unknown): MeasurementsPosition | undefined {
 }
 
 const measurementsPosition = makeSetting<MeasurementsPosition>(
-  'hew.settings.measurementsPosition', 'measurementsPosition', 'top-right', parsePosition, (v) => v,
+  'hew.settings.measurementsPosition', 'measurementsPosition', 'bottom-right', parsePosition, (v) => v,
 )
 export const getMeasurementsPosition = measurementsPosition.get
 export const setMeasurementsPosition = measurementsPosition.set

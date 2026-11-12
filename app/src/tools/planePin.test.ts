@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { PlanePin } from './planePin'
 import { groundDrawPlane, drawPlaneThrough } from './drawPlane'
 import type { DrawPlane } from './drawPlane'
-import type { EditContext } from './types'
+import type { EditContext, Snap } from './types'
 import type { V3 } from '../viewport/geoHelpers'
 
 const TOP: EditContext = { kind: 'top' }
@@ -150,12 +150,52 @@ describe('PlanePin — constraint', () => {
     expect(pin.constraint()).toBeNull()
   })
 
-  it('a pin constrains to the plane\'s own point and normal', () => {
+  it('a pin constrains to the plane\'s own point and normal, and still offers named points off it (R18 c)', () => {
     const pin = new PlanePin()
     pin.trackHover(PLANE_B, THROUGH_B)
     pin.setShiftHeld(true)
     expect(pin.constraint()).toEqual({
       constraintPlane: { point: PLANE_B.origin, normal: PLANE_B.normal },
+      offPlanePoints: true,
     })
+  })
+})
+
+describe('PlanePin — a named point off the pinned plane (R18 c)', () => {
+  const corner = (x: number, y: number, z: number, kind = 'endpoint'): Snap => ({ x, y, z, kind } as Snap)
+  const GREEN = drawPlaneThrough([0, 0, 0], [0, 1, 0]) as DrawPlane
+
+  function pinned(plane: DrawPlane): PlanePin {
+    const pin = new PlanePin()
+    pin.trackHover(plane, plane.origin)
+    pin.setShiftHeld(true)
+    return pin
+  }
+
+  it('the first click takes the pinned orientation through the point', () => {
+    const pin = pinned(GREEN)
+    const target = pin.clickTarget(TOP, corner(0.5, 1, 0))
+    expect(target?.plane.normal).toEqual(GREEN.normal)
+    expect(target?.plane.origin).toEqual([0.5, 1, 0])
+    expect(target?.plane.ground).toBe(false)
+    expect(target?.target).toEqual({ kind: 'plane', plane: target?.plane, instance: null })
+  })
+
+  it('a point already on the plane, or one that names no point, leaves the pinned plane', () => {
+    const pin = pinned(GREEN)
+    expect(pin.clickTarget(TOP, corner(2, 0, 3))?.plane).toBe(GREEN)
+    expect(pin.clickTarget(TOP, corner(0.5, 1, 0, 'on-edge'))?.plane).toBe(GREEN)
+    expect(pin.clickTarget(TOP, null)?.plane).toBe(GREEN)
+  })
+
+  it('a pinned ground lifted onto a ground point is the exact ground', () => {
+    const ground = drawPlaneThrough([0, 0, 0], [0, 0, 1]) as DrawPlane
+    const pin = pinned(ground)
+    expect(pin.pointPlane(corner(1, 1, 0))).toBeNull()
+    expect(pin.pointPlane(corner(1, 1, 2))?.ground).toBe(false)
+  })
+
+  it('nothing pinned gives no plane', () => {
+    expect(new PlanePin().pointPlane(corner(1, 1, 1))).toBeNull()
   })
 })
