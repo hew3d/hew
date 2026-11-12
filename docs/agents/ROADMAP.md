@@ -1361,6 +1361,20 @@ below.
   pseudo-locale Playwright smoke. `SHIPPED_LOCALES`
   (`app/src/i18n/locales.ts`) is English only; the Japanese catalog is not
   offered until complete (`docs/LOCALIZATION.md`)
+- User-configurable keyboard shortcuts (Settings ▸ Controls): every command
+  in the `menuActionRef` id space (tools, File/Edit/Window commands, views,
+  toggles, scenes) can take any number of keys, listed in the command
+  palette's own look with search, key recording, a confirm before moving a
+  key another command uses, and per-command and global reset. The defaults
+  (`app/src/keymap/defaults.ts`) are SketchUp's bare letters plus, on
+  the macOS desktop only, SketchUp for Mac's Cmd-combinations; only the person's changes are stored, so a new default
+  reaches everyone who never touched that command. One keydown dispatcher
+  (`keymap/dispatch.ts`) serves the editor and Shop Mode, and the tool
+  rail, both menu bars, and the palette all show the effective keys. Esc,
+  Enter, Tab, and the arrows stay with the tools. On macOS the native menu's
+  accelerators follow the keymap through `set_menu_accelerators`; Cut, Copy,
+  Paste, and Select All keep their standard keys there, because text fields
+  rely on those items. Mouse bindings will join the same tab
 
 ### Reliability & diagnostics
 

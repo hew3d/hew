@@ -64,6 +64,14 @@ msgstr "{bytes} B"
 msgid "{cap, plural, one {Array copy is limited to {limit} copy} other {Array copy is limited to {limit} copies}}"
 msgstr "{cap, plural, one {Array copy is limited to {limit} copy} other {Array copy is limited to {limit} copies}}"
 
+#: src/settings/ControlsPane.tsx
+msgid "{chordLabel} belongs to the tools and can’t be a shortcut."
+msgstr "{chordLabel} belongs to the tools and can’t be a shortcut."
+
+#: src/settings/ControlsPane.tsx
+msgid "{chordLabel} is used by {ownerLabel}."
+msgstr "{chordLabel} is used by {ownerLabel}."
+
 #: src/App.tsx
 msgid "{copiedCount, plural, one {Copied # object} other {Copied # objects}}"
 msgstr "{copiedCount, plural, one {Copied # object} other {Copied # objects}}"
@@ -876,6 +884,7 @@ msgid "action bar"
 msgstr "action bar"
 
 #: src/palette/CommandPalette.tsx
+#: src/settings/ControlsPane.tsx
 msgid "Actions"
 msgstr "Actions"
 
@@ -910,6 +919,14 @@ msgstr "Add \"{displayName}\" to palette"
 #: src/scenes/scenesModel.ts
 msgid "Add a description — it shows on the phone."
 msgstr "Add a description — it shows on the phone."
+
+#: src/settings/ControlsPane.tsx
+msgid "Add a shortcut"
+msgstr "Add a shortcut"
+
+#: src/settings/ControlsPane.tsx
+msgid "Add a shortcut to {label}"
+msgstr "Add a shortcut to {label}"
 
 #: src/panels/MaterialPalette.tsx
 msgid "Add color"
@@ -1309,6 +1326,7 @@ msgstr "cancel"
 #: src/panels/StlUnitsDialog.tsx
 #: src/panels/TextDialog.tsx
 #: src/panels/UnsavedChangesDialog.tsx
+#: src/settings/ControlsPane.tsx
 #: src/shop/ReceiveConfirmSheet.tsx
 #: src/shop/ScanSheet.tsx
 msgid "Cancel"
@@ -1360,6 +1378,10 @@ msgstr "Change tags"
 #: src/settings/FoldersPane.tsx
 msgid "Change…"
 msgstr "Change…"
+
+#: src/settings/ControlsPane.tsx
+msgid "Changed from the default"
+msgstr "Changed from the default"
 
 #: src/App.tsx
 #: src/i18n/nativeMenu.ts
@@ -1784,9 +1806,17 @@ msgstr "Close the pieces where they meet and keep the inside walls"
 msgid "Close the pieces where they meet and remove the inside walls between them"
 msgstr "Close the pieces where they meet and remove the inside walls between them"
 
+#: src/settings/ControlsPane.tsx
+msgid "Close this document window."
+msgstr "Close this document window."
+
 #: src/health/healthCopy.ts
 msgid "Close this opening"
 msgstr "Close this opening"
+
+#: src/settings/ControlsPane.tsx
+msgid "Close Window"
+msgstr "Close Window"
 
 #: src/panels/SentReportsDialog.tsx
 msgid "Closed"
@@ -1842,6 +1872,7 @@ msgstr "Command palette"
 
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
+#: src/settings/ControlsPane.tsx
 msgid "Command Palette…"
 msgstr "Command Palette…"
 
@@ -1924,6 +1955,11 @@ msgstr "Contextual Dock"
 #: src/panels/SaveFormatDialog.tsx
 msgid "Continue"
 msgstr "Continue"
+
+#: src/settings/FluentSettingsPage.tsx
+#: src/settings/SettingsWindow.tsx
+msgid "Controls"
+msgstr "Controls"
 
 #: src/settings/UnitsPane.tsx
 msgid "Controls how lengths are displayed (e.g. the Move tool's live measurement). Precision sets how far readouts are rounded: a number of decimals, or a fraction of an inch. A rounded readout is marked with ~, and Exact shows every digit a length needs. Each format remembers its own choice. Model geometry is always stored in meters internally."
@@ -2967,6 +3003,10 @@ msgstr "Esc re-picks the path."
 #: src/palette/CommandPalette.tsx
 msgid "esc to close"
 msgstr "esc to close"
+
+#: src/settings/ControlsPane.tsx
+msgid "Esc, Enter, Tab and the arrow keys stay with the tools (cancel, commit, axis lock), and so does the Measurements box while you type a value."
+msgstr "Esc, Enter, Tab and the arrow keys stay with the tools (cancel, commit, axis lock), and so does the Measurements box while you type a value."
 
 #: src/health/healthCopy.ts
 msgid "Every object here is solid."
@@ -4244,6 +4284,10 @@ msgstr "Keep the inside walls"
 msgid "Keeps everything Hew stores."
 msgstr "Keeps everything Hew stores."
 
+#: src/settings/ControlsPane.tsx
+msgid "Keyboard shortcuts"
+msgstr "Keyboard shortcuts"
+
 #: src/panels/library/LibraryDetailPane.tsx
 msgid "Keywords"
 msgstr "Keywords"
@@ -5138,6 +5182,7 @@ msgid "No longer available"
 msgstr "No longer available"
 
 #: src/palette/CommandPalette.tsx
+#: src/settings/ControlsPane.tsx
 msgid "No matches for “{query}”."
 msgstr "No matches for “{query}”."
 
@@ -6147,6 +6192,10 @@ msgstr "preferences"
 msgid "Preparing…"
 msgstr "Preparing…"
 
+#: src/settings/ControlsPane.tsx
+msgid "Press a key…"
+msgstr "Press a key…"
+
 #: src/tools/TapeMeasureTool.ts
 msgid "Press Enter to resize the model to the typed distance — Esc to keep the measurement as it is."
 msgstr "Press Enter to resize the model to the typed distance — Esc to keep the measurement as it is."
@@ -6373,6 +6422,10 @@ msgstr "Reading the file ({size})"
 msgid "Ready"
 msgstr "Ready"
 
+#: src/settings/ControlsPane.tsx
+msgid "Reassign"
+msgstr "Reassign"
+
 #: src/panels/WelcomeScreen.tsx
 msgid "Recent"
 msgstr "Recent"
@@ -6540,6 +6593,14 @@ msgstr "Reload Hew"
 msgid "remove"
 msgstr "remove"
 
+#: src/settings/ControlsPane.tsx
+msgid "Remove"
+msgstr "Remove"
+
+#: src/settings/ControlsPane.tsx
+msgid "Remove {shown} from {label}"
+msgstr "Remove {shown} from {label}"
+
 #: src/palette/registry.ts
 msgid "Remove every construction guide."
 msgstr "Remove every construction guide."
@@ -6691,6 +6752,14 @@ msgstr "Reposition the drawing axes: click an origin, then the red and green dir
 #: src/shop/ScanSheet.tsx
 msgid "Requesting camera access…"
 msgstr "Requesting camera access…"
+
+#: src/settings/ControlsPane.tsx
+msgid "Reset"
+msgstr "Reset"
+
+#: src/settings/ControlsPane.tsx
+msgid "Reset All"
+msgstr "Reset All"
 
 #: src/palette/registry.ts
 msgid "reset axes"
@@ -7147,9 +7216,21 @@ msgstr "Scope"
 msgid "Search"
 msgstr "Search"
 
+#: src/settings/ControlsPane.tsx
+msgid "Search commands"
+msgstr "Search commands"
+
 #: src/panels/MenuBar.tsx
 msgid "Search commands and help"
 msgstr "Search commands and help"
+
+#: src/settings/ControlsPane.tsx
+msgid "Search commands…"
+msgstr "Search commands…"
+
+#: src/settings/ControlsPane.tsx
+msgid "Search every tool and action."
+msgstr "Search every tool and action."
 
 #: src/panels/LibraryDialog.tsx
 msgid "Search name or keyword…"
@@ -9075,6 +9156,7 @@ msgstr "toolbar"
 #: src/palette/CommandPalette.tsx
 #: src/panels/MenuBar.tsx
 #: src/panels/ToolRail.tsx
+#: src/settings/ControlsPane.tsx
 msgid "Tools"
 msgstr "Tools"
 
@@ -9124,6 +9206,10 @@ msgstr "Tray"
 #: src/log/RenderStatsReadout.tsx
 msgid "tri {triangles}"
 msgstr "tri {triangles}"
+
+#: src/settings/ControlsPane.tsx
+msgid "Try Another"
+msgstr "Try Another"
 
 #: src/viewport/gpuCapability.ts
 msgid "Try launching Hew with these environment variables, which switch it to a slower but reliable software renderer:"

@@ -278,6 +278,7 @@ import { MATERIAL_SENTINEL } from './tools/PaintTool'
 import { clearOpenAttempt, getFailedOpen } from './log/failedOpen'
 import { clearKernelStop, getKernelStop, getPanicCapture, KERNEL_PANIC_EVENT } from './log/panicCapture'
 import { kernelMemoryBytes } from './wasm/kernelMemory'
+import { resetAllChords, setChords } from './keymap/keymap'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -865,6 +866,28 @@ describe('App — keyboard shortcuts', () => {
     fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
     const arcItem = menubar().getByText('Arc').closest('div')
     expect(arcItem?.textContent).toContain('✓')
+  })
+
+  it('a key bound in Settings ▸ Controls runs its command and shows in the menus', async () => {
+    try {
+      await renderAndLoad()
+      act(() => {
+        setChords('tool-dimension', ['D'])
+        setChords('tool-rectangle', [])
+      })
+      fireEvent.keyDown(document, { key: 'd', code: 'KeyD' })
+      fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+      const dimension = menubar().getByText('Dimension').closest('div')
+      expect(dimension?.textContent).toContain('✓')
+      expect(dimension?.textContent).toContain('D')
+      fireEvent.keyDown(document, { key: 'Escape' })
+      // Rectangle's R was removed: the key now does nothing.
+      fireEvent.keyDown(document, { key: 'r', code: 'KeyR' })
+      fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
+      expect(menubar().getByText('Rectangle').closest('div')?.textContent).not.toContain('✓')
+    } finally {
+      resetAllChords()
+    }
   })
 
   it('clicking Draw > Arc activates the Arc tool', async () => {

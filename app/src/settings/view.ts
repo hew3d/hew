@@ -24,13 +24,13 @@ import { msg } from '@lingui/core/macro'
 import type { MessageDescriptor } from '@lingui/core'
 import { isTauri } from '../io/fileHost'
 
-interface ViewSetting<T> {
+export interface ViewSetting<T> {
   get(): T
   set(next: T): void
   subscribe(cb: (value: T) => void): () => void
 }
 
-function makeSetting<T>(
+export function makeSetting<T>(
   storageKey: string,
   payloadKey: string,
   fallback: T,

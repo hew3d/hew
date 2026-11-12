@@ -32,7 +32,7 @@ describe('SettingsWindow', () => {
   it('shows the toolbar tab strip with one tab per pane', () => {
     render(<SettingsWindow />)
     const tabs = screen.getAllByRole('tab')
-    expect(tabs.map((t) => t.textContent)).toEqual(['Units', 'View', 'Theme', 'Language', 'Folders', 'Advanced', 'Debug'])
+    expect(tabs.map((t) => t.textContent)).toEqual(['Units', 'View', 'Controls', 'Theme', 'Language', 'Folders', 'Advanced', 'Debug'])
   })
 
   it('shows the Units pane by default (Units tab selected)', () => {

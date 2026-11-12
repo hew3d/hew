@@ -109,19 +109,18 @@ describe('paletteShortcut', () => {
   const entries = paletteEntries()
   const rectangle = entries.find((e) => e.id === 'tool-rectangle')!
   const saveAction = entries.find((e) => e.id === 'save')!
+  const zoomExtents = entries.find((e) => e.id === 'zoom-extents')!
 
-  it('returns the mac shortcut for a tool entry when isMac', () => {
-    // Unified bare-letter scheme — same key the rail shows and App.tsx
-    // dispatches on macOS (the native menu's ⌘K remains a secondary accel).
-    expect(paletteShortcut(rectangle, true)).toBe('R')
+  // The test environment is neither macOS nor the desktop shell.
+  it('shows a tool entry\'s key from the keymap', () => {
+    expect(paletteShortcut(rectangle)).toBe('R')
   })
 
-  it('returns the Windows/Linux/Web shortcut for a tool entry when !isMac', () => {
-    expect(paletteShortcut(rectangle, false)).toBe('R')
+  it('shows an action entry\'s key too', () => {
+    expect(paletteShortcut(saveAction)).toBe('Ctrl+S')
   })
 
-  it('returns "" for a non-tool action entry', () => {
-    expect(paletteShortcut(saveAction, true)).toBe('')
-    expect(paletteShortcut(saveAction, false)).toBe('')
+  it('is empty for a command with no key', () => {
+    expect(paletteShortcut(zoomExtents)).toBe('')
   })
 })

@@ -1,10 +1,10 @@
 /**
- * Platform detection for keyboard-shortcut *display*.
+ * Platform detection.
  *
  * Hew ships the same web bundle on macOS, Windows, and Linux (Tauri +
- * WebKitGTK). Key handling already accepts `metaKey || ctrlKey` everywhere, so
- * this only governs how shortcut hints are rendered: the ⌘ glyph reads as
- * "Command" and is wrong on Linux/Windows, where the modifier is Ctrl.
+ * WebKitGTK). The keymap (keymap/) reads `isMac` to tell Cmd from Ctrl and
+ * to show shortcuts the platform's way: the ⌘ glyph reads as "Command" and
+ * is wrong on Linux/Windows, where the modifier is Ctrl.
  *
  * `navigator.platform` is deprecated but still populated by every webview we
  * target (incl. WebKitGTK, where it reports "Linux x86_64"), and needs no async
@@ -28,17 +28,11 @@ export const isLinux: boolean =
 
 /**
  * True on Windows (`navigator.platform` reports "Win32"/"Win64" in every
- * webview we target, incl. Tauri's WebView2). Added in alongside
- * the Windows/Linux/Web bare-letter keybinding split — see the global keydown
- * handler in `App.tsx`, which now runs on Windows too (previously Linux-only
- * under Tauri).
+ * webview we target, incl. Tauri's WebView2).
  */
 export const isWindows: boolean =
   typeof navigator !== 'undefined' && /Win/.test(navigator.platform)
 
-/** Modifier prefix shown in shortcut hints: '⌘' on macOS, 'Ctrl+' elsewhere. */
-// oxlint-disable-next-line lingui/no-unlocalized-strings -- keyboard modifier key cap, not translated (shortcuts are out of scope per LOCALIZATION.md)
-export const modLabel: string = isMac ? '⌘' : 'Ctrl+'
 
 /**
  * The platform-appropriate "tap to toggle copy mode" modifier key — SketchUp's

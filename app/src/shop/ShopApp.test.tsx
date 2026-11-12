@@ -474,6 +474,21 @@ describe('ShopApp — tool switcher', () => {
     await waitFor(() => expect(latestViewportProps().activeTool).toBe('Orbit'))
   })
 
+  it('the keymap\'s keys for the three tools switch them; editor-only keys do nothing', async () => {
+    await renderAndOpenWithFixture()
+    fireEvent.keyDown(window, { key: 'o', code: 'KeyO' })
+    await waitFor(() => expect(latestViewportProps().activeTool).toBe('Orbit'))
+    fireEvent.keyDown(window, { key: 't', code: 'KeyT' })
+    await waitFor(() => expect(latestViewportProps().activeTool).toBe('Tape Measure'))
+    // Rectangle's R is an editor command: not Shop Mode's, and not swallowed.
+    const r = new KeyboardEvent('keydown', { key: 'r', code: 'KeyR', cancelable: true })
+    act(() => { window.dispatchEvent(r) })
+    expect(r.defaultPrevented).toBe(false)
+    expect(latestViewportProps().activeTool).toBe('Tape Measure')
+    fireEvent.keyDown(window, { key: ' ', code: 'Space' })
+    await waitFor(() => expect(latestViewportProps().activeTool).toBe('Select'))
+  })
+
   it('switching to Tape Measure updates the activeTool prop Viewport receives', async () => {
     await renderAndOpenWithFixture()
     fireEvent.click(screen.getByRole('button', { name: /^tape measure$/i }))
