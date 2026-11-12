@@ -310,7 +310,7 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
           }
         }
         gen++
-        return id
+        return JSON.stringify({ objects: [], sketches: [Number(id)], kept_as_sketch: [], faces_closed: [], cells: [] })
       },
     ),
   }
@@ -614,6 +614,48 @@ describe('RotateTool — snapConstraint (axis-lock plane)', () => {
     expect(tool.snapConstraint()).toEqual({
       constraintPlane: { point: [0, 0, 0], normal: [0, 0, 1] },
     })
+  })
+})
+
+describe('RotateTool — the center-to-first-point dashed line', () => {
+  /** The dashed line's [start, end] in the preview, or null. */
+  function linkEnds(preview: THREE.Group): number[][] | null {
+    let found: THREE.LineSegments | null = null
+    preview.traverse((o) => {
+      if (o instanceof THREE.LineSegments && o.material instanceof THREE.LineDashedMaterial) found = o
+    })
+    if (found === null) return null
+    const pos = (found as THREE.LineSegments).geometry.getAttribute('position')
+    return [[pos.getX(0), pos.getY(0), pos.getZ(0)], [pos.getX(1), pos.getY(1), pos.getZ(1)]]
+  }
+
+  it('locked, it ends where the click will put the first point: in the rotation plane', () => {
+    const { tool, preview } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot at origin
+    tool.onKey(makeKeyEvent('ArrowUp')) // lock Z
+    // A snap off the rotation plane (z = 0.5): the click would project it.
+    tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 0.5, kind: 'endpoint' }), rayThrough(1, 0))
+    const [start, end] = linkEnds(preview)!
+    expect(start).toEqual([0, 0, 0])
+    expect(end[0]).toBeCloseTo(1)
+    expect(end[1]).toBeCloseTo(0)
+    expect(end[2]).toBeCloseTo(0)
+  })
+})
+
+describe('RotateTool — the center-to-first-point line with no snap', () => {
+  it('is hidden while the pointer has no snap, and returns with the next one', () => {
+    const { tool, preview } = makeTool()
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // center
+    tool.onPointerMove(makeSnap({ x: 2, y: 1, z: 0 }), rayThrough(2, 1))
+    let line: THREE.LineSegments | undefined
+    preview.traverse((o) => { if (o instanceof THREE.LineSegments && o.material instanceof THREE.LineDashedMaterial) line = o })
+    expect(line!.visible).toBe(true)
+    tool.onPointerMove(null, rayThrough(5, 5)) // a ray with no snap (parallel to the plane)
+    expect(line!.visible).toBe(false)
+    tool.onPointerMove(makeSnap({ x: 1, y: 2, z: 0 }), rayThrough(1, 2))
+    expect(line!.visible).toBe(true)
   })
 })
 
@@ -1771,5 +1813,135 @@ describe('RotateTool — the drag ghost is session geometry, mirrored onto sibli
     tool.onKey(makeKeyEvent('Escape'))
     mirror.sync()
     expect(mirror.mirrorCount).toBe(0)
+  })
+})
+
+describe('RotateTool — a click-taken selection lasts only for the gesture (as Move)', () => {
+  const NODE: NodeRef = { kind: 'object', id: 7n }
+
+  function makeAcquiring() {
+    const t = makeTool({ selection: [] })
+    const acquire = vi.fn(() => [NODE])
+    const release = vi.fn()
+    t.tool.setSelectionAcquirer(acquire, release)
+    return { ...t, acquire, release }
+  }
+
+  it('a landed rotation empties the selection again', () => {
+    const t = makeAcquiring()
+    runNinetyDegreeGesture(t.tool)
+    expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(t.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('Esc mid-gesture gives the selection back', () => {
+    const t = makeAcquiring()
+    t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot
+    t.tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference
+    t.tool.onKey(makeKeyEvent('Escape'))
+    expect(t.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('a refused rotation gives the selection back', () => {
+    const t = makeAcquiring()
+    t.wasmScene.transform_selection.mockImplementationOnce(() => { throw new Error('InvalidTransform: refused') })
+    runNinetyDegreeGesture(t.tool)
+    expect(t.onToast).toHaveBeenCalled()
+    expect(t.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('a refused retype leaves the gesture\'s release to the retype that lands', () => {
+    const t = makeAcquiring()
+    runNinetyDegreeGesture(t.tool)
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    t.wasmScene.transform_selection.mockImplementationOnce(() => { throw new Error('InvalidTransform: refused') })
+    typeKeys(t.tool, '45')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.onToast).toHaveBeenCalled()
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    typeKeys(t.tool, '30')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(3)
+    expect(t.release).toHaveBeenCalledTimes(2)
+  })
+
+  it('a copy and its ×N array leave nothing selected — the array still fans from the source', () => {
+    const t = makeAcquiring()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+    expect(t.release).toHaveBeenCalledTimes(1)
+    typeKeys(t.tool, '3x')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    const [, ids, , count] = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
+    expect(Array.from(ids as BigUint64Array)).toEqual([7n])
+    expect(count).toBe(3)
+    expect(t.release).toHaveBeenCalledTimes(2)
+  })
+
+  it('a selection made beforehand is kept', () => {
+    const t = makeTool()
+    const release = vi.fn()
+    t.tool.setSelectionAcquirer(() => [NODE], release)
+    runNinetyDegreeGesture(t.tool)
+    expect(release).not.toHaveBeenCalled()
+  })
+})
+
+describe('RotateTool — what a click would take (clickAcquire, the hover highlight)', () => {
+  it('idle with nothing selected: a guide first when guides can be taken, else a node', () => {
+    const t = makeTool({ selection: [] })
+    t.tool.setSelectionAcquirer(() => null)
+    expect(t.tool.clickAcquire()).toEqual({ guides: false, nodes: true })
+    t.tool.setGuideHooks(() => null, vi.fn())
+    expect(t.tool.clickAcquire()).toEqual({ guides: true, nodes: true })
+  })
+
+  it('nothing with nodes or a guide selected (the click is the pivot), or mid-gesture', () => {
+    const selected = makeTool()
+    selected.tool.setSelectionAcquirer(() => null)
+    expect(selected.tool.clickAcquire()).toBeNull()
+
+    const guide = makeTool({ selection: [] })
+    guide.tool.setSelectionAcquirer(() => null)
+    guide.tool.setGuideHooks(() => null, vi.fn())
+    guide.tool.setGuideTarget(5n)
+    expect(guide.tool.clickAcquire()).toBeNull()
+
+    const t = makeTool({ selection: [] })
+    t.tool.setSelectionAcquirer(() => [{ kind: 'object', id: 7n }])
+    t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    expect(t.tool.clickAcquire()).toBeNull()
+  })
+})
+
+describe('RotateTool — dashed line from the center to the first point', () => {
+  function dashedLine(preview: THREE.Object3D): THREE.LineSegments | undefined {
+    let found: THREE.LineSegments | undefined
+    preview.traverse((o) => {
+      if (o instanceof THREE.LineSegments && o.material instanceof THREE.LineDashedMaterial) found = o
+    })
+    return found
+  }
+  const ends = (line: THREE.LineSegments): number[] => {
+    const pos = line.geometry.getAttribute('position')
+    return [pos.getX(0), pos.getY(0), pos.getX(1), pos.getY(1)]
+  }
+
+  it('runs to the cursor while the first point is chosen, then holds at it through the sweep', () => {
+    const { tool, preview } = makeTool()
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // center
+    expect(dashedLine(preview)).toBeUndefined()
+
+    tool.onPointerMove(makeSnap({ x: 2, y: 1, z: 0 }), rayThrough(2, 1))
+    expect(ends(dashedLine(preview)!)).toEqual([0, 0, 2, 1])
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // first point
+    tool.onPointerMove(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(0, 1)) // sweep
+    expect(ends(dashedLine(preview)!)).toEqual([0, 0, 1, 0])
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(0, 1)) // commit
+    expect(dashedLine(preview)).toBeUndefined()
   })
 })

@@ -11,6 +11,26 @@ msgstr ""
 msgid ".hew, or import SketchUp, COLLADA, glTF, or STL."
 msgstr ".hew, or import SketchUp, COLLADA, glTF, or STL."
 
+#. Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · blue"
+#: src/viewport/InferenceTooltip.tsx
+msgid "· blue"
+msgstr "· blue"
+
+#. Snap tooltip suffix for a drawing plane that lies along no axis (a tilted face's plane), as in "Endpoint · face plane"
+#: src/viewport/InferenceTooltip.tsx
+msgid "· face plane"
+msgstr "· face plane"
+
+#. Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · green"
+#: src/viewport/InferenceTooltip.tsx
+msgid "· green"
+msgstr "· green"
+
+#. Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · red"
+#: src/viewport/InferenceTooltip.tsx
+msgid "· red"
+msgstr "· red"
+
 #: src/App.tsx
 msgid "\"{matDeleteName}\" — used on {matDeleteUsage, plural, one {# face} other {# faces}} — delete and unpaint them?"
 msgstr "\"{matDeleteName}\" — used on {matDeleteUsage, plural, one {# face} other {# faces}} — delete and unpaint them?"
@@ -44,6 +64,11 @@ msgstr "{0, plural, one {# solid} other {# solids}}"
 #: src/linkSimilar.ts
 msgid "{0, plural, one {Linked # copy} other {Linked # copies}}"
 msgstr "{0, plural, one {Linked # copy} other {Linked # copies}}"
+
+#. placeholder {0}: d.openEdges
+#: src/panels/MakeSolidSketches.tsx
+msgid "{0, plural, one {Not closed yet. # open edge is marked in red.} other {Not closed yet. # open edges are marked in red.}}"
+msgstr "{0, plural, one {Not closed yet. # open edge is marked in red.} other {Not closed yet. # open edges are marked in red.}}"
 
 #. placeholder {0}: r.skipped
 #: src/linkSimilar.ts
@@ -414,6 +439,10 @@ msgstr "{objects, plural, one {Hew checked the object in this import.} other {He
 #: src/health/healthCopy.ts
 msgid "{objects, plural, one {Hew checked the object in this model.} other {Hew checked the # objects in this model.}}"
 msgstr "{objects, plural, one {Hew checked the object in this model.} other {Hew checked the # objects in this model.}}"
+
+#: src/health/healthCopy.ts
+msgid "{objects, plural, one {Hew checked the object that is not solid.} other {Hew checked the # objects that are not solid.}}"
+msgstr "{objects, plural, one {Hew checked the object that is not solid.} other {Hew checked the # objects that are not solid.}}"
 
 #: src/health/healthCopy.ts
 msgid "{objects, plural, one {Hew checked the object you selected.} other {Hew checked the # objects you selected.}}"
@@ -1250,6 +1279,7 @@ msgstr "axis"
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
 #: src/settings/FluentSettingsPage.tsx
+#: src/viewport/ViewDie.tsx
 msgid "Back"
 msgstr "Back"
 
@@ -1293,6 +1323,7 @@ msgstr "boolean"
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
+#: src/viewport/ViewDie.tsx
 msgid "Bottom"
 msgstr "Bottom"
 
@@ -2833,8 +2864,12 @@ msgid "Drag a corner pin, or type the absolute skew/V-scale (blue): degrees, or 
 msgstr "Drag a corner pin, or type the absolute skew/V-scale (blue): degrees, or 2x for scale. Enter commits, Esc cancels."
 
 #: src/tools/ScaleTool.ts
-msgid "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center."
-msgstr "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center."
+#~ msgid "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center."
+#~ msgstr "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center."
+
+#: src/tools/ScaleTool.ts
+msgid "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center. Click another object to scale it instead."
+msgstr "Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center. Click another object to scale it instead."
 
 #: src/palette/registry.ts
 msgid "Drag a rectangle to zoom the camera onto it, then return to Select."
@@ -3247,6 +3282,27 @@ msgstr "Extrusion depth ({unit})"
 msgid "eye height"
 msgstr "eye height"
 
+#: src/tools/CircleTool.ts
+#: src/tools/PolygonTool.ts
+msgid "Facing the {axis} plane — click the center to draw on it; ↑ for the ground, Shift pins it."
+msgstr "Facing the {axis} plane — click the center to draw on it; ↑ for the ground, Shift pins it."
+
+#: src/tools/PlaceImageTool.ts
+msgid "Facing the {axis} plane — click the first corner of \"{name}\" to place it there; ↑ for the ground. Esc cancels."
+msgstr "Facing the {axis} plane — click the first corner of \"{name}\" to place it there; ↑ for the ground. Esc cancels."
+
+#: src/tools/RectangleTool.ts
+msgid "Facing the {axis} plane — click the first corner to draw on it; ↑ for the ground, Shift pins it."
+msgstr "Facing the {axis} plane — click the first corner to draw on it; ↑ for the ground, Shift pins it."
+
+#: src/tools/ArcTool.ts
+msgid "Facing the {axis} plane — click the first endpoint to draw on it; ↑ for the ground, Shift pins it."
+msgstr "Facing the {axis} plane — click the first endpoint to draw on it; ↑ for the ground, Shift pins it."
+
+#: src/tools/LineTool.ts
+msgid "Facing the {axis} plane — click to start a line on it; ↑ for the ground, Shift pins it."
+msgstr "Facing the {axis} plane — click to start a line on it; ↑ for the ground, Shift pins it."
+
 #: src/viewport/MeasurementBox.tsx
 msgid "Factor"
 msgstr "Factor"
@@ -3565,7 +3621,7 @@ msgstr "From your desktop…"
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
-#: src/viewport/ViewportHUD.tsx
+#: src/viewport/ViewDie.tsx
 msgid "Front"
 msgstr "Front"
 
@@ -3844,6 +3900,10 @@ msgstr "Hew cloud ({cloudHost})"
 msgid "Hew couldn't complete that ({code}: {rawMsg}). If this keeps happening, use Report Bug."
 msgstr "Hew couldn't complete that ({code}: {rawMsg}). If this keeps happening, use Report Bug."
 
+#: src/panels/MakeSolidSketches.tsx
+msgid "Hew couldn't make a solid from this shape."
+msgstr "Hew couldn't make a solid from this shape."
+
 #: src/health/healthBatch.ts
 msgid "Hew couldn't make that change."
 msgstr "Hew couldn't make that change."
@@ -3915,6 +3975,10 @@ msgstr "Hew tried to turn this dimension or label into a different kind of entit
 #: src/kernelErrors.ts
 msgid "Hew tries to stand the profile up automatically, but couldn't square it to the path here. Move the profile closer to where the sweep should start — on a drawn circle, near the rim, in line with the circle's center."
 msgstr "Hew tries to stand the profile up automatically, but couldn't square it to the path here. Move the profile closer to where the sweep should start — on a drawn circle, near the rim, in line with the circle's center."
+
+#: src/panels/MakeSolidSketches.tsx
+msgid "Hew will turn the closed shapes you selected into solids."
+msgstr "Hew will turn the closed shapes you selected into solids."
 
 #: src/panels/SentReportsDialog.tsx
 msgid "Hew’s developer"
@@ -4314,7 +4378,6 @@ msgstr "Invert Selection"
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Iso"
 msgstr "Iso"
 
@@ -4322,6 +4385,38 @@ msgstr "Iso"
 msgctxt "view"
 msgid "ISO"
 msgstr "ISO"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · back left"
+msgstr "Iso · back left"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · back right"
+msgstr "Iso · back right"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · from below, back left"
+msgstr "Iso · from below, back left"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · from below, back right"
+msgstr "Iso · from below, back right"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · from below, front left"
+msgstr "Iso · from below, front left"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · from below, front right"
+msgstr "Iso · from below, front right"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · front left"
+msgstr "Iso · front left"
+
+#: src/viewport/ViewDie.tsx
+msgid "Iso · front right"
+msgstr "Iso · front right"
 
 #: src/shop/ShopApp.tsx
 msgid "Isolated"
@@ -4497,6 +4592,7 @@ msgstr "Leave this as it is and hide it from this list"
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
+#: src/viewport/ViewDie.tsx
 msgid "Left"
 msgstr "Left"
 
@@ -4695,6 +4791,18 @@ msgstr "Loading system fonts…"
 msgid "Loading…"
 msgstr "Loading…"
 
+#: src/viewport/ViewDie.tsx
+msgid "Lock blue plane  ↑"
+msgstr "Lock blue plane  ↑"
+
+#: src/viewport/ViewDie.tsx
+msgid "Lock green plane  ←"
+msgstr "Lock green plane  ←"
+
+#: src/viewport/ViewDie.tsx
+msgid "Lock red plane  →"
+msgstr "Lock red plane  →"
+
 #: src/tools/PlaceImageTool.ts
 msgid "Locked to the {axis} plane — click the first corner; same arrow or Esc unlocks."
 msgstr "Locked to the {axis} plane — click the first corner; same arrow or Esc unlocks."
@@ -4799,6 +4907,7 @@ msgid "Make solid"
 msgstr "Make solid"
 
 #: src/health/healthCopy.ts
+#: src/i18n/historyLabels.ts
 msgid "Make Solid"
 msgstr "Make Solid"
 
@@ -4822,6 +4931,10 @@ msgstr "Make the selection solid"
 #: src/health/healthCopy.ts
 msgid "Make these objects linked copies, so editing one changes them all"
 msgstr "Make these objects linked copies, so editing one changes them all"
+
+#: src/health/healthCopy.ts
+msgid "Make these objects solid"
+msgstr "Make these objects solid"
 
 #: src/health/healthCopy.ts
 msgid "Make this import solid"
@@ -6010,7 +6123,6 @@ msgstr "Or scan the QR with your camera app instead."
 #: src/i18n/nativeMenu.ts
 #: src/shop/ShopApp.tsx
 #: src/tools/toolRegistry.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Orbit"
 msgstr "Orbit"
 
@@ -6305,6 +6417,10 @@ msgstr "Pie"
 #: src/health/healthCopy.ts
 msgid "Piece of a split shape"
 msgstr "Piece of a split shape"
+
+#: src/viewport/ViewDie.tsx
+msgid "Pin the plane under the cursor  Shift"
+msgstr "Pin the plane under the cursor  Shift"
 
 #: src/tools/ArcTool.ts
 #: src/tools/CircleTool.ts
@@ -6812,6 +6928,22 @@ msgstr "Rejoined as one solid."
 msgid "Release"
 msgstr "Release"
 
+#: src/viewport/ViewDie.tsx
+msgid "Release blue plane  ↑"
+msgstr "Release blue plane  ↑"
+
+#: src/viewport/ViewDie.tsx
+msgid "Release green plane  ←"
+msgstr "Release green plane  ←"
+
+#: src/viewport/ViewDie.tsx
+msgid "Release red plane  →"
+msgstr "Release red plane  →"
+
+#: src/viewport/ViewDie.tsx
+msgid "Release the pinned plane  Shift"
+msgstr "Release the pinned plane  Shift"
+
 #: src/palette/registry.ts
 msgid "reload"
 msgstr "reload"
@@ -7112,6 +7244,7 @@ msgstr "revolve"
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
+#: src/viewport/ViewDie.tsx
 msgid "Right"
 msgstr "Right"
 
@@ -8150,12 +8283,10 @@ msgid "Standard View: Bottom"
 msgstr "Standard View: Bottom"
 
 #: src/palette/registry.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Standard View: Front"
 msgstr "Standard View: Front"
 
 #: src/palette/registry.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Standard View: Iso"
 msgstr "Standard View: Iso"
 
@@ -8168,7 +8299,6 @@ msgid "Standard View: Right"
 msgstr "Standard View: Right"
 
 #: src/palette/registry.ts
-#: src/viewport/ViewportHUD.tsx
 msgid "Standard View: Top"
 msgstr "Standard View: Top"
 
@@ -8702,6 +8832,18 @@ msgstr "The browser denied access. Pick the folder again under Settings ▸ Fold
 msgid "The camera needs a secure (https) connection — open the installed Hew app rather than a local preview."
 msgstr "The camera needs a secure (https) connection — open the installed Hew app rather than a local preview."
 
+#: src/tools/draftCommit.ts
+msgid "The closed shape is now a solid of its own. It could not be joined to the one it touches."
+msgstr "The closed shape is now a solid of its own. It could not be joined to the one it touches."
+
+#: src/tools/draftCommit.ts
+msgid "The closed shape is now a solid."
+msgstr "The closed shape is now a solid."
+
+#: src/tools/draftCommit.ts
+msgid "The closed shape joined the solid it was drawn on."
+msgstr "The closed shape joined the solid it was drawn on."
+
 #: src/io/docFormat.ts
 msgid "The current SketchUp file format."
 msgstr "The current SketchUp file format."
@@ -8916,6 +9058,10 @@ msgstr "The shape can't absorb that offset — its boundary would collapse, cros
 msgid "The shape can't go there: it would run off the face, touch an edge or another shape at just one point, or leave a piece too small to keep. A shape being moved can't overlap another one either. Keep it on the face, and draw across or along edges instead of touching them at one point."
 msgstr "The shape can't go there: it would run off the face, touch an edge or another shape at just one point, or leave a piece too small to keep. A shape being moved can't overlap another one either. Keep it on the face, and draw across or along edges instead of touching them at one point."
 
+#: src/panels/MakeSolidSketches.tsx
+msgid "The shape touches itself, so it can't be a solid. Pull the touching parts apart."
+msgstr "The shape touches itself, so it can't be a solid. Pull the touching parts apart."
+
 #: src/kernelErrors.ts
 msgid "The shape's outline crosses itself. Draw a simple, non-crossing outline."
 msgstr "The shape's outline crosses itself. Draw a simple, non-crossing outline."
@@ -9008,6 +9154,14 @@ msgstr "These aren't the same shape."
 #: src/kernelErrors.ts
 msgid "These faces touch along more than one separate edge run, which merge can't dissolve yet. Merge along one shared run at a time."
 msgstr "These faces touch along more than one separate edge run, which merge can't dissolve yet. Merge along one shared run at a time."
+
+#: src/tools/LineTool.ts
+msgid "These lines do not lie on one plane, so no face formed."
+msgstr "These lines do not lie on one plane, so no face formed."
+
+#: src/panels/MakeSolidSketches.tsx
+msgid "These lines do not lie on one plane, so they can't form a face."
+msgstr "These lines do not lie on one plane, so they can't form a face."
 
 #: src/health/healthCopy.ts
 msgid "These objects aren't solid, so the {format} may not print cleanly:"
@@ -9227,8 +9381,8 @@ msgid "This operation can't target an object inside a group. Ungroup it, or leav
 msgstr "This operation can't target an object inside a group. Ungroup it, or leave the group context, first."
 
 #: src/tools/LineTool.ts
-msgid "This outline spans two planes, so it can't close into a single face — finish the shape on one plane instead."
-msgstr "This outline spans two planes, so it can't close into a single face — finish the shape on one plane instead."
+#~ msgid "This outline spans two planes, so it can't close into a single face — finish the shape on one plane instead."
+#~ msgstr "This outline spans two planes, so it can't close into a single face — finish the shape on one plane instead."
 
 #: src/tools/FollowMeTool.ts
 msgid "This path can't be swept in reverse from here — it either only closes going one direction, or bends too tightly to walk backward. Drag forward instead, or start the profile somewhere with more room to reverse."
@@ -9290,6 +9444,10 @@ msgstr "This report is too large to send."
 msgid "This shape has no circle behind it, so there's nothing to re-build. Only a circle drawn with the Circle tool has a segment count."
 msgstr "This shape has no circle behind it, so there's nothing to re-build. Only a circle drawn with the Circle tool has a segment count."
 
+#: src/panels/MakeSolidSketches.tsx
+msgid "This shape is inside a solid, so nothing was made. Push or pull its face to cut into the solid."
+msgstr "This shape is inside a solid, so nothing was made. Push or pull its face to cut into the solid."
+
 #: src/kernelErrors.ts
 msgid "This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart."
 msgstr "This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart."
@@ -9321,6 +9479,10 @@ msgstr "This throws away everything you changed since the last save."
 #: src/kernelErrors.ts
 #~ msgid "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
 #~ msgstr "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
+
+#: src/panels/MakeSolidSketches.tsx
+msgid "Those edges don't lie flat on one plane, so a single face can't close them. Draw a line across the opening to split it into flat faces."
+msgstr "Those edges don't lie flat on one plane, so a single face can't close them. Draw a line across the opening to split it into flat faces."
 
 #: src/kernelErrors.ts
 msgid "Those points don't define a plane. Pick three points that aren't in a line."
@@ -9464,7 +9626,7 @@ msgstr "Tools"
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/print/printJob.ts
-#: src/viewport/ViewportHUD.tsx
+#: src/viewport/ViewDie.tsx
 msgid "Top"
 msgstr "Top"
 
@@ -9539,6 +9701,10 @@ msgstr "tween"
 #: src/kernelErrors.ts
 msgid "Two faces in this panel meet without sharing an edge, so a thickness would leave a crack inside. Draw a line where they meet, then try again."
 msgstr "Two faces in this panel meet without sharing an edge, so a thickness would leave a crack inside. Draw a line where they meet, then try again."
+
+#: src/panels/MakeSolidSketches.tsx
+msgid "Two faces lie on top of each other where the red marks are; erase one of them."
+msgstr "Two faces lie on top of each other where the red marks are; erase one of them."
 
 #. Library list column header
 #: src/panels/library/LibraryListHead.tsx

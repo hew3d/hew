@@ -567,6 +567,14 @@ pub struct Sketch {
     /// ([`Sketch::apply_transform_edges`], [`Sketch::copy_edges_transformed`]),
     /// so the drafting engine can heal a seam moved off the boundary.
     seams: Vec<Point3>,
+    /// Transient drafting state (never saved, ignored by equality): lines a
+    /// drafting lift holds from elsewhere (another plane's or sketch's
+    /// drawing lying in this plane) that new drawing must not bend. A
+    /// facet of a curve chain lying along one is split only on its own
+    /// line, never at a point of its exact circle off that line
+    /// ([`Sketch::split_circle_facet_at`]): the line stays drawn end to end
+    /// as its home holds it.
+    rigid: Vec<(Point3, Point3)>,
 }
 
 /// Everything an undo needs to re-insert consumed scaffolding
@@ -612,7 +620,7 @@ impl Sketch {
     /// An empty sketch on this sketch's plane with its `detached` flag:
     /// what every rebuild of an existing sketch starts from, so the flag is
     /// carried structurally. Transient drafting state (curve bracket, bulk
-    /// insertion cells, snapping, seams) is NOT copied.
+    /// insertion cells, snapping, seams, rigid lines) is NOT copied.
     pub fn blank_like(&self) -> Sketch {
         Self::blank(self.plane, self.detached)
     }
@@ -638,6 +646,7 @@ impl Sketch {
             bulk_vertex_cells: None,
             snap_to_existing: false,
             seams: Vec::new(),
+            rigid: Vec::new(),
         }
     }
 
@@ -656,6 +665,11 @@ impl Sketch {
     /// The seam points, carried through moves and copies.
     pub(crate) fn seams(&self) -> &[Point3] {
         &self.seams
+    }
+
+    /// Sets the rigid lines (see the field `rigid`).
+    pub(crate) fn set_rigid(&mut self, rigid: Vec<(Point3, Point3)>) {
+        self.rigid = rigid;
     }
 
     /// `t` of every seam that is an endpoint of one of `edges` (the drawing
@@ -1080,15 +1094,29 @@ impl Sketch {
         }
 
         // Assign ids: reuse where the anchor edge landed; fresh otherwise.
+        // Each component takes, of the unused old islands anchored on one
+        // of its edges, the one with the smallest (anchor, id) — found by
+        // walking its ascending edges through an anchor index, so a sketch
+        // of thousands of islands is not quadratic in them.
+        let mut by_anchor: std::collections::BTreeMap<SketchEdgeId, Vec<SketchIslandId>> =
+            std::collections::BTreeMap::new();
+        for &(id, anchor) in &old_anchors {
+            by_anchor.entry(anchor).or_default().push(id);
+        }
+        for ids in by_anchor.values_mut() {
+            ids.sort();
+        }
         let mut used: std::collections::BTreeSet<SketchIslandId> =
             std::collections::BTreeSet::new();
         let mut assignments: Vec<(Option<SketchIslandId>, Vec<SketchEdgeId>)> = Vec::new();
         for comp in components {
-            let reuse = old_anchors
-                .iter()
-                .filter(|(id, anchor)| !used.contains(id) && comp.binary_search(anchor).is_ok())
-                .min_by_key(|(id, anchor)| (*anchor, *id))
-                .map(|(id, _)| *id);
+            let reuse = comp.iter().find_map(|e| {
+                by_anchor
+                    .get(e)?
+                    .iter()
+                    .copied()
+                    .find(|id| !used.contains(id))
+            });
             if let Some(id) = reuse {
                 used.insert(id);
             }
@@ -1938,8 +1966,9 @@ impl Sketch {
     /// one facet's span but on none of its points, splits that facet at `p`
     /// into two chords of the same circle in the same chain, so drawing that
     /// ends on the curve (a quadrant, any point the curve's own snaps offer)
-    /// meets it there rather than a sagitta outside it. Returns whether it
-    /// split.
+    /// meets it there rather than a sagitta outside it. A facet lying along
+    /// a rigid line (see the field `rigid`) is never split so. Returns
+    /// whether it split.
     fn split_circle_facet_at(&mut self, p: Point3) -> Result<bool, SketchError> {
         let m = tol::POINT_MERGE;
         let found = self.edges.iter().find_map(|(id, e)| {
@@ -1954,6 +1983,12 @@ impl Sketch {
             }
             let (a, b) = (self.vertices[e.from].position, self.vertices[e.to].position);
             if p.approx_eq(a, m) || p.approx_eq(b, m) {
+                return None;
+            }
+            if self.rigid.iter().any(|&(r0, r1)| {
+                crate::geom2d::point_near_segment(a, r0, r1, m)
+                    && crate::geom2d::point_near_segment(b, r0, r1, m)
+            }) {
                 return None;
             }
             let ab = b - a;

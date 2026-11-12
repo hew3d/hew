@@ -47,7 +47,7 @@ h.mark('scene-start');
 
 // Top view: the rectangle, its edges, and every guide read as clean
 // horizontals/verticals — no iso foreshortening to fight.
-await page.getByRole('button', { name: 'Top', exact: true }).click();
+await h.dieFace('top');
 await page.waitForTimeout(500);
 
 // beat 1 — rectangle with typed exact size

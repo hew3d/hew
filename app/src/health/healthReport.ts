@@ -499,6 +499,11 @@ export interface HealthOverlay {
   /** While the pointer / focus is on a Close button: the rims it WILL cap,
    *  drawn in the solid color over the usual ones (design §5.3). */
   capPreview: { id: bigint; rim: number }[] | null
+  /** Loose line segments to draw (six floats each, `ax ay az bx by bz`,
+   *  world space), for drawing that has no Object to key them to: the open
+   *  edges of faces Make Solid could not close (rim color) and the edges of
+   *  closed loops that lie on no one plane (warn color). Wireframe faces §6. */
+  segments?: { open: Float32Array; warn: Float32Array }
 }
 
 /** The rims a Close on `rows` would cap: those the kernel flags `cappable`

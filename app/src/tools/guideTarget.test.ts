@@ -77,3 +77,14 @@ describe('GuideTarget landing', () => {
     expect(u.onCommit).not.toHaveBeenCalled()
   })
 })
+
+describe('GuideTarget.canAcquire', () => {
+  it('tells whether a click can take a guide (a picker was given)', () => {
+    const target = new GuideTarget()
+    expect(target.canAcquire).toBe(false)
+    target.setHooks(() => null, vi.fn())
+    expect(target.canAcquire).toBe(true)
+    target.setHooks(null, vi.fn())
+    expect(target.canAcquire).toBe(false)
+  })
+})

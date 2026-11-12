@@ -47,7 +47,7 @@ describe('view settings defaults', () => {
     expect(fresh.getSmoothCamera()).toBe(true)
     expect(fresh.getShowToolHints()).toBe(true)
     expect(fresh.getShowToolPointer()).toBe(true)
-    expect(fresh.getMeasurementsPosition()).toBe('top-right')
+    expect(fresh.getMeasurementsPosition()).toBe('bottom-right')
   })
   it('ignores garbage in storage and falls back', async () => {
     localStorage.setItem('hew.settings.zoomWheelSpeed', '9')
@@ -57,7 +57,7 @@ describe('view settings defaults', () => {
     const fresh = await import('./view')
     expect(fresh.getZoomWheelStop()).toBe(2)
     expect(fresh.getSmoothCamera()).toBe(true)
-    expect(fresh.getMeasurementsPosition()).toBe('top-right')
+    expect(fresh.getMeasurementsPosition()).toBe('bottom-right')
   })
   it('restores what was stored', async () => {
     localStorage.setItem('hew.settings.zoomWheelSpeed', '0')

@@ -84,6 +84,19 @@ doesn't exist yet — only its 2D sketch outline does, and that outline is
 consumed once the extrusion happens: it becomes the solid's base face and
 leaves the sketch (see 2.6).
 
+There is a second road to an Object that also has no "make solid" step:
+closed faces. When an edit leaves flat faces that enclose a space with no
+gap, they become a solid in the same undo step (2.4, "The close pass";
+`document/cells.rs`). Six Rectangles arranged as a cube, twelve Lines, or
+a Rectangle with four Lines up to an apex all arrive at the same solid. A
+shape that closes against one existing solid's faces grows that solid
+instead: the result is a new id, the old Object is hidden, and its name,
+tags, and parent carry over. A detached shape (2.6) is a solid of its own.
+A closed shape drawn inside a solid does nothing automatic, since the
+matching rule would have to carve, and carving stays push-through.
+Nothing is repaired to get there: a cell that is not watertight, or
+that fails `validate()`, leaves the faces as they are.
+
 ### 2.3 Combination is always explicit
 
 Two Objects only become one via a deliberate command: boolean union,
@@ -175,7 +188,18 @@ events) edits the whole drawing on one plane as one undo step:
   on it, those objects' owned sketches, and the free sketches there. A
   solid's own edges on the plane (where its faces meet non-coplanar ones)
   are FIXED: drafting splits them where lines meet them but never moves or
-  removes them.
+  removes them. So are **foreign edges** (`gather_foreign`): straight edges
+  that lie in the plane, both ends within `tol::PLANE_DIST`, but belong to
+  something else. They come from live free sketches of the frame on other
+  planes (a sketch facing the other way on the same plane counts as
+  another plane, because `planes_coincide` is same-facing) and from
+  visible Objects' edges that bound no face on this plane, either facing
+  (for a detached shape the Object rule differs; see §2.6). A part of a
+  foreign edge lying over a participating Object's face on
+  the plane is not lifted, since it could close nothing there. Only what
+  participates lends edges: a free sketch must be shown (live, in the
+  frame, no hidden tag, not in a closed group), and an Object must pass
+  the same visibility rule as `drawable_objects_on_plane`'s owner rule.
 - **Edit.** Any ordinary `Sketch` method runs on the working sketch
   (drawing, erasing, moving islands, dragging points, offsetting,
   re-faceting), and the sticky rules arrange the edit exactly as they do
@@ -190,7 +214,14 @@ events) edits the whole drawing on one plane as one undo step:
   to that object's OWNED sketch. An edge over no face goes to a FREE
   sketch. Stores whose content did not change are not rewritten. A region
   the face cannot hold (a sliver too small for a saved file to reopen) is
-  kept as owned drawing instead of refused.
+  kept as owned drawing instead of refused. **Take**: when a foreign edge
+  is materialized into a free region's sketch and, in the free sketch it
+  came from, it bounded no region, it is removed there in the same step,
+  so a loose line that becomes a face's edge moves to the face's sketch;
+  a curve's facets move as their curve chain, and what is left at home
+  stays a chain per contiguous run. A detached lower takes only lines of
+  its connected set. An edge that bounds faces on two planes has a copy in
+  each, which is the only duplication.
 - **Materialization.** A free region may be closed partly by a solid's
   edge (a crescent closed by a face's edge). Before any operation moves or
   removes solid edges (transform, delete, boolean, slice, push/pull) the
@@ -198,6 +229,62 @@ events) edits the whole drawing on one plane as one undo step:
   void keeps what the user saw; spans backed by a face edge again are
   dropped afterwards. A free region is thereby extrudable like any ground
   region, and a covered region is pushed or pulled as its face.
+- **Close pass** (`close_faces_pass`). A loop on one plane is a face
+  whichever sketches hold its lines, but the tool draws each line on the
+  plane it chose, which is not always the plane of the loop. So after an
+  edit adds or moves free edges, the pass looks at each such edge e:
+  every edge of the frame that meets an end of e and is not collinear
+  with it names a candidate plane (through e and that edge). Each
+  candidate other than e's own plane is lifted with foreign edges, and
+  every region whose ring contains e, that no Object face on the plane
+  covers and that is not already a face there, is written into that
+  plane's free sketch by the materialization path, with take. One edge
+  can close several faces (the last top edge of a wire cube closes a side
+  and the top). A plane the pass chose faces as a free sketch of the same
+  kind already on it does; failing that, for ordinary drawing, as an
+  Object's face on it does, which is how a gable closes against its end
+  face's edge; failing that, canonically (first nonzero of z, y, x
+  positive). The pass runs inside the edit's undo step and is seeded by
+  drafts (`lower_draft`) and by sketch moves and copies
+  (`transform_sketch`, the island variants, `copy_sketch_islands`,
+  `move_sketch_vertex`). It never runs on load, import, library insert,
+  undo, or redo: a file reopens as it was saved. `DraftReport` carries
+  `faces_closed` (faces made on other planes) and `cells` (solid
+  outcomes, below); a sketch move or copy reports in the same shape
+  (`Document::sketch_edit_report`), and the wasm `transform_sketch_islands`
+  and `copy_sketch_islands` return it as the JSON `draft_end` returns, so
+  a Move, Rotate, Scale or Copy that closes a face or a solid tells the
+  app as a draw does (a whole-sketch move reports nothing yet). Planarity is exact (`tol::PLANE_DIST`): four points
+  that miss a plane by more make no face, and the tool says so.
+- **Closed cells** (`crates/kernel/src/document/cells.rs`). The faces an
+  edit made or moved seed a search. It gathers every face connected to a
+  seed through shared edges (rings are refined first, so a vertex of one
+  ring on another's edge splits it), prunes faces with an open edge that
+  no cappable rim covers, orders the rest around each edge by angle, and
+  walks the rotation to close cells. Two rooms that share a wall are two
+  cells. Faces with the same loop on one plane (one wall drawn twice, as
+  a detached shape and as ordinary drawing, which never merge; a point
+  along a side does not make another loop) are one face to the search: it takes the ordinary one, else the earlier drawn,
+  and the other stays a sketch on the solid's face. Faces that lie over
+  each other without being the same loop decline the cells they bound
+  (`OverlappingFaces`), naming the edges where they do, which Make
+  Solid's overlay draws. Each bounded cell is built through `from_polygons_impl` (holes
+  included) and must be Watertight and pass `validate()`; any failure
+  leaves the faces as the edit left them. The commit is one of three: a
+  new Object; an Object grown by `Object::boolean(Union, ...)` plus
+  `merge_coplanar_faces` (the `push_through` pattern), committed like
+  `push_pull_through` with the old name, tags, and parent carried over;
+  or, when a detached face is in the cell or the rim lies on two or more
+  Objects, a new Object that includes its caps as faces, with nothing
+  unioned. If the union refuses, the cell is a separate Object and the
+  user is told. A cell inside the Object it rims makes nothing. Faces are
+  flat; a circle on a ring edge stays edge metadata. A face takes part
+  only under the visibility rule above. The same search runs on demand as
+  Make Solid on selected sketches, after the close pass over every line
+  of the selection (so faces an older build never formed are made on the
+  way), all as one step; when no solid forms nothing is kept, the pass's
+  faces included, and when one forms every face the pass made is kept
+  (`faces_open_edges` reads the gaps).
 - **Units and keys** (`crates/kernel/src/unit_key.rs`, `Document::
   plane_units`). Islands, curve runs, edges, and regions are keyed by
   geometry, not slot history: FNV-1a over the `(u, v)` bit patterns in the
@@ -285,7 +372,42 @@ sketches to a change). The file records an owned sketch's owner as
 A free sketch may be **detached**: it takes part in no plane arrangement
 (`Sketch::detached`, format v23), is its own drafting context, and
 extrudes only to a new Object. It is the one way to draw on a face
-without joining it; nothing joins it later. The viewport draws a
+without joining it; nothing joins it later. That holds for closing faces
+too. A detached lift has no fixed edges from faces or sketches on its own
+plane, and foreign edges reach it only from other detached sketches of
+the frame and from Objects' edges lying in the plane whose two ends are
+both vertices of the detached shape (no Object takes part in a detached
+lift). The shape is the drawn sketch plus the detached edges in the plane
+connected to it end to end; a line that only ends on its edge does not
+link. So a detached gable whose rafters end on a box's top corners closes
+against the box's top edge, while a detached rectangle drawn around the
+box's footprint shares no vertex with it and stays one region. A detached
+draft's shape is known only after its edit, so the lowering adds the
+Object edges the drawn shape now ends on before it lowers (not after a
+vertex drag, which closes nothing on its own plane). Every region the
+connected shape bounds is a face of the gesture, not only those its own
+lines bound: a gable split by a post closes both halves when the second
+rafter adds the box's top edge, the half on the first rafter's side
+included. Other detached sketches on the same plane are neither lifted
+nor foreign in a detached draft, and a line from another plane that the
+drawn shape does not reach end to end drops out of its lift, so it
+neither splits nor joins the shape. The close pass is more generous: it
+looks at every detached sketch lying in a candidate plane, the draft's
+own plane included when another shape there shares a corner, so a
+detached line closes a face whichever plane the tool homed it on, and
+four detached Line gestures on one plane that share corners make a face
+(four that never share an end make none). It arranges the connected set
+only: a line that merely crosses it stays whole and loose. No Object face
+covers a detached shape, so a detached loop on a box's top is a loose
+face there. A region a loop of the connected set already holds, faced or
+not, is never made again, so shapes that share a corner or a side stay as
+drawn, and a face is final to later detached gestures (a diagonal drawn
+across a detached square stays a loose line; drawn first, the square
+closes as two triangles); a loop the set does not reach never blocks,
+so nested shapes both fill. Ordinary drawing and detached
+lines never close a face together, and a face the pass makes from a
+detached edge is a detached sketch. A solid formed from a detached face
+is a new Object, never a growth of the solid under it. The viewport draws a
 detached sketch, like any free sketch, in blue, and the edges and regions
 of a solid's face (imprints, object-owned sketches) in orange.
 
@@ -299,7 +421,8 @@ Object to every operation; the verdict only keeps the UI from presenting it
 as broken, and the one flag a person can set (`hew.health` / `surface` in
 the Object's attributes) records that they accepted it as a surface. Native
 drawing still never makes one: a flat shape stays a Sketch until it is
-extruded.
+extruded, or until faces drawn around a space close it into a solid
+(2.2). Faces that do not close stay Sketches, never an open Object.
 
 A Sketch is the larval form of a solid: extruding a region makes the
 drawn profile BECOME the solid's base face, so the geometry that bounded
@@ -521,7 +644,17 @@ is designed so that watertightness can never be broken as a side effect:
 - **Push-through.** Pushing or pulling a face past the Object's opposite
   face performs a boolean subtraction of the swept volume rather than
   producing an open shell — this is the *only* way material is removed from
-  a solid in Hew.
+  a solid in Hew. Every result piece carries the source's name and tags
+  (when an inward push severs the solid, each piece does: tags are
+  membership, and names are not unique). Undo is unchanged. Booleans give
+  their result no name and no tags, since two Objects merge there and
+  neither name wins.
+- **Close to solid.** Flat faces that enclose a space become an Object
+  (or grow the one they close against) by construction: the cell is built
+  through the same polygon builder, must be Watertight and validate, and
+  otherwise nothing happens (2.2, 2.4). The growing path is a boolean
+  union followed by coplanar merging, so it keeps the Object's coplanar
+  edge segments the way push-through does.
 - **Slice.** Cutting an Object with a plane produces two independent,
   fully watertight Objects sharing a coincident cut face — a real geometric
   split (in the spirit of a CAD "split body" operation), not a virtual

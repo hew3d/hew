@@ -26,7 +26,7 @@
  * HONOURS that snap: the fourth segment commits exactly to (0,0,0), on a
  * freshly re-homed plane that genuinely contains it (the mock kernel
  * enforces the real `PointOffPlane` planarity check), while the honest
- * "spans two planes, can't close a face" refusal still fires — the snap
+ * "do not lie on one plane, can't close a face" refusal still fires — the snap
  * works AND no face is claimed.
  *
  * Rays are genuine oblique-camera rays (eye at (5,−4,3.5), matching the
@@ -187,7 +187,7 @@ describe('LineTool — the 3d-line staircase: closing back onto the chain origin
     // belongs to the chain's FIRST sketch, so no face can be claimed — the
     // toast says so, but the segment above still committed.
     expect(onToast).toHaveBeenCalledTimes(1)
-    expect(onToast).toHaveBeenCalledWith(expect.stringContaining('spans two planes'))
+    expect(onToast).toHaveBeenCalledWith(expect.stringContaining('do not lie on one plane'))
   })
 
   it('never publishes the live rubber band as a snap candidate (the phantom-"Endpoint" feedback loop)', () => {

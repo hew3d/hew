@@ -55,6 +55,22 @@ export interface Snap {
    *  projected onto the locked line (`x/y/z` are the projection). The cue
    *  layer draws the dotted tie between the two. */
   projectedFrom?: [number, number, number]
+  /** For a reference-line snap (`kind === 'from-point'`, `referenceLines.ts`):
+   *  the foot on the drawing plane of the reference point the line runs
+   *  through. The cue draws the dashed line from here to the snap point. */
+  from?: [number, number, number]
+  /** The reference point itself when it is off the drawing plane (the foot's
+   *  source), so the cue can draw the thin tie from it to its foot. Also set
+   *  on a plain projected snap (a named point dropped onto the plane), where
+   *  it is the point before the drop and `x/y/z` is the foot. */
+  fromSource?: [number, number, number]
+  /** For a reference-line CROSSING: the second line through the snap point,
+   *  drawn like the first. */
+  fromAlso?: {
+    from: [number, number, number]
+    direction: [number, number, number]
+    fromSource?: [number, number, number]
+  }
   /** For an `'intersection'` snap: true when an edge passes THROUGH a face
    *  of another owner (the kernel's `pierced_face` is set), false when two
    *  edges — or an edge and a guide or axis — cross. The edge is the snap's
@@ -145,6 +161,29 @@ export interface SnapConstraint {
    */
   seeThroughPoints?: boolean
   facesOnly?: boolean
+  /**
+   * A plane used ONLY for the snap service's ray∩plane fallback when the
+   * kernel offers no candidate; never passed to the kernel, so geometry
+   * anywhere still snaps. The idle draw tools set it to the axis plane the
+   * view faces (view-plane design, picker step 7), so a click in empty space
+   * lands on that plane while a nearby corner or edge still wins.
+   * `constraintPlane`, when set, takes precedence.
+   */
+  fallbackPlane?: { point: [number, number, number]; normal: [number, number, number] }
+}
+
+/**
+ * What a click right now would pick up from under the cursor — the
+ * transform tools' empty-selection auto-acquire (Move/Rotate/Scale) — so the
+ * viewport can highlight it on hover before the click (SketchUp's
+ * pre-selection highlight). A tool offers it through an optional
+ * `clickAcquire(): ClickAcquire | null` (null: a click acquires nothing).
+ * `guides` before `nodes`, as Move's click takes a guide over the object
+ * beneath it.
+ */
+export interface ClickAcquire {
+  guides: boolean
+  nodes: boolean
 }
 
 /**
@@ -194,6 +233,69 @@ export interface Tool {
   updateCamera?(camera: THREE.Camera): void
 
   /**
+   * (optional) True for a tool whose idle hover follows the view: the plane
+   * a click in empty space lands on is inferred from the camera
+   * (docs/design/view-plane-inference.md), so a still cursor's answer
+   * changes when an idle key, Shift or the camera does. Only these tools get
+   * the Viewport's held-pointer hover replay after those events
+   * (`followsViewPlane`, heldPointerReplay.ts); every other tool keeps its
+   * hover where the last real pointer move left it.
+   */
+  readonly followsViewPlane?: boolean
+
+  /**
+   * (optional) The plane state the view die, pips and cursor cue read
+   * (docs/design/view-die.md §3.4). Null / absent when the tool is not a
+   * plane-drawing tool. Implemented by the five `followsViewPlane` draw tools.
+   */
+  drawPlaneState?(): import('./drawPlane').DrawPlaneState | null
+
+  /**
+   * (optional) Toggle the Shift plane pin as one fresh Shift press would
+   * while idle — the view die's custom pip (docs/design/view-die.md §3.3).
+   * A no-op mid-gesture. Paired with `pinnablePlane`.
+   */
+  togglePlanePin?(): void
+
+  /**
+   * (optional) The plane `togglePlanePin` acts on right now: the pinned
+   * plane, else the tracked hover plane a pin would take; null mid-gesture
+   * or with nothing to pin.
+   */
+  pinnablePlane?(): import('./drawPlane').DrawPlane | null
+
+  /**
+   * (optional) The plane the view die's custom pip acts on: a pinned custom
+   * plane, a custom tracked hover plane, or the live custom candidate (the
+   * last custom plane hovered, kept for 2 s and while the pointer is off
+   * the canvas on its way to the pip); null mid-gesture or with none, which
+   * disables the pip (docs/design/view-die.md §3.3).
+   */
+  customPipPlane?(): import('./drawPlane').DrawPlane | null
+
+  /**
+   * (optional) The custom pip's click: release an active pin, else pin the
+   * custom candidate's plane. A no-op mid-gesture.
+   */
+  pinCustomCandidate?(): void
+
+  /**
+   * (optional) Milliseconds until the custom candidate's window closes, or
+   * null with no timed expiry pending — the host schedules one pip refresh
+   * then.
+   */
+  customPipTtl?(): number | null
+
+  /**
+   * (optional) Whether the arrow `key` at the tool's current stage would
+   * release the held plane lock rather than set one — so the view die's
+   * pip tooltip reads "Release" only when a click would release
+   * (docs/design/view-die.md §3.3). Line mid-chain answers false: its
+   * arrows lock the segment's axis there.
+   */
+  planeKeyReleases?(key: string): boolean
+
+  /**
    * (optional) True when the snap most recently handed to `onPointerMove` was
    * PROJECTED onto the tool's drawing plane rather than used as-is — i.e. the
    * point the gesture will actually commit is not the point the inference
@@ -226,11 +328,28 @@ export interface Tool {
   hoverHint?(): string | null
 
   /**
+   * (optional) The camera moved (a wheel zoom, a Scene tween, Fly) while the
+   * pointer rests on the canvas: `ray` is the ray at the pointer's position
+   * for the camera as it is now, undefined when no cursor is over the canvas
+   * to aim one (a button held, a panel covering it). A tool that lights
+   * something under the cursor re-aims it here, as a pointer move would.
+   */
+  onViewChanged?(ray: Ray | undefined): void
+
+  /**
    * (optional) The pointer left the canvas. A tool that memoizes anything
-   * about what is hovered (`hoverHint`'s refusal line) drops it here, so the
-   * status bar does not keep describing a face the cursor is no longer over.
+   * about what is hovered (`hoverHint`'s refusal line, a draw tool's idle
+   * plane patch) drops it here, so the status bar and the drawing-plane cue
+   * (both re-polled right after) do not keep describing a face or plane the
+   * cursor is no longer over.
    */
   onPointerLeave?(): void
+
+  /**
+   * (optional) What a click right now would pick up from under the cursor
+   * (`ClickAcquire`; null: nothing), for the viewport's hover highlight.
+   */
+  clickAcquire?(): ClickAcquire | null
 
   /**
    * (optional) Return snap constraints the tool wants injected into the next

@@ -1777,6 +1777,10 @@ export interface SketchCopyParams {
 }
 
 export interface SketchCopyResult {
+  /** present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed */
+  faces_closed?: string[]
+  /** present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags) */
+  solid?: { grew: boolean; object_id: string }
   /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
   units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
 }
@@ -1820,7 +1824,7 @@ export interface SketchDrawArcParams {
   start_angle: number
 }
 
-export type SketchDrawArcResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
+export type SketchDrawArcResult = { curve_id?: string; faces_closed?: string[]; region_id?: string; region_ids: string[]; sketch: string; solid?: { grew: boolean; object_id: string } } | { faces_closed?: string[]; object_id: string; solid?: { grew: boolean; object_id: string }; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.draw_circle` (v1) — Draw a circle on a plane spec.
@@ -1838,7 +1842,7 @@ export interface SketchDrawCircleParams {
   segments?: number
 }
 
-export type SketchDrawCircleResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
+export type SketchDrawCircleResult = { curve_id?: string; faces_closed?: string[]; region_id?: string; region_ids: string[]; sketch: string; solid?: { grew: boolean; object_id: string } } | { faces_closed?: string[]; object_id: string; solid?: { grew: boolean; object_id: string }; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.draw_line` (v1) — Draw a line (chain) on a plane spec.
@@ -1853,7 +1857,7 @@ export interface SketchDrawLineParams {
   points: ([number, number, number] | UnspecifiedShape)[]
 }
 
-export type SketchDrawLineResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
+export type SketchDrawLineResult = { curve_id?: string; faces_closed?: string[]; region_id?: string; region_ids: string[]; sketch: string; solid?: { grew: boolean; object_id: string } } | { faces_closed?: string[]; object_id: string; solid?: { grew: boolean; object_id: string }; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.draw_polygon` (v1) — Draw a regular N-gon on a plane spec.
@@ -1870,7 +1874,7 @@ export interface SketchDrawPolygonParams {
   sides: number
 }
 
-export type SketchDrawPolygonResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
+export type SketchDrawPolygonResult = { curve_id?: string; faces_closed?: string[]; region_id?: string; region_ids: string[]; sketch: string; solid?: { grew: boolean; object_id: string } } | { faces_closed?: string[]; object_id: string; solid?: { grew: boolean; object_id: string }; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.draw_rect` (v1) — Draw an axis-aligned rectangle on a plane spec.
@@ -1886,7 +1890,7 @@ export interface SketchDrawRectParams {
   plane: UnspecifiedShape
 }
 
-export type SketchDrawRectResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
+export type SketchDrawRectResult = { curve_id?: string; faces_closed?: string[]; region_id?: string; region_ids: string[]; sketch: string; solid?: { grew: boolean; object_id: string } } | { faces_closed?: string[]; object_id: string; solid?: { grew: boolean; object_id: string }; units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.move` (v1) — Move drawing units (islands, edges, circles, regions) on a plane by an offset.
@@ -1903,6 +1907,10 @@ export interface SketchMoveParams {
 }
 
 export interface SketchMoveResult {
+  /** present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed */
+  faces_closed?: string[]
+  /** present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags) */
+  solid?: { grew: boolean; object_id: string }
   /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
   units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
 }
@@ -1939,6 +1947,10 @@ export interface SketchRotateParams {
 }
 
 export interface SketchRotateResult {
+  /** present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed */
+  faces_closed?: string[]
+  /** present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags) */
+  solid?: { grew: boolean; object_id: string }
   /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
   units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
 }
@@ -1961,6 +1973,10 @@ export interface SketchScaleParams {
 }
 
 export interface SketchScaleResult {
+  /** present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed */
+  faces_closed?: string[]
+  /** present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags) */
+  solid?: { grew: boolean; object_id: string }
   /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
   units: ({ detached?: boolean; key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
 }
@@ -2065,6 +2081,23 @@ export interface SolidFollowMeParams {
 }
 
 export interface SolidFollowMeResult {
+  object_id: string
+}
+
+/**
+ * `hew.solid.from_faces` (v1) — Make a solid from drawn faces that enclose a space (Make Solid on sketches), first filling the faces the named sketches' lines can close; a shape closed against a solid grows it.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: faces_not_closed, loop_not_planar, faces_not_solid, unknown_entity
+ */
+export interface SolidFromFacesParams {
+  /** skt_ ids of free sketches; their lines first fill every face they can close (as a draw would), then every face (faced region) they hold, and every face so filled, seeds the search, which gathers every face connected to one through shared edges (two faces with the same loop on one plane are one face: the ordinary one, else the earlier drawn) */
+  sketches: string[]
+}
+
+export interface SolidFromFacesResult {
+  /** the shape closed against an existing solid, which grew into object_id (carrying its name and tags) */
+  grew: boolean
+  /** the first solid made */
   object_id: string
 }
 
@@ -2803,6 +2836,7 @@ export class HewApiClient {
     deleteImprint: (params: SolidDeleteImprintParams): Promise<SolidDeleteImprintResult> => this.mutate('hew.solid.delete_imprint', params),
     extrude: (params: SolidExtrudeParams): Promise<SolidExtrudeResult> => this.mutate('hew.solid.extrude', params),
     followMe: (params: SolidFollowMeParams): Promise<SolidFollowMeResult> => this.mutate('hew.solid.follow_me', params),
+    fromFaces: (params: SolidFromFacesParams): Promise<SolidFromFacesResult> => this.mutate('hew.solid.from_faces', params),
     imprints: (params: SolidImprintsParams): Promise<SolidImprintsResult> => this.call('hew.solid.imprints', params),
     intersect: (params: SolidIntersectParams): Promise<SolidIntersectResult> => this.mutate('hew.solid.intersect', params),
     markSurface: (params: SolidMarkSurfaceParams): Promise<SolidMarkSurfaceResult> => this.mutate('hew.solid.mark_surface', params),

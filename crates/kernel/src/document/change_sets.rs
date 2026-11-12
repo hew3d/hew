@@ -253,6 +253,21 @@ impl Document {
                 }
                 b.reanchored(reanchored);
             }
+            DocAction::CreatedObjectFromFaces { id } => {
+                // The consumed scaffolding is its own rows beside this one.
+                b.object(Added, *id);
+                b.owner_defs(&[*id], &[], &[]);
+            }
+            DocAction::GrewObjectFromFaces {
+                from,
+                to,
+                reanchored,
+            } => {
+                b.object(Added, *to);
+                b.object(Removed, *from);
+                b.owner_defs(&[*from, *to], &[], &[]);
+                b.reanchored(reanchored);
+            }
             DocAction::ObjectOp { object } => b.object(Modified, *object),
             DocAction::Boolean {
                 result,

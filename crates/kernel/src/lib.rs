@@ -54,12 +54,13 @@ pub use changes::{
     AttrChange, AttrScope, CHANGE_RING_CAP, ChangeKind, ChangeRecord, ChangeRef, ChangeSet,
 };
 pub use document::{
-    AttrTarget, Axis, CompoundMeta, CompoundOutcome, CompoundToken, DocChange, DocTransaction,
-    Document, DocumentError, DraftCurveRun, DraftEdge, DraftRegion, DraftRegionWhy, DraftReport,
-    DraftStore, DraftUnit, EntityRef, FlipAbout, FollowMePath, HEW_ATTR_NS, HistoryArg,
-    HistoryEntries, HistoryEntryInfo, HistoryKind, HistoryOrigin, IngestJob, IngestProgress,
-    InsertOptions, InsertReport, LINKED_ATTR_KEY, LibraryProvenance, LinkPolicy, LinkedJoin,
-    LinkedWrap, MAX_COMPONENT_DEPTH, MAX_OCCURRENCES, MaterialScope, NodeId, Occurrence,
+    AttrTarget, Axis, CellDecline, CellDeclineReason, CellOutcome, CellScope, CellSeed,
+    ClosingEdge, CompoundMeta, CompoundOutcome, CompoundToken, DocChange, DocTransaction, Document,
+    DocumentError, DraftCurveRun, DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore,
+    DraftUnit, EntityRef, FlipAbout, FollowMePath, HEW_ATTR_NS, HistoryArg, HistoryEntries,
+    HistoryEntryInfo, HistoryKind, HistoryOrigin, IngestJob, IngestProgress, InsertOptions,
+    InsertReport, LINKED_ATTR_KEY, LibraryProvenance, LinkPolicy, LinkedJoin, LinkedWrap,
+    MAX_COMPONENT_DEPTH, MAX_OCCURRENCES, MaterialScope, NodeId, Occurrence, OpenEdges,
     PendingActionKind, PlaneListing, PlaneUnits, PurgeReport, Remap, RenderRoot, WRAPPED_DEF_SID,
 };
 pub use error::TopologyError;

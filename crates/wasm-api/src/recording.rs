@@ -1274,6 +1274,11 @@ pub enum RecordedCall {
         /// The calls recorded while the compound was open, in order.
         calls: Vec<RecordedCall>,
     },
+    /// `make_solid_from_sketches(sketches)`: Make Solid on drawn faces
+    /// (wireframe faces §6). Additive (the posture above): a recording that
+    /// never makes a solid from faces replays on older builds unchanged; one
+    /// that does fails to parse there, loudly.
+    MakeSolidFromSketches { sketches: Vec<u64> },
 }
 
 /// A [`kernel::UvFrame`]'s components, flattened for [`RecordedCall::SetFaceUvFrame`]

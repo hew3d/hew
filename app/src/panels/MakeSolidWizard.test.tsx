@@ -89,7 +89,7 @@ function makeScene(
   return { scene: scene as unknown as WasmScene & typeof scene, sent, transacts: () => sent.filter((s) => s.method === 'hew.doc.transact') }
 }
 
-function setup(over: { scene?: ReturnType<typeof makeScene>['scene']; scope?: 'import' | 'selection' | 'model'; objectIds?: bigint[] } = {}) {
+function setup(over: { scene?: ReturnType<typeof makeScene>['scene']; scope?: 'import' | 'selection' | 'export' | 'model'; objectIds?: bigint[] } = {}) {
   const made = over.scene === undefined ? makeScene() : null
   const scene = over.scene ?? made!.scene
   const props = {
@@ -147,6 +147,15 @@ describe('MakeSolidWizard — overview', () => {
     expect(scene.last_import_object_ids).not.toHaveBeenCalled()
     expect(screen.getByRole('heading', { name: 'Make the selection solid' })).toBeInTheDocument()
     expect(screen.getByText(/you selected\./)).toBeInTheDocument()
+    expect(screen.getByText('3 shapes have openings: close them.')).toBeInTheDocument()
+  })
+
+  it("an export warning's objects: reads them, recommends closing, and never says the person selected them (KB-6)", () => {
+    const { scene } = setup({ scope: 'export', objectIds: [4n, 5n] })
+    expect(scene.health_report_json).toHaveBeenCalledWith(BigUint64Array.from([4n, 5n]))
+    expect(screen.getByRole('heading', { name: 'Make these objects solid' })).toBeInTheDocument()
+    expect(screen.getByText(/objects that are not solid\./)).toBeInTheDocument()
+    expect(screen.queryByText(/you selected/)).not.toBeInTheDocument()
     expect(screen.getByText('3 shapes have openings: close them.')).toBeInTheDocument()
   })
 

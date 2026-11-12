@@ -4838,12 +4838,20 @@ impl Scene {
     /// handles; an arranging landing gives the moved geometry fresh handles
     /// (island ids may be gone), so re-query via `sketch_island_ids`. See
     /// [`kernel::Document::transform_sketch_islands`].
+    ///
+    /// Returns the step's report as the JSON [`Scene::draft_end`] returns
+    /// (wireframe faces §16 R20): `{"objects":[],"sketches":[id..],
+    /// "kept_as_sketch":[],"faces_closed":[id..],"cells":[..]}`, where
+    /// `sketches` lists every sketch the step wrote, the moved sketch first
+    /// (a detaching move: the source, then the new sketch), and
+    /// `faces_closed` / `cells` say what the move closed — a face on another
+    /// plane, or a solid made or grown — exactly as for a draw.
     pub fn transform_sketch_islands(
         &mut self,
         sketch: u64,
         islands: &[u64],
         affine: &[f64],
-    ) -> Result<(), ApiError> {
+    ) -> Result<String, ApiError> {
         self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
@@ -4864,7 +4872,10 @@ impl Scene {
             islands: islands.to_vec(),
             affine: *rows,
         });
-        Ok(())
+        Ok(draft_api::draft_report_json(
+            &self.doc.sketch_edit_report(&change),
+            None,
+        ))
     }
 
     /// The island of `sketch` that holds the edge whose endpoints sit at
@@ -4933,12 +4944,22 @@ impl Scene {
     /// hides the copy, `scene_redo` unhides it (the returned handle stays
     /// valid across both). The new sketch's island/element handles are fresh;
     /// re-query via `sketch_island_ids`, as after any reshaping mutation.
+    ///
+    /// Returns the step's report as the JSON [`Scene::draft_end`] returns
+    /// (wireframe faces §16 R20): `{"objects":[],"sketches":[copy,..],
+    /// "kept_as_sketch":[],"faces_closed":[id..],"cells":[..]}`. The new
+    /// sketch's handle is `sketches[0]`, always (the rest are sketches the
+    /// close pass and the cells search wrote); `faces_closed` / `cells` say
+    /// what the copy closed — a face on another plane, or a solid made or
+    /// grown — exactly as for a draw. A copy whose faces became a solid is
+    /// consumed in the same step, so `sketches[0]` may then name a deleted
+    /// sketch.
     pub fn copy_sketch_islands(
         &mut self,
         sketch: u64,
         islands: &[u64],
         affine: &[f64],
-    ) -> Result<u64, ApiError> {
+    ) -> Result<String, ApiError> {
         self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
@@ -4959,7 +4980,13 @@ impl Scene {
             islands: islands.to_vec(),
             affine: *rows,
         });
-        Ok(copy.data().as_ffi())
+        let report = self.doc.sketch_edit_report(&change);
+        debug_assert_eq!(
+            report.sketches.first(),
+            Some(&copy),
+            "the copy is named first"
+        );
+        Ok(draft_api::draft_report_json(&report, None))
     }
 
     /// A sketch's plane as `[px,py,pz, nx,ny,nz]` — a point on the plane
@@ -8703,6 +8730,24 @@ impl Scene {
         Ok(vec![p.x, p.y, p.z, n.x, n.y, n.z])
     }
 
+    /// Whether an Object face is a chord facet of a curved wall (it carries
+    /// an analytic surface reference, the same stamp the tessellator smooths
+    /// by). `false` for every plane-true face. The drawing-plane cue reads
+    /// this to outline only faces that are really flat, without tessellating
+    /// the object to find out.
+    pub fn face_is_curved(&self, object: u64, face: u64) -> Result<bool, ApiError> {
+        let object = self
+            .doc
+            .object(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let fid = FaceId::from(KeyData::from_ffi(face));
+        let face = object
+            .faces()
+            .get(fid)
+            .ok_or_else(|| stale("UnknownFace", "face"))?;
+        Ok(face.surface.is_some())
+    }
+
     /// A world Object edge's two endpoint positions in world space, as
     /// `[ax,ay,az, bx,by,bz]` — the geometry the Tape Measure tool needs to
     /// build a parallel guide line. `undefined` if `object` isn't a live world
@@ -9725,6 +9770,9 @@ impl Scene {
     pub fn set_hidden(&mut self, object_ids: &[u64], instance_ids: &[u64]) {
         self.hidden_objects = object_ids.iter().map(|&h| object_id(h)).collect();
         self.hidden_instances = instance_ids.iter().map(|&h| instance_id(h)).collect();
+        // A hidden solid never grows from faces closed against it.
+        self.doc
+            .set_view_hidden_objects(self.hidden_objects.iter().copied());
 
         // Rebuild inference registration to match the new sets: clear every
         // object/instance candidate wholesale, then register only the visible
@@ -12931,6 +12979,9 @@ impl Scene {
                 }
                 CapRims { object, rims } => {
                     self.cap_rims(object, rims)?;
+                }
+                MakeSolidFromSketches { sketches } => {
+                    self.make_solid_from_sketches(sketches)?;
                 }
                 DeleteFaces { object, faces } => {
                     self.delete_faces(object, faces)?;
@@ -18438,6 +18489,19 @@ mod tests {
         assert_eq!(scene.face_uv_frame(object, face), Some(frame));
     }
 
+    /// `face_is_curved` is false for a box face and true for a cylinder
+    /// wall facet; a stale handle is refused.
+    #[test]
+    fn face_is_curved_tells_walls_from_planes() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        assert_eq!(pick.object(), a);
+        assert!(!scene.face_is_curved(pick.object(), pick.face()).unwrap());
+        assert!(scene.face_is_curved(u64::MAX, pick.face()).is_err());
+    }
+
     /// `face_mesh_range` gives a `[base, count]` vertex range that actually
     /// indexes into `object_mesh`'s `uvs`/`positions` — the Position Texture
     /// tool's live-preview patch target (paint-tool design §3).
@@ -19779,7 +19843,9 @@ mod tests {
             0.0, 1.0, 0.0, 0.0, //
             0.0, 0.0, 1.0, 0.1,
         ];
-        let copy = scene.copy_sketch_islands(s, &islands, &up).unwrap();
+        let report = scene.copy_sketch_islands(s, &islands, &up).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+        let copy = report["sketches"][0].as_u64().unwrap();
         assert_ne!(copy, s, "the copy is its own sketch");
 
         // Both sketches are live; the source is unchanged on the ground.

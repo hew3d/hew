@@ -4,7 +4,7 @@ description: "Move, Rotate, or Scale with full snapping, axis locks, and typed v
 order: 9
 ---
 
-Move, Rotate, and Scale all work on the current selection — but they don't demand one. With nothing selected, clicking an object with any of the three selects it and starts the gesture in the same click, so moving something is one fluid motion, not Select-then-Move. With a selection already made, the click places the first reference point as usual.
+Move, Rotate, and Scale all work on the current selection — but they don't demand one. With nothing selected, hovering highlights what a click would take — an object, a group, a component, a drawn shape, or (Move and Rotate) a guide. With Move and Rotate, clicking it selects it and starts the gesture in the same click, so moving something is one fluid motion, not Select-then-Move. That selection lasts only for the gesture: once a Move or Rotate lands (or you press `Esc`), nothing is selected again, ready for the next object. With a selection already made, their click places the first reference point as usual, and the selection stays. Scale's first click only selects and shows the grips to drag (see Scale below).
 
 <docs-video theme="dark" slug="moving-and-transforming" label="moving and transforming demonstration"></docs-video>
 
@@ -37,7 +37,7 @@ Beyond clicking and dragging, **Edit ▸ Select All** (`⌘A` / `Ctrl+A`) select
 ## Move (`M`)
 
 1. Click a **base point**. Pick a meaningful one, like a corner you want to land somewhere. (With nothing selected, this click also selects the object under the cursor.)
-2. Click the **destination**. The base point lands exactly there, snapping to anything the inference engine finds.
+2. Click the **destination**. The base point lands exactly there, snapping to anything the inference engine finds. A dashed line runs from the base point to the cursor, gray like a guide, or in the axis color when it lies along an axis.
 
 Move, Rotate, and Scale also take a drag: press on the first point (Move's base point, Rotate's pivot, a Scale grip), drag, and let go where the second click would go; a short press is still a click, and a value typed right after you let go applies just as it would after a click.
 
@@ -45,7 +45,7 @@ Move, Rotate, and Scale also take a drag: press on the first point (Move's base 
 
 **Axis locking:** hold `Shift` to lock to the dominant axis of your drag, or press `→` for X, `←` for Y, `↑` for Z (`↓` clears). The preview line takes the axis color.
 
-**Copy instead of move:** tap `Option` (Mac) / `Ctrl` (Windows, Linux) — copy mode switches on and stays on, with the readout prefixed "Copy ·", a `+` badge on the cursor, and the status bar confirming it. Because it's a toggle rather than a held key, everything else works exactly as in a plain move: type an exact distance and press `Enter` to place a copy at a precise offset. The original stays put, the copy lands at the destination and becomes the new selection, so repeated moves chain copies.
+**Copy instead of move:** tap `Option` (Mac) / `Ctrl` (Windows, Linux) — copy mode switches on and stays on, with the readout prefixed "Copy ·", a `+` badge on the cursor, and the status bar confirming it. Because it's a toggle rather than a held key, everything else works exactly as in a plain move: type an exact distance and press `Enter` to place a copy at a precise offset. The original stays put and the copy lands at the destination. If you had selected the original beforehand, the copy becomes the new selection, so repeated moves chain copies; if the click took it, nothing stays selected.
 
 By default a copy is a **linked copy**: it shares its shape with the original, so editing one changes both ([Linked copies](/learn/groups-and-components/#linked-copies)). Tap the copy key again and you get an **independent copy**, the readout reads "Independent copy ·" and the badge reads "+ independent", which is a plain duplicate with no link. One more tap goes back to moving. If you would rather copies start out independent, turn off **Copies are linked** in [Settings](/learn/settings/#editing); the taps then run Copy (independent), Linked copy, Move.
 
@@ -70,7 +70,7 @@ The retyped-distance window and the array window share one typed buffer: right a
 Rotate puts a **protractor** — a round dial — under your cursor. The dial lies in the plane you'll rotate in, and its color is the axis you'll spin around: blue on the ground (vertical Z), red for X, green for Y, or purple for an off-axis face. As you move over the model the dial tilts to whatever **face or edge** is under the cursor, so you can see the axis before you commit to it.
 
 1. Hover until the dial shows the axis you want, then click the **pivot** (the center of rotation).
-2. Click a **reference point** to define the zero direction.
+2. Click a **reference point** to define the zero direction. A dashed line runs from the pivot to it, in the axis color when it lies along an axis.
 3. Sweep to the new angle and click to commit. A dim arm marks 0° and a colored arm tracks the live angle.
 
 **Locking the axis.** Hold `Shift` to lock the dial to the axis it's currently showing — it renders solid, with a short stub along the axis, so the lock is obvious. Or force a world axis outright: `→` X, `←` Y, `↑` Z; `↓` clears the lock and goes back to following faces. Locking with an arrow is how you rotate something that offers no face to aim at — tipping a **cylinder** onto its side, say: hover it, press `←` or `→` to lock a horizontal axis, then pick your two points. Once locked, your reference click and the live sweep are held to that plane, so you can snap exactly onto a point in it — a corner, an edge — instead of the nearest point in full 3D, which could read differently than the flat angle you're actually setting.
@@ -81,7 +81,9 @@ Type degrees again right after the commit and Hew redoes the rotation about that
 
 ## Scale (`S`)
 
-Scale draws a **grip gizmo** on the selection's bounding box: a grip at the center of each of the 6 faces, one at each of the 8 corners, and one at each of the 12 edge midpoints.
+Scale draws a **grip gizmo** on the selection's bounding box: a grip at the center of each of the 6 faces, one at each of the 8 corners, and one at each of the 12 edge midpoints. With nothing selected, the first click on an object only selects it and shows its grips. After that, a click off the grips picks another object to scale, and a click on empty space clears the selection.
+
+Hovering a grip highlights it together with the point it scales about, joined by a dashed line — so you can see what will move and what stays put before you grab it. The pair stays visible through the drag.
 
 ![The Scale tool active on a box, showing the full grip gizmo; the status bar explains what each grip does](/docs/scale-grips.webp)
 

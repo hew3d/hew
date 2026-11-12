@@ -38,18 +38,24 @@ interface Props {
 
 const CRUMB_MAX_PX = 180
 
-/** Left edge of the strip's band: clears the view HUD (ViewportHUD.tsx:
- *  `left: 16px`, four chips measured at ~216 px with their 6 px gaps, rounded up to 220)
- *  plus a 12 px margin. */
-export const STRIP_BAND_LEFT_PX = 16 + 220 + 12
-/** Right edge of the strip's band: clears the measurement box
- *  (MeasurementBox.tsx editor variant: `right: 16px`, ~206 px measured with a
- *  long dimension readout, rounded up to 220) plus a 12 px margin. */
-export const STRIP_BAND_RIGHT_PX = 16 + 220 + 12
+/** Width the view die reserves at the viewport's top right (ViewDie.tsx:
+ *  `right: 16px`, 76 px wide) plus a 12 px margin. The pips under it overhang
+ *  by 3 px each side, inside the margin. */
+const DIE_CLEAR_PX = 16 + 76 + 12
+/** Left edge of the strip's band. The old top-left view chips are gone, so
+ *  the band is symmetric about the viewport and clears the die on both
+ *  sides to stay centered. */
+export const STRIP_BAND_LEFT_PX = DIE_CLEAR_PX
+/** Right edge of the strip's band: clears the view die. The measurement box
+ *  never competes for this row: bottom-right by default, and under the die
+ *  and its pips (below this row) when docked top-right. */
+export const STRIP_BAND_RIGHT_PX = DIE_CLEAR_PX
 
-/** Top of the second row: just under the HUD chip row. */
+/** Top of the second row, under the first row's 16 px inset and ~30 px height. */
 const SECOND_ROW_TOP_PX = 54
 const SECOND_ROW_GUTTER_PX = 16
+/** The second row runs under the die's column, so its right edge still clears the die. */
+const SECOND_ROW_RIGHT_PX = DIE_CLEAR_PX
 
 export function SelectionPathStrip({ crumbs, onSelect, onModel, onFrame, onEnter }: Props) {
   const { t } = useLingui()
@@ -86,7 +92,7 @@ export function SelectionPathStrip({ crumbs, onSelect, onModel, onFrame, onEnter
     } else {
       // On the second row the strip is no longer band-constrained, so compare
       // its natural width with the band's width instead.
-      const band = root.clientWidth - (STRIP_BAND_LEFT_PX - SECOND_ROW_GUTTER_PX) - (STRIP_BAND_RIGHT_PX - SECOND_ROW_GUTTER_PX)
+      const band = root.clientWidth + (SECOND_ROW_GUTTER_PX + SECOND_ROW_RIGHT_PX) - (STRIP_BAND_LEFT_PX + STRIP_BAND_RIGHT_PX)
       next = box.scrollWidth <= band ? 'band' : 'second'
     }
     if (next !== rowRef.current) {
@@ -120,7 +126,7 @@ export function SelectionPathStrip({ crumbs, onSelect, onModel, onFrame, onEnter
         position: 'absolute',
         top: row === 'band' ? '16px' : `${SECOND_ROW_TOP_PX}px`,
         left: row === 'band' ? `${STRIP_BAND_LEFT_PX}px` : `${SECOND_ROW_GUTTER_PX}px`,
-        right: row === 'band' ? `${STRIP_BAND_RIGHT_PX}px` : `${SECOND_ROW_GUTTER_PX}px`,
+        right: row === 'band' ? `${STRIP_BAND_RIGHT_PX}px` : `${SECOND_ROW_RIGHT_PX}px`,
         display: 'flex',
         justifyContent: 'center',
         pointerEvents: 'none',

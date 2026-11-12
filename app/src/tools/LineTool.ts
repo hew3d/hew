@@ -97,13 +97,15 @@ import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '
 import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, axisLockColorName } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { displayedLength, isFreePick } from './displayedValue'
-import { segmentLength, directionBetween, rehomePlaneNormal, fromPointCandidate, dotV3 } from './lineInput'
+import { segmentLength, directionBetween, rehomePlaneNormal, dotV3 } from './lineInput'
+import { ReferenceLines, drawingFrame, resolveDrawCursor, resolveIdleReference, type DrawCursor } from './referenceLines'
 import type { SketchTarget } from './sketchGesture'
 import { DetachedMode, type OnDetachedChange } from './detachedMode'
-import { runDraft, addDraftSegment, refreshAfterDraft, draftTargetFromSketchTarget, type DraftTarget } from './draftCommit'
-import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, isPointOnDrawPlane, planeKey, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
+import { runDraft, addDraftSegment, refreshAfterDraft, draftClosedLoop, draftTargetFromSketchTarget, type DraftTarget } from './draftCommit'
+import { cameraView } from './viewPlaneInference'
+import { namedPointLeavesPlane, isNamedPointSnap, pointOnPlane, drawPlaneThrough, isGroundPlane, isPointOnDrawPlane, planeKey, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, DrawPlaneTracker, pinnedPlaneThrough, faceStageDrawPlane, idleFallbackPlane, customPipPlaneFor, pinCustomPlane, type DrawPlane, type IdleDrawTarget, type CameraView, type DrawPlaneState, type IdleHoverResolution } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
-import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick, cursorOnFrozenPlane, firstPointOnFace } from './faceDraw'
+import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick, cursorOnFrozenPlane, firstPointOnFace, FACE_PLANE_EPS_M } from './faceDraw'
 import { pickRenderMode } from './pickPolicy'
 import { PlanePin } from './planePin'
 import { isCoarsePointer } from '../platform'
@@ -179,30 +181,6 @@ export function samePointMessage(): string {
 
 /** Toast for a typed length of zero (`_commitTyped`, `_retypeLast`). */
 const zeroLengthMessage = (): string => t`A line needs a length. Type a length other than 0.`
-
-/**
- * Screen-pixel radius within which the FROM-POINT closing inference (module
- * doc — SketchUp's classic "draw three sides of a square, the fourth snaps
- * shut") takes over the cursor — see `_findFromPointCandidate`. Mirrors
- * `DimensionTool`'s `ALIGN_SNAP_PX` screen-space acquire-radius pattern.
- */
-const FROM_POINT_SNAP_PX = 8
-
-/** World-space fallback tolerance for the from-point inference before the
- *  first `updateDiskScale` tick lands (no live camera feed yet — every
- *  legacy unit test that never wires a camera in). */
-const FROM_POINT_FALLBACK_TOLERANCE_M = 0.02
-
-/**
- * Kernel/inference snap kinds weak enough that the from-point closing
- * inference is allowed to override them. A precise kernel snap (endpoint,
- * midpoint, center, intersection, quadrant, tangent, on-edge, on-guide, ...)
- * always wins over this UI-side inference — this override only fires when
- * the resolved snap carries no such commitment: no snap at all, a bare
- * constraint-plane/ground fallback, an on-face hover, or the kernel's own
- * SOFT on-axis inference (no lock held).
- */
-const FROM_POINT_WEAK_SNAP_KINDS: ReadonlySet<string> = new Set(['plane', 'ground', 'on-face', 'on-axis'])
 
 /** How far past the anchor, along a fresh axis lock, `_readoptFaceForLock`
  *  probes for the face the lock actually runs along. A millimetre: past any
@@ -307,9 +285,27 @@ const RETYPE_POINTER_STILL_PX = 4
 const RETYPE_POINTER_STILL_COS = Math.cos(0.005)
 
 export class LineTool implements Tool {
+  /** Idle over empty space, the plane follows the view (`Tool.followsViewPlane`). */
+  readonly followsViewPlane = true
   readonly name = 'Line'
   /** Click-drag-release works as well as click-click (Tool.dragCommits). */
   readonly dragCommits = true
+
+  /** Live camera feed (Tool.updateCamera): keeps the view direction the idle
+   *  picker infers the drawing plane from. */
+  updateCamera(camera: THREE.Camera): void {
+    this._view = cameraView(camera)
+  }
+
+  /** The pointer left the canvas (Tool.onPointerLeave): nothing is hovered,
+   *  so the idle hover's plane patch, its "Facing" hint line and its projected verdict go with it. A
+   *  lock, a pin and an anchored gesture are choices, not hover, and stay;
+   *  the next move (or a held-pointer replay) rebuilds the hover. */
+  onPointerLeave(): void {
+    this._planeTracker.leave()
+    this._idleInferred = null
+    this._idleProjected = false
+  }
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
@@ -342,6 +338,10 @@ export class LineTool implements Tool {
     }
     if (this.pin.current !== null) {
       return t`Pinned to the hovered plane — click to start; Shift again or Esc unpins.`
+    }
+    if (this._idleInferred !== null && this._idleInferred.axis !== 2) {
+      const axis = axisLockColorName(this._idleInferred.axis)
+      return t`Facing the ${axis} plane — click to start a line on it; ↑ for the ground, Shift pins it.`
     }
     return t`Click to start a line — on the ground plane or any face or sketch.`
   }
@@ -406,6 +406,10 @@ export class LineTool implements Tool {
   /** The most recent pointer ray direction (move or press) — what a commit
    *  arms the window with. */
   private _lastRayDir: V3 | null = null
+  /** The ray of the last press or move, so a hover replayed at a parked
+   *  pointer (the same ray, rebuilt) is not taken for the pointer moving
+   *  on (`onPointerMove`'s `_closedByClick`). */
+  private _lastPointerRay: Ray | null = null
   /** True while a retype is re-laying a segment, so the commit path does
    *  not re-arm the window from inside the cycle (the window re-arms
    *  itself on the outcome). */
@@ -450,8 +454,7 @@ export class LineTool implements Tool {
   /** The snap last seen on hover — `Viewport.publishSnapCues`'s established
    *  `'lastSnap' in activeTool` opt-in (`DimensionTool`'s own field, same
    *  contract). Mirrors the raw `snap` argument to `onPointerMove` exactly,
-   *  EXCEPT while the from-point closing inference (module doc,
-   *  `_findFromPointCandidate`) is winning: then this reports that
+   *  EXCEPT while a reference-line inference (`referenceLines.ts`) is winning: then this reports that
    *  candidate as a synthetic `Snap` (`kind: 'from-point'`), so the cursor-
    *  anchored tooltip chip and the CueLayer dashed guide line both track
    *  the point a click would actually commit, not wherever SnapService
@@ -459,108 +462,53 @@ export class LineTool implements Tool {
    *  report (idle, or a degenerate ray) — face mode never sets this. */
   lastSnap: Snap | null = null
 
-  /** Live world-per-pixel feed (`Tool.updateDiskScale`'s doc — feature-
-   *  detected by the Viewport render loop, called once per frame before this
-   *  tool draws anything): the from-point inference's `FROM_POINT_SNAP_PX`
-   *  acquire radius is a SCREEN distance, and `onPointerMove`/`onPointerDown`
-   *  only ever carry a per-pixel cursor ray, never the camera itself or its
-   *  projection. `null` until the first post-activation frame (every legacy
-   *  unit test, which never wires a camera in) — `_fromPointTolerance` falls
-   *  back to `FROM_POINT_FALLBACK_TOLERANCE_M` in that case. Mirrors
-   *  `DimensionTool`'s identical `_worldPerPixelFn`/`_cameraPos` pair. */
-  private _worldPerPixelFn: ((dist: number) => number) | null = null
+  /** The camera's eye, fed by `updateDiskScale` each frame (null until the
+   *  first one — every unit test that never wires a camera in). */
   private _cameraPos: V3 | null = null
 
-  /** Live pixel-scale feed for the from-point closing inference — see
-   *  `_worldPerPixelFn`'s doc. */
+  /** Live pixel-scale feed: the reference-line acquire radius is a SCREEN
+   *  distance (`ReferenceLines.tolerance`). */
   updateDiskScale(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void {
-    this._worldPerPixelFn = worldPerPixel
     this._cameraPos = [camera.position.x, camera.position.y, camera.position.z]
+    this.refs.updateScale(camera, worldPerPixel)
   }
 
-  /** World-space from-point-inference tolerance at `atPoint`
-   *  (`FROM_POINT_SNAP_PX` converted via the live `updateDiskScale` feed, or
-   *  `FROM_POINT_FALLBACK_TOLERANCE_M` before the first tick of it has
-   *  landed — see `_worldPerPixelFn`'s doc). */
-  private _fromPointTolerance(atPoint: V3): number {
-    if (this._worldPerPixelFn === null || this._cameraPos === null) return FROM_POINT_FALLBACK_TOLERANCE_M
-    const dist = segmentLength(atPoint, this._cameraPos)
-    return this._worldPerPixelFn(dist) * FROM_POINT_SNAP_PX
-  }
+  /** Reference points and lines (design §3, `referenceLines.ts`): the
+   *  from-point closing inference this tool used to hold privately, now
+   *  shared by the five draw tools, plus the dwell ring and the start
+   *  shape's corners. */
+  private readonly refs = new ReferenceLines()
 
   /**
-   * The from-point closing-inference candidate (module doc): while a
-   * plane-mode chain has at least two committed points, for every EARLIER
-   * chain vertex `p` (every one except the current segment's start `S`) and
-   * each of the three movable drawing-axis directions, consider the
-   * infinite line through `p` along that axis (`fromPointCandidate`,
-   * lineInput.ts). If the current segment is itself axis-locked, the
-   * candidate is where the LOCKED segment (its actual current direction,
-   * `S` → `cursor` — already collinear with the lock, so this is exactly
-   * "S + s·u") meets `p`'s line; unlocked, it's the foot of the
-   * perpendicular from `cursor` onto `p`'s line. Only accepted within
-   * `_fromPointTolerance` of `cursor`; several candidates can qualify, and
-   * the closest one wins.
-   *
-   * Returns null outside plane mode, with fewer than two committed points,
-   * while axis-locked but the cursor hasn't moved off `S` yet (no segment
-   * direction to intersect with), or when nothing lands within tolerance.
-   */
-  private _findFromPointCandidate(cursor: V3): { point: V3; direction: V3 } | null {
-    if (this.planeStage.kind !== 'anchored') return null
-    if (this._chainVertices.length < 2) return null
-
-    const { plane, anchor: segStart } = this.planeStage
-    let lockDir: V3 | null = null
-    if (this.lockAxis !== null) {
-      lockDir = directionBetween(segStart, cursor)
-      if (lockDir === null) return null
-    }
-
-    const frame = getDrawingAxes(this.wasmScene)
-    const axes: V3[] = [frame.x, frame.y, frame.z]
-    const earlierVertices = this._chainVertices.slice(0, -1)
-
-    let best: { point: V3; direction: V3; distance: number } | null = null
-    for (const { point: p } of earlierVertices) {
-      for (const d of axes) {
-        const candidate = fromPointCandidate(p, d, segStart, cursor, lockDir, plane.origin, plane.u, plane.v)
-        if (candidate === null) continue
-        const distance = segmentLength(candidate, cursor)
-        if (distance > this._fromPointTolerance(candidate)) continue
-        if (best === null || distance < best.distance) best = { point: candidate, direction: d, distance }
-      }
-    }
-    return best === null ? null : { point: best.point, direction: best.direction }
-  }
-
-  /**
-   * `_planeCursor`'s result, then the from-point closing inference layered
-   * on top when it wins precedence over the resolved `snap`
+   * `_planeCursor`'s result, then the reference-line inference layered on
+   * top when it wins precedence over the resolved `snap`
    * (`FROM_POINT_WEAK_SNAP_KINDS`) — shared by the move-preview and the
    * click-commit path so a click always lands exactly where the preview/
-   * chip showed it would. Returns null only when `_planeCursor` itself does
-   * (no cursor at all).
+   * chip showed it would. The gesture's own points are the chain's EARLIER
+   * vertices (every one except the current segment's start); an off-plane
+   * one offers its foot. A snap `_planeCursor` dropped onto the plane keeps
+   * its kind and gains the tie line's source (`projectedSnap`). Returns null
+   * only when `_planeCursor` itself does (no cursor at all).
    */
   private _resolvePlaneCursor(
     snap: Snap | null, ray: Ray, plane: DrawPlane,
   ): { point: V3; snap: Snap | null } | null {
     const cursor = this._planeCursor(snap, ray, plane)
     if (cursor === null) return null
-    if (snap === null || FROM_POINT_WEAK_SNAP_KINDS.has(snap.kind)) {
-      const fromPoint = this._findFromPointCandidate(cursor)
-      if (fromPoint !== null) {
-        return {
-          point: fromPoint.point,
-          snap: {
-            x: fromPoint.point[0], y: fromPoint.point[1], z: fromPoint.point[2],
-            kind: 'from-point',
-            direction: fromPoint.direction,
-          },
-        }
-      }
-    }
-    return { point: cursor, snap }
+    if (this.planeStage.kind !== 'anchored') return { point: cursor, snap }
+    const anchor = this.planeStage.anchor
+    const lockDir = this.lockAxis !== null ? directionBetween(anchor, cursor) : null
+    // A hard axis lock with the cursor still on the anchor has no direction
+    // to intersect with: no reference line applies yet.
+    if (this.lockAxis !== null && lockDir === null) return { point: cursor, snap }
+    const out = resolveDrawCursor(this.refs, {
+      snap, cursor, plane, anchor, lockDir,
+      frame: () => drawingFrame(this.wasmScene),
+      gesture: this._chainVertices.slice(0, -1).map((v) => v.point),
+      projected: this._snapProjected,
+    })
+    if (out.reference) this._snapProjected = false
+    return { point: out.point, snap: out.snap }
   }
 
   /** The last pointer ray's direction seen by either `onPointerMove` or
@@ -583,9 +531,25 @@ export class LineTool implements Tool {
   private idlePlaneLock: 0 | 1 | 2 | null = null
 
   /** The last hover point seen while idle-locked (design §6 bullet 1) — feeds
-   *  `activeDrawPlaneCue()`'s idle-locked case. Reset to null whenever the
+   *  `drawPlaneState()`'s locked plane. Reset to null whenever the
    *  lock itself changes (a fresh lock has no hover yet) and by `cancel()`. */
   private _lastIdleHoverPoint: V3 | null = null
+
+  /** The camera's forward direction and eye, refreshed every frame via
+   *  `updateCamera` (view-plane inference: the idle picker infers the axis
+   *  plane that faces the camera from it). `null` until the first frame, so a
+   *  caller that never feeds a camera keeps the ground fallback. */
+  private _view: CameraView | null = null
+  /** What the idle picker inferred from the view at the last hover (step 7:
+   *  the axis plane facing the camera) with the ray it was resolved for, or
+   *  null when the ground, a face, a sketch, a lock or a pin decided
+   *  instead. Drives, for a vertical plane, the inference line of the
+   *  status hint (the cursor cue reads `drawPlaneState()`). */
+  private _idleInferred: { axis: 0 | 1 | 2; plane: DrawPlane; ray: Ray } | null = null
+  /** What `drawPlaneState()` reads: the cursor ray, and the plane the last
+   *  idle hover resolved when no lock or pin decided it (view-die design
+   *  §3.4). */
+  private readonly _planeTracker = new DrawPlaneTracker()
 
   /** Shift-pinned drawing plane (GitHub issue 14) — see planePin.ts and
    *  RectangleTool's identical field. Idle-only; a pin displaces an arrow
@@ -685,7 +649,12 @@ export class LineTool implements Tool {
    *   `_activeContext` exactly like PushPullTool) and return its plane so
    *   the FIRST-click point lands precisely on the face; absent that, a
    *   top-level hover over a non-ground sketch returns ITS plane so the
-   *   first click lands on it.
+   *   first click lands on it. Inside an entered object only that object's
+   *   faces constrain: nothing else there takes a click.
+   * - Idle over nothing with the view facing a vertical (or moved-frame)
+   *   axis plane (picker step 7): `fallbackPlane` only — a miss lands on
+   *   that plane, but the kernel is not constrained, so geometry anywhere
+   *   still snaps.
    * - No eligible face/sketch under the cursor and nothing anchored: return
    *   null (ground, unconstrained).
    */
@@ -763,14 +732,26 @@ export class LineTool implements Tool {
     const pinned = this.pin.constraint()
     if (pinned !== null) return { ...lockPart, ...pinned }
 
-    const plane = this._idleHoverPlane(ray)
+    // Over nothing, the axis plane the view faces (picker step 7) is only
+    // where a miss lands: it is never sent to the kernel as a constraint, so
+    // a corner or edge anywhere in the scene still snaps (and then decides
+    // the plane itself, steps 3-6).
+    const hover = this._idleHoverResolution(ray)
+    // Inside an entered object only its own faces take a click (`_currentMode`
+    // stays in face mode there, and the hover patch shows nothing else), so
+    // a sketch or plane from outside it must not filter the snap either.
+    if (this._activeContext !== null && hover.onFace !== true) return Object.keys(lockPart).length > 0 ? lockPart : null
+    if (hover.inferredAxis !== undefined) {
+      return { ...lockPart, fallbackPlane: { point: hover.plane.origin, normal: hover.plane.normal } }
+    }
+    const plane = hover.plane
     if (!plane.ground) {
       // Only in X-ray may the hover reach hidden points through the face:
       // a hidden edge or corner starts the chain on the face it lies on
       // (`faceThrough`), any other hidden point is dropped onto the hovered
       // face and disclosed (`firstPointOnFace`). Wireframe has no faces to
       // adopt, so it keeps the plain plane filter here.
-      return { ...lockPart, constraintPlane: { point: plane.origin, normal: plane.normal }, seeThroughPoints: pickRenderMode() === 'xray' }
+      return { ...lockPart, constraintPlane: { point: plane.origin, normal: plane.normal }, seeThroughPoints: pickRenderMode() === 'xray', offPlanePoints: true }
     }
     return Object.keys(lockPart).length > 0 ? lockPart : null
   }
@@ -784,6 +765,14 @@ export class LineTool implements Tool {
    * miss.
    */
   private _idleHoverPlane(ray: Ray, snap: Snap | null = null): DrawPlane {
+    return this._idleHoverResolution(ray, snap).plane
+  }
+
+  /** `_idleHoverPlane` with how it was decided: `inferredAxis` is set
+   *  only when nothing was under the cursor and the plane is the axis
+   *  plane the view faces (picker step 7, `resolveIdleDrawTarget`);
+   *  `onFace` only when a face decided it (steps 3, 5, 6). */
+  private _idleHoverResolution(ray: Ray, snap: Snap | null = null): IdleHoverResolution {
     // Hovering an object's edge or corner: the plain ray pick misses there
     // (strict at the boundary), so the ranked boundary pick answers which
     // face the point belongs to — a Shift press over a wall's edge
@@ -792,18 +781,51 @@ export class LineTool implements Tool {
       const through = this._facePickAt(snap, ray)
       if (through !== null) {
         const drawPlane = drawPlaneThrough(through.point, through.normal)
-        if (drawPlane !== null) return drawPlane
+        const detail = this._pickCache.throughDetail(through)
+        if (drawPlane !== null) {
+          return {
+            plane: drawPlane,
+            onFace: true,
+            face: { object: through.object, face: through.face, instance: detail?.instance ?? this._activeInstance, boundary: true, offObject: detail?.offObject ?? false },
+          }
+        }
       }
     }
     const eligible = this._eligiblePickFor(ray)
-    if (eligible !== null) {
+    if (eligible !== null && !this._faceGivesWay(eligible.object, eligible.face, snap, ray)) {
       const plane = this._worldFacePlane(eligible.object, eligible.face)
       if (plane !== null) {
         const drawPlane = drawPlaneThrough(plane.point, plane.normal)
-        if (drawPlane !== null) return drawPlane
+        if (drawPlane !== null) {
+          return { plane: drawPlane, onFace: true, face: { object: eligible.object, face: eligible.face, instance: this._activeInstance, boundary: false, offObject: false } }
+        }
       }
     }
-    return this._resolveIdleTarget(ray, snap).plane
+    return this._resolveIdleTarget(ray, snap)
+  }
+
+  /** What step 7 of the idle picker inferred at this hover, or null when
+   *  anything else decided: a face, an edge or corner, a sketch, or the
+   *  plain ground. */
+  private _inferredAt(ray: Ray, snap: Snap | null): { axis: 0 | 1 | 2; plane: DrawPlane; ray: Ray } | null {
+    if (this._view === null || this._currentMode(ray, snap) === 'face') return null
+    const resolved = this._resolveIdleTarget(ray, snap)
+    return resolved.inferredAxis === undefined ? null : { axis: resolved.inferredAxis, plane: resolved.plane, ray }
+  }
+
+  /** The reference-line snap the idle hover and the first click share
+   *  (`resolveIdleReference`): the dwell ring's lines on the plane the click
+   *  would freeze. */
+  private _idleReferenceAt(snap: Snap | null, ray: Ray): DrawCursor | null {
+    if (this.refs.dwellPoints.length === 0) return null
+    const target = this._resolveClickTarget(snap, ray)
+    if (target === null) return null
+    const before = this._snapProjected
+    const cursor = this._planeCursor(snap, ray, target.plane)
+    const projected = this._snapProjected
+    this._snapProjected = before
+    if (cursor === null) return null
+    return resolveIdleReference(this.refs, this.wasmScene, { snap, cursor, plane: target.plane, projected })
   }
 
   /** Idle hover bookkeeping: the hover point for the plane cue (arrow lock
@@ -812,68 +834,122 @@ export class LineTool implements Tool {
   private _trackIdleHover(snap: Snap | null, ray: Ray): void {
     this._snapProjected = false
     this._idleProjected = false
+    this._idleInferred = null
+    this._planeTracker.clearHover()
+    // A lock or pin skips every face pick below (it beats face mode), yet
+    // the boundary pick's hover memory (`FacePickCache`, view-plane design
+    // §4.2 rule 2) must keep following the cursor, or a release at a corner
+    // would remember the face it was over before the lock. The pick itself
+    // is discarded; a boundary snap never feeds the memory.
+    if ((this.idlePlaneLock !== null || this.pin.current !== null) && !snapOnObjectBoundary(snap)) this._eligiblePickFor(ray)
     if (snap === null) return
     if (this._currentMode(ray, snap) === 'face') {
       const face = this._facePickAt(snap, ray)
       if (face !== null) this._idleProjected = firstPointOnFace(this.wasmScene, face, this._activeInstance, snap, ray).projected
+    } else if (this.idlePlaneLock === null && this.pin.current === null && isNamedPointSnap(snap)) {
+      // Plane mode: what the first click would do with a named point. In the
+      // air it starts there (not projected); hidden behind the picked plane
+      // it drops onto it (projected). Asked of `_planeCursor` itself, which
+      // keeps this in step with the click.
+      this._planeCursor(snap, ray, this._idleHoverPlane(ray, snap))
+      this._idleProjected = this._snapProjected
+      this._snapProjected = false
     }
     const through: V3 = [snap.x, snap.y, snap.z]
     this._lastIdleHoverPoint = through
     if (this.idlePlaneLock === null) this.pin.trackHover(this._idleHoverPlane(ray, snap), through)
+    this._idleInferred = this.idlePlaneLock === null && this.pin.current === null ? this._inferredAt(ray, snap) : null
+    if (this.idlePlaneLock === null && this.pin.current === null) this._planeTracker.trackIdle(this.wasmScene, this._idleHoverResolution(ray, snap), ray, through, this._activeContext !== null)
+    this.lastSnap = this._currentMode(ray, snap) === 'face' ? null : (this._idleReferenceAt(snap, ray)?.snap ?? null)
   }
 
   /**
-   * The drawing-plane cue the Viewport should render right now (design §6
-   * bullet 1) — a grid patch on the active NON-ground plane, or null (ground
-   * is covered by the world grid already). See `drawPlaneCue` in
-   * `drawPlane.ts` for the two cases (anchored non-ground / idle-locked with
-   * a tracked hover).
+   * The plane state the view die, its pips and the cursor cue read
+   * (`Tool.drawPlaneState`, view-die design §3.4): the gesture's frozen
+   * plane while one is under way, else the pin, the arrow lock, or the
+   * plane the last idle hover resolved (kept while the pointer is off the
+   * canvas). See `DrawPlaneTracker.state`.
    */
-  activeDrawPlaneCue(): { plane: DrawPlane; through: V3 } | null {
-    if (this.faceStage.kind === 'anchored') {
-      const basis = facePlaneBasis(this.faceStage.normal)
-      if (basis === null) return null
-      const anchoredPlane: DrawPlane = {
-        origin: this.faceStage.planePoint,
-        normal: this.faceStage.normal,
-        u: basis.u,
-        v: basis.v,
-        ground: isGroundPlane(this.faceStage.planePoint, this.faceStage.normal),
-      }
-      return drawPlaneCue({
-        anchoredPlane,
-        anchoredThrough: this.faceStage.planePoint,
-        idleLock: null,
-        idleHover: null,
-      })
-    }
-    if (this.planeStage.kind === 'anchored') {
-      return drawPlaneCue({
-        anchoredPlane: this.planeStage.plane,
-        anchoredThrough: this.planeStage.anchor,
-        idleLock: null,
-        idleHover: null,
-      })
-    }
-    const pinned = this.pin.current
-    if (pinned !== null) {
-      // The pinned plane through wherever the cursor is now (its foot on
-      // the plane — the snap is constrained to it), so the patch follows
-      // the hover exactly as the arrow-lock preview does.
-      return drawPlaneCue({
-        anchoredPlane: pinned.plane,
-        anchoredThrough: this._lastIdleHoverPoint ?? pinned.through,
-        idleLock: null,
-        idleHover: null,
-      })
-    }
-    return drawPlaneCue({
-      anchoredPlane: null,
-      anchoredThrough: null,
-      idleLock: this.idlePlaneLock,
-      idleHover: this._lastIdleHoverPoint,
-      frame: getDrawingAxes(this.wasmScene),
+  drawPlaneState(): DrawPlaneState {
+    const frame = getDrawingAxes(this.wasmScene)
+    let anchored: DrawPlane | null = null
+    if (!this._dragDone && this.faceStage.kind === 'anchored') anchored = faceStageDrawPlane(this.faceStage.planePoint, this.faceStage.normal)
+    else if (!this._dragDone && this.planeStage.kind === 'anchored') anchored = this.planeStage.plane
+    return this._planeTracker.state({
+      anchored,
+      lock: this.idlePlaneLock,
+      // A pin through a named point off it reports the lifted plane a
+      // first click there starts on (`pinnedPlaneThrough`).
+      pinned: this.pin.current === null ? null : pinnedPlaneThrough(this.pin.current.plane, this._lastIdleHoverPoint ?? this.pin.current.through),
+      lockHover: this._lastIdleHoverPoint,
+      fallback: idleFallbackPlane(frame, this._view),
+      frame,
     })
+  }
+
+  /**
+   * Toggle the Shift pin exactly as a fresh Shift press would while idle
+   * (the custom pip's click, view-die design §3.3): pins the tracked hover
+   * plane, or releases the pin. Ignores the physical-Shift autorepeat guard,
+   * which a click has nothing to do with. Does nothing mid-gesture.
+   */
+  togglePlanePin(): void {
+    if (this.capturingInput() && !this._dragDone) return
+    if (this.pin.toggle()) this._onPinChanged()
+  }
+
+  /** The plane `togglePlanePin` acts on right now: the pinned plane (it
+   *  releases it), else the tracked hover plane (it pins it); null
+   *  mid-gesture or before any hover. The custom pip is clickable only when
+   *  this is a custom plane (view-die design §3.3). */
+  pinnablePlane(): DrawPlane | null {
+    if (this.capturingInput() && !this._dragDone) return null
+    return this.pin.current?.plane ?? this.pin.tracked?.plane ?? null
+  }
+
+  /**
+   * Whether `key` (an arrow) at the tool's current stage would RELEASE the
+   * held plane lock rather than set one (the view die's pip tooltip says
+   * "Release" only then, view-die design §3.3): the same arrow as the
+   * active lock.
+   */
+  planeKeyReleases(key: string): boolean {
+    const axis = arrowToAxis(key)
+    if (axis === null || this.idlePlaneLock !== axis) return false
+    if (!this.capturingInput() || this._dragDone) return true
+    // Mid-chain an arrow locks the next segment's AXIS, never the plane.
+    return false
+  }
+
+  /** The plane the view die's custom pip acts on (`customPipPlaneFor`):
+   *  a pinned custom plane, a custom tracked hover, or the live custom
+   *  candidate the pointer left on its way to the pip; null mid-gesture. */
+  customPipPlane(): DrawPlane | null {
+    if (this.capturingInput() && !this._dragDone) return null
+    return customPipPlaneFor(this.wasmScene, this.pin, this._planeTracker)
+  }
+
+  /** Milliseconds until the custom pip's candidate expires, or null with
+   *  no timed expiry pending: the host refreshes the pips then. */
+  customPipTtl(): number | null {
+    return this._planeTracker.customCandidateTtl()
+  }
+
+  /** The custom pip's click (`pinCustomPlane`): release the pin, else pin
+   *  the custom candidate. Does nothing mid-gesture. */
+  pinCustomCandidate(): void {
+    if (this.capturingInput() && !this._dragDone) return
+    if (pinCustomPlane(this.wasmScene, this.pin, this._planeTracker)) this._onPinChanged()
+  }
+
+  /** A pin set or released: it displaces an arrow lock (two shapes of the
+   *  same choice), and the hover tracked under the old choice is stale, as
+   *  is the custom pip's candidate. */
+  private _onPinChanged(): void {
+    this._planeTracker.clearCandidate()
+    this.idlePlaneLock = null
+    this._lastIdleHoverPoint = null
+    this._idleInferred = null
   }
 
   /** The last placed point of whichever chain is currently anchored, or null. */
@@ -912,8 +988,8 @@ export class LineTool implements Tool {
    * ruled out face mode (which takes priority), so no `_activeContext`
    * re-check is needed here.
    */
-  private _resolveIdleTarget(ray: Ray, snap: Snap | null = null): { plane: DrawPlane; target: SketchTarget } {
-    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext, () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap), snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '')
+  private _resolveIdleTarget(ray: Ray, snap: Snap | null = null): IdleDrawTarget {
+    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext, () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap), snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '', this._view, snap)
   }
 
   /**
@@ -926,13 +1002,14 @@ export class LineTool implements Tool {
    * active. Returns `null` only when a lock is active but there's no snap
    * point yet (nothing to click through).
    */
-  private _resolveClickTarget(snap: Snap | null, ray: Ray): { plane: DrawPlane; target: SketchTarget } | null {
-    const pinned = this.pin.clickTarget(this._editContext)
+  private _resolveClickTarget(snap: Snap | null, ray: Ray): IdleDrawTarget | null {
+    const pinned = this.pin.clickTarget(this._editContext, snap)
     if (pinned !== null) return pinned
     return resolveClickDrawTarget(
       this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray, this._editContext,
       () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap),
       snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '',
+      this._view,
     )
   }
 
@@ -967,23 +1044,74 @@ export class LineTool implements Tool {
    *  as "the same point". Kept whole, it re-homes onto a vertical plane
    *  through `_commitPlaneSegment` exactly like the up-arrow lock.
    *
+   *  On the ground plane, anchored, with NO lock and no held plane, a snap to
+   *  a NAMED point (endpoint, midpoint, center, quadrant, intersection — a
+   *  guide point is an endpoint) keeps its height too: a snap to a point is
+   *  that point (wireframe-faces-and-solids design §2.2), and the chain
+   *  re-homes onto the plane through it exactly as it does on any other
+   *  plane. `_isStraightOverAnchor` is the special case of that which also
+   *  covers the non-point Blue-axis inference. Every other off-plane snap
+   *  (on an edge, on a face, on an axis) still drops onto the ground and
+   *  says "projected", and so does every snap when the user holds the plane
+   *  (Shift pin or arrow-key plane lock): a held plane never re-homes.
+   *
    *  On any OTHER (non-ground) plane: the snap (already plane-constrained
-   *  via `snapConstraint`) if present, else ray∩plane — unchanged. */
+   *  via `snapConstraint`) if present, else ray∩plane; a held plane drops an
+   *  off-plane snap onto itself, disclosed (`cursorOnFrozenPlane`). */
   private _planeCursor(snap: Snap | null, ray: Ray, plane: DrawPlane): V3 | null {
     if (plane.ground) {
       if (snap === null) return null
-      if (this.lockAxis !== null || this._isStraightOverAnchor(snap)) {
+      if (this.lockAxis !== null || this._keepsOffPlaneSnap(snap)) {
         this._snapProjected = false
         return [snap.x, snap.y, snap.z]
       }
       // Records whether the z about to be discarded was actually carrying
-      // information — see `snapProjected`.
-      this._snapProjected = snap.z !== 0
+      // information — see `snapProjected`. A named point within
+      // `FACE_PLANE_EPS_M` of the ground is on it: its float noise is no
+      // projection.
+      this._snapProjected = snap.z !== 0 && !(isNamedPointSnap(snap) && Math.abs(snap.z) <= FACE_PLANE_EPS_M)
       return [snap.x, snap.y, 0]
+    }
+    // A plane the user holds (Shift pin or arrow lock) does not re-home: a
+    // snap off it, a named point included, drops straight onto it and says
+    // so (`cursorOnFrozenPlane`), as the other draw tools' frozen planes do.
+    // A hard axis lock and a point straight over the anchor keep their full
+    // snap, as on the ground.
+    if (
+      snap !== null &&
+      this.planeStage.kind === 'anchored' &&
+      this._planeHeld() &&
+      this.lockAxis === null &&
+      !this._isStraightOverAnchor(snap)
+    ) {
+      const at = cursorOnFrozenPlane(snap, ray, plane.origin, plane.normal)
+      this._snapProjected = at?.projected ?? false
+      return at?.point ?? null
     }
     this._snapProjected = false
     if (snap !== null) return [snap.x, snap.y, snap.z]
     return pointOnPlane(ray, plane)
+  }
+
+  /** Whether the user chose the drawing plane (a Shift pin or an arrow-key
+   *  plane lock), so the chain stays on it. */
+  private _planeHeld(): boolean {
+    return this.pin.current !== null || this.idlePlaneLock !== null
+  }
+
+  /** Whether an anchored ground chain keeps `snap`'s height instead of
+   *  dropping it onto the ground: a named point (a snap to a point is that
+   *  point, wireframe-faces-and-solids design §2.2) unless the plane is held,
+   *  or a snap straight over the anchor (`_isStraightOverAnchor`). The first
+   *  click of a chain never gets here with a named point in the air: the
+   *  picker has already put its plane through the point. A named point
+   *  within `FACE_PLANE_EPS_M` of the ground is on it: it drops to exactly
+   *  z = 0, as Rectangle and Circle drop it (`namedPointLeavesPlane`), so
+   *  float noise never re-homes the chain onto a skewed plane. */
+  private _keepsOffPlaneSnap(snap: Snap): boolean {
+    if (this.planeStage.kind !== 'anchored') return false
+    if (this._isStraightOverAnchor(snap)) return true
+    return !this._planeHeld() && isNamedPointSnap(snap) && Math.abs(snap.z) > FACE_PLANE_EPS_M
   }
 
   /** See `Tool.snapProjected`. Set by `_planeCursor` and `_faceCursor`,
@@ -1074,9 +1202,20 @@ export class LineTool implements Tool {
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
+    this._planeTracker.move(ray)
+    // A move along the very ray of the last press or move is no move: the
+    // Viewport replays the hover at a parked pointer after the document
+    // changes (the loop a click just closed included), and that replay
+    // must not cancel the `dblclick` the closing press still owes.
+    const last = this._lastPointerRay
+    const sameRay = last !== null &&
+      last.origin[0] === ray.origin[0] && last.origin[1] === ray.origin[1] && last.origin[2] === ray.origin[2] &&
+      last.direction[0] === ray.direction[0] && last.direction[1] === ray.direction[1] && last.direction[2] === ray.direction[2]
+    this._lastPointerRay = ray
     this._lastViewDir = ray.direction
+    this.refs.observeHover(snap)
     this._lastRayDir = ray.direction
-    this._closedByClick = false
+    if (!sameRay) this._closedByClick = false
     // The pointer moved on: the segment just placed is settled and a typed
     // length now means the next one (module doc — `RetypeSpec`).
     if (this.retype.isOpen && this._retypeRayDir !== null && this._retypeScreen === null) {
@@ -1129,13 +1268,25 @@ export class LineTool implements Tool {
     if (this.idlePlaneLock !== null || this.pin.current !== null) return 'plane'
     if (ray === undefined) return 'plane'
 
-    return this._facePickAt(snap, ray) !== null ? 'face' : 'plane'
+    const face = this._facePickAt(snap, ray)
+    if (face === null) return 'plane'
+    return this._faceGivesWay(face.object, face.face, snap, ray) ? 'plane' : 'face'
+  }
+
+  /** Whether a snap to a named point in front of the hovered face's plane
+   *  makes the face give way to the plane through the point
+   *  (wireframe-faces-and-solids design §2.1, ruling R1). Never inside an
+   *  entered Object, where the tool stays in face mode and the point drops
+   *  onto the face, disclosed. */
+  private _faceGivesWay(object: bigint, face: bigint, snap: Snap | null, ray: Ray): boolean {
+    if (this._activeContext !== null || !isNamedPointSnap(snap)) return false
+    const plane = this._worldFacePlane(object, face)
+    return plane !== null && namedPointLeavesPlane(snap, ray, plane.point, plane.normal)
   }
 
   private _onPointerMovePlane(snap: Snap | null, ray: Ray): void {
     if (this.planeStage.kind !== 'anchored') {
       this._trackIdleHover(snap, ray)
-      this.lastSnap = null
       this._clearPreview()
       if (this.typed === '') this.onMeasurementCb('')
       return
@@ -1302,9 +1453,13 @@ export class LineTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    // A press starts (or continues) a gesture: the custom pip's candidate
+    // is spent.
+    this._planeTracker.clearCandidate()
     // After a dragged line every press starts a new one.
     this._dropDragDone()
     this._lastRayDir = ray.direction
+    this._lastPointerRay = ray
     this._closedByClick = false
     this._finishedByReclick = false
     // A new press ends the window; the segment it places re-arms it.
@@ -1364,6 +1519,8 @@ export class LineTool implements Tool {
 
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
+      // Esc from idle forgets the points the cursor rested on (design §3.2).
+      if (!this.capturingInput()) this.refs.clearRing()
       // Idle with an active plane lock: Escape clears the lock FIRST — only
       // a second Escape (already idle, unlocked) falls through to today's
       // idle-Escape behavior (design §5.2).
@@ -1371,6 +1528,7 @@ export class LineTool implements Tool {
         this.idlePlaneLock = null
         this.pin.clear()
         this._lastIdleHoverPoint = null
+        this._idleInferred = null
         return
       }
       this._onEscape()
@@ -1390,8 +1548,10 @@ export class LineTool implements Tool {
       if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
         this.idlePlaneLock = nextIdlePlaneLock(this.idlePlaneLock, ev.key)
         this.pin.clear() // an arrow lock displaces a Shift pin, and vice versa
+        this._planeTracker.clearCandidate() // and ends the custom pip's candidate
         // A fresh/changed lock has no tracked hover yet (design §6 bullet 1).
         this._lastIdleHoverPoint = null
+        this._idleInferred = null
       }
       return
     }
@@ -1512,10 +1672,7 @@ export class LineTool implements Tool {
       // the plane the last hover recorded becomes the chain's drawing
       // plane until Shift is pressed again or Escape releases it. A pin
       // displaces an arrow-key lock (two shapes of the same choice).
-      if (this.pin.setShiftHeld(held)) {
-        this.idlePlaneLock = null
-        this._lastIdleHoverPoint = null
-      }
+      if (this.pin.setShiftHeld(held)) this._onPinChanged()
       return
     }
     this.pin.markShift(held) // keep the autorepeat guard honest, never toggle
@@ -1530,6 +1687,17 @@ export class LineTool implements Tool {
       this.lockAxis = null
       this.shiftAxisLock = false
     }
+  }
+
+  /**
+   * An arrow-key axis lock covers ONE segment (R19, as in SketchUp): once a
+   * segment is committed the lock releases, and the hint returns to the
+   * plain "Click the next point". A Shift-held lock is the held key's own
+   * and stays until Shift is released. Plane locks of the other draw tools
+   * (idle `idlePlaneLock`, Rectangle's mid-gesture re-lock) are unaffected.
+   */
+  private _releaseArrowLock(): void {
+    if (!this.shiftAxisLock) this.lockAxis = null
   }
 
   /** The world axis the current anchor→cursor segment is most aligned with, or null. */
@@ -1613,6 +1781,7 @@ export class LineTool implements Tool {
     this._lastFaceCursor = null
     this._prevSegmentDir = null
     this._chainVertices = []
+    this.refs.endGesture()
     this._resetChainLatch()
     this.lockAxis = null
     this.shiftAxisLock = false
@@ -1671,7 +1840,7 @@ export class LineTool implements Tool {
    * chain's last placed point: the point is `last` (within the kernel's own
    * coincidence line, `DEGENERATE_SEGMENT_EPS`) AND the pick ray actually
    * passes over it (within the same pixel radius the from-point inference
-   * acquires at, `_fromPointTolerance`). Such a click finishes the chain
+   * acquires at, `ReferenceLines.tolerance`). Such a click finishes the chain
    * (`_finishOnReclick`), as a double-click does, at any pace.
    *
    * The ray test keeps the honest refusal for the other way a click can
@@ -1689,7 +1858,7 @@ export class LineTool implements Tool {
     const t = dotV3(w, d) / dLen
     if (t < 0) return false // behind the eye
     const off = Math.sqrt(Math.max(0, dotV3(w, w) - t * t))
-    return off <= this._fromPointTolerance(last)
+    return off <= this.refs.tolerance(last)
   }
 
   /** A click back on the last placed point (`_isReclick`): end the chain,
@@ -1702,6 +1871,7 @@ export class LineTool implements Tool {
   }
 
   cancel(): void {
+    this._planeTracker.clearIdle()
     this._dragDone = false
     this.retype.close()
     this._closedByClick = false
@@ -1721,9 +1891,17 @@ export class LineTool implements Tool {
     this.idlePlaneLock = null
     this.pin.clear()
     this._lastIdleHoverPoint = null
+    this._idleInferred = null
     this._clearPreview()
     this.onMeasurementCb('')
     this.wasmScene.clear_transient_segments()
+  }
+
+  /** The tool became the active one: the points the cursor rested on while
+   *  another tool (or an earlier use of this one) was active are forgotten
+   *  (reference points, design §3.2). */
+  activate(): void {
+    this.refs.clearRing()
   }
 
   /**
@@ -1733,8 +1911,13 @@ export class LineTool implements Tool {
    * clears the stale handles.
    */
   onDocumentReset(): void {
+    this._planeTracker.reset()
     this.cancel()
+    this.refs.clearRing()
     this.sep.reset()
+    // A new document's handles can reuse the old one's: no memoized pick
+    // or hover memory may outlive it.
+    this._pickCache.clear()
   }
 
   /** Ctrl/Cmd clean tap (Viewport-driven; a bare Ctrl never reaches onKey):
@@ -1843,10 +2026,11 @@ export class LineTool implements Tool {
       const resolved = this._resolveClickTarget(snap, ray)
       if (resolved === null) return
       const { plane, target } = resolved
-      const anchor = this._planeCursor(snap, ray, plane)
+      const anchor = this._idleReferenceAt(snap, ray)?.point ?? this._planeCursor(snap, ray, plane)
       if (anchor === null) return
 
       this.planeStage = { kind: 'anchored', plane, target, anchor }
+      this.refs.beginGesture(this.wasmScene, snap, anchor, ray)
       this._prevSegmentDir = null
       this._chainVertices = []
       this._lastPlaneCursor = null
@@ -2008,13 +2192,20 @@ export class LineTool implements Tool {
       // silently accepting geometry that looks closed but isn't; an
       // ordinary "not closed yet" (no coincident earlier-plane point) is
       // unaffected and stays silent, as intended.
-      if (!closed) {
-        const spansEarlierPlane = this._chainVertices.some(
+      // A face closed on another plane (`facesClosed`) or a solid formed
+      // (`cells`) also means the loop closed (wireframe faces §4.2, §5).
+      const loopClosed = closed || draftClosedLoop(report)
+      if (!loopClosed) {
+        // The last chain vertex is `anchor` and the one before it the other
+        // end of the Line just drawn: a click back onto that one (an axis
+        // lock still held, aimed at the start, lands on the Line's own foot)
+        // retraces that Line, and two Lines make no loop.
+        const spansEarlierPlane = this._chainVertices.slice(0, -2).some(
           (v) => v.plane !== planeTag && segmentLength(v.point, cursor) < CHAIN_VERTEX_MERGE_EPS,
         )
         if (spansEarlierPlane) {
           this.onToast(
-            t`This outline spans two planes, so it can't close into a single face — finish the shape on one plane instead.`,
+            t`These lines do not lie on one plane, so no face formed.`,
           )
         }
       }
@@ -2022,11 +2213,12 @@ export class LineTool implements Tool {
       this._chainVertices.push({ point: cursor, plane: planeTag })
 
       refreshAfterDraft(report, {
+        onToast: (m) => this.onToast(m),
         onObject: (o) => this.onFaceImprint(o),
         onSketch: (sketch) => this.onCommit(sketch),
       })
 
-      if (closed) {
+      if (loopClosed) {
         // The loop closed into a face — end the chain (idle, ready for a new line).
         this.planeStage = { kind: 'idle' }
         this._snapProjected = false
@@ -2045,6 +2237,7 @@ export class LineTool implements Tool {
         // segment, on the (possibly just re-homed) frozen plane/target.
         this.planeStage = { kind: 'anchored', plane: effectivePlane, target: effectiveTarget, anchor: cursor }
         this._prevSegmentDir = directionBetween(anchor, cursor)
+        this._releaseArrowLock()
         this._lastPlaneCursor = null
         this.typed = ''
         this._clearPreview()
@@ -2139,6 +2332,16 @@ export class LineTool implements Tool {
       return false
     }
 
+    // A locked first segment that leaves the face, where no face holding the
+    // lock was in view to move onto (`_readoptFaceForLock`): the anchor is a
+    // point like any other, and the chain leaves the face as a plane chain's
+    // locked segment leaves its plane (`_commitPlaneSegment` re-homes it).
+    // Inside an entered Object drawing stays on its faces, and the kernel's
+    // refusal says so.
+    if (points.length === 1 && this._activeContext === null && !this._onFacePlane(point)) {
+      return this._leaveFaceForPlane(point)
+    }
+
     // Each click is its own draft on the face (one undo step), exactly like
     // a ground chain: the segment lowers into face topology, the object's
     // owned sketch, or — over no face — a free sketch. Nothing is waiting to
@@ -2147,6 +2350,7 @@ export class LineTool implements Tool {
     if (!this._commitFaceSegment(object, face, last, point)) return false
 
     points.push(point)
+    this._releaseArrowLock()
     this._lastFaceCursor = null
     this.typed = ''
     this._clearPreview()
@@ -2171,6 +2375,48 @@ export class LineTool implements Tool {
       this._retypeScreen = this._lastScreen
     }
     return true
+  }
+
+  /** Whether `point` lies on the anchored face chain's plane (the kernel's
+   *  plane tolerance, as `isPointOnDrawPlane`). */
+  private _onFacePlane(point: V3): boolean {
+    if (this.faceStage.kind !== 'anchored') return false
+    const { planePoint, normal } = this.faceStage
+    const basis = facePlaneBasis(normal) ?? { u: [1, 0, 0] as V3, v: [0, 1, 0] as V3 }
+    return isPointOnDrawPlane(point, { origin: planePoint, normal, u: basis.u, v: basis.v, ground: false })
+  }
+
+  /**
+   * The bare-anchor face chain becomes a plane chain on the face's plane
+   * through its anchor, and commits `point` there: off that plane, so
+   * `_commitPlaneSegment` re-homes the chain onto a plane holding the
+   * segment, exactly as the same locked segment from a point on the ground
+   * would. If that commit is refused (it says so) the chain is put back on
+   * the face as it was.
+   */
+  private _leaveFaceForPlane(point: V3): boolean {
+    if (this.faceStage.kind !== 'anchored') return false
+    const face = this.faceStage
+    const anchor = face.points[0]
+    const basis = facePlaneBasis(face.normal)
+    if (basis === null) return false
+    const plane: DrawPlane = {
+      origin: anchor, normal: face.normal, u: basis.u, v: basis.v,
+      ground: isGroundPlane(anchor, face.normal),
+    }
+    const target: SketchTarget = { kind: 'plane', plane, instance: this._activeInstance }
+    const lastFaceCursor = this._lastFaceCursor
+    this.faceStage = { kind: 'idle' }
+    this._lastFaceCursor = null
+    this.planeStage = { kind: 'anchored', plane, target, anchor }
+    this._prevSegmentDir = null
+    this._chainVertices = []
+    this._lastPlaneCursor = null
+    if (this._commitPlaneSegment(plane, target, anchor, point)) return true
+    this.planeStage = { kind: 'idle' }
+    this.faceStage = face
+    this._lastFaceCursor = lastFaceCursor
+    return false
   }
 
   /** Commit one face-chain segment `a` → `b` as a draft on `face`. Once an
@@ -2212,6 +2458,7 @@ export class LineTool implements Tool {
       }
       this._noteChainSketch(outcome.report)
       refreshAfterDraft(outcome.report, {
+        onToast: (m) => this.onToast(m),
         onObject: (o) => this.onFaceImprint(o),
         onSketch: (sketch) => this.onCommit(sketch),
       })

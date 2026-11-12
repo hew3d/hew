@@ -11059,6 +11059,29 @@ Copy drawing units on a plane by an offset.
 {
   "description": "the plane units the edit made (new keys after the edit); empty for delete",
   "properties": {
+    "faces_closed": {
+      "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "solid": {
+      "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+      "properties": {
+        "grew": {
+          "type": "boolean"
+        },
+        "object_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "object_id",
+        "grew"
+      ],
+      "type": "object"
+    },
     "units": {
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
@@ -11319,6 +11342,13 @@ Draw an arc on a plane spec.
           "description": "present when this command began a curve chain",
           "type": "string"
         },
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "region_id": {
           "description": "present when exactly one region resulted (HEW_API.md §6.1's example)",
           "type": "string"
@@ -11331,6 +11361,22 @@ Draw an arc on a plane spec.
         },
         "sketch": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         }
       },
       "required": [
@@ -11342,8 +11388,31 @@ Draw an arc on a plane spec.
     {
       "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"a\"/\"b\" (an open sweep — a plain boundary-to-boundary cut) or \"face\"/\"parent\" (a full-turn sweep, or a pie/segment close — closed, imprinted like a circle) (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "object_id": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         },
         "units": {
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
@@ -11488,6 +11557,13 @@ Draw a circle on a plane spec.
           "description": "present when this command began a curve chain",
           "type": "string"
         },
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "region_id": {
           "description": "present when exactly one region resulted (HEW_API.md §6.1's example)",
           "type": "string"
@@ -11500,6 +11576,22 @@ Draw a circle on a plane spec.
         },
         "sketch": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         }
       },
       "required": [
@@ -11511,8 +11603,31 @@ Draw a circle on a plane spec.
     {
       "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"face\" (the new sub-face) and \"parent\" (the reshaped parent, now carrying the loop as a hole) (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "object_id": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         },
         "units": {
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
@@ -11653,6 +11768,13 @@ Draw a line (chain) on a plane spec.
           "description": "present when this command began a curve chain",
           "type": "string"
         },
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "region_id": {
           "description": "present when exactly one region resulted (HEW_API.md §6.1's example)",
           "type": "string"
@@ -11665,6 +11787,22 @@ Draw a line (chain) on a plane spec.
         },
         "sketch": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         }
       },
       "required": [
@@ -11676,8 +11814,31 @@ Draw a line (chain) on a plane spec.
     {
       "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"a\"/\"b\" naming the faces either side of the path's last cut — for a single cut, the two faces it produced (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "object_id": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         },
         "units": {
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
@@ -11821,6 +11982,13 @@ Draw a regular N-gon on a plane spec.
           "description": "present when this command began a curve chain",
           "type": "string"
         },
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "region_id": {
           "description": "present when exactly one region resulted (HEW_API.md §6.1's example)",
           "type": "string"
@@ -11833,6 +12001,22 @@ Draw a regular N-gon on a plane spec.
         },
         "sketch": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         }
       },
       "required": [
@@ -11844,8 +12028,31 @@ Draw a regular N-gon on a plane spec.
     {
       "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"face\" (the new sub-face) and \"parent\" (the reshaped parent, now carrying the loop as a hole) (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "object_id": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         },
         "units": {
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
@@ -11997,6 +12204,13 @@ Draw an axis-aligned rectangle on a plane spec.
           "description": "present when this command began a curve chain",
           "type": "string"
         },
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "region_id": {
           "description": "present when exactly one region resulted (HEW_API.md §6.1's example)",
           "type": "string"
@@ -12009,6 +12223,22 @@ Draw an axis-aligned rectangle on a plane spec.
         },
         "sketch": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         }
       },
       "required": [
@@ -12020,8 +12250,31 @@ Draw an axis-aligned rectangle on a plane spec.
     {
       "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"face\" (the new sub-face) and \"parent\" (the reshaped parent, now carrying the loop as a hole) (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "object_id": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         },
         "units": {
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
@@ -12146,6 +12399,29 @@ Move drawing units (islands, edges, circles, regions) on a plane by an offset.
 {
   "description": "the plane units the edit made (new keys after the edit); empty for delete",
   "properties": {
+    "faces_closed": {
+      "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "solid": {
+      "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+      "properties": {
+        "grew": {
+          "type": "boolean"
+        },
+        "object_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "object_id",
+        "grew"
+      ],
+      "type": "object"
+    },
     "units": {
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
@@ -12415,6 +12691,29 @@ Rotate drawing units on a plane about the plane normal through a point.
 {
   "description": "the plane units the edit made (new keys after the edit); empty for delete",
   "properties": {
+    "faces_closed": {
+      "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "solid": {
+      "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+      "properties": {
+        "grew": {
+          "type": "boolean"
+        },
+        "object_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "object_id",
+        "grew"
+      ],
+      "type": "object"
+    },
     "units": {
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
@@ -12552,6 +12851,29 @@ Scale drawing units on a plane about a center, uniformly or per axis.
 {
   "description": "the plane units the edit made (new keys after the edit); empty for delete",
   "properties": {
+    "faces_closed": {
+      "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "solid": {
+      "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+      "properties": {
+        "grew": {
+          "type": "boolean"
+        },
+        "object_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "object_id",
+        "grew"
+      ],
+      "type": "object"
+    },
     "units": {
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
@@ -13215,6 +13537,68 @@ Sweep a profile along an edge-chain path, as the tool does.
 - `locator_missed`
 - `ambiguous_locator`
 - `unimplemented`
+
+### `hew.solid.from_faces`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Make a solid from drawn faces that enclose a space (Make Solid on sketches), first filling the faces the named sketches' lines can close; a shape closed against a solid grows it.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "sketches": {
+      "description": "skt_ ids of free sketches; their lines first fill every face they can close (as a draw would), then every face (faced region) they hold, and every face so filled, seeds the search, which gathers every face connected to one through shared edges (two faces with the same loop on one plane are one face: the ordinary one, else the earlier drawn)",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "sketches"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "the faces enclosed a space and became a solid, one undo step; the faces' sketches lose the consumed edges (an emptied sketch is deleted)",
+  "properties": {
+    "grew": {
+      "description": "the shape closed against an existing solid, which grew into object_id (carrying its name and tags)",
+      "type": "boolean"
+    },
+    "object_id": {
+      "description": "the first solid made",
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id",
+    "grew"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `faces_not_closed`
+- `loop_not_planar`
+- `faces_not_solid`
+- `unknown_entity`
 
 ### `hew.solid.imprints`
 

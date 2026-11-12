@@ -493,22 +493,12 @@ impl Scene {
     }
 
     /// The working-sketch edges named by `keys`; refuses unknown keys.
+    /// (A listed edge that another plane's line crosses in the draft's
+    /// lift names every piece of it, [`kernel::Document::draft_edges_for_keys`].)
     fn draft_edges(&self, keys: &[u64]) -> Result<Vec<SketchEdgeId>, ApiError> {
-        let edges = self.doc.draft_edges_by_key(keys);
-        let sk = self.doc.draft_sketch().ok_or_else(stale_draft)?;
-        let plane = sk.plane();
-        let found: std::collections::BTreeSet<u64> = edges
-            .iter()
-            .filter_map(|&e| {
-                let ed = sk.edges().get(e)?;
-                Some(kernel::edge_key(
-                    &plane,
-                    sk.vertices()[ed.from].position,
-                    sk.vertices()[ed.to].position,
-                ))
-            })
-            .collect();
-        if let Some(k) = keys.iter().find(|k| !found.contains(k)) {
+        self.doc.draft_sketch().ok_or_else(stale_draft)?;
+        let (edges, missing) = self.doc.draft_edges_for_keys(keys);
+        if let Some(k) = missing.first() {
             return Err(ApiError(format!(
                 "UnknownEdge: no draft edge has key {}",
                 hex(*k)
@@ -726,8 +716,17 @@ impl Scene {
     }
 
     /// Lowers the draft as one undo step and closes it. Returns the report
-    /// as JSON `{"objects":[id..],"sketches":[id..],"kept_as_sketch":[[[x,y,z],[x,y,z]],..]}`
-    /// (world coordinates). A refusal leaves the draft open.
+    /// as JSON `{"objects":[id..],"sketches":[id..],"kept_as_sketch":[[[x,y,z],[x,y,z]],..],"faces_closed":[id..]}`
+    /// (world coordinates); `faces_closed` names the free sketches on other
+    /// planes the edit closed a face in (a loop on one plane is a face,
+    /// whichever sketches hold its lines); `cells` lists the solids the
+    /// edit made from closed faces, each one of `{"created":id}`,
+    /// `{"grew":{"from":id,"to":id}}`, `{"unjoined":{"object":id,"with":id}}`
+    /// (the union with `with` refused, so the shape is a solid of its own),
+    /// or `{"declined":{"reason":"…","open_edges":n,"non_planar_loops":n,"overlapping_edges":n}}`
+    /// (`overlapping_edges`: for `"overlapping_faces"`, how many edges two
+    /// faces lie over each other along, wireframe faces §16 R22).
+    /// A refusal leaves the draft open.
     pub fn draft_end(&mut self, draft: u64) -> Result<String, ApiError> {
         self.ensure_not_busy()?;
         let pose = self.draft_check(draft)?;
@@ -735,16 +734,7 @@ impl Scene {
         self.open_draft = None;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DraftEnd { draft });
-        let out = serde_json::json!({
-            "objects": report.objects.iter().map(|o| o.data().as_ffi()).collect::<Vec<_>>(),
-            "sketches": report.sketches.iter().map(|s| s.data().as_ffi()).collect::<Vec<_>>(),
-            "kept_as_sketch": report
-                .kept_as_sketch
-                .iter()
-                .map(|&(a, b)| serde_json::json!([world_json(pose, a), world_json(pose, b)]))
-                .collect::<Vec<_>>(),
-        });
-        Ok(out.to_string())
+        Ok(draft_report_json(&report, pose))
     }
 
     /// Abandons the draft; the document is untouched. `false` for a stale
@@ -1025,15 +1015,19 @@ impl Scene {
         let to = pose.map_or(Point3::new(tx, ty, tz), |p| {
             p.to_local(Point3::new(tx, ty, tz))
         });
-        let v = self
-            .doc
-            .draft_vertex_at(at)
-            .ok_or_else(|| ApiError::new("UnknownVertex", "no draft vertex at that position"))?;
-        self.draft_edit(draft, true, |sk, _| {
-            sk.move_vertex_arranging(v, to)
-                .map(|_| ())
-                .map_err(|e| api_err(&e, &e))
-        })?;
+        // A vertex drag moves its plane's drawing and never another plane's
+        // line (wireframe faces §4.1): the kernel lifts the draft without
+        // foreign edges first, and leaves it exactly as it was on a refusal.
+        match self.doc.draft_drag_vertex(at, to) {
+            None => {
+                return Err(ApiError::new(
+                    "UnknownVertex",
+                    "no draft vertex at that position",
+                ));
+            }
+            Some(Err(e)) => return Err(api_err(&e, &e)),
+            Some(Ok(_)) => {}
+        }
         recording::record(recording::RecordedCall::DraftMoveVertex {
             draft,
             at: [x, y, z],
@@ -1497,6 +1491,419 @@ impl Scene {
     }
 }
 
+/// The most corners [`Scene::snap_owner_points`] returns.
+const MAX_SNAP_OWNER_POINTS: usize = 1024;
+
+impl Scene {
+    /// Definition-local to world for a read in `frame`: identity for the
+    /// world; for a definition, the pose of `instance` (or else of the
+    /// instance whose definition the inference engine has registered) when
+    /// that visible instance places the definition directly; `None` when no
+    /// placement resolves.
+    fn frame_pose(&self, frame: Option<ComponentId>, instance: Option<u64>) -> Option<Transform> {
+        let Some(def) = frame else {
+            return Some(Transform::IDENTITY);
+        };
+        let iid = instance
+            .map(instance_id)
+            .or(self.active_inference_instance)?;
+        if self.hidden_instances.contains(&iid) || self.doc.instance_def(iid) != Some(def) {
+            return None;
+        }
+        self.doc.instance_pose(iid)
+    }
+
+    /// The frame a sketch's geometry is stored in: its definition, or its
+    /// owning Object's.
+    fn sketch_frame(&self, sid: SketchId) -> Option<ComponentId> {
+        self.doc.sketch_owner_component(sid).or_else(|| {
+            self.doc
+                .sketch_owner_object(sid)
+                .and_then(|o| self.doc.object_owner_component(o))
+        })
+    }
+
+    /// The corners of the sketch island a sketch snap sits on, in the
+    /// sketch's frame (every vertex of the sketch when `element` is
+    /// absent); empty for a stale handle or an unknown kind.
+    fn sketch_owner_corners(&self, sid: SketchId, element: Option<u64>, kind: &str) -> Vec<Point3> {
+        let Some(sk) = self.doc.sketch(sid) else {
+            return Vec::new();
+        };
+        let Some(element) = element else {
+            return sk.vertices().values().map(|v| v.position).collect();
+        };
+        let edge = match kind {
+            "sketch-edge" => Some(SketchEdgeId::from(KeyData::from_ffi(element))),
+            "sketch-region" => {
+                let rid = kernel::SketchRegionId::from(KeyData::from_ffi(element));
+                sk.regions().get(rid).and_then(|r| {
+                    let (a, b) = (*r.outer.first()?, *r.outer.get(1)?);
+                    sk.edges()
+                        .iter()
+                        .find(|(_, e)| (e.from == a && e.to == b) || (e.from == b && e.to == a))
+                        .map(|(id, _)| id)
+                })
+            }
+            "sketch-curve" => sk
+                .curve_edges(kernel::SketchCurveId::from(KeyData::from_ffi(element)))
+                .first()
+                .copied(),
+            "sketch-vertex" => {
+                let v = kernel::SketchVertexId::from(KeyData::from_ffi(element));
+                sk.edges()
+                    .iter()
+                    .find(|(_, e)| e.from == v || e.to == v)
+                    .map(|(id, _)| id)
+            }
+            _ => None,
+        };
+        let Some(island) = edge.and_then(|e| sk.island_of_edge(e)) else {
+            return Vec::new();
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for &e in &sk.islands()[island].edges {
+            let ed = sk.edges()[e];
+            for v in [ed.from, ed.to] {
+                if seen.insert(v) {
+                    out.push(sk.vertices()[v].position);
+                }
+            }
+        }
+        out
+    }
+
+    /// The corners, in world space through `pose`, of every OTHER sketch of
+    /// `frame` that the inference engine holds a vertex for at sketch
+    /// `sid`'s vertex `v`: each island meeting at that corner (a ground
+    /// Rectangle and a wall standing on its edge share two). Empty for a
+    /// stale handle.
+    fn shared_corner_points(
+        &self,
+        sid: SketchId,
+        v: u64,
+        frame: Option<ComponentId>,
+        pose: &Transform,
+    ) -> Vec<Point3> {
+        let Some(at) = self.doc.sketch(sid).and_then(|sk| {
+            sk.vertices()
+                .get(kernel::SketchVertexId::from(KeyData::from_ffi(v)))
+                .map(|vx| vx.position)
+        }) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (other, ov) in self
+            .inference
+            .sketch_vertices_at(pose.apply_point(at), kernel::tol::POINT_MERGE)
+        {
+            if other == sid || self.sketch_frame(other) != frame {
+                continue;
+            }
+            out.extend(
+                self.sketch_owner_corners(other, Some(ov.data().as_ffi()), "sketch-vertex")
+                    .into_iter()
+                    .map(|p| pose.apply_point(p)),
+            );
+        }
+        out
+    }
+
+    /// The vertices of the faces around a solid's snapped vertex, edge or
+    /// face, in the Object's frame; empty for a stale or hidden handle or
+    /// an unknown kind.
+    fn object_owner_corners(&self, oid: ObjectId, element: u64, kind: &str) -> Vec<Point3> {
+        if self.hidden_objects.contains(&oid) {
+            return Vec::new();
+        }
+        let Some(obj) = self.doc.object(oid) else {
+            return Vec::new();
+        };
+        let key = KeyData::from_ffi(element);
+        let faces: Vec<FaceId> = match kind {
+            "vertex" => {
+                let v = kernel::VertexId::from(key);
+                if !obj.vertices().contains_key(v) {
+                    return Vec::new();
+                }
+                let mut fs: Vec<FaceId> = obj
+                    .half_edges()
+                    .values()
+                    .filter(|h| h.origin == v)
+                    .map(|h| obj.loops()[h.loop_id].face)
+                    .collect();
+                fs.sort();
+                fs.dedup();
+                fs
+            }
+            "edge" => {
+                let Some(e) = obj.edges().get(kernel::EdgeId::from(key)) else {
+                    return Vec::new();
+                };
+                let he = &obj.half_edges()[e.half_edge];
+                let mut fs = vec![obj.loops()[he.loop_id].face];
+                if let Some(t) = he.twin {
+                    let f = obj.loops()[obj.half_edges()[t].loop_id].face;
+                    if !fs.contains(&f) {
+                        fs.push(f);
+                    }
+                }
+                fs
+            }
+            "face" => {
+                let f = FaceId::from(key);
+                if !obj.faces().contains_key(f) {
+                    return Vec::new();
+                }
+                vec![f]
+            }
+            _ => return Vec::new(),
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for f in faces {
+            let face = &obj.faces()[f];
+            for l in std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied()) {
+                for h in obj.loop_half_edges(l) {
+                    let v = obj.half_edges()[h].origin;
+                    if seen.insert(v) {
+                        out.push(obj.vertices()[v].position);
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+#[wasm_bindgen]
+impl Scene {
+    /// **The start shape's corners** (wireframe faces §3.2, source 2): the
+    /// points a draw tool's first click lends reference lines from, as flat
+    /// WORLD-space xyz triples. Pass the first click's snap as it reports
+    /// itself: `sketch`/`object`, `element`, and `element_kind`, plus,
+    /// optionally, the snap's `instance`.
+    ///
+    /// - `"sketch-edge"`, `"sketch-region"`, `"sketch-curve"`,
+    ///   `"sketch-vertex"` (with `sketch`; `element` the edge, region,
+    ///   curve, or vertex): every vertex of the sketch island it lies on (of
+    ///   the whole sketch when `element` is absent). A plain corner's snap
+    ///   names no sketch; the tool resolves it with
+    ///   [`Scene::pick_sketch_vertex`] and passes the vertex
+    ///   (wireframe faces §16 R15). A vertex other sketches of the same
+    ///   frame also hold at that point (a wall standing on a ground
+    ///   Rectangle's edge) adds their islands' corners too: the gesture
+    ///   starts on every shape meeting at the corner.
+    /// - `"vertex"`, `"edge"`, `"face"` (with `object` and `element`): the
+    ///   vertices of the faces around that vertex or edge, or of that face
+    ///   (its holes included).
+    ///
+    /// A definition's geometry maps through `instance`'s pose, or, when it
+    /// is absent, through the pose of the instance the inference engine has
+    /// registered (`set_active_inference_instance`); with no placement of
+    /// that definition to map through, nothing is returned. Read-only. At
+    /// most 1024 points (the first found), each once. Empty for a stale or
+    /// hidden handle, an unknown kind, or another kind (`"meeting-line"`).
+    pub fn snap_owner_points(
+        &self,
+        sketch: Option<u64>,
+        object: Option<u64>,
+        element: Option<u64>,
+        element_kind: Option<String>,
+        instance: Option<u64>,
+    ) -> Vec<f64> {
+        let kind = element_kind.as_deref().unwrap_or("");
+        let (corners, frame) = match (sketch, object) {
+            (Some(s), _) if kind.starts_with("sketch-") => {
+                let sid = sketch_id(s);
+                (
+                    self.sketch_owner_corners(sid, element, kind),
+                    self.sketch_frame(sid),
+                )
+            }
+            (_, Some(o)) => {
+                let oid = object_id(o);
+                match element {
+                    Some(e) => (
+                        self.object_owner_corners(oid, e, kind),
+                        self.doc.object_owner_component(oid),
+                    ),
+                    None => (Vec::new(), None),
+                }
+            }
+            _ => (Vec::new(), None),
+        };
+        if corners.is_empty() {
+            return Vec::new();
+        }
+        let Some(pose) = self.frame_pose(frame, instance) else {
+            return Vec::new();
+        };
+        let mut world: Vec<Point3> = corners.into_iter().map(|p| pose.apply_point(p)).collect();
+        // A corner two shapes share starts the gesture on both of them.
+        if let (Some(s), Some(v), "sketch-vertex") = (sketch, element, kind) {
+            for p in self.shared_corner_points(sketch_id(s), v, frame, &pose) {
+                if !world
+                    .iter()
+                    .any(|q| (*q - p).length() <= kernel::tol::POINT_MERGE)
+                {
+                    world.push(p);
+                }
+            }
+        }
+        world
+            .into_iter()
+            .take(MAX_SNAP_OWNER_POINTS)
+            .flat_map(|w| [w.x, w.y, w.z])
+            .collect()
+    }
+
+    /// **Make Solid on drawn faces** (wireframe faces §6,
+    /// [`kernel::Document::make_solid_from_sketches`]): every faced region
+    /// of the free sketches `sketches` seeds the cells search; what closes
+    /// becomes a solid (or grows the solid it closed against) as ONE undo
+    /// step labeled "Make Solid". Returns JSON
+    /// `{"cells":[…],"created":n,"grew":n,"unjoined":n,"declined":n}`,
+    /// `cells` as [`Scene::draft_end`] lists them (`{"created":id}`,
+    /// `{"grew":{"from":id,"to":id}}`, `{"unjoined":{"object":id,"with":id}}`,
+    /// `{"declined":{"reason":"…","open_edges":n,"non_planar_loops":n,"overlapping_edges":n}}`),
+    /// the counts tallying them. It first fills the faces the sketches'
+    /// lines can close; when nothing closes, nothing changes, and when a
+    /// solid forms those faces stay, open shapes' included. Draw what is
+    /// missing with [`Scene::faces_open_edge_segments`].
+    ///
+    /// # Errors
+    /// `UnknownSketch` for a stale or deleted sketch; nothing changes.
+    pub fn make_solid_from_sketches(&mut self, sketches: Vec<u64>) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let sids: Vec<SketchId> = sketches.iter().map(|&h| sketch_id(h)).collect();
+        let (outcomes, change) = self.doc.make_solid_from_sketches(&sids).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::MakeSolidFromSketches { sketches });
+        let count = |f: fn(&kernel::CellOutcome) -> bool| outcomes.iter().filter(|c| f(c)).count();
+        Ok(serde_json::json!({
+            "cells": outcomes.iter().map(cell_json).collect::<Vec<_>>(),
+            "created": count(|c| matches!(c, kernel::CellOutcome::Created(_))),
+            "grew": count(|c| matches!(c, kernel::CellOutcome::Grew { .. })),
+            "unjoined": count(|c| matches!(c, kernel::CellOutcome::Unjoined { .. })),
+            "declined": count(|c| matches!(c, kernel::CellOutcome::Declined(_))),
+        })
+        .to_string())
+    }
+
+    /// **What drawn faces are missing** before Make Solid can close them
+    /// (wireframe faces §6, [`kernel::Document::faces_open_edges`]), for the
+    /// viewport's Model Health line overlay. Read-only. One flat array:
+    ///
+    /// `[n_open, n_loops, …open edges…, …loop edges…]`
+    ///
+    /// `n_open` open edges (one face, on no cappable rim) follow the
+    /// two-number header as six floats each (`ax ay az bx by bz`); every
+    /// remaining six floats are warn-colored segments: first the edges of
+    /// the `n_loops` closed loops of open edges that lie on no one plane
+    /// (each loop's edges in order, closing back to its first corner), then
+    /// the edges along which two faces that are not the same loop lie over
+    /// each other (a Make Solid that declined with overlapping faces,
+    /// wireframe faces §16 R22). Empty when nothing is missing: `[0, 0]`. World space; a definition's
+    /// sketches map through the pose of the instance the inference engine
+    /// has registered when it places that definition, and stay
+    /// definition-local otherwise. A stale or deleted sketch contributes
+    /// nothing.
+    pub fn faces_open_edge_segments(&self, sketches: Vec<u64>) -> Vec<f32> {
+        let mut by_frame: std::collections::BTreeMap<Option<ComponentId>, Vec<SketchId>> =
+            std::collections::BTreeMap::new();
+        for &h in &sketches {
+            let sid = sketch_id(h);
+            if self.doc.sketch(sid).is_some() {
+                by_frame
+                    .entry(self.sketch_frame(sid))
+                    .or_default()
+                    .push(sid);
+            }
+        }
+        let mut open: Vec<f32> = Vec::new();
+        let mut loops: Vec<f32> = Vec::new();
+        let mut overlaps: Vec<f32> = Vec::new();
+        let (mut n_open, mut n_loops) = (0usize, 0usize);
+        let seg = |out: &mut Vec<f32>, pose: &Transform, a: Point3, b: Point3| {
+            let (a, b) = (pose.apply_point(a), pose.apply_point(b));
+            out.extend([a.x, a.y, a.z, b.x, b.y, b.z].map(|x| x as f32));
+        };
+        for (frame, sids) in by_frame {
+            let missing = self.doc.faces_open_edges(&sids);
+            let pose = self.frame_pose(frame, None).unwrap_or(Transform::IDENTITY);
+            n_open += missing.open_edges.len();
+            for &(a, b) in &missing.open_edges {
+                seg(&mut open, &pose, a, b);
+            }
+            n_loops += missing.non_planar_loops.len();
+            for l in &missing.non_planar_loops {
+                for i in 0..l.len() {
+                    seg(&mut loops, &pose, l[i], l[(i + 1) % l.len()]);
+                }
+            }
+            for &(a, b) in &missing.overlapping_edges {
+                seg(&mut overlaps, &pose, a, b);
+            }
+        }
+        let mut out = Vec::with_capacity(2 + open.len() + loops.len() + overlaps.len());
+        out.push(n_open as f32);
+        out.push(n_loops as f32);
+        out.extend(open);
+        out.extend(loops);
+        out.extend(overlaps);
+        out
+    }
+}
+
+/// A [`kernel::DraftReport`] as the JSON [`Scene::draft_end`] returns (and
+/// the sketch moves and copies, wireframe faces §16 R20): `kept_as_sketch`
+/// in world coordinates through `pose`.
+pub(crate) fn draft_report_json(report: &kernel::DraftReport, pose: Option<Pose>) -> String {
+    serde_json::json!({
+        "objects": report.objects.iter().map(|o| o.data().as_ffi()).collect::<Vec<_>>(),
+        "sketches": report.sketches.iter().map(|s| s.data().as_ffi()).collect::<Vec<_>>(),
+        "kept_as_sketch": report
+            .kept_as_sketch
+            .iter()
+            .map(|&(a, b)| serde_json::json!([world_json(pose, a), world_json(pose, b)]))
+            .collect::<Vec<_>>(),
+        "faces_closed": report.faces_closed.iter().map(|s| s.data().as_ffi()).collect::<Vec<_>>(),
+        "cells": report.cells.iter().map(cell_json).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+/// One [`kernel::CellOutcome`] as `draft_end`'s `cells` entry.
+fn cell_json(c: &kernel::CellOutcome) -> serde_json::Value {
+    let id = |o: kernel::ObjectId| o.data().as_ffi();
+    match c {
+        kernel::CellOutcome::Created(o) => serde_json::json!({ "created": id(*o) }),
+        kernel::CellOutcome::Grew { from, to } => {
+            serde_json::json!({ "grew": { "from": id(*from), "to": id(*to) } })
+        }
+        kernel::CellOutcome::Unjoined { object, with } => {
+            serde_json::json!({ "unjoined": { "object": id(*object), "with": id(*with) } })
+        }
+        kernel::CellOutcome::Declined(d) => {
+            let reason = match d.reason {
+                kernel::CellDeclineReason::NotClosed => "not_closed",
+                kernel::CellDeclineReason::OverlappingFaces => "overlapping_faces",
+                kernel::CellDeclineReason::InsideSolid(_) => "inside_solid",
+                kernel::CellDeclineReason::SelfTouching => "self_touching",
+                kernel::CellDeclineReason::Invalid(_) => "invalid",
+            };
+            serde_json::json!({ "declined": {
+                "reason": reason,
+                "open_edges": d.open_edges.len(),
+                "non_planar_loops": d.non_planar_loops.len(),
+                "overlapping_edges": d.overlapping_edges.len(),
+            } })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1559,6 +1966,101 @@ mod tests {
             .flat_map(|un| un["edges"].as_array().unwrap())
             .map(|e| u64::from_str_radix(e["key"].as_str().unwrap(), 16).unwrap())
             .collect()
+    }
+
+    /// Whether the open draft's working sketch holds the edge `a`–`b`.
+    fn draft_holds(scene: &Scene, a: [f64; 3], b: [f64; 3]) -> bool {
+        let (a, b) = (Point3::new(a[0], a[1], a[2]), Point3::new(b[0], b[1], b[2]));
+        let w = scene.doc.draft_sketch().unwrap();
+        w.edges().values().any(|e| {
+            let (c, d) = (w.vertices()[e.from].position, w.vertices()[e.to].position);
+            (c.approx_eq(a, 1e-12) && d.approx_eq(b, 1e-12))
+                || (c.approx_eq(b, 1e-12) && d.approx_eq(a, 1e-12))
+        })
+    }
+
+    /// A vertex drag (Move vertex) lifts its draft without foreign edges, so
+    /// a ground corner that a line on a wall's plane ends on moves alone; a
+    /// refused drag leaves the draft as it was, the foreign line still
+    /// lifted (wireframe faces §4.1).
+    #[test]
+    fn a_vertex_drag_drops_foreign_edges_only_when_it_moves() {
+        let mut scene = Scene::new();
+        // E on the vertical x–z plane, lying in the ground.
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, "Line")
+            .unwrap();
+        scene
+            .draft_add_segment(d, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            .unwrap();
+        scene.draft_end(d).unwrap();
+        // G on the ground, from E's end.
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Line")
+            .unwrap();
+        scene
+            .draft_add_segment(d, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+            .unwrap();
+        scene.draft_end(d).unwrap();
+        let before = scene.doc.state_hash();
+        let e = ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+
+        // Refused (onto G's other end) and missed drags: the lift stays.
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Move vertex")
+            .unwrap();
+        assert!(draft_holds(&scene, e.0, e.1), "E is lifted as foreign");
+        assert!(
+            scene
+                .draft_move_vertex(d, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+                .is_err()
+        );
+        assert!(
+            draft_holds(&scene, e.0, e.1),
+            "a refused drag keeps the lift"
+        );
+        assert!(
+            scene
+                .draft_move_vertex(d, 5.0, 5.0, 0.0, 6.0, 5.0, 0.0)
+                .is_err()
+        );
+        assert!(
+            draft_holds(&scene, e.0, e.1),
+            "a missed drag keeps the lift"
+        );
+        scene.draft_cancel(d).unwrap();
+        assert_eq!(scene.doc.state_hash(), before);
+
+        // The drag that moves: E dropped, G's end moves alone.
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Move vertex")
+            .unwrap();
+        scene
+            .draft_move_vertex(d, 0.0, 0.0, 0.0, 0.0, -0.5, 0.0)
+            .unwrap();
+        assert!(!draft_holds(&scene, e.0, e.1), "the drag dropped E");
+        scene.draft_end(d).expect("the drag lowers");
+        let doc = &scene.doc;
+        let holds = |a: Point3, b: Point3| {
+            doc.sketch_ids().into_iter().any(|s| {
+                let sk = doc.sketch(s).unwrap();
+                sk.edges().values().any(|ed| {
+                    let (c, d) = (
+                        sk.vertices()[ed.from].position,
+                        sk.vertices()[ed.to].position,
+                    );
+                    (c.approx_eq(a, 1e-12) && d.approx_eq(b, 1e-12))
+                        || (c.approx_eq(b, 1e-12) && d.approx_eq(a, 1e-12))
+                })
+            })
+        };
+        let p = Point3::new;
+        assert!(holds(p(0.0, -0.5, 0.0), p(0.0, 1.0, 0.0)), "G's end moved");
+        assert!(holds(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0)), "E stays");
+        assert!(
+            !holds(p(0.0, -0.5, 0.0), p(1.0, 0.0, 0.0)),
+            "nothing follows"
+        );
     }
 
     #[test]
@@ -2563,7 +3065,9 @@ mod tests {
         let islands = scene.sketch_island_ids(s);
         let shift = [1.0, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
         let before = scene.doc.sketch(sketch_id(s)).unwrap().clone();
-        let copy = scene.copy_sketch_islands(s, &islands, &shift).unwrap();
+        let report = scene.copy_sketch_islands(s, &islands, &shift).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+        let copy = report["sketches"][0].as_u64().unwrap();
         assert_ne!(copy, s);
         assert!(scene.doc.sketch(sketch_id(copy)).unwrap().detached());
         assert_eq!(
@@ -2680,5 +3184,477 @@ mod tests {
         let rec = scene.take_recording();
         let mut fresh = Scene::new();
         assert_eq!(fresh.replay(&rec).unwrap(), hash);
+    }
+
+    // ---------------------------------------- wireframe faces §3.2, §6
+
+    /// A closed polygon as one raw (legacy) sketch gesture on a new sketch
+    /// on its plane: recorded and replayable, and closing nothing on its
+    /// own, so five faces of a cube can stay open.
+    fn raw_face(scene: &mut Scene, corners: &[[f64; 3]]) -> u64 {
+        let pts: Vec<Point3> = corners.iter().map(|&c| p3(c)).collect();
+        let pl = Plane::from_polygon(&pts).unwrap();
+        let (o, n) = (pl.point(), pl.normal());
+        let s = scene
+            .begin_sketch_on_plane(o.x, o.y, o.z, n.x, n.y, n.z)
+            .unwrap();
+        scene.sketch_begin_gesture(s).unwrap();
+        for i in 0..corners.len() {
+            let (a, b) = (corners[i], corners[(i + 1) % corners.len()]);
+            scene
+                .sketch_add_segment(s, a[0], a[1], a[2], b[0], b[1], b[2])
+                .unwrap();
+        }
+        scene.sketch_end_gesture(s).unwrap();
+        s
+    }
+
+    const CUBE_TOP: [[f64; 3]; 4] = [[0., 0., 1.], [1., 0., 1.], [1., 1., 1.], [0., 1., 1.]];
+
+    fn open_cube(scene: &mut Scene) -> Vec<u64> {
+        let (a, b, c, d) = ([0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]);
+        let [a1, b1, c1, d1] = CUBE_TOP;
+        vec![
+            raw_face(scene, &[a, b, c, d]),
+            raw_face(scene, &[a, b, b1, a1]),
+            raw_face(scene, &[b, c, c1, b1]),
+            raw_face(scene, &[c, d, d1, c1]),
+            raw_face(scene, &[d, a, a1, d1]),
+        ]
+    }
+
+    fn triples(flat: &[f64]) -> Vec<[f64; 3]> {
+        flat.chunks(3).map(|c| [c[0], c[1], c[2]]).collect()
+    }
+
+    fn has(pts: &[[f64; 3]], q: [f64; 3]) -> bool {
+        pts.iter()
+            .any(|p| (0..3).all(|i| (p[i] - q[i]).abs() < 1e-9))
+    }
+
+    /// §3.2 source 2 on a sketch: every vertex of the snapped island, for
+    /// an edge, a region and (no element) the whole sketch; a stale handle
+    /// or an unknown kind returns nothing.
+    #[test]
+    fn snap_owner_points_lists_a_sketch_islands_corners() {
+        let mut scene = Scene::new();
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Rectangle")
+            .unwrap();
+        rect(&mut scene, d, 0.0, 0.0, 2.0, 1.0, 0.0);
+        rect(&mut scene, d, 5.0, 5.0, 6.0, 6.0, 0.0);
+        let report = json(&scene.draft_end(d).unwrap());
+        let s = report["sketches"][0].as_u64().unwrap();
+        let sk = scene.doc.sketch(sketch_id(s)).unwrap();
+        let (eid, edge) = sk
+            .edges()
+            .iter()
+            .find(|(_, e)| sk.vertices()[e.from].position.x < 3.0)
+            .unwrap();
+        let _ = edge;
+        let region = sk
+            .regions()
+            .iter()
+            .find(|(_, r)| sk.vertices()[r.outer[0]].position.x < 3.0)
+            .map(|(id, _)| id.data().as_ffi())
+            .unwrap();
+        let e = eid.data().as_ffi();
+        let corners = [[0., 0., 0.], [2., 0., 0.], [2., 1., 0.], [0., 1., 0.]];
+        for (el, kind) in [(Some(e), "sketch-edge"), (Some(region), "sketch-region")] {
+            let pts = triples(&scene.snap_owner_points(Some(s), None, el, Some(kind.into()), None));
+            assert_eq!(pts.len(), 4, "{kind}: {pts:?}");
+            assert!(corners.iter().all(|&c| has(&pts, c)), "{kind}");
+        }
+        let all = scene.snap_owner_points(Some(s), None, None, Some("sketch-edge".into()), None);
+        assert_eq!(all.len(), 8 * 3, "the whole sketch without an element");
+        assert!(
+            scene
+                .snap_owner_points(Some(s), None, Some(e), Some("vertex".into()), None)
+                .is_empty()
+        );
+        assert!(
+            scene
+                .snap_owner_points(
+                    Some(s + 977),
+                    None,
+                    Some(e),
+                    Some("sketch-edge".into()),
+                    None
+                )
+                .is_empty()
+        );
+    }
+
+    /// §16 R15: a plain corner's snap names no sketch, so the tool picks
+    /// the vertex on the click ray and asks with `"sketch-vertex"`: the
+    /// picked vertex's island corners come back (and only that island's).
+    #[test]
+    fn snap_owner_points_lists_a_picked_sketch_vertexs_island() {
+        let mut scene = Scene::new();
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Rectangle")
+            .unwrap();
+        rect(&mut scene, d, 0.0, 0.0, 2.0, 1.0, 0.0);
+        rect(&mut scene, d, 5.0, 5.0, 6.0, 6.0, 0.0);
+        scene.draft_end(d).unwrap();
+        // Straight down onto the corner (2, 1, 0).
+        let pick = scene
+            .pick_sketch_vertex(2.0, 1.0, 5.0, 0.0, 0.0, -1.0)
+            .expect("the corner is picked");
+        assert!((pick.x - 2.0).abs() < 1e-9 && (pick.y - 1.0).abs() < 1e-9 && pick.z.abs() < 1e-9);
+        let pts = triples(&scene.snap_owner_points(
+            Some(pick.sketch),
+            None,
+            Some(pick.vertex),
+            Some("sketch-vertex".into()),
+            None,
+        ));
+        assert_eq!(pts.len(), 4, "{pts:?}");
+        for c in [[0., 0., 0.], [2., 0., 0.], [2., 1., 0.], [0., 1., 0.]] {
+            assert!(has(&pts, c), "{c:?} in {pts:?}");
+        }
+        // A stale vertex handle returns nothing.
+        assert!(
+            scene
+                .snap_owner_points(
+                    Some(pick.sketch),
+                    None,
+                    Some(pick.vertex + 977),
+                    Some("sketch-vertex".into()),
+                    None
+                )
+                .is_empty()
+        );
+    }
+
+    /// §3.2 source 2 at a corner two shapes share (playtest step 4, walls
+    /// stood on a ground square): the gesture starts on every shape that
+    /// holds the clicked corner, so each island meeting there lends its
+    /// corners, whichever sketch the pick ranked first. Without the
+    /// wall's top corners the next wall's height has nothing to snap to,
+    /// and the walls' tops miss each other by the cursor's error.
+    #[test]
+    fn snap_owner_points_at_a_shared_corner_lists_every_shape_meeting_there() {
+        let mut scene = Scene::new();
+        let (a, b, c, d) = ([0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]);
+        let ground = raw_face(&mut scene, &[a, b, c, d]);
+        let wall = raw_face(&mut scene, &[a, b, [1., 0., 0.7], [0., 0., 0.7]]);
+        let expected = [a, b, c, d, [1., 0., 0.7], [0., 0., 0.7]];
+        let vertex_at = |scene: &Scene, s: u64, p: [f64; 3]| {
+            let sk = scene.doc.sketch(sketch_id(s)).unwrap();
+            sk.vertices()
+                .iter()
+                .find(|(_, v)| v.position == p3(p))
+                .map(|(id, _)| id.data().as_ffi())
+                .expect("the corner is a vertex of the sketch")
+        };
+        for s in [ground, wall] {
+            let v = vertex_at(&scene, s, b);
+            let pts = triples(&scene.snap_owner_points(
+                Some(s),
+                None,
+                Some(v),
+                Some("sketch-vertex".into()),
+                None,
+            ));
+            assert_eq!(pts.len(), expected.len(), "sketch {s}: {pts:?}");
+            for p in expected {
+                assert!(has(&pts, p), "sketch {s}: {p:?} in {pts:?}");
+            }
+        }
+        // A corner only the ground holds lends the ground's island alone.
+        let v = vertex_at(&scene, ground, c);
+        let pts = triples(&scene.snap_owner_points(
+            Some(ground),
+            None,
+            Some(v),
+            Some("sketch-vertex".into()),
+            None,
+        ));
+        assert_eq!(pts.len(), 4, "{pts:?}");
+    }
+
+    /// §3.2 source 2 on a solid: the vertices of the faces around the
+    /// snapped vertex, edge or face, world-space through an instance pose.
+    #[test]
+    fn snap_owner_points_lists_the_faces_around_a_solid_element() {
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 1.0, 1.0, 1.0);
+        let obj = scene.doc.object(object_id(b)).unwrap();
+        let top = top_face(&scene, b);
+        let corner = obj
+            .vertices()
+            .iter()
+            .find(|(_, v)| v.position.approx_eq(Point3::new(0., 0., 1.), 1e-12))
+            .map(|(id, _)| id.data().as_ffi())
+            .unwrap();
+        let edge = obj
+            .edges()
+            .keys()
+            .find(|&e| {
+                let (a, b) = obj.edge_endpoints(e).unwrap();
+                a.z == 1.0 && b.z == 1.0 && a.y == 0.0 && b.y == 0.0
+            })
+            .unwrap()
+            .data()
+            .as_ffi();
+        let count = |el: u64, kind: &str| {
+            scene
+                .snap_owner_points(None, Some(b), Some(el), Some(kind.into()), None)
+                .len()
+                / 3
+        };
+        assert_eq!(count(top, "face"), 4);
+        assert_eq!(count(edge, "edge"), 6, "the top and the front: 6 corners");
+        assert_eq!(count(corner, "vertex"), 7, "three faces at a corner");
+        assert_eq!(count(top, "meeting-line"), 0);
+        assert_eq!(count(top + 991, "face"), 0, "a stale face");
+
+        // Through an instance: world-space, by the given instance or the
+        // registered one; nothing without a placement to map through.
+        let inst = scene.make_component(&[0], &[b]).unwrap();
+        scene
+            .transform_instance(inst, &[1., 0., 0., 10., 0., 1., 0., 0., 0., 0., 1., 0.])
+            .unwrap();
+        let member = scene
+            .doc
+            .def_members(scene.doc.instance_def(instance_id(inst)).unwrap())
+            .unwrap()[0]
+            .data()
+            .as_ffi();
+        let top = top_face(&scene, member);
+        let pts = |scene: &Scene, i: Option<u64>| {
+            triples(&scene.snap_owner_points(None, Some(member), Some(top), Some("face".into()), i))
+        };
+        assert!(pts(&scene, None).is_empty(), "no placement to map through");
+        let world = pts(&scene, Some(inst));
+        assert_eq!(world.len(), 4);
+        assert!(
+            has(&world, [10., 0., 1.]) && has(&world, [11., 1., 1.]),
+            "{world:?}"
+        );
+        scene.set_active_inference_instance(Some(inst));
+        assert_eq!(pts(&scene, None), world);
+    }
+
+    /// §6, §11 stage 5, as §16 R26/R27 amend it: Make Solid on a cube's
+    /// floor and three walls declines (the overlay array names the open
+    /// rim, one loop of six edges on no one plane, in the warn color) and
+    /// changes nothing; with the fourth wall it fills the lid on the way and
+    /// makes the solid; the calls record and replay.
+    #[test]
+    fn make_solid_from_sketches_declines_then_closes_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (a, b, c, d) = ([0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]);
+        let [a1, b1, c1, d1] = CUBE_TOP;
+        let four = vec![
+            raw_face(&mut scene, &[a, b, c, d]),
+            raw_face(&mut scene, &[a, b, b1, a1]),
+            raw_face(&mut scene, &[b, c, c1, b1]),
+            raw_face(&mut scene, &[c, d, d1, c1]),
+        ];
+        let hash = scene.state_hash();
+        let out = json(&scene.make_solid_from_sketches(four.clone()).unwrap());
+        assert_eq!(out["declined"], 1, "{out}");
+        assert_eq!(out["created"], 0);
+        assert_eq!(out["cells"][0]["declined"]["reason"], "not_closed");
+        assert_eq!(scene.state_hash(), hash, "a decline changes nothing");
+
+        let seg = scene.faces_open_edge_segments(four.clone());
+        assert_eq!(seg[0], 0.0, "no open edge off the loop");
+        assert_eq!(seg[1], 1.0, "one non-planar loop");
+        assert_eq!(seg.len(), 2 + 6 * 6, "its six edges");
+
+        raw_face(&mut scene, &[d, a, a1, d1]);
+        let out = json(&scene.make_solid_from_sketches(vec![four[1]]).unwrap());
+        assert_eq!(out["created"], 1, "{out}");
+        let id = out["cells"][0]["created"].as_u64().unwrap();
+        assert!(scene.object_solid(id));
+        assert_eq!(scene.faces_open_edge_segments(four.clone()), vec![0.0, 0.0]);
+        assert!(
+            scene.make_solid_from_sketches(four).is_err(),
+            "the consumed sketches are gone"
+        );
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let rec = scene.take_recording();
+        assert!(rec.contains("\"method\":\"make_solid_from_sketches\""));
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&rec).unwrap(), golden);
+        assert_eq!(fresh.save(), scene.save());
+    }
+
+    /// §16 R22: faces lying over each other (a whole front wall over one
+    /// split in two) decline Make Solid with `overlapping_faces`, the count
+    /// of edges where they do, and those edges as warn segments after the
+    /// (empty) open edges and loops; the same wall drawn twice makes the
+    /// solid.
+    #[test]
+    fn make_solid_names_overlapping_faces_and_takes_one_of_a_twin() {
+        let mut scene = Scene::new();
+        let (a, b, c, d) = ([0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]);
+        let [a1, b1, c1, d1] = CUBE_TOP;
+        let (m, m1) = ([0.5, 0., 0.], [0.5, 0., 1.]);
+        let ids = vec![
+            raw_face(&mut scene, &[a, b, c, d]),
+            raw_face(&mut scene, &[a, m, m1, a1]),
+            raw_face(&mut scene, &[m, b, b1, m1]),
+            raw_face(&mut scene, &[a, b, b1, a1]),
+            raw_face(&mut scene, &[b, c, c1, b1]),
+            raw_face(&mut scene, &[c, d, d1, c1]),
+            raw_face(&mut scene, &[d, a, a1, d1]),
+            raw_face(&mut scene, &CUBE_TOP),
+        ];
+        let hash = scene.state_hash();
+        let out = json(&scene.make_solid_from_sketches(ids.clone()).unwrap());
+        assert_eq!(out["declined"], 1, "{out}");
+        let d0 = &out["cells"][0]["declined"];
+        assert_eq!(d0["reason"], "overlapping_faces");
+        let n = d0["overlapping_edges"].as_u64().unwrap();
+        assert!(n > 0);
+        assert_eq!(scene.state_hash(), hash);
+        let seg = scene.faces_open_edge_segments(ids);
+        assert_eq!(&seg[..2], &[0.0, 0.0], "no open edge, no loop");
+        assert_eq!(seg.len(), 2 + 6 * n as usize, "the overlap's edges follow");
+        assert!(seg[2..].chunks(3).all(|q| q[1] == 0.0), "all on the front");
+
+        let mut scene = Scene::new();
+        let mut ids = open_cube(&mut scene);
+        ids.push(raw_face(&mut scene, &CUBE_TOP));
+        let twin = raw_face(&mut scene, &CUBE_TOP);
+        ids.push(twin);
+        let out = json(&scene.make_solid_from_sketches(ids).unwrap());
+        assert_eq!(out["created"], 1, "{out}");
+        assert!(scene.sketch_ids().contains(&twin), "the later twin stays");
+    }
+
+    /// A raw sketch holding one segment `a–b`, on the plane through it with
+    /// normal `n` (no close pass runs).
+    fn raw_line(scene: &mut Scene, a: [f64; 3], b: [f64; 3], n: [f64; 3]) -> u64 {
+        let s = scene
+            .begin_sketch_on_plane(a[0], a[1], a[2], n[0], n[1], n[2])
+            .unwrap();
+        scene.sketch_begin_gesture(s).unwrap();
+        scene
+            .sketch_add_segment(s, a[0], a[1], a[2], b[0], b[1], b[2])
+            .unwrap();
+        scene.sketch_end_gesture(s).unwrap();
+        s
+    }
+
+    fn shift(dx: f64, dy: f64, dz: f64) -> [f64; 12] {
+        [1., 0., 0., dx, 0., 1., 0., dy, 0., 0., 1., dz]
+    }
+
+    /// §16 R20: a sketch move reports what it closed, in a draw's report
+    /// shape. Moving the top face of an open cube into place closes the
+    /// cube: `cells` names the new solid and `sketches` the moved sketch,
+    /// first; one undo restores the open cube. A move that closes nothing
+    /// reports empty `faces_closed` and `cells`.
+    #[test]
+    fn transform_sketch_islands_reports_the_solid_it_closes() {
+        let mut scene = Scene::new();
+        open_cube(&mut scene);
+        let high: Vec<[f64; 3]> = CUBE_TOP.iter().map(|c| [c[0], c[1], 3.]).collect();
+        let top = raw_face(&mut scene, &high);
+        let islands = scene.sketch_island_ids(top);
+        // Clear of everything: nothing closes.
+        let out = json(
+            &scene
+                .transform_sketch_islands(top, &islands, &shift(0., 0., 1.))
+                .unwrap(),
+        );
+        assert_eq!(out["sketches"][0], top, "{out}");
+        assert_eq!(out["faces_closed"], serde_json::json!([]));
+        assert_eq!(out["cells"], serde_json::json!([]));
+        assert_eq!(out["objects"], serde_json::json!([]));
+        assert_eq!(out["kept_as_sketch"], serde_json::json!([]));
+        let before = scene.state_hash();
+        let islands = scene.sketch_island_ids(top);
+        let out = json(
+            &scene
+                .transform_sketch_islands(top, &islands, &shift(0., 0., -3.))
+                .unwrap(),
+        );
+        assert_eq!(out["sketches"][0], top, "{out}");
+        let id = out["cells"][0]["created"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("a solid: {out}"));
+        assert!(scene.object_solid(id));
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), before, "one undo step");
+    }
+
+    /// §16 R20: a sketch copy reports in a draw's report shape too, the
+    /// copy's handle first in `sketches`. Copying a high top face onto an
+    /// open cube closes it; the source stays.
+    #[test]
+    fn copy_sketch_islands_reports_the_solid_it_closes() {
+        let mut scene = Scene::new();
+        open_cube(&mut scene);
+        let high: Vec<[f64; 3]> = CUBE_TOP.iter().map(|c| [c[0], c[1], 3.]).collect();
+        let top = raw_face(&mut scene, &high);
+        let islands = scene.sketch_island_ids(top);
+        let before = scene.state_hash();
+        let out = json(
+            &scene
+                .copy_sketch_islands(top, &islands, &shift(0., 0., -2.))
+                .unwrap(),
+        );
+        let copy = out["sketches"][0].as_u64().unwrap();
+        assert_ne!(copy, top, "the copy is a sketch of its own");
+        let id = out["cells"][0]["created"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("a solid: {out}"));
+        assert!(scene.object_solid(id));
+        assert!(scene.sketch_ids().contains(&top), "the source stays");
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), before, "one undo step");
+    }
+
+    /// §16 R20: a move that closes a face on another plane names it in
+    /// `faces_closed`: a slanted line moved onto a ground rectangle's
+    /// corner closes the triangle with the other slanted line.
+    #[test]
+    fn transform_sketch_islands_reports_the_faces_it_closes() {
+        let mut scene = Scene::new();
+        let (a, b, c, d) = ([0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]);
+        let apex = [0.5, 0.5, 1.];
+        raw_face(&mut scene, &[a, b, c, d]);
+        raw_line(&mut scene, apex, a, [1., -1., 0.]);
+        let far = raw_line(&mut scene, [5.5, 0.5, 1.], [6., 0., 0.], [1., 1., 0.]);
+        let islands = scene.sketch_island_ids(far);
+        let out = json(
+            &scene
+                .transform_sketch_islands(far, &islands, &shift(-5., 0., 0.))
+                .unwrap(),
+        );
+        let closed = out["faces_closed"].as_array().unwrap();
+        assert_eq!(closed.len(), 1, "{out}");
+        assert_eq!(out["sketches"][0], far);
+        assert_eq!(out["cells"], serde_json::json!([]));
+    }
+
+    /// §6: a gap whose rim lies on no one plane comes back as a loop (after
+    /// the header's open-edge segments, of which there are none).
+    #[test]
+    fn faces_open_edge_segments_lists_a_non_planar_loop() {
+        let mut scene = Scene::new();
+        let (a, b, c, d) = ([0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]);
+        let [a1, b1, c1, _] = CUBE_TOP;
+        let d1 = [0., 1., 2.];
+        let five = vec![
+            raw_face(&mut scene, &[a, b, c, d]),
+            raw_face(&mut scene, &[a, b, b1, a1]),
+            raw_face(&mut scene, &[b, c, c1, b1]),
+            raw_face(&mut scene, &[c, d, d1, c1]),
+            raw_face(&mut scene, &[d, a, a1, d1]),
+        ];
+        let seg = scene.faces_open_edge_segments(five);
+        assert_eq!((seg[0], seg[1]), (0.0, 1.0));
+        assert_eq!(seg.len(), 2 + 4 * 6, "the loop's four edges");
     }
 }

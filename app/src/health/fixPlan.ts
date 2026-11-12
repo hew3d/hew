@@ -27,7 +27,7 @@ import {
   type BatchOp,
   type BatchOptions,
 } from './healthBatch'
-import { SPLIT_PIECE_LEFT, WIZARD, rowDetail, type KindKey, type WizardScope } from './healthCopy'
+import { SPLIT_PIECE_LEFT, WIZARD, rowDetail, scopeIsPicked, type KindKey, type WizardScope } from './healthCopy'
 import { defaultThicknessText, parseThickness, type ThickenSide } from './thickenSettings'
 
 export { classifyRow }
@@ -137,7 +137,7 @@ export interface FixChoices {
  */
 export function defaultChoices(scope: WizardScope = 'model'): FixChoices {
   return {
-    openings: scope === 'selection' ? 'close' : 'leave',
+    openings: scopeIsPicked(scope) ? 'close' : 'leave',
     split: 'rejoin',
     flatPanels: 'keep',
     thickness: { text: defaultThicknessText(), side: 'front' },

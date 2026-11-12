@@ -96,7 +96,7 @@
 
 import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
-import type { Tool, Snap, EditContext } from './types'
+import type { Tool, Snap, SnapConstraint, EditContext } from './types'
 import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -107,14 +107,16 @@ import { makeFatSegments, disposeFatSegments } from '../viewport/fatLine'
 import { displayedLength, isFreePick, sagittaForDisplayedRadius } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { segmentLength, directionBetween, rehomePlaneNormal } from './lineInput'
-import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, axisLockColorName, radiusReadout } from './moveInput'
+import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, axisLockColorName, radiusReadout, arrowToAxis } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import type { SketchTarget } from './sketchGesture'
 import { DetachedMode, type OnDetachedChange } from './detachedMode'
 import { runDraft, addDraftSegment, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
-import { drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
+import { cameraView } from './viewPlaneInference'
+import { namedPointLeavesPlane, isNamedPointSnap, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, DrawPlaneTracker, pinnedPlaneThrough, faceStageDrawPlane, idleFallbackPlane, customPipPlaneFor, pinCustomPlane, type DrawPlane, type IdleDrawTarget, type CameraView, type DrawPlaneState, type IdleHoverResolution } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
-import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick, cursorOnFrozenPlane } from './faceDraw'
+import { ReferenceLines, drawingFrame, projectedSnap, resolveDrawCursor, resolveIdleReference, type DrawCursor } from './referenceLines'
+import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick, cursorOnFrozenPlane, firstPointOnFace } from './faceDraw'
 import { PlanePin } from './planePin'
 import {
   ARC_MIN_CHORD_M,
@@ -267,9 +269,27 @@ type RetypeSpec = {
 )
 
 export class ArcTool implements Tool {
+  /** Idle over empty space, the plane follows the view (`Tool.followsViewPlane`). */
+  readonly followsViewPlane = true
   readonly name = 'Arc'
   /** Click-drag-release works as well as click-click (Tool.dragCommits). */
   readonly dragCommits = true
+
+  /** Live camera feed (Tool.updateCamera): keeps the view direction the idle
+   *  picker infers the drawing plane from. */
+  updateCamera(camera: THREE.Camera): void {
+    this._view = cameraView(camera)
+  }
+
+  /** The pointer left the canvas (Tool.onPointerLeave): nothing is hovered,
+   *  so the idle hover's plane patch and its "Facing" hint line go with it. A
+   *  lock, a pin and an anchored gesture are choices, not hover, and stay;
+   *  the next move (or a held-pointer replay) rebuilds the hover. */
+  onPointerLeave(): void {
+    this._planeTracker.leave()
+    this._idleInferred = null
+    this._idleProjected = false
+  }
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
@@ -279,7 +299,7 @@ export class ArcTool implements Tool {
   }
 
   private _stageHint(): string {
-    if (!this.capturingInput() && this.idlePlaneLock === null && this.retype.isOpen) {
+    if (!this.capturingInput() && this.idlePlaneLock === null && this.pin.current === null && this.retype.isOpen) {
       return t`Type an exact bulge to redraw the arc you just drew — or click the first point of the next one.`
     }
     const stage = this.faceStage.kind !== 'idle' ? this.faceStage.kind : this.planeStage.kind
@@ -295,6 +315,10 @@ export class ArcTool implements Tool {
     }
     if (this.pin.current !== null) {
       return t`Pinned to the hovered plane — click to start; Shift again or Esc unpins.`
+    }
+    if (this._idleInferred !== null && this._idleInferred.axis !== 2) {
+      const axis = axisLockColorName(this._idleInferred.axis)
+      return t`Facing the ${axis} plane — click the first endpoint to draw on it; ↑ for the ground, Shift pins it.`
     }
     return t`Click the arc's first endpoint — on the ground plane or any face or sketch.`
   }
@@ -368,9 +392,29 @@ export class ArcTool implements Tool {
   private readonly pin = new PlanePin()
 
   /** The last hover point seen while idle-locked (design §6 bullet 1) — feeds
-   *  `activeDrawPlaneCue()`'s idle-locked case. Reset to null whenever the
+   *  `drawPlaneState()`'s locked plane. Reset to null whenever the
    *  lock itself changes (a fresh lock has no hover yet) and by `cancel()`. */
   private _lastIdleHoverPoint: V3 | null = null
+
+  /** The camera's forward direction and eye, refreshed every frame via
+   *  `updateCamera` (view-plane inference: the idle picker infers the axis
+   *  plane that faces the camera from it). `null` until the first frame, so a
+   *  caller that never feeds a camera keeps the ground fallback. */
+  private _view: CameraView | null = null
+  /** `_view` as it stood at the gesture's first press, so a mid-gesture
+   *  arrow release reverts to the plane an unlocked first click would have
+   *  chosen even if the camera has orbited since. */
+  private _gestureView: CameraView | null = null
+  /** What the idle picker inferred from the view at the last hover (step 7:
+   *  the axis plane facing the camera) with the ray it was resolved for, or
+   *  null when the ground, a face, a sketch, a lock or a pin decided
+   *  instead. Drives, for a vertical plane, the inference line of the
+   *  status hint (the cursor cue reads `drawPlaneState()`). */
+  private _idleInferred: { axis: 0 | 1 | 2; plane: DrawPlane; ray: Ray } | null = null
+  /** What `drawPlaneState()` reads: the cursor ray, and the plane the last
+   *  idle hover resolved when no lock or pin decided it (view-die design
+   *  §3.4). */
+  private readonly _planeTracker = new DrawPlaneTracker()
 
   constructor(
     wasmScene: WasmScene,
@@ -456,8 +500,8 @@ export class ArcTool implements Tool {
    * ruled out face mode (which takes priority), so no `_activeContext`
    * re-check is needed here.
    */
-  private _resolveIdleTarget(ray: Ray, snap: Snap | null = null): { plane: DrawPlane; target: SketchTarget } {
-    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext, () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap), snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '')
+  private _resolveIdleTarget(ray: Ray, snap: Snap | null = null): IdleDrawTarget {
+    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext, () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap), snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '', this._view, snap)
   }
 
   /**
@@ -470,13 +514,14 @@ export class ArcTool implements Tool {
    * active. Returns `null` only when a lock is active but there's no snap
    * point yet (nothing to click through).
    */
-  private _resolveClickTarget(snap: Snap | null, ray: Ray): { plane: DrawPlane; target: SketchTarget } | null {
-    const pinned = this.pin.clickTarget(this._editContext)
+  private _resolveClickTarget(snap: Snap | null, ray: Ray): IdleDrawTarget | null {
+    const pinned = this.pin.clickTarget(this._editContext, snap)
     if (pinned !== null) return pinned
     return resolveClickDrawTarget(
       this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray, this._editContext,
       () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap),
       snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '',
+      this._view,
     )
   }
 
@@ -503,9 +548,11 @@ export class ArcTool implements Tool {
         this._cursorStraightOver = true
         return [snap.x, snap.y, snap.z]
       }
-      // Records whether the z about to be discarded was actually carrying
-      // information — see `snapProjected`.
-      this._snapProjected = snap.z !== 0
+      // The foot and the "projected" verdict come from the one place every
+      // frozen plane gets them (`cursorOnFrozenPlane`); the committed
+      // coordinates stay the exact legacy `[x, y, 0]`, so ground commits are
+      // bit-identical (at world identity the foot of (x, y, z) is (x, y, 0)).
+      this._snapProjected = cursorOnFrozenPlane(snap, ray, plane.origin, plane.normal)?.projected ?? false
       return [snap.x, snap.y, 0]
     }
     // A non-ground plane is frozen like a face: an off-plane snap (X-ray)
@@ -538,6 +585,52 @@ export class ArcTool implements Tool {
    *  chord along that cursor re-homes exactly when a click there would. */
   private _lastPlaneCursorStraightOver = false
 
+  /** Reference points and lines (design §3, `referenceLines.ts`). */
+  private readonly refs = new ReferenceLines()
+
+  /** The snap the cue should draw for the last plane-mode move: a reference
+   *  line's (kind `from-point`, with its foot and tie) or a projected snap's
+   *  (tie line), else the engine's own; null when there is nothing to
+   *  override (`Viewport.toolSnapForCues`). */
+  lastSnap: Snap | null = null
+
+  /** Live pixel-scale feed (`Tool.updateDiskScale`): the reference-line
+   *  acquire radius is a screen distance. */
+  updateDiskScale(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void {
+    this.refs.updateScale(camera, worldPerPixel)
+  }
+
+  /** The tool became the active one: the points the cursor rested on while
+   *  another tool was active are forgotten (design §3.2). */
+  activate(): void {
+    this.refs.clearRing()
+  }
+
+  /** `_planeCursor` for an anchored gesture, then the reference lines
+   *  (`resolveDrawCursor`): the point to use and the snap to draw. Only the
+   *  chord stage consults them (anchor A): the bulge click sets a sagitta,
+   *  not a position, so a reference line there would quietly change the
+   *  radius it commits. A cursor kept straight over A is the vertical
+   *  re-home (`_planeCursor`) and no reference line may take it. */
+  private _anchoredCursor(snap: Snap | null, ray: Ray, plane: DrawPlane): { point: V3; snap: Snap | null } | null {
+    const cursor = this._planeCursor(snap, ray, plane)
+    if (cursor === null) return null
+    const stage = this.planeStage
+    if (this._cursorStraightOver || stage.kind !== 'chord') {
+      return { point: cursor, snap: this._snapProjected ? projectedSnap(snap, cursor) : snap }
+    }
+    const out = resolveDrawCursor(this.refs, {
+      snap, cursor, plane,
+      anchor: stage.a,
+      lockDir: null,
+      frame: () => drawingFrame(this.wasmScene),
+      gesture: [],
+      projected: this._snapProjected,
+    })
+    if (out.reference) this._snapProjected = false
+    return { point: out.point, snap: out.snap }
+  }
+
   /** See `Tool.snapProjected`. Set by `_planeCursor` and `_faceCursor`,
    *  where the drawing plane replaces an off-plane snap (the ground drops its
    *  height; a face or sketch plane drops it straight onto itself). */
@@ -545,8 +638,14 @@ export class ArcTool implements Tool {
     // Only a gesture under way projects anything: once the stage is back to
     // idle (a commit, Esc, a context change) the last verdict must not ride
     // along on ordinary hover cues.
-    return this._snapProjected && (this.faceStage.kind !== 'idle' || this.planeStage.kind !== 'idle')
+    // An idle hover reports what its click would do (`_idleProjected`).
+    const active = this.faceStage.kind !== 'idle' || this.planeStage.kind !== 'idle'
+    return active ? this._snapProjected : this._idleProjected
   }
+
+  /** Whether the idle hover's first click would drop its snap onto the
+   *  hovered face or plane; set by `_trackIdleHover`. */
+  private _idleProjected = false
 
   /** Whether the last `_planeCursor` / `_faceCursor` moved the snap onto its plane. */
   private _snapProjected = false
@@ -568,7 +667,20 @@ export class ArcTool implements Tool {
     // sketch-hover adoption (design §5.2) — the user already chose a plane.
     if (this.idlePlaneLock !== null || this.pin.current !== null) return 'plane'
     if (ray === undefined) return 'plane'
-    return this._facePickAt(snap, ray) !== null ? 'face' : 'plane'
+    const face = this._facePickAt(snap, ray)
+    if (face === null) return 'plane'
+    return this._faceGivesWay(face.object, face.face, snap, ray) ? 'plane' : 'face'
+  }
+
+  /** Whether a snap to a named point in front of the hovered face's plane
+   *  makes the face give way to the plane through the point
+   *  (wireframe-faces-and-solids design §2.1, ruling R1). Never inside an
+   *  entered Object, where the tool stays in face mode and the point drops
+   *  onto the face, disclosed. */
+  private _faceGivesWay(object: bigint, face: bigint, snap: Snap | null, ray: Ray): boolean {
+    if (this._activeContext !== null || !isNamedPointSnap(snap)) return false
+    const plane = worldFacePlane(this.wasmScene, object, face, this._activeInstance)
+    return plane !== null && namedPointLeavesPlane(snap, ray, plane.point, plane.normal)
   }
 
   /**
@@ -584,9 +696,13 @@ export class ArcTool implements Tool {
    *   and return its plane so the FIRST-click endpoint lands precisely on
    *   the face; absent that, a top-level hover over a non-ground sketch
    *   returns ITS plane.
+   * - Idle over nothing with the view facing a vertical (or moved-frame)
+   *   axis plane (picker step 7): `fallbackPlane` only — a miss lands on
+   *   that plane, but the kernel is not constrained, so geometry anywhere
+   *   still snaps.
    * - Otherwise (ground mode): return null (unconstrained).
    */
-  snapConstraint(ray: Ray): { anchor?: [number, number, number]; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] }; seeThroughPoints?: boolean } | null {
+  snapConstraint(ray: Ray): SnapConstraint | null {
     if (this.faceStage.kind !== 'idle') {
       // Gesture in progress: lock to the established face plane
       return {
@@ -597,6 +713,11 @@ export class ArcTool implements Tool {
         // Dropped onto the plane and disclosed (`cursorOnFrozenPlane`), so
         // X-ray and Wireframe may offer hidden points through it.
         seeThroughPoints: true,
+        // A snap to a named point is that point (design §2.3): Shaded mode
+        // offers a corner or guide point off the plane too, and the cursor
+        // drops it onto the plane and says "projected" instead of the
+        // engine discarding it.
+        offPlanePoints: true,
       }
     }
 
@@ -619,6 +740,11 @@ export class ArcTool implements Tool {
         // Dropped onto the plane and disclosed (`cursorOnFrozenPlane`), so
         // X-ray and Wireframe may offer hidden points through it.
         seeThroughPoints: true,
+        // A snap to a named point is that point (design §2.3): Shaded mode
+        // offers a corner or guide point off the plane too, and the cursor
+        // drops it onto the plane and says "projected" instead of the
+        // engine discarding it.
+        offPlanePoints: true,
       }
     }
 
@@ -634,9 +760,21 @@ export class ArcTool implements Tool {
     const pinned = this.pin.constraint()
     if (pinned !== null) return pinned
 
-    const plane = this._idleHoverPlane(ray)
+    // Over nothing, the axis plane the view faces (picker step 7) is only
+    // where a miss lands: it is never sent to the kernel as a constraint, so
+    // a corner or edge anywhere in the scene still snaps (and then decides
+    // the plane itself, steps 3-6).
+    const hover = this._idleHoverResolution(ray)
+    // Inside an entered object only its own faces take a click (`_currentMode`
+    // stays in face mode there, and the hover patch shows nothing else), so
+    // a sketch or plane from outside it must not filter the snap either.
+    if (this._activeContext !== null && hover.onFace !== true) return null
+    if (hover.inferredAxis !== undefined) {
+      return { fallbackPlane: { point: hover.plane.origin, normal: hover.plane.normal } }
+    }
+    const plane = hover.plane
     if (!plane.ground) {
-      return { constraintPlane: { point: plane.origin, normal: plane.normal }, seeThroughPoints: true }
+      return { constraintPlane: { point: plane.origin, normal: plane.normal }, seeThroughPoints: true, offPlanePoints: true }
     }
     return null
   }
@@ -649,6 +787,14 @@ export class ArcTool implements Tool {
    * for a stale face (no world normal), matching `_currentMode`'s miss.
    */
   private _idleHoverPlane(ray: Ray, snap: Snap | null = null): DrawPlane {
+    return this._idleHoverResolution(ray, snap).plane
+  }
+
+  /** `_idleHoverPlane` with how it was decided: `inferredAxis` is set
+   *  only when nothing was under the cursor and the plane is the axis
+   *  plane the view faces (picker step 7, `resolveIdleDrawTarget`);
+   *  `onFace` only when a face decided it (steps 3, 5, 6). */
+  private _idleHoverResolution(ray: Ray, snap: Snap | null = null): IdleHoverResolution {
     // Hovering an object's edge or corner: the plain ray pick misses there
     // (strict at the boundary), so the ranked boundary pick answers which
     // face the point belongs to — a Shift press over a wall's edge
@@ -657,73 +803,117 @@ export class ArcTool implements Tool {
       const through = this._facePickAt(snap, ray)
       if (through !== null) {
         const drawPlane = drawPlaneThrough(through.point, through.normal)
-        if (drawPlane !== null) return drawPlane
+        const detail = this._pickCache.throughDetail(through)
+        if (drawPlane !== null) {
+          return {
+            plane: drawPlane,
+            onFace: true,
+            face: { object: through.object, face: through.face, instance: detail?.instance ?? this._activeInstance, boundary: true, offObject: detail?.offObject ?? false },
+          }
+        }
       }
     }
     const eligible = this._eligiblePickFor(ray)
-    if (eligible !== null) {
+    if (eligible !== null && !this._faceGivesWay(eligible.object, eligible.face, snap, ray)) {
       const plane = worldFacePlane(this.wasmScene, eligible.object, eligible.face, this._activeInstance)
       if (plane !== null) {
         const drawPlane = drawPlaneThrough(plane.point, plane.normal)
-        if (drawPlane !== null) return drawPlane
+        if (drawPlane !== null) {
+          return { plane: drawPlane, onFace: true, face: { object: eligible.object, face: eligible.face, instance: this._activeInstance, boundary: false, offObject: false } }
+        }
       }
     }
-    return this._resolveIdleTarget(ray, snap).plane
+    return this._resolveIdleTarget(ray, snap)
   }
 
   /**
-   * The drawing-plane cue the Viewport should render right now (design §6
-   * bullet 1) — a grid patch on the active NON-ground plane, or null (ground
-   * is covered by the world grid already). See `drawPlaneCue` in
-   * `drawPlane.ts` for the two cases (anchored non-ground / idle-locked with
-   * a tracked hover). "Anchored" here is either the chord or bulge stage —
-   * both freeze the same plane/anchor for the rest of the gesture.
+   * The plane state the view die, its pips and the cursor cue read
+   * (`Tool.drawPlaneState`, view-die design §3.4): the gesture's frozen
+   * plane while one is under way, else the pin, the arrow lock, or the
+   * plane the last idle hover resolved (kept while the pointer is off the
+   * canvas). See `DrawPlaneTracker.state`.
    */
-  activeDrawPlaneCue(): { plane: DrawPlane; through: V3 } | null {
-    if (this.faceStage.kind !== 'idle') {
-      const basis = facePlaneBasis(this.faceStage.normal)
-      if (basis === null) return null
-      const anchoredPlane: DrawPlane = {
-        origin: this.faceStage.planePoint,
-        normal: this.faceStage.normal,
-        u: basis.u,
-        v: basis.v,
-        ground: isGroundPlane(this.faceStage.planePoint, this.faceStage.normal),
-      }
-      return drawPlaneCue({
-        anchoredPlane,
-        anchoredThrough: this.faceStage.planePoint,
-        idleLock: null,
-        idleHover: null,
-      })
-    }
-    if (this.planeStage.kind !== 'idle') {
-      return drawPlaneCue({
-        anchoredPlane: this.planeStage.plane,
-        anchoredThrough: this.planeStage.a,
-        idleLock: null,
-        idleHover: null,
-      })
-    }
-    const pinned = this.pin.current
-    if (pinned !== null) {
-      // The pinned plane through wherever the cursor is now (its foot on
-      // the plane — the snap is constrained to it), so the patch follows
-      // the hover exactly as the arrow-lock preview does.
-      return drawPlaneCue({
-        anchoredPlane: pinned.plane,
-        anchoredThrough: this._lastIdleHoverPoint ?? pinned.through,
-        idleLock: null,
-        idleHover: null,
-      })
-    }
-    return drawPlaneCue({
-      anchoredPlane: null,
-      anchoredThrough: null,
-      idleLock: this.idlePlaneLock,
-      idleHover: this._lastIdleHoverPoint,
-      frame: getDrawingAxes(this.wasmScene),
+  drawPlaneState(): DrawPlaneState {
+    const frame = getDrawingAxes(this.wasmScene)
+    let anchored: DrawPlane | null = null
+    if (this.faceStage.kind !== 'idle') anchored = faceStageDrawPlane(this.faceStage.planePoint, this.faceStage.normal)
+    else if (this.planeStage.kind !== 'idle') anchored = this.planeStage.plane
+    return this._planeTracker.state({
+      anchored,
+      lock: this.idlePlaneLock,
+      // A pin through a named point off it reports the lifted plane a
+      // first click there starts on (`pinnedPlaneThrough`).
+      pinned: this.pin.current === null ? null : pinnedPlaneThrough(this.pin.current.plane, this._lastIdleHoverPoint ?? this.pin.current.through),
+      lockHover: this._lastIdleHoverPoint,
+      fallback: idleFallbackPlane(frame, this._view),
+      frame,
     })
+  }
+
+  /**
+   * Toggle the Shift pin exactly as a fresh Shift press would while idle
+   * (the custom pip's click, view-die design §3.3): pins the tracked hover
+   * plane, or releases the pin. Ignores the physical-Shift autorepeat guard,
+   * which a click has nothing to do with. Does nothing mid-gesture.
+   */
+  togglePlanePin(): void {
+    if (this.capturingInput()) return
+    if (this.pin.toggle()) this._onPinChanged()
+  }
+
+  /** The plane `togglePlanePin` acts on right now: the pinned plane (it
+   *  releases it), else the tracked hover plane (it pins it); null
+   *  mid-gesture or before any hover. The custom pip is clickable only when
+   *  this is a custom plane (view-die design §3.3). */
+  pinnablePlane(): DrawPlane | null {
+    if (this.capturingInput()) return null
+    return this.pin.current?.plane ?? this.pin.tracked?.plane ?? null
+  }
+
+  /**
+   * Whether `key` (an arrow) at the tool's current stage would RELEASE the
+   * held plane lock rather than set one (the view die's pip tooltip says
+   * "Release" only then, view-die design §3.3): the same arrow as the
+   * active lock.
+   */
+  planeKeyReleases(key: string): boolean {
+    const axis = arrowToAxis(key)
+    if (axis === null || this.idlePlaneLock !== axis) return false
+    if (!this.capturingInput()) return true
+    // Mid-gesture only the chord stage re-locks (`nextGestureLockPlane`);
+    // the bulge stage's plane is frozen.
+    return this.planeStage.kind === 'chord'
+  }
+
+  /** The plane the view die's custom pip acts on (`customPipPlaneFor`):
+   *  a pinned custom plane, a custom tracked hover, or the live custom
+   *  candidate the pointer left on its way to the pip; null mid-gesture. */
+  customPipPlane(): DrawPlane | null {
+    if (this.capturingInput()) return null
+    return customPipPlaneFor(this.wasmScene, this.pin, this._planeTracker)
+  }
+
+  /** Milliseconds until the custom pip's candidate expires, or null with
+   *  no timed expiry pending: the host refreshes the pips then. */
+  customPipTtl(): number | null {
+    return this._planeTracker.customCandidateTtl()
+  }
+
+  /** The custom pip's click (`pinCustomPlane`): release the pin, else pin
+   *  the custom candidate. Does nothing mid-gesture. */
+  pinCustomCandidate(): void {
+    if (this.capturingInput()) return
+    if (pinCustomPlane(this.wasmScene, this.pin, this._planeTracker)) this._onPinChanged()
+  }
+
+  /** A pin set or released: it displaces an arrow lock (two shapes of the
+   *  same choice), and the hover tracked under the old choice is stale, as
+   *  is the custom pip's candidate. */
+  private _onPinChanged(): void {
+    this._planeTracker.clearCandidate()
+    this.idlePlaneLock = null
+    this._lastIdleHoverPoint = null
+    this._idleInferred = null
   }
 
   /**
@@ -739,10 +929,31 @@ export class ArcTool implements Tool {
       this.pin.markShift(held) // keep the autorepeat guard honest, never toggle
       return
     }
-    if (this.pin.setShiftHeld(held)) {
-      this.idlePlaneLock = null
-      this._lastIdleHoverPoint = null
-    }
+    if (this.pin.setShiftHeld(held)) this._onPinChanged()
+  }
+
+  /** What step 7 of the idle picker inferred at this hover, or null when
+   *  anything else decided: a face, an edge or corner, a sketch, or the
+   *  plain ground. */
+  private _inferredAt(ray: Ray, snap: Snap | null): { axis: 0 | 1 | 2; plane: DrawPlane; ray: Ray } | null {
+    if (this._view === null || this._currentMode(ray, snap) === 'face') return null
+    const resolved = this._resolveIdleTarget(ray, snap)
+    return resolved.inferredAxis === undefined ? null : { axis: resolved.inferredAxis, plane: resolved.plane, ray }
+  }
+
+  /** The reference-line snap the idle hover and the first click share
+   *  (`resolveIdleReference`): the dwell ring's lines on the plane the click
+   *  would freeze. */
+  private _idleReferenceAt(snap: Snap | null, ray: Ray): DrawCursor | null {
+    if (this.refs.dwellPoints.length === 0) return null
+    const target = this._resolveClickTarget(snap, ray)
+    if (target === null) return null
+    const before = this._snapProjected
+    const cursor = this._planeCursor(snap, ray, target.plane)
+    const projected = this._snapProjected
+    this._snapProjected = before
+    if (cursor === null) return null
+    return resolveIdleReference(this.refs, this.wasmScene, { snap, cursor, plane: target.plane, projected })
   }
 
   /** Idle hover bookkeeping: the hover point for the plane cue (arrow lock
@@ -750,13 +961,40 @@ export class ArcTool implements Tool {
    *  plane the next click would land on (`_idleHoverPlane`). */
   private _trackIdleHover(snap: Snap | null, ray: Ray): void {
     this._snapProjected = false
+    this._idleProjected = false
+    this._idleInferred = null
+    this._planeTracker.clearHover()
+    // A lock or pin skips every face pick below (it beats face mode), yet
+    // the boundary pick's hover memory (`FacePickCache`, view-plane design
+    // §4.2 rule 2) must keep following the cursor, or a release at a corner
+    // would remember the face it was over before the lock. The pick itself
+    // is discarded; a boundary snap never feeds the memory.
+    if ((this.idlePlaneLock !== null || this.pin.current !== null) && !snapOnObjectBoundary(snap)) this._eligiblePickFor(ray)
     if (snap === null) return
+    if (this._currentMode(ray, snap) === 'face') {
+      const face = this._facePickAt(snap, ray)
+      if (face !== null) this._idleProjected = firstPointOnFace(this.wasmScene, face, this._activeInstance, snap, ray).projected
+    } else if (this.idlePlaneLock === null && this.pin.current === null && isNamedPointSnap(snap)) {
+      // Plane mode: what the first click would do with a named point. In the
+      // air it starts there (not projected); hidden behind the picked plane
+      // it drops onto it (projected). Asked of `_planeCursor` itself, which
+      // keeps this in step with the click.
+      this._planeCursor(snap, ray, this._idleHoverPlane(ray, snap))
+      this._idleProjected = this._snapProjected
+      this._snapProjected = false
+    }
     const through: V3 = [snap.x, snap.y, snap.z]
     this._lastIdleHoverPoint = through
     if (this.idlePlaneLock === null) this.pin.trackHover(this._idleHoverPlane(ray, snap), through)
+    this._idleInferred = this.idlePlaneLock === null && this.pin.current === null ? this._inferredAt(ray, snap) : null
+    if (this.idlePlaneLock === null && this.pin.current === null) this._planeTracker.trackIdle(this.wasmScene, this._idleHoverResolution(ray, snap), ray, through, this._activeContext !== null)
+    this.lastSnap = this._currentMode(ray, snap) === 'face' ? null : (this._idleReferenceAt(snap, ray)?.snap ?? null)
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
+    this._planeTracker.move(ray)
+    this.refs.observeHover(snap)
+    this.lastSnap = null
     if (this._currentMode(ray, snap) === 'face') {
       this._onPointerMoveFace(snap, ray)
     } else {
@@ -765,8 +1003,12 @@ export class ArcTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    // A press starts (or continues) a gesture: the custom pip's candidate
+    // is spent.
+    this._planeTracker.clearCandidate()
     // Any pointer action ends the retype window — the next arc has begun.
     this.disarmRetype()
+    if (this.planeStage.kind === 'idle' && this.faceStage.kind === 'idle') this._gestureView = this._view
     if (this._currentMode(ray, snap) === 'face') {
       this._onPointerDownFace(snap, ray)
     } else {
@@ -818,6 +1060,8 @@ export class ArcTool implements Tool {
 
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
+      // Esc from idle forgets the points the cursor rested on (design §3.2).
+      if (!this.capturingInput()) this.refs.clearRing()
       // Idle with an active plane lock: Escape clears the lock FIRST — only
       // a second Escape (already idle, unlocked) falls through to today's
       // idle-Escape behavior (design §5.2).
@@ -830,6 +1074,7 @@ export class ArcTool implements Tool {
         this.idlePlaneLock = null
         this.pin.clear()
         this._lastIdleHoverPoint = null
+        this._idleInferred = null
         return
       }
       // Aborting an in-progress gesture keeps the plane lock: the lock is
@@ -866,8 +1111,10 @@ export class ArcTool implements Tool {
         if (ev.repeat) return
         this.idlePlaneLock = nextIdlePlaneLock(this.idlePlaneLock, ev.key)
         this.pin.clear() // an arrow lock displaces a Shift pin, and vice versa
+        this._planeTracker.clearCandidate() // and ends the custom pip's candidate
         // A fresh/changed lock has no tracked hover yet (design §6 bullet 1).
         this._lastIdleHoverPoint = null
+        this._idleInferred = null
       }
       return
     }
@@ -892,10 +1139,13 @@ export class ArcTool implements Tool {
         if (this._activeContext !== null) return
         const fromFace = this.faceStage
         const { a } = fromFace
-        const natural = groundNaturalTarget(this._editContext, a)
+        const natural = groundNaturalTarget(this._editContext, a, this._gestureView, getDrawingAxes(this.wasmScene))
         const next = nextGestureLockPlane(null, ev.key, a, natural, getDrawingAxes(this.wasmScene), this._editContext)
         if (next.lock === null) return // Down with no lock: nothing to release
         this.idlePlaneLock = next.lock
+        // A lock displaces a Shift pin mid-gesture too (the idle rule), so
+        // after the commit or an Escape only one plane choice is left.
+        if (next.lock !== null) this.pin.clear()
         this.faceStage = { kind: 'idle' }
         this.planeStage = { kind: 'chord', plane: next.plane, target: next.target, a, natural, fromFace }
         this._lastFaceCursor = null
@@ -910,6 +1160,9 @@ export class ArcTool implements Tool {
           this.idlePlaneLock, ev.key, a, natural, getDrawingAxes(this.wasmScene), this._editContext,
         )
         this.idlePlaneLock = next.lock
+        // A lock displaces a Shift pin mid-gesture too (the idle rule), so
+        // after the commit or an Escape only one plane choice is left.
+        if (next.lock !== null) this.pin.clear()
         if (next.lock === null && fromFace !== undefined) {
           this.planeStage = { kind: 'idle' }
           this.faceStage = fromFace
@@ -997,6 +1250,9 @@ export class ArcTool implements Tool {
   }
 
   cancel(): void {
+    this._planeTracker.clearIdle()
+    this.lastSnap = null
+    this.refs.endGesture()
     this.retype.close()
     this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
@@ -1007,6 +1263,7 @@ export class ArcTool implements Tool {
     this.idlePlaneLock = null
     this.pin.clear()
     this._lastIdleHoverPoint = null
+    this._idleInferred = null
     this._clearPreview()
     this.onMeasurementCb('')
   }
@@ -1017,9 +1274,14 @@ export class ArcTool implements Tool {
    * all and reset. Called by the Viewport from `notifyLoaded`.
    */
   onDocumentReset(): void {
+    this._planeTracker.reset()
     this.completion = 'open' // a fresh document starts with the default close
     this.cancel()
+    this.refs.clearRing()
     this.sep.reset()
+    // A new document's handles can reuse the old one's: no memoized pick
+    // or hover memory may outlive it.
+    this._pickCache.clear()
   }
 
   /** Ctrl/Cmd clean tap (Viewport-driven; a bare Ctrl never reaches onKey):
@@ -1250,7 +1512,9 @@ export class ArcTool implements Tool {
       return
     }
     const { plane } = this.planeStage
-    const cursor = this._planeCursor(snap, ray, plane)
+    const resolvedCursor = this._anchoredCursor(snap, ray, plane)
+    const cursor = resolvedCursor === null ? null : resolvedCursor.point
+    this.lastSnap = resolvedCursor === null ? null : resolvedCursor.snap
     if (cursor === null) {
       this._clearPreview()
       // An open retype window owns the readout (its buffer, or the flat-bulge
@@ -1317,7 +1581,7 @@ export class ArcTool implements Tool {
       const resolved = this._resolveClickTarget(snap, ray)
       if (resolved === null) return
       const { plane, target } = resolved
-      const a = this._planeCursor(snap, ray, plane)
+      const a = this._idleReferenceAt(snap, ray)?.point ?? this._planeCursor(snap, ray, plane)
       if (a === null) return
       // The unlocked resolution at this SAME click (design §2a) — reuse it
       // for free when no lock was active; fall back to ground WITHOUT
@@ -1325,23 +1589,28 @@ export class ArcTool implements Tool {
       // A Shift pin's first click resolves to the pinned plane itself, which
       // is exactly what a later arrow-lock release should revert to.
       const natural = this.idlePlaneLock !== null
-        ? groundNaturalTarget(this._editContext, a)
+        ? groundNaturalTarget(this._editContext, a, this._gestureView, getDrawingAxes(this.wasmScene))
         : resolved
       this.planeStage = { kind: 'chord', plane, target, a, natural }
+      this.refs.beginGesture(this.wasmScene, snap, a, ray)
       this.typed = ''
       this._lastPlaneCursor = null
       return
     }
 
     const { plane } = this.planeStage
-    const cursor = this._planeCursor(snap, ray, plane)
-    if (cursor === null) return
+    const resolvedCursor = this._anchoredCursor(snap, ray, plane)
+    if (resolvedCursor === null) return
+    const cursor = resolvedCursor.point
+    // What the commit sees is the snap the cue showed (a reference line is a hard pick).
+    const pickSnap = resolvedCursor.snap
+    this.lastSnap = null
 
     if (this.planeStage.kind === 'chord') {
       // Second click: endpoint B (the chord). Ignore a degenerate chord.
       // A free pick places B at the DISPLAYED chord length, as if typed.
       const shown = displayedLength(segmentLength(this.planeStage.a, cursor))
-      if (isFreePick(snap, this.planeStage.a) && shown >= ARC_MIN_CHORD_M) {
+      if (isFreePick(pickSnap, this.planeStage.a) && shown >= ARC_MIN_CHORD_M) {
         this._lastPlaneCursor = cursor
         this._lastPlaneCursorStraightOver = this._cursorStraightOver
         this._commitTypedPlaneChord(shown)
@@ -1368,7 +1637,7 @@ export class ArcTool implements Tool {
       return
     }
     // A free pick commits the sagitta of the DISPLAYED radius, as if typed.
-    if (isFreePick(snap)) {
+    if (isFreePick(pickSnap)) {
       const sd = sagittaForDisplayedRadius(segmentLength(a, b), Math.abs(s), Math.abs(s) > segmentLength(a, b) / 2)
       if (sd !== null && sd >= ARC_MIN_SAGITTA_M) {
         this._lastPlaneCursor = cursor
@@ -1561,6 +1830,7 @@ export class ArcTool implements Tool {
         return last
       })
       refreshAfterDraft(report, {
+        onToast: (m) => this.onToast(m),
         onObject: (o) => this.onFaceImprint(o),
         onSketch: (sketchHandle) => this.onCommit({ sketchHandle, regionsCreated }),
       })
@@ -1676,7 +1946,12 @@ export class ArcTool implements Tool {
       if (eligible === null) return
 
       const { normal } = eligible
-      const a: V3 = [snap.x, snap.y, snap.z]
+      // On the face's plane: a hidden point that is no part of the face
+      // drops onto it, disclosed, like the gesture's later clicks (and like
+      // the other draw tools' first click).
+      const first = firstPointOnFace(this.wasmScene, eligible, this._activeInstance, snap, ray)
+      const a: V3 = first.point
+      this._snapProjected = first.projected
 
       this.faceStage = {
         kind: 'chord',

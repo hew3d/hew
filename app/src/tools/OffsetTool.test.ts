@@ -113,6 +113,8 @@ function makeWasmScene(opts: {
   const dm = draftMock({ ctxObjects: opts.ctxObjects ?? (opts.facePick !== undefined ? [3n] : []) })
   const units = planeUnitsMock(opts.listings ?? { [CTX_GROUND]: GROUND_LISTING, [CTX_FACE]: FACE_LISTING, [CTX_GROUND_IN_42]: GROUND_LISTING })
   return {
+    // First, so this scene's own region picks override the mock's misses.
+    ...dm.members,
     draftLog: dm.log,
     history_generation: vi.fn(() => 1n),
     pick_face: vi.fn(() => opts.facePick),
@@ -127,7 +129,6 @@ function makeWasmScene(opts: {
     instance_pose: vi.fn(() => instancePose),
     node_parent: vi.fn(() => opts.nodeParent),
     ...units,
-    ...dm.members,
   } as unknown as WasmScene & { draftLog: DraftLog }
 }
 

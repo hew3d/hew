@@ -229,14 +229,14 @@ describe('LineTool — typed length with the cursor on the Blue axis (#51a)', ()
     expect(tool.snapProjected()).toBe(false)
   })
 
-  it('an ordinary off-axis snap with height is still flattened onto the ground and reported as projected', () => {
+  it('an ordinary off-axis snap with height (not a named point) is still flattened onto the ground and reported as projected', () => {
     const w = makeWasmScene()
     const { tool } = makeTool(w.scene)
 
     tool.onPointerDown(makeSnap([2, 3, 0]), RAY)
-    tool.onPointerMove({ x: 5, y: 3, z: 2, kind: 'endpoint' }, RAY)
+    tool.onPointerMove({ x: 5, y: 3, z: 2, kind: 'on-edge' }, RAY)
     expect(tool.snapProjected()).toBe(true)
-    tool.onPointerDown({ x: 5, y: 3, z: 2, kind: 'endpoint' }, RAY)
+    tool.onPointerDown({ x: 5, y: 3, z: 2, kind: 'on-edge' }, RAY)
 
     expect(w.segmentCalls).toEqual([[2, 3, 0, 5, 3, 0]])
     expect(w.planeCalls).toEqual([[0, 0, 0, 0, 0, 1]])

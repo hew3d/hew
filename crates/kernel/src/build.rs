@@ -136,6 +136,28 @@ impl Object {
         )
     }
 
+    /// Native faces with holes at the strict [`tol::PLANE_DIST`] gate:
+    /// `holes[i]` is face `i`'s inner-loop index lists, wound against its
+    /// outer loop. Validated exactly like [`Object::from_polygons`]. Used
+    /// by the cells search (wireframe faces §5.3), whose faces are drawn,
+    /// not imported.
+    pub(crate) fn from_polygons_with_holes(
+        positions: &[Point3],
+        faces: &[Vec<usize>],
+        holes: &[Vec<Vec<usize>>],
+    ) -> Result<Object, TopologyError> {
+        Object::from_polygons_impl(
+            positions,
+            faces,
+            None,
+            None,
+            None,
+            None,
+            tol::PLANE_DIST,
+            Some(holes),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn from_polygons_impl(
         positions: &[Point3],

@@ -845,6 +845,13 @@ impl Registry {
             "Rejoin one seam family of split pieces as a single solid (Model Health's Rejoin as one solid); one undo entry.",
         );
         add(
+            "hew.solid.from_faces",
+            M,
+            Kernel,
+            Std,
+            "Make a solid from drawn faces that enclose a space (Make Solid on sketches), first filling the faces the named sketches' lines can close; a shape closed against a solid grows it.",
+        );
+        add(
             "hew.solid.union",
             M,
             Kernel,
@@ -5190,6 +5197,23 @@ impl Registry {
                 "type": "boolean",
                 "description": "keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides"
             });
+            // What a drawing edit closed (wireframe faces): a loop on one
+            // plane is a face whichever sketches hold its lines, and faces
+            // that enclose a space become a solid in the same undo step.
+            let faces_closed_schema = serde_json::json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed"
+            });
+            let solid_schema = serde_json::json!({
+                "type": "object",
+                "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+                "properties": {
+                    "object_id": { "type": "string" },
+                    "grew": { "type": "boolean" }
+                },
+                "required": ["object_id", "grew"]
+            });
             let sketch_result_schema = serde_json::json!({
                 "type": "object",
                 "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec",
@@ -5197,7 +5221,9 @@ impl Registry {
                     "sketch": { "type": "string" },
                     "region_ids": { "type": "array", "items": { "type": "string" } },
                     "region_id": { "type": "string", "description": "present when exactly one region resulted (HEW_API.md §6.1's example)" },
-                    "curve_id": { "type": "string", "description": "present when this command began a curve chain" }
+                    "curve_id": { "type": "string", "description": "present when this command began a curve chain" },
+                    "faces_closed": faces_closed_schema.clone(),
+                    "solid": solid_schema.clone()
                 },
                 "required": ["sketch", "region_ids"]
             });
@@ -5230,7 +5256,9 @@ impl Registry {
                     "type": "object",
                     "properties": {
                         "object_id": { "type": "string" },
-                        "units": touched_units_schema.clone()
+                        "units": touched_units_schema.clone(),
+                        "faces_closed": faces_closed_schema.clone(),
+                        "solid": solid_schema.clone()
                     },
                     "required": ["object_id", "units"],
                     "description": format!(
@@ -5493,6 +5521,17 @@ impl Registry {
             });
             let edit_result = serde_json::json!({
                 "type": "object",
+                "properties": {
+                    "units": touched_units_schema.clone(),
+                    "faces_closed": faces_closed_schema.clone(),
+                    "solid": solid_schema.clone()
+                },
+                "required": ["units"],
+                "description": "the plane units the edit made (new keys after the edit); empty for delete"
+            });
+            // Delete removes drawing and so closes nothing.
+            let delete_result = serde_json::json!({
+                "type": "object",
                 "properties": { "units": touched_units_schema.clone() },
                 "required": ["units"],
                 "description": "the plane units the edit made (new keys after the edit); empty for delete"
@@ -5663,8 +5702,41 @@ impl Registry {
                 },
                 "required": ["plane", "units"]
             });
-            cmd.result_schema = edit_result.clone();
+            cmd.result_schema = delete_result;
             cmd.refusals = edit_refusals();
+
+            let cmd = commands
+                .get_mut("hew.solid.from_faces")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "sketches": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "string" },
+                        "description": "skt_ ids of free sketches; their lines first fill every face they can close (as a draw would), then every face (faced region) they hold, and every face so filled, seeds the search, which gathers every face connected to one through shared edges (two faces with the same loop on one plane are one face: the ordinary one, else the earlier drawn)"
+                    }
+                },
+                "required": ["sketches"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "description": "the faces enclosed a space and became a solid, one undo step; the faces' sketches lose the consumed edges (an emptied sketch is deleted)",
+                "properties": {
+                    "object_id": { "type": "string", "description": "the first solid made" },
+                    "grew": { "type": "boolean", "description": "the shape closed against an existing solid, which grew into object_id (carrying its name and tags)" }
+                },
+                "required": ["object_id", "grew"]
+            });
+            cmd.refusals = vec![
+                "faces_not_closed",
+                "loop_not_planar",
+                "faces_not_solid",
+                "unknown_entity",
+            ];
         }
         {
             let face_locator_schema = serde_json::json!({
@@ -6928,6 +7000,7 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.solid.delete_imprint",
                 "hew.solid.extrude",
                 "hew.solid.follow_me",
+                "hew.solid.from_faces",
                 "hew.solid.intersect",
                 "hew.solid.mark_surface",
                 "hew.solid.move_imprint",

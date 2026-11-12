@@ -63,7 +63,7 @@ jobs:
       # The app dev server imports the wasm bindings from app/src/wasm/pkg;
       # Playwright's webServer boots vite, so the build must exist first.
       - name: Build kernel to WASM (web)
-        run: wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
+        run: wasm-pack build crates/wasm-api --target web --no-opt --out-dir ../../app/src/wasm/pkg
 
       - name: Install Playwright Chromium
         run: pnpm --dir app exec playwright install --with-deps chromium

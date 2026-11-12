@@ -31,6 +31,10 @@
 #              docs describe the release people can download rather than
 #              whatever main says today (see docs/dev/DEVELOPMENT.md §2)
 #
+# A `vX.Y.Z-pre.LABEL` tag is a pre-release of an effort that has not
+# shipped: it builds every package, but deploys the web app to the effort's
+# own preview branch, skips :latest, and never moves `site-live`.
+#
 # Releases stay DRAFTS. Publishing is a deliberate human act after smoke
 # installs.
 #
@@ -687,16 +691,15 @@ jobs:
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker buildx create --use --name hew-relay-builder
           # A pre-release gets only its own version tag, never :latest.
-          TAGS_EXTRA="--tag $IMAGE:latest"
-          if [[ "$TAG" == *-pre.* ]]; then
-            TAGS_EXTRA=""
+          TAG_ARGS=(--tag "$IMAGE:$VERSION")
+          if [[ "$TAG" != *-pre.* ]]; then
+            TAG_ARGS+=(--tag "$IMAGE:latest")
           fi
           # COPY-only Dockerfile: both platforms build without emulation.
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --file crates/hew-relay/Dockerfile \
-            --tag "$IMAGE:$VERSION" \
-            $TAGS_EXTRA \
+            "${TAG_ARGS[@]}" \
             --push \
             .
 
@@ -816,7 +819,7 @@ jobs:
           # The publisher reminder goes out first so it also appears on a
           # re-run that finds the table already written.
           if [[ "$TAG" == *-pre.* ]]; then
-            LEAD="_Pre-release: not for general use, plugin API preview._"
+            LEAD="_Pre-release: not for general use._"
             {
               echo "### Publish as a pre-release"
               echo
@@ -824,8 +827,8 @@ jobs:
               echo "Leaving it unticked marks this build as the latest release,"
               echo "which the updater and the package channels would pick up."
               echo
-              echo "Cut pre-release tags from the \`feature/plugin-system\` integration"
-              echo "branch; \`main\` is for real releases only."
+              echo "Cut pre-release tags from the effort's integration branch;"
+              echo "\`main\` is for real releases only."
             } >> "$GITHUB_STEP_SUMMARY"
           else
             LEAD="_Draft: replace this line with release highlights before publishing._"
@@ -936,8 +939,12 @@ jobs:
   # tags whose runs finish out of order, cannot rewind it; and a re-run of
   # this tag's own run leaves alone any hotfix cherry-picked onto the branch
   # since. The lease makes the push atomic against another run's move.
+  #
+  # Pre-release tags (vX.Y.Z-pre.LABEL) never move it: they are builds of
+  # work that has not shipped, and the site must only describe a release.
   site-live:
     needs: [create-release, web]
+    if: ${{ !contains(github.ref_name, '-pre.') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

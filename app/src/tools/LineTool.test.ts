@@ -748,7 +748,8 @@ describe('LineTool — a hidden point that is no part of the face, clicked first
     tool.onPointerDown(ground(1, 0), down(1, 0))
     tool.onPointerDown(ground(1, 1), down(1, 1))
     // The closing click snaps a point above the start: its height drops.
-    const above = makeSnap({ x: 0, y: 0, z: 0.5, kind: 'endpoint' })
+    // An edge point, not a named point (a named point would keep its height).
+    const above = makeSnap({ x: 0, y: 0, z: 0.5, kind: 'on-edge' })
     tool.onPointerMove(above, down(0, 0))
     expect(tool.snapProjected()).toBe(true)
     tool.onPointerDown(above, down(0, 0))

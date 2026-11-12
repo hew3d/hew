@@ -1,9 +1,17 @@
-# Hew CI — mirrors scripts/verify.sh (the canonical local gate: fmt +
+# Hew CI — runs scripts/verify.sh (the canonical local gate: fmt +
 # clippy -D warnings + cargo test + wasm-pack + Vitest + app build + the
-# site build + the Tauri host crate's fmt/clippy), then adds the replay
-# gate, the web-E2E smoke, and the visual goldens, and artifacts the built
-# web app. A second job holds the "Open on Phone" relay to its contract
+# site build + the Tauri host crate's fmt/clippy) as parallel lanes, then
+# adds the replay gate, the web-E2E smoke (sharded), and the visual goldens.
+# A separate job holds the "Open on Phone" relay to its contract
 # (scripts/relay-contract.sh) on both implementations.
+#
+# Shape: one `wasm` job builds the kernel once, WITHOUT wasm-opt (about 7 of
+# every 9 minutes of a wasm-pack build is wasm-opt, and nothing that tests
+# the kernel needs it: E2E runs the vite dev server and the replay gate
+# checks state hashes). Everything that needs the kernel downloads that
+# artifact. The size-optimized build that actually ships is built once, in
+# parallel and off the critical path (`wasm-release`), so a wasm-opt failure
+# still turns a PR red; deploy-beta reuses that artifact.
 #
 # Every toolchain here is pinned, and every action is pinned to a commit SHA;
 # Renovate proposes the bumps (.github/renovate.json5). Nothing in this file
@@ -17,136 +25,87 @@ on:
     branches: [main, feature/plugin-system]
   pull_request:
 
+# A new push to a PR supersedes the old one. Pushes to main are never
+# cancelled (every commit keeps its own signal, and deploy-beta carries its
+# own group): their group key is the unique run id.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  verify:
+  # The kernel, built once for the test lanes. --no-opt skips wasm-opt (see
+  # the header). Both wasm-pack targets compile the same cargo artifact, so
+  # the second build is bindgen only. Both packages are gitignored build
+  # outputs; they travel between jobs as artifacts.
+  wasm:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # The Tauri host crate's clippy pass needs the webkit2gtk/gtk stack;
-      # the Playwright/WebGL smoke needs xvfb for the non-headless engines.
-      - name: System libs (Tauri + WebGL)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config build-essential libssl-dev \
-            libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
-            xvfb xauth
-
-      # rustup honors rust-toolchain.toml — a PINNED version, so this runner
-      # compiles with the exact toolchain a developer machine does.
       - name: Rust cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: |
-            .
-            shells/tauri/src-tauri
-
       - name: Install wasm-pack (pinned)
         run: scripts/install-wasm-pack.sh
 
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .node-version
-
-      # pnpm's version comes from `packageManager` in the root package.json —
-      # one source of truth that pnpm itself also honors locally. (Corepack,
-      # which this step used to use, is no longer distributed with Node 25+.)
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-
-      - name: Toolchain versions
-        run: |
-          rustc --version
-          cargo --version
-          wasm-pack --version
-          node --version
-          pnpm --version
-
-      # Ask pnpm where its store is rather than assuming: the path depends on
-      # the OS and on how pnpm was installed, and a wrong guess yields a cache
-      # that silently never hits.
-      - name: Locate pnpm store
-        run: echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
-
-      - name: Cache pnpm store
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ env.PNPM_STORE }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            pnpm-${{ runner.os }}-
-
-      - name: Install JS dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Verify (fmt, clippy, cargo test, wasm, vitest, builds)
-        run: scripts/verify.sh
-
-      # Replay gate — replay every committed recording into a fresh kernel
-      # and assert its golden state_hash still matches. Needs a separate
-      # wasm build: the runner consumes `--target nodejs` (CommonJS)
-      # bindings, distinct from verify.sh's `--target web` app build.
       # NB: wasm-pack's --out-dir is relative to the crate dir.
-      - name: Build kernel for Node (replay runner)
-        run: wasm-pack build crates/wasm-api --target nodejs --out-dir ../../tools/replay-runner/pkg-node
+      - name: Build kernel (web target, no wasm-opt)
+        run: wasm-pack build crates/wasm-api --target web --no-opt --out-dir ../../app/src/wasm/pkg
 
-      - name: Replay gate (golden state-hash fixtures)
-        run: node tools/replay-runner/run.mjs
+      - name: Build kernel (Node target, no wasm-opt)
+        run: wasm-pack build crates/wasm-api --target nodejs --no-opt --out-dir ../../tools/replay-runner/pkg-node
 
-      - name: Install Playwright browsers
-        run: pnpm --dir app exec playwright install --with-deps chromium webkit
+      - name: Upload kernel (web)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wasm-web
+          path: app/src/wasm/pkg
+          if-no-files-found: error
 
-      # Chromium (SwiftShader software GL): boot smoke, harness specs, and
-      # the draw → push/pull → save/reload lifecycle.
-      - name: Web E2E smoke (chromium)
+      - name: Upload kernel (Node)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wasm-node
+          path: tools/replay-runner/pkg-node
+          if-no-files-found: error
+
+  # Rust: packaging tests, fmt, clippy -D warnings, cargo test.
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Rust gate
+        run: scripts/verify.sh rust
+
+  # Web app: typecheck, lint, i18n, Vitest, app + site builds. The app build
+  # reuses the downloaded kernel package.
+  web:
+    needs: wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
+      # Downloaded after checkout, so the files are NEWER than the sources;
+      # touch them anyway because app/scripts/build-wasm.mjs rebuilds the
+      # kernel when any Rust source is newer than the package, and an
+      # artifact can restore its original (older) mtimes.
+      - name: Download kernel (WASM, web target)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-web
+          path: app/src/wasm/pkg
+      - name: Freshen kernel package mtimes
+        run: find app/src/wasm/pkg -type f -exec touch {} +
+      - name: Web gate
         env:
-          CI: '1'
-        run: pnpm --dir app exec playwright test --project=chromium
-
-      # WebKit (WebKitGTK) — the engine closest to the macOS WKWebView.
-      # Runs under Xvfb because headless WebKitGTK needs a display + system
-      # GL (llvmpipe) to bring up the WebGL2 viewport.
-      #
-      # Still non-blocking, deliberately, even though it has been green as
-      # consistently as the visual lane. The visual lane is deterministic by
-      # construction — pinned resolution, pinned DPR, and a software
-      # rasterizer that ships inside Playwright. This one depends on the
-      # runner image's WebKitGTK, its system GL (llvmpipe), and Xvfb, none of
-      # which are pinned by anything in this repository, so a green history
-      # is weaker evidence here than it is there. Promote it when its stack
-      # is pinned, or when a failure it catches justifies the flake risk.
-      - name: Web E2E smoke (webkit) [validating — non-blocking]
-        continue-on-error: true
-        env:
-          CI: '1'
-        run: xvfb-run -a pnpm --dir app exec playwright test --project=webkit
-
-      # Visual-regression goldens on the pinned `visual` project (fixed
-      # 800×600 / DPR=1 / SwiftShader). The renderer is ANGLE-SwiftShader
-      # bundled with Playwright's pinned Chromium, so output is reproducible
-      # across hosts on the same @playwright/test version.
-      #
-      # BLOCKING. It spent its validation period non-blocking and came back
-      # green on every run that reached it — including the one that carried
-      # three.js 0.184 -> 0.185 and Playwright 1.61 -> 1.62 together, which
-      # replaced both the renderer and the bundled SwiftShader at once. That
-      # is the pair most likely to shift pixels, and it did not.
-      #
-      # Making it required is what lets three.js and Playwright automerge
-      # (.github/renovate.json5): until now nothing could fail a build on a
-      # renderer regression, so those two needed a person. A legitimate shift
-      # — usually a Playwright bump bringing a new Chromium — now turns the
-      # PR red rather than landing unnoticed, and the fix is to regenerate:
-      # Actions ▸ Regen Visual Goldens ▸ Run workflow (it takes a branch),
-      # then commit the PNGs it produces onto that branch.
-      - name: Web E2E visual goldens
-        env:
-          CI: '1'
-        run: pnpm --dir app exec playwright test --project=visual
+          # This lane builds against the unoptimized test kernel; see the
+          # precache ceiling in app/vite.config.ts.
+          HEW_UNOPTIMIZED_WASM: '1'
+        run: scripts/verify.sh web
 
       - name: Upload built web app
         if: always()
@@ -166,12 +125,218 @@ jobs:
           path: site/dist
           if-no-files-found: warn
 
+  # Tauri host crate fmt + clippy. tauri's generate_context! reads app/dist
+  # at compile time, so this needs the web build's output.
+  tauri:
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The Tauri host crate's clippy pass needs the webkit2gtk/gtk stack.
+      - name: System libs (Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config build-essential libssl-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: |
+            .
+            shells/tauri/src-tauri
+
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
+      - name: Download built web app
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web-dist
+          path: app/dist
+
+      - name: Tauri host gate
+        run: scripts/verify.sh tauri
+
+  # Replay gate — replay every committed recording into a fresh kernel and
+  # assert its golden state_hash still matches. Consumes the `--target
+  # nodejs` (CommonJS) bindings built by the `wasm` job.
+  replay:
+    needs: wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+
+      - name: Download kernel (WASM, Node target)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-node
+          path: tools/replay-runner/pkg-node
+
+      - name: Replay gate (golden state-hash fixtures)
+        run: node tools/replay-runner/run.mjs
+
+  # Chromium (SwiftShader software GL): boot smoke, harness specs, and the
+  # draw -> push/pull -> save/reload lifecycle. Sharded across runners:
+  # playwright.config.ts pins workers: 1 because SwiftShader is CPU-bound
+  # and parallel workers on ONE machine contend; separate runners do not.
+  # fullyParallel is off, so a shard is a set of whole spec files.
+  e2e-chromium:
+    needs: wasm
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
+      # Downloaded after checkout, so the files are NEWER than the sources;
+      # touch them anyway because app/scripts/build-wasm.mjs rebuilds the
+      # kernel when any Rust source is newer than the package, and an
+      # artifact can restore its original (older) mtimes.
+      - name: Download kernel (WASM, web target)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-web
+          path: app/src/wasm/pkg
+      - name: Freshen kernel package mtimes
+        run: find app/src/wasm/pkg -type f -exec touch {} +
+      - name: Install Playwright browsers
+        run: pnpm --dir app exec playwright install --with-deps chromium
+
+      - name: Web E2E smoke (chromium, shard ${{ matrix.shard }}/4)
+        env:
+          CI: '1'
+        run: pnpm --dir app exec playwright test --project=chromium --shard=${{ matrix.shard }}/4
+
       - name: Upload Playwright report on failure
         if: failure()
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: playwright-report
+          name: playwright-report-chromium-${{ matrix.shard }}
+          path: app/playwright-report
+          if-no-files-found: ignore
+
+  # Visual-regression goldens on the pinned `visual` project (fixed 800x600 /
+  # DPR=1 / SwiftShader). The renderer is ANGLE-SwiftShader bundled with
+  # Playwright's pinned Chromium, so output is reproducible across hosts on
+  # the same @playwright/test version. Not sharded: it is a handful of
+  # tests.
+  #
+  # BLOCKING. It spent its validation period non-blocking and came back
+  # green on every run that reached it — including the one that carried
+  # three.js 0.184 -> 0.185 and Playwright 1.61 -> 1.62 together, which
+  # replaced both the renderer and the bundled SwiftShader at once. That
+  # is the pair most likely to shift pixels, and it did not.
+  #
+  # Making it required is what lets three.js and Playwright automerge
+  # (.github/renovate.json5): until now nothing could fail a build on a
+  # renderer regression, so those two needed a person. A legitimate shift
+  # — usually a Playwright bump bringing a new Chromium — now turns the
+  # PR red rather than landing unnoticed, and the fix is to regenerate:
+  # Actions > Regen Visual Goldens > Run workflow (it takes a branch),
+  # then commit the PNGs it produces onto that branch.
+  e2e-visual:
+    needs: wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
+      # Downloaded after checkout, so the files are NEWER than the sources;
+      # touch them anyway because app/scripts/build-wasm.mjs rebuilds the
+      # kernel when any Rust source is newer than the package, and an
+      # artifact can restore its original (older) mtimes.
+      - name: Download kernel (WASM, web target)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-web
+          path: app/src/wasm/pkg
+      - name: Freshen kernel package mtimes
+        run: find app/src/wasm/pkg -type f -exec touch {} +
+      - name: Install Playwright browsers
+        run: pnpm --dir app exec playwright install --with-deps chromium
+
+      - name: Web E2E visual goldens
+        env:
+          CI: '1'
+        run: pnpm --dir app exec playwright test --project=visual
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report-visual
+          path: app/playwright-report
+          if-no-files-found: ignore
+
+  # WebKit (WebKitGTK) — the engine closest to the macOS WKWebView. Runs
+  # under Xvfb because headless WebKitGTK needs a display + system GL
+  # (llvmpipe) to bring up the WebGL2 viewport.
+  #
+  # NON-BLOCKING, and it is NOT green: a recent run had dozens of failures
+  # (and ~70 minutes of retries) that the step-level continue-on-error hid.
+  # It depends on the runner image's WebKitGTK, its system GL, and Xvfb,
+  # none of which this repository pins. It is its own job so it never sits
+  # on the critical path, and nothing `needs` it (deploy-beta included).
+  # continue-on-error stays on the STEP, not the job: the job then reports
+  # success, which is what keeps Renovate's automerge-on-green working.
+  # Triage the failures before promoting it.
+  e2e-webkit:
+    needs: wasm
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: System libs (Xvfb)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xauth
+
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
+      # Downloaded after checkout, so the files are NEWER than the sources;
+      # touch them anyway because app/scripts/build-wasm.mjs rebuilds the
+      # kernel when any Rust source is newer than the package, and an
+      # artifact can restore its original (older) mtimes.
+      - name: Download kernel (WASM, web target)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-web
+          path: app/src/wasm/pkg
+      - name: Freshen kernel package mtimes
+        run: find app/src/wasm/pkg -type f -exec touch {} +
+      - name: Install Playwright browsers
+        run: pnpm --dir app exec playwright install --with-deps webkit
+
+      - name: Web E2E smoke (webkit, shard ${{ matrix.shard }}/4) [validating — non-blocking]
+        continue-on-error: true
+        env:
+          CI: '1'
+        run: xvfb-run -a pnpm --dir app exec playwright test --project=webkit --shard=${{ matrix.shard }}/4
+
+      - name: Upload Playwright report on failure
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report-webkit-${{ matrix.shard }}
           path: app/playwright-report
           if-no-files-found: ignore
 
@@ -226,6 +391,33 @@ jobs:
           cd workers/bug-intake
           npm test
 
+  # The size-optimized kernel that actually ships (wasm-opt on). Built on
+  # every run, in parallel with the test lanes, so a wasm-opt or release-
+  # profile failure surfaces on the PR rather than after merge, and so
+  # deploy-beta finds it ready instead of spending ~7 minutes on it after
+  # everything is green.
+  wasm-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install wasm-pack (pinned)
+        run: scripts/install-wasm-pack.sh
+
+      - name: Build kernel (web target, optimized)
+        run: wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
+
+      - name: Upload optimized kernel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wasm-web-release
+          path: app/src/wasm/pkg
+          if-no-files-found: error
+
   # beta.hew3d.com — the pre-release copy of main for testers. Every push to
   # main that passes the WHOLE workflow is deployed here, so testers see
   # fixes and features before the next tagged release reaches app.hew3d.com.
@@ -248,7 +440,7 @@ jobs:
   # separate from the production deploy: release.yml's `web` job still
   # publishes app.hew3d.com at tag time and is unaffected.
   deploy-beta:
-    needs: [verify, relay-contract, bug-intake-tests]
+    needs: [wasm, rust, web, tauri, replay, e2e-chromium, e2e-visual, relay-contract, bug-intake-tests, wasm-release]
     if: >-
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
@@ -261,35 +453,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
 
-      - name: Install wasm-pack (pinned)
-        run: scripts/install-wasm-pack.sh
-
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      # The size-optimized kernel built in parallel by `wasm-release`. Freshen
+      # the mtimes so app/scripts/build-wasm.mjs sees it as newer than the
+      # sources and does not rebuild it (a wasm-pack build is ~7 minutes,
+      # almost all of it wasm-opt).
+      - name: Download optimized kernel (WASM)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          node-version-file: .node-version
-
-      # pnpm's version comes from `packageManager` in the root package.json.
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-
-      # Ask pnpm where its store is rather than assuming — see the desktop job.
-      - name: Locate pnpm store
-        run: echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
-
-      - name: Cache pnpm store
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ env.PNPM_STORE }}
-          key: pnpm-${{ runner.os }}-X64-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            pnpm-${{ runner.os }}-X64-
-
-      - name: Install JS dependencies
-        run: pnpm install --frozen-lockfile
+          name: wasm-web-release
+          path: app/src/wasm/pkg
+      - name: Freshen kernel package mtimes
+        run: find app/src/wasm/pkg -type f -exec touch {} +
 
       # Freshness guard. Skip a stale run before spending minutes building it.
       - name: Skip if main has moved on

@@ -4844,6 +4844,18 @@ impl InferenceScene {
             .or(best)
             .map(|(_, _, id, vid, pos)| (id, vid, pos))
     }
+
+    /// Every registered sketch vertex within `tol` of world point `p`, in
+    /// registration order: the corners of every sketch that a click on
+    /// `p` stands on. Read-only; the same registry
+    /// [`InferenceScene::pick_sketch_vertex`] searches.
+    pub fn sketch_vertices_at(&self, p: Point3, tol: f64) -> Vec<(SketchId, SketchVertexId)> {
+        self.sketch_vertices
+            .iter()
+            .filter(|(_, _, q)| (*q - p).length() <= tol)
+            .map(|&(id, vid, _)| (id, vid))
+            .collect()
+    }
 }
 
 /// Internal candidate tuple used inside `resolve`:

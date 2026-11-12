@@ -1,0 +1,37 @@
+name: Set up JS toolchain
+description: >-
+  Node (from .node-version), pnpm (from the root packageManager field), the
+  pnpm store cache, and a frozen-lockfile install. Shared by the CI jobs so
+  the pinned versions live in one place.
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version-file: .node-version
+
+    # pnpm's version comes from `packageManager` in the root package.json —
+    # one source of truth that pnpm itself also honors locally.
+    - name: Setup pnpm
+      uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+    # Ask pnpm where its store is rather than assuming: the path depends on
+    # the OS and on how pnpm was installed, and a wrong guess yields a cache
+    # that silently never hits.
+    - name: Locate pnpm store
+      shell: bash
+      run: echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+
+    - name: Cache pnpm store
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ env.PNPM_STORE }}
+        key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+        restore-keys: |
+          pnpm-${{ runner.os }}-
+
+    - name: Install JS dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile

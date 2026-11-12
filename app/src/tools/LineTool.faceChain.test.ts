@@ -258,7 +258,8 @@ describe('LineTool — a ground chain\'s "projected" verdict ends with the chain
     ;(scene.pick_face as ReturnType<typeof vi.fn>).mockImplementation(() => undefined) // bare ground
     const { tool } = makeTool(scene)
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), rayThrough(0, 0))
-    tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 1, kind: 'endpoint' }), rayThrough(1, 0))
+    // An edge point (not a named point): a named point would keep its height.
+    tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 1, kind: 'on-edge' }), rayThrough(1, 0))
     expect(tool.snapProjected()).toBe(true)
     tool.onKey({ key: 'Escape' } as KeyboardEvent)
     expect(tool.snapProjected()).toBe(false)
@@ -321,6 +322,17 @@ describe('LineTool — review fixes on the face-chain round', () => {
     tool.onPointerDown(onFace(0.2, 0.2), rayThrough(0.2, 0.2))
     tool.onPointerMove(onFace(0.3, 0.3), rayThrough(0.3, 0.3)) // the pointer moved on: no dblclick is owed
     expect(tool.onDoubleClick(onFace(0.3, 0.3), rayThrough(0.3, 0.3))).toBe(false)
+  })
+
+  it('a hover replayed at the closing press\'s own ray (the Viewport\'s replay after the commit) keeps the dblclick owed', () => {
+    const scene = makeScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(onFace(0.2, 0.2), rayThrough(0.2, 0.2))
+    tool.onPointerDown(onFace(0.8, 0.2), rayThrough(0.8, 0.2))
+    tool.onPointerDown(onFace(0.5, 0.8), rayThrough(0.5, 0.8))
+    tool.onPointerDown(onFace(0.2, 0.2), rayThrough(0.2, 0.2)) // closes the loop
+    tool.onPointerMove(onFace(0.2, 0.2), rayThrough(0.2, 0.2)) // replayed where it rests
+    expect(tool.onDoubleClick(onFace(0.2, 0.2), rayThrough(0.2, 0.2))).toBe(true)
   })
 
   it('retyping a face segment\'s length undoes and re-commits it at the typed length', () => {
@@ -410,4 +422,157 @@ describe('LineTool — starts from an edge-crossing snap (#51b)', () => {
       expectFaceDrafts(scene, 1)
     })
   }
+})
+
+describe('LineTool — a locked first segment that leaves the face (playtest step 5, the ridge post)', () => {
+  // A ↑ lock from a point on the box's top face (here the midpoint of its
+  // back edge), when no face holding the lock is in view — the back face
+  // turns away from the camera — so the chain cannot move onto a neighbour
+  // face. The segment cannot lie on the top face either: the kernel refused
+  // it as off the face (`PointOffPlane`), and the typed post never appeared.
+  // A bare face anchor is a point like any other: the segment re-homes the
+  // chain off the face exactly as a plane chain's locked segment does.
+  const backEdgeMid = makeSnap({ x: 0.5, y: 1, z: 1, kind: 'midpoint', object: 7n, element: 12n, elementKind: 'edge' })
+  const upFromMid = makeSnap({ x: 0.5, y: 1, z: 1.25, kind: 'on-axis' })
+  const fromFrontAbove = (p: readonly [number, number, number]): Ray => {
+    const eye: [number, number, number] = [3, -2.5, 3]
+    const d = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]]
+    const len = Math.hypot(d[0], d[1], d[2])
+    return { origin: eye, direction: [d[0] / len, d[1] / len, d[2] / len] }
+  }
+  /** The kernel's face draft refuses a point off the face's plane z = 1. */
+  function strictScene() {
+    const scene = makeScene({ enforcePlane: true })
+    let faceDraftOpen = false
+    const beginFace = scene.draft_begin_face as unknown as (...a: unknown[]) => bigint
+    scene.draft_begin_face = vi.fn((...a: unknown[]) => {
+      const d = beginFace(...a)
+      faceDraftOpen = true
+      return d
+    }) as unknown as typeof scene.draft_begin_face
+    const add = scene.draft_add_segment as unknown as (...a: unknown[]) => unknown
+    scene.draft_add_segment = vi.fn((d: bigint, ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
+      if (faceDraftOpen && (Math.abs(az - 1) > 1e-9 || Math.abs(bz - 1) > 1e-9)) throw new Error('PointOffPlane: point is off the draft plane')
+      return add(d, ax, ay, az, bx, by, bz)
+    }) as unknown as typeof scene.draft_add_segment
+    const end = scene.draft_end as unknown as (d: bigint) => string
+    scene.draft_end = vi.fn((d: bigint) => {
+      faceDraftOpen = false
+      return end(d)
+    }) as unknown as typeof scene.draft_end
+    return scene
+  }
+
+  for (const how of ['typed', 'clicked'] as const) {
+    it(`a ${how} ↑ segment from the back edge's midpoint draws the post off the face, with no toast`, () => {
+      const scene = strictScene()
+      const { tool, onToast } = makeTool(scene)
+      tool.onPointerMove(backEdgeMid, fromFrontAbove([0.5, 1, 1]))
+      tool.onPointerDown(backEdgeMid, fromFrontAbove([0.5, 1, 1]))
+      tool.onKey({ key: 'ArrowUp' } as KeyboardEvent)
+      tool.onPointerMove(upFromMid, fromFrontAbove([0.5, 1, 1.25]))
+      if (how === 'typed') {
+        for (const k of '0.5') tool.onKey({ key: k } as KeyboardEvent)
+        tool.onKey({ key: 'Enter' } as KeyboardEvent)
+      } else {
+        tool.onPointerDown(upFromMid, fromFrontAbove([0.5, 1, 1.25]))
+      }
+      expect(onToast).not.toHaveBeenCalled()
+      const top = how === 'typed' ? 1.5 : 1.25
+      expect(scene.log.segments).toEqual([[0.5, 1, 1, 0.5, 1, top]])
+      expect(scene.draft_begin_face).not.toHaveBeenCalled()
+      expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+      // The chain goes on from the post's top.
+      expect(tool.capturingInput()).toBe(true)
+    })
+  }
+
+  it('the arrow lock of that first segment releases once it commits (R19, _leaveFaceForPlane)', () => {
+    const scene = strictScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerMove(backEdgeMid, fromFrontAbove([0.5, 1, 1]))
+    tool.onPointerDown(backEdgeMid, fromFrontAbove([0.5, 1, 1]))
+    tool.onKey({ key: 'ArrowUp' } as KeyboardEvent)
+    expect((tool as unknown as { lockAxis: unknown }).lockAxis).toBe(2)
+    tool.onPointerMove(upFromMid, fromFrontAbove([0.5, 1, 1.25]))
+    tool.onPointerDown(upFromMid, fromFrontAbove([0.5, 1, 1.25]))
+    expect(scene.log.segments).toHaveLength(1)
+    expect((tool as unknown as { lockAxis: unknown }).lockAxis).toBeNull()
+  })
+
+  it('a refused plane commit keeps the face cursor, so retyping the length without moving retries', () => {
+    const scene = strictScene()
+    // The first plane draft's segment is refused once (a transient kernel refusal).
+    let planeDraftOpen = false
+    let refused = false
+    const beginPlane = scene.draft_begin_plane as unknown as (...a: unknown[]) => bigint
+    scene.draft_begin_plane = vi.fn((...a: unknown[]) => {
+      const d = beginPlane(...a)
+      planeDraftOpen = true
+      return d
+    }) as unknown as typeof scene.draft_begin_plane
+    const add = scene.draft_add_segment as unknown as (...a: unknown[]) => unknown
+    scene.draft_add_segment = vi.fn((...a: unknown[]) => {
+      if (planeDraftOpen && !refused) {
+        refused = true
+        throw new Error('PointOffPlane: injected one-shot refusal')
+      }
+      return add(...a)
+    }) as unknown as typeof scene.draft_add_segment
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerMove(backEdgeMid, fromFrontAbove([0.5, 1, 1]))
+    tool.onPointerDown(backEdgeMid, fromFrontAbove([0.5, 1, 1]))
+    tool.onKey({ key: 'ArrowUp' } as KeyboardEvent)
+    tool.onPointerMove(upFromMid, fromFrontAbove([0.5, 1, 1.25]))
+    const typeHalf = () => {
+      for (const k of '0.5') tool.onKey({ key: k } as KeyboardEvent)
+      tool.onKey({ key: 'Enter' } as KeyboardEvent)
+    }
+    typeHalf()
+    expect(refused).toBe(true)
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(String(onToast.mock.calls[0][0])).toMatch(/drawing surface/)
+    expect(scene.log.segments).toEqual([])
+    // Same pointer position: the typed length is still in the box, so Enter
+    // alone retries; it must reach the scene, not ask for a cursor move.
+    tool.onKey({ key: 'Enter' } as KeyboardEvent)
+    expect(scene.log.segments).toEqual([[0.5, 1, 1, 0.5, 1, 1.5]])
+    for (const c of onToast.mock.calls) expect(String(c[0])).not.toContain('Move the cursor to point the line')
+  })
+
+  it('a later locked segment of a chain already on the face still stays on the face', () => {
+    const scene = strictScene()
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
+    tool.onPointerDown(onFace(0.5, 0.5), rayThrough(0.5, 0.5))
+    expectFaceDrafts(scene, 1)
+    tool.onKey({ key: 'ArrowUp' } as KeyboardEvent)
+    tool.onPointerMove(makeSnap({ x: 0.5, y: 0.5, z: 1.3, kind: 'on-axis' }), fromFrontAbove([0.5, 0.5, 1.3]))
+    for (const k of '0.3') tool.onKey({ key: k } as KeyboardEvent)
+    tool.onKey({ key: 'Enter' } as KeyboardEvent)
+    // Refused, and said so: face chains never re-home once they have a segment.
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(scene.log.segments).toHaveLength(1)
+  })
+})
+
+describe('LineTool — an arrow lock on a face chain covers one segment (R19, _appendFacePoint)', () => {
+  it('the lock releases once the locked face segment commits, and the next segment is free', () => {
+    const scene = makeScene()
+    const { tool } = makeTool(scene)
+    const lockOf = () => (tool as unknown as { lockAxis: unknown }).lockAxis
+    tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
+    tool.onKey({ key: 'ArrowRight' } as KeyboardEvent)
+    expect(lockOf()).toBe(0)
+    tool.onPointerMove(onFace(0.5, 0.5), rayThrough(0.5, 0.5))
+    tool.onPointerDown(onFace(0.5, 0.5), rayThrough(0.5, 0.5))
+    expectFaceDrafts(scene, 1)
+    expect(scene.log.segments).toHaveLength(1)
+    expect(lockOf()).toBeNull()
+    // The next segment goes where it is clicked, off the old axis.
+    tool.onPointerMove(hardOnFace(0.5, 0.9), rayThrough(0.5, 0.9))
+    tool.onPointerDown(hardOnFace(0.5, 0.9), rayThrough(0.5, 0.9))
+    expect(scene.log.segments).toHaveLength(2)
+    expect(scene.log.segments[1].slice(3, 6)).toEqual([0.5, 0.9, 1])
+  })
 })

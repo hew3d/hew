@@ -413,6 +413,38 @@ describe('runSketchGesture — instance (definition-owned) targets', () => {
   })
 })
 
+describe('runSketchGesture — a non-uniformly scaled instance', () => {
+  it('reuses the sketch it opened on a plane: the posed sketch plane matches the target plane', () => {
+    // Instance stretched 2× along X. The world target plane through the
+    // origin with normal ∝ (0.5, 0, 1) is the local plane with normal
+    // (1, 0, 1)/√2 posed exactly (inverse-transpose). Read back and posed the
+    // same way, the minted sketch matches it, so the second gesture reuses
+    // it instead of minting another.
+    const h = Math.SQRT1_2
+    const pose = new Float64Array([2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])
+    const len = Math.hypot(0.5, 1)
+    const normal: [number, number, number] = [0.5 / len, 0, 1 / len]
+    const plane: DrawPlane = { origin: [0, 0, 0], normal, u: [0, 1, 0], v: [-normal[2], 0, normal[0]], ground: false }
+    const scene = {
+      begin_ground_sketch: vi.fn(),
+      begin_sketch_on_plane_in_instance: vi.fn(() => 11n),
+      sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, h, 0, h])),
+      sketch_begin_gesture: vi.fn(),
+      sketch_end_gesture: vi.fn(),
+      instance_pose: vi.fn(() => pose),
+    } as unknown as WasmScene
+    const cache = makeSketchPlaneCache()
+    const target: SketchTarget = { kind: 'plane', plane, instance: 42n }
+
+    const seen: bigint[] = []
+    runSketchGesture(scene, cache, target, (s) => seen.push(s))
+    runSketchGesture(scene, cache, target, (s) => seen.push(s))
+
+    expect(scene.begin_sketch_on_plane_in_instance).toHaveBeenCalledTimes(1)
+    expect(seen).toEqual([11n, 11n])
+  })
+})
+
 describe('SketchPlaneCache', () => {
   it('get/set/clear round-trip per key, independent of other keys', () => {
     const cache = makeSketchPlaneCache()

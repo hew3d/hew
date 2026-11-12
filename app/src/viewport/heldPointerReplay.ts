@@ -1,7 +1,8 @@
 /**
  * heldPointerReplay — whether, and how, the Viewport re-runs the snap at the
  * pointer's last position without a pointer event (`reResolveAtHeldPointer`:
- * a precision key held or released, a render-mode switch).
+ * a precision key held or released, a render-mode switch, and for a tool that
+ * follows the view an idle key, Shift or the camera settling).
  *
  * Pure decision logic beside dragMove.ts, so the guards are unit-tested
  * directly rather than only through a browser.
@@ -38,6 +39,17 @@ export function shouldReplayHeldPointer(s: HeldPointerState): boolean {
     s.elementAtPoint !== null &&
     s.container.contains(s.elementAtPoint)
   )
+}
+
+/** Whether the held-pointer hover replay after an idle key, Shift or the
+ *  camera settling applies to `tool`: only a tool whose idle hover follows
+ *  the view (`Tool.followsViewPlane`) has an answer those events change
+ *  under a still cursor. Replaying any other tool's `onPointerMove` there
+ *  would re-hover where the cursor rests now in a state that never asked
+ *  for it, e.g. Follow Me backing up to profile-pick on Escape mid-drag,
+ *  whose hint must keep the verdict of the profile the drag was armed on. */
+export function followsViewPlane(tool: object): boolean {
+  return (tool as { followsViewPlane?: unknown }).followsViewPlane === true
 }
 
 /** A screen-space drag tool (Look Around, Walk) has no world pick of its

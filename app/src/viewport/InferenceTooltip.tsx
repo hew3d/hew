@@ -12,8 +12,10 @@ import type { MessageDescriptor } from '@lingui/core'
 import { msg } from '@lingui/core/macro'
 import { useLingui } from '@lingui/react/macro'
 import { useEffect, useState } from 'react'
-import { inferenceAxisName, inferenceCssColor } from './inferenceColor'
+import lockSvg from '@material-symbols/svg-400/outlined/lock.svg?raw'
+import { inferenceAxisName, inferenceCssColor, planePipCssColor } from './inferenceColor'
 import type { InferenceInfo } from './Viewport'
+import { InlineIcon } from '../panels/InlineIcon'
 import { getShowToolHints, subscribeShowToolHints } from '../settings/view'
 import { useViewSetting } from '../settings/useViewSetting'
 
@@ -52,6 +54,16 @@ const KIND_LABEL: Record<string, MessageDescriptor> = {
 export function inferenceKindLabel(kind: string): string {
   const label = KIND_LABEL[kind]
   return label === undefined ? kind : i18n._(label)
+}
+
+/** The drawing plane's word on the chip (view-die design §4), appended
+ *  after the snap's own text: the plane's axis color, or "face plane" for a
+ *  custom plane. */
+const PLANE_WORD: Record<'red' | 'green' | 'blue' | 'custom', MessageDescriptor> = {
+  red: msg({ comment: 'Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · red"', message: '· red' }),
+  green: msg({ comment: 'Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · green"', message: '· green' }),
+  blue: msg({ comment: 'Snap tooltip suffix naming the drawing plane by its axis color, as in "Endpoint · blue"', message: '· blue' }),
+  custom: msg({ comment: 'Snap tooltip suffix for a drawing plane that lies along no axis (a tilted face\'s plane), as in "Endpoint · face plane"', message: '· face plane' }),
 }
 
 /** How long the same object must sit under the cursor before the tip's
@@ -119,6 +131,21 @@ export function InferenceTooltip({ info, detail = null }: { info: InferenceInfo 
         )}
         {axisName !== null && info.kind !== 'on-axis' && (
           <span style={{ color: `var(--axis-${axisName})` }}>{t({ comment: 'Snap tooltip; the placeholder is the axis letter x, y, or z', message: `on ${axisName} axis` })}</span>
+        )}
+        {/* The drawing plane, tinted, with a padlock when a lock or a Shift
+            pin holds it (view-die design §4). */}
+        {info.plane !== undefined && (
+          <span
+            data-testid="inference-tip-plane"
+            style={{ color: planePipCssColor(info.plane.pip), display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+          >
+            {i18n._(PLANE_WORD[info.plane.pip])}
+            {(info.plane.hold === 'locked' || info.plane.hold === 'pinned') && (
+              <span data-testid="inference-tip-padlock" style={{ display: 'inline-flex' }}>
+                <InlineIcon svg={lockSvg} size={12} />
+              </span>
+            )}
+          </span>
         )}
       </div>
       {showDetail && (

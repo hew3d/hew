@@ -33,13 +33,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
+mod cells;
 mod change_sets;
 mod draft;
 mod member_ops;
 mod occurrences;
+pub use cells::{CellDecline, CellDeclineReason, CellOutcome, CellScope, CellSeed, OpenEdges};
 pub use draft::{
-    DraftCurveRun, DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore, DraftUnit,
-    PlaneListing, PlaneUnits,
+    ClosingEdge, DraftCurveRun, DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore,
+    DraftUnit, PlaneListing, PlaneUnits,
 };
 pub use occurrences::{MAX_OCCURRENCES, Occurrence, RenderRoot};
 
@@ -1015,6 +1017,7 @@ pub fn render_history_label(kind: &HistoryKind) -> String {
         "intersect" => "Intersect".to_string(),
         "slice" => "Slice".to_string(),
         "push-through" => "Push/Pull through".to_string(),
+        "make-solid" => "Make Solid".to_string(),
         "close-openings" => {
             if count("count") == 1 {
                 "Close an opening".to_string()
@@ -1381,6 +1384,24 @@ enum DocAction {
         /// [`Document::reevaluate_liveness_recorded`] changed when `source`
         /// was consumed — undo/redo restore it verbatim, mirroring
         /// [`DocAction::Deleted::reanchored`].
+        reanchored: Vec<AnnotationReanchor>,
+    },
+    /// Closed faces became a new Object (wireframe faces §5.4). The faces'
+    /// consumed scaffolding is recorded beside it, in the same compound,
+    /// as [`DocAction::SketchGesture`] / [`DocAction::DeletedSketch`] rows.
+    /// Undo hides `id` (never deleting it; a definition member stays
+    /// listed, like every hidden member); redo shows it again.
+    CreatedObjectFromFaces { id: ObjectId },
+    /// Closed faces capped on Object `from` grew it into `to` (a union;
+    /// wireframe faces §5.4), which carries `from`'s name, tags and parent.
+    /// The faces' consumed scaffolding is recorded beside it as for
+    /// [`DocAction::CreatedObjectFromFaces`]. Undo hides `to` and shows
+    /// `from`; redo reverses — visibility flipping, handles stable, like
+    /// [`DocAction::PushThrough`].
+    GrewObjectFromFaces {
+        from: ObjectId,
+        to: ObjectId,
+        /// As [`DocAction::PushThrough::reanchored`], for `from`.
         reanchored: Vec<AnnotationReanchor>,
     },
     /// A move/rotate/scale baked into one or more objects' geometry. A single
@@ -2728,6 +2749,8 @@ impl DocAction {
                 v.extend(results.iter().copied());
                 v
             }
+            DocAction::CreatedObjectFromFaces { id } => vec![*id],
+            DocAction::GrewObjectFromFaces { from, to, .. } => vec![*from, *to],
             DocAction::Repaired {
                 object, split_off, ..
             } => {
@@ -2895,6 +2918,8 @@ impl DocAction {
             | DocAction::BooleanNodes { .. }
             | DocAction::Sliced { .. }
             | DocAction::PushThrough { .. }
+            | DocAction::CreatedObjectFromFaces { .. }
+            | DocAction::GrewObjectFromFaces { .. }
             | DocAction::Repaired { .. } => Vec::new(),
             // A transformed object's owned sketches ride with it.
             DocAction::Transform { sketches, .. } => sketches.iter().map(|&(id, _)| id).collect(),
@@ -3014,6 +3039,8 @@ impl DocAction {
             DocAction::BooleanNodes { result_objects, .. } => (result_objects.clone(), Vec::new()),
             DocAction::Sliced { a, b, .. } => (vec![*a, *b], Vec::new()),
             DocAction::PushThrough { results, .. } => (results.clone(), Vec::new()),
+            DocAction::CreatedObjectFromFaces { id } => (vec![*id], Vec::new()),
+            DocAction::GrewObjectFromFaces { to, .. } => (vec![*to], Vec::new()),
             DocAction::Repaired { split_off, .. } => (split_off.clone(), Vec::new()),
             DocAction::DetachedSketchIsland { detached, .. } => (Vec::new(), vec![*detached]),
             DocAction::CopiedSketchIslands { copy } => (Vec::new(), vec![*copy]),
@@ -3076,6 +3103,8 @@ impl DocAction {
             DocAction::BooleanNodes { result_objects, .. } => objects_only(result_objects),
             DocAction::Sliced { a, b, .. } => vec![NodeId::Object(*a), NodeId::Object(*b)],
             DocAction::PushThrough { results, .. } => objects_only(results),
+            DocAction::CreatedObjectFromFaces { id } => vec![NodeId::Object(*id)],
+            DocAction::GrewObjectFromFaces { to, .. } => vec![NodeId::Object(*to)],
             DocAction::Repaired { split_off, .. } => objects_only(split_off),
             DocAction::FollowMeFace { result, .. } => vec![NodeId::Object(*result)],
             DocAction::Exploded {
@@ -4272,6 +4301,20 @@ pub struct Document {
     /// The open drafting gesture ([`Document::begin_draft`]), if any.
     /// Session-only, like `pending_sketch_gesture`; never serialized.
     pending_draft: Option<Box<draft::PendingDraft>>,
+    /// The free sketches the close pass (wireframe faces §4.2) closed a face
+    /// in during the most recent recorded edit
+    /// ([`Document::faces_closed_by_last_edit`]). Session-only, never
+    /// serialized; cleared by every new recorded edit.
+    faces_closed_last: Vec<SketchId>,
+    /// The cells the most recent recorded edit's search made or declined
+    /// (wireframe faces §5, [`Document::cells_by_last_edit`]). Session-only,
+    /// never serialized; cleared by every new recorded edit.
+    cells_last: Vec<CellOutcome>,
+    /// The Objects the view hides (the app's Hide), which the automatic
+    /// cell search never closes against or grows
+    /// ([`Document::set_view_hidden_objects`]). Session-only view state,
+    /// never serialized.
+    view_hidden: BTreeSet<ObjectId>,
     /// Non-zero while a [`DocAction::Compound`]'s children are being undone
     /// or redone one by one: a compound is atomic, so the document-level
     /// invariants are checked once, after its last child — an intermediate
@@ -8810,6 +8853,61 @@ impl Document {
         })
     }
 
+    /// [`Document::end_sketch_gesture`], then the rules of wireframe faces
+    /// §4.2 and §5 inside the gesture's own undo step: the close pass over
+    /// the edges the gesture added (the gesture's own plane included, since
+    /// a raw gesture arranges nothing on it), then the cells search seeded
+    /// by those edges. Drawing through the Hew API ends its plane-mode
+    /// gestures this way, so a rectangle and four lines to an apex make a
+    /// pyramid there as with the pointer. Returns the change and, as a
+    /// draft's report lists them, the free sketches the pass closed a face
+    /// in and the cells the search made (never a decline: most edits close
+    /// nothing). An unchanged gesture records nothing and returns empty
+    /// lists.
+    ///
+    /// # Errors
+    /// As [`Document::end_sketch_gesture`]; the gesture is closed either
+    /// way.
+    pub fn end_sketch_gesture_closing_faces(
+        &mut self,
+        sketch: SketchId,
+    ) -> Result<(DocChange, Vec<SketchId>, Vec<CellOutcome>), DocumentError> {
+        let before = self
+            .pending_sketch_gesture
+            .as_ref()
+            .filter(|p| p.sketch == sketch)
+            .map(|p| (*p.before).clone());
+        let mut change = self.end_sketch_gesture(sketch)?;
+        let Some(before) = before else {
+            return Ok((change, Vec::new(), Vec::new()));
+        };
+        if change.sketches_touched.is_empty() {
+            // Nothing was recorded.
+            return Ok((change, Vec::new(), Vec::new()));
+        }
+        let seeds = self.sketch_edges_new_since(sketch, Some(&before));
+        if seeds.is_empty() {
+            return Ok((change, Vec::new(), Vec::new()));
+        }
+        let frame = self.def_sketches.get(&sketch).copied();
+        let pass = self.close_faces_followups(&seeds, frame, true);
+        self.debug_validate();
+        merge_unique(&mut change.sketches_touched, pass.sketches_touched());
+        merge_unique(&mut change.objects_touched, pass.objects_touched().to_vec());
+        if let Some(def) = frame {
+            merge_unique(&mut change.components_touched, vec![def]);
+            merge_unique(&mut change.instances_touched, self.placing_instances(def));
+        }
+        let cells = pass
+            .cells
+            .outcomes
+            .iter()
+            .filter(|c| !matches!(c, CellOutcome::Declined(_)))
+            .cloned()
+            .collect();
+        Ok((change, pass.closed, cells))
+    }
+
     /// Drops the open gesture (if any) without recording anything — the
     /// tool-cancel path. Returns whether a gesture was open. Any mutations
     /// made inside the abandoned bracket stay in the sketch but out of the
@@ -8907,6 +9005,52 @@ impl Document {
         self.sessions
             .iter()
             .any(|f| matches!(f, SessionFrame::Group(s) if s.group == g))
+    }
+
+    /// Whether free sketch `s` takes part in what the wireframe-faces rules
+    /// gather in `frame` — foreign edges, the close pass's seeds, partners,
+    /// facing and candidate lifts, and the faces of a cell (§16 R11): live,
+    /// not an Object's, in the frame, no tag of its own or above one hidden,
+    /// and in no group or in the group an open session is editing. (The
+    /// ordinary on-plane lift of a draft does not use this: a draft still
+    /// arranges with such sketches on its own plane.)
+    pub(crate) fn sketch_takes_part(&self, s: SketchId, frame: Option<ComponentId>) -> bool {
+        self.sketches.contains_key(s)
+            && !self.sketch_tombstoned(&s)
+            && !self.object_sketches.contains_key(&s)
+            && self.def_sketches.get(&s).copied() == frame
+            && !self.sketch_tags_hidden(s)
+            && self
+                .group_sketches
+                .get(&s)
+                .is_none_or(|&g| self.group_in_session(g))
+    }
+
+    /// Whether Object `o` takes part in what the wireframe-faces rules
+    /// gather in `frame` (§16 R11): live, not hidden by the document's own
+    /// Hide ([`Document::set_node_user_hidden`], persisted, so headless,
+    /// API and replayed sessions see it as the app does) nor by the view
+    /// ([`Document::set_view_hidden_objects`]), no tag of its own or above
+    /// one hidden, in the frame, and top-level there: in no group, in the
+    /// world or in the definition. (A group's member takes no part from
+    /// the frame the group lives in; a group session lends its members to
+    /// the frame as top-level nodes.)
+    pub(crate) fn object_takes_part(&self, o: ObjectId, frame: Option<ComponentId>) -> bool {
+        self.objects.get(o).is_some_and(|rec| {
+            !rec.hidden
+                && !self.user_hidden_objects.contains(&o)
+                && !self.view_hidden.contains(&o)
+                && self.object_owner_component(o) == frame
+                && match rec.owner {
+                    ObjectOwner::World { parent } | ObjectOwner::Definition { parent, .. } => {
+                        parent.is_none()
+                    }
+                }
+                && !rec
+                    .tags
+                    .iter()
+                    .any(|t| (1..=t.len()).any(|n| self.tag_hidden(&t[..n])))
+        })
     }
 
     /// Re-derives each object-owned sketch's definition membership from its
@@ -15055,7 +15199,8 @@ impl Document {
     /// that fully severs the solid yields two (or more) independent Objects.
     /// Outward: a union — the pulled prism grows past the co-facing wall ahead
     /// of the face into one solid. The source is hidden (tombstone); the
-    /// result pieces become top-level world objects. Undoable; handles
+    /// result pieces become top-level world objects, each carrying the
+    /// source's name and tags (wireframe faces §5.6). Undoable; handles
     /// stable. Routed to by the push/pull entry when
     /// [`Object::push_pull_overshoots`] reports the through case.
     ///
@@ -15084,6 +15229,9 @@ impl Document {
             .push_through(face, distance)
             .map_err(|e| DocumentError::Op(KernelOpError::PushPull(e)))?;
         let pieces = result.split_connected_components();
+        // Every piece keeps the source's name and tags (wireframe faces
+        // §5.6): tags are membership, and names are not unique.
+        let (name, tags) = (rec.name.clone(), rec.tags.clone());
 
         let mut results: Vec<ObjectId> = Vec::with_capacity(pieces.len());
         for piece in pieces {
@@ -15092,8 +15240,8 @@ impl Document {
                 history: History::new(),
                 hidden: false,
                 owner: ObjectOwner::World { parent: None },
-                name: None,
-                tags: Vec::new(),
+                name: name.clone(),
+                tags: tags.clone(),
             });
             results.push(id);
         }
@@ -15173,6 +15321,9 @@ impl Document {
             .push_through(face, distance)
             .map_err(|e| DocumentError::Op(KernelOpError::PushPull(e)))?;
         let pieces = result.split_connected_components();
+        // As in `push_pull_through`: every piece keeps the source's name
+        // and tags (wireframe faces §5.6).
+        let (name, tags) = (rec.name.clone(), rec.tags.clone());
 
         let mut results = Vec::with_capacity(pieces.len());
         for piece in pieces {
@@ -15184,8 +15335,8 @@ impl Document {
                     def: component,
                     parent: None,
                 },
-                name: None,
-                tags: Vec::new(),
+                name: name.clone(),
+                tags: tags.clone(),
             });
             self.components[component].members.push(NodeId::Object(id));
             results.push(id);
@@ -15951,17 +16102,23 @@ impl Document {
         // An owned sketch moved off every face of its owner becomes free
         // drawing, and an edge moved onto an owner edge is dropped, in the
         // same undo step (`reconcile_owned_drawing`, run by the commit).
+        // Every edge moved: each is a close-pass seed (wireframe faces
+        // §4.2), its writes inside this step.
+        let seeds = self.sketch_edges_new_since(sketch, None);
         self.undo.push(DocAction::TransformSketch {
             sketch,
             prior,
             forward: *t,
         });
         self.commit_new_action();
+        let mut sketches_touched = vec![sketch];
+        let closed = self.close_faces_after_sketch_edit(&seeds);
+        merge_unique(&mut sketches_touched, closed.sketches_touched());
         self.debug_validate();
 
         Ok(DocChange {
-            objects_touched: Vec::new(),
-            sketches_touched: vec![sketch],
+            objects_touched: closed.objects_touched().to_vec(),
+            sketches_touched,
             groups_touched: Vec::new(),
             instances_touched: Vec::new(),
             components_touched: Vec::new(),
@@ -16034,6 +16191,7 @@ impl Document {
         let prior = self.sketches[sketch].clone();
         match self.sketches[sketch].apply_transform_islands(islands, t) {
             Ok(()) => {
+                let seeds = self.sketch_edges_new_since(sketch, Some(&prior));
                 self.undo.push(DocAction::TransformSketchIsland {
                     sketch,
                     islands: islands.to_vec(),
@@ -16041,12 +16199,15 @@ impl Document {
                     forward: *t,
                 });
                 self.commit_new_action();
+                let mut sketches_touched = vec![sketch];
+                let closed = self.close_faces_after_sketch_edit(&seeds);
+                merge_unique(&mut sketches_touched, closed.sketches_touched());
                 self.debug_validate();
 
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
                 Ok(DocChange {
-                    objects_touched: Vec::new(),
-                    sketches_touched: vec![sketch],
+                    objects_touched: closed.objects_touched().to_vec(),
+                    sketches_touched,
                     groups_touched: Vec::new(),
                     instances_touched,
                     components_touched,
@@ -16166,18 +16327,22 @@ impl Document {
             self.def_sketches.insert(detached, component);
         }
         self.carry_sketch_tags(source, detached);
+        let seeds = self.sketch_edges_new_since(detached, None);
         self.undo.push(DocAction::DetachedSketchIsland {
             source,
             detached,
             removed,
         });
         self.commit_new_action();
+        let mut sketches_touched = vec![source, detached];
+        let closed = self.close_faces_after_sketch_edit(&seeds);
+        merge_unique(&mut sketches_touched, closed.sketches_touched());
         self.debug_validate();
 
         let (components_touched, instances_touched) = self.def_sketch_owner_change(source);
         Ok(DocChange {
-            objects_touched: Vec::new(),
-            sketches_touched: vec![source, detached],
+            objects_touched: closed.objects_touched().to_vec(),
+            sketches_touched,
             groups_touched: Vec::new(),
             instances_touched,
             components_touched,
@@ -16242,15 +16407,19 @@ impl Document {
         // Nothing left can fail; commit. The source is not touched.
         let copy = self.insert_sketch_record(fresh);
         self.carry_sketch_tags(source, copy);
+        let seeds = self.sketch_edges_new_since(copy, None);
         self.undo.push(DocAction::CopiedSketchIslands { copy });
         self.commit_new_action();
+        let mut sketches_touched = vec![copy];
+        let closed = self.close_faces_after_sketch_edit(&seeds);
+        merge_unique(&mut sketches_touched, closed.sketches_touched());
         self.debug_validate();
 
         Ok((
             copy,
             DocChange {
-                objects_touched: Vec::new(),
-                sketches_touched: vec![copy],
+                objects_touched: closed.objects_touched().to_vec(),
+                sketches_touched,
                 groups_touched: Vec::new(),
                 instances_touched: Vec::new(),
                 components_touched: Vec::new(),
@@ -16288,6 +16457,7 @@ impl Document {
         let moved = self.sketches[sketch]
             .move_vertex_arranging(vertex, new_pos)
             .map_err(DocumentError::Sketch)?;
+        let seeds = self.sketch_edges_new_since(sketch, Some(&before));
         if moved.rearranged {
             let after = self.sketches[sketch].clone();
             self.undo.push(DocAction::RearrangedSketchVertex {
@@ -16304,12 +16474,15 @@ impl Document {
             });
         }
         self.commit_new_action();
+        let mut sketches_touched = vec![sketch];
+        let closed = self.close_faces_after_sketch_edit(&seeds);
+        merge_unique(&mut sketches_touched, closed.sketches_touched());
         self.debug_validate();
 
         let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
         Ok(DocChange {
-            objects_touched: Vec::new(),
-            sketches_touched: vec![sketch],
+            objects_touched: closed.objects_touched().to_vec(),
+            sketches_touched,
             groups_touched: Vec::new(),
             instances_touched,
             components_touched,
@@ -23293,6 +23466,8 @@ impl Document {
     /// identity, so the mark stays valid across them.
     fn commit_new_action(&mut self) {
         self.document_epoch += 1;
+        self.faces_closed_last.clear();
+        self.cells_last.clear();
         self.reconcile_owned_drawing();
         // The mark is a CONTENT depth (bookkeeping entries — session
         // open/close — do not count, see `DocAction::is_bookkeeping`), so
@@ -23338,6 +23513,32 @@ impl Document {
             before,
         };
         self.change_ring.push(record, held);
+    }
+
+    /// Re-derives the newest change record when it is the commit of the undo
+    /// step on top. A step's follow-ups (the close pass's faces, a solid
+    /// the cells search made) are appended to its compound after the commit
+    /// was recorded; without this the record would name less than one undo
+    /// of the step reverses.
+    pub(crate) fn refresh_top_change_record(&mut self) {
+        let generation = self.history_generation();
+        let Some(newest) = self.change_ring.records.last() else {
+            return;
+        };
+        if newest.kind != crate::changes::ChangeKind::Commit || newest.generation != generation {
+            return;
+        }
+        let Some(action) = self.undo.last() else {
+            return;
+        };
+        let info = self.entry_info(action, self.undo.actions.len().checked_sub(1));
+        let changes = self.action_changes(action);
+        if let Some(record) = self.change_ring.records.last_mut() {
+            record.origin = info.origin;
+            record.label = info.label;
+            record.bookkeeping = info.bookkeeping;
+            record.changes = changes;
+        }
     }
 
     /// Records a change that replaced the whole state (`Abort`, `Reset`).
@@ -23776,6 +23977,9 @@ impl Document {
             },
             DocAction::Sliced { .. } => k("slice"),
             DocAction::PushThrough { .. } => k("push-through"),
+            DocAction::CreatedObjectFromFaces { .. } | DocAction::GrewObjectFromFaces { .. } => {
+                k("make-solid")
+            }
             DocAction::Repaired { kind, .. } => match *kind {
                 RepairKind::Cap { rims } => k("close-openings").count("count", rims),
                 RepairKind::DeleteFaces { faces } => k("delete-faces").count("count", faces),
@@ -23942,6 +24146,15 @@ impl Document {
     /// (with a count when they all agree), else the first child's kind
     /// plus how many more it bundles.
     fn describe_children(&self, actions: &[DocAction], undo_index: Option<usize>) -> HistoryKind {
+        // A step whose solids' rows lead is Make Solid from faces (the
+        // cells search recorded alone, `cells::record_cells`); an edit that
+        // closed a solid as a followup leads with its own row instead.
+        if matches!(
+            actions.first(),
+            Some(DocAction::CreatedObjectFromFaces { .. } | DocAction::GrewObjectFromFaces { .. })
+        ) {
+            return HistoryKind::new("make-solid");
+        }
         let kinds: Vec<HistoryKind> = actions
             .iter()
             .map(|a| self.describe_action(a, undo_index))
@@ -25493,6 +25706,39 @@ impl Document {
                     components_touched,
                     guides_touched: Vec::new(),
                     linked: Vec::new(),
+                }
+            }
+            &DocAction::CreatedObjectFromFaces { id } => {
+                // Undo a solid made from faces: hide it (the faces come
+                // back through the sketch rows beside it).
+                self.objects[id].hidden = true;
+                let (components_touched, instances_touched) = self.def_owner_change(id);
+                DocChange {
+                    objects_touched: vec![id],
+                    instances_touched,
+                    components_touched,
+                    ..Default::default()
+                }
+            }
+            DocAction::GrewObjectFromFaces {
+                from,
+                to,
+                reanchored,
+            } => {
+                let (from, to) = (*from, *to);
+                self.swap_group_member(to, from);
+                self.objects[to].hidden = true;
+                self.objects[from].hidden = false;
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
+                }
+                let (components_touched, instances_touched) = self.def_owner_change(from);
+                DocChange {
+                    objects_touched: vec![to, from],
+                    instances_touched,
+                    components_touched,
+                    ..Default::default()
                 }
             }
             DocAction::PushThrough {
@@ -27378,6 +27624,37 @@ impl Document {
                     components_touched,
                     guides_touched: Vec::new(),
                     linked: Vec::new(),
+                }
+            }
+            &DocAction::CreatedObjectFromFaces { id } => {
+                self.objects[id].hidden = false;
+                let (components_touched, instances_touched) = self.def_owner_change(id);
+                DocChange {
+                    objects_touched: vec![id],
+                    instances_touched,
+                    components_touched,
+                    ..Default::default()
+                }
+            }
+            DocAction::GrewObjectFromFaces {
+                from,
+                to,
+                reanchored,
+            } => {
+                let (from, to) = (*from, *to);
+                self.swap_group_member(from, to);
+                self.objects[from].hidden = true;
+                self.objects[to].hidden = false;
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
+                }
+                let (components_touched, instances_touched) = self.def_owner_change(from);
+                DocChange {
+                    objects_touched: vec![from, to],
+                    instances_touched,
+                    components_touched,
+                    ..Default::default()
                 }
             }
             DocAction::PushThrough {

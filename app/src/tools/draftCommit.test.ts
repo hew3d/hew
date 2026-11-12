@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from 'vitest'
-import { runDraft, addDraftSegment } from './draftCommit'
+import {
+  runDraft,
+  addDraftSegment,
+  noteSketchTransformReport,
+  resetSketchTransformReports,
+  surfaceSketchTransformReports,
+  setDraftSolidSelector,
+} from './draftCommit'
 import { groundDrawPlane } from './drawPlane'
 import type { Scene as WasmScene } from '../wasm/loader'
 
@@ -120,5 +127,78 @@ describe('addDraftSegment', () => {
     })
     expect(addDraftSegment(m.scene, 1n, [0, 0, 0], [1, 0, 0])).toEqual([7n])
     expect(free).toHaveBeenCalled()
+  })
+})
+
+describe('sketch transform reports (R20)', () => {
+  const rep = (cells: unknown[], extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ objects: [], sketches: [3], kept_as_sketch: [], faces_closed: [], cells, ...extra })
+
+  function surface() {
+    const toasts: string[] = []
+    const selected: bigint[] = []
+    setDraftSolidSelector((o) => selected.push(o))
+    surfaceSketchTransformReports((m) => toasts.push(m))
+    setDraftSolidSelector(null)
+    return { toasts, selected }
+  }
+
+  it('toasts and selects a solid a move created', () => {
+    resetSketchTransformReports()
+    noteSketchTransformReport(rep([{ created: 7 }], { faces_closed: [3] }))
+    const { toasts, selected } = surface()
+    expect(toasts).toEqual(['The closed shape is now a solid.'])
+    expect(selected).toEqual([7n])
+  })
+
+  it('makes one toast per commit, unjoined over grew over created', () => {
+    resetSketchTransformReports()
+    noteSketchTransformReport(rep([{ created: 7 }]))
+    noteSketchTransformReport(rep([{ grew: { from: 1, to: 8 } }]))
+    noteSketchTransformReport(rep([{ unjoined: { object: 9, with: 1 } }]))
+    const { toasts } = surface()
+    expect(toasts).toEqual(['The closed shape is now a solid of its own. It could not be joined to the one it touches.'])
+    // Held reports are cleared: a second surface is silent.
+    expect(surface().toasts).toEqual([])
+  })
+
+  it('grew outranks created', () => {
+    resetSketchTransformReports()
+    noteSketchTransformReport(rep([{ created: 7 }, { grew: { from: 1, to: 8 } }]))
+    expect(surface().toasts).toEqual(['The closed shape joined the solid it was drawn on.'])
+  })
+
+  it('stays silent for a declined or empty result', () => {
+    resetSketchTransformReports()
+    noteSketchTransformReport(rep([{ declined: { reason: 'not_closed' } }]))
+    noteSketchTransformReport(rep([]))
+    const { toasts, selected } = surface()
+    expect(toasts).toEqual([])
+    expect(selected).toEqual([])
+  })
+
+  it('selects the final solid when a later report grows the one an earlier report created', () => {
+    resetSketchTransformReports()
+    noteSketchTransformReport(rep([{ created: 10 }]))
+    noteSketchTransformReport(rep([{ grew: { from: 10, to: 11 } }]))
+    const { toasts, selected } = surface()
+    expect(selected).toEqual([11n])
+    // The solid is new to the document, not a join to an older one.
+    expect(toasts).toEqual(['The closed shape is now a solid.'])
+  })
+
+  it('follows a grew chain to its last solid', () => {
+    resetSketchTransformReports()
+    noteSketchTransformReport(rep([{ grew: { from: 1, to: 2 } }]))
+    noteSketchTransformReport(rep([{ grew: { from: 2, to: 3 } }]))
+    const { toasts, selected } = surface()
+    expect(selected).toEqual([3n])
+    expect(toasts).toEqual(['The closed shape joined the solid it was drawn on.'])
+  })
+
+  it('reset drops reports from an abandoned commit', () => {
+    noteSketchTransformReport(rep([{ created: 7 }]))
+    resetSketchTransformReports()
+    expect(surface().toasts).toEqual([])
   })
 })

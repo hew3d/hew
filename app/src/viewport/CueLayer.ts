@@ -11,9 +11,9 @@
  *       on-face    → blue    #0055cc
  *       on-guide   → purple  #9933cc  (construction guide)
  *       on-axis    → axis color (X=red, Y=green, Z=blue; unknown=magenta)
- *       from-point → axis color, same as on-axis (LineTool's from-point
- *                    closing inference — a tool-local kind, never emitted
- *                    by SnapService itself)
+ *       from-point → axis color, same as on-axis (the draw tools'
+ *                    reference-line inference, referenceLines.ts — a
+ *                    tool-local kind, never emitted by SnapService itself)
  *       ground     → gray    #888888  (fallback — no kernel snap)
  *       plane      → gray    #888888  (constraint-plane fallback, same role)
  *       other      → white   #ffffff
@@ -30,7 +30,8 @@
 
 import * as THREE from 'three'
 import type { Snap } from '../tools/types'
-import { axisColorsForTheme } from './axisColors'
+import { axisColorForDirection, axisColorsForTheme } from './axisColors'
+import { WORLD_DRAWING_AXES, type DrawingAxes } from '../tools/drawingAxes'
 import { getResolvedTheme } from '../settings/theme'
 
 const SNAP_COLORS: Record<string, number> = {
@@ -47,6 +48,15 @@ const SNAP_COLORS: Record<string, number> = {
   ground: 0x888888,
   plane: 0x888888,
 }
+
+/** Neutral color of a reference line that runs along no drawing axis. */
+const NEUTRAL_LINE_COLOR = 0x888888
+
+/** Screen size (px) of the dot at a reference line's foot. */
+const FOOT_DOT_PX = 7
+
+/** |cos| above which a reference line counts as running along a drawing axis. */
+const AXIS_LINE_TOL_DOT = Math.cos((1 * Math.PI) / 180)
 
 /** Half-length of the dashed guide line (meters) */
 const GUIDE_HALF_LENGTH = 5
@@ -124,6 +134,16 @@ function buildTieLine(from: THREE.Vector3, to: THREE.Vector3, color: number): TH
   return ls
 }
 
+/** The dot marking a reference line's foot on the drawing plane. */
+function buildFootDot(at: THREE.Vector3, color: number): THREE.Points {
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([at.x, at.y, at.z]), 3))
+  const mat = new THREE.PointsMaterial({ color, size: FOOT_DOT_PX, sizeAttenuation: false, depthTest: false, transparent: true, opacity: 0.9 })
+  const pts = new THREE.Points(geo, mat)
+  pts.renderOrder = 999
+  return pts
+}
+
 /** Nominal dash length of the projection tie (metres, before the 4..40 dash
  *  clamp) — short enough to read as dotted at drawing scale. */
 const TIE_DASH_LENGTH_M = 0.02
@@ -171,10 +191,10 @@ export class CueLayer {
    * point but not the line (Tape Measure under `readOnly`) get exactly
    * that by passing `true` here while leaving the snap itself unmodified.
    */
-  update(snap: Snap | null, suppressAxisLine = false): void {
+  update(snap: Snap | null, suppressAxisLine = false, frame: DrawingAxes = WORLD_DRAWING_AXES): void {
     // Dispose old geometry
     this.group.traverse((child) => {
-      if (child instanceof THREE.LineSegments) {
+      if (child instanceof THREE.LineSegments || child instanceof THREE.Points) {
         child.geometry.dispose()
         if (child.material instanceof THREE.Material) {
           child.material.dispose()
@@ -206,8 +226,33 @@ export class CueLayer {
     // against any geometry, unlike the thin 1px three.js cross this used to
     // draw. CueLayer keeps only the in-scene dashed GUIDE line (which the DOM
     // layer can't do — it needs depth + world extent along the axis/edge).
-    if (snap.direction !== undefined && !(suppressAxisLine && snap.kind === 'on-axis')) {
+    if (snap.from !== undefined) {
+      // A reference line (referenceLines.ts): dashed from its foot on the
+      // drawing plane to the snap point — in the axis color when it runs along
+      // a drawing axis, neutral otherwise — with a dot at the foot and, when
+      // the reference point is off the plane, a thin tie up to it. A crossing
+      // draws its second line the same way.
+      const colors = axisColorsForTheme(getResolvedTheme())
+      const lineColor = (dir: [number, number, number] | undefined): number => {
+        const match = dir === undefined ? null : axisColorForDirection(dir, AXIS_LINE_TOL_DOT, colors, frame)
+        return match === null ? NEUTRAL_LINE_COLOR : match.color
+      }
+      const addLine = (from: [number, number, number], source: [number, number, number] | undefined, dir: [number, number, number] | undefined): void => {
+        const foot = new THREE.Vector3(...from)
+        const c = lineColor(dir)
+        this.group.add(buildTieLine(foot, pos, c))
+        this.group.add(buildFootDot(foot, c))
+        if (source !== undefined) this.group.add(buildTieLine(new THREE.Vector3(...source), foot, NEUTRAL_LINE_COLOR))
+      }
+      addLine(snap.from, snap.fromSource, snap.direction)
+      if (snap.fromAlso !== undefined) addLine(snap.fromAlso.from, snap.fromAlso.fromSource, snap.fromAlso.direction)
+    } else if (snap.direction !== undefined && !(suppressAxisLine && snap.kind === 'on-axis')) {
       this.group.add(buildGuideLine(pos, snap.direction, color))
+    }
+    // A plain projected snap (a named point dropped onto the drawing plane):
+    // the thin tie from where the point is to where the drawing lands.
+    if (snap.from === undefined && snap.fromSource !== undefined) {
+      this.group.add(buildTieLine(new THREE.Vector3(...snap.fromSource), pos, snapColor(snap.kind)))
     }
     // A locked snap projected from a real point: tie the two together in
     // the snap's own kind colour (the axis colour above belongs to the
