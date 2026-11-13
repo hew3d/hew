@@ -94,6 +94,7 @@ export const NATIVE_MENU_LABELS: Record<string, MessageDescriptor> = {
   'edit-make-unique': msg`Make Unique`,
   'edit-unlink': msg`Unlink`,
   'edit-unlink-all': msg`Unlink all`,
+  'edit-link-identical-copies': msg`Link identical copies`,
   'edit-select-all-copies': msg`Select all copies`,
   'submenu:flip-along': msg`Flip Along`,
   'edit-flip-red': msg`Red`,

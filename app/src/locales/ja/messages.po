@@ -37,8 +37,8 @@ msgstr ""
 
 #. placeholder {0}: r.frameDiffered
 #: src/linkSimilar.ts
-#~ msgid "{0, plural, one {# copy had its own axes; the first copy’s axes now apply} other {# copies had their own axes; the first copy’s axes now apply}}"
-#~ msgstr ""
+msgid "{0, plural, one {# copy had its own axes; the first copy’s axes now apply} other {# copies had their own axes; the first copy’s axes now apply}}"
+msgstr ""
 
 #. placeholder {0}: item.summary.materials
 #: src/library/libraryModel.ts
@@ -47,8 +47,8 @@ msgstr ""
 
 #. placeholder {0}: r.skipped
 #: src/linkSimilar.ts
-#~ msgid "{0, plural, one {# object could not be linked} other {# objects could not be linked}}"
-#~ msgstr ""
+msgid "{0, plural, one {# object could not be linked} other {# objects could not be linked}}"
+msgstr ""
 
 #. placeholder {0}: shapes - mendable
 #: src/health/healthCopy.ts
@@ -67,8 +67,8 @@ msgstr ""
 
 #. placeholder {0}: r.linked + r.sets
 #: src/linkSimilar.ts
-#~ msgid "{0, plural, one {Linked # copy} other {Linked # copies}}"
-#~ msgstr ""
+msgid "{0, plural, one {Linked # copy} other {Linked # copies}}"
+msgstr ""
 
 #. placeholder {0}: d.openEdges
 #: src/panels/MakeSolidSketches.tsx
@@ -77,13 +77,13 @@ msgstr ""
 
 #. placeholder {0}: r.skipped
 #: src/linkSimilar.ts
-#~ msgid "{0, plural, one {Nothing was linked: # object looked alike but was not the same shape.} other {Nothing was linked: # objects looked alike but were not the same shape.}}"
-#~ msgstr ""
+msgid "{0, plural, one {Nothing was linked: # object looked alike but was not the same shape.} other {Nothing was linked: # objects looked alike but were not the same shape.}}"
+msgstr ""
 
 #. placeholder {0}: r.droppedFacePaint
 #: src/linkSimilar.ts
-#~ msgid "{0, plural, one {paint on the faces of # copy was dropped} other {paint on the faces of # copies was dropped}}"
-#~ msgstr ""
+msgid "{0, plural, one {paint on the faces of # copy was dropped} other {paint on the faces of # copies was dropped}}"
+msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "{base}. The distance you typed is used where it fits; other objects use their own."
@@ -131,8 +131,8 @@ msgid "{count, plural, one {{count} change undone since last save.} other {{coun
 msgstr ""
 
 #: src/health/healthCopy.ts
-#~ msgid "{count, plural, one {# look-alike object can be linked} other {# look-alike objects can be linked}}"
-#~ msgstr ""
+msgid "{count, plural, one {# look-alike object can be linked} other {# look-alike objects can be linked}}"
+msgstr ""
 
 #: src/linkedCopyCopy.ts
 msgid "{count, plural, one {Cut all # copy} other {Cut all # copies}}"
@@ -4990,12 +4990,12 @@ msgstr ""
 #: src/linkSimilar.ts
 #: src/palette/registry.ts
 #: src/panels/MenuBar.tsx
-#~ msgid "Link identical copies"
-#~ msgstr ""
+msgid "Link identical copies"
+msgstr ""
 
 #: src/palette/registry.ts
-#~ msgid "link similar"
-#~ msgstr ""
+msgid "link similar"
+msgstr ""
 
 #: src/palette/registry.ts
 msgid "linked copies"
@@ -5121,8 +5121,8 @@ msgid "Look straight up at the model."
 msgstr ""
 
 #: src/palette/registry.ts
-#~ msgid "look-alike"
-#~ msgstr ""
+msgid "look-alike"
+msgstr ""
 
 #: src/tools/MoveTool.ts
 #: src/tools/RotateTool.ts
@@ -5188,8 +5188,8 @@ msgid "Make the selection solid"
 msgstr ""
 
 #: src/health/healthCopy.ts
-#~ msgid "Make these objects linked copies, so editing one changes them all"
-#~ msgstr ""
+msgid "Make these objects linked copies, so editing one changes them all"
+msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Make these objects solid"
@@ -6016,8 +6016,8 @@ msgid "Nothing was kept."
 msgstr ""
 
 #: src/linkSimilar.ts
-#~ msgid "Nothing was linked: no two objects were the same shape."
-#~ msgstr ""
+msgid "Nothing was linked: no two objects were the same shape."
+msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Nothing was mended."
@@ -6579,8 +6579,8 @@ msgid "Painting a component colors this placement. Edit the component to paint i
 msgstr ""
 
 #: src/tools/PaintTool.ts
-#~ msgid "Painting a linked copy colors just that copy. Edit the copy to paint faces on every copy."
-#~ msgstr ""
+msgid "Painting a linked copy colors just that copy. Edit the copy to paint faces on every copy."
+msgstr ""
 
 #: src/i18n/nativeMenu.ts
 msgid "Pan"
@@ -7704,8 +7704,8 @@ msgid "Running without graphics acceleration — large models will be slow."
 msgstr ""
 
 #: src/palette/registry.ts
-#~ msgid "same shape"
-#~ msgstr ""
+msgid "same shape"
+msgstr ""
 
 #: src/panels/WelcomeScreen.tsx
 msgid "Sample models"
@@ -9569,8 +9569,8 @@ msgid "These are single flat faces, such as glass, signs, or a drawn floor. To m
 msgstr ""
 
 #: src/kernelErrors.ts
-#~ msgid "These aren't the same shape."
-#~ msgstr ""
+msgid "These aren't the same shape."
+msgstr ""
 
 #: src/kernelErrors.ts
 msgid "These faces touch along more than one separate edge run, which merge can't dissolve yet. Merge along one shared run at a time."
@@ -10113,8 +10113,8 @@ msgid "Try launching Hew with these environment variables, which switch it to a 
 msgstr ""
 
 #: src/palette/registry.ts
-#~ msgid "Turn objects that are the same shape into linked copies, so editing one changes them all."
-#~ msgstr ""
+msgid "Turn objects that are the same shape into linked copies, so editing one changes them all."
+msgstr ""
 
 #: src/health/healthCopy.ts
 msgid "Turn open shapes into solids so you can push, pull, combine, or 3D print them."

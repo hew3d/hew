@@ -10,6 +10,7 @@ describe('historyLabel (English must match the kernel renderer)', () => {
     expect(historyLabel(k('push-pull'), 'x')).toBe('Push/Pull')
     expect(historyLabel(k('follow-me'), 'x')).toBe('Follow Me')
     expect(historyLabel(k('edit'), 'x')).toBe('Edit')
+    expect(historyLabel(k('link-identical-copies'), 'x')).toBe('Link identical copies')
   })
 
   it('labeled, repeat and bundle', () => {

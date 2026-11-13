@@ -251,6 +251,25 @@ describe('linked Paste', () => {
     expect(scene.instance_def(pasted)).toBe(scene.instance_def(placements[1]))
     expect(scene.definition_usage(scene.instance_def(pasted)!)).toBe(5)
   })
+
+  it('a paste looks like its source: a copy whose paint hides under the shared base pastes unpainted', () => {
+    const scene = new Scene()
+    const { leg, placements } = fourLegs(scene)
+    const red = scene.add_material('Red', 220, 30, 30, 255)
+    const green = scene.add_material('Green', 30, 220, 30, 255)
+    // An ordinarily painted copy lends its color.
+    scene.set_instance_material(placements[1], green)
+    const plain = pasteLinked(scene, [{ kind: 'instance' as const, id: placements[1] }], null, shift(0.5)).result.rootIds[0]
+    expect(scene.instance_material(plain)).toBe(green)
+    // Under a base on the shared solid every copy shows red; the paste does
+    // too and nothing moves off the solid.
+    scene.set_object_material(leg, red)
+    const covered = pasteLinked(scene, [{ kind: 'instance' as const, id: placements[1] }], null, shift(0.7)).result.rootIds[0]
+    expect(scene.instance_material(covered)).toBe(0xffff_ffff_ffff_ffffn)
+    expect(scene.instance_material(placements[1])).toBe(green)
+    expect(scene.instance_material(placements[0])).toBe(0xffff_ffff_ffff_ffffn)
+    expect(Array.from(scene.object_materials(leg))).toEqual([red])
+  })
 })
 
 describe('booleans on a placement', () => {

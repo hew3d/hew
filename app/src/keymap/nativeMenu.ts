@@ -77,7 +77,7 @@ export const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   'save', 'save-as', 'save-to-library', 'save-to-library-doc', 'scenes-add',
   'scenes-next', 'scenes-previous', 'scenes-transitions', 'scenes-update',
   'sent-reports',
-  'edit-flip-blue', 'edit-flip-green', 'edit-flip-red',
+  'edit-flip-blue', 'edit-flip-green', 'edit-flip-red', 'edit-link-identical-copies',
   'edit-paste-independent', 'edit-paste-linked', 'edit-select-all-copies',
   'edit-unlink', 'edit-unlink-all', 'toggle-part-axes', 'tool-flip',
   'toggle-axes', 'toggle-changes', 'toggle-compact-rail', 'toggle-components',

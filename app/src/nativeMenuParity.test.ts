@@ -579,6 +579,7 @@ describe('linked copy menu items parity', () => {
     'edit-unlink',
     'edit-unlink-all',
     'edit-select-all-copies',
+    'edit-link-identical-copies',
     'edit-paste-independent',
     'edit-paste-linked',
   ]

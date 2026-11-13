@@ -46,7 +46,7 @@ import {
   type HealthRow,
   type HealthScope,
 } from '../health/healthReport'
-import { ACTION, KIND_NAME, MEND, PANEL, REASON_MEND_LINE, REASON_ON_PURPOSE, REASON_SENTENCE, TOOLTIP, UNDO_LABEL, distinctLabels, type KindKey } from '../health/healthCopy'
+import { ACTION, KIND_NAME, LOOK_ALIKE, MEND, PANEL, REASON_MEND_LINE, REASON_ON_PURPOSE, REASON_SENTENCE, TOOLTIP, UNDO_LABEL, distinctLabels, type KindKey } from '../health/healthCopy'
 import {
   batchLabel,
   batchSummary,
@@ -121,6 +121,10 @@ interface Props {
   /** After a repair: re-tessellate and bump `docRev` (App's refreshAfterPanelMutation). */
   onGeometryChanged: () => void
   onToast?: (message: string, code?: string) => void
+  /** Objects that are the same part as another (Link identical copies); 0 or absent hides the notice. */
+  lookAlikeCount?: number
+  /** Runs Link identical copies over the whole model. */
+  onLinkLookAlikes?: () => void
   /** App's busy card: show `message`, let it paint, run `work`. False when
    *  another long change is still running (the caller says so). */
   onBusy?: (message: string, work: () => void) => boolean
@@ -259,6 +263,8 @@ export function ModelHealthPanel({
   onOverlayChange,
   onGeometryChanged,
   onToast,
+  lookAlikeCount = 0,
+  onLinkLookAlikes,
   onBusy,
 }: Props) {
   const { t } = useLingui()
@@ -1023,6 +1029,17 @@ export function ModelHealthPanel({
         />
         {PANEL.showKept}
       </label>
+      {lookAlikeCount >= 2 && onLinkLookAlikes !== undefined && (
+        <div
+          data-look-alike-notice
+          style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-secondary, #ccc)' }}
+        >
+          <span>{LOOK_ALIKE.notice(lookAlikeCount)}</span>
+          <button type="button" style={ACTION_BUTTON_STYLE} title={LOOK_ALIKE.actionTitle} onClick={onLinkLookAlikes}>
+            {LOOK_ALIKE.action}
+          </button>
+        </div>
+      )}
       {objectFilter !== null && (
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: 'var(--text-secondary, #ccc)' }}>
           <span>{PANEL.showingOne}</span>

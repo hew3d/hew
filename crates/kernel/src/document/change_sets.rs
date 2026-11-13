@@ -502,6 +502,26 @@ impl Document {
                 }
             }
             DocAction::PlacedInstance { instance } => b.instance(Added, *instance),
+            DocAction::JoinedLinked {
+                joiner,
+                instance,
+                set,
+                reanchored,
+                keeper,
+                cleared_base,
+                restamped,
+                ..
+            } => {
+                b.instance(Added, *instance);
+                b.node(Removed, NodeId::Object(*joiner));
+                // The member's base moved onto the set's other placements.
+                if cleared_base.is_some() {
+                    b.object(Modified, *keeper);
+                    b.instances(Modified, restamped.iter().map(|&(i, _)| i));
+                }
+                b.reanchored(reanchored);
+                b.copied([(EntityRef::Instance(*instance), EntityRef::Instance(*set))]);
+            }
             DocAction::Duplicated {
                 root,
                 parent,
@@ -659,7 +679,18 @@ impl Document {
             DocAction::PaintFace { object, .. }
             | DocAction::SetObjectMaterial { object, .. }
             | DocAction::SetFaceUvFrame { object, .. } => b.object(Modified, *object),
-            DocAction::SetInstanceMaterial { instance, .. } => b.instance(Modified, *instance),
+            DocAction::SetInstanceMaterial {
+                instance,
+                moved_base,
+                ..
+            } => {
+                b.instance(Modified, *instance);
+                // The set's base moved onto its other copies first.
+                if let Some(m) = moved_base {
+                    b.object(Modified, m.keeper);
+                    b.instances(Modified, m.restamped.iter().map(|&(i, _)| i));
+                }
+            }
             DocAction::ReplaceMaterial {
                 from,
                 to,

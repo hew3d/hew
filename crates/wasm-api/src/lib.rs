@@ -6883,6 +6883,110 @@ impl Scene {
         Ok(instance.data().as_ffi())
     }
 
+    /// "Link identical copies": replaces the loose world Object `joiner`
+    /// with a new placement of `set_instance`'s linked set at `affine`
+    /// (row-major 3x4, 12 finite floats; a reflection is allowed and makes
+    /// a mirrored placement) ([`kernel::Document::join_linked`]). The
+    /// kernel checks the pose: the set's solid placed by it must be the
+    /// joiner's shape at the signature's 1 µm quantum. The placement takes
+    /// the joiner's name, tags, user-hidden flag, object material (as its
+    /// instance material), and attributes (not its `hew.part` / `frame`:
+    /// the shared member's serves every placement); face paint on the
+    /// joiner is dropped. A base material on the shared member moves onto
+    /// every placement the set already has and is cleared on the member,
+    /// so each copy keeps its own color. The joiner is hidden. Returns the new
+    /// placement's handle; [`Scene::join_linked_report`] also says what
+    /// was dropped. One undo step, labeled "Link identical copies".
+    ///
+    /// # Errors
+    /// `UnknownInstance` for a stale or non-world `set_instance`,
+    /// `NotLinked` when it places a component that is not a linked set,
+    /// `UnknownObject` for a stale joiner or a definition member,
+    /// `GroupedOperand` for a joiner inside a group, `ExplodeSessionScope`
+    /// while a session is open, `Transform` for a singular pose,
+    /// `ComponentExpansionExceeded`, `NotIdentical` when the pose does not
+    /// place the set's shape onto the joiner (or the set holds more than
+    /// one solid), and `BadAffine` for a wrong length or a non-finite
+    /// value.
+    pub fn join_linked(
+        &mut self,
+        set_instance: u64,
+        joiner: u64,
+        affine: &[f64],
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        Ok(self
+            .join_linked_core(set_instance, joiner, affine)?
+            .instance
+            .data()
+            .as_ffi())
+    }
+
+    /// [`Scene::join_linked`], returning what the app announces as JSON:
+    /// `{"instance":"<ffi>","dropped_face_paint":bool,"frame_differed":bool}`
+    /// (a decimal-string handle). `dropped_face_paint`: the joiner had
+    /// painted faces, which the shared solid cannot keep.
+    /// `frame_differed`: the joiner's own `hew.part` / `frame` (or its
+    /// lack of one) was not the shared member's, which now serves the
+    /// placement. Same errors; recorded as the same call.
+    pub fn join_linked_report(
+        &mut self,
+        set_instance: u64,
+        joiner: u64,
+        affine: &[f64],
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let join = self.join_linked_core(set_instance, joiner, affine)?;
+        Ok(serde_json::json!({
+            "instance": join.instance.data().as_ffi().to_string(),
+            "dropped_face_paint": join.dropped_face_paint,
+            "frame_differed": join.frame_differed,
+        })
+        .to_string())
+    }
+
+    /// The shared body of the two join entry points: validates at the
+    /// trust boundary, runs the kernel op, reconciles, and records.
+    fn join_linked_core(
+        &mut self,
+        set_instance: u64,
+        joiner: u64,
+        affine: &[f64],
+    ) -> Result<kernel::LinkedJoin, ApiError> {
+        self.ensure_not_busy()?;
+        let rec_affine: [f64; 12] = affine
+            .try_into()
+            .ok()
+            .filter(|a: &[f64; 12]| a.iter().all(|v| v.is_finite()))
+            .ok_or_else(|| {
+                ApiError(
+                    "BadAffine: transform must be 12 finite floats (row-major 3x4)".to_string(),
+                )
+            })?;
+        let pose = Transform::from_affine(&rec_affine);
+        let (join, change) =
+            match self
+                .doc
+                .join_linked(instance_id(set_instance), object_id(joiner), pose)
+            {
+                Ok(done) => done,
+                Err(DocumentError::UnknownAttr) => {
+                    return Err(ApiError::new(
+                        "NotLinked",
+                        "that placement is not one of a linked set",
+                    ));
+                }
+                Err(e) => return Err(doc_err(e)),
+            };
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::JoinLinked {
+            set_instance,
+            joiner,
+            affine: rec_affine,
+        });
+        Ok(join)
+    }
+
     /// Whether `instance` places a linked set (its definition carries
     /// `hew` / `linked`). False for a stale handle.
     pub fn is_linked(&self, instance: u64) -> bool {
@@ -10273,14 +10377,35 @@ impl Scene {
             .map_or(u64::MAX, |m| m.data().as_ffi())
     }
 
+    /// The material a new placement needs of its own to look like
+    /// `instance` (`u64::MAX`: none, or a stale or hidden handle): its own
+    /// material, except none for a copy of a linked set whose shared solid
+    /// has a base, which already shows on every copy
+    /// ([`kernel::Document::instance_appearance_material`]). A linked paste
+    /// paints its copy with this.
+    pub fn instance_appearance_material(&self, instance: u64) -> u64 {
+        self.doc
+            .instance_appearance_material(instance_id(instance))
+            .flatten()
+            .map_or(u64::MAX, |m| m.data().as_ffi())
+    }
+
     /// Set a placement's own material (`u64::MAX` clears it): member faces
     /// show it where neither the face nor its Object's base is painted,
     /// the nearest painted placement winning. Undoable. World and nested
     /// placements alike.
     ///
+    /// A copy of a linked set whose shared solid has a base first hands
+    /// that base to every other copy as its own material (the kernel's
+    /// `set_instance_material`), so the painted copy shows its color and
+    /// the others look the same; one undo step either way.
+    ///
     /// Returns the WORLD instances whose drawing changed — the instance
     /// itself, or for a nested placement every world placement that draws
-    /// it — so the renderer re-pulls each of them, not just the one painted.
+    /// it, and after a base move every world placement of the set — so the
+    /// renderer re-pulls each of them, not just the one painted. The set's
+    /// member geometry changed then too: a caller painting a linked copy
+    /// re-pulls its definition's members.
     ///
     /// # Errors
     /// - `UnknownInstance` — stale or hidden instance handle.
@@ -12948,6 +13073,13 @@ impl Scene {
                 }
                 WrapLinked { kind, id } => {
                     self.wrap_linked(kind, id)?;
+                }
+                JoinLinked {
+                    set_instance,
+                    joiner,
+                    affine,
+                } => {
+                    self.join_linked(set_instance, joiner, &affine)?;
                 }
                 FlipSelection {
                     kinds,
@@ -16261,6 +16393,184 @@ mod tests {
         assert!(!scene.is_linked(u64::MAX), "a stale handle is not linked");
     }
 
+    /// Row-major 3x4 translation by (5, 0, 0).
+    const STEP_X5: [f64; 12] = [
+        1.0, 0.0, 0.0, 5.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0,
+    ];
+
+    #[test]
+    fn join_linked_replaces_the_joiner_with_a_linked_placement_and_undoes() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let set = scene.wrap_linked(0, o).unwrap();
+        let placed = scene.join_linked(set, p, &STEP_X5).unwrap();
+        assert!(scene.is_linked(placed));
+        assert_eq!(scene.instance_def(placed), scene.instance_def(set));
+        assert!(scene.node_is_live(2, placed));
+        assert!(!scene.node_is_live(0, p), "the joiner is hidden");
+        scene.scene_undo().unwrap();
+        assert!(scene.node_is_live(0, p));
+        assert!(!scene.node_is_live(2, placed));
+        scene.scene_redo().unwrap();
+        assert!(scene.node_is_live(2, placed));
+        assert!(!scene.node_is_live(0, p));
+    }
+
+    #[test]
+    fn join_linked_refuses_typed() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let (s3, r3) = ground_unit_square_at(&mut scene, 10.0, 0.0);
+        let q = scene.extrude_region(s3, r3, 1.0).unwrap();
+        let plain = scene.make_component(&[0], &[q]).unwrap();
+        let err = scene.join_linked(plain, p, &STEP_X5).unwrap_err();
+        assert!(err.0.starts_with("NotLinked"), "got {}", err.0);
+        let set = scene.wrap_linked(0, o).unwrap();
+        let err = scene.join_linked(set, p, &STEP_X5[..11]).unwrap_err();
+        assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
+        scene.group_nodes(&[0], &[p]).unwrap();
+        let err = scene.join_linked(set, p, &STEP_X5).unwrap_err();
+        assert!(err.0.starts_with("GroupedOperand"), "got {}", err.0);
+        let err = scene.join_linked(set, o, &STEP_X5).unwrap_err();
+        assert!(err.0.starts_with("UnknownObject"), "got {}", err.0);
+    }
+
+    #[test]
+    fn join_linked_records_and_replays_to_the_same_state_hash() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let set = scene.wrap_linked(0, o).unwrap();
+        scene.join_linked(set, p, &STEP_X5).unwrap();
+        scene.stop_recording();
+        let json = scene.take_recording();
+        assert!(json.contains("\"join_linked\""), "recorded: {json}");
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), scene.state_hash());
+        recording::reset();
+    }
+
+    /// Two unit boxes five apart, the first wrapped as a linked set:
+    /// `(set placement, joiner)`.
+    fn join_linked_pair(scene: &mut Scene) -> (u64, u64) {
+        let (s, r) = ground_unit_square(scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(scene, 5.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        (scene.wrap_linked(0, o).unwrap(), p)
+    }
+
+    #[test]
+    fn join_linked_refuses_a_non_finite_affine_and_records_nothing() {
+        recording::reset();
+        let mut scene = Scene::new();
+        let (set, p) = join_linked_pair(&mut scene);
+        scene.start_recording();
+        let hash = scene.state_hash();
+        for bad in [f64::NAN, f64::INFINITY] {
+            let mut affine = STEP_X5;
+            affine[3] = bad;
+            let err = scene.join_linked(set, p, &affine).unwrap_err();
+            assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
+            let err = scene.join_linked_report(set, p, &affine).unwrap_err();
+            assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
+        }
+        assert_eq!(scene.state_hash(), hash);
+        scene.stop_recording();
+        let json = scene.take_recording();
+        assert!(!json.contains("join_linked"), "recorded: {json}");
+        recording::reset();
+    }
+
+    #[test]
+    fn join_linked_refuses_a_pose_that_misses_not_identical() {
+        let mut scene = Scene::new();
+        let (set, p) = join_linked_pair(&mut scene);
+        let mut affine = STEP_X5;
+        affine[3] = 6.0;
+        let err = scene.join_linked(set, p, &affine).unwrap_err();
+        assert!(err.0.starts_with("NotIdentical"), "got {}", err.0);
+        assert!(scene.node_is_live(0, p));
+    }
+
+    #[test]
+    fn join_linked_refuses_document_busy_during_a_compound() {
+        let (mut scene, caller, _provider) = compound_scene();
+        let (set, p) = join_linked_pair(&mut scene);
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let busy = |e: ApiError| assert!(e.0.starts_with("DocumentBusy:"), "{}", e.0);
+        busy(scene.join_linked(set, p, &STEP_X5).unwrap_err());
+        busy(scene.join_linked_report(set, p, &STEP_X5).unwrap_err());
+        scene.compound_abort(kt).unwrap();
+        assert!(scene.node_is_live(0, p), "nothing joined");
+        assert!(scene.join_linked(set, p, &STEP_X5).is_ok());
+    }
+
+    #[test]
+    fn join_linked_report_says_what_was_dropped_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (set, p) = join_linked_pair(&mut scene);
+        let blue = scene.doc.add_material(kernel::Material::solid(
+            "Blue",
+            kernel::Rgba8::rgb(30, 30, 200),
+        ));
+        let joiner = object_id(p);
+        let face = scene
+            .doc
+            .object(joiner)
+            .unwrap()
+            .faces()
+            .keys()
+            .next()
+            .unwrap();
+        scene.doc.set_object_material(joiner, Some(blue)).unwrap();
+        scene.doc.paint_face(joiner, face, Some(blue)).unwrap();
+        scene
+            .doc
+            .attr_set(
+                kernel::AttrTarget::Entity(kernel::EntityRef::Object(joiner)),
+                "hew.part",
+                "frame",
+                kernel::AttrValue::Text("f".into()),
+            )
+            .unwrap();
+        let json = scene.join_linked_report(set, p, &STEP_X5).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let placed: u64 = v["instance"].as_str().unwrap().parse().unwrap();
+        assert_eq!(v["dropped_face_paint"], true, "{json}");
+        assert_eq!(v["frame_differed"], true, "{json}");
+        assert!(scene.node_is_live(2, placed));
+        assert_eq!(
+            scene.doc.instance_material(instance_id(placed)),
+            Some(Some(blue))
+        );
+        scene.stop_recording();
+        assert!(scene.take_recording().contains("\"join_linked\""));
+        recording::reset();
+
+        let mut scene = Scene::new();
+        let (set, p) = join_linked_pair(&mut scene);
+        let json = scene.join_linked_report(set, p, &STEP_X5).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["dropped_face_paint"], false, "{json}");
+        assert_eq!(v["frame_differed"], false, "{json}");
+    }
+
     #[test]
     fn node_is_live_follows_the_wrap_and_its_undo() {
         let mut scene = Scene::new();
@@ -17942,6 +18252,95 @@ mod tests {
             "replaying a material/definition lifecycle session reproduces the golden state_hash"
         );
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// Painting one linked copy whose shared solid has a base moves the
+    /// base onto the other copies first: every copy redraws, the painted
+    /// one shows its color, one undo restores it all, and the session
+    /// replays to the same state.
+    #[test]
+    fn painting_a_linked_copy_moves_the_member_base_and_redraws_every_copy() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let first = scene.wrap_linked(0, o).unwrap();
+        let def = scene.instance_def(first).unwrap();
+        let at = |x: f64| [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let second = scene.place_instance(def, &at(3.0)).unwrap();
+        let third = scene.place_instance(def, &at(6.0)).unwrap();
+        let red = scene
+            .add_material("Red".to_string(), 220, 30, 30, 255)
+            .unwrap();
+        let blue = scene
+            .add_material("Blue".to_string(), 30, 30, 220, 255)
+            .unwrap();
+        scene.set_object_material(o, red).unwrap();
+        let before = scene.state_hash();
+
+        let mut touched = scene.set_instance_material(second, blue).unwrap();
+        touched.sort_unstable();
+        let mut all = vec![first, second, third];
+        all.sort_unstable();
+        assert_eq!(touched, all, "every copy redraws");
+        assert_eq!(scene.instance_material(second), blue);
+        assert_eq!(scene.instance_material(first), red);
+        assert_eq!(scene.instance_material(third), red);
+        assert_eq!(scene.instance_expanded_inherited(second), vec![blue]);
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), before, "one undo restores it all");
+        assert_eq!(scene.instance_material(first), u64::MAX);
+    }
+
+    /// A linked paste paints its new copy with the source's
+    /// `instance_appearance_material`: a source whose own green is covered
+    /// by the shared solid's red base lends nothing (every copy stays red,
+    /// nothing moves), and an ordinarily painted source lends its color.
+    #[test]
+    fn a_linked_paste_copies_what_the_source_looks_like() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let first = scene.wrap_linked(0, o).unwrap();
+        let def = scene.instance_def(first).unwrap();
+        let at = |x: f64| [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let source = scene.place_instance(def, &at(3.0)).unwrap();
+        let red = scene
+            .add_material("Red".to_string(), 220, 30, 30, 255)
+            .unwrap();
+        let green = scene
+            .add_material("Green".to_string(), 30, 220, 30, 255)
+            .unwrap();
+        let paste = |scene: &mut Scene, from: u64, x: f64| {
+            let id = scene.place_instance(def, &at(x)).unwrap();
+            let m = scene.instance_appearance_material(from);
+            if m != u64::MAX {
+                scene.set_instance_material(id, m).unwrap();
+            }
+            id
+        };
+
+        // Ordinary: the paste takes the source's own color.
+        scene.set_instance_material(source, green).unwrap();
+        let plain = paste(&mut scene, source, 6.0);
+        assert_eq!(scene.instance_material(plain), green);
+        assert_eq!(scene.instance_material(first), u64::MAX);
+
+        // Covered: the solid's red base shows on every copy.
+        scene.set_object_material(o, red).unwrap();
+        assert_eq!(scene.instance_appearance_material(source), u64::MAX);
+        let covered = paste(&mut scene, source, 9.0);
+        assert_eq!(scene.instance_material(covered), u64::MAX);
+        assert_eq!(scene.instance_material(source), green, "nothing moved");
+        assert_eq!(scene.instance_material(first), u64::MAX, "nothing moved");
+        assert_eq!(scene.object_materials(o), vec![red], "the base stays");
     }
 
     /// Painting a placement and a whole definition records and replays,

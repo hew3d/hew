@@ -26,6 +26,8 @@ type PasteScene = Pick<
   | 'instance_def'
   | 'instance_pose'
   | 'place_instance'
+  | 'instance_appearance_material'
+  | 'set_instance_material'
   | 'history_bracket_open'
   | 'history_bracket_commit'
   | 'history_bracket_abort'
@@ -33,6 +35,8 @@ type PasteScene = Pick<
 
 const KIND_NUMBER = { object: 0, group: 1, instance: 2 } as const
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
+/** `instance_appearance_material`'s answer when the copy needs no material. */
+const NO_MATERIAL = 0xffff_ffff_ffff_ffffn
 
 /**
  * The copied nodes a paste can link to right now, or null when it cannot:
@@ -82,7 +86,9 @@ function asAffine(a: ArrayLike<number>): Affine12 {
  * `copyAffine` (the placement at copy time) is only the fallback when the
  * live one cannot be read. One undo step. Returns the new placements and the
  * sources that were wrapped, so the caller can keep the clipboard pointing at
- * live nodes.
+ * live nodes. Each copy looks like its source placement: it takes the
+ * source's own material unless the set's shared solid has a base, which
+ * already shows on the copy.
  */
 export function pasteLinked(
   scene: PasteScene,
@@ -100,18 +106,29 @@ export function pasteLinked(
   return inHistoryBracket(scene as WasmScene, t`Paste`, () => {
     const ids: bigint[] = []
     const sources: LinkSource['nodes'] = []
+    // The copy takes the source placement's own material, as a plain paste
+    // does: a wrap moved a painted Object's color onto its placement. A
+    // source whose own material is covered by the shared solid's base
+    // lends none: the copy shows that base already, and painting it would
+    // move the base off the set and show the hidden material instead.
+    const place = (from: bigint, def: bigint, pose: ArrayLike<number>): bigint => {
+      const id = scene.place_instance(def, Float64Array.from(pose))
+      const material = scene.instance_appearance_material(from)
+      if (material !== NO_MATERIAL) scene.set_instance_material(id, material)
+      return id
+    }
     for (const node of nodes) {
       if (node.kind === 'instance') {
         const def = scene.instance_def(node.id)
         const pose = scene.instance_pose(node.id)
         if (def === undefined || pose === undefined) throw new Error('UnknownInstance: the copied component is gone')
-        ids.push(scene.place_instance(def, Float64Array.from(composeAffine(asAffine(pose), delta))))
+        ids.push(place(node.id, def, composeAffine(asAffine(pose), delta)))
         sources.push(node)
       } else {
         const wrapped = scene.wrap_linked(KIND_NUMBER[node.kind], node.id)
         const def = scene.instance_def(wrapped)
         if (def === undefined) throw new Error('UnknownInstance: the set was not created')
-        ids.push(scene.place_instance(def, Float64Array.from(delta)))
+        ids.push(place(wrapped, def, delta))
         sources.push({ kind: 'instance', id: wrapped })
       }
     }

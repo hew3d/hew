@@ -171,6 +171,8 @@ import { resolveLinkSource, pasteLinked, planPaste } from './clipboard/linkedPas
 import { getCopiesLinked, subscribeCopiesLinked } from './settings/editing'
 import { routeBooleanMany } from './viewport/placementBoolean'
 import { CutScopeStrip } from './panels/CutScopeStrip'
+import { findLookAlikes, linkSimilar, linkSimilarMessage, linkSimilarScope, countLookAlikes, restrictToSelection } from './linkSimilar'
+import { useLookAlikeGroups } from './useLookAlikeGroups'
 import { blockedWhileEditing, promoteForSave, undoPromotionIfUnmoved, linkGates, linkedPlacementOf, unlinkCopy, unlinkAllCopies, promoteToComponent, renameLinkedCopy } from './linkedCopies'
 import { SettingsWindow } from './settings/SettingsWindow'
 import { FluentSettingsPage } from './settings/FluentSettingsPage'
@@ -2622,6 +2624,13 @@ export default function App() {
     const leaves = Array.from(state.scene.node_leaf_objects(kind, deepest.id))
     return new Set(leaves)
   }, [activeContext, state])
+
+  // Link identical copies: objects that are the same shape as another. One
+  // whole-model read (a signature per loose Object) once the document has
+  // settled, off the render path and skipped for a very large model; the
+  // selection only narrows it.
+  const lookAlikeGroups = useLookAlikeGroups(state?.scene, docRev, componentFrameOpen)
+  const canLinkSimilarNow = restrictToSelection(lookAlikeGroups, selectedIds).length > 0
 
   // Selection-dependent command availability — one derivation shared by the
   // render-body handlers, the native Edit menu (sync_menu_state), and the
@@ -6193,6 +6202,7 @@ export default function App() {
       case 'edit-place-copy': handlePlaceInstance(); break
       case 'edit-explode': handleExplodeInstance(); break
       case 'edit-make-unique': handleMakeUnique(); break
+      case 'edit-link-identical-copies': handleLinkSimilar('menu'); break
       case 'edit-unlink': handleUnlink(false); break
       case 'edit-unlink-all': handleUnlink(true); break
       case 'edit-select-all-copies': handleSelectAllCopies(); break
@@ -6741,6 +6751,7 @@ export default function App() {
       'edit-save-selection-to-library': menuGates?.canSaveSelectionToLibrary ?? false,
       'edit-explode': menuGates?.canExplode ?? false,
       'edit-make-unique': menuGates?.canMakeUnique ?? false,
+      'edit-link-identical-copies': canLinkSimilarNow,
       'edit-unlink': menuGates?.canUnlink ?? false,
       'edit-unlink-all': menuGates?.canUnlinkAll ?? false,
       'edit-select-all-copies': menuGates?.canUnlinkAll ?? false,
@@ -7402,6 +7413,21 @@ export default function App() {
     })
   }
 
+  /** Edit ▸ Link identical copies: over the selected Objects (two or more),
+   *  else the whole model; the Model Health button always over the whole
+   *  model, as its count is. One undo step; the status line says what
+   *  happened. */
+  const handleLinkSimilar = (origin: 'menu' | 'model-health') => {
+    if (blockedWhileEditing(componentFrameOpen, handleToast)) return
+    const scene = sceneRef.current
+    if (scene === null) return
+    let message = ''
+    const ok = runLinkedOp((s) => {
+      message = linkSimilarMessage(linkSimilar(s, findLookAlikes(s, linkSimilarScope(origin, selectedIds))))
+    })
+    if (ok) handleToast(message)
+  }
+
   const handleSelectAllCopies = (node?: NodeRef) => {
     const scene = sceneRef.current
     const linked = scene !== null ? linkedPlacementOf(scene, node !== undefined ? [node] : selectedIds) : null
@@ -7623,6 +7649,7 @@ export default function App() {
           canMakeUnique: canUnique,
           canUnlink: menuGates?.canUnlink ?? false,
           canUnlinkAll: menuGates?.canUnlinkAll ?? false,
+          canLinkSimilar: canLinkSimilarNow,
           canPromote: menuGates?.canPromote ?? false,
           canFlip: menuGates?.canFlip ?? false,
           canBoolean,
@@ -7913,6 +7940,8 @@ export default function App() {
                 onOverlayChange={handleHealthOverlay}
                 onGeometryChanged={refreshAfterPanelMutation}
                 onToast={handleToast}
+                lookAlikeCount={countLookAlikes(lookAlikeGroups)}
+                onLinkLookAlikes={() => handleLinkSimilar('model-health')}
                 onBusy={runBusy}
               />
             </FloatingWindow>
@@ -8850,6 +8879,7 @@ export default function App() {
           canMakeUnique: menuGates?.canMakeUnique ?? false,
           canUnlink: menuGates?.canUnlink ?? false,
           canUnlinkAll: menuGates?.canUnlinkAll ?? false,
+          canLinkSimilar: canLinkSimilarNow,
           canPromote: menuGates?.canPromote ?? false,
           canFlip: menuGates?.canFlip ?? false,
           canPasteLinked: (menuGates?.clipboardHasContent ?? false) && !copiesLinked,

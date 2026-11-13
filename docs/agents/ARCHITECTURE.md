@@ -511,7 +511,58 @@ and undo brings them back. The rule is transitive: a set placed only by
 instances among those hidden members goes too, as does one placed only
 inside a deleted definition — while a named component stays available with
 no placements. Removing the attribute (`promote_linked`) turns a set into
-a named component; the reverse does not exist.
+a named component; the reverse does not exist. `join_linked` folds a
+separately drawn look-alike into an existing set: the loose Object is
+hidden and a new placement of the set takes its place at the pose the
+caller gives (the app derives it from both Objects' signature frames; a
+reflecting pose makes a mirrored placement), in one undo entry. The
+kernel checks the pose rather than trusting it: the set's one solid,
+posed, must have the Object's vertex set at the signature's 1 µm quantum,
+or the join refuses `NotIdentical` (a pose with a non-finite entry
+refuses `Transform`). The placement carries the Object's name, tags,
+user-hidden flag, and attributes, and its object material becomes the
+placement's instance material; the Object's face paint cannot survive a
+shared solid and is dropped, and its own `hew.part` / `frame` stays
+behind, since the member's frame serves every placement through the
+pose. The op reports both (`LinkedJoin::dropped_face_paint`,
+`frame_differed`) so the app can say so.
+
+Color in a linked set lives on the placements, not on the shared
+member, because a placement's instance material shows only where the
+member has no base material and no face paint. Wrapping an Object moves
+its base material onto its placement and clears it on the member (face
+paint stays), and every copy then carries it too. A join moves whatever
+base the member still has (painted for all copies, or an older file)
+onto every placement the set already has and clears it, while the new
+placement takes the joined Object's own base, so a red keeper and a blue
+joiner stay red and blue and nothing visible changes; the join's one
+undo entry restores the member's base and each placement's prior
+material exactly. The trip back is lossless: unlinking a placement
+(`make_unique_by_path` on a linked set) moves the placement's own
+material onto its private copy, as the base of each copied Object
+without one, and clears it on the placement, and exploding one bakes it
+the same way. A named component's fork leaves instance materials alone.
+
+A base can still reach a linked set's member: Ctrl-click inside an open
+set sets it, and so do older files. Painting one copy then makes the
+join's move first (`set_instance_material`): the member's base goes onto
+every other copy of the set as its own material, user-hidden copies and
+the one an open session hid included, and is cleared on the member; then
+the paint applies, so the painted copy shows its color and the others
+look the same. It is one undo entry (`SetInstanceMaterial` carries the
+move), exact by state hash, and the change lists the member and every
+placement as modified. A Shift-click replace of unpainted faces across
+the model (`replace_material(Document, None, to)`) never puts a base on
+a one-solid linked set's member: each copy with no color of its own
+takes `to` instead (the copy an open session entered too, so it matches
+the others after the close), so a painted copy keeps its color. A set
+whose member already has a base shows that base everywhere, so the
+replace leaves it alone. A linked paste gives its new copy the
+source's `instance_appearance_material`: the source's own material, or
+none when the member's base covers it (painting the copy would move the
+base and show the hidden material instead). A named
+component's base means "every copy", so painting one of its placements
+leaves the base alone and the base still shows.
 
 The app presents a linked set as copies, never as a definition: Move,
 Rotate, arrays, and Paste link by default (a preference), the Outliner and

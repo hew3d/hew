@@ -725,6 +725,18 @@ pub struct LinkedWrap {
     pub definition: ComponentId,
 }
 
+/// What [`Document::join_linked`] made and what the caller should
+/// announce: the new placement, whether the joiner carried face paint
+/// that a shared solid cannot keep (it was dropped), and whether the
+/// joiner's own `hew.part` / `frame` (or its absence) differed from the
+/// keeper's, which now serves the placement through the pose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkedJoin {
+    pub instance: InstanceId,
+    pub dropped_face_paint: bool,
+    pub frame_differed: bool,
+}
+
 /// A definition hidden because the operation removed its last live
 /// placement, with exactly the member nodes hidden alongside it (so undo
 /// reveals that set and nothing else).
@@ -1041,6 +1053,7 @@ pub fn render_history_label(kind: &HistoryKind) -> String {
         }
         "make-component" => with_name("Make component"),
         "place-instance" => "Place instance".to_string(),
+        "link-identical-copies" => "Link identical copies".to_string(),
         "copy" => "Copy".to_string(),
         "copy-array" => format!("Copy ×{}", count("count")),
         "guide" => "Guide".to_string(),
@@ -1151,6 +1164,18 @@ enum RepairKind {
 // full `Object`/`Sketch` clones, neither of which derives it, and nothing
 // outside this private enum ever compares two actions (`matches!` needs no
 // such bound) — a manual impl would be dead weight.
+/// A linked set's shared-solid base moved onto its copies, as
+/// [`Document::join_linked`] and a paint on one copy
+/// ([`Document::set_instance_material`]) do: every placement in
+/// `restamped` took `cleared_base` (it held the material recorded next to
+/// it before), and the base was cleared on `keeper`.
+#[derive(Debug, Clone)]
+struct LinkedBaseMove {
+    keeper: ObjectId,
+    cleared_base: FaceMaterial,
+    restamped: Vec<(InstanceId, FaceMaterial)>,
+}
+
 #[derive(Debug, Clone)]
 enum DocAction {
     /// Several ordinary actions committed as one step. Children stay
@@ -1766,6 +1791,11 @@ enum DocAction {
         folded_groups: Vec<GroupId>,
         folded_instances: Vec<InstanceId>,
         reanchored: Vec<AnnotationReanchor>,
+        /// A wrapped Object's base material, moved onto `instance` as its
+        /// instance material (the member's base is cleared). Undo puts it
+        /// back on the Object and clears the instance's; redo moves it
+        /// again. `None` for a Group or an unpainted Object.
+        moved_material: FaceMaterial,
     },
     /// A [`LinkPolicy::Linked`] copy as one entry: the wraps it made, then
     /// the copies. Undo reverses `array`, then each wrap last to first;
@@ -1777,6 +1807,36 @@ enum DocAction {
         /// The [`DocAction::Duplicated`] or [`DocAction::DuplicatedArray`]
         /// the copies recorded.
         array: Box<DocAction>,
+    },
+    /// `join_linked` ("Link identical copies") replaced the loose world
+    /// Object `joiner` with `instance`, a new top-level placement of the
+    /// linked set `set_def`, carrying the joiner's name, tags, base
+    /// material, and attribute dictionary. When the shared member had a
+    /// base material, it moved onto every other placement of the set
+    /// (`restamped`) and was cleared on the member (`cleared_base`). Undo
+    /// hides the placement (and drops the dictionary it was given), puts
+    /// the member's base and each placement's prior material back,
+    /// unhides the joiner, and restores the annotations anchored to it;
+    /// redo re-copies the joiner's dictionary, moves the base again, and
+    /// hides the joiner again. All handles stay stable (hide-not-delete).
+    JoinedLinked {
+        joiner: ObjectId,
+        instance: InstanceId,
+        set_def: ComponentId,
+        /// The placement of the set the call named: the source of the
+        /// `copied_from` pair.
+        set: InstanceId,
+        /// The annotations hiding the joiner detached, as in
+        /// [`DocAction::Deleted::reanchored`].
+        reanchored: Vec<AnnotationReanchor>,
+        /// The set's shared solid and the base material the join cleared
+        /// on it (`None`: it had none, and nothing moved).
+        keeper: ObjectId,
+        cleared_base: FaceMaterial,
+        /// Every placement of the set that existed before the join, with
+        /// its own material before the join took `cleared_base` (empty
+        /// when nothing moved).
+        restamped: Vec<(InstanceId, FaceMaterial)>,
     },
     /// `place_instance` stamped another instance of an existing
     /// definition. Undo hides it; redo unhides. The `InstanceId` stays stable.
@@ -1995,6 +2055,14 @@ enum DocAction {
         /// emptied by a later shared repoint lands on the step that forked
         /// it. Undo reveals them, redo hides them again.
         hidden_defs: Vec<HiddenDef>,
+        /// The instance's own material when a linked set's placement was
+        /// forked (an unlink): it moved onto the private copy, as the base
+        /// of each copied Object without one (and the material of each
+        /// copied member instance without one), and was cleared on the
+        /// instance, so a joined or wrapped board gets its color back as
+        /// its base. Undo puts it back on the instance (the copies hide
+        /// with `new_def`), redo clears it again. `None` otherwise.
+        moved_material: FaceMaterial,
     },
     /// `open_explode_session` baked `component`'s live members/sketches into
     /// world ownership at `pose` and hid the entered instance
@@ -2178,11 +2246,17 @@ enum DocAction {
         next: Option<MaterialId>,
     },
     /// [`Document::set_instance_material`] reassigned a placement's own
-    /// material. Undo restores `prev`, redo re-applies `next`.
+    /// material. Undo restores `prev`, redo re-applies `next`. When the
+    /// placement is a copy of a linked set whose shared solid had a base,
+    /// `moved_base` records the [`Document::join_linked`]-style move made
+    /// first in the same entry: undo restores `prev`, then every other
+    /// copy's material and the member's base; redo moves the base again,
+    /// then applies `next`.
     SetInstanceMaterial {
         instance: InstanceId,
         prev: FaceMaterial,
         next: FaceMaterial,
+        moved_base: Option<Box<LinkedBaseMove>>,
     },
     /// `set_face_uv_frame` reassigned a face's UV positioning frame
     /// (paint-tool design §3 — SketchUp's fixed-pin Position Texture).
@@ -2742,6 +2816,7 @@ impl DocAction {
                 .flat_map(DocAction::touched_objects)
                 .collect(),
             DocAction::PlacedInstance { .. } => Vec::new(),
+            DocAction::JoinedLinked { joiner, .. } => vec![*joiner],
             DocAction::Duplicated { objects, .. } => objects.clone(),
             DocAction::DuplicatedArray { objects, .. } => objects.clone(),
             DocAction::CreatedGuide { .. }
@@ -2759,7 +2834,11 @@ impl DocAction {
             DocAction::MadeUnique { .. } => Vec::new(),
             DocAction::PaintFace { object, .. } => vec![*object],
             DocAction::SetObjectMaterial { object, .. } => vec![*object],
-            DocAction::SetInstanceMaterial { .. } => Vec::new(),
+            // A moved base edits the shared solid, so a session closing
+            // over it unbakes rather than restoring the stale snapshot.
+            DocAction::SetInstanceMaterial { moved_base, .. } => {
+                moved_base.iter().map(|m| m.keeper).collect()
+            }
             DocAction::SetFaceUvFrame { object, .. } => vec![*object],
             DocAction::ReplaceMaterial {
                 faces,
@@ -2877,6 +2956,7 @@ impl DocAction {
             | DocAction::MadeComponent { .. }
             | DocAction::WrappedLinked { .. }
             | DocAction::PlacedInstance { .. }
+            | DocAction::JoinedLinked { .. }
             | DocAction::Duplicated { .. }
             | DocAction::DuplicatedArray { .. }
             | DocAction::CreatedGuide { .. }
@@ -3062,7 +3142,9 @@ impl DocAction {
                     _ => None,
                 })
                 .collect(),
-            DocAction::PlacedInstance { instance } => vec![NodeId::Instance(*instance)],
+            DocAction::PlacedInstance { instance } | DocAction::JoinedLinked { instance, .. } => {
+                vec![NodeId::Instance(*instance)]
+            }
             DocAction::Duplicated {
                 objects,
                 groups,
@@ -3742,6 +3824,11 @@ pub enum DocumentError {
     /// open; rejoining it as pieces is the choice for it). The document is
     /// untouched.
     RejoinNotPossible,
+    /// [`Document::join_linked`] refused: the linked set's shape placed by
+    /// the given pose is not the joiner's (their vertex sets differ at the
+    /// signature's 1 µm quantum), or the set holds more than one solid.
+    /// The document is untouched.
+    NotIdentical,
 }
 
 impl std::fmt::Display for DocumentError {
@@ -3976,6 +4063,7 @@ impl std::fmt::Display for DocumentError {
             DocumentError::RejoinNotPossible => {
                 write!(f, "these pieces can't be rejoined into one solid")
             }
+            DocumentError::NotIdentical => write!(f, "these aren't the same shape"),
             DocumentError::GroupCycle => write!(
                 f,
                 "a group can't be moved into itself or into one of its own members"
@@ -9816,6 +9904,25 @@ impl Document {
             .map(|r| r.material)
     }
 
+    /// The material a NEW placement of `instance`'s definition needs of
+    /// its own to look like `instance` (a linked paste's copy): the
+    /// placement's own material, except `Some(None)` for a copy of a linked
+    /// set ([`Document::is_linked_set`]) whose shared solid has a base. That
+    /// base shows on every copy and covers the copy's own material, so the
+    /// new placement already looks the same, and painting it would move
+    /// the base onto the other copies ([`Document::set_instance_material`])
+    /// and show the hidden material instead. `None` for a stale or hidden
+    /// handle.
+    pub fn instance_appearance_material(&self, instance: InstanceId) -> Option<FaceMaterial> {
+        let own = self.instance_material(instance)?;
+        let def = self.instances[instance].def;
+        let covered = self.is_linked_set(def)
+            && self
+                .linked_set_solid(def)
+                .is_some_and(|o| self.objects[o].object.default_material.is_some());
+        Some(if covered { None } else { own })
+    }
+
     /// Set a placement's own material (`None` clears it), recording one
     /// undoable [`DocAction::SetInstanceMaterial`]. A member face shows it
     /// only when neither the face nor its Object's base is painted, and
@@ -9825,8 +9932,18 @@ impl Document {
     /// A definition-owned (nested) placement is a valid target: that is
     /// how one nested part gets its own color.
     ///
+    /// A copy of a linked set ([`Document::is_linked_set`]) whose shared
+    /// solid has a base would keep showing that base, so the call first
+    /// makes [`Document::join_linked`]'s move: the base goes onto every
+    /// OTHER copy as its own material (user-hidden copies and one hidden
+    /// by an open session included) and is cleared on the solid; then the
+    /// paint applies. Nothing else changes on screen, and it is all ONE
+    /// undo entry. A named component's base means "every copy" and stays.
+    ///
     /// The returned [`DocChange`] names the instance and, for a nested one,
-    /// every world placement drawing it; no member geometry changes.
+    /// every world placement drawing it; no member geometry changes. After
+    /// a base move it also names the shared solid and every placement
+    /// drawing the set.
     ///
     /// # Errors
     /// - [`DocumentError::UnknownInstance`] — stale or hidden instance.
@@ -9845,20 +9962,81 @@ impl Document {
         {
             return Err(DocumentError::UnknownMaterial);
         }
-        let rec = match self.instances.get_mut(instance) {
-            Some(rec) if !rec.hidden => rec,
-            _ => return Err(DocumentError::UnknownInstance),
-        };
+        if self.instances.get(instance).is_none_or(|r| r.hidden) {
+            return Err(DocumentError::UnknownInstance);
+        }
+        // A copy of a linked set whose shared solid has a base would show
+        // the base, not its own color: move the base onto every other copy
+        // first, as joining does, so nothing else changes on screen.
+        let moved_base = self.linked_base_move(instance).map(Box::new);
+        if let Some(m) = &moved_base {
+            self.apply_join_material_move(m.keeper, m.cleared_base, &m.restamped);
+        }
+        let rec = &mut self.instances[instance];
         let prev = rec.material;
         rec.material = material;
+        let mut change = self.instance_material_change(instance);
+        if let Some(m) = &moved_base {
+            self.merge_linked_base_move_change(&mut change, instance, m);
+        }
         self.undo.push(DocAction::SetInstanceMaterial {
             instance,
             prev,
             next: material,
+            moved_base,
         });
         self.commit_new_action();
         self.debug_validate();
-        Ok(self.instance_material_change(instance))
+        Ok(change)
+    }
+
+    /// The base move painting `instance` needs first: `Some` only when it
+    /// places a linked set ([`Document::is_linked_set`]) of one solid whose
+    /// base is painted. Every OTHER placement of the set is restamped —
+    /// live ones (user-hidden ones too: that is view state) and the one an
+    /// open session hid. A named component's base means "every copy", so
+    /// it never moves.
+    fn linked_base_move(&self, instance: InstanceId) -> Option<LinkedBaseMove> {
+        let def = self.instances.get(instance)?.def;
+        if !self.is_linked_set(def) {
+            return None;
+        }
+        let keeper = self.linked_set_solid(def)?;
+        let cleared_base = self.objects[keeper].object.default_material;
+        cleared_base?;
+        let session_hid = |i: InstanceId| {
+            self.sessions
+                .iter()
+                .any(|f| matches!(f, SessionFrame::Component(s) if s.hidden_instances.contains(&i)))
+        };
+        let restamped = self
+            .instances
+            .iter()
+            .filter(|&(i, r)| r.def == def && i != instance && (!r.hidden || session_hid(i)))
+            .map(|(i, r)| (i, r.material))
+            .collect();
+        Some(LinkedBaseMove {
+            keeper,
+            cleared_base,
+            restamped,
+        })
+    }
+
+    /// Adds a [`LinkedBaseMove`]'s reach to a placement paint's change: the
+    /// member, and every world placement drawing the set (the restamped
+    /// copies and the outer placements of nested ones).
+    fn merge_linked_base_move_change(
+        &self,
+        change: &mut DocChange,
+        instance: InstanceId,
+        m: &LinkedBaseMove,
+    ) {
+        merge_unique(&mut change.objects_touched, vec![m.keeper]);
+        let def = self.instances[instance].def;
+        let mut placings = self.placing_instances(def);
+        placings.extend(m.restamped.iter().map(|&(i, _)| i));
+        merge_unique(&mut change.instances_touched, placings);
+        change.instances_touched.sort_unstable();
     }
 
     /// The material a leaf placement inherits: walking `path` (instance ids
@@ -10043,6 +10221,16 @@ impl Document {
     /// `from`, exactly matching SketchUp: those faces are not "unpainted",
     /// they're rendering their base color.
     ///
+    /// One exception at Document scope with `from = None`: the shared solid
+    /// of a one-solid linked set ([`Document::is_linked_set`]) keeps its
+    /// empty base, since a base there would cover every copy's own color.
+    /// Each live copy with no material of its own takes `to` instead (the
+    /// copy an open session entered and hid too, so it matches the others
+    /// after the close), so the same faces turn `to` and a painted copy
+    /// keeps its color. A set whose solid already has a base shows that
+    /// base on every copy, so nothing on it is unpainted and it is left
+    /// alone. A named component's member takes `to` as its base as before.
+    ///
     /// `scope` confines the sweep to one object ([`MaterialScope::Object`])
     /// or the whole document ([`MaterialScope::Document`]) — Ctrl/Cmd+Shift
     /// vs. plain Shift in the tool. Document scope also switches every live
@@ -10096,6 +10284,38 @@ impl Document {
             return Ok(DocChange::default());
         }
 
+        // An unpainted linked set's shared solid keeps its empty base: a
+        // base there would cover every copy's own color. Its unpainted
+        // copies take `to` instead (below), so the faces that showed
+        // unpainted show `to` and a painted copy keeps its color. A solid
+        // that already has a base (an older file's) shows that base on
+        // every copy, so nothing on it is unpainted: the set is left out
+        // entirely and no copy is stamped where the stamp would not show.
+        let linked_unpainted: Vec<(ObjectId, ComponentId)> =
+            if matches!(scope, MaterialScope::Document) && from.is_none() {
+                self.components
+                    .iter()
+                    .filter(|&(c, _)| self.is_linked_set(c))
+                    .filter_map(|(c, _)| self.linked_set_solid(c).map(|o| (o, c)))
+                    .filter(|&(o, _)| self.objects[o].object.default_material.is_none())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        // The copy an open session entered is hidden for its duration, but
+        // it is still a copy: it takes `to` like the others, so after the
+        // close it matches them (its baked solid is the shared one, which
+        // keeps its empty base above).
+        let session_hid: Vec<InstanceId> = self
+            .sessions
+            .iter()
+            .filter_map(|f| match f {
+                SessionFrame::Component(s) => Some(s.hidden_instances.iter().copied()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+
         let mut faces: Vec<(ObjectId, FaceId)> = Vec::new();
         let mut back_faces: Vec<(ObjectId, FaceId)> = Vec::new();
         let mut defaults: Vec<ObjectId> = Vec::new();
@@ -10104,7 +10324,9 @@ impl Document {
                 .objects
                 .get_mut(oid)
                 .expect("collected from live objects above");
-            if rec.object.default_material == from {
+            if rec.object.default_material == from
+                && !linked_unpainted.iter().any(|&(o, _)| o == oid)
+            {
                 rec.object.default_material = to;
                 defaults.push(oid);
             }
@@ -10137,6 +10359,15 @@ impl Document {
                     rec.material = to;
                     instances.push(iid);
                 }
+            }
+        }
+        for (iid, rec) in self.instances.iter_mut() {
+            if (!rec.hidden || session_hid.contains(&iid))
+                && rec.material.is_none()
+                && linked_unpainted.iter().any(|&(_, c)| c == rec.def)
+            {
+                rec.material = to;
+                instances.push(iid);
             }
         }
 
@@ -18033,13 +18264,20 @@ impl Document {
     /// `linked` = `true`, whose only member is the node, plus one instance
     /// at [`Transform::IDENTITY`] in the node's old spot (its parent
     /// group's member list, or the outer definition's member list for a
-    /// direct member of one), with no name, the node's tags, no material,
-    /// and no attributes. Copies of the node are then placements of that
+    /// direct member of one), with no name, the node's tags, and no
+    /// attributes. Copies of the node are then placements of that
     /// definition ([`LinkPolicy::Linked`]).
     ///
+    /// A wrapped Object's base material moves onto the placement as its
+    /// instance material and is cleared on the Object (it looks the same:
+    /// a placement's material shows wherever the member has no base and
+    /// no face paint), so each placement of a linked set carries its own
+    /// color. Face paint stays on the Object. A Group's materials stay
+    /// where they are, and its placement has none.
+    ///
     /// The node keeps its identity: an Object keeps its id, name, tags,
-    /// history, attributes (`hew.part/frame` included), and owned
-    /// sketches; a Group keeps its id, name, tags, attributes, and whole
+    /// history, attributes (`hew.part/frame` included), face paint, and
+    /// owned sketches; a Group keeps its id, name, tags, attributes, and whole
     /// subtree. No geometry moves: the definition-local frame is the frame
     /// the node was in. A definition-owned node (inside an outer
     /// definition, reached by path) makes a definition-owned placement of
@@ -18120,6 +18358,16 @@ impl Document {
             definition: fold.component,
         };
         change.linked.push(wrap);
+        // An Object's base material moves onto its placement, so every
+        // later placement of the set (a copy, a joined look-alike) carries
+        // its own color and the shared member carries none.
+        let moved_material = match node {
+            NodeId::Object(o) => self.objects[o].object.default_material.take(),
+            _ => None,
+        };
+        if moved_material.is_some() {
+            self.instances[fold.instance].material = moved_material;
+        }
         let action = DocAction::WrappedLinked {
             def: fold.component,
             instance: fold.instance,
@@ -18132,6 +18380,7 @@ impl Document {
             folded_groups: fold.folded_groups,
             folded_instances: fold.folded_instances,
             reanchored: fold.reanchored,
+            moved_material,
         };
         Ok((action, wrap, change))
     }
@@ -18210,6 +18459,278 @@ impl Document {
             instances_touched: self.placing_instances(component),
             ..Default::default()
         })
+    }
+
+    /// "Link identical copies": replaces the loose world Object `joiner`
+    /// with a new placement of `set`'s linked-set definition at `pose`.
+    /// The app derives `pose` from both Objects' `hew.query.signature`
+    /// frames; the kernel checks it: the definition's one solid, posed,
+    /// must have the joiner's vertex set at the signature's 1 µm quantum
+    /// (within [`tol::LINK_POSE_MATCH`] per axis), so a wrong pose cannot
+    /// swap a different solid in.
+    ///
+    /// The placement lands at the top level and takes the joiner's name,
+    /// tags, user-hidden flag, and base material (as its instance
+    /// material), plus its attribute dictionary less the same-document
+    /// identity stamps ([`Document::copy_identity_attrs`]) and less its
+    /// `hew.part` / `frame`: the keeper's frame, on the shared member,
+    /// serves every placement through the pose. The joiner's face paint
+    /// cannot survive a shared solid and is dropped. The returned
+    /// [`LinkedJoin`] says when paint was dropped or the frames differed,
+    /// so the caller can say so. The joiner is hidden, never deleted (so
+    /// its own dictionary is no longer readable, and undo is exact), and
+    /// annotations anchored to it detach as they do on delete. The set's
+    /// member keeps its own name, tags, attributes, and face paint. When
+    /// the member has a base material (painted for all copies, or a file
+    /// from before [`Document::wrap_linked`] moved it), that base moves
+    /// onto every placement the set already has and is cleared on the
+    /// member, so each placement shows its own source's color: a red
+    /// keeper and a blue joiner stay red and blue. A reflecting `pose`
+    /// makes a mirrored placement; nothing is baked.
+    ///
+    /// Recorded as one [`DocAction::JoinedLinked`], labeled "Link
+    /// identical copies".
+    ///
+    /// # Errors
+    /// - [`DocumentError::ExplodeSessionScope`] — an editing session is
+    ///   open.
+    /// - [`DocumentError::UnknownInstance`] — `set` is stale, hidden, or
+    ///   not a world placement.
+    /// - [`DocumentError::UnknownAttr`] — `set` places a definition that is
+    ///   not a linked set (the refusal [`Document::promote_linked`] uses).
+    /// - [`DocumentError::UnknownObject`] — `joiner` is stale, hidden, or a
+    ///   definition member (the set's own member included).
+    /// - [`DocumentError::GroupedOperand`] — `joiner` is inside a group.
+    /// - [`DocumentError::Transform`] — `pose` has a non-finite entry
+    ///   ([`TransformError::Singular`]) or is singular.
+    /// - [`DocumentError::ComponentExpansionExceeded`] — the placement
+    ///   would push the expanded placement count past the bound.
+    /// - [`DocumentError::NotIdentical`] — the set's shape at `pose` is not
+    ///   the joiner's, or the set holds more than one solid.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn join_linked(
+        &mut self,
+        set: InstanceId,
+        joiner: ObjectId,
+        pose: Transform,
+    ) -> Result<(LinkedJoin, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "join_linked", set = ?set, joiner = ?joiner);
+        if !self.sessions.is_empty() {
+            return Err(DocumentError::ExplodeSessionScope);
+        }
+        if !self.node_is_live(NodeId::Instance(set)) {
+            return Err(DocumentError::UnknownInstance);
+        }
+        let set_def = self.instances[set].def;
+        if !self.is_linked_set(set_def) {
+            return Err(DocumentError::UnknownAttr);
+        }
+        let rec = self
+            .objects
+            .get(joiner)
+            .filter(|r| !r.hidden)
+            .ok_or(DocumentError::UnknownObject)?;
+        match rec.owner {
+            ObjectOwner::Definition { .. } => return Err(DocumentError::UnknownObject),
+            ObjectOwner::World { parent: Some(_) } => return Err(DocumentError::GroupedOperand),
+            ObjectOwner::World { parent: None } => {}
+        }
+        if pose.to_affine().iter().any(|v| !v.is_finite()) {
+            return Err(DocumentError::Transform(TransformError::Singular));
+        }
+        pose.inverse().map_err(DocumentError::Transform)?;
+        // No session is open, so the placement renders once: the
+        // definition's full expansion, as `place_instance` measures it.
+        if self
+            .expanded_total()
+            .saturating_add(self.def_placement_count(set_def))
+            > MAX_EXPANDED_PLACEMENTS
+        {
+            return Err(DocumentError::ComponentExpansionExceeded);
+        }
+        let keeper = self
+            .linked_set_solid(set_def)
+            .ok_or(DocumentError::NotIdentical)?;
+        let posed: Vec<Point3> = self.objects[keeper]
+            .object
+            .vertices()
+            .values()
+            .map(|v| pose.apply_point(v.position))
+            .collect();
+        let rec = &self.objects[joiner];
+        let target: Vec<Point3> = rec.object.vertices().values().map(|v| v.position).collect();
+        if !same_point_set(&posed, &target, tol::LINK_POSE_MATCH) {
+            return Err(DocumentError::NotIdentical);
+        }
+        let (name, tags) = (rec.name.clone(), rec.tags.clone());
+        let material = rec.object.default_material();
+        let dropped_face_paint = rec
+            .object
+            .faces()
+            .values()
+            .any(|f| f.material.is_some() || f.back_material.is_some());
+        let frame_differed = self.part_frame_attr(EntityRef::Object(joiner))
+            != self.part_frame_attr(EntityRef::Object(keeper));
+
+        // The shared member's base moves onto every placement the set
+        // already has (each of them is a copy of the keeper), so nothing
+        // visible changes and the new placement's own color shows.
+        let cleared_base = self.objects[keeper].object.default_material;
+        let restamped: Vec<(InstanceId, FaceMaterial)> = match cleared_base {
+            Some(_) => self
+                .instances_of(set_def)
+                .into_iter()
+                .map(|i| (i, self.instances[i].material))
+                .collect(),
+            None => Vec::new(),
+        };
+        self.apply_join_material_move(keeper, cleared_base, &restamped);
+
+        let instance = self.insert_instance_record(InstanceRecord {
+            def: set_def,
+            pose,
+            parent: None,
+            owner_def: None,
+            hidden: false,
+            name,
+            tags,
+            material,
+        });
+        self.copy_join_attrs(joiner, instance);
+        self.carry_join_user_hidden(joiner, instance);
+        self.objects[joiner].hidden = true;
+        let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(joiner)]);
+        let action = DocAction::JoinedLinked {
+            joiner,
+            instance,
+            set_def,
+            set,
+            reanchored,
+            keeper,
+            cleared_base,
+            restamped,
+        };
+        let change = self.joined_linked_change(&action);
+        self.undo.push(action);
+        self.commit_new_action();
+        self.debug_validate();
+        Ok((
+            LinkedJoin {
+                instance,
+                dropped_face_paint,
+                frame_differed,
+            },
+            change,
+        ))
+    }
+
+    /// [`Document::join_linked`]'s material move, for the op and its redo:
+    /// when the shared member `keeper` has a base (`cleared_base`), every
+    /// placement in `restamped` takes it and the member's is cleared.
+    fn apply_join_material_move(
+        &mut self,
+        keeper: ObjectId,
+        cleared_base: FaceMaterial,
+        restamped: &[(InstanceId, FaceMaterial)],
+    ) {
+        if cleared_base.is_none() {
+            return;
+        }
+        for &(i, _) in restamped {
+            self.instances[i].material = cleared_base;
+        }
+        self.objects[keeper].object.default_material = None;
+    }
+
+    /// What a [`DocAction::JoinedLinked`] did, undid, or redid: the
+    /// joiner, the placement, and the set's definition (its placement
+    /// count changed), plus, when the member's base moved, the member and
+    /// every placement drawing the set.
+    fn joined_linked_change(&self, action: &DocAction) -> DocChange {
+        let DocAction::JoinedLinked {
+            joiner,
+            instance,
+            set_def,
+            keeper,
+            cleared_base,
+            restamped,
+            ..
+        } = action
+        else {
+            unreachable!("called with a JoinedLinked action");
+        };
+        let mut change = DocChange {
+            objects_touched: vec![*joiner],
+            instances_touched: vec![*instance],
+            components_touched: vec![*set_def],
+            ..Default::default()
+        };
+        if cleared_base.is_some() {
+            change.objects_touched.push(*keeper);
+            let mut placings = self.placing_instances(*set_def);
+            placings.extend(restamped.iter().map(|&(i, _)| i));
+            merge_unique(&mut change.instances_touched, placings);
+        }
+        change
+    }
+
+    /// The one live solid a linked set's definition holds, or `None` when
+    /// it holds anything else (several members, a group, a placement): a
+    /// single Object can only be the same shape as a single solid.
+    fn linked_set_solid(&self, def: ComponentId) -> Option<ObjectId> {
+        let members: Vec<NodeId> = self.components[def]
+            .members
+            .iter()
+            .copied()
+            .filter(|&n| match n {
+                NodeId::Object(o) => self.objects.get(o).is_some_and(|r| !r.hidden),
+                NodeId::Group(g) => self.groups.get(g).is_some_and(|r| !r.hidden),
+                NodeId::Instance(i) => self.instances.get(i).is_some_and(|r| !r.hidden),
+            })
+            .collect();
+        match members.as_slice() {
+            [NodeId::Object(o)] => Some(*o),
+            _ => None,
+        }
+    }
+
+    /// `entity`'s `hew.part` / `frame` value, if it has one.
+    fn part_frame_attr(&self, entity: EntityRef) -> Option<&crate::attr::AttrValue> {
+        self.attrs
+            .get(&AttrTarget::Entity(entity))?
+            .get(PART_ATTR_NS)?
+            .get(PART_FRAME_KEY)
+    }
+
+    /// The joiner's dictionary onto its placement, for
+    /// [`Document::join_linked`] and its redo: the same-document copy rule
+    /// ([`Document::copy_identity_attrs`]) less `hew.part` / `frame`.
+    fn copy_join_attrs(&mut self, joiner: ObjectId, instance: InstanceId) {
+        let key = AttrTarget::Entity(EntityRef::Instance(instance));
+        self.copy_identity_attrs(&EntityRef::Object(joiner), EntityRef::Instance(instance));
+        if let Some(dict) = self.attrs.get_mut(&key) {
+            if let Some(ns) = dict.get_mut(PART_ATTR_NS) {
+                ns.remove(PART_FRAME_KEY);
+                if ns.is_empty() {
+                    dict.remove(PART_ATTR_NS);
+                }
+            }
+            if dict.is_empty() {
+                self.attrs.remove(&key);
+            }
+        }
+    }
+
+    /// The joiner's user-hidden flag onto its placement (a hidden board
+    /// stays hidden), for [`Document::join_linked`] and its redo. The
+    /// joiner's own flag is left as it is, so undo finds it unchanged.
+    fn carry_join_user_hidden(&mut self, joiner: ObjectId, instance: InstanceId) {
+        if self.user_hidden_objects.contains(&joiner) {
+            self.user_hidden_instances.insert(instance);
+        } else {
+            self.user_hidden_instances.remove(&instance);
+        }
     }
 
     /// What a [`DocAction::WrappedLinked`] undo or redo touched: the same
@@ -20315,6 +20836,39 @@ impl Document {
                 _ => {}
             }
         }
+        // Unlinking a placement of a linked set gives its color back to the
+        // shape: the placement's own material becomes the base of every
+        // copied Object without one (and the material of every copied
+        // member instance without one), and leaves the placement, so a
+        // joined or wrapped board unlinks into what it was. Looks the same:
+        // the placement's material only showed where those had none. A
+        // nested fork of a deep call never moves it (a copy repointed onto
+        // a shared private definition would otherwise show the first
+        // placement's color), nor does a named component's fork.
+        let moved_material = match self.instances[instance].material {
+            Some(m) if promote && self.is_linked_set(prev_def) => {
+                for (new, _) in &copied {
+                    match *new {
+                        EntityRef::Object(o) => {
+                            let obj = &mut self.objects[o].object;
+                            if obj.default_material.is_none() {
+                                obj.default_material = Some(m);
+                            }
+                        }
+                        EntityRef::Instance(i) => {
+                            let rec = &mut self.instances[i];
+                            if rec.material.is_none() {
+                                rec.material = Some(m);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                self.instances[instance].material = None;
+                Some(m)
+            }
+            _ => None,
+        };
         actions.push(DocAction::MadeUnique {
             instance,
             prev_def,
@@ -20323,6 +20877,7 @@ impl Document {
             copied,
             shared: Vec::new(),
             hidden_defs: Vec::new(),
+            moved_material,
         });
 
         if deep {
@@ -23622,6 +24177,7 @@ impl Document {
                 k("make-component").maybe_text("name", self.component_name(*component))
             }
             DocAction::PlacedInstance { .. } => k("place-instance"),
+            DocAction::JoinedLinked { .. } => k("link-identical-copies"),
             DocAction::Duplicated { .. } => k("copy"),
             // A bare wrap is the first half of a copy.
             DocAction::WrappedLinked { .. } => k("copy"),
@@ -25735,13 +26291,19 @@ impl Document {
                 folded_groups,
                 folded_instances,
                 reanchored,
+                moved_material,
             } => {
                 // Unwrap: the node and its subtree go back to their owner
                 // (world, or the outer definition) under the same ids, the
-                // parent's or the outer definition's order is restored, and
+                // parent's or the outer definition's order is restored, the
+                // Object's base material comes back from the placement, and
                 // the definition and its instance are hidden.
                 let (def, instance, node, parent, owner_def) =
                     (*def, *instance, *node, *parent, *owner_def);
+                if let (Some(_), NodeId::Object(o)) = (moved_material, node) {
+                    self.objects[o].object.default_material = *moved_material;
+                    self.instances[instance].material = None;
+                }
                 for &(o, prior) in member_prior_parents {
                     self.objects[o].owner = match owner_def {
                         None => ObjectOwner::World { parent: prior },
@@ -25782,6 +26344,40 @@ impl Document {
                     self.annotations[r.annotation].detached = r.before_detached;
                 }
                 self.wrapped_linked_change(&action, sketches_touched)
+            }
+            DocAction::JoinedLinked {
+                joiner,
+                instance,
+                reanchored,
+                keeper,
+                cleared_base,
+                restamped,
+                ..
+            } => {
+                // Unjoin: the placement goes dark with the dictionary and
+                // user-hidden flag it was given (it had none of its own),
+                // the member's base and each placement's own material come
+                // back, and the joiner comes back with its name, tags,
+                // material, face paint, flag, and dictionary untouched.
+                let (joiner, instance) = (*joiner, *instance);
+                if cleared_base.is_some() {
+                    for &(i, prev) in restamped {
+                        self.instances[i].material = prev;
+                    }
+                    self.objects[*keeper].object.default_material = *cleared_base;
+                }
+                self.instances[instance].hidden = true;
+                self.attrs
+                    .remove(&AttrTarget::Entity(EntityRef::Instance(instance)));
+                self.user_hidden_instances.remove(&instance);
+                self.objects[joiner].hidden = false;
+                // Verbatim restore, not a re-derived liveness check — see
+                // `Document::reevaluate_liveness_recorded`'s doc comment.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.before.clone();
+                    self.annotations[r.annotation].detached = r.before_detached;
+                }
+                self.joined_linked_change(&action)
             }
             &DocAction::PlacedInstance { instance } => {
                 self.instances[instance].hidden = true;
@@ -26058,6 +26654,7 @@ impl Document {
                 prev_instance_name,
                 shared,
                 hidden_defs,
+                moved_material,
                 ..
             } => {
                 let (instance, prev_def, new_def) = (*instance, *prev_def, *new_def);
@@ -26066,6 +26663,11 @@ impl Document {
                     self.set_definition_hidden(*d, nodes, false);
                 }
                 self.instances[instance].def = prev_def;
+                // The color an unlink moved onto the copies (which hide
+                // with `new_def`, keeping it) comes back to the placement.
+                if moved_material.is_some() {
+                    self.instances[instance].material = *moved_material;
+                }
                 // Restore the instance name a promotion cleared. Nothing to
                 // restore when none was promoted: by LIFO the name is what
                 // the op left, which it never touched.
@@ -26402,11 +27004,25 @@ impl Document {
                 }
                 self.paint_change(object)
             }
-            &DocAction::SetInstanceMaterial { instance, prev, .. } => {
+            DocAction::SetInstanceMaterial {
+                instance,
+                prev,
+                moved_base,
+                ..
+            } => {
+                let instance = *instance;
                 if let Some(rec) = self.instances.get_mut(instance) {
-                    rec.material = prev;
+                    rec.material = *prev;
                 }
-                self.instance_material_change(instance)
+                let mut change = self.instance_material_change(instance);
+                if let Some(m) = moved_base {
+                    for &(i, before) in &m.restamped {
+                        self.instances[i].material = before;
+                    }
+                    self.objects[m.keeper].object.default_material = m.cleared_base;
+                    self.merge_linked_base_move_change(&mut change, instance, m);
+                }
+                change
             }
             DocAction::SetFaceUvFrame {
                 object, face, prev, ..
@@ -27614,14 +28230,20 @@ impl Document {
                 folded_groups,
                 folded_instances,
                 reanchored,
+                moved_material,
                 ..
             } => {
                 // Re-wrap: re-own the subtree into the definition (the node
                 // a def-local root, everything beneath it keeping its parent
-                // link), reveal the definition and its instance, and splice
-                // the instance back into the node's spot.
+                // link), move an Object's base onto the placement again,
+                // reveal the definition and its instance, and splice the
+                // instance back into the node's spot.
                 let (def, instance, node, parent, owner_def) =
                     (*def, *instance, *node, *parent, *owner_def);
+                if let (Some(_), NodeId::Object(o)) = (moved_material, node) {
+                    self.objects[o].object.default_material = None;
+                    self.instances[instance].material = *moved_material;
+                }
                 for &(o, prior) in member_prior_parents {
                     self.objects[o].owner = ObjectOwner::Definition {
                         def,
@@ -27663,6 +28285,35 @@ impl Document {
                     self.annotations[r.annotation].detached = r.after_detached;
                 }
                 self.wrapped_linked_change(&action, sketches_touched)
+            }
+            DocAction::JoinedLinked {
+                joiner,
+                instance,
+                reanchored,
+                keeper,
+                cleared_base,
+                restamped,
+                ..
+            } => {
+                // Rejoin: the member's base moves onto the set's other
+                // placements again, the joiner's dictionary (unchanged
+                // while it was live, since any edit to it cleared the redo
+                // stack) goes onto the placement again, as does its
+                // user-hidden flag (view state, so it may have changed),
+                // and the joiner goes dark. The placement kept its material.
+                let (joiner, instance) = (*joiner, *instance);
+                self.apply_join_material_move(*keeper, *cleared_base, restamped);
+                self.instances[instance].hidden = false;
+                self.copy_join_attrs(joiner, instance);
+                self.carry_join_user_hidden(joiner, instance);
+                self.objects[joiner].hidden = true;
+                // Verbatim replay — see the undo arm and
+                // `Document::reevaluate_liveness_recorded`'s doc comment.
+                for r in reanchored {
+                    self.annotations[r.annotation].annotation = r.after.clone();
+                    self.annotations[r.annotation].detached = r.after_detached;
+                }
+                self.joined_linked_change(&action)
             }
             &DocAction::PlacedInstance { instance } => {
                 self.instances[instance].hidden = false;
@@ -27931,10 +28582,14 @@ impl Document {
                 prev_instance_name,
                 shared,
                 hidden_defs,
+                moved_material,
                 ..
             } => {
                 let (instance, prev_def, new_def) = (*instance, *prev_def, *new_def);
                 let placing_before = self.made_unique_placings(prev_def, new_def);
+                if moved_material.is_some() {
+                    self.instances[instance].material = None;
+                }
                 self.components[new_def].hidden = false;
                 self.set_def_subtree_hidden(new_def, false);
                 // Revealing `new_def` brings back the sketches it owned when
@@ -28066,11 +28721,24 @@ impl Document {
                 }
                 self.paint_change(object)
             }
-            &DocAction::SetInstanceMaterial { instance, next, .. } => {
-                if let Some(rec) = self.instances.get_mut(instance) {
-                    rec.material = next;
+            DocAction::SetInstanceMaterial {
+                instance,
+                next,
+                moved_base,
+                ..
+            } => {
+                let instance = *instance;
+                if let Some(m) = moved_base {
+                    self.apply_join_material_move(m.keeper, m.cleared_base, &m.restamped);
                 }
-                self.instance_material_change(instance)
+                if let Some(rec) = self.instances.get_mut(instance) {
+                    rec.material = *next;
+                }
+                let mut change = self.instance_material_change(instance);
+                if let Some(m) = moved_base {
+                    self.merge_linked_base_move_change(&mut change, instance, m);
+                }
+                change
             }
             DocAction::SetFaceUvFrame {
                 object, face, next, ..
@@ -29212,6 +29880,12 @@ pub const LINKED_ATTR_KEY: &str = "linked";
 /// bytes: the insert strips it from every copy, so it never lands in a
 /// document or a library file.
 const CLIPBOARD_ATTR_NS: &str = "hew.clipboard";
+/// The namespace and key of a part's frame override (`hew.part` /
+/// `frame`, read by the `api` crate's `part_frame`). The kernel names it
+/// only so [`Document::join_linked`] can leave a joiner's own frame
+/// behind: the keeper's, on the shared member, serves every placement.
+const PART_ATTR_NS: &str = "hew.part";
+const PART_FRAME_KEY: &str = "frame";
 const CLIPBOARD_ORIGIN_KEY: &str = "origin";
 const CLIPBOARD_DEF_SID_KEY: &str = "def_sid";
 
@@ -30154,6 +30828,53 @@ fn boolean_nodes_change(
         guides_touched: Vec::new(),
         linked: Vec::new(),
     }
+}
+
+/// Whether `a` and `b` are the same point set within `tol` on each axis:
+/// every point of each has a point of the other that close.
+fn same_point_set(a: &[Point3], b: &[Point3], tol: f64) -> bool {
+    covered_by(a, b, tol) && covered_by(b, a, tol)
+}
+
+/// Whether every point of `a` has a point of `b` within `tol` on each
+/// axis. `b` is bucketed into cubes of side `tol`, so a match is in one of
+/// the 27 cubes around a point's own. A coordinate too far out for an
+/// `i64` cell saturates (the cast and the neighbor step both clamp), so
+/// such points share an edge cell and the exact per-axis check still
+/// decides: nothing overflows and nothing false matches.
+fn covered_by(a: &[Point3], b: &[Point3], tol: f64) -> bool {
+    let cell = |p: Point3| {
+        (
+            (p.x / tol).floor() as i64,
+            (p.y / tol).floor() as i64,
+            (p.z / tol).floor() as i64,
+        )
+    };
+    let mut grid: BTreeMap<(i64, i64, i64), Vec<Point3>> = BTreeMap::new();
+    for &q in b {
+        grid.entry(cell(q)).or_default().push(q);
+    }
+    a.iter().all(|&p| {
+        let (x, y, z) = cell(p);
+        (-1..=1).any(|dx| {
+            (-1..=1).any(|dy| {
+                (-1..=1).any(|dz| {
+                    let key = (
+                        x.saturating_add(dx),
+                        y.saturating_add(dy),
+                        z.saturating_add(dz),
+                    );
+                    grid.get(&key).is_some_and(|qs| {
+                        qs.iter().any(|q| {
+                            (p.x - q.x).abs() <= tol
+                                && (p.y - q.y).abs() <= tol
+                                && (p.z - q.z).abs() <= tol
+                        })
+                    })
+                })
+            })
+        })
+    })
 }
 
 /// The [`DocChange`] for `delete_node`/its undo/redo: every node in the hidden

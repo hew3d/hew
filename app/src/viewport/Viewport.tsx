@@ -2542,6 +2542,15 @@ export type UnlinkAndJoinOutcome =
   | { kind: 'ok'; node: NodeRef; unlinked: number; exploded: number }
   | { kind: 'refused'; code?: string; message: string }
 
+/**
+ * What a placement paint refreshes: the redrawn world placements, plus the
+ * linked set a painted copy belongs to, whose shared solid may have handed
+ * its base to the copies (the Paint tool's `OnInstancePaintCommit`).
+ */
+export function instancePaintRefresh(instanceIds: bigint[], componentIds: bigint[]): RefreshTouched {
+  return { instanceIds, componentIds }
+}
+
 export function booleanUnlinkingPlacements(
   wasmScene: WasmScene,
   op: number,
@@ -8073,9 +8082,11 @@ export default function Viewport({
         // face, not as a whole.
         () => sessionStackRef.current,
         // A painted placement: only the world placements drawing it re-key
-        // on the new material (every outer one, for a nested placement).
-        (instanceIds) => {
-          handleSceneRefresh({ instanceIds })
+        // on the new material (every outer one, for a nested placement). A
+        // painted linked copy also names its set, whose shared solid may
+        // have handed its base to the copies.
+        (instanceIds, componentIds) => {
+          handleSceneRefresh(instancePaintRefresh(instanceIds, componentIds))
         },
         // Outline the placement a click would paint.
         (instanceId) => {

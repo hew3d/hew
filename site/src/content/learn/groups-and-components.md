@@ -50,6 +50,12 @@ Nothing splits behind your back. If a command can't keep copies linked, Hew tell
 
 **How a linked copy differs from a component.** A component is a part you named and meant to reuse: it has a name, a place in the Components panel, and a Library entry. A linked copy is what you get when you copy something: no name required, no panel entry, and no new word to learn. If a set of linked copies turns out to be a part you want to keep, Make component promotes it. The reverse never happens; a component doesn't turn back into linked copies.
 
+### Link identical copies
+
+Boards you drew one at a time are separate objects even when they are the same shape. **Edit ▸ Link identical copies** finds loose objects that are the same shape, or mirror images of each other, and turns them into one set of linked copies. Select two or more objects to limit it to those; with nothing selected it looks at the whole model. A mirror image becomes a mirrored copy of the first board.
+
+Each copy keeps its own position, name, tags, and paint. The first board's shape is the one they all share, so if the others had paint on individual faces, Hew says so: "Linked 4 copies; paint on the faces of 2 copies was dropped". It also tells you when a copy's own axes were replaced by the first board's. One undo puts every board back. Hew never does this on its own; [Model Health](/learn/import-export/) shows a "look-alike objects can be linked" notice with a **Link identical copies** button when it finds some.
+
 ## Components
 
 A component is shared geometry: one **definition**, any number of placed **instances**. Every instance has its own position, rotation, scale, and mirroring, but they all reference the same shape. Model one screw, place it eight times; fix the thread once, all eight update.

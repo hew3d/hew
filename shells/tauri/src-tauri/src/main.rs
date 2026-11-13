@@ -1421,6 +1421,7 @@ fn menu_action_for(id: &str) -> Option<&'static str> {
         "edit-make-unique" => "edit-make-unique",
         "edit-unlink" => "edit-unlink",
         "edit-unlink-all" => "edit-unlink-all",
+        "edit-link-identical-copies" => "edit-link-identical-copies",
         "edit-select-all-copies" => "edit-select-all-copies",
         "edit-flip-red" => "edit-flip-red",
         "edit-flip-green" => "edit-flip-green",
@@ -3691,6 +3692,14 @@ fn main() {
                 None,
                 None,
             )?;
+            let edit_link_identical_copies = gated_item(
+                handle,
+                &mut gated,
+                "edit-link-identical-copies",
+                lbl!("edit-link-identical-copies"),
+                None,
+                None,
+            )?;
             let edit_select_all_copies = gated_item(
                 handle,
                 &mut gated,
@@ -3759,6 +3768,7 @@ fn main() {
                 &edit_make_unique,
                 &edit_unlink,
                 &edit_unlink_all,
+                &edit_link_identical_copies,
                 &edit_select_all_copies,
                 &edit_flip_red,
                 &edit_flip_green,
@@ -3828,6 +3838,7 @@ fn main() {
                     .item(&edit_make_unique)
                     .item(&edit_unlink)
                     .item(&edit_unlink_all)
+                    .item(&edit_link_identical_copies)
                     .item(&edit_select_all_copies)
                     .item(&flip_along_menu)
                     .item(&edit_place_copy)

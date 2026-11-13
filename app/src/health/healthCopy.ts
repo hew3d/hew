@@ -318,6 +318,23 @@ export const PANEL = {
   },
 }
 
+/** The notice row for objects that are the same part (Link identical copies). */
+export const LOOK_ALIKE = {
+  /** "N look-alike objects can be linked". */
+  notice(count: number): string {
+    return plural(count, {
+      one: '# look-alike object can be linked',
+      other: '# look-alike objects can be linked',
+    })
+  },
+  get action() {
+    return t`Link identical copies`
+  },
+  get actionTitle() {
+    return t`Make these objects linked copies, so editing one changes them all`
+  },
+}
+
 /** The line under a row an action refused. */
 export function rowWarning(action: 'close' | 'thicken' | 'keep' | 'rejoin' | 'mend', reason: string): string {
   switch (action) {

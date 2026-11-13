@@ -327,6 +327,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "NotLinked" => {
             "This is already a component, not a set of linked copies, so there's nothing to change."
         }
+        "NotIdentical" => "These aren't the same shape.",
         "BooleanOperandNotSolid" => {
             "Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…"
         }

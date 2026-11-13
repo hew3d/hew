@@ -311,6 +311,16 @@ pub enum RecordedCall {
     /// `wrap_linked(kind, id)` — one Object or Group wrapped as a linked
     /// set. Additive variant (same posture as the others).
     WrapLinked { kind: u8, id: u64 },
+    /// `join_linked(set_instance, joiner, affine)` — "Link identical
+    /// copies": the loose Object `joiner` replaced by a new placement of
+    /// `set_instance`'s linked set at `affine`, one undo step;
+    /// `join_linked_report` records as this too. Additive variant (same
+    /// posture as the others).
+    JoinLinked {
+        set_instance: u64,
+        joiner: u64,
+        affine: [f64; 12],
+    },
     /// `set_linked(component, linked)` — "Make component" removing a linked
     /// set's `hew` / `linked` (`linked = false`). Additive variant.
     SetLinked { component: u64, linked: bool },

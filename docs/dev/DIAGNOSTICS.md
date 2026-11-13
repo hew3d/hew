@@ -291,8 +291,9 @@ longer replay.
 | `open_explode_session` | `instance` | open an explode session on an instance |
 | `close_explode_session` | — | close the explode session |
 | `make_unique` | `instance` | detach an instance onto a private definition copy |
-| `make_unique_by_path` | `path[]`, `cascade`, `deep` | fork the placement at the end of an instance path (outermost first) onto a private definition copy; `cascade` forks every definition on the path so only that placement diverges, `deep` also forks the definitions nested inside the leaf's. One undo entry |
-| `wrap_linked` | `kind` (0=object, 1=group), `id` | wrap one Object or Group as a linked set: a definition carrying `hew` / `linked` with the node as its only member, placed once in the node's spot. One undo entry |
+| `make_unique_by_path` | `path[]`, `cascade`, `deep` | fork the placement at the end of an instance path (outermost first) onto a private definition copy; `cascade` forks every definition on the path so only that placement diverges, `deep` also forks the definitions nested inside the leaf's; forking a linked set's placement moves its own material back onto the copy as the base of each copied Object without one. One undo entry |
+| `wrap_linked` | `kind` (0=object, 1=group), `id` | wrap one Object or Group as a linked set: a definition carrying `hew` / `linked` with the node as its only member, placed once in the node's spot; an Object's base material moves onto the placement. One undo entry |
+| `join_linked` | `set_instance`, `joiner`, `affine[12]` (finite) | Link identical copies: replace the loose world Object `joiner` with a new placement of `set_instance`'s linked set at the pose (a reflection makes a mirrored placement; a pose that does not place the set's shape onto the joiner refuses `NotIdentical`); the placement takes the joiner's name, tags, user-hidden flag, attributes less `hew.part` / `frame`, and object material as its instance material; a base material on the shared member moves onto every placement the set already has; face paint on the joiner is dropped, and the joiner is hidden. `join_linked_report` records as this call. One undo entry |
 | `set_linked` | `component`, `linked` (only `false` replays; `true` is refused) | remove `hew` / `linked` from a linked set, so it reads as a named component. One undo entry |
 | `delete_definition` | `component` | delete a component definition and every instance that places it |
 | `purge_unused` | — | delete every unused definition and material in one undo step; recorded only when something was purged |
@@ -336,7 +337,7 @@ longer replay.
 | `paint_face` | `object`, `face`, `material` (`u64::MAX` = unpaint) | paint one face |
 | `set_face_uv_frame` | `object`, `face`, `frame` (or null) | set a face's texture frame; null resets it to the planar projection default |
 | `set_object_material` | `object`, `material` (`u64::MAX` = clear) | set an object's base material |
-| `set_instance_material` | `instance`, `material` (`u64::MAX` = clear) | set a component placement's own material |
+| `set_instance_material` | `instance`, `material` (`u64::MAX` = clear) | set a component placement's own material; on a linked copy whose shared member has a base material, that base first moves onto every other copy of the set and is cleared on the member (one undo entry) |
 | `set_definition_material` | `component`, `material` (`u64::MAX` = clear) | set the base material of every object a definition owns, as one undo entry |
 | `add_guide_line` | `origin[3]`, `dir[3]` | add a construction line |
 | `add_guide_point` | `p[3]` | add a construction point |

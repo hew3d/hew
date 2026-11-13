@@ -1631,7 +1631,34 @@ below.
   surface exports `wrap_linked`, `is_linked`, `set_linked`,
   `owner_definition`, `duplicate_selection_array_linked`, and
   `duplicate_selection_placements` (with a `_linked` sibling that reports
-  the wraps; the Move grid, recorded as one call). On the bus
+  the wraps; the Move grid, recorded as one call). "Link identical
+  copies" has its kernel op: `Document::join_linked` replaces a loose
+  Object with a new placement of a linked set at a given pose (mirrored
+  when the pose reflects), in one undo entry. The pose is checked: the
+  set's solid at the pose must match the Object's vertices at the
+  signature's 1 µm quantum (`NotIdentical` otherwise; a non-finite pose
+  refuses `Transform`). The placement takes the Object's name, tags,
+  user-hidden flag, attributes (not its `hew.part` / `frame`; the
+  member's serves every placement), and object material as its instance
+  material; face paint on the Object is dropped, and the op reports that
+  and a differing frame. Color lives on the placements: a wrap moves the
+  Object's base material onto its placement, a join moves any base the
+  shared member still has onto every placement the set already has (a
+  red keeper and a blue joiner stay red and blue), and Unlink
+  (`make_unique_by_path` on a linked set) and Explode put a placement's
+  material back as the copied Object's base, so the round trip is
+  lossless. Painting one copy whose shared member still has a base
+  (Ctrl-click inside the open set, an older file) first makes the
+  join's move onto the other copies, in the same undo entry, so the
+  paint shows; a model-wide Shift-click replace of unpainted faces
+  paints the unpainted copies (the one entered in an open set too)
+  rather than the member's base, and leaves a set whose member has a
+  base alone. A linked paste copies what the source looks like
+  (`instance_appearance_material`). The wasm surface exports
+  `join_linked` and `join_linked_report` (the same call with the two
+  flags as JSON); the app's Edit > Link identical copies runs over
+  `hew.query.signature`.
+  On the bus
   a copy links by default (`copy.linked`, `true` whatever the app's
   preference; the result lists the wraps in `linked`), a linked set
   becomes a named component with `hew.component.promote`, face and edge
