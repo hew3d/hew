@@ -178,7 +178,6 @@ export class TauriFileHost implements FileHost {
     const path = await invoke<string | null>('pick_open_path', {
       filters: [{ name: t`Hew model`, extensions: ['hew'] }],
       write: true,
-      approveDir: false,
     })
     if (path === null) return null
 
@@ -244,7 +243,6 @@ export class TauriFileHost implements FileHost {
     const filePath = await invoke<string | null>('pick_open_path', {
       filters: [{ name: 'Pictures (PNG, JPEG)', extensions: ['png', 'jpg', 'jpeg'] }],
       write: false,
-      approveDir: false,
     })
     if (filePath === null) return null
     // A pick whose bytes can't be read is not a cancel: reject with
@@ -261,8 +259,8 @@ export class TauriFileHost implements FileHost {
 
   async openForImport(): Promise<ImportPick | null> {
     const { invoke } = await import('@tauri-apps/api/core')
-    // approveDir: true — the DAE texture scan below reads the picked file's
-    // siblings and textures/-style subfolders; the pick approves that too.
+    // The native picker grants sibling reads only when the picked file is
+    // COLLADA, whose texture scan needs textures/-style subfolders.
     const filePath = await invoke<string | null>('pick_open_path', {
       filters: [
         {
@@ -275,7 +273,6 @@ export class TauriFileHost implements FileHost {
         { name: t`STL model`, extensions: ['stl'] },
       ],
       write: false,
-      approveDir: true,
     })
     if (filePath === null) return null
 
@@ -288,18 +285,8 @@ export class TauriFileHost implements FileHost {
    * Prompt with ONE dialog covering `.hew` plus every import format, and
    * dispatch on the extension the user picked. `write: true` mirrors
    * `open()`'s hew-only pick (a hew pick may be Saved back in place without
-   * a further dialog); `approveDir: true` mirrors `openForImport()`'s pick
-   * (a DAE pick needs its sibling directory approved for the texture scan).
-   * Both are granted regardless of which extension is actually picked, since
-   * the extension isn't known until the dialog resolves and approval is
-   * granted at pick time — `write` is inert for every non-hew kind (nothing
-   * ever calls `write_file` against an import-format path), but `approveDir`
-   * is a real, if bounded, widening: a plain `.hew` pick through THIS dialog
-   * now also gets its containing directory approved for read/list (see
-   * `ApprovedPaths::read_dirs` in shells/tauri/src-tauri/src/main.rs), where
-   * the narrower `.hew`-only `open()` above never did. Flagged for the
-   * maintainer, not fixed here — gating `approveDir` on the resolved path's
-   * own extension would need a Rust-side change to `pick_open_path` itself.
+   * a further dialog). Rust decides additional directory read approval from
+   * the resolved extension: only COLLADA needs sibling texture access.
    */
   async openAny(): Promise<OpenPick | null> {
     const { invoke } = await import('@tauri-apps/api/core')
@@ -316,7 +303,6 @@ export class TauriFileHost implements FileHost {
         { name: t`STL model`, extensions: ['stl'] },
       ],
       write: true,
-      approveDir: true,
     })
     if (filePath === null) return null
 
