@@ -10647,8 +10647,8 @@ impl Scene {
     /// non-solid objects before an STL/3MF export, but the export itself
     /// has always included them regardless — this keeps that exact
     /// behavior rather than starting to silently drop geometry.
-    /// Unsafe STL precision/topology now returns `export_failed` instead
-    /// of silently omitting triangles. No partial file is returned.
+    /// Non-finite coordinates, or a solid that millimeter f32 rounding
+    /// itself breaks, return `export_failed` with no partial file.
     ///
     /// wasm-bindgen marshals `Option<Vec<u8>>` to `Uint8Array | undefined`.
     pub fn export(
