@@ -56,7 +56,8 @@ Sketch shapes copy too, keeping their curve identity — a copied circle is a tr
 **Array copy:** right after a copy commits, type a multiplier and press `Enter`:
 
 - `3x` (or `x3`, or `*3` — either order works) makes **3 copies total** at that same spacing, continuing along the same line — copy something 2 m over, type `5x`, and five copies march off at 2 m intervals.
-- `3/` (or `/3`) makes **3 copies dividing the distance** — place the last fence post first, then `3/` fills the run with evenly spaced posts between.
+- `3/` (or `/3`) makes **3 copies dividing the distance** — place the last fence post first, then `3/` fills the run with evenly spaced posts between. This is also how you distribute copies evenly along a move.
+- `4x,3x` (or `x4,x3`, or `*4,*3`) makes a **grid**: 4 copies along the move and 3 along a second direction, a lattice of 5 by 4 spots with the original at one corner and 19 new copies. The rows sit one move length apart. The second direction is the horizontal line across the move (green, for a move along red); for a vertical move it is red. Press an arrow key (right for red, left for green, up for blue) to choose another direction — before you press `Enter`, or afterward to re-lay the grid. The grid follows the kind of copy you made, and Hew refuses a grid of more than 1,000 copies. It is one undo step.
 
 ![A cedar fence with six evenly spaced posts and two rails, one post shown mid-copy down the line](/docs/transform-array.webp)
 

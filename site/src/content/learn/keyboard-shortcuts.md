@@ -90,6 +90,7 @@ These keys change what the *current tool operation* does. Each is covered in mor
 | `Option` (Mac) / `Ctrl` (Windows, Linux) (tap) | Move/Rotate cycles moving/rotating, then a copy (linked by default), then the other kind of copy (independent), then back to moving; the cursor badge reads `+`, `+ independent`, or nothing, and it stays on until tapped again |
 | `Option`/`Alt` (press) | Arc cycles how the arc closes: open · pie · segment |
 | `3x` or `3/` + `Enter` | Right after a copy commits: multiply it into 3 copies / divide the distance into 3 (Move; `x3` and `/3` work too) |
+| `4x,3x` + `Enter` | Right after a copy commits: a grid of 4 copies along the move and 3 along a second direction (an arrow key picks that direction) |
 | `Shift`-click | Toggle each clicked object in the selection (Select tool); same for a Shift-drag marquee |
 | `⌘`/`Option`-click (Mac) · `Ctrl`/`Alt`-click (Windows, Linux) | Add to the selection, never removing (Select tool); same for a marquee drag. On a Mac, `Ctrl`-click is a right-click, so use `⌘` or `Option` there |
 | `Shift` + `⌘`/`Option`-click (Mac) · `Shift` + `Ctrl`/`Alt`-click (Windows, Linux) | Subtract from the selection, never adding (Select tool); same for a marquee drag |

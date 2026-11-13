@@ -569,6 +569,59 @@ fn linked_copy_poses_compose_the_step_k_times_onto_the_identity() {
 }
 
 #[test]
+fn a_grid_of_placements_makes_one_set_with_the_right_poses() {
+    // C4: a 5 by 4 lattice, the original's slot skipped: 19 placements of
+    // one shared set, 20 with the wrapped original, each at i*2 in x and
+    // j*3 in y.
+    let mut doc = Document::new();
+    let o = board(&mut doc, 0.0);
+    let mut grid: Vec<Transform> = Vec::new();
+    for i in 0..5 {
+        for j in 0..4 {
+            if i == 0 && j == 0 {
+                continue;
+            }
+            grid.push(Transform::translation(Vec3::new(
+                2.0 * i as f64,
+                3.0 * j as f64,
+                0.0,
+            )));
+        }
+    }
+    assert_eq!(grid.len(), 19);
+    let (roots, change) = doc
+        .duplicate_nodes_placements(&[NodeId::Object(o)], &grid, Linked)
+        .unwrap();
+    assert_eq!(roots.len(), 19);
+    assert_eq!(change.linked.len(), 1, "one wrap for the one source");
+    let def = change.linked[0].definition;
+    assert_eq!(doc.instances_of(def).len(), 20);
+    for (r, p) in roots.iter().zip(&grid) {
+        assert_eq!(
+            doc.instance_pose(ins(*r)),
+            Some(Transform::IDENTITY.then(p))
+        );
+    }
+    assert_eq!(doc.live_object_ids().len(), 1, "no geometry was copied");
+    // The 20 expanded placements cover the lattice exactly once.
+    let mut slots: Vec<(i64, i64)> = doc
+        .expanded_placements()
+        .into_iter()
+        .filter(|(obj, _, _)| *obj == o)
+        .map(|(_, pose, _)| {
+            let q = pose.apply_point(Point3::new(0.0, 0.0, 0.0));
+            (q.x.round() as i64, q.y.round() as i64)
+        })
+        .collect();
+    slots.sort_unstable();
+    let mut want: Vec<(i64, i64)> = (0..5)
+        .flat_map(|i| (0..4).map(move |j| (2 * i, 3 * j)))
+        .collect();
+    want.sort_unstable();
+    assert_eq!(slots, want);
+}
+
+#[test]
 fn linked_array_of_n_makes_one_set_of_n_plus_one_placements() {
     let mut doc = Document::new();
     let o = board(&mut doc, 0.0);

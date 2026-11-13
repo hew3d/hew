@@ -281,6 +281,18 @@ pub enum RecordedCall {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         linked: bool,
     },
+    /// `duplicate_selection_placements(kinds, ids, affines, linked)` — the
+    /// Move tool's grid array: every listed node cloned once per placement
+    /// (`affines` is the 12-float rows concatenated), one undo step.
+    /// Additive variant (same posture as [`RecordedCall::DuplicateSelectionArray`]);
+    /// one that carries it fails to parse on older builds, loudly.
+    DuplicateSelectionPlacements {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        affines: Vec<f64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        linked: bool,
+    },
     /// `wrap_linked(kind, id)` — one Object or Group wrapped as a linked
     /// set. Additive variant (same posture as the others).
     WrapLinked { kind: u8, id: u64 },

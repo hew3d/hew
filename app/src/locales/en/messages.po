@@ -1030,8 +1030,8 @@ msgid "A group can't be moved into itself or into one of its own members. Pick a
 msgstr "A group can't be moved into itself or into one of its own members. Pick a different group, or move it out to the top level."
 
 #: src/tools/MoveTool.ts
-#~ msgid "A guide copies along one direction only — type a single count."
-#~ msgstr "A guide copies along one direction only — type a single count."
+msgid "A guide copies along one direction only — type a single count."
+msgstr "A guide copies along one direction only — type a single count."
 
 #: src/App.tsx
 msgid "A kernel error occurred — the session is no longer usable. Reload the page to recover."
@@ -7673,16 +7673,16 @@ msgid "Roughness for {selectedName}"
 msgstr "Roughness for {selectedName}"
 
 #: src/tools/MoveTool.ts
-#~ msgid "Rows across the move — press an arrow key to change them, or type another count. Enter applies."
-#~ msgstr "Rows across the move — press an arrow key to change them, or type another count. Enter applies."
+msgid "Rows across the move — press an arrow key to change them, or type another count. Enter applies."
+msgstr "Rows across the move — press an arrow key to change them, or type another count. Enter applies."
 
 #: src/tools/MoveTool.ts
-#~ msgid "Rows along {color} — press an arrow key to change them, or type another count. Enter applies."
-#~ msgstr "Rows along {color} — press an arrow key to change them, or type another count. Enter applies."
+msgid "Rows along {color} — press an arrow key to change them, or type another count. Enter applies."
+msgstr "Rows along {color} — press an arrow key to change them, or type another count. Enter applies."
 
 #: src/tools/MoveTool.ts
-#~ msgid "Rows cannot run along the move — pick another direction."
-#~ msgstr "Rows cannot run along the move — pick another direction."
+msgid "Rows cannot run along the move — pick another direction."
+msgstr "Rows cannot run along the move — pick another direction."
 
 #: src/viewport/Viewport.tsx
 msgid "Running without graphics acceleration — large models will be slow."
@@ -10109,16 +10109,16 @@ msgid "Type"
 msgstr "Type"
 
 #: src/tools/MoveTool.ts
-#~ msgid "Type 3x to make 3 copies, 3/ to divide the distance, or 4x,3x for a grid — Enter applies."
-#~ msgstr "Type 3x to make 3 copies, 3/ to divide the distance, or 4x,3x for a grid — Enter applies."
+msgid "Type 3x to make 3 copies, 3/ to divide the distance, or 4x,3x for a grid — Enter applies."
+msgstr "Type 3x to make 3 copies, 3/ to divide the distance, or 4x,3x for a grid — Enter applies."
 
 #: src/tools/RotateTool.ts
 msgid "Type 3x to make 3 copies, or 3/ to divide the angle — Enter applies."
 msgstr "Type 3x to make 3 copies, or 3/ to divide the angle — Enter applies."
 
 #: src/tools/MoveTool.ts
-msgid "Type 3x to make 3 copies, or 3/ to divide the distance — Enter applies."
-msgstr "Type 3x to make 3 copies, or 3/ to divide the distance — Enter applies."
+#~ msgid "Type 3x to make 3 copies, or 3/ to divide the distance — Enter applies."
+#~ msgstr "Type 3x to make 3 copies, or 3/ to divide the distance — Enter applies."
 
 #: src/tools/TapeMeasureTool.ts
 msgid "Type a distance and press Enter to resize the model to it — or click a point to measure from."
@@ -10149,12 +10149,12 @@ msgid "Type an exact bulge to redraw the arc you just drew — or click the firs
 msgstr "Type an exact bulge to redraw the arc you just drew — or click the first point of the next one."
 
 #: src/tools/MoveTool.ts
-#~ msgid "Type an exact distance to redo the copy you just made, 3x to add copies, 3/ to divide it, or 4x,3x for a grid — Enter applies."
-#~ msgstr "Type an exact distance to redo the copy you just made, 3x to add copies, 3/ to divide it, or 4x,3x for a grid — Enter applies."
+msgid "Type an exact distance to redo the copy you just made, 3x to add copies, 3/ to divide it, or 4x,3x for a grid — Enter applies."
+msgstr "Type an exact distance to redo the copy you just made, 3x to add copies, 3/ to divide it, or 4x,3x for a grid — Enter applies."
 
 #: src/tools/MoveTool.ts
-msgid "Type an exact distance to redo the copy you just made, or 3x / 3/ for an array — Enter applies."
-msgstr "Type an exact distance to redo the copy you just made, or 3x / 3/ for an array — Enter applies."
+#~ msgid "Type an exact distance to redo the copy you just made, or 3x / 3/ for an array — Enter applies."
+#~ msgstr "Type an exact distance to redo the copy you just made, or 3x / 3/ for an array — Enter applies."
 
 #: src/tools/MoveTool.ts
 msgid "Type an exact distance to redo the move you just made — or click a base point to start another."

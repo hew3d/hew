@@ -269,6 +269,7 @@ longer replay.
 | `delete_selection` | `kinds[]`, `ids[]` | delete several nodes as one undo step (the Delete and Cut batch delete) |
 | `reparent_nodes` | `kinds[]`, `ids[]`, `group` (or null) | move several nodes into a group, or to the top level when `group` is null, as one undo step |
 | `duplicate_selection_array` | `kinds[]`/`ids[]` (parallel node lists), `affine[12]`, `count` (1–1000; an out-of-range count fails the replay typed rather than hanging), `linked` (optional, written only when `true`) | array copy: every listed node cloned `count` times along the step, one undo step. With `linked`, each Object or Group is first wrapped as its own linked set and the copies are placements of it; a recording without the field replays as independent copies |
+| `duplicate_selection_placements` | `kinds[]`/`ids[]` (parallel node lists), `affines[]` (12 floats per placement, row-major 3x4, concatenated; 1–1000 placements, otherwise the replay fails typed), `linked` (optional, written only when `true`) | grid array copy: every listed node cloned once per placement, one undo step, placement-major. With `linked`, each Object or Group is first wrapped as its own linked set and the copies are placements of it; a recording without the field replays as independent copies |
 | `scene_undo` / `scene_redo` | — | document-level undo/redo (recorded only when it succeeded) |
 | `transform_sketch` | `sketch`, `affine[12]` | bake an affine into a free-standing sketch |
 | `transform_sketch_island` | `sketch`, `island`, `affine[12]` | rigidly move one sketch island |

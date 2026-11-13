@@ -100,11 +100,13 @@ import {
 import { surfaceSketchTransformReports } from './draftCommit'
 import {
   arrowToAxis,
+  axisLockColorName,
   editArrayBuffer,
   editLengthBuffer,
   isLengthInputKey,
   parseArraySpec,
   pointAlong,
+  type ArraySpec,
 } from './moveInput'
 import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
 import { buildGuidePreview } from './guidePreview'
@@ -183,11 +185,11 @@ export class MoveTool implements Tool {
     if (this.stage.kind === 'idle') {
       if (this.retype.isOpen) {
         return this.arrayHot !== null
-          ? t`Type an exact distance to redo the copy you just made, or 3x / 3/ for an array — Enter applies.`
+          ? this._armedArrayHint(true)
           : t`Type an exact distance to redo the move you just made — or click a base point to start another.`
       }
       if (this.arrayHot !== null) {
-        return t`Type 3x to make 3 copies, or 3/ to divide the distance — Enter applies.`
+        return this._armedArrayHint()
       }
       if (this.selection.length === 0 && this.guides.selected === null) {
         return t`Click the object you want to move.`
@@ -202,6 +204,33 @@ export class MoveTool implements Tool {
     return this.copyState === 'off'
       ? t`Click the destination — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to place a copy.`
       : t`Click where the copy lands — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to ${next}.`
+  }
+
+  /** Whether `key` is an arrow Move owns right now: only with a grid laid or
+   *  a two-count spec being typed. Otherwise arrows keep their global meaning,
+   *  as they did before grids. */
+  private _arrowsAreGridKeys(key: string): boolean {
+    if (this.arrayHot === null) return false
+    if (arrowToAxis(key) === null && key !== 'ArrowDown') return false
+    return this.arrayLast?.count2 !== undefined || this.typed.includes(',')
+  }
+
+  /** The hint while the array window is armed: what to type, and, once a
+   *  grid is laid, which way its rows run. */
+  private _armedArrayHint(redoable = false): string {
+    const hot = this.arrayHot
+    if (hot !== null && this.arrayLast?.count2 !== undefined) {
+      // Always the axis of the grid that is laid, never a pending choice.
+      const axis = this._gridAxisIndex(hot)
+      if (axis !== null) {
+        const color = axisLockColorName(axis)
+        return t`Rows along ${color} — press an arrow key to change them, or type another count. Enter applies.`
+      }
+      return t`Rows across the move — press an arrow key to change them, or type another count. Enter applies.`
+    }
+    return redoable
+      ? t`Type an exact distance to redo the copy you just made, 3x to add copies, 3/ to divide it, or 4x,3x for a grid — Enter applies.`
+      : t`Type 3x to make 3 copies, 3/ to divide the distance, or 4x,3x for a grid — Enter applies.`
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -249,6 +278,10 @@ export class MoveTool implements Tool {
     linked: boolean
     /** The copy state the copy was made under, re-armed on the retype window. */
     copyState: CopyState
+    /** The second-direction axis of the grid that is laid (null = the default direction). */
+    axis2: 0 | 1 | 2 | null
+    /** An arrow choice not yet laid (typed text was in the way); undefined = none. */
+    pendingAxis2?: 0 | 1 | 2 | null
   } | null = null
   /** Array-copy VCB buffer ("x3" / "/3"), live only while `arrayHot` is set. */
   private arrayTyped: string = ''
@@ -256,7 +289,7 @@ export class MoveTool implements Tool {
   /** The ×N / /N spec the array window last resolved, or null while the hot
    *  copy is still a single copy — a distance typed afterwards re-spaces the
    *  whole array rather than collapsing it back to one copy. */
-  private arrayLast: { mode: 'multiply' | 'divide'; count: number } | null = null
+  private arrayLast: ArraySpec | null = null
   /** The move/copy just committed, redoable at a typed distance until the
    *  next pointer action, Escape, tool switch, or other document mutation
    *  (see `RetypeSpec` and retypeWindow.ts). */
@@ -500,7 +533,9 @@ export class MoveTool implements Tool {
     if ((key >= '0' && key <= '9') || key === '-' || key === '.') return true
     // The array window's own set, unchanged: its tokens and the guarded
     // Delete keystroke, whatever the buffer holds.
-    if (this.arrayHot !== null && (arrayKey || key === 'Backspace' || key === 'Delete' || key === 'Enter')) return true
+    if (this.arrayHot !== null && (arrayKey || key === ',' || key === 'Backspace' || key === 'Delete' || key === 'Enter')) return true
+    // The grid's second direction is chosen with the arrow keys while the window is armed.
+    if (this._arrowsAreGridKeys(key)) return true
     // The retype window: with an empty buffer every other key keeps its
     // global meaning; once something is typed the length grammar follows.
     if (this.typed === '' || key === ' ') return false // Space always resets to Select
@@ -746,6 +781,10 @@ export class MoveTool implements Tool {
         if (meters !== null && this.retype.isOpen) this._retypeDistance(meters)
         return
       }
+      if (this._arrowsAreGridKeys(ev.key)) {
+        this._chooseGridAxis(arrowToAxis(ev.key))
+        return
+      }
       const next = this._editIdleBuffer(this.typed, ev.key)
       if (next !== this.typed) {
         this.typed = next
@@ -941,6 +980,7 @@ export class MoveTool implements Tool {
             historyGen: this.wasmScene.history_generation().toString(),
             linked,
             copyState: this.copyState,
+            axis2: null,
           }
           this.arrayTyped = ''
         } finally {
@@ -996,6 +1036,7 @@ export class MoveTool implements Tool {
           historyGen: this.wasmScene.history_generation().toString(),
           linked: false,
           copyState: this.copyState,
+          axis2: null,
         }
         this.arrayTyped = ''
         this.guides.landed(copy)
@@ -1058,10 +1099,8 @@ export class MoveTool implements Tool {
     if (spec === null) return this._commitHot(hot, v)
     const arr = this.arrayHot
     if (arr === null) return this._commitHot(hot, v)
-    const step: [number, number, number] =
-      spec.mode === 'divide' ? [v[0] / spec.count, v[1] / spec.count, v[2] / spec.count] : v
     try {
-      const created = this._arrayAt(arr, step, spec.count)
+      const created = this._arrayAt(arr, v, spec)
       this.arrayHot = {
         ...arr,
         vector: v,
@@ -1097,7 +1136,7 @@ export class MoveTool implements Tool {
     const multiplyKey = key === 'x' || key === 'X' || key === '*'
     if (this.arrayHot !== null) {
       // A copy is hot: the full array grammar, `/` included (divide).
-      if (/[x/]/.test(buf) || multiplyKey || key === '/') return editArrayBuffer(buf, key)
+      if (/[x/]/.test(buf) || multiplyKey || key === '/' || key === ',') return editArrayBuffer(buf, key)
     } else if (multiplyKey || /x/.test(buf)) {
       // No copy to array: an `x3` attempt is still kept as typed — so Enter
       // finds no length in it and stays inert — rather than being read as
@@ -1113,7 +1152,7 @@ export class MoveTool implements Tool {
   private _idleReadout(): string {
     if (this.typed === '') return ''
     const arrayish = /x/.test(this.typed) || (this.arrayHot !== null && /\//.test(this.typed))
-    return arrayish ? this.typed.replace('x', '×') : this._decorate(this._typedReadout())
+    return arrayish ? this.typed.replace(/x/g, '×').replace(',', ', ') : this._decorate(this._typedReadout())
   }
 
   /**
@@ -1135,31 +1174,112 @@ export class MoveTool implements Tool {
     }
   }
 
-  /** Lay `count` copies of the hot sources at multiples of `step`: the
-   *  drawn shapes through cumulative translations, the objects through one
-   *  `duplicate_selection_array` call — or a hot guide's copies through one
-   *  `duplicate_guide_array` call. */
+  /** The unit direction of a grid's second axis for a move `v`: the arrow
+   *  key's drawing axis when one was chosen, else the horizontal direction
+   *  most nearly perpendicular to the move (world Z crossed with it; world X
+   *  when the move is vertical). Null when the chosen axis runs along the move. */
+  private _gridDir2(v: readonly [number, number, number], axis2: 0 | 1 | 2 | null): [number, number, number] | null {
+    const len = Math.hypot(v[0], v[1], v[2])
+    if (len < 1e-12) return null
+    if (axis2 !== null) {
+      const d = this.axisDir(axis2)
+      const cx = d[1] * v[2] - d[2] * v[1]
+      const cy = d[2] * v[0] - d[0] * v[2]
+      const cz = d[0] * v[1] - d[1] * v[0]
+      // Near-parallel (under about 6 degrees) would stack the rows on the columns.
+      return Math.hypot(cx, cy, cz) < 0.1 * len ? null : [d[0], d[1], d[2]]
+    }
+    // z cross v
+    const hx = -v[1]
+    const hy = v[0]
+    const h = Math.hypot(hx, hy)
+    if (h < 1e-9 * len) return [1, 0, 0]
+    return [hx / h, hy / h, 0]
+  }
+
+  /** The drawing axis (0 red, 1 green, 2 blue) a laid grid's rows run along,
+   *  or null when they run along none of them. */
+  private _gridAxisIndex(hot: NonNullable<MoveTool['arrayHot']>): 0 | 1 | 2 | null {
+    if (hot.axis2 !== null) return hot.axis2
+    const d = this._gridDir2(hot.vector, null)
+    if (d === null) return null
+    for (const a of [0, 1, 2] as const) {
+      const f = this.axisDir(a)
+      if (Math.abs(f[0] * d[0] + f[1] * d[1] + f[2] * d[2]) > 0.999) return a
+    }
+    return null
+  }
+
+  /** An arrow key while the array window is armed (Down clears): chooses
+   *  the grid's second direction. A laid grid is re-laid along it at once;
+   *  otherwise the choice waits for the next two-count Enter. */
+  private _chooseGridAxis(axis: 0 | 1 | 2 | null): void {
+    const hot = this.arrayHot
+    if (hot === null) return
+    const laid = this.arrayLast?.count2 !== undefined
+    if (laid && axis !== null && this._gridDir2(hot.vector, axis) === null) {
+      this.onToast(t`Rows cannot run along the move — pick another direction.`)
+      return
+    }
+    const last = this.arrayLast
+    if (laid && last !== null && this.typed === '') {
+      if (axis !== hot.axis2) this._resolveArray(last, axis)
+    } else {
+      // Held back until Enter: the laid grid, and the hint, stay as they are.
+      this.arrayHot = { ...hot, pendingAxis2: axis }
+    }
+  }
+
+  /** The translations an array of `spec` lays down for the move `v`, in
+   *  placement order. A grid is the lattice `i*v + j*s2` (`s2` one move long
+   *  along the second direction) with the original's slot left out. */
+  private _placementSteps(
+    arr: NonNullable<MoveTool['arrayHot']>,
+    v: [number, number, number],
+    spec: ArraySpec,
+  ): [number, number, number][] {
+    if (spec.count2 === undefined) {
+      const step: [number, number, number] =
+        spec.mode === 'divide' ? [v[0] / spec.count, v[1] / spec.count, v[2] / spec.count] : v
+      const out: [number, number, number][] = []
+      for (let k = 1; k <= spec.count; k += 1) out.push([step[0] * k, step[1] * k, step[2] * k])
+      return out
+    }
+    const len = Math.hypot(v[0], v[1], v[2])
+    const d = this._gridDir2(v, arr.axis2) ?? this._gridDir2(v, null) ?? [1, 0, 0]
+    const out: [number, number, number][] = []
+    for (let i = 0; i <= spec.count; i += 1) {
+      for (let j = 0; j <= spec.count2; j += 1) {
+        if (i === 0 && j === 0) continue
+        out.push([i * v[0] + j * len * d[0], i * v[1] + j * len * d[1], i * v[2] + j * len * d[2]])
+      }
+    }
+    return out
+  }
+
+  /** Lay the array `spec` describes for the move `v` on the hot sources:
+   *  the drawn shapes through the same translations, the objects through
+   *  one call — `duplicate_selection_array` for a row, `duplicate_selection_placements`
+   *  for a grid — or a hot guide's copies through one `duplicate_guide_array` call. */
   private _arrayAt(
     arr: NonNullable<MoveTool['arrayHot']>,
-    step: [number, number, number],
-    count: number,
+    v: [number, number, number],
+    spec: ArraySpec,
   ): ArrayLanding {
     if (arr.guide !== null) {
+      const step: [number, number, number] =
+        spec.mode === 'divide' ? [v[0] / spec.count, v[1] / spec.count, v[2] / spec.count] : v
       const affine = affineToFloat64(translationAffine(step[0], step[1], step[2]))
-      const copies = this.wasmScene.duplicate_guide_array(arr.guide, affine, count)
+      const copies = this.wasmScene.duplicate_guide_array(arr.guide, affine, spec.count)
       return { guide: copies[copies.length - 1] }
     }
-    const affines: Float64Array[] = []
-    for (let k = 1; k <= count; k += 1) {
-      affines.push(affineToFloat64(translationAffine(step[0] * k, step[1] * k, step[2] * k)))
-    }
+    const steps = this._placementSteps(arr, v, spec)
+    const affines = steps.map((s) => affineToFloat64(translationAffine(s[0], s[1], s[2])))
     return {
-      nodes: copyOwnersAndDrawing(
-        this.wasmScene,
-        arr.sources,
-        arr.sketchSources,
-        affines,
-        () => this._duplicateArray(arr.sources, affineToFloat64(translationAffine(step[0], step[1], step[2])), count, arr.linked),
+      nodes: copyOwnersAndDrawing(this.wasmScene, arr.sources, arr.sketchSources, affines, () =>
+        spec.count2 === undefined
+          ? this._duplicateArray(arr.sources, affines[0], spec.count, arr.linked)
+          : this._duplicatePlacements(arr.sources, affines, arr.linked),
       ),
     }
   }
@@ -1202,10 +1322,30 @@ export class MoveTool implements Tool {
       .map(nodeRefFromJs)
   }
 
+  /** One `duplicate_selection_placements` call over `nodes` (a grid), mapped
+   *  to NodeRefs; a linked grid reports its wraps as a linked row does. */
+  private _duplicatePlacements(
+    nodes: readonly NodeRef[],
+    affines: readonly Float64Array[],
+    linked: boolean,
+  ): NodeRef[] {
+    this.linkedWraps = []
+    const kinds = new Uint8Array(nodes.map((n) => nodeKindToNumber(n.kind)))
+    const ids = new BigUint64Array(nodes.map((n) => n.id))
+    const flat = new Float64Array(affines.length * 12)
+    affines.forEach((a, i) => flat.set(a, i * 12))
+    if (linked) {
+      const result = parseLinkedResult(this.wasmScene.duplicate_selection_placements_linked(kinds, ids, flat))
+      this.linkedWraps = result.linked
+      return result.nodes
+    }
+    return this.wasmScene.duplicate_selection_placements(kinds, ids, flat, false).map(nodeRefFromJs)
+  }
+
   /** The array buffer as a readout, with the display glyph for `x` (the
    * buffer holds at most one, leading `x5` or trailing `5x`). */
   private _arrayReadout(): string {
-    return this.arrayTyped.replace('x', '×')
+    return this.arrayTyped.replace(/x/g, '×').replace(',', ', ')
   }
 
   /**
@@ -1216,19 +1356,29 @@ export class MoveTool implements Tool {
    * places the whole array — leaving a single undo step for all N copies.
    * The gesture stays hot afterwards so a different count can be re-entered.
    */
-  private _resolveArray(): void {
-    const hot = this.arrayHot
-    const spec = parseArraySpec(this.arrayTyped)
+  private _resolveArray(override?: ArraySpec, axis2?: 0 | 1 | 2 | null): void {
+    const current = this.arrayHot
+    const spec = override ?? parseArraySpec(this.arrayTyped)
     this.arrayTyped = ''
     this.onMeasurementCb('')
-    if (hot === null || spec === null) return
+    if (current === null || spec === null) return
+    // A chosen direction takes effect only if the re-lay succeeds. An arrow
+    // held back while text was typed applies now.
+    const chosen = axis2 !== undefined ? axis2 : current.pendingAxis2
+    const hot = chosen === undefined ? current : { ...current, axis2: chosen }
 
     const cap = this.wasmScene.max_array_count()
-    if (spec.count > cap) {
+    // A grid's copies are its lattice slots less the original's own.
+    const placements = spec.count2 === undefined ? spec.count : (spec.count + 1) * (spec.count2 + 1) - 1
+    if (placements > cap) {
       const limit = formatNumber(cap, { grouping: false })
       this.onToast(
         plural(cap, { one: `Array copy is limited to ${limit} copy`, other: `Array copy is limited to ${limit} copies` }),
       )
+      return
+    }
+    if (spec.count2 !== undefined && hot.guide !== null) {
+      this.onToast(t`A guide copies along one direction only — type a single count.`)
       return
     }
 
@@ -1239,26 +1389,20 @@ export class MoveTool implements Tool {
     // rather than Enter silently doing nothing. View-state toggles (hide/
     // tag visibility) don't move it, so decluttering the scene mid-gesture
     // keeps the window open.
-    if (this.wasmScene.history_generation().toString() !== hot.historyGen) {
+    if (this.wasmScene.history_generation().toString() !== current.historyGen) {
       this.arrayHot = null
       this.onToast(t`Array entry ended — the model changed since the copy`)
       return
     }
-
-    const [tx, ty, tz] = hot.vector
-    const step: [number, number, number] =
-      spec.mode === 'divide'
-        ? [tx / spec.count, ty / spec.count, tz / spec.count]
-        : [tx, ty, tz]
 
     // Retract the previous commit/resolve: always exactly one entry.
     this.wasmScene.scene_undo().free()
     const genBefore = this.wasmScene.history_generation()
     let created: ArrayLanding
     try {
-      created = this._arrayAt(hot, step, spec.count)
+      created = this._arrayAt(hot, hot.vector, spec)
     } catch (err) {
-      this._restoreAfterRefusedArray(hot, genBefore)
+      this._restoreAfterRefusedArray(current, genBefore)
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
@@ -1267,6 +1411,7 @@ export class MoveTool implements Tool {
 
     this.arrayHot = {
       ...hot,
+      pendingAxis2: undefined,
       historyGen: this.wasmScene.history_generation().toString(),
     }
     this.arrayLast = spec

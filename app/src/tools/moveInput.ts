@@ -437,6 +437,23 @@ export function editArrayBuffer(buf: string, key: string): string {
     return buf.slice(0, -1)
   }
 
+  // The grid form `x4,x3`: a comma follows a COMPLETE multiply token, and
+  // the second token takes the same rules with multiply only (no divide).
+  if (key === ',') {
+    return /^(?:[x]\d+|\d+x)$/.test(buf) ? buf + ',' : buf
+  }
+  const comma = buf.indexOf(',')
+  if (comma >= 0) {
+    if (key === '/') return buf
+    const head = buf.slice(0, comma + 1)
+    return head + editArrayToken(buf.slice(comma + 1), key)
+  }
+
+  return editArrayToken(buf, key)
+}
+
+/** One array token's editing rules (see {@link editArrayBuffer}). */
+function editArrayToken(buf: string, key: string): string {
   if (key === 'x' || key === 'X' || key === '*' || key === '/') {
     const token = key === '/' ? '/' : 'x'
     if (buf === '') return token                 // leading form: xN / /N
@@ -454,25 +471,45 @@ export function editArrayBuffer(buf: string, key: string): string {
   return buf
 }
 
-/**
- * Parse the array-copy buffer to a spec, or null when it is empty or
- * malformed (`x`, `3`, `/0`, `x0`, junk). Both token orders parse (`x5` and
- * `5x`, `/5` and `5/`). `multiply` = external array (N total copies at the
- * committed spacing, continuing along the vector); `divide` = internal
- * array (N copies evenly dividing the committed distance). Over-large
- * counts parse — the caller checks them against the kernel's cap
- * (`Scene.max_array_count()`, the single source of truth) and refuses with
- * feedback, so they aren't silently ignored.
- */
-export function parseArraySpec(
-  buf: string,
-): { mode: 'multiply' | 'divide'; count: number } | null {
-  const m = /^([xX*/])(\d+)$/.exec(buf) ?? /^(\d+)([xX*/])$/.exec(buf)
+/** A parsed array spec. `count2` is present for the grid form only. */
+export interface ArraySpec {
+  mode: 'multiply' | 'divide'
+  /** Copies along the move (original excluded). */
+  count: number
+  /** Copies along the second direction (original excluded); grid form only. */
+  count2?: number
+}
+
+function parseArrayToken(tok: string): { mode: 'multiply' | 'divide'; count: number } | null {
+  const m = /^([xX*/])(\d+)$/.exec(tok) ?? /^(\d+)([xX*/])$/.exec(tok)
   if (m === null) return null
   const [digits, mode] = /\d/.test(m[1]) ? [m[1], m[2]] : [m[2], m[1]]
   const count = parseInt(digits, 10)
   if (!Number.isFinite(count) || count < 1) return null
   return { mode: mode === '/' ? 'divide' : 'multiply', count }
+}
+
+/**
+ * Parse the array-copy buffer to a spec, or null when it is empty or
+ * malformed (`x`, `3`, `/0`, `x0`, junk). Both token orders parse (`x5` and
+ * `5x`, `/5` and `5/`). `multiply` = external array (N copies at the
+ * committed spacing, continuing along the vector); `divide` = internal
+ * array (N copies evenly dividing the committed distance). Two multiply
+ * tokens joined by a comma (`x4,x3`, `4x,3x`, `x4,3x`) are a grid: `count`
+ * copies along the move and `count2` along the second direction. Divide is
+ * accepted only alone. Over-large counts parse — the caller checks them
+ * against the kernel's cap (`Scene.max_array_count()`, the single source of
+ * truth) and refuses with feedback, so they aren't silently ignored.
+ */
+export function parseArraySpec(buf: string): ArraySpec | null {
+  const parts = buf.split(',')
+  if (parts.length > 2) return null
+  const first = parseArrayToken(parts[0])
+  if (first === null) return null
+  if (parts.length === 1) return first
+  const second = parseArrayToken(parts[1])
+  if (second === null || first.mode !== 'multiply' || second.mode !== 'multiply') return null
+  return { mode: 'multiply', count: first.count, count2: second.count }
 }
 
 /**
