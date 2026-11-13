@@ -536,6 +536,28 @@ describe('native menu labels come from the one table (docs/LOCALIZATION.md "Nati
   })
 })
 
+describe('native menu labels with line breaks', () => {
+  // The generator reads the label table from source, where a template
+  // literal's `\n` is still two characters. Left undecoded it reached the
+  // native updater dialog as a literal backslash and "n" ("…installed.\n\n…").
+  it('decodes the escapes a template literal would', async () => {
+    const { decodeTemplateEscapes } = await import('../scripts/i18n-menus-lib.mjs')
+    expect(decodeTemplateEscapes('a\\nb\\n\\nc')).toBe('a\nb\n\nc')
+    expect(decodeTemplateEscapes('tab\\there \\u00e9 \\u{1F600} \\x41 \\` \\\\')).toBe('tab\there \u00e9 \u{1F600} A ` \\')
+  })
+
+  it('every committed label holds real newlines, never the escape text', async () => {
+    const { MENU_LOCALES_DIR } = await import('../scripts/i18n-menus-lib.mjs')
+    const labels: Record<string, string> = JSON.parse(
+      readFileSync(resolve(MENU_LOCALES_DIR, 'menu.en.json'), 'utf8'),
+    )
+    const escaped = Object.entries(labels).filter(([, v]) => /\\[nrt]/.test(v)).map(([k]) => k)
+    expect(escaped, 'labels still carrying a literal backslash escape').toEqual([])
+    expect(labels['updater:failed-body']).toContain('\n\n{error}')
+    expect(labels['updater:available-body']).toContain('{current}.\n\nDownload')
+  })
+})
+
 /**
  * File ▸ Import Image… (Place Image): a GATED native item (disabled while a
  * component is open, pushed by sync_menu_state like Import…) right after

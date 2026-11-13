@@ -35,7 +35,7 @@ features:
     body: "Hew is AGPL-3.0 open source. No subscription, no account, no trial that expires, no feature tier held back for a paid plan. Everything is on GitHub."
   - title: "Every desktop, and the browser"
     icon: globe
-    body: "Native apps for macOS (Apple Silicon and Intel), Windows, and Linux, with automatic updates. The web app at app.hew3d.com runs the same kernel (not a preview). Shop Mode brings the model to your phone. Self-host it in your homelab for ultimate privacy."
+    body: "Native apps for macOS (Apple Silicon and Intel), Windows, and Linux, with built-in update checks. The web app at app.hew3d.com runs the same kernel (not a preview). Shop Mode brings the model to your phone. Self-host it in your homelab for ultimate privacy."
   - title: "Opens and saves every SketchUp version"
     icon: file
     body: "Hew opens and saves .skp files from every version of SketchUp, from SketchUp 3 through 2027: today's files (web app included), every release from 2021 on, and every older release (3 to 8 and 2013 to 2020) that older models are in. A file saves back in the version it came from, and Save As writes any of them. It also reads COLLADA .dae files from SketchUp's exporter. It exports glTF, STL, 3MF, and USDZ. Its own .hew format is a documented zip of JSON and geometry buffers, so nothing you make is locked in."

@@ -2152,6 +2152,10 @@ msgstr ""
 msgid "Combining needs a solid on both sides. To make it solid, select it and choose Object ▸ Make Solid…"
 msgstr ""
 
+#: src/i18n/nativeMenu.ts
+msgid "Command copied"
+msgstr ""
+
 #: src/palette/CommandPalette.tsx
 msgid "Command palette"
 msgstr ""
@@ -2322,6 +2326,10 @@ msgstr ""
 msgid "Copy all log entries to the clipboard"
 msgstr ""
 
+#: src/i18n/nativeMenu.ts
+msgid "Copy Command"
+msgstr ""
+
 #: src/palette/registry.ts
 msgid "copy component"
 msgstr ""
@@ -2355,6 +2363,12 @@ msgstr ""
 msgid "Copy: {label}"
 msgstr ""
 
+#: src/i18n/nativeMenu.ts
+msgid "Could not check for updates.\n"
+"\n"
+"{error}"
+msgstr ""
+
 #: src/settings/serverForm.ts
 msgid "Could not reach {host} — check the address, your connection, and that the server is up."
 msgstr ""
@@ -2382,6 +2396,12 @@ msgstr ""
 
 #: src/tools/PositionTextureTool.ts
 msgid "Could not read that value — type degrees, or a scale like 2x"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+msgid "Could not start the updater.\n"
+"\n"
+"{error}"
 msgstr ""
 
 #: src/health/healthCopy.ts
@@ -4093,6 +4113,10 @@ msgid "Hew — kernel load error"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
+msgid "Hew {version} is available — you have {current}."
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
 msgid "Hew {version} is available — you have {current}.\n"
 "\n"
 "Download and install it now?"
@@ -4171,6 +4195,10 @@ msgstr ""
 
 #: src/i18n/nativeMenu.ts
 msgid "Hew is already checking for updates."
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+msgid "Hew is running the latest version."
 msgstr ""
 
 #: src/panels/ReportBugDialog.tsx
@@ -6302,6 +6330,10 @@ msgstr ""
 
 #: src/panels/ImportReportDialog.tsx
 msgid "Open Complete"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+msgid "Open Download Page"
 msgstr ""
 
 #: src/health/healthCopy.ts
@@ -9522,9 +9554,21 @@ msgid "The thickness must be more than zero."
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
+msgid "The update command is on your clipboard. Paste it into a terminal to update Hew."
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+#~ msgid "The update could not be installed.\n"
+#~ "\n"
+#~ "{error}"
+#~ msgstr ""
+
+#: src/i18n/nativeMenu.ts
 msgid "The update could not be installed.\n"
 "\n"
-"{error}"
+"{error}\n"
+"\n"
+"You can download the new version from the Download page instead."
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
@@ -9659,6 +9703,22 @@ msgstr ""
 
 #: src/kernelErrors.ts
 msgid "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+msgid "This copy of Hew can’t update itself. Update it the same way you installed it, or get the new version from the Download page."
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+msgid "This copy of Hew was installed with Flatpak, so Flatpak updates it. To update, run this in a terminal:"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+msgid "This copy of Hew was installed with pacman, so pacman updates it. To update, run this in a terminal:"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+msgid "This copy of Hew was installed with Portage, so Portage updates it. To update, run this in a terminal:"
 msgstr ""
 
 #: src/panels/ObjectInfoPanel.tsx
@@ -10380,7 +10440,15 @@ msgid "Up"
 msgstr ""
 
 #: src/i18n/nativeMenu.ts
+msgid "Update"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
 msgid "Update available"
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+msgid "Update Help"
 msgstr ""
 
 #: src/panels/SentReportsDialog.tsx
@@ -10696,6 +10764,10 @@ msgstr ""
 msgid "You’re on {running}."
 msgstr ""
 
+#: src/i18n/nativeMenu.ts
+msgid "You’re up to date"
+msgstr ""
+
 #. placeholder {0}: only.id
 #: src/panels/FollowNoticeBar.tsx
 #~ msgid "Your bug report {0} has a reply from Hew’s developer."
@@ -10707,6 +10779,10 @@ msgstr ""
 
 #: src/panels/FollowNoticeBar.tsx
 msgid "Your bug report {onlyId} has an update from Hew’s developer."
+msgstr ""
+
+#: src/i18n/nativeMenu.ts
+msgid "Your computer will ask for your password to install it."
 msgstr ""
 
 #: src/panels/LibraryDialog.tsx

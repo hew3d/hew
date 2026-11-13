@@ -1,0 +1,178 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+---
+
+<BaseLayout
+  title="Updating Hew on Linux"
+  description="How a new version of Hew reaches you on Linux, by how you installed it: AppImage, .deb or .rpm, Flatpak, Arch, or Gentoo."
+>
+  <div class="container help-page">
+    <header class="page-head">
+      <h1>Updating Hew on Linux</h1>
+      <p class="intro">
+        Hew checks for a new version when it starts, and whenever you choose
+        Check for Updates from the menu. What happens next depends on how you
+        installed it. Find yours below.
+      </p>
+    </header>
+
+    <nav class="jump" aria-label="Kinds of install">
+      <ul>
+        <li><a href="#appimage">AppImage</a>: Hew updates itself.</li>
+        <li><a href="#deb-rpm">.deb or .rpm</a>: Hew installs the update for you.</li>
+        <li><a href="#flatpak">Flatpak</a>: Hew shows the command to run.</li>
+        <li><a href="#arch">Arch Linux</a>: Hew shows the command to run.</li>
+        <li><a href="#gentoo">Gentoo</a>: Hew shows the command to run.</li>
+      </ul>
+      <p>
+        Not sure which you have? If you downloaded a single file and ran it,
+        it is the AppImage. If you installed it with a command or from a
+        software store, it is one of the others.
+      </p>
+    </nav>
+
+    <div class="prose">
+      <h2 id="appimage">AppImage</h2>
+      <p>
+        When a new version is out, Hew asks whether to install it. Choose
+        <strong>Install</strong> and Hew replaces the AppImage file it is
+        running from, then offers to restart. The file has to be somewhere
+        you can write to, such as your home folder.
+      </p>
+      <p>
+        If an update fails, download the new AppImage from the
+        <a href="/download/">Download page</a> and put it where the old one
+        was.
+      </p>
+
+      <h2 id="deb-rpm">.deb and .rpm</h2>
+      <p>
+        When a new version is out, Hew asks whether to install it. Choose
+        <strong>Install</strong> and your computer asks for your password,
+        because installing a package changes system files. Hew then offers to
+        restart.
+      </p>
+      <p>
+        <strong>Did the update fail?</strong> Hew 1.4.0 and older could
+        stop with "invalid updater binary format" on these installs. If an
+        update from inside Hew doesn't work, download the new
+        <code>.deb</code> or <code>.rpm</code> from the
+        <a href="/download/">Download page</a> once and install it by
+        double-clicking it or with one of these commands:
+      </p>
+      <pre><code>sudo apt install ./Hew_VERSION_amd64.deb
+sudo dnf install ./Hew-VERSION-1.x86_64.rpm</code></pre>
+      <p>
+        Use the file name you downloaded, and the first command on Debian and
+        Ubuntu, the second on Fedora. After that one manual update, updates
+        work from inside Hew.
+      </p>
+
+      <h2 id="flatpak">Flatpak</h2>
+      <p>
+        Flatpak updates Hew, not Hew itself. When a new version is out, Hew
+        shows the command and a <strong>Copy Command</strong> button. Paste
+        it into a terminal:
+      </p>
+      <pre><code>flatpak update com.hew3d.Hew</code></pre>
+      <p>
+        A software store that supports Flatpak, such as GNOME Software or
+        Discover, will also offer the update.
+      </p>
+
+      <h3>"Nothing to do"</h3>
+      <p>
+        If <code>flatpak update</code> says "Nothing to do" even though a new
+        version is out, your copy was installed from a single-file bundle
+        made before Hew 1.4, which didn't know where to look for updates. Add
+        Hew's repository and reinstall once:
+      </p>
+      <pre><code>flatpak remote-add --user --if-not-exists hew https://hew3d.github.io/hew-packages/flatpak/com.hew3d.Hew.flatpakrepo
+flatpak install --user --reinstall hew com.hew3d.Hew</code></pre>
+      <p>
+        If you installed Hew for everyone on the computer, leave out
+        <code>--user</code> in both commands. Your settings and files are
+        kept. From then on, <code>flatpak update</code> works.
+      </p>
+
+      <h2 id="arch">Arch Linux</h2>
+      <p>
+        Pacman updates Hew, not Hew itself. When a new version is out, Hew
+        shows the command and a <strong>Copy Command</strong> button. Paste
+        it into a terminal:
+      </p>
+      <pre><code>sudo pacman -Syu</code></pre>
+      <p>
+        Arch doesn't support updating a single package on its own, so this
+        updates your whole system, Hew included.
+      </p>
+
+      <h2 id="gentoo">Gentoo</h2>
+      <p>
+        Portage updates Hew, not Hew itself. When a new version is out, Hew
+        shows the command and a <strong>Copy Command</strong> button. Paste
+        it into a terminal:
+      </p>
+      <pre><code>sudo emaint sync -r hew3d &amp;&amp; sudo emerge --update media-gfx/hew-bin</code></pre>
+
+      <h2 id="other">Something else</h2>
+      <p>
+        If Hew came from another package manager, update it the same way you
+        installed it. The <a href="/download/">Download page</a> always has
+        the newest version, and the
+        <a href="https://hew3d.github.io/hew-packages/">Arch, Gentoo, and
+        Flatpak packages page</a> has the install steps for those.
+      </p>
+    </div>
+  </div>
+</BaseLayout>
+
+<style>
+  .help-page {
+    padding-block: var(--space-2xl) var(--space-3xl);
+  }
+
+  .page-head {
+    max-width: 42rem;
+    margin-bottom: var(--space-xl);
+  }
+
+  .page-head .intro {
+    margin-top: var(--space-sm);
+    font-size: 1.0625rem;
+    color: var(--color-text-muted);
+  }
+
+  .jump {
+    max-width: 42rem;
+    margin-bottom: var(--space-xl);
+    color: var(--color-text-muted);
+    line-height: 1.6;
+  }
+
+  .jump ul {
+    padding-left: 1.25rem;
+    margin-bottom: var(--space-sm);
+  }
+
+  .prose {
+    max-width: 42rem;
+  }
+
+  .prose h2 {
+    margin-top: var(--space-xl);
+    font-size: 1.125rem;
+    /* Keep a heading clear of the top edge when reached by anchor. */
+    scroll-margin-top: var(--space-md);
+  }
+
+  .prose h3 {
+    margin-top: var(--space-lg);
+    font-size: 1rem;
+  }
+
+  .prose p {
+    color: var(--color-text-muted);
+    line-height: 1.6;
+  }
+</style>

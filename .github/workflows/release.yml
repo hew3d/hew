@@ -712,6 +712,11 @@ jobs:
     needs: [create-release, desktop]
     runs-on: ubuntu-latest
     steps:
+      # The assembly script and CHANGELOG.md (the manifest's `notes`) come
+      # from the tagged commit.
+      - name: Check out the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Build and upload latest.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -723,63 +728,29 @@ jobs:
             --jq '.[] | [.name, .id] | @tsv' > assets.tsv
           cat assets.tsv
 
-          sig_for() { # sig_for <asset-name> → prints signature file content
-            local id
-            id="$(awk -F'\t' -v n="$1.sig" '$1 == n {print $2}' assets.tsv)"
-            [ -n "$id" ] || { echo "::error::Missing $1.sig on the release." >&2; exit 1; }
-            gh api -H "Accept: application/octet-stream" \
-              "repos/$GITHUB_REPOSITORY/releases/assets/$id"
-          }
+          # Fetch every .sig asset to a file. Each one is its own simple
+          # command, so a failed download stops the job (an exit inside a
+          # command substitution used as one argument among many is
+          # swallowed by bash). The script then refuses a missing or empty
+          # signature, so none can ship blank while the job reports green.
+          mkdir sigs
+          while IFS=$'\t' read -r name id; do
+            case "$name" in
+              *.sig)
+                gh api -H "Accept: application/octet-stream" \
+                  "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "sigs/$name"
+                ;;
+            esac
+          done < assets.tsv
 
-          name_matching() { # name_matching <regex> → exactly one asset name
-            local m
-            m="$(cut -f1 assets.tsv | grep -E "$1" | grep -v '\.sig$' || true)"
-            [ "$(echo "$m" | grep -c .)" -eq 1 ] || {
-              echo "::error::Expected exactly one asset matching '$1', got: $m" >&2; exit 1; }
-            echo "$m"
-          }
-
-          MAC=$(name_matching '\.app\.tar\.gz$')
-          WIN_X64=$(name_matching 'x64.*-setup\.exe$')
-          WIN_ARM=$(name_matching 'arm64.*-setup\.exe$')
-          LIN_X64=$(name_matching '(amd64|x86_64).*\.AppImage$')
-          LIN_ARM=$(name_matching '(arm64|aarch64).*\.AppImage$')
-
-          url() { echo "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$1"; }
-
-          # Bare assignments, NOT inline $(sig_for …) in the jq argument list:
-          # an exit inside a command substitution used as one argument among
-          # many is swallowed by bash, and a missing .sig would ship a
-          # latest.json with a blank signature while the job reports green.
-          MAC_SIG=$(sig_for "$MAC")
-          WX_SIG=$(sig_for "$WIN_X64")
-          WA_SIG=$(sig_for "$WIN_ARM")
-          LX_SIG=$(sig_for "$LIN_X64")
-          LA_SIG=$(sig_for "$LIN_ARM")
-
-          jq -n \
-            --arg version "$VERSION" \
-            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg mac_url "$(url "$MAC")"         --arg mac_sig "$MAC_SIG" \
-            --arg wx_url  "$(url "$WIN_X64")"     --arg wx_sig  "$WX_SIG" \
-            --arg wa_url  "$(url "$WIN_ARM")"     --arg wa_sig  "$WA_SIG" \
-            --arg lx_url  "$(url "$LIN_X64")"     --arg lx_sig  "$LX_SIG" \
-            --arg la_url  "$(url "$LIN_ARM")"     --arg la_sig  "$LA_SIG" \
-            '{
-              version: $version,
-              notes: "Hew \($version)",
-              pub_date: $pub_date,
-              platforms: {
-                "darwin-x86_64":  { url: $mac_url, signature: $mac_sig },
-                "darwin-aarch64": { url: $mac_url, signature: $mac_sig },
-                "windows-x86_64": { url: $wx_url,  signature: $wx_sig },
-                "windows-aarch64":{ url: $wa_url,  signature: $wa_sig },
-                "linux-x86_64":   { url: $lx_url,  signature: $lx_sig },
-                "linux-aarch64":  { url: $la_url,  signature: $la_sig }
-              }
-            }' > latest.json
-
-          jq . latest.json
+          # Asset matching, the per-bundle-type keys, the changelog `notes`,
+          # and the guard that every signed desktop bundle is reachable all
+          # live in the script, so they run locally under
+          # packaging/tests/test_updater_manifest.py.
+          python3 .github/scripts/build-updater-manifest.py \
+            --repo "$GITHUB_REPOSITORY" --tag "$TAG" \
+            --assets assets.tsv --sigs sigs \
+            --changelog CHANGELOG.md --out latest.json
 
           # Idempotent for the same reason as the web tarball: a re-run must
           # replace, not collide with, the latest.json it uploaded before.
@@ -897,9 +868,11 @@ jobs:
             first run, or install the .deb/.rpm. Arch, Gentoo, and Flatpak
             users have native packages too, at
             [hew3d.github.io/hew-packages](https://hew3d.github.io/hew-packages/).
-          - Desktop builds update themselves; \`latest.json\` and the
-            \`.sig\` assets serve that built-in updater and are not meant
-            for manual download.
+          - Desktop builds check for new versions. The macOS and Windows
+            apps, the AppImage, and .deb/.rpm installs update in place;
+            Flatpak, Arch, and Gentoo copies update through their package
+            manager. \`latest.json\` and the \`.sig\` assets serve that
+            built-in check and are not meant for manual download.
           - Or skip installing entirely: Hew runs in the browser at
             [app.hew3d.com](https://app.hew3d.com).
           - Self-hosting the web app, and the optional relay that makes

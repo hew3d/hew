@@ -28,6 +28,10 @@ use tauri::{
 // (`read_font_file` takes an opaque token, never a path).
 mod fly_cursor;
 mod fonts;
+// How this copy was installed, and so how it updates. Only the updater reads
+// it; a build without the `updater` feature leaves it unused.
+#[cfg_attr(not(feature = "updater"), allow(dead_code))]
+mod install_channel;
 mod menu_labels;
 mod version;
 
@@ -55,19 +59,27 @@ mod relay_client;
 mod report_client;
 
 // ---------------------------------------------------------------------------
-// In-app auto-updater (compiled in via the `updater` feature — see Cargo.toml).
+// In-app updater (compiled in via the `updater` feature — see Cargo.toml).
 //
 // Talks to the signed `latest.json` published on GitHub Releases: a silent
 // check on launch, plus a manual "Check for Updates" menu item. The whole
-// flow lives shell-side — check, native confirm, download, restart prompt —
-// so the webview is granted no update-related capability, and a
-// `--no-default-features` build (Flathub/winget/AUR, which own their own
-// updates) drops the module, the menu item, and the launch check together.
+// flow lives shell-side — check, native dialog, download, restart prompt —
+// so the webview is granted no update-related capability.
+//
+// What happens after a check finds a newer version depends on how this copy
+// was installed (install_channel.rs): the macOS app, the Windows installer,
+// and the AppImage replace themselves; a native .deb or .rpm installs the
+// package after the system asks for a password; a Flatpak, pacman, Gentoo, or
+// other package-manager copy only announces the version and shows the
+// command that updates it. Every branch below reads the `UpdatePlan` and
+// nothing else, so no code here inspects the platform.
 // ---------------------------------------------------------------------------
 #[cfg(feature = "updater")]
 mod updater {
+    use crate::install_channel::{self, InstallChannel, UpdateMode, UpdatePlan};
     use std::sync::atomic::{AtomicBool, Ordering};
     use tauri::{AppHandle, Manager};
+    use tauri_plugin_clipboard_manager::ClipboardExt;
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     use tauri_plugin_updater::UpdaterExt;
 
@@ -78,6 +90,11 @@ mod updater {
     /// target (the macOS bundle swap is not atomic). One flag serializes them.
     #[derive(Default)]
     pub struct UpdateGuard(pub AtomicBool);
+
+    /// Set once an update has been installed and the restart was put off. The
+    /// running process still reports the old version, so another check would
+    /// offer the same update again; it offers the restart instead.
+    static INSTALLED_PENDING_RESTART: AtomicBool = AtomicBool::new(false);
 
     /// Run an update check against the configured endpoint — at most one at a
     /// time. A second call while one is in flight backs off: the launch check
@@ -108,29 +125,54 @@ mod updater {
     /// The check → prompt → download → restart flow itself; `run_check`
     /// serializes calls to it.
     async fn check_and_install(app: AppHandle, interactive: bool) {
+        let labels = crate::current_menu_labels(&app);
+        // Resolved before anything can replace the binary on disk; see
+        // `install_channel::current_channel`.
+        let plan = install_channel::current_plan();
+        if INSTALLED_PENDING_RESTART.load(Ordering::SeqCst) {
+            if interactive {
+                offer_restart(&app).await;
+            }
+            return;
+        }
         let updater = match app.updater() {
             Ok(updater) => updater,
             Err(err) => {
                 if interactive {
-                    error_dialog(&app, &format!("Could not start the updater.\n\n{err}"));
+                    error_dialog(
+                        &app,
+                        &labels
+                            .get("updater:start-failed-body")
+                            .replace("{error}", &err.to_string()),
+                    );
                 }
                 return;
             }
         };
         match updater.check().await {
-            Ok(Some(update)) => prompt_and_install(app, update).await,
+            Ok(Some(update)) => match plan.mode {
+                UpdateMode::NotifyOnly => notify_only(app, plan, update, interactive).await,
+                UpdateMode::SelfInstall | UpdateMode::SelfInstallElevated => {
+                    prompt_and_install(app, plan, update).await
+                }
+            },
             Ok(None) => {
                 if interactive {
                     info_dialog(
                         &app,
-                        "You’re up to date",
-                        "Hew is running the latest version.",
+                        labels.get("updater:up-to-date-title"),
+                        labels.get("updater:up-to-date-body"),
                     );
                 }
             }
             Err(err) => {
                 if interactive {
-                    error_dialog(&app, &format!("Could not check for updates.\n\n{err}"));
+                    error_dialog(
+                        &app,
+                        &labels
+                            .get("updater:check-failed-body")
+                            .replace("{error}", &err.to_string()),
+                    );
                 }
             }
         }
@@ -139,16 +181,28 @@ mod updater {
     /// Offer the found update; on acceptance, download it and offer a restart.
     /// Each prompt is a native modal, and the install replaces the running app
     /// in place (the `.app` bundle on macOS, the NSIS install on Windows, the
-    /// AppImage on Linux).
-    async fn prompt_and_install(app: AppHandle, update: tauri_plugin_updater::Update) {
+    /// AppImage or the .deb/.rpm package on Linux).
+    async fn prompt_and_install(
+        app: AppHandle,
+        plan: UpdatePlan,
+        update: tauri_plugin_updater::Update,
+    ) {
         let labels = crate::current_menu_labels(&app);
+        let mut body = labels
+            .get("updater:available-body")
+            .replace("{version}", &update.version)
+            .replace("{current}", &update.current_version);
+        if plan.mode == UpdateMode::SelfInstallElevated {
+            // A native package install runs as root: say so before the
+            // system's own password prompt appears.
+            body.push(' ');
+            body.push_str(labels.get("updater:elevated-note"));
+        }
         let install = confirm(
             &app,
+            MessageDialogKind::Info,
             labels.get("updater:available-title"),
-            &labels
-                .get("updater:available-body")
-                .replace("{version}", &update.version)
-                .replace("{current}", &update.current_version),
+            &body,
             labels.get("updater:install"),
             labels.get("updater:later"),
         )
@@ -162,20 +216,81 @@ mod updater {
         // immediately, so the restart prompt is macOS/Linux-only in practice —
         // the Windows path ends the app here. Autosave/crash-recovery covers a
         // dirty document if that happens.
-        if let Err(err) = update
-            .download_and_install(|_chunk, _total| {}, || {})
-            .await
-        {
-            error_dialog(
+        if let Err(error) = run_install(&app, &plan, &update).await {
+            // `None` is the user dismissing the password prompt: not a failure.
+            let Some(error) = error else {
+                return;
+            };
+            // Keep the error text and point at the Download page, so a failed
+            // install is never a dead end.
+            let open_download = confirm(
                 &app,
-                &labels
-                    .get("updater:failed-body")
-                    .replace("{error}", &err.to_string()),
-            );
+                MessageDialogKind::Error,
+                labels.get("updater:title"),
+                &labels.get("updater:failed-body").replace("{error}", &error),
+                labels.get("updater:open-download"),
+                labels.get("updater:close"),
+            )
+            .await;
+            if open_download {
+                open_url(install_channel::DOWNLOAD_URL);
+            }
             return;
         }
+        INSTALLED_PENDING_RESTART.store(true, Ordering::SeqCst);
+        offer_restart(&app).await;
+    }
+
+    /// Download and install `update` the way `plan` says. `Err(None)` means
+    /// the user backed out at the system's password prompt.
+    ///
+    /// A native `.deb`/`.rpm` copy downloads (and signature-checks) through
+    /// the plugin but installs with our own single `pkexec` call; see
+    /// `install_channel::install_package_elevated`. Every other copy uses the
+    /// plugin's installer.
+    async fn run_install(
+        app: &AppHandle,
+        plan: &UpdatePlan,
+        update: &tauri_plugin_updater::Update,
+    ) -> Result<(), Option<String>> {
+        #[cfg(target_os = "linux")]
+        if plan.mode == UpdateMode::SelfInstallElevated {
+            use install_channel::PackageInstall;
+            let bytes = update
+                .download(|_chunk, _total| {}, || {})
+                .await
+                .map_err(|err| Some(err.to_string()))?;
+            let work_dir = app
+                .path()
+                .app_cache_dir()
+                .map_err(|err| Some(err.to_string()))?
+                .join("update");
+            let channel = plan.channel.clone();
+            let outcome = tauri::async_runtime::spawn_blocking(move || {
+                install_channel::install_package_elevated(&channel, &bytes, &work_dir)
+            })
+            .await
+            .map_err(|err| Some(err.to_string()))?;
+            return match outcome {
+                PackageInstall::Installed => Ok(()),
+                PackageInstall::Cancelled => Err(None),
+                PackageInstall::Failed(message) => Err(Some(message)),
+            };
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (app, plan);
+        update
+            .download_and_install(|_chunk, _total| {}, || {})
+            .await
+            .map_err(|err| Some(err.to_string()))
+    }
+
+    /// Say the update is installed and offer to restart into it.
+    async fn offer_restart(app: &AppHandle) {
+        let labels = crate::current_menu_labels(app);
         let restart = confirm(
-            &app,
+            app,
+            MessageDialogKind::Info,
             labels.get("updater:installed-title"),
             labels.get("updater:installed-body"),
             labels.get("updater:restart"),
@@ -187,10 +302,90 @@ mod updater {
         }
     }
 
-    /// A modal OK/Cancel, run off the event loop: the dialog plugin forbids its
-    /// blocking API on the main thread (the file pickers take the same
-    /// `spawn_blocking` route). Returns true when the primary button is chosen.
-    async fn confirm(app: &AppHandle, title: &str, body: &str, ok: &str, cancel: &str) -> bool {
+    /// Announce a new version on a channel whose package manager installs it.
+    /// Never downloads or installs anything. The launch check names each
+    /// version once; the manual menu check always shows the notice.
+    async fn notify_only(
+        app: AppHandle,
+        plan: UpdatePlan,
+        update: tauri_plugin_updater::Update,
+        interactive: bool,
+    ) {
+        let config_dir = app.path().app_config_dir().ok();
+        if !interactive && !install_channel::should_announce(config_dir.as_deref(), &update.version)
+        {
+            return;
+        }
+        if let Some(dir) = &config_dir {
+            install_channel::write_announced(dir, &update.version);
+        }
+        let labels = crate::current_menu_labels(&app);
+        let channel_sentence = match &plan.channel {
+            InstallChannel::Flatpak => labels.get("updater:notify-flatpak"),
+            InstallChannel::Pacman => labels.get("updater:notify-pacman"),
+            InstallChannel::Gentoo => labels.get("updater:notify-gentoo"),
+            _ => labels.get("updater:notify-other"),
+        };
+        let mut body = format!(
+            "{}\n\n{}",
+            labels
+                .get("updater:notify-version")
+                .replace("{version}", &update.version)
+                .replace("{current}", &update.current_version),
+            channel_sentence
+        );
+        if let Some(command) = &plan.command {
+            body.push_str("\n\n");
+            body.push_str(command);
+        }
+        body.push_str("\n\n");
+        body.push_str(&plan.help_url);
+        let primary = if plan.command.is_some() {
+            labels.get("updater:copy-command")
+        } else {
+            labels.get("updater:update-help")
+        };
+        let chosen = confirm(
+            &app,
+            MessageDialogKind::Info,
+            labels.get("updater:available-title"),
+            &body,
+            primary,
+            labels.get("updater:later"),
+        )
+        .await;
+        if !chosen {
+            return;
+        }
+        match &plan.command {
+            Some(command) if app.clipboard().write_text(command.clone()).is_ok() => info_dialog(
+                &app,
+                labels.get("updater:copied-title"),
+                labels.get("updater:copied-body"),
+            ),
+            // No command, or the clipboard is unavailable: the help page has
+            // the same instructions.
+            _ => open_url(&plan.help_url),
+        }
+    }
+
+    /// Open a web page in the default browser. Best effort.
+    fn open_url(url: &str) {
+        let _ = tauri_plugin_opener::open_url(url, None::<&str>);
+    }
+
+    /// A modal two-button dialog, run off the event loop: the dialog plugin
+    /// forbids its blocking API on the main thread (the file pickers take the
+    /// same `spawn_blocking` route). Returns true when the primary button is
+    /// chosen.
+    async fn confirm(
+        app: &AppHandle,
+        kind: MessageDialogKind,
+        title: &str,
+        body: &str,
+        ok: &str,
+        cancel: &str,
+    ) -> bool {
         let app = app.clone();
         let title = title.to_string();
         let body = body.to_string();
@@ -200,7 +395,7 @@ mod updater {
             app.dialog()
                 .message(body)
                 .title(title)
-                .kind(MessageDialogKind::Info)
+                .kind(kind)
                 .buttons(MessageDialogButtons::OkCancelCustom(ok, cancel))
                 .blocking_show()
         })
@@ -219,9 +414,10 @@ mod updater {
 
     /// A non-blocking error dialog.
     fn error_dialog(app: &AppHandle, body: &str) {
+        let labels = crate::current_menu_labels(app);
         app.dialog()
             .message(body)
-            .title("Update")
+            .title(labels.get("updater:title"))
             .kind(MessageDialogKind::Error)
             .show(|_| {});
     }
@@ -239,9 +435,11 @@ async fn check_for_updates(app: tauri::AppHandle) {
     let _ = app;
 }
 
-/// Whether this build carries the auto-updater. The in-app menu bar shows the
-/// "Check for Updates" item only when true, so package-manager builds (which
-/// compile the updater out) never advertise an update path they don't have.
+/// Whether this build carries the update check. The in-app menu bar shows the
+/// "Check for Updates" item only when true. Every channel of a default build
+/// has it (package-manager copies are told the command to run), so it is
+/// false only for a `--no-default-features` build, which no shipped package
+/// uses.
 #[tauri::command]
 fn updater_available() -> bool {
     cfg!(feature = "updater")

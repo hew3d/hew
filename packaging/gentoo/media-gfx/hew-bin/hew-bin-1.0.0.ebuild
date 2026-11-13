@@ -36,4 +36,12 @@ src_install() {
 	insinto /usr
 	doins -r usr/*
 	fperms 0755 /usr/bin/hew /usr/bin/hew-cli
+
+	# Tell the app how it was installed (shells/tauri/src-tauri/src/
+	# install_channel.rs). The .deb's binary carries the Deb marker, which
+	# would otherwise send it to `dpkg`; Portage owns this copy, so the app
+	# only announces updates and shows the emerge command.
+	printf 'gentoo\n' > "${T}"/install-channel || die
+	insinto /usr/share/hew
+	doins "${T}"/install-channel
 }

@@ -36,9 +36,11 @@ const webTarballUrl = `https://github.com/${repo}/releases/download/v${version}/
     </div>
 
     <p class="updater-line">
-      Desktop builds keep themselves current: the macOS app, Windows install,
-      and Linux AppImage check for new releases and update in place. (.deb and
-      .rpm installs pick up new versions from this page.)
+      Hew checks for new versions when it starts. The macOS app, the Windows
+      install, and the Linux AppImage, .deb, and .rpm can install the update
+      for you. Flatpak, Arch, and Gentoo installs show you the command that
+      updates them. <a href="/download/update-help/">Updating Hew on Linux</a>
+      explains each one.
     </p>
 
     {
@@ -63,8 +65,8 @@ const webTarballUrl = `https://github.com/${repo}/releases/download/v${version}/
           <a href="https://hew3d.github.io/hew-packages/">
             Arch, Gentoo, and Flatpak packages
           </a>{' '}
-          — native, auto-updated packages for those distros and package
-          managers.
+          — native packages for those distros and package managers,
+          updated by the package manager.
         </li>
         <li>
           <a href="https://github.com/hew3d/homebrew-tap">Homebrew</a>{' '}

@@ -200,15 +200,33 @@ export const NATIVE_MENU_LABELS: Record<string, MessageDescriptor> = {
   // Window list: a document window with no title yet
   'fallback:untitled': msg`Untitled`,
 
-  // Updater dialogs (native alerts; {version} and {current} are filled in by the shell)
+  // Updater dialogs (native alerts; {version}, {current}, and {error} are filled in by the shell)
+  'updater:title': msg`Update`,
   'updater:in-progress-title': msg`Update in progress`,
   'updater:in-progress-body': msg`Hew is already checking for updates.`,
+  'updater:up-to-date-title': msg`You’re up to date`,
+  'updater:up-to-date-body': msg`Hew is running the latest version.`,
+  'updater:start-failed-body': msg`Could not start the updater.\n\n{error}`,
+  'updater:check-failed-body': msg`Could not check for updates.\n\n{error}`,
   'updater:available-title': msg`Update available`,
   'updater:available-body': msg`Hew {version} is available — you have {current}.\n\nDownload and install it now?`,
+  'updater:elevated-note': msg`Your computer will ask for your password to install it.`,
   'updater:install': msg`Install`,
   'updater:later': msg`Later`,
-  'updater:failed-body': msg`The update could not be installed.\n\n{error}`,
+  'updater:close': msg`Close`,
+  'updater:failed-body': msg`The update could not be installed.\n\n{error}\n\nYou can download the new version from the Download page instead.`,
+  'updater:open-download': msg`Open Download Page`,
   'updater:installed-title': msg`Update installed`,
   'updater:installed-body': msg`The update has been installed. Restart Hew now to use it?`,
   'updater:restart': msg`Restart`,
+  // Package-manager copies (Flatpak, Arch, Gentoo, and others) only announce an update
+  'updater:notify-version': msg`Hew {version} is available — you have {current}.`,
+  'updater:notify-flatpak': msg`This copy of Hew was installed with Flatpak, so Flatpak updates it. To update, run this in a terminal:`,
+  'updater:notify-pacman': msg`This copy of Hew was installed with pacman, so pacman updates it. To update, run this in a terminal:`,
+  'updater:notify-gentoo': msg`This copy of Hew was installed with Portage, so Portage updates it. To update, run this in a terminal:`,
+  'updater:notify-other': msg`This copy of Hew can’t update itself. Update it the same way you installed it, or get the new version from the Download page.`,
+  'updater:copy-command': msg`Copy Command`,
+  'updater:update-help': msg`Update Help`,
+  'updater:copied-title': msg`Command copied`,
+  'updater:copied-body': msg`The update command is on your clipboard. Paste it into a terminal to update Hew.`,
 }

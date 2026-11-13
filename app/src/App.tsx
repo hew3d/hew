@@ -2430,8 +2430,8 @@ export default function App() {
     return startWebLaunchCheck(getFollowHost())
   }, [])
 
-  // Whether this desktop build carries the auto-updater (package-manager
-  // builds compile it out — see the shell's `updater` feature). The in-app
+  // Whether this desktop build carries the update check (every build we ship
+  // does — see the shell's `updater` feature). The in-app
   // menu bar (Windows/Linux) shows "Check for Updates" only when true; macOS
   // reaches it through the native menu instead. Stays false on the web build,
   // where the invoke simply never resolves.

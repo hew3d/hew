@@ -11,6 +11,34 @@ import { parsePo, poLookup } from './po.mjs'
 export const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 export const MENU_LOCALES_DIR = resolve(APP_DIR, '../shells/tauri/src-tauri/locales')
 
+/**
+ * The text a `msg` template yields at runtime. The table is read from source
+ * rather than executed, so the escapes a template literal would decode
+ * (`\n` above all) must be decoded here; left raw they reach the native
+ * dialog as a literal backslash and "n".
+ */
+export function decodeTemplateEscapes(text) {
+  return text.replace(/\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[\s\S])/g, (_, e) => {
+    const wide = e.length > 1
+    switch (wide ? e[0] : e) {
+      case 'n':
+        return '\n'
+      case 't':
+        return '\t'
+      case 'r':
+        return '\r'
+      case 'u':
+        if (!wide) return e
+        return String.fromCodePoint(parseInt(e.replace(/[u{}]/g, ''), 16))
+      case 'x':
+        if (!wide) return e
+        return String.fromCharCode(parseInt(e.slice(1), 16))
+      default:
+        return e
+    }
+  })
+}
+
 /** [{ key, context, message }] from the table's source text. */
 export function readNativeMenuTable(source) {
   const rows = []
@@ -19,11 +47,11 @@ export function readNativeMenuTable(source) {
   for (const line of source.split('\n')) {
     let m = simple.exec(line)
     if (m) {
-      rows.push({ key: m[1], context: '', message: m[2] })
+      rows.push({ key: m[1], context: '', message: decodeTemplateEscapes(m[2]) })
       continue
     }
     m = ctx.exec(line)
-    if (m) rows.push({ key: m[1], context: m[2], message: m[3] })
+    if (m) rows.push({ key: m[1], context: m[2], message: decodeTemplateEscapes(m[3]) })
   }
   return rows
 }

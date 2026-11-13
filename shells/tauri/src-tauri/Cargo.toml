@@ -30,8 +30,8 @@ tauri-plugin-clipboard-manager = "2"
 # running instance: per-window-label autosave/recovery namespacing and
 # window-state.json assume one process owns the config dir.
 tauri-plugin-single-instance = "2"
-# In-app auto-updater (see the `updater` feature below). Optional so
-# package-manager builds can compile it out — they must own updates.
+# In-app updater (see the `updater` feature below). Optional so a build can
+# compile it out entirely; none of the shipped packages does.
 #
 # Without the plugin's default `zip` feature: that feature only unpacks
 # zipped Windows installers and gzipped AppImages, and Hew publishes neither
@@ -118,14 +118,16 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [features]
-# The in-app auto-updater: a check on launch plus a manual "Check for
-# Updates" menu item, talking to the signed `latest.json` published on
-# GitHub Releases. On by default, so the builds we ship directly (the
-# notarized .dmg, the NSIS installer, the AppImage) can update themselves
-# in place. Package-manager builds (Flathub, winget, AUR) own their own
-# updates, so they build with `--no-default-features` and the updater —
-# plugin, menu item, and launch check — compiles out entirely. The Homebrew
-# cask is not one of them: it installs the notarized .dmg unchanged and
-# declares `auto_updates`, leaving updates to this updater.
+# The in-app updater: a check on launch plus a manual "Check for Updates"
+# menu item, talking to the signed `latest.json` published on GitHub
+# Releases. On by default and in every package we ship. What it does with a
+# newer release depends on how the copy was installed (src/install_channel.rs):
+# the macOS app, Windows installer, and AppImage install it themselves, a
+# native .deb or .rpm installs the package after a password prompt, and
+# Flatpak, pacman, Gentoo, and other package-manager copies only announce it
+# and show the command that updates them. The Homebrew cask installs the
+# notarized .dmg unchanged and declares `auto_updates`, leaving updates to
+# this updater. Building with `--no-default-features` compiles the plugin,
+# menu item, and launch check out entirely; no shipped recipe does that.
 default = ["updater"]
 updater = ["dep:tauri-plugin-updater"]

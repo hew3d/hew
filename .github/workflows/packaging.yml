@@ -187,6 +187,28 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$TAG" layout/flatpak/hew.flatpak --repo hew3d/hew --clobber
 
+  # After the Pages publish: does an installed Flatpak actually update to
+  # this release, and does a fresh install get it? Reporting only — it runs
+  # after the publish, never gates or undoes one, and a failure here is a
+  # flag to look at the Flatpak channel (hence continue-on-error).
+  flatpak-update-smoke:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
+    needs: publish-pages
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: packaging/scripts
+      - name: Install Flatpak
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak
+      - name: Update from the previous release's bundle, then install fresh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: packaging/scripts/smoke-flatpak-update.sh "$TAG"
+
   gentoo-publish:
     if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     needs: [render, gentoo-validate]

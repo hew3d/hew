@@ -19,7 +19,7 @@ run or pushed by hand.
 | `gentoo/` | a Gentoo overlay: `media-gfx/hew-bin` ebuild, `metadata.xml`, `Manifest`, and the overlay's own `profiles/` and `metadata/` | the `hew3d/gentoo-overlay` repository, added with `eselect repository add hew3d git https://github.com/hew3d/gentoo-overlay.git` |
 | `flatpak/` | a Flatpak manifest (`com.hew3d.Hew.yml`) and AppStream metainfo | a self-hosted, GPG-signed Flatpak repo under `hew3d/hew-packages`, plus a single-file `.flatpak` bundle attached to each GitHub release |
 | `homebrew/` | a Homebrew cask (`Casks/hew.rb`) that installs the release `.dmg` and links `hew-cli` onto `PATH`, plus the tap's own `README.md` | the `hew3d/homebrew-tap` repository, installed with `brew install --cask hew3d/tap/hew` |
-| `pages/index.html` | the landing page for `hew3d.github.io/hew-packages`, with install instructions for all three | published as-is alongside the pacman/Flatpak repos |
+| `pages/index.html` | the landing page for `hew3d.github.io/hew-packages`, with install and update instructions for all three | published as-is alongside the pacman/Flatpak repos |
 | `scripts/` | the render/build/validate scripts the workflow calls; see the header comment in each for what it does | n/a — CI-only |
 
 ## Publishing pipeline
@@ -54,6 +54,10 @@ cutting a new release. Job graph:
    jobs fail; the Linux targets still publish.
 8. **homebrew-publish** — after validation passes, republishes
    `packaging/homebrew/` wholesale into `hew3d/homebrew-tap`.
+9. **flatpak-update-smoke** — after the Pages publish, installs the previous
+   release's Flatpak bundle, runs `flatpak update`, and checks the installed
+   version becomes the new one (and that a fresh install gets it). Reporting
+   only.
 
 `hew3d/hew-packages`, `hew3d/gentoo-overlay`, and `hew3d/homebrew-tap` are
 all rebuilt and
@@ -102,6 +106,55 @@ python3 -B -m unittest discover -s packaging/tests -v
 They execute the build script and published install commands against
 controlled tool doubles; the real Linux build remains in the packaging
 workflow.
+
+## How the app knows which package manager updates it
+
+Every Linux package here repackages the release `.deb`, so its binary carries
+the Deb bundle marker that Tauri's updater uses to pick an installer. Left
+alone, a Flatpak, pacman, or Gentoo copy would try to run `dpkg -i`. The app
+(`shells/tauri/src-tauri/src/install_channel.rs`) decides instead, per copy,
+first match wins:
+
+1. Inside a Flatpak sandbox (`/.flatpak-info` or `FLATPAK_ID`): `flatpak`.
+2. A marker file `share/hew/install-channel` next to the binary's `bin/`
+   directory. Its first line names the channel. Each recipe writes it:
+
+   | Recipe | Writes | Where |
+   |---|---|---|
+   | `flatpak/com.hew3d.Hew.yml` | `flatpak` | `/app/share/hew/install-channel` |
+   | `pacman/hew-bin/PKGBUILD` | `pacman` | `/usr/share/hew/install-channel` |
+   | `gentoo/media-gfx/hew-bin/*.ebuild` | `gentoo` | `/usr/share/hew/install-channel` |
+
+   Any other non-empty value means "some other package manager": the app
+   only announces updates. A third-party packager who repackages Hew should
+   write its own name there.
+3. The bundle marker in the binary. An AppImage updates itself. A Deb or Rpm
+   marker updates itself, after a password prompt, only when `dpkg-query -S`
+   or `rpm -qf` says the package manager owns the running binary; a
+   repackager the app has never heard of is treated as "some other package
+   manager" instead of being handed to `dpkg -i`.
+4. Anything else (a dev build) only announces.
+
+For the channels that only announce, the app shows the package manager's
+command (`flatpak update com.hew3d.Hew`, `sudo pacman -Syu`, `sudo emaint
+sync -r hew3d && sudo emerge --update media-gfx/hew-bin`) and a link to
+`hew3d.com/download/update-help`, which `site/src/pages/download/update-help.astro`
+serves. The Homebrew cask is untouched: it installs the notarized `.dmg`
+and its macOS updater.
+
+`tests/test_install_channel.py` runs each recipe's marker step into a
+scratch prefix, and `validate-gentoo-ebuild.sh` checks the installed
+ebuild image. After each release's packages publish, the `flatpak-update-smoke`
+job in `packaging.yml` (`scripts/smoke-flatpak-update.sh`) installs the
+previous release's bundle, updates it, and checks a fresh install reports the
+new version. It only reports; it never gates or undoes a publish.
+
+The release's `latest.json` is assembled by
+`.github/scripts/build-updater-manifest.py` (tested by
+`tests/test_updater_manifest.py`). It lists the `.deb` and `.rpm` for each
+architecture under `linux-<arch>-deb` and `linux-<arch>-rpm`, the AppImage under
+`linux-<arch>-appimage` and the bare `linux-<arch>`, and fails the release job if
+any signed desktop bundle is left out.
 
 ## Why the cask keeps the in-app updater
 

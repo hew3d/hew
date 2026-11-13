@@ -53,8 +53,10 @@ it on top of a stricter foundation:
 
 Native desktop apps for macOS, Windows, and Linux — the recommended way to
 use Hew — are on the [download page](https://hew3d.com/download) and the
-[releases page](https://github.com/hew3d/hew/releases); desktop builds
-update themselves in place. The same app also runs in any WebGL2-capable
+[releases page](https://github.com/hew3d/hew/releases); the macOS and Windows
+apps and the Linux AppImage, .deb, and .rpm can install updates themselves,
+and Flatpak, Arch, and Gentoo installs show the command that updates them
+([Linux update help](https://hew3d.com/download/update-help)). The same app also runs in any WebGL2-capable
 browser at [app.hew3d.com](https://app.hew3d.com), with nothing to install.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for what's shipped and what's

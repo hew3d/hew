@@ -43,5 +43,11 @@ sudo emerge media-gfx/hew-bin</code></pre>
 flatpak remote-add --user --if-not-exists hew https://hew3d.github.io/hew-packages/flatpak/com.hew3d.Hew.flatpakrepo
 flatpak install --user hew com.hew3d.Hew</code></pre>
 <p>Or download the <a href="flatpak/hew.flatpak">single-file bundle</a> from the latest release and install it with <code>flatpak install --user ./hew.flatpak</code> — it sets up the same remote automatically, so <code>flatpak update --user</code> keeps it current afterward.</p>
+<p>Bundles from before Hew 1.4 were made without an update address, so <code>flatpak update</code> says "Nothing to do" for them. Add the remote and reinstall once (drop <code>--user</code> if you installed system-wide) and updates work from then on:</p>
+<pre><code>flatpak remote-add --user --if-not-exists hew https://hew3d.github.io/hew-packages/flatpak/com.hew3d.Hew.flatpakrepo
+flatpak install --user --reinstall hew com.hew3d.Hew</code></pre>
+
+<h2>Updating</h2>
+<p>Hew checks for new versions when it starts and tells you when one is out. These packages are updated by your package manager, not by Hew itself: <code>flatpak update com.hew3d.Hew</code> for Flatpak, <code>sudo pacman -Syu</code> for Arch, and <code>sudo emaint sync -r hew3d &amp;&amp; sudo emerge --update media-gfx/hew-bin</code> for Gentoo. More detail is on the <a href="https://hew3d.com/download/update-help">update help page</a>.</p>
 </body>
 </html>

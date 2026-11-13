@@ -33,6 +33,10 @@ is not guaranteed: releases that change the `.hew` format say so under
 
 ### Fixed
 
+- **Updates (Linux):** A Flatpak, Arch, or Gentoo copy of Hew no longer tries to install the update itself and fails with "invalid updater binary format". These installs now say a new version is out and show the command that updates them (`flatpak update com.hew3d.Hew`, `sudo pacman -Syu`, or the `emerge` line), with a Copy Command button and a link to a new update help page at hew3d.com/download/update-help. The notice shows once per version at launch; Check for Updates always shows it. A copy installed by some other package manager is told to update the same way it was installed.
+- **Updates (Linux):** `.deb` and `.rpm` installs now update from inside Hew. The release's update file lists the `.deb` and `.rpm` for each architecture, and Hew installs the package only when the system's package manager really owns the running copy. Installing asks for your password. Dismissing the password prompt cancels the update. If an update from Hew 1.4.0 or older fails, the update help page has the steps for installing the new package by hand.
+- **Updates:** If an update can't be installed, the message now points to the Download page and has an Open Download Page button. The update dialogs no longer show a literal `\n\n` where a blank line belongs.
+- **Packages:** The Flatpak, pacman, and Gentoo packages now mark how Hew was installed, so the app knows which package manager updates it. The Flatpak install page also explains how to recover from "Nothing to do" on a bundle made before 1.4.
 - **Push/Pull:** Pushing a face clean through an Object now keeps the Object's name and tags. The result used to come back unnamed and off its tags. If the push splits the Object in two, both pieces keep them.
 
 ## [1.4.0] (2026-11-08) - The "All In" Release

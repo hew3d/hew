@@ -2152,6 +2152,10 @@ msgstr "Combining can't consume a component instance — its geometry is shared 
 msgid "Combining needs a solid on both sides. To make it solid, select it and choose Object ▸ Make Solid…"
 msgstr "Combining needs a solid on both sides. To make it solid, select it and choose Object ▸ Make Solid…"
 
+#: src/i18n/nativeMenu.ts
+msgid "Command copied"
+msgstr "Command copied"
+
 #: src/palette/CommandPalette.tsx
 msgid "Command palette"
 msgstr "Command palette"
@@ -2322,6 +2326,10 @@ msgstr "Copy a face or profile's boundary inward or outward at a set distance."
 msgid "Copy all log entries to the clipboard"
 msgstr "Copy all log entries to the clipboard"
 
+#: src/i18n/nativeMenu.ts
+msgid "Copy Command"
+msgstr "Copy Command"
+
 #: src/palette/registry.ts
 msgid "copy component"
 msgstr "copy component"
@@ -2355,6 +2363,14 @@ msgstr "Copy the selection to the clipboard, then delete it."
 msgid "Copy: {label}"
 msgstr "Copy: {label}"
 
+#: src/i18n/nativeMenu.ts
+msgid "Could not check for updates.\n"
+"\n"
+"{error}"
+msgstr "Could not check for updates.\n"
+"\n"
+"{error}"
+
 #: src/settings/serverForm.ts
 msgid "Could not reach {host} — check the address, your connection, and that the server is up."
 msgstr "Could not reach {host} — check the address, your connection, and that the server is up."
@@ -2383,6 +2399,14 @@ msgstr "Could not read that length"
 #: src/tools/PositionTextureTool.ts
 msgid "Could not read that value — type degrees, or a scale like 2x"
 msgstr "Could not read that value — type degrees, or a scale like 2x"
+
+#: src/i18n/nativeMenu.ts
+msgid "Could not start the updater.\n"
+"\n"
+"{error}"
+msgstr "Could not start the updater.\n"
+"\n"
+"{error}"
 
 #: src/health/healthCopy.ts
 msgid "Couldn't add thickness: {reason}"
@@ -4093,6 +4117,10 @@ msgid "Hew — kernel load error"
 msgstr "Hew — kernel load error"
 
 #: src/i18n/nativeMenu.ts
+msgid "Hew {version} is available — you have {current}."
+msgstr "Hew {version} is available — you have {current}."
+
+#: src/i18n/nativeMenu.ts
 msgid "Hew {version} is available — you have {current}.\n"
 "\n"
 "Download and install it now?"
@@ -4174,6 +4202,10 @@ msgstr "Hew hit an error"
 #: src/i18n/nativeMenu.ts
 msgid "Hew is already checking for updates."
 msgstr "Hew is already checking for updates."
+
+#: src/i18n/nativeMenu.ts
+msgid "Hew is running the latest version."
+msgstr "Hew is running the latest version."
 
 #: src/panels/ReportBugDialog.tsx
 msgid "Hew keeps a private key for this report on this computer and checks for a reply when it starts. No account, no email. You can stop any time under Help ▸ Sent Reports."
@@ -6305,6 +6337,10 @@ msgstr "Open as Document"
 #: src/panels/ImportReportDialog.tsx
 msgid "Open Complete"
 msgstr "Open Complete"
+
+#: src/i18n/nativeMenu.ts
+msgid "Open Download Page"
+msgstr "Open Download Page"
 
 #: src/health/healthCopy.ts
 #~ msgid "Open edges branch"
@@ -9524,12 +9560,28 @@ msgid "The thickness must be more than zero."
 msgstr "The thickness must be more than zero."
 
 #: src/i18n/nativeMenu.ts
+msgid "The update command is on your clipboard. Paste it into a terminal to update Hew."
+msgstr "The update command is on your clipboard. Paste it into a terminal to update Hew."
+
+#: src/i18n/nativeMenu.ts
+#~ msgid "The update could not be installed.\n"
+#~ "\n"
+#~ "{error}"
+#~ msgstr "The update could not be installed.\n"
+#~ "\n"
+#~ "{error}"
+
+#: src/i18n/nativeMenu.ts
 msgid "The update could not be installed.\n"
 "\n"
-"{error}"
+"{error}\n"
+"\n"
+"You can download the new version from the Download page instead."
 msgstr "The update could not be installed.\n"
 "\n"
-"{error}"
+"{error}\n"
+"\n"
+"You can download the new version from the Download page instead."
 
 #: src/i18n/nativeMenu.ts
 msgid "The update has been installed. Restart Hew now to use it?"
@@ -9664,6 +9716,22 @@ msgstr "This copy"
 #: src/kernelErrors.ts
 msgid "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
 msgstr "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
+
+#: src/i18n/nativeMenu.ts
+msgid "This copy of Hew can’t update itself. Update it the same way you installed it, or get the new version from the Download page."
+msgstr "This copy of Hew can’t update itself. Update it the same way you installed it, or get the new version from the Download page."
+
+#: src/i18n/nativeMenu.ts
+msgid "This copy of Hew was installed with Flatpak, so Flatpak updates it. To update, run this in a terminal:"
+msgstr "This copy of Hew was installed with Flatpak, so Flatpak updates it. To update, run this in a terminal:"
+
+#: src/i18n/nativeMenu.ts
+msgid "This copy of Hew was installed with pacman, so pacman updates it. To update, run this in a terminal:"
+msgstr "This copy of Hew was installed with pacman, so pacman updates it. To update, run this in a terminal:"
+
+#: src/i18n/nativeMenu.ts
+msgid "This copy of Hew was installed with Portage, so Portage updates it. To update, run this in a terminal:"
+msgstr "This copy of Hew was installed with Portage, so Portage updates it. To update, run this in a terminal:"
 
 #: src/panels/ObjectInfoPanel.tsx
 msgid "This copy only — leave empty to show the shared name"
@@ -10384,8 +10452,16 @@ msgid "Up"
 msgstr "Up"
 
 #: src/i18n/nativeMenu.ts
+msgid "Update"
+msgstr "Update"
+
+#: src/i18n/nativeMenu.ts
 msgid "Update available"
 msgstr "Update available"
+
+#: src/i18n/nativeMenu.ts
+msgid "Update Help"
+msgstr "Update Help"
 
 #: src/panels/SentReportsDialog.tsx
 msgid "Update Hew through your package manager."
@@ -10700,6 +10776,10 @@ msgstr "You’ll find replies and the report’s status under <0>Help ▸ Sent R
 msgid "You’re on {running}."
 msgstr "You’re on {running}."
 
+#: src/i18n/nativeMenu.ts
+msgid "You’re up to date"
+msgstr "You’re up to date"
+
 #. placeholder {0}: only.id
 #: src/panels/FollowNoticeBar.tsx
 #~ msgid "Your bug report {0} has a reply from Hew’s developer."
@@ -10712,6 +10792,10 @@ msgstr "Your bug report {onlyId} has a reply from Hew’s developer."
 #: src/panels/FollowNoticeBar.tsx
 msgid "Your bug report {onlyId} has an update from Hew’s developer."
 msgstr "Your bug report {onlyId} has an update from Hew’s developer."
+
+#: src/i18n/nativeMenu.ts
+msgid "Your computer will ask for your password to install it."
+msgstr "Your computer will ask for your password to install it."
 
 #: src/panels/LibraryDialog.tsx
 msgid "Your library folder needs permission again."

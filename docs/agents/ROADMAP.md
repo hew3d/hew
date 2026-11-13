@@ -11,7 +11,7 @@
 
 Hew is publicly released: the core modeling experience — draw, push/pull,
 combine, organize, and save or export a model start to finish — ships as
-native desktop apps for macOS, Windows, and Linux (with automatic updates)
+native desktop apps for macOS, Windows, and Linux (with in-app update checks)
 and as a browser app at app.hew3d.com. The release is aimed squarely at the
 3D-printing and maker audience: model something in a familiar,
 SketchUp-like interaction style and export a file a slicer accepts as
