@@ -74,8 +74,9 @@ import { hasMendWork, hasWarpedHoles, mendCandidate, readMendCensus } from '../h
 import { batchLabel, failureLine, runBatch, thickenOp } from '../health/healthBatch'
 import { ThickenDialog } from './ThickenDialog'
 import { worldBoundsForSelection, boundsExtents, type Bounds } from './objectBounds'
-import { formatLength } from '../settings/units'
-import { useLengthDisplay } from '../settings/useLengthDisplay'
+import { formatLength, formatLengthIn, formatAreaIn, formatVolumeIn } from '../settings/units'
+import { useLengthDisplay, type LengthDisplay } from '../settings/useLengthDisplay'
+import { measureSelection, type SelectionMeasure } from './measureInfo'
 import { selectionMaterials } from './selectionMaterials'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { MIN_SEGMENTS_PER_TURN } from '../tools/arcMath'
@@ -286,7 +287,7 @@ const ADD_TAG_BUTTON_STYLE: React.CSSProperties = {
 export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onSelectTag, onSelectMaterial, onToast, onShowHealth, selectedAnnotation = null, selectedGuide = null, sessionStack, sessionMembers = null, onUnlink, onMakeComponent }: Props) {
   const { t } = useLingui()
   // Re-render the length readouts when the format OR the Precision changes.
-  useLengthDisplay()
+  const lengthDisplay = useLengthDisplay()
   const selectedCount = selectedIds.length
   // --------------------------------------------------------------------------
   // Derive the node info from the scene whenever docRev or selectedIds changes.
@@ -560,6 +561,15 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
   // --------------------------------------------------------------------------
   const bounds = useMemo(
     () => worldBoundsForSelection(scene, selectedIds),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scene, docRev, selectedIds],
+  )
+
+  // Volume / Surface area / Size rows for a single or multi selection
+  // (measureInfo.ts: kernel `measure_json` per root, memoized by history
+  // generation). Null for a selection with no geometry.
+  const measure = useMemo(
+    () => measureSelection(scene, selectedIds),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [scene, docRev, selectedIds],
   )
@@ -991,6 +1001,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
           {plural(selectedCount, { one: '# selected', other: '# selected' })}
         </div>
         {bounds !== null && <BoundingBoxRow bounds={bounds} />}
+        {measure !== null && <MeasureRows measure={measure} display={lengthDisplay} />}
         {multi !== null && (
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
@@ -1382,6 +1393,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       {/* Bounding Box — world AABB extents; hidden for a mesh-less selection
        * (e.g. a Sketch, or a stale instance). */}
       {bounds !== null && <BoundingBoxRow bounds={bounds} />}
+      {measure !== null && <MeasureRows measure={measure} display={lengthDisplay} />}
 
       {/* Tags — sketches can't be tagged yet. Empty state is just the "+"
        * button next to the label: no chips, no "No tags" text. */}
@@ -1577,6 +1589,58 @@ function BoundingBoxRow({ bounds }: { bounds: Bounds }) {
         <span style={{ color: 'var(--axis-blue)' }}>Z</span> {formatLength(ez)}
       </div>
     </div>
+  )
+}
+/* oxlint-enable lingui/no-unlocalized-strings */
+
+// ---------------------------------------------------------------------------
+// MeasureRows — Volume, Surface area, and Size under the Bounding Box. Values
+// are formatted in the active display units (units.ts), display only. An open
+// leaf makes the volume meaningless, so it reads "—" with a "Not closed" note.
+// ---------------------------------------------------------------------------
+
+/* oxlint-disable lingui/no-unlocalized-strings -- axis letters and the dash glyph */
+function MeasureRows({ measure, display }: { measure: SelectionMeasure; display: LengthDisplay }) {
+  const { t } = useLingui()
+  const { format, precision } = display
+  const sizeTitle =
+    measure.sizeSource === null
+      ? t`Size along the world axes`
+      : measure.sizeSource === 'attribute'
+        ? t`Size along the part axes (set on this part)`
+        : t`Size along the part axes (from its largest face)`
+  return (
+    <>
+      <div>
+        <div style={LABEL_STYLE}><Trans>Volume</Trans></div>
+        <div style={VALUE_STYLE} data-testid="measure-volume">
+          {measure.volume === null ? (
+            <>
+              <span>—</span>
+              <span style={{ color: 'var(--text-faint, #888)' }}> <Trans>Not closed</Trans></span>
+            </>
+          ) : (
+            formatVolumeIn(measure.volume, format, precision)
+          )}
+        </div>
+      </div>
+      <div>
+        <div style={LABEL_STYLE}><Trans>Surface area</Trans></div>
+        <div style={VALUE_STYLE} data-testid="measure-area">{formatAreaIn(measure.area, format, precision)}</div>
+      </div>
+      {measure.size !== null && (
+        <div>
+          <div style={LABEL_STYLE}><Trans>Size</Trans></div>
+          <div style={VALUE_STYLE} data-testid="measure-size" title={sizeTitle}>
+            {formatLengthIn(measure.size[0], format, precision)}
+            <span style={{ color: 'var(--text-faint, #888)' }}> × </span>
+            {formatLengthIn(measure.size[1], format, precision)}
+            <span style={{ color: 'var(--text-faint, #888)' }}> × </span>
+            {formatLengthIn(measure.size[2], format, precision)}
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 /* oxlint-enable lingui/no-unlocalized-strings */

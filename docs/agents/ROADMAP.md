@@ -903,7 +903,10 @@ below.
   API) with every object and nested tag path following the new name
 - An Object Info panel for renaming, tagging, and checking an object's
   solid status; with several objects selected it tags them all at once,
-  showing the tags they share
+  showing the tags they share. It also reads Volume, Surface area, and
+  Size in the display units (summed over a selection, a group, or an
+  instance; a dash with "Not closed" when any leaf is open), from the
+  wasm `measure_json`, which shares `hew.query.measure`'s builder
 - A Components panel listing every component definition with its live
   instance count; rename and delete (deleting a definition removes every
   instance that places it, confirmed when it has any); Purge Unused

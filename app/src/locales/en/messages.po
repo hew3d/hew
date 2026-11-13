@@ -5910,6 +5910,10 @@ msgstr "Not available"
 msgid "Not available in the browser build yet."
 msgstr "Not available in the browser build yet."
 
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Not closed"
+msgstr "Not closed"
+
 #: src/palette/registry.ts
 msgid "note"
 msgstr "note"
@@ -8465,8 +8469,21 @@ msgstr "sidebar"
 
 #. Library list column header
 #: src/panels/library/LibraryListHead.tsx
+#: src/panels/ObjectInfoPanel.tsx
 msgid "Size"
 msgstr "Size"
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Size along the part axes (from its largest face)"
+msgstr "Size along the part axes (from its largest face)"
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Size along the part axes (set on this part)"
+msgstr "Size along the part axes (set on this part)"
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Size along the world axes"
+msgstr "Size along the world axes"
 
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Sketch"
@@ -8756,6 +8773,10 @@ msgstr "Style"
 #: src/viewport/placementBoolean.ts
 msgid "Subtract"
 msgstr "Subtract"
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Surface area"
+msgstr "Surface area"
 
 #: src/palette/registry.ts
 msgid "svg"
@@ -9525,6 +9546,10 @@ msgstr "Theme"
 #: src/kernelErrors.ts
 msgid "There is no drawing step in progress to finish."
 msgstr "There is no drawing step in progress to finish."
+
+#: src/kernelErrors.ts
+msgid "There is nothing in that selection to measure."
+msgstr "There is nothing in that selection to measure."
 
 #: src/App.tsx
 msgid "There is nothing to revert."
@@ -10474,6 +10499,10 @@ msgstr "Views, scenes, and zoom fly into place, and orbiting coasts to a stop. T
 #: src/scenes/scenesModel.ts
 msgid "Visible tags"
 msgstr "Visible tags"
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Volume"
+msgstr "Volume"
 
 #. One-letter label for the width of a part
 #. One-letter label for the width of a part

@@ -6663,6 +6663,36 @@ impl Scene {
         Ok(v.to_string())
     }
 
+    /// `hew.query.measure`'s result JSON for one world node: `{ volume, area,
+    /// bbox, extents, leaf_count, open_leaves }` (volume is null when any
+    /// leaf is open; hidden members still measure). `kind` is `0` = object,
+    /// `1` = group, `2` = instance.
+    ///
+    /// # Errors
+    /// - `NotPlaced` — the node has no world placement: a stale handle, or a
+    ///   nested group member that needs a path to place.
+    /// - `NoGeometry` — the node holds no geometry to measure.
+    /// - any other kernel refusal (e.g. `TooManyOccurrences`) keeps its code.
+    pub fn measure_json(&self, kind: u8, id: u64) -> Result<String, ApiError> {
+        let node = node_id(kind, id)?;
+        let occ = self
+            .doc
+            .occurrence_at(&[], node)
+            .ok_or_else(|| ApiError::new("NotPlaced", "no world placement for that node"))?;
+        let v = api::commands::query::measure_result(&self.doc, occ).map_err(|e| match e {
+            api::commands::CmdError::Params(m) => ApiError::new("NoGeometry", &m),
+            other => api_err(&other, &format!("{other:?}")),
+        })?;
+        Ok(v.to_string())
+    }
+
+    /// The document's epoch: bumped when the document is replaced (a load),
+    /// so a cache keyed on [`Scene::history_generation`] alone can tell a
+    /// swapped document from an unchanged one.
+    pub fn document_epoch(&self) -> u64 {
+        self.doc.document_epoch()
+    }
+
     /// The containing group handle of a node, or `None` if it is top-level (or
     /// the node handle is stale/hidden). `kind` is `0` = object, `1` = group.
     pub fn node_parent(&self, kind: u8, id: u64) -> Result<Option<u64>, ApiError> {
@@ -20249,6 +20279,97 @@ mod tests {
         assert!(v["generation"].is_u64() && v["epoch"].is_u64());
         let err = scene.part_frame_json(0, o ^ 0xffff_0000_0000).unwrap_err();
         assert!(err.0.starts_with("NotPlaced"), "got {}", err.0);
+    }
+
+    /// `measure_json` answers `hew.query.measure`'s result for a world node
+    /// (the same builder the bus uses) and refuses a stale handle typed.
+    #[test]
+    fn measure_json_reports_a_single_object() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 0.25).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&scene.measure_json(0, o).unwrap()).unwrap();
+        assert!((v["volume"].as_f64().unwrap() - 0.25).abs() < 1e-9);
+        assert!((v["area"].as_f64().unwrap() - 3.0).abs() < 1e-9);
+        assert_eq!(v["leaf_count"], 1);
+        assert_eq!(v["open_leaves"], 0);
+    }
+
+    #[test]
+    fn measure_json_refuses_a_stale_handle_not_placed() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 0.25).unwrap();
+        let err = scene.measure_json(0, o ^ 0xffff_0000_0000).unwrap_err();
+        assert!(err.0.starts_with("NotPlaced"), "got {}", err.0);
+    }
+
+    /// A group (kind 1) sums its leaves.
+    #[test]
+    fn measure_json_group_sums_two_leaves() {
+        let mut scene = Scene::new();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let o1 = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
+        let o2 = scene.extrude_region(s2, r2, 2.0).unwrap();
+        let g = scene.group_nodes(&[0, 0], &[o1, o2]).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&scene.measure_json(1, g).unwrap()).unwrap();
+        assert!((v["volume"].as_f64().unwrap() - 3.0).abs() < 1e-9);
+        // 6 faces of the unit cube + (2*1 + 4*(1*2)) for the 1x1x2 box.
+        assert!((v["area"].as_f64().unwrap() - 16.0).abs() < 1e-9);
+        assert_eq!(v["leaf_count"], 2);
+        assert_eq!(v["open_leaves"], 0);
+    }
+
+    /// An instance (kind 2) measures through its pose: a 2x scale multiplies
+    /// volume by 8 and area by 4, and a mirror leaves both positive.
+    #[test]
+    fn measure_json_instance_applies_scaled_and_flipped_poses() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        let scaled = scene
+            .place_instance(
+                comp,
+                &[2.0, 0.0, 0.0, 5.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0],
+            )
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&scene.measure_json(2, scaled).unwrap()).unwrap();
+        assert!((v["volume"].as_f64().unwrap() - 8.0).abs() < 1e-9, "{v}");
+        assert!((v["area"].as_f64().unwrap() - 24.0).abs() < 1e-9, "{v}");
+        let flipped = scene
+            .place_instance(
+                comp,
+                &[-1.0, 0.0, 0.0, 9.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&scene.measure_json(2, flipped).unwrap()).unwrap();
+        assert!((v["volume"].as_f64().unwrap() - 1.0).abs() < 1e-9, "{v}");
+        assert!((v["area"].as_f64().unwrap() - 6.0).abs() < 1e-9, "{v}");
+    }
+
+    /// A group with no leaves holds no geometry: `NoGeometry`.
+    #[test]
+    fn measure_json_empty_group_is_no_geometry() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.group_nodes(&[0], &[o]).unwrap();
+        scene.delete_node(0, o).unwrap();
+        let err = scene.measure_json(1, g).unwrap_err();
+        assert!(err.0.starts_with("NoGeometry"), "got {}", err.0);
+    }
+
+    #[test]
+    fn document_epoch_is_exposed() {
+        let scene = Scene::new();
+        assert_eq!(scene.document_epoch(), scene.doc.document_epoch());
     }
 
     /// `reparent_nodes` moves a live node into a group across the FFI as
