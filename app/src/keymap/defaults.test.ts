@@ -63,7 +63,7 @@ describe('default bindings', () => {
     expect(b['save-as']).toEqual(['Ctrl+Shift+S'])
     expect(b['print']).toEqual(['Ctrl+P'])
     expect(b['undo']).toEqual(['Ctrl+Z'])
-    expect(b['redo']).toEqual(['Ctrl+Shift+Z'])
+    expect(b['redo']).toEqual(['Ctrl+Shift+Z', 'Ctrl+Y'])
     expect(b['edit-cut']).toEqual(['Ctrl+X'])
     expect(b['edit-copy']).toEqual(['Ctrl+C'])
     expect(b['edit-paste']).toEqual(['Ctrl+V'])
@@ -112,6 +112,12 @@ describe('default bindings', () => {
 
   it('leaves Cmd+K to Rectangle on macOS: the palette has only Cmd+/ there', () => {
     expect(effective({ isMac: true, isDesktop: true })['open-palette']).toEqual(['Meta+/'])
+  })
+
+  it('adds Ctrl+Y as a second redo binding everywhere except macOS', () => {
+    expect(effective({ isMac: false, isDesktop: true })['redo']).toEqual(['Ctrl+Shift+Z', 'Ctrl+Y'])
+    expect(effective({ isMac: true, isDesktop: true })['redo']).toEqual(['Shift+Meta+Z'])
+    expect(effective({ isMac: true, isDesktop: false })['redo']).toEqual(['Shift+Meta+Z'])
   })
 
   it('leads Delete with the key the platform calls delete', () => {

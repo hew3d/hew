@@ -68,7 +68,7 @@ Recovery snapshots are an emergency net, not a save system. Save normally, and t
 
 ## Undo history
 
-Undo (`⌘Z` / `Ctrl+Z`) and redo (`⇧⌘Z` / `Ctrl+Shift+Z`) span the whole document — every modeling operation, transform, paint, rename, and delete. History lives for the session; it isn't stored in the file. The Edit menu names the specific step you're about to undo or redo ("Undo Push/Pull," "Redo Move"), not just the bare verb.
+Undo (`⌘Z` / `Ctrl+Z`) and redo (`⇧⌘Z` / `Ctrl+Shift+Z` or `Ctrl+Y`) span the whole document — every modeling operation, transform, paint, rename, and delete. History lives for the session; it isn't stored in the file. The Edit menu names the specific step you're about to undo or redo ("Undo Push/Pull," "Redo Move"), not just the bare verb.
 
 Your view is the one exception to both rules above. It's saved with the file, so reopening a model brings back the last view you had it framed in, but changing it is never an undo step — panning, orbiting, or walking around isn't something you'd want an accidental `Ctrl+Z` to reverse.
 

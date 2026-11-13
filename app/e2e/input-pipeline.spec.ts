@@ -277,6 +277,34 @@ test('Ctrl+Z undoes and Ctrl+Shift+Z redoes through the live keydown path', asyn
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
 })
 
+test('Ctrl+Y redoes through the live keydown path, but not inside a text field', async ({ page }) => {
+  await setup(page)
+
+  await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [1, 1, 0], 1))
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
+
+  await page.keyboard.press('Control+z')
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 0)
+
+  // Focus a text field: its native Ctrl+Y must not redo the scene.
+  await page.evaluate(() => {
+    const input = document.createElement('input')
+    input.id = 'ctrl-y-probe'
+    document.body.appendChild(input)
+    input.focus()
+  })
+  await page.keyboard.press('Control+y')
+  await page.waitForTimeout(150)
+  expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(0)
+
+  await page.evaluate(() => {
+    document.getElementById('ctrl-y-probe')?.remove()
+    ;(document.activeElement as HTMLElement | null)?.blur()
+  })
+  await page.keyboard.press('Control+y')
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
+})
+
 // ---------------------------------------------------------------------------
 // Group / Ungroup through the real keyboard binding (not the menu)
 // ---------------------------------------------------------------------------

@@ -92,7 +92,7 @@ edge." Three strategies, in priority order:
   `page.mouse` targets. Covers the Rectangle→Push/Pull typed journey, Arc
   typed-bulge entry, Escape cancel, click-selection (SelectTool ray-pick +
   dock context follow), the Delete-key handler, and the Ctrl+Z /
-  Ctrl+Shift+Z bindings.
+  Ctrl+Shift+Z / Ctrl+Y bindings.
   Keep it small: geometry correctness stays in kernel tests; per-op behavior
   stays in `tools.spec.ts` — only *wiring* belongs here. Gotcha discovered
   while writing it: a chord on a world axis axis-snaps the bulge cursor back

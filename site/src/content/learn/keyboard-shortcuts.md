@@ -41,7 +41,7 @@ Polygon, Follow Me, Dimension, Protractor, Slice, Section Plane, and Edit Vertex
 | Print | `⌘P` | `Ctrl+P` |
 | Close window | `⌘W` (desktop) | `Ctrl+W` (desktop) |
 | Undo | `⌘Z` | `Ctrl+Z` |
-| Redo | `⇧⌘Z` | `Ctrl+Shift+Z` |
+| Redo | `⇧⌘Z` | `Ctrl+Shift+Z` or `Ctrl+Y` |
 | Select All | `⌘A` | `Ctrl+A` |
 | Select None | `⇧⌘A` | `Ctrl+Shift+A` |
 | Invert Selection | — | — |

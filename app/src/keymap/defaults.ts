@@ -66,7 +66,8 @@ export function defaultBindings({ isMac, isDesktop }: KeymapPlatform): Bindings 
 
     // ---- Edit ----
     'undo': ['Mod+Z'],
-    'redo': ['Mod+Shift+Z'],
+    // Ctrl+Y is SketchUp on Windows' redo; Cmd+Y is not redo on macOS.
+    'redo': ['Mod+Shift+Z', ...(isMac ? [] : ['Ctrl+Y'])],
     'edit-cut': ['Mod+X'],
     'edit-copy': ['Mod+C'],
     'edit-paste': ['Mod+V'],
