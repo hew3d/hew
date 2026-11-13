@@ -269,7 +269,7 @@ fn attr_target_schema() -> serde_json::Value {
             {
                 "type": "object",
                 "properties": {
-                    "face": { "description": "a face locator: {object, at}, {object, ray}, or {\"$face\": \"label#key\"}" }
+                    "face": { "description": "a face locator: {object | path, at}, {object | path, ray}, or {\"$face\": \"label#key\"}; path is an occurrence path ending at the object, at and ray in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement" }
                 },
                 "required": ["face"],
                 "additionalProperties": false
@@ -277,7 +277,7 @@ fn attr_target_schema() -> serde_json::Value {
             {
                 "type": "object",
                 "properties": {
-                    "edge": { "description": "a solid edge locator: {object, at}" }
+                    "edge": { "description": "a solid edge locator: {object | path, at}, at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement" }
                 },
                 "required": ["edge"],
                 "additionalProperties": false
@@ -322,6 +322,35 @@ fn occurrence_target_schema(with_space: bool) -> serde_json::Value {
     })
 }
 
+/// `exclude` on the part reads (HEW_API.md "exclude").
+fn exclude_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Object ids, each one of the target's own members, left out of the frame and the measures (needs scope \"own\"); an id that is not an own member is -32602"
+    })
+}
+
+/// `solids_only` on the part reads.
+fn solids_only_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "boolean",
+        "default": false,
+        "description": "true leaves out Objects that are not closed solids (stray faces, imported surfaces; the ones hew.query.occurrences reports as solid: false) from the frame and the measures. Works with any scope and composes with exclude; when nothing is left it answers as exclude does when it leaves nothing"
+    })
+}
+
+/// `scope` on the part reads and the render commands (docs/agents/PLUGINS.md
+/// "Reading a container's own Objects").
+fn scope_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "string",
+        "enum": ["own", "all"],
+        "default": "all",
+        "description": "all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same"
+    })
+}
+
 /// One `hew.query.occurrences` row.
 fn occurrence_json_schema() -> serde_json::Value {
     let nullable_string = serde_json::json!({ "type": ["string", "null"] });
@@ -342,9 +371,24 @@ fn occurrence_json_schema() -> serde_json::Value {
             "tags": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } },
             "name": nullable_string,
             "definition_name": nullable_string,
-            "depth": { "type": "integer", "minimum": 0 }
+            "depth": { "type": "integer", "minimum": 0 },
+            "members": {
+                "type": "object",
+                "description": "the node's direct members by kind, in member order: a group's members, an instance's definition's members, three empty lists for an object. Hidden members are left out unless include_hidden",
+                "properties": {
+                    "objects": { "type": "array", "items": { "type": "string" } },
+                    "groups": { "type": "array", "items": { "type": "string" } },
+                    "instances": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["objects", "groups", "instances"],
+                "additionalProperties": false
+            },
+            "solid": { "type": "boolean", "description": "object rows only: the health verdict is solid (closed and manifold)" },
+            "family": { "type": ["integer", "null"], "description": "object rows only: the seam family index in hew.doc.health's families, valid for the same document state; null when the object is in no family" },
+            "family_closed": { "type": ["boolean", "null"], "description": "object rows only: every shared rim of the family can take a cap; null exactly when family is null" },
+            "linked": { "type": "boolean", "description": "instance rows only: the definition is a set of linked copies (hew / linked)" }
         },
-        "required": ["path", "id", "kind", "definition", "parent", "world_pose", "mirrored", "hidden", "user_hidden", "material", "material_effective", "tags", "name", "definition_name", "depth"],
+        "required": ["path", "id", "kind", "definition", "parent", "world_pose", "mirrored", "hidden", "user_hidden", "material", "material_effective", "tags", "name", "definition_name", "depth", "members"],
         "additionalProperties": false
     })
 }
@@ -645,6 +689,13 @@ impl Registry {
             Kernel,
             Std,
             "A part measured along its own axes: origin, axes, and extents of one placement.",
+        );
+        add(
+            "hew.query.signature",
+            R,
+            Kernel,
+            Std,
+            "Whether two objects are the same part or mirrored twins: one object's shape and mirror hashes, and its part frame.",
         );
         add(
             "hew.query.mesh",
@@ -958,6 +1009,13 @@ impl Registry {
             "Rotate about a pivot and axis by an angle; ids may be paths to members of one definition, turned in world terms with every placement following.",
         );
         add(
+            "hew.entity.flip",
+            M,
+            Kernel,
+            Std,
+            "Mirror a selection across a plane (Flip Along an axis through its center, the origin, or a point; or a given plane), in place or as one mirrored copy that links by default.",
+        );
+        add(
             "hew.entity.scale",
             M,
             Kernel,
@@ -1034,7 +1092,14 @@ impl Registry {
             M,
             Kernel,
             Std,
-            "Deep-copy an instance's definition into a private one.",
+            "Give one placement its own private definition (through an occurrence path at any depth), with the old-to-new id map.",
+        );
+        add(
+            "hew.component.promote",
+            M,
+            Kernel,
+            Std,
+            "Make a set of linked copies a named component: removes its linked mark and names its definition.",
         );
         add(
             "hew.component.explode",
@@ -1542,9 +1607,33 @@ impl Registry {
                                 }
                             },
                             "document": { "type": "boolean" },
-                            "full": { "type": "boolean" }
+                            "full": { "type": "boolean" },
+                            "linked": {
+                                "type": "array",
+                                "description": "linked-copy wraps made in the range: the source, the placement that now stands for it, and the shared definition",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "source": { "type": "string" },
+                                        "instance": { "type": "string" },
+                                        "definition": { "type": "string" }
+                                    },
+                                    "required": ["source", "instance", "definition"],
+                                    "additionalProperties": false
+                                }
+                            },
+                            "copied_from": {
+                                "type": "array",
+                                "description": "[new, source] pairs of public ids for entities copied in the range",
+                                "items": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "minItems": 2,
+                                    "maxItems": 2
+                                }
+                            }
                         },
-                        "required": ["added", "removed", "modified", "attrs", "document", "full"],
+                        "required": ["added", "removed", "modified", "attrs", "document", "full", "linked", "copied_from"],
                         "additionalProperties": false
                     }
                 },
@@ -1852,7 +1941,7 @@ impl Registry {
                     "normal": { "type": "array" },
                     "path": { "type": "array", "items": { "type": "string" }, "description": "the hit part's occurrence path without the part itself (the form hew.query.occurrences uses); [] for a world object" },
                     "leaf": { "type": "string", "description": "the hit Object's public id" },
-                    "face": { "type": "object", "description": "a face locator {object, at} with at in the leaf Object's own frame; feed it to hew.query.resolve, hew.material.paint, or hew.solid.push_pull" },
+                    "face": { "type": "object", "description": "a face locator {object, at} with at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement; feed it to hew.query.resolve, hew.material.paint, or hew.solid.push_pull" },
                     "hidden": { "type": "boolean", "description": "effective visibility including tags; false unless include_hidden" }
                 },
                 "required": ["object", "kind", "point", "distance", "normal", "path", "leaf", "face", "hidden"]
@@ -1895,13 +1984,13 @@ impl Registry {
                     },
                     {
                         "type": "object",
-                        "properties": { "id": { "type": "string", "description": "a world object, group, or instance; a definition member needs path" } },
+                        "properties": { "id": { "type": "string", "description": "a world object, group, or instance; a definition member needs path" }, "scope": scope_schema(), "exclude": exclude_schema(), "solids_only": solids_only_schema() },
                         "required": ["id"],
                         "additionalProperties": false
                     },
                     {
                         "type": "object",
-                        "properties": { "path": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "an occurrence path [...instances, node]" } },
+                        "properties": { "path": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "an occurrence path [...instances, node]" }, "scope": scope_schema(), "exclude": exclude_schema(), "solids_only": solids_only_schema() },
                         "required": ["path"],
                         "additionalProperties": false
                     }
@@ -1958,7 +2047,7 @@ impl Registry {
                     },
                     "occurrence": {
                         "type": "object",
-                        "description": "an occurrence locator {path: [instance, …, leaf]}; answers {occurrence: OccurrenceJson}"
+                        "description": "an occurrence locator {path: [instance, …, leaf]}; answers {occurrence: OccurrenceJson without members, solid, family, or linked}"
                     }
                 },
                 "additionalProperties": false
@@ -2054,7 +2143,11 @@ impl Registry {
                 .get_mut("hew.query.part_frame")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.params_schema = occurrence_target_schema(false);
+            let mut params = occurrence_target_schema(false);
+            params["properties"]["scope"] = scope_schema();
+            params["properties"]["exclude"] = exclude_schema();
+            params["properties"]["solids_only"] = solids_only_schema();
+            cmd.params_schema = params;
             let vec3 = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
@@ -2073,6 +2166,39 @@ impl Registry {
             cmd.refusals = vec![
                 "unknown_entity",
                 "unknown_occurrence",
+                "no_part_frame",
+                "too_many_occurrences",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.query.signature")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = occurrence_target_schema(false);
+            let vec3 = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
+            let hash = serde_json::json!({ "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256, lowercase hex" });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "shape": hash.clone(),
+                    "mirror": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "the shape hash of the object's mirror image: a.shape == b.mirror means a and b are mirrored twins" },
+                    "symmetric": { "type": "boolean", "description": "shape == mirror: the part is its own mirror image" },
+                    "frame": {
+                        "type": "object",
+                        "description": "the part's face frame (l ≥ w ≥ t, right-handed), as hew.query.part_frame reports it without a hew.part / frame override; origin is the part's minimum corner in that frame and extents its size along x, y, z, so the frame's center is origin + extents / 2 along the axes",
+                        "properties": { "origin": vec3.clone(), "x": vec3.clone(), "y": vec3.clone(), "z": vec3.clone(), "extents": vec3 },
+                        "required": ["origin", "x", "y", "z", "extents"],
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["shape", "mirror", "symmetric", "frame"],
+                "additionalProperties": false
+            });
+            cmd.refusals = vec![
+                "unknown_entity",
+                "unknown_occurrence",
+                "not_an_object",
                 "no_part_frame",
                 "too_many_occurrences",
             ];
@@ -2595,7 +2721,7 @@ impl Registry {
                     "object": { "type": "string" },
                     "faces": {
                         "type": "array",
-                        "items": { "type": "object", "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}" },
+                        "items": { "type": "object", "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}; with a path through a placement, at and ray are read in the leaf's frame (the definition's coordinates), not world coordinates" },
                         "minItems": 1,
                         "description": "faces of that object; omitted = every face, which deletes the object (a component member too, unless it is its component's last object: last_definition_member)"
                     }
@@ -2798,6 +2924,13 @@ impl Registry {
                         "type": "string",
                         "description": "\"transparent\", #rrggbb, or #rrggbbaa; the fill of pixels no surface touches (defaults to the rasterizer's light gray). The id, depth, and normals passes are unaffected."
                     },
+                    "scope": scope_schema(),
+                    "orient": {
+                        "type": "string",
+                        "enum": ["world", "part"],
+                        "default": "world",
+                        "description": "part renders the one selection root in its part frame: the named view (iso when none) means the frame's axes, front looking along the frame's +y, top along -z, right along -x. Needs a selection of exactly one entity and no camera"
+                    },
                     "scene": {
                         "type": "string",
                         "description": "a Scene's id: renders through its resolved camera and hidden sets (Document::resolve_scene) instead of the document's own — falls back to the usual cameraless resolution when the Scene captures no camera. Mutually exclusive with camera and view. The Scene's section plane, if any, is NOT rendered headlessly at 1.0."
@@ -2883,6 +3016,7 @@ impl Registry {
                 "unknown_occurrence",
                 "unknown_scene",
                 "too_many_occurrences",
+                "no_part_frame",
             ];
         }
         {
@@ -2902,7 +3036,8 @@ impl Registry {
                     "format": { "type": "string", "enum": ["svg", "segments"], "description": "defaults to svg" },
                     "scale": { "type": "number", "description": "svg only: paper/model drawing scale, defaults to 1 (full size); the SVG's width/height are millimeters at that scale" },
                     "path": { "type": "string", "description": "svg only: write the file here instead of returning it inline (hosts with filesystem access)" },
-                    "selection": render_selection_schema()
+                    "selection": render_selection_schema(),
+                    "scope": scope_schema()
                 },
                 "additionalProperties": false
             });
@@ -3580,6 +3715,27 @@ impl Registry {
                 "explode_session_scope",
             ];
         }
+        // `copy.linked` and the copy result's `linked` (docs/agents/PLUGINS.md
+        // "Linked copies").
+        let copy_linked_schema = serde_json::json!({
+            "type": "boolean",
+            "default": true,
+            "description": "true (the default on the bus, whatever the app's preference): each object or group copied becomes a set of linked copies, its copies placements of one shared solid; false: independent geometry"
+        });
+        let copy_wraps_schema = serde_json::json!({
+            "type": "array",
+            "description": "present whenever copy was given: each object or group the copy wrapped as a linked set (it keeps its id, now inside definition, placed by instance in its old spot); empty for linked: false or when every root already was a placement",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string" },
+                    "instance": { "type": "string" },
+                    "definition": { "type": "string" }
+                },
+                "required": ["source", "instance", "definition"],
+                "additionalProperties": false
+            }
+        });
         // `ids` of move/rotate/scale: world ids, or occurrence paths to
         // members of ONE definition by ONE path (HEW_API.md §7).
         let transform_ids_schema = serde_json::json!({
@@ -3616,7 +3772,8 @@ impl Registry {
                                     "required": ["count", "step"],
                                     "additionalProperties": false
                                 }
-                            }
+                            },
+                            "linked": copy_linked_schema.clone()
                         },
                         "additionalProperties": false
                     }
@@ -3626,7 +3783,10 @@ impl Registry {
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "ids": { "type": "array", "items": { "type": "string" }, "description": "the copies, placement-major, each placement's block in ids order" } }
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "string" }, "description": "the copies, placement-major, each placement's block in ids order; a linked copy's are placements (ins_)" },
+                    "linked": copy_wraps_schema.clone()
+                }
             });
             cmd.refusals = vec![
                 "unknown_entity",
@@ -3659,7 +3819,10 @@ impl Registry {
                     "angle": { "type": "number", "description": "radians, right-handed about axis" },
                     "copy": {
                         "type": "object",
-                        "properties": { "count": { "type": "integer", "minimum": 1, "maximum": 1000 } },
+                        "properties": {
+                            "count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+                            "linked": copy_linked_schema.clone()
+                        },
                         "additionalProperties": false
                     }
                 },
@@ -3668,7 +3831,10 @@ impl Registry {
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "ids": { "type": "array", "items": { "type": "string" } } }
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "string" } },
+                    "linked": copy_wraps_schema.clone()
+                }
             });
             cmd.refusals = vec![
                 "unknown_entity",
@@ -3685,6 +3851,69 @@ impl Registry {
                 "unknown_component",
                 "explode_session_scope",
                 "component_expansion_exceeded",
+            ];
+        }
+        {
+            let cmd = commands.get_mut("hew.entity.flip").expect("declared above");
+            cmd.implemented = true;
+            let xyz = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ids": transform_ids_schema.clone(),
+                    "axis": { "type": "string", "enum": ["x", "y", "z"], "description": "the mirror plane's world normal (SketchUp's Flip Along); exactly one of axis and plane" },
+                    "plane": {
+                        "type": "object",
+                        "properties": {
+                            "point": { "description": "a point on the plane: [x, y, z] or a derived-point locator (§5.3)" },
+                            "normal": xyz.clone()
+                        },
+                        "required": ["point", "normal"],
+                        "additionalProperties": false,
+                        "description": "the mirror plane in world coordinates; takes no about"
+                    },
+                    "about": {
+                        "oneOf": [
+                            { "type": "string", "enum": ["center", "origin"] },
+                            xyz
+                        ],
+                        "description": "where an axis plane passes: center (the default, the selection's world bounding-box center), origin, or a point"
+                    },
+                    "copy": {
+                        "type": "object",
+                        "properties": { "linked": copy_linked_schema.clone() },
+                        "additionalProperties": false,
+                        "description": "one mirrored copy instead of flipping in place; a linked copy is another placement at a mirrored pose"
+                    }
+                },
+                "required": ["ids"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "string" }, "description": "with copy: the mirrored copies (placements for a linked copy)" },
+                    "linked": copy_wraps_schema.clone()
+                },
+                "description": "{} for a flip in place"
+            });
+            cmd.refusals = vec![
+                "unknown_entity",
+                "sketch_copy_unsupported",
+                "empty_selection",
+                "duplicate_member",
+                "unknown_object",
+                "unknown_group",
+                "unknown_instance",
+                "unknown_sketch",
+                "unknown_occurrence",
+                "unknown_component",
+                "explode_session_scope",
+                "component_expansion_exceeded",
+                "too_many_occurrences",
+                "singular",
+                "degenerate_axis",
+                "degenerate_texture_frame",
             ];
         }
         {
@@ -3952,16 +4181,56 @@ impl Registry {
             cmd.implemented = true;
             cmd.params_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "instance": { "type": "string" } },
-                "required": ["instance"],
+                "properties": {
+                    "instance": { "type": "string", "description": "a world placement: the same as path [instance]" },
+                    "path": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "instance ids, outermost first; the last is the placement to fork" },
+                    "cascade": { "type": "boolean", "default": true, "description": "true: every instance on the path is made unique in turn, so only the placement at the end diverges; false: only the last definition is forked, in place inside its owner, so every placement of the owners changes" },
+                    "deep": { "type": "boolean", "default": false, "description": "also give every nested definition of the fork a private copy" }
+                },
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "component": { "type": "string", "description": "the forked definition" },
+                    "instance": { "type": "string", "description": "the placement at the end of the path after the call: the leaf itself for a one-element path, its divergent twin (a value in remap) for a deeper one" },
+                    "remap": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "every id the call minted, keyed by the id it copies, over every kind (objects, groups, instances, definitions); only new ids are values"
+                    }
+                },
+                "required": ["component", "instance", "remap"]
+            });
+            cmd.refusals = vec![
+                "unknown_entity",
+                "unknown_occurrence",
+                "unknown_instance",
+                "unknown_component",
+                "explode_session_scope",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.component.promote")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "component": { "type": "string", "description": "the linked set's definition (cmp_)" },
+                    "name": { "type": "string", "description": "the component's name: not blank, at most 128 bytes, no control characters" }
+                },
+                "required": ["component", "name"],
                 "additionalProperties": false
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
                 "properties": { "component": { "type": "string" } },
-                "required": ["component"]
+                "required": ["component"],
+                "additionalProperties": false
             });
-            cmd.refusals = vec!["unknown_entity", "unknown_instance", "unknown_component"];
+            cmd.refusals = vec!["unknown_entity", "not_linked"];
         }
         {
             let cmd = commands
@@ -4123,7 +4392,7 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "face": {},
+                    "face": { "description": "a face locator {object | path, at} | {object | path, ray} | {\"$face\"}; through a path the definition's face is painted, so every copy shows it" },
                     "id": { "type": "string", "description": "an object (its base material), an instance (the placement's own material), or a definition (every object it owns)" },
                     "material": { "type": ["string", "null"] },
                     "scope": { "type": "string", "enum": ["instance", "definition"], "description": "for an instance id: the placement (default) or its definition; a definition id takes only \"definition\"" }
@@ -4145,6 +4414,9 @@ impl Registry {
                 "unknown_material",
                 "locator_missed",
                 "ambiguous_locator",
+                "unknown_occurrence",
+                "not_an_object",
+                "explode_session_scope",
             ];
         }
         {
@@ -4755,6 +5027,9 @@ impl Registry {
                 "ambiguous_locator",
                 "face_token_unknown",
                 "face_token_stale",
+                "unknown_occurrence",
+                "not_an_object",
+                "explode_session_scope",
                 "unknown_object",
                 "unknown_group",
                 "unknown_instance",
@@ -4793,6 +5068,9 @@ impl Registry {
                 "ambiguous_locator",
                 "face_token_unknown",
                 "face_token_stale",
+                "unknown_occurrence",
+                "not_an_object",
+                "explode_session_scope",
                 "invalid_attr_name",
                 "reserved_attr_namespace",
                 "attr_namespace_not_granted",
@@ -4836,6 +5114,9 @@ impl Registry {
                 "ambiguous_locator",
                 "face_token_unknown",
                 "face_token_stale",
+                "unknown_occurrence",
+                "not_an_object",
+                "explode_session_scope",
                 "invalid_attr_name",
                 "reserved_attr_namespace",
                 "attr_namespace_not_granted",
@@ -5539,7 +5820,7 @@ impl Registry {
             cmd.implemented = true;
             let mut push_face = face_locator_schema.clone();
             push_face["description"] = serde_json::json!(
-                "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}; object may be {path: [instance, …, object]} to reach a definition member through a placement (at and ray stay in the object's own frame)"
+                "HEW_API.md §5.2 face locator: {object | path, at} | {object | path, ray} | {\"$face\":\"label#key\"}; path (or object as {path: [...]}) is an occurrence path [instance, …, object] that reaches a definition member through a placement, every placement following (at and ray stay in the leaf's frame, the definition's coordinates, not world coordinates)"
             );
             cmd.params_schema = serde_json::json!({
                 "type": "object",
@@ -5576,6 +5857,7 @@ impl Registry {
                 "face_token_stale",
                 "unknown_occurrence",
                 "explode_session_scope",
+                "not_an_object",
             ];
 
             let mut operand_a = occurrence_locator_schema();
@@ -5618,9 +5900,24 @@ impl Registry {
                         "type": "array",
                         "items": { "type": "string" },
                         "minItems": 2,
-                        "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand and a transient cutter take a and b"
+                        "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand, a transient cutter and unlink take a and b"
                     }
                 }
+            });
+            // Union and intersect with a placement operand split it from
+            // its copies, so they ask first (Addendum D §5).
+            let mut join_params = boolean_params.clone();
+            join_params["properties"]["unlink"] = serde_json::json!({
+                "type": "boolean",
+                "description": "true: a placement operand (an instance, a member by path, or a group holding one) is unlinked and exploded into plain solids, then joined; its other copies keep the shared solid. Without it such an operand refuses would_unlink. Ignored when no operand is a placement, and in a call with three or more operands, where a placement refuses boolean_operand_has_instance"
+            });
+            let join_result = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "result": { "type": "string" },
+                    "unlinked": { "type": "array", "items": { "type": "string" }, "description": "present when unlink: true split placements off: the placements exploded" }
+                },
+                "required": ["result"]
             });
             let boolean_result = serde_json::json!({
                 "type": "object",
@@ -5647,9 +5944,10 @@ impl Registry {
 
             let cmd = commands.get_mut("hew.solid.union").expect("declared above");
             cmd.implemented = true;
-            cmd.params_schema = boolean_params.clone();
-            cmd.result_schema = boolean_result.clone();
+            cmd.params_schema = join_params.clone();
+            cmd.result_schema = join_result.clone();
             cmd.refusals = boolean_refusals();
+            cmd.refusals.push("would_unlink");
 
             let cmd = commands
                 .get_mut("hew.solid.subtract")
@@ -5671,9 +5969,10 @@ impl Registry {
                 .get_mut("hew.solid.intersect")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.params_schema = boolean_params;
-            cmd.result_schema = boolean_result;
+            cmd.params_schema = join_params;
+            cmd.result_schema = join_result;
             cmd.refusals = boolean_refusals();
+            cmd.refusals.push("would_unlink");
 
             let cmd = commands.get_mut("hew.solid.slice").expect("declared above");
             cmd.implemented = true;
@@ -6370,6 +6669,7 @@ impl Registry {
             "hew.query.context",
             "hew.query.occurrences",
             "hew.query.part_frame",
+            "hew.query.signature",
             "hew.query.mesh",
             "hew.query.topology",
             "hew.history.status",
@@ -6692,6 +6992,7 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.query.occurrences",
                 "hew.query.part_frame",
                 "hew.query.raycast",
+                "hew.query.signature",
                 "hew.query.resolve",
                 "hew.query.scene",
                 "hew.query.topology",
@@ -6750,6 +7051,7 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.solid.thicken",
                 "hew.solid.union",
                 "hew.entity.delete",
+                "hew.entity.flip",
                 "hew.entity.move",
                 "hew.entity.rename",
                 "hew.entity.rotate",
@@ -6764,6 +7066,7 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.component.explode",
                 "hew.component.make_unique",
                 "hew.component.place",
+                "hew.component.promote",
                 "hew.component.import_definition",
                 "hew.component.rebase",
                 "hew.component.flip_instance",

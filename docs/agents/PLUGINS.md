@@ -422,13 +422,32 @@ The recipe for an outliner panel:
    and the call changes nothing. Try again when it ends. `hew.query.context`
    reports `armed`.
 
+Each step the window takes is reported as it happens: entering through N
+session frames sends N `context_changed` events, one per frame, and
+`hew.view.exit_all` sends one per frame it closes. Every event carries the
+whole `stack` and `fallback`, so draw from the latest one and do not count
+events. `hew.view.exit` at the top level (no frame and no in-context
+entry open) refuses `nothing_to_exit`; `hew.view.exit_all` there answers
+`{}` and sends no event.
+
+Known gap: the window can decline an entry after the call has answered
+`{}`. A node whose definition nests other groups or components, placed
+unevenly scaled or inside a group, cannot be entered; the person sees a
+message that the nested component can't open for editing there, and no
+`context_changed` follows for that step. Steps of the path before the
+declined one have already been entered and have sent their events, so
+the context can end part of the way down. A plugin that waits for the
+event should time out and call `hew.query.context`, which always answers
+where the person is.
+
 Calls are solitary: a multi-command transaction carrying one is refused
 `-32602`.
 
 ## Reading parts
 
 A plugin holding `model.read` can list every part of a model, measure
-each one along its own axes, and read its geometry (HEW_API.md §7.4).
+each one along its own axes, tell identical and mirrored parts apart,
+and read its geometry (HEW_API.md §7.4).
 
 **List the parts.** `hew.query.occurrences` returns one row per
 placement: every object, group, and instance, with nested components
@@ -437,6 +456,27 @@ instances above it, so the same definition member appears once per
 placement, each with its own `world_pose`. Pass `kinds: ["object",
 "instance"]` for the leaves a cut list counts, and leave `include_hidden`
 off for what the person sees. A list shows `name ?? definition_name`.
+
+A row's `path` lists instances only, and never the row's own id. A member
+of an instance has the path `[...instance.path, instance.id]`. A member of
+a group has the group's own `path`, with `parent` naming the group.
+`members` returns bare ids, so a member's locator follows that rule. A
+door group `grp_d` in the world holding a hinge instance `ins_h`, whose
+definition holds `obj_pin`:
+
+```
+grp_d    path: []         parent: null
+ins_h    path: []         parent: "grp_d"   (a group member: the group's path)
+obj_pin  path: ["ins_h"]  parent: null      (an instance member: [...path, instance])
+```
+
+`obj_pin`'s locator is `{ path: ["ins_h", "obj_pin"] }`, `[...row.path, row.id]`.
+
+An object row's `world_pose` is its placement's pose (the pose of the
+path, with the instance's own pose included), not the object's geometry.
+Moving the Object inside its definition leaves `world_pose` as it was,
+because the geometry moved, not the placement. To see such an edit, read
+`hew.query.measure { path }` and compare its `bbox`.
 
 **From the selection.** `const { ids } = await hew.selection.get();
 const nodes = ids.filter((id) => /^(obj|grp|ins)_/.test(id));
@@ -496,6 +536,84 @@ which is what one thumbnail or one 3D preview per definition wants.
 faces (planes, loops as vertex indices, cylinder surfaces), and edges
 (their faces and circle curves). Its indices are valid for the
 `generation` it returns only; after any edit, read it again.
+
+### What a row says about a part
+
+Hew does not decide what a part is; a plugin's rule does, from facts each
+`hew.query.occurrences` row carries (HEW_API.md §7.4):
+
+- `members`, on every row: `{ objects, groups, instances }`, the node's
+  direct members by id, in member order. A group lists its members, an
+  instance its definition's, an object three empty lists. Hidden members
+  are left out unless `include_hidden`.
+- `solid`, on object rows: Model Health's verdict is solid (closed and
+  manifold).
+- `family` and `family_closed`, on object rows: the seam family the
+  object belongs to (an index into `hew.doc.health`'s `families`, good for
+  the same `generation` only) and whether every shared rim of that family
+  can take a cap, so the family can be rejoined; both `null` for an
+  object in no family.
+- `linked`, on instance rows: the definition is a set of linked copies
+  rather than a named component.
+
+Group and instance rows carry no `solid` or `family` keys. A typical
+rule: a container whose `members` are only objects, every one `solid`,
+is one part (a glued-up blank); an object with a `family` whose
+`family_closed` is true is a piece of one part split on import; anything
+else is read level by level. Hew's own default, in its cut list, stays
+"the deepest node whose members are all objects".
+
+### Where a locator's `at` is read
+
+A face or edge locator reads `at` (and `ray`) in the object's own frame,
+as `hew.query.faces` and `hew.query.raycast` report them. For an Object
+with no placement above it, that is the world frame. For a member reached
+through a placement (`{ path: [instance, …, object], at }`) it is the
+definition's coordinates, not world coordinates, so the same point is
+valid through every placement. When a locator whose path goes through a
+placement misses, the `locator_missed` refusal names the frame.
+
+### Reading a container's own Objects
+
+`scope: "own"` on `hew.query.part_frame`, `hew.query.measure`,
+`hew.view.snapshot`, and `hew.view.line_drawing` takes a container's own
+objects: its direct object members and the objects of its groups, never
+the members of a nested instance. A door group holding a panel and a
+hinge component measures as the panel alone with `scope: "own"`, and as
+panel plus hinge with the default `"all"`. On an object both scopes are
+the same; a container with no objects of its own refuses as an empty one
+does (`no_part_frame` for `part_frame`). The render commands need a
+`selection` for it.
+
+`scope: "own"` includes own Objects that are not closed solids (a stray
+face, an imported surface), so a part's frame and extents grow to cover
+them. Pass `solids_only: true` on `hew.query.part_frame` or
+`hew.query.measure` to leave those out: an Object counts when its row's
+`solid` is true. It works with any `scope` and composes with `exclude`.
+When it leaves nothing to measure, the answer is the one `exclude` gives
+when it leaves nothing (`no_part_frame` for `part_frame`, `-32602` for
+`measure`). The default is `false`, which changes no existing answer.
+
+`hew.view.snapshot` with `orient: "part"` and one `selection` entry
+renders that part in its own frame: `view: "front"` looks along the
+frame's `y`, `top` down its `z`, so every board in a parts list is drawn
+the same way however it sits in the model.
+
+### Same part, mirrored part
+
+`hew.query.signature { id | path }` answers `{ shape, mirror, symmetric,
+frame: { origin, x, y, z, extents } }` for one object. Two objects with equal `shape` are the same
+part in any position; `a.shape == b.mirror` means `b` is `a`'s mirror
+image (a left and a right side); `symmetric` means the part is its own
+mirror image. The hashes survive a save and reload and any move or turn,
+to 1 µm. `frame` is the part's face frame, `origin` its minimum corner
+and `extents` its size along the axes; the pose that carries one
+matching part onto another is `frame_b ∘ frame_a⁻¹`, and onto its
+mirror twin `frame_b ∘ C ∘ R ∘ C⁻¹ ∘ frame_a⁻¹` with `R` a reflection
+and `C` the shift to the frame's center, `origin + extents / 2` (a
+reflection about `origin` would land the part off by its own size). A
+group or instance
+refuses `not_an_object`: ask per solid, from the rows' `members`.
 
 ### Probing with rays
 
@@ -598,8 +716,14 @@ A plugin holding `model.write` can change how a part is measured
 - **One mirrored copy: `hew.component.flip_instance`.** `{ instance,
   axis }` mirrors one world placement across its definition's local
   `x`, `y`, or `z` plane, leaving the definition and every other copy
-  alone, and answers the new pose and `mirrored`. A mirrored copy of a
-  part is copy, then flip, then move, in one transaction.
+  alone, and answers the new pose and `mirrored`.
+- **A mirrored part: `hew.entity.flip`.** `{ ids, axis, copy: {} }`
+  makes one mirrored copy across the plane normal to `axis` through the
+  selection's center (`about: "origin"` or a point moves the plane;
+  `plane: { point, normal }` names any plane). The copy is a linked
+  placement at a mirrored pose, so a left and a right side share one
+  solid; `copy: { linked: false }` bakes independent geometry, and no
+  `copy` flips the selection in place.
 
 `hew.entity.move` also copies into a grid in one undo step:
 `copy: { grid: [{ count, step }, …] }` with one to three axes, `count`
@@ -607,6 +731,50 @@ the number of slots along an axis counting the original, so `[{ count:
 2, step: [w, 0, 0] }, { count: 3, step: [0, d, 0] }]` fills the other
 five slots of a 2 × 3 field. A grid takes no `translation`; `copy.count`
 keeps its own meaning (that many copies at the step and its multiples).
+
+## Linked copies
+
+A copy made over the bus is linked by default, whatever the person's
+"Copies are linked" preference says: the object or group copied becomes
+the one member of a new definition (it keeps its id, name, tags, and
+attributes), a placement takes its spot, and each copy is another
+placement. Editing one copy through its definition edits them all.
+
+- **Copy.** `hew.entity.move` and `hew.entity.rotate` take `copy: {
+  count?, grid?, linked? }`. The result's `ids` are the new placements
+  (`ins_…`) and `linked` lists each wrap, `{ source, instance,
+  definition }`, so a plugin holding `source` can switch to `instance`.
+  Several boards copied together make one set each; a group makes one
+  set. `linked: false` copies independent geometry. The wrap and the
+  copies are one undo step.
+- **Edit through any copy.** A face or edge locator takes `{ path:
+  [...row.path, row.id], at }` in place of `{ object, at }`, `at` in the
+  object's own frame as `hew.query.raycast` reports it, so
+  `hew.solid.push_pull` and `hew.material.paint` by path change every
+  copy. `hew.solid.subtract` with `a: { path }` cuts every copy.
+- **Unlink.** `hew.component.make_unique { path, cascade?, deep? }` gives
+  the placement at the end of `path` its own definition and answers `{
+  component, instance, remap }`, `remap` mapping each copied id to its
+  new id. The copy keeps its name and tags and stays a linked set of one.
+- **Make component.** `hew.component.promote { component, name }` turns a
+  linked set into a named component; a named component refuses
+  `not_linked`.
+- **Joining.** `hew.solid.union` or `intersect` with a placement operand
+  refuses `would_unlink`, since joining splits it from its copies; pass
+  `unlink: true` to explode it into plain solids first (the result lists
+  `unlinked`).
+- **Change sets.** Every `document_changed` and `hew.query.changes_since`
+  change set carries `linked` (the wraps) and `copied_from` (`[new,
+  source]` pairs); both are empty for an undo.
+
+```js
+const r = await hew.entity.move({ ids: [board], translation: [0.5, 0, 0], copy: { count: 3 } });
+const set = r.linked[0].definition;       // the shared solid
+const { occurrences } = await hew.query.occurrences({ kinds: ["instance"] });
+const copies = occurrences.filter((o) => o.definition === set);
+console.log(copies.length, copies.every((o) => o.linked)); // 4 true
+await hew.component.make_unique({ path: [copies[3].id] });  // one copy goes its own way
+```
 
 ## Part libraries
 

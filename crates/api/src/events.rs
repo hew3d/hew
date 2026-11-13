@@ -7,7 +7,9 @@
 //! [`crate::Connection::wants`]; the builders here only shape params, from
 //! a `&kernel::Document` and what the host knows about it.
 
-use kernel::{AttrScope, AttrTarget, ChangeKind, ChangeRecord, ChangeSet, HistoryOrigin};
+use kernel::{
+    AttrScope, AttrTarget, ChangeKind, ChangeRecord, ChangeSet, EntityRef, HistoryOrigin,
+};
 use serde_json::{Value, json};
 
 use crate::ids;
@@ -111,6 +113,34 @@ pub fn change_set_json(doc: &kernel::Document, changes: &ChangeSet) -> Value {
             }
         })
         .collect();
+    // A wrap names live-or-tombstoned records; stable ids outlive both.
+    let public = |e: EntityRef| doc.sid_of(&e).map(|sid| ids::public_id(&e, sid));
+    let linked: Vec<Value> = changes
+        .linked
+        .iter()
+        .filter_map(|w| {
+            let source = match w.source {
+                kernel::NodeId::Object(o) => EntityRef::Object(o),
+                kernel::NodeId::Group(g) => EntityRef::Group(g),
+                kernel::NodeId::Instance(i) => EntityRef::Instance(i),
+            };
+            Some(json!({
+                "source": public(source)?,
+                "instance": public(EntityRef::Instance(w.instance))?,
+                "definition": public(EntityRef::Component(w.definition))?,
+            }))
+        })
+        .collect();
+    let copied_from: Vec<Value> = changes
+        .copied_from
+        .iter()
+        .map(|(new, source)| {
+            json!([
+                ids::public_id(&new.entity, new.sid),
+                ids::public_id(&source.entity, source.sid)
+            ])
+        })
+        .collect();
     json!({
         "added": ids(&changes.added),
         "removed": ids(&changes.removed),
@@ -118,6 +148,8 @@ pub fn change_set_json(doc: &kernel::Document, changes: &ChangeSet) -> Value {
         "attrs": attrs,
         "document": changes.document,
         "full": changes.full,
+        "linked": linked,
+        "copied_from": copied_from,
     })
 }
 
@@ -131,6 +163,8 @@ pub fn full_change_set_json() -> Value {
         "attrs": [],
         "document": false,
         "full": true,
+        "linked": [],
+        "copied_from": [],
     })
 }
 
@@ -348,7 +382,7 @@ mod tests {
         assert_eq!(since["full"], false);
         assert_eq!(
             full_change_set_json(),
-            json!({ "added": [], "removed": [], "modified": [], "attrs": [], "document": false, "full": true })
+            json!({ "added": [], "removed": [], "modified": [], "attrs": [], "document": false, "full": true, "linked": [], "copied_from": [] })
         );
         // A generation the ring does not know answers full.
         assert_eq!(changes_since_json(&doc, 999), full_change_set_json());

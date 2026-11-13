@@ -455,11 +455,17 @@ many commands it ran: while a plugin command runs, the envelopes it
 commits produce no events, and when it ends its one entry does (or, if
 it is aborted, one `abort` and nothing of what it did).
 
-The kernel's change sets (`kernel::ChangeSet`) also carry `linked` (every
-Object or Group a copy wrapped as a linked set, with the placement that
-took its spot) and `copied_from` (new-to-source pairs for every copy and
-every id an unlink minted; both empty for an undo); their wire shape on
-`document_changed` is still to come.
+Two more lists are always present. `linked` names every Object or Group
+the change wrapped as a set of linked copies, as `{source, instance,
+definition}`: `source` keeps its id and is now the definition's member,
+and `instance` is the placement that took its spot, so a client holding
+`source` selects `instance`. `copied_from` lists `[new, source]` pairs for
+every entity the change copied: an independent copy's nodes, a linked
+copy's new placement and the placement it was copied from (the wrap's
+own placement for a node the same change wrapped), and every id an
+unlink (`hew.component.make_unique`) minted. Both describe the forward
+change only: an undo's lists are empty (what it took away is in
+`removed`), and a `full` set keeps them empty.
 
 The host emits one `document_changed` per change since it last sent
 events. More than 64 at once, or a gap its history no longer reaches,
@@ -544,6 +550,19 @@ or edge take a **locator** instead — the API's equivalent of pointing:
   face (or edge) of that object containing, or nearest within tolerance
   to, the point. Ambiguity (a point on a shared edge of two candidate
   faces, when a face was required) is refused typed, never guessed.
+  `{"path": ["ins_…", …, "obj_…"], "at": …}` names the object by an
+  occurrence path instead (exactly one of `object` and `path`): the path
+  must end at an object (a group or instance refuses `not_an_object`),
+  `at` and `ray` stay in that object's own frame as `hew.query.raycast`
+  reports them (for a member reached through a placement that is the
+  definition's coordinates, not world coordinates; for an object with no
+  placement above it the two are the same), a miss through a placement
+  refuses `locator_missed` and names the frame, and the locator reaches the same face the `object` form
+  does, the definition's, so an edit through it shows on every
+  placement. A path through a definition open for editing refuses
+  `explode_session_scope`. The path form works wherever a face or edge
+  locator does: `hew.solid.push_pull`, `hew.material.paint`, the
+  `hew.attr.*` face and edge targets, and `hew.query.resolve`.
 - **By ray** — `{"object": "obj_5f3a", "ray": {"origin": …, "dir": …}}`:
   first hit on the object, the programmatic form of clicking.
   (`hew.query.raycast` returns a by-point locator for what it hit: `at` is
@@ -834,9 +853,16 @@ fallback entry or a session frame; `hew.view.exit_all`
 goes back to the top level. Each answers `{}`: the outcome is the
 `context_changed` event, which carries the new `stack` and the `fallback`
 entries (`{kind: "object" | "instance", id}`, outermost first, inside the
-innermost frame). A refusal the app shows the person as a toast leaves the
-context unchanged and sends no event; `hew.query.context` afterward
-reports the truth. While a tool gesture is armed in the window (a Move
+innermost frame). Entering through N session frames sends N events, and
+`exit_all` one per frame closed; `exit` at the top level refuses
+`nothing_to_exit` while `exit_all` there answers `{}` with no event. A
+refusal the app shows the person as a toast sends no event for that
+step, and the call has already answered `{}` (an entry the window
+declines because the definition nests other groups or components, on an
+unevenly scaled or group-placed instance, is one). Steps of the path
+before the declined one have already been entered and have sent their
+events, so the context can end part of the way down;
+`hew.query.context` afterward reports the truth. While a tool gesture is armed in the window (a Move
 drag in flight) all three refuse `gesture_in_progress`. A call inside a
 multi-command transaction is `-32602`. Each is `mutates_document: true`,
 because opening or closing a session is a history step the window
@@ -991,14 +1017,14 @@ for, not shipped.
 |---|---|---|
 | `hew.meta` | `hello`, `capabilities`, `documents` (the open documents: id, title, path, dirty, document_id; in the desktop app also front, attached, label — §4.2) | Required |
 | `hew.doc` | `attach` (to a named document, §4.2), `transact`, `new`, `open` (the desktop app opens each into a new background window), `close`, `focus` (desktop app windows; `app` profile), `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats), `purge_unused` (delete every unused palette material and component definition, one undo entry), `health` (every open object with its verdict, open rims and seam family) | Required (`import`, `purge_unused`, `health`, `close`, `focus` Standard) |
-| `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack as `stack`, the app's in-context entries as `fallback`, whether a tool gesture is armed as `armed`; headless: `fallback: []`, `armed: false`), `changes_since` (what changed since a history generation, §4.5), `occurrences`, `part_frame`, `mesh`, `topology` (§7.4) | Required (`changes_since`, `occurrences`, `part_frame`, `mesh`, `topology` Standard) |
+| `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack as `stack`, the app's in-context entries as `fallback`, whether a tool gesture is armed as `armed`; headless: `fallback: []`, `armed: false`), `changes_since` (what changed since a history generation, §4.5), `occurrences`, `part_frame`, `signature` (same part or mirrored twin), `mesh`, `topology` (§7.4) | Required (`changes_since`, `occurrences`, `part_frame`, `signature`, `mesh`, `topology` Standard) |
 | `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` (a sketch region, or a face/plane region by unit key), `units` (list a plane's drawing as units), `move`, `rotate`, `scale`, `copy`, `delete` (edit units on a plane) | Required (`units`, `move`, `rotate`, `scale`, `copy`, `delete` Standard) |
 | `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice` (`subtract`, `slice`, and `push_pull` also on a definition member through a path, below), `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form), `cap`, `delete_faces`, `mark_surface`, `thicken` (repair open objects, see below), `from_faces` (Make Solid on drawn faces) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint`, the repair commands and `from_faces` Standard) |
 | `hew.compute` | `boolean`, `slice`, `shells`, `measure`, `outline`, `offset`: pure computations on transient solids that never change the document (§7.6); `project` and `stretch` are declared and refuse `unimplemented` until the flat-drawing projection and section stretch land | Standard |
-| `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy, array, and grid forms), `rotate`, `scale` (each also on members of one definition through a path, below), `set_frame` (a part's frame override, §7.4) | Required (`set_frame` Standard) |
+| `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy, array, and grid forms), `rotate`, `scale`, `flip` (mirror across a plane, with an optional mirrored copy) (each also on members of one definition through a path, below), `set_frame` (a part's frame override, §7.4) | Required (`flip`, `set_frame` Standard) |
 | `hew.context` | `enter`, `exit` | Required |
 | `hew.group` | `create`, `explode`, `reparent` | Required (`reparent` Standard) |
-| `hew.component` | `create`, `place`, `make_unique`, `explode`, `rebase` (new definition axes, nothing moves), `flip_instance` (mirror one placement) (§7.4) | Standard |
+| `hew.component` | `create`, `place`, `make_unique` (one placement, through a path at any depth), `promote` (a linked set becomes a named component), `explode`, `rebase` (new definition axes, nothing moves), `flip_instance` (mirror one placement) (§7.4) | Standard |
 | `hew.material` | `create` (color or texture), `paint`, `set_default`, `set_opacity`, `set_pbr` (metallic and roughness, 0 to 1; maps are kept), `position_texture`, `replace` | Standard |
 | `hew.tag` | `create`, `assign`, `set_visible`, `delete`, `rename` | Standard |
 | `hew.geo` | `get`, `set` (the document's geo-reference / coordinate reference system; `set` is one undo step) | Standard |
@@ -1405,7 +1431,22 @@ Semantics notes, normative:
   A grid takes its steps from `grid`, so `translation`, `from`, and
   `to` are params errors beside it, as are `count` and `grid` together,
   `grid` on `rotate`, an axis with `count` 0, and a grid with no axis
-  above 1. The copies are every index tuple `(i0, i1, i2)` in
+  above 1. `copy.linked` (default `true` on the bus, whatever the app's
+  preference says) links each Object or Group copied: it is wrapped as a
+  set of linked copies (it keeps its id and becomes the definition's
+  member, a placement taking its spot) and every copy is another
+  placement, so the result's `ids` are `ins_` ids. Several Objects copied
+  together make one set each; a Group makes one set; an instance copies
+  as another placement of its own definition either way. `linked:
+  false` copies independent geometry, as before. Whenever `copy` is
+  given the result also carries `linked: [{source, instance,
+  definition}]`, every wrap the copy made (empty for `linked: false`, or
+  when every root already was a placement); a plain move has no
+  `linked`. The wrap and the copies are one undo entry whose undo
+  restores the loose node exactly. Sketches are never wrapped (a sketch
+  copy still refuses `sketch_copy_unsupported`). Through a path, a
+  linked copy wraps each member inside its definition first, so the
+  definition holds placements of the new set. The copies are every index tuple `(i0, i1, i2)` in
   lexicographic order except `(0, 0, 0)`, each translated by `Σ i_a ·
   step_a`; `ids` lists them placement by placement, each block in `ids`
   order. `copy.count` makes at most 1000 copies; a grid's counts
@@ -1643,10 +1684,19 @@ Semantics notes, normative:
   `union` or `intersect`, is `-32602`. With `b` a member
   of the same definition by the same path (`{"path": […]}`), `union`,
   `subtract`, and `intersect` all run between the two members inside the
-  definition. A union or intersect of a path member with a world object
-  refuses `-32602`: the result would move world material into a shared
-  definition, which unlinking is for; and `b` must not be a path member
-  when `a` is a world node. `hew.solid.slice` takes `object` as a path to
+  definition. A union or intersect with any other placement operand (a
+  world instance, a path member beside a world object, or a group
+  holding an instance) would split that placement from its copies, so it
+  refuses `would_unlink` with `detail: {operands}` unless `unlink: true`
+  is passed; with it, each placement operand is exploded into plain
+  solids (its other copies keep the shared solid), the world boolean
+  runs, and the result adds `unlinked`, the placements split off, all in
+  one undo entry. A path member takes `unlink: true` when it is a direct
+  object member of a world placement (`{path: [instance, object]}`);
+  deeper paths are `-32602` (unlink the placement first). `unlink: true`
+  with no placement operand is accepted and ignored, and `unlink` on
+  `subtract` is `-32602` (a subtract through a placement cuts every
+  copy). `b` must not be a path member when `a` is a world node. `hew.solid.slice` takes `object` as a path to
   a member; the `plane` stays in world coordinates and both pieces stay in
   the definition. `hew.solid.push_pull` takes a face locator whose
   `object` is a path to a member; `at` and `ray` stay in that object's own
@@ -2028,19 +2078,34 @@ inside `core` too and refuses there for want of a selection.
 ### 7.4 Parts: occurrences, frames, meshes, topology
 
 These reads let a client list every part, measure it along its own axes,
-and read its geometry. All four are `model.read`, kernel-served, and carry
-the document's clock.
+tell identical and mirrored parts apart, and read its geometry. All of
+them are `model.read`, kernel-served, and carry the document's clock.
 
 **`hew.query.occurrences`** `{roots?, kinds?, include_hidden?}` lists every
 placement depth-first, members in their recorded order, nested
 definitions expanded through each instance that places them. Each row:
 `{path, id, kind, definition, definition_name, parent, world_pose,
 mirrored, hidden, user_hidden, material, material_effective, tags, name,
-depth}`. `path` is
-the instances above the node (§5.2's occurrence paths); `world_pose` is
+depth, members}`, plus `solid`, `family`, and `family_closed` on object
+rows and `linked` on instance rows (the keys are absent on the other
+kinds). `members` is `{objects, groups, instances}`, the node's direct
+members as ids in member order: a group's members, an instance's
+definition's members, three empty lists for an object; hidden members
+are left out unless `include_hidden`. `solid` is the health verdict
+being solid (closed and manifold). `family` is the object's seam family
+index in `hew.doc.health`'s `families` (valid for the same document
+state) or `null`; `family_closed` is whether every shared rim of that
+family can take a cap, `null` exactly when `family` is. `linked` is
+whether the instance's definition is a set of linked copies (`hew` /
+`linked` on the definition). `path` is
+the instances above the node (§5.2's occurrence paths; never the node's own
+id, so a member of an instance has `[...path, instance]`, and a member of a
+group has the group's `path` with `parent` naming the group); `world_pose` is
 row-major 3×4, the node's own frame in world space: an instance's own pose
 composed through its path, the path's pose for an object or group (their
-geometry is already in their owner's frame); `mirrored` is that pose's
+geometry is already in their owner's frame, so moving an object inside its
+definition leaves `world_pose` unchanged: read `hew.query.measure {path}`
+and its `bbox` to see that edit); `mirrored` is that pose's
 determinant sign. `hidden` is effective visibility: the node's own flag
 and tags, its groups', and the same for every instance on the path;
 `user_hidden` is the node's own flag. `name` is the node's own name,
@@ -2087,7 +2152,10 @@ is the same after a save and reload. A `hew.part` / `frame` attribute
 replaces it (`source: "attribute"`); its values are coordinates in the
 face frame this command reports for the part without the attribute, so
 echoing that frame's own axes back (`origin: [0,0,0], x: [1,0,0], y:
-[0,1,0]`) changes nothing. A placement with no face refuses
+[0,1,0]`) changes nothing. An instance whose definition holds exactly
+one member carrying such an override (a board copied as a linked set
+keeps its override on the member) answers that member's frame through
+the placement's pose, `source: "attribute"`. A placement with no face refuses
 `no_part_frame`; one holding more than 200,000 placements refuses
 `too_many_occurrences`.
 
@@ -2163,7 +2231,67 @@ is watertight. `bbox` is the world-axis-aligned box of the vertices and
 `extents` its sizes `[dx, dy, dz]`; the part-frame sizes are
 `hew.query.part_frame`'s `extents`. A definition-member id without a path
 refuses `unknown_occurrence`; any other mix of the three forms is a
-params error.
+params error. `scope: "own"` (part forms only) sums the container's own
+objects, below.
+
+**`scope: "own" | "all"`** (default `all`) on `hew.query.part_frame`,
+`hew.query.measure`, `hew.view.snapshot`, and `hew.view.line_drawing`:
+`own` takes a container's direct object members and the objects of its
+direct groups, recursively through groups only, never the members of a
+nested instance. A container is a group or an instance (its
+definition's direct members). On an object both scopes are the same.
+`part_frame` with `own` measures the own objects (an instance still
+answers its definition's axes, with extents from its own objects'
+definition-local box); `measure` sums them (`leaf_count` counts them);
+`snapshot` and `line_drawing` draw only the own objects of each
+`selection` root, the camera fitted to them, and need a `selection`
+(`-32602` without one); a definition's `cmp_` id there draws only when
+the definition places no nested instance (`-32602` otherwise; select a
+placement instead). A container with no own objects refuses as an
+empty one does: `no_part_frame`, `-32602` for `measure` and the render
+commands. `hew.query.mesh` and `hew.query.topology` take no `scope`.
+
+**`exclude: ["obj_…"]`** on `hew.query.part_frame` and `hew.query.measure`
+(with `scope: "own"` only): those own Objects are left out of the frame and
+of the measures (`volume`, `area`, `bbox`, `extents`, `leaf_count`, `open_leaves`), so a
+part is sized without its machining bodies (a bore, a groove). Each id must
+be an Object that is one of the target's own members; an id that is not an
+Object, is not an own member, or is given without `scope: "own"` is
+`-32602`; an empty list excludes nothing. Excluding every own Object leaves nothing to measure and refuses
+as a container with no own Objects does (`no_part_frame`; `-32602` for
+`measure`). `hew.query.mesh`, `hew.query.topology`, and
+`hew.query.signature` take no `exclude`.
+
+**`solids_only: true`** (default `false`) on `hew.query.part_frame` and
+`hew.query.measure`: every leaf the `scope` selects that is not a closed
+solid (the ones `hew.query.occurrences` reports as `solid: false`; a stray
+face, an imported surface) is left out of the frame and the measures, as
+if listed in `exclude`. Any `scope` works, and it composes with `exclude`.
+When nothing is left to measure the answer is the one `exclude` gives
+(`no_part_frame`; `-32602` for `measure`). `hew.query.mesh`,
+`hew.query.topology`, `hew.query.signature`, and a `{from, to}` measure
+take no `solids_only`.
+
+**`hew.query.signature`** `{id | path}` tells whether two objects are the
+same part or mirrored twins: `{shape, mirror, symmetric, frame: {origin,
+x, y, z, extents}}`. `frame` is the object's face frame (`l ≥ w ≥ t`,
+right-handed), what `hew.query.part_frame` reports without a `hew.part`
+/ `frame` override: `origin` is the part's minimum corner in that frame
+and `extents` its size along `x`, `y`, `z`, so a pose that maps one
+part onto its twin reflects about the frame's center, `origin +
+extents / 2` along the axes, not about `origin`. Every rotation that
+maps the frame's axes onto themselves and keeps the extent order is a
+candidate (four with distinct extents, more when they tie); under each,
+every vertex about
+the frame box's center is quantized to 1 µm, each face listed as its
+loops (outer first, each started at its smallest vertex, holes sorted)
+with its surface kind and parameters (plane; cylinder axis line and
+radius), the faces sorted, and the whole hashed with SHA-256. `shape` is
+the smallest hash (lowercase hex); `mirror` is the same over the
+reflections, so `a.shape == b.mirror` means `b` is `a`'s mirror image,
+and `symmetric` is `shape == mirror`. The hash survives a save and
+reload and any rigid motion. A group or instance refuses
+`not_an_object`; an object with no face `no_part_frame`.
 
 **Setting axes.** Three `model.write` commands change how a part is
 measured; each is one undo entry.
@@ -2181,6 +2309,46 @@ and nothing moves on screen; a placement's `world_pose` changes, its
 number of placing instances. A frame that fails the check refuses
 `invalid_frame`; while any editing session is open it refuses
 `rebase_during_session`.
+
+`hew.component.make_unique` `{instance? | path?, cascade? = true, deep?
+= false}` gives one placement a private definition: exactly one of
+`instance` (a world placement) and `path` (instance ids, outermost
+first, the last the placement to fork). `cascade: true` makes every
+instance on the path unique in turn, so only the placement at the end
+diverges ("Unlink" in the app); `false` forks only the last definition,
+in place inside its owner, so every placement of the owners changes.
+`deep: true` also gives each nested definition of the fork a private
+copy. Result `{component, instance, remap}`: the forked definition, the
+placement at the end of the path after the call (the leaf itself for a
+one-element path, its divergent twin for a deeper one), and `remap`, one
+flat map from each copied id to its copy over every kind (objects,
+groups, instances, definitions; only new ids are values). The copies
+keep their names and tags, and a fork of a linked set stays a linked
+set (a set of one placement). One undo entry. While a definition the
+call would read or fork is open for editing it refuses
+`explode_session_scope`.
+
+`hew.component.promote` `{component, name}` makes a set of linked copies
+a named component ("Make component"): it removes `hew` / `linked` from
+the definition and sets its name (trimmed; not blank, at most 128
+bytes, no control characters, else `-32602`). A definition that is not a
+linked set refuses `not_linked`. Result `{component}`; one undo entry.
+
+`hew.entity.flip` `{ids, axis | plane, about?, copy?}` mirrors a
+selection: world nodes and sketches, or members of one definition
+through one path, as `move` takes them. `axis` (`"x"`, `"y"`, `"z"`) is
+the mirror plane's world normal (SketchUp's Flip Along), through `about`:
+`"center"` (the default, the selection's world bounding-box center),
+`"origin"`, or `[x, y, z]`; `plane` is `{point, normal}` in world
+coordinates and takes no `about`; exactly one of `axis` and `plane`.
+Without `copy` the selection flips in place (objects and sketches bake
+the reflection right side out, an instance takes a mirrored pose) and
+the result is `{}`. `copy: {linked?}` (no `count`, no `grid`) makes one
+mirrored copy instead: linked by default, another placement at a
+mirrored pose (`mirrored: true` on its row), or independent baked
+geometry with `linked: false`; the result is `{ids, linked}` as for a
+`move` copy. A sketch copy refuses `sketch_copy_unsupported`. One undo
+entry.
 
 `hew.component.flip_instance` `{instance, axis: "x" | "y" | "z"}`
 mirrors one world instance across the plane normal to its definition's
@@ -2259,7 +2427,14 @@ members, an id named twice) is exported or drawn once. A selection over
 the walk's 200,000-row cap refuses `too_many_occurrences`. Export keeps
 its solids-only rule. The SketchUp formats write
 the whole document, so `selection` with `skp` or `skp2017` is a params
-error. An empty `selection` is a params error.
+error. An empty `selection` is a params error. `scope: "own"` narrows
+each root to its own objects (§7.4). `hew.view.snapshot`'s `orient:
+"part"` renders its one selection root in the root's part frame: the
+named view (iso when none) means the frame's axes, `front` looking along
+the frame's +y, `top` along −z, `right` along −x, so a turned board
+renders the same picture at any pose. It needs a selection of exactly
+one entity and no `camera` (`-32602`), and refuses `no_part_frame` for a
+root with no face.
 
 ### 7.6 Compute
 

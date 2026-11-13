@@ -284,14 +284,15 @@
     },
     {
       "compare": "/result/results/0/ids",
-      "note": "two copies of a through the path, 2 m apart along world +y",
+      "note": "two copies of a through the path, 2 m apart along world +y (independent)",
       "request": {
         "id": 10,
         "jsonrpc": "2.0",
         "method": "hew.entity.move",
         "params": {
           "copy": {
-            "count": 2
+            "count": 2,
+            "linked": false
           },
           "ids": [
             {

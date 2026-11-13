@@ -1030,9 +1030,10 @@ fn union_takes_any_number_of_operands_as_one_undo_step() {
     assert_eq!(doc.visible_object_ids().len(), 1);
 }
 
-/// Two operands given as `operands` are the `a` and `b` call.
+/// Two operands given as `operands` are the `a` and `b` call, and `unlink`
+/// with three or more plain solids is ignored, as it is with two.
 #[test]
-fn operands_of_two_are_a_and_b() {
+fn operands_of_two_are_a_and_b_and_unlink_is_ignored_for_plain_solids() {
     let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
@@ -1060,7 +1061,7 @@ fn operands_of_two_are_a_and_b() {
         &mut doc,
         11,
         "hew.solid.union",
-        json!({ "operands": [boxes[2], boxes[3], boxes[4]] }),
+        json!({ "operands": [boxes[2], boxes[3], boxes[4]], "unlink": true }),
     ));
     assert!(
         three["result"].as_str().unwrap().starts_with("obj_"),

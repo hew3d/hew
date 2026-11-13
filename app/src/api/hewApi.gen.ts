@@ -97,7 +97,7 @@ export type UnspecifiedShape = Record<string, unknown>
 /**
  * `hew.attr.delete` (v1) — Delete one attribute key or a whole namespace.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, unknown_face, unknown_edge, not_a_solid_edge, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, invalid_attr_name, reserved_attr_namespace, attr_namespace_not_granted, unknown_attr, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
+ * Refusals: unknown_entity, unknown_face, unknown_edge, not_a_solid_edge, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, unknown_occurrence, not_an_object, explode_session_scope, invalid_attr_name, reserved_attr_namespace, attr_namespace_not_granted, unknown_attr, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
  */
 export interface AttrDeleteParams {
   key?: string
@@ -110,7 +110,7 @@ export interface AttrDeleteResult {}
 /**
  * `hew.attr.get` (v1) — Read a target's attribute dictionaries.
  * Tier: Required · Class: read-only · Served: kernel
- * Refusals: unknown_entity, unknown_face, unknown_edge, not_a_solid_edge, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
+ * Refusals: unknown_entity, unknown_face, unknown_edge, not_a_solid_edge, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, unknown_occurrence, not_an_object, explode_session_scope, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
  */
 export interface AttrGetParams {
   ns?: string
@@ -122,7 +122,7 @@ export type AttrGetResult = UnspecifiedShape
 /**
  * `hew.attr.set` (v1) — Write one attribute key.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, unknown_face, unknown_edge, not_a_solid_edge, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, invalid_attr_name, reserved_attr_namespace, attr_namespace_not_granted, non_finite_attr_value, attr_value_too_deep, unrepresentable_attr_value, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
+ * Refusals: unknown_entity, unknown_face, unknown_edge, not_a_solid_edge, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, unknown_occurrence, not_an_object, explode_session_scope, invalid_attr_name, reserved_attr_namespace, attr_namespace_not_granted, non_finite_attr_value, attr_value_too_deep, unrepresentable_attr_value, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_guide, unknown_material, unknown_component, unknown_tag
  */
 export interface AttrSetParams {
   key: string
@@ -207,16 +207,28 @@ export interface ComponentImportDefinitionResult {
 }
 
 /**
- * `hew.component.make_unique` (v1) — Deep-copy an instance's definition into a private one.
+ * `hew.component.make_unique` (v1) — Give one placement its own private definition (through an occurrence path at any depth), with the old-to-new id map.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, unknown_instance, unknown_component
+ * Refusals: unknown_entity, unknown_occurrence, unknown_instance, unknown_component, explode_session_scope
  */
 export interface ComponentMakeUniqueParams {
-  instance: string
+  /** true: every instance on the path is made unique in turn, so only the placement at the end diverges; false: only the last definition is forked, in place inside its owner, so every placement of the owners changes */
+  cascade?: boolean
+  /** also give every nested definition of the fork a private copy */
+  deep?: boolean
+  /** a world placement: the same as path [instance] */
+  instance?: string
+  /** instance ids, outermost first; the last is the placement to fork */
+  path?: string[]
 }
 
 export interface ComponentMakeUniqueResult {
+  /** the forked definition */
   component: string
+  /** the placement at the end of the path after the call: the leaf itself for a one-element path, its divergent twin (a value in remap) for a deeper one */
+  instance: string
+  /** every id the call minted, keyed by the id it copies, over every kind (objects, groups, instances, definitions); only new ids are values */
+  remap: UnspecifiedShape
 }
 
 /**
@@ -231,6 +243,22 @@ export interface ComponentPlaceParams {
 
 export interface ComponentPlaceResult {
   instance: string
+}
+
+/**
+ * `hew.component.promote` (v1) — Make a set of linked copies a named component: removes its linked mark and names its definition.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_entity, not_linked
+ */
+export interface ComponentPromoteParams {
+  /** the linked set's definition (cmp_) */
+  component: string
+  /** the component's name: not blank, at most 128 bytes, no control characters */
+  name: string
+}
+
+export interface ComponentPromoteResult {
+  component: string
 }
 
 /**
@@ -666,12 +694,37 @@ export interface EntityDeleteParams {
 export interface EntityDeleteResult {}
 
 /**
+ * `hew.entity.flip` (v1) — Mirror a selection across a plane (Flip Along an axis through its center, the origin, or a point; or a given plane), in place or as one mirrored copy that links by default.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_entity, sketch_copy_unsupported, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope, component_expansion_exceeded, too_many_occurrences, singular, degenerate_axis, degenerate_texture_frame
+ */
+export interface EntityFlipParams {
+  /** where an axis plane passes: center (the default, the selection's world bounding-box center), origin, or a point */
+  about?: "center" | "origin" | [number, number, number]
+  /** the mirror plane's world normal (SketchUp's Flip Along); exactly one of axis and plane */
+  axis?: "x" | "y" | "z"
+  /** one mirrored copy instead of flipping in place; a linked copy is another placement at a mirrored pose */
+  copy?: { linked?: boolean }
+  /** world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602 */
+  ids: (string | { path: string[] })[]
+  /** the mirror plane in world coordinates; takes no about */
+  plane?: { normal: [number, number, number]; point: UnspecifiedShape }
+}
+
+export interface EntityFlipResult {
+  /** with copy: the mirrored copies (placements for a linked copy) */
+  ids?: string[]
+  /** present whenever copy was given: each object or group the copy wrapped as a linked set (it keeps its id, now inside definition, placed by instance in its old spot); empty for linked: false or when every root already was a placement */
+  linked?: { definition: string; instance: string; source: string }[]
+}
+
+/**
  * `hew.entity.move` (v1) — Translate (with copy/array forms) by vector or from→to points; ids may be paths to members of one definition, moved in world terms with every placement following.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: unknown_entity, mixed_selection_unsupported, sketch_copy_unsupported, array_count_too_large, empty_selection, duplicate_member, unknown_object, unknown_group, unknown_instance, unknown_sketch, unknown_occurrence, unknown_component, explode_session_scope, component_expansion_exceeded
  */
 export interface EntityMoveParams {
-  copy?: { count?: number; grid?: { count: number; step: [number, number, number] }[] }
+  copy?: { count?: number; grid?: { count: number; step: [number, number, number] }[]; linked?: boolean }
   from?: UnspecifiedShape
   /** world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602 */
   ids: (string | { path: string[] })[]
@@ -680,8 +733,10 @@ export interface EntityMoveParams {
 }
 
 export interface EntityMoveResult {
-  /** the copies, placement-major, each placement's block in ids order */
+  /** the copies, placement-major, each placement's block in ids order; a linked copy's are placements (ins_) */
   ids?: string[]
+  /** present whenever copy was given: each object or group the copy wrapped as a linked set (it keeps its id, now inside definition, placed by instance in its old spot); empty for linked: false or when every root already was a placement */
+  linked?: { definition: string; instance: string; source: string }[]
 }
 
 /**
@@ -705,7 +760,7 @@ export interface EntityRotateParams {
   /** radians, right-handed about axis */
   angle: number
   axis: [number, number, number]
-  copy?: { count?: number }
+  copy?: { count?: number; linked?: boolean }
   /** world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602 */
   ids: (string | { path: string[] })[]
   pivot: UnspecifiedShape
@@ -713,6 +768,8 @@ export interface EntityRotateParams {
 
 export interface EntityRotateResult {
   ids?: string[]
+  /** present whenever copy was given: each object or group the copy wrapped as a linked set (it keeps its id, now inside definition, placed by instance in its old spot); empty for linked: false or when every root already was a placement */
+  linked?: { definition: string; instance: string; source: string }[]
 }
 
 /**
@@ -1089,9 +1146,10 @@ export interface MaterialCreateResult {
 /**
  * `hew.material.paint` (v1) — Paint a face or entity.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: unknown_entity, unknown_object, unknown_instance, unknown_component, unknown_face, unknown_material, locator_missed, ambiguous_locator
+ * Refusals: unknown_entity, unknown_object, unknown_instance, unknown_component, unknown_face, unknown_material, locator_missed, ambiguous_locator, unknown_occurrence, not_an_object, explode_session_scope
  */
 export interface MaterialPaintParams {
+  /** a face locator {object | path, at} | {object | path, ray} | {"$face"}; through a path the definition's face is painted, so every copy shows it */
   face?: UnspecifiedShape
   /** an object (its base material), an instance (the placement's own material), or a definition (every object it owns) */
   id?: string
@@ -1277,7 +1335,7 @@ export interface QueryChangesSinceParams {
 }
 
 export interface QueryChangesSinceResult {
-  changes: { added: string[]; attrs: ({ id: string; ns: string; scope: "entity" | "face" | "edge" })[]; document: boolean; full: boolean; modified: string[]; removed: string[] }
+  changes: { added: string[]; attrs: ({ id: string; ns: string; scope: "entity" | "face" | "edge" })[]; copied_from: [string, string][]; document: boolean; full: boolean; linked: { definition: string; instance: string; source: string }[]; modified: string[]; removed: string[] }
   epoch: number
   from: number
   generation: number
@@ -1343,7 +1401,7 @@ export interface QueryFacesResult {
  * Tier: Required · Class: read-only · Served: kernel
  * Refusals: unknown_entity, unknown_occurrence, locator_missed, ambiguous_locator, no_such_point, too_many_occurrences
  */
-export type QueryMeasureParams = { from: UnspecifiedShape; to: UnspecifiedShape } | { id: string } | { path: string[] }
+export type QueryMeasureParams = { from: UnspecifiedShape; to: UnspecifiedShape } | { exclude?: string[]; id: string; scope?: "own" | "all"; solids_only?: boolean } | { exclude?: string[]; path: string[]; scope?: "own" | "all"; solids_only?: boolean }
 
 export type QueryMeasureResult = { delta: unknown[]; distance: number; epoch: number; generation: number } | { area: number; bbox: { max: unknown[]; min: unknown[] }; epoch: number; extents: unknown[]; generation: number; leaf_count: number; open_leaves: number; volume: number | null }
 
@@ -1394,7 +1452,7 @@ export interface QueryOccurrencesParams {
 export interface QueryOccurrencesResult {
   epoch: number
   generation: number
-  occurrences: ({ definition: string | null; definition_name: string | null; depth: number; hidden: boolean; id: string; kind: "object" | "group" | "instance"; material: string | null; material_effective: string | null; mirrored: boolean; name: string | null; parent: string | null; path: string[]; tags: string[][]; user_hidden: boolean; world_pose: number[] })[]
+  occurrences: ({ definition: string | null; definition_name: string | null; depth: number; family?: number | null; family_closed?: boolean | null; hidden: boolean; id: string; kind: "object" | "group" | "instance"; linked?: boolean; material: string | null; material_effective: string | null; members: { groups: string[]; instances: string[]; objects: string[] }; mirrored: boolean; name: string | null; parent: string | null; path: string[]; solid?: boolean; tags: string[][]; user_hidden: boolean; world_pose: number[] })[]
 }
 
 /**
@@ -1403,10 +1461,16 @@ export interface QueryOccurrencesResult {
  * Refusals: unknown_entity, unknown_occurrence, no_part_frame, too_many_occurrences
  */
 export interface QueryPartFrameParams {
+  /** Object ids, each one of the target's own members, left out of the frame and the measures (needs scope "own"); an id that is not an own member is -32602 */
+  exclude?: string[]
   /** a world node's public id */
   id?: string
   /** an occurrence path, instances first and the node last */
   path?: string[]
+  /** all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same */
+  scope?: "own" | "all"
+  /** true leaves out Objects that are not closed solids (stray faces, imported surfaces; the ones hew.query.occurrences reports as solid: false) from the frame and the measures. Works with any scope and composes with exclude; when nothing is left it answers as exclude does when it leaves nothing */
+  solids_only?: boolean
 }
 
 export interface QueryPartFrameResult {
@@ -1451,7 +1515,7 @@ export interface QueryResolveParams {
   /** HEW_API.md §5.2's edge locator: a solid edge by {object,at}, a sketch edge's own public id ("edg_…") as a bare string, or a sketch edge by {sketch,at} / {sketch,from,to} */
   edge?: UnspecifiedShape
   face?: UnspecifiedShape
-  /** an occurrence locator {path: [instance, …, leaf]}; answers {occurrence: OccurrenceJson} */
+  /** an occurrence locator {path: [instance, …, leaf]}; answers {occurrence: OccurrenceJson without members, solid, family, or linked} */
   occurrence?: UnspecifiedShape
   point?: UnspecifiedShape
 }
@@ -1479,6 +1543,31 @@ export interface QuerySceneResult {
   sketches: unknown[]
   tags: unknown[]
   tree: unknown[]
+}
+
+/**
+ * `hew.query.signature` (v1) — Whether two objects are the same part or mirrored twins: one object's shape and mirror hashes, and its part frame.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_entity, unknown_occurrence, not_an_object, no_part_frame, too_many_occurrences
+ */
+export interface QuerySignatureParams {
+  /** a world node's public id */
+  id?: string
+  /** an occurrence path, instances first and the node last */
+  path?: string[]
+}
+
+export interface QuerySignatureResult {
+  epoch: number
+  /** the part's face frame (l ≥ w ≥ t, right-handed), as hew.query.part_frame reports it without a hew.part / frame override; origin is the part's minimum corner in that frame and extents its size along x, y, z, so the frame's center is origin + extents / 2 along the axes */
+  frame: { extents: [number, number, number]; origin: [number, number, number]; x: [number, number, number]; y: [number, number, number]; z: [number, number, number] }
+  generation: number
+  /** the shape hash of the object's mirror image: a.shape == b.mirror means a and b are mirrored twins */
+  mirror: string
+  /** SHA-256, lowercase hex */
+  shape: string
+  /** shape == mirror: the part is its own mirror image */
+  symmetric: boolean
 }
 
 /**
@@ -2032,19 +2121,23 @@ export interface SolidImprintsResult {
 /**
  * `hew.solid.intersect` (v1) — Boolean intersection of two or more solids: the material in all of them.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, would_unlink
  */
 export interface SolidIntersectParams {
   /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
   a?: string | { path: string[] }
   /** a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path */
   b?: string | { path: string[] }
-  /** every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand and a transient cutter take a and b */
+  /** every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand, a transient cutter and unlink take a and b */
   operands?: string[]
+  /** true: a placement operand (an instance, a member by path, or a group holding one) is unlinked and exploded into plain solids, then joined; its other copies keep the shared solid. Without it such an operand refuses would_unlink. Ignored when no operand is a placement, and in a call with three or more operands, where a placement refuses boolean_operand_has_instance */
+  unlink?: boolean
 }
 
 export interface SolidIntersectResult {
   result: string
+  /** present when unlink: true split placements off: the placements exploded */
+  unlinked?: string[]
 }
 
 /**
@@ -2130,11 +2223,11 @@ export interface SolidMoveImprintResult {
 /**
  * `hew.solid.push_pull` (v1) — Push/pull a face of a solid with the tool's full semantics.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: object_not_solid, distance_too_small, would_vanish, non_manifold_result, not_a_sub_face, radius_vanishes, wall_neighbor_non_planar, unknown_face, unknown_object, unknown_component, grouped_operand, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, unknown_occurrence, explode_session_scope
+ * Refusals: object_not_solid, distance_too_small, would_vanish, non_manifold_result, not_a_sub_face, radius_vanishes, wall_neighbor_non_planar, unknown_face, unknown_object, unknown_component, grouped_operand, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, unknown_occurrence, explode_session_scope, not_an_object
  */
 export interface SolidPushPullParams {
   distance: number
-  /** HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {"$face":"label#key"}; object may be {path: [instance, …, object]} to reach a definition member through a placement (at and ray stay in the object's own frame) */
+  /** HEW_API.md §5.2 face locator: {object | path, at} | {object | path, ray} | {"$face":"label#key"}; path (or object as {path: [...]}) is an occurrence path [instance, …, object] that reaches a definition member through a placement, every placement following (at and ray stay in the leaf's frame, the definition's coordinates, not world coordinates) */
   face: UnspecifiedShape
 }
 
@@ -2206,7 +2299,7 @@ export interface SolidSubtractParams {
   a?: string | { path: string[] }
   /** a world node id; with a by path, a world object (consumed), {path} to a member of the same definition by the same path, or a transient cutter {prism} | {box} in world coordinates (no object is created) */
   b?: string | { path: string[] } | { prism: UnspecifiedShape } | { box: UnspecifiedShape }
-  /** every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand and a transient cutter take a and b */
+  /** every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand, a transient cutter and unlink take a and b */
   operands?: string[]
 }
 
@@ -2237,19 +2330,23 @@ export interface SolidThickenResult {
 /**
  * `hew.solid.union` (v1) — Boolean union of two or more solids: the material in any of them.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope
+ * Refusals: boolean_needs_two, boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity, unknown_occurrence, unknown_component, explode_session_scope, would_unlink
  */
 export interface SolidUnionParams {
   /** a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows */
   a?: string | { path: string[] }
   /** a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path */
   b?: string | { path: string[] }
-  /** every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand and a transient cutter take a and b */
+  /** every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand, a transient cutter and unlink take a and b */
   operands?: string[]
+  /** true: a placement operand (an instance, a member by path, or a group holding one) is unlinked and exploded into plain solids, then joined; its other copies keep the shared solid. Without it such an operand refuses would_unlink. Ignored when no operand is a placement, and in a call with three or more operands, where a placement refuses boolean_operand_has_instance */
+  unlink?: boolean
 }
 
 export interface SolidUnionResult {
   result: string
+  /** present when unlink: true split placements off: the placements exploded */
+  unlinked?: string[]
 }
 
 /**
@@ -2429,6 +2526,8 @@ export interface ViewLineDrawingParams {
   scale?: number
   /** a Scene's id: its camera and hidden sets, as hew.view.snapshot */
   scene?: string
+  /** all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same */
+  scope?: "own" | "all"
   /** draw only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its leaves at the identity pose) */
   selection?: (string | { path: string[] })[]
   /** a named standard view (parallel projection); mutually exclusive with camera and scene */
@@ -2478,7 +2577,7 @@ export interface ViewShowAllResult {
 /**
  * `hew.view.snapshot` (v1) — Render the attached document to PNG, rendered by the host's software rasterizer, identically in the app and in hew-cli, optionally of a selection on a transparent background — bytes base64 by default, or a path on hosts with filesystem access.
  * Tier: Standard · Class: solitary · Served: host
- * Refusals: host_capability_missing, nothing_to_render, save_failed, unknown_entity, unknown_occurrence, unknown_scene, too_many_occurrences
+ * Refusals: host_capability_missing, nothing_to_render, save_failed, unknown_entity, unknown_occurrence, unknown_scene, too_many_occurrences, no_part_frame
  */
 export interface ViewSnapshotParams {
   /** "transparent", #rrggbb, or #rrggbbaa; the fill of pixels no surface touches (defaults to the rasterizer's light gray). The id, depth, and normals passes are unaffected. */
@@ -2495,10 +2594,14 @@ export interface ViewSnapshotParams {
   include_ids?: boolean
   /** defaults to false; when true, also returns a camera-space normals pass as an RGB PNG: (n * 0.5 + 0.5) * 255 per axis, x right, y up, z toward the viewer, background (128, 128, 255) */
   include_normals?: boolean
+  /** part renders the one selection root in its part frame: the named view (iso when none) means the frame's axes, front looking along the frame's +y, top along -z, right along -x. Needs a selection of exactly one entity and no camera */
+  orient?: "world" | "part"
   /** when given, the PNG is written here instead of returned inline, honored by hosts with filesystem access and refused typed elsewhere (mirrors hew.doc.export) */
   path?: string
   /** a Scene's id: renders through its resolved camera and hidden sets (Document::resolve_scene) instead of the document's own — falls back to the usual cameraless resolution when the Scene captures no camera. Mutually exclusive with camera and view. The Scene's section plane, if any, is NOT rendered headlessly at 1.0. */
   scene?: string
+  /** all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same */
+  scope?: "own" | "all"
   /** render only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its members at the identity pose, one picture however many times it is placed). With no camera or view the camera is a fitted isometric over the selection, never the document's saved camera; view fits that standard view to the selection. Mutually exclusive with scene. */
   selection?: (string | { path: string[] })[]
   /** a named standard view fitted to the scene bounding box; mutually exclusive with camera and scene */
@@ -2617,6 +2720,7 @@ export class HewApiClient {
     importDefinition: (params: ComponentImportDefinitionParams): Promise<ComponentImportDefinitionResult> => this.call('hew.component.import_definition', params),
     makeUnique: (params: ComponentMakeUniqueParams): Promise<ComponentMakeUniqueResult> => this.mutate('hew.component.make_unique', params),
     place: (params: ComponentPlaceParams): Promise<ComponentPlaceResult> => this.mutate('hew.component.place', params),
+    promote: (params: ComponentPromoteParams): Promise<ComponentPromoteResult> => this.mutate('hew.component.promote', params),
     rebase: (params: ComponentRebaseParams): Promise<ComponentRebaseResult> => this.mutate('hew.component.rebase', params),
   }
 
@@ -2653,6 +2757,7 @@ export class HewApiClient {
 
   readonly entity = {
     delete: (params: EntityDeleteParams): Promise<EntityDeleteResult> => this.mutate('hew.entity.delete', params),
+    flip: (params: EntityFlipParams): Promise<EntityFlipResult> => this.mutate('hew.entity.flip', params),
     move: (params: EntityMoveParams): Promise<EntityMoveResult> => this.mutate('hew.entity.move', params),
     rename: (params: EntityRenameParams): Promise<EntityRenameResult> => this.mutate('hew.entity.rename', params),
     rotate: (params: EntityRotateParams): Promise<EntityRotateResult> => this.mutate('hew.entity.rotate', params),
@@ -2730,6 +2835,7 @@ export class HewApiClient {
     raycast: (params: QueryRaycastParams): Promise<QueryRaycastResult> => this.call('hew.query.raycast', params),
     resolve: (params: QueryResolveParams): Promise<QueryResolveResult> => this.call('hew.query.resolve', params),
     scene: (params: QuerySceneParams): Promise<QuerySceneResult> => this.call('hew.query.scene', params),
+    signature: (params: QuerySignatureParams): Promise<QuerySignatureResult> => this.call('hew.query.signature', params),
     topology: (params: QueryTopologyParams): Promise<QueryTopologyResult> => this.call('hew.query.topology', params),
   }
 

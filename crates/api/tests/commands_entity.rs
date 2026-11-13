@@ -516,7 +516,7 @@ fn move_with_copy_count_three_creates_an_array_in_one_undo_entry() {
         json!({
             "ids": [public],
             "translation": [1.0, 0.0, 0.0],
-            "copy": { "count": 3 }
+            "copy": { "count": 3, "linked": false }
         }),
     );
     let ids = result["ids"].as_array().expect("ids array");
@@ -689,7 +689,7 @@ fn rotate_with_copy_creates_a_rotated_duplicate() {
             "pivot": [0.0, 0.0, 0.0],
             "axis": [0.0, 0.0, 1.0],
             "angle": std::f64::consts::FRAC_PI_2,
-            "copy": {}
+            "copy": { "linked": false }
         }),
     );
     let ids = result["ids"].as_array().expect("ids array");
@@ -992,7 +992,7 @@ fn copy_by_path_lands_in_the_definition_and_refuses_while_it_is_open() {
         &mut f.doc,
         2,
         "hew.entity.move",
-        json!({ "ids": [path.clone()], "translation": [0.0, 2.0, 0.0], "copy": { "count": 2 } }),
+        json!({ "ids": [path.clone()], "translation": [0.0, 2.0, 0.0], "copy": { "count": 2, "linked": false } }),
     );
     let ids = result["ids"].as_array().expect("copies listed");
     assert_eq!(ids.len(), 2);
@@ -1003,7 +1003,7 @@ fn copy_by_path_lands_in_the_definition_and_refuses_while_it_is_open() {
         &mut f.doc,
         3,
         "hew.entity.move",
-        json!({ "ids": [path.clone()], "copy": { "grid": [{ "count": 2, "step": [0.0, 0.0, 2.0] }] } }),
+        json!({ "ids": [path.clone()], "copy": { "grid": [{ "count": 2, "step": [0.0, 0.0, 2.0] }], "linked": false } }),
     );
     assert_eq!(result["ids"].as_array().unwrap().len(), 1);
 
@@ -1032,12 +1032,16 @@ fn subtract_by_path_cuts_every_placement_and_union_with_a_world_b_refuses() {
     let tool = build_box(&mut f.doc, 19.5);
     let tool_id = obj_id(&f.doc, tool);
     let a_path = json!({ "path": [ins_id(&f.doc, f.i2), obj_id(&f.doc, f.a)] });
-    call_params_err(
+    // Joining a member with world material would split it from its other
+    // placements: the bus asks first (`unlink: true`).
+    let data = call_err(
         &mut conn,
         &mut f.doc,
+        80,
         "hew.solid.union",
         json!({ "a": a_path.clone(), "b": tool_id.clone() }),
     );
+    assert_eq!(data["refusal"], "would_unlink");
     call_params_err(
         &mut conn,
         &mut f.doc,
@@ -1263,7 +1267,7 @@ fn transforms_through_a_turned_or_nested_path_land_where_asked_in_world_terms() 
             &mut f.doc,
             id,
             "hew.entity.move",
-            json!({ "ids": [loc], "copy": { "grid": [{ "count": 2, "step": [3.0, 0.0, 0.0] }] } }),
+            json!({ "ids": [loc], "copy": { "grid": [{ "count": 2, "step": [3.0, 0.0, 0.0] }], "linked": false } }),
         );
         let fresh: Vec<ObjectId> = f
             .doc

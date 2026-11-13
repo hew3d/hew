@@ -1,0 +1,836 @@
+{
+  "profile": "core",
+  "frames": [
+    {
+      "compare": "/result/profile",
+      "note": "the handshake",
+      "request": {
+        "id": 0,
+        "jsonrpc": "2.0",
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": "core"
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "compare": "/result/results/1/object_id",
+      "note": "the panel",
+      "request": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "label": "panel",
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  0.4,
+                  0.2,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.018,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response": "obj_1"
+    },
+    {
+      "compare": "/result/results/1/object_id",
+      "note": "the plate",
+      "request": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "label": "plate",
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  1.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  1.04,
+                  0.03,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.002,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response": "obj_3"
+    },
+    {
+      "compare": "/result/results/1/object_id",
+      "note": "the pin",
+      "request": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "label": "pin",
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  2.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  2.01,
+                  0.01,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.03,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response": "obj_5"
+    },
+    {
+      "compare": "/result/results/1/object_id",
+      "note": "the shelf",
+      "request": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "label": "shelf",
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  3.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  3.3,
+                  0.2,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.018,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "response": "obj_7"
+    },
+    {
+      "note": "the hinge: plate and pin as one definition",
+      "request": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "method": "hew.component.create",
+        "params": {
+          "members": [
+            "obj_3",
+            "obj_5"
+          ]
+        }
+      },
+      "response": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.create",
+          "results": [
+            {
+              "component": "cmp_8",
+              "instance": "ins_9"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "the door: the panel and a hinge placement",
+      "request": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "method": "hew.group.create",
+        "params": {
+          "members": [
+            "obj_1",
+            "ins_9"
+          ]
+        }
+      },
+      "response": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.group.create",
+          "results": [
+            {
+              "group": "grp_a"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "two seam halves ingested, then the shelf copied: the copy links, so both placements share a linked set",
+      "request": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "method": "hew.entity.move",
+        "params": {
+          "ids": [
+            "obj_7"
+          ],
+          "translation": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "copy": {}
+        }
+      },
+      "response": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.entity.move",
+          "results": [
+            {
+              "ids": [
+                "ins_f"
+              ],
+              "linked": [
+                {
+                  "definition": "cmp_d",
+                  "instance": "ins_e",
+                  "source": "obj_7"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "fixture": "seam_halves"
+    },
+    {
+      "note": "every row carries members; object rows solid and family, instance rows linked",
+      "request": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "method": "hew.query.occurrences",
+        "params": {}
+      },
+      "response": [
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 0,
+          "family": 0,
+          "family_closed": true,
+          "hidden": false,
+          "id": "obj_b",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
+          "mirrored": false,
+          "name": "Left",
+          "parent": null,
+          "path": [],
+          "solid": false,
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 0,
+          "family": 0,
+          "family_closed": true,
+          "hidden": false,
+          "id": "obj_c",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
+          "mirrored": false,
+          "name": "Right",
+          "parent": null,
+          "path": [],
+          "solid": false,
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "grp_a",
+          "kind": "group",
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [
+              "ins_9"
+            ],
+            "objects": [
+              "obj_1"
+            ]
+          },
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 0,
+          "family": null,
+          "family_closed": null,
+          "hidden": false,
+          "id": "obj_1",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
+          "mirrored": false,
+          "name": null,
+          "parent": "grp_a",
+          "path": [],
+          "solid": true,
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": "cmp_8",
+          "definition_name": "Component 1",
+          "depth": 0,
+          "hidden": false,
+          "id": "ins_9",
+          "kind": "instance",
+          "linked": false,
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_3",
+              "obj_5"
+            ]
+          },
+          "mirrored": false,
+          "name": null,
+          "parent": "grp_a",
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 1,
+          "family": null,
+          "family_closed": null,
+          "hidden": false,
+          "id": "obj_3",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_9"
+          ],
+          "solid": true,
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 1,
+          "family": null,
+          "family_closed": null,
+          "hidden": false,
+          "id": "obj_5",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_9"
+          ],
+          "solid": true,
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": "cmp_d",
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "ins_e",
+          "kind": "instance",
+          "linked": true,
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_7"
+            ]
+          },
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 1,
+          "family": null,
+          "family_closed": null,
+          "hidden": false,
+          "id": "obj_7",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_e"
+          ],
+          "solid": true,
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": "cmp_d",
+          "definition_name": null,
+          "depth": 0,
+          "hidden": false,
+          "id": "ins_f",
+          "kind": "instance",
+          "linked": true,
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": [
+              "obj_7"
+            ]
+          },
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [],
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        },
+        {
+          "definition": null,
+          "definition_name": null,
+          "depth": 1,
+          "family": null,
+          "family_closed": null,
+          "hidden": false,
+          "id": "obj_7",
+          "kind": "object",
+          "material": null,
+          "material_effective": null,
+          "members": {
+            "groups": [],
+            "instances": [],
+            "objects": []
+          },
+          "mirrored": false,
+          "name": null,
+          "parent": null,
+          "path": [
+            "ins_f"
+          ],
+          "solid": true,
+          "tags": [],
+          "user_hidden": false,
+          "world_pose": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      ],
+      "compare": "/result/occurrences"
+    },
+    {
+      "note": "the door's own objects: the panel alone",
+      "request": {
+        "id": 10,
+        "jsonrpc": "2.0",
+        "method": "hew.query.measure",
+        "params": {
+          "id": "grp_a",
+          "scope": "own"
+        }
+      },
+      "response": 1,
+      "compare": "/result/leaf_count"
+    },
+    {
+      "note": "the door with its hinge",
+      "request": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "method": "hew.query.measure",
+        "params": {
+          "id": "grp_a"
+        }
+      },
+      "response": 3,
+      "compare": "/result/leaf_count"
+    },
+    {
+      "note": "the door's own frame is the panel's",
+      "request": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "method": "hew.query.part_frame",
+        "params": {
+          "id": "grp_a",
+          "scope": "own"
+        }
+      },
+      "response": [
+        0.4,
+        0.2,
+        0.018
+      ],
+      "compare": "/result/extents"
+    },
+    {
+      "note": "an unknown scope is a params error",
+      "request": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "method": "hew.query.part_frame",
+        "params": {
+          "id": "grp_a",
+          "scope": "mine"
+        }
+      },
+      "response": -32602,
+      "compare": "/error/code"
+    },
+    {
+      "note": "the panel's signature: a board is its own mirror image",
+      "request": {
+        "id": 14,
+        "jsonrpc": "2.0",
+        "method": "hew.query.signature",
+        "params": {
+          "id": "obj_1"
+        }
+      },
+      "response": true,
+      "compare": "/result/symmetric"
+    },
+    {
+      "note": "a seam half's",
+      "request": {
+        "id": 15,
+        "jsonrpc": "2.0",
+        "method": "hew.query.signature",
+        "params": {
+          "id": "obj_b"
+        }
+      },
+      "response": "1323a9a59228ebd07c46ec163099b88bce82fff1f69eaf94ad50b717c811e922",
+      "compare": "/result/shape"
+    },
+    {
+      "note": "a group is not an object",
+      "request": {
+        "id": 16,
+        "jsonrpc": "2.0",
+        "method": "hew.query.signature",
+        "params": {
+          "id": "grp_a"
+        }
+      },
+      "response": "not_an_object",
+      "compare": "/error/data/refusal"
+    }
+  ]
+}

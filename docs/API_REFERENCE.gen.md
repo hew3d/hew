@@ -50,7 +50,7 @@ Delete one attribute key or a whole namespace.
           "additionalProperties": false,
           "properties": {
             "face": {
-              "description": "a face locator: {object, at}, {object, ray}, or {\"$face\": \"label#key\"}"
+              "description": "a face locator: {object | path, at}, {object | path, ray}, or {\"$face\": \"label#key\"}; path is an occurrence path ending at the object, at and ray in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement"
             }
           },
           "required": [
@@ -62,7 +62,7 @@ Delete one attribute key or a whole namespace.
           "additionalProperties": false,
           "properties": {
             "edge": {
-              "description": "a solid edge locator: {object, at}"
+              "description": "a solid edge locator: {object | path, at}, at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement"
             }
           },
           "required": [
@@ -101,6 +101,9 @@ Delete one attribute key or a whole namespace.
 - `ambiguous_locator`
 - `face_token_unknown`
 - `face_token_stale`
+- `unknown_occurrence`
+- `not_an_object`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `invalid_attr_name` — Attribute names need both a namespace and a key. Give the attribute a non-empty name and try again.
 - `reserved_attr_namespace`
 - `attr_namespace_not_granted`
@@ -143,7 +146,7 @@ Read a target's attribute dictionaries.
           "additionalProperties": false,
           "properties": {
             "face": {
-              "description": "a face locator: {object, at}, {object, ray}, or {\"$face\": \"label#key\"}"
+              "description": "a face locator: {object | path, at}, {object | path, ray}, or {\"$face\": \"label#key\"}; path is an occurrence path ending at the object, at and ray in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement"
             }
           },
           "required": [
@@ -155,7 +158,7 @@ Read a target's attribute dictionaries.
           "additionalProperties": false,
           "properties": {
             "edge": {
-              "description": "a solid edge locator: {object, at}"
+              "description": "a solid edge locator: {object | path, at}, at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement"
             }
           },
           "required": [
@@ -191,6 +194,9 @@ Read a target's attribute dictionaries.
 - `ambiguous_locator`
 - `face_token_unknown`
 - `face_token_stale`
+- `unknown_occurrence`
+- `not_an_object`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
@@ -232,7 +238,7 @@ Write one attribute key.
           "additionalProperties": false,
           "properties": {
             "face": {
-              "description": "a face locator: {object, at}, {object, ray}, or {\"$face\": \"label#key\"}"
+              "description": "a face locator: {object | path, at}, {object | path, ray}, or {\"$face\": \"label#key\"}; path is an occurrence path ending at the object, at and ray in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement"
             }
           },
           "required": [
@@ -244,7 +250,7 @@ Write one attribute key.
           "additionalProperties": false,
           "properties": {
             "edge": {
-              "description": "a solid edge locator: {object, at}"
+              "description": "a solid edge locator: {object | path, at}, at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement"
             }
           },
           "required": [
@@ -286,6 +292,9 @@ Write one attribute key.
 - `ambiguous_locator`
 - `face_token_unknown`
 - `face_token_stale`
+- `unknown_occurrence`
+- `not_an_object`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `invalid_attr_name` — Attribute names need both a namespace and a key. Give the attribute a non-empty name and try again.
 - `reserved_attr_namespace`
 - `attr_namespace_not_granted`
@@ -611,7 +620,7 @@ Turn a file's bytes (hew, skp, glb, gltf, stl, dae) into one unplaced component 
 - **Served:** kernel
 - **Permission:** model.write
 
-Deep-copy an instance's definition into a private one.
+Give one placement its own private definition (through an occurrence path at any depth), with the old-to-new id map.
 
 **Params schema:**
 
@@ -619,13 +628,29 @@ Deep-copy an instance's definition into a private one.
 {
   "additionalProperties": false,
   "properties": {
+    "cascade": {
+      "default": true,
+      "description": "true: every instance on the path is made unique in turn, so only the placement at the end diverges; false: only the last definition is forked, in place inside its owner, so every placement of the owners changes",
+      "type": "boolean"
+    },
+    "deep": {
+      "default": false,
+      "description": "also give every nested definition of the fork a private copy",
+      "type": "boolean"
+    },
     "instance": {
+      "description": "a world placement: the same as path [instance]",
       "type": "string"
+    },
+    "path": {
+      "description": "instance ids, outermost first; the last is the placement to fork",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
     }
   },
-  "required": [
-    "instance"
-  ],
   "type": "object"
 }
 ```
@@ -636,11 +661,25 @@ Deep-copy an instance's definition into a private one.
 {
   "properties": {
     "component": {
+      "description": "the forked definition",
       "type": "string"
+    },
+    "instance": {
+      "description": "the placement at the end of the path after the call: the leaf itself for a one-element path, its divergent twin (a value in remap) for a deeper one",
+      "type": "string"
+    },
+    "remap": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "every id the call minted, keyed by the id it copies, over every kind (objects, groups, instances, definitions); only new ids are values",
+      "type": "object"
     }
   },
   "required": [
-    "component"
+    "component",
+    "instance",
+    "remap"
   ],
   "type": "object"
 }
@@ -649,8 +688,10 @@ Deep-copy an instance's definition into a private one.
 **Refusals:**
 
 - `unknown_entity`
+- `unknown_occurrence`
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.component.place`
 
@@ -701,6 +742,61 @@ Place an instance of a definition at a pose.
 - `unknown_entity`
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `singular` — That transform would scale the object down to nothing, so it was refused.
+
+### `hew.component.promote`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Make a set of linked copies a named component: removes its linked mark and names its definition.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "component": {
+      "description": "the linked set's definition (cmp_)",
+      "type": "string"
+    },
+    "name": {
+      "description": "the component's name: not blank, at most 128 bytes, no control characters",
+      "type": "string"
+    }
+  },
+  "required": [
+    "component",
+    "name"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "component": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "component"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `not_linked` — This is already a component, not a set of linked copies, so there's nothing to change.
 
 ### `hew.component.rebase`
 
@@ -4924,6 +5020,182 @@ Delete an entity.
 - `definition_nested_in_definition` — This component is used inside another component's definition. Make that component's instances unique or explode them first, or delete the outer component.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
+### `hew.entity.flip`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Mirror a selection across a plane (Flip Along an axis through its center, the origin, or a point; or a given plane), in place or as one mirrored copy that links by default.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "about": {
+      "description": "where an axis plane passes: center (the default, the selection's world bounding-box center), origin, or a point",
+      "oneOf": [
+        {
+          "enum": [
+            "center",
+            "origin"
+          ],
+          "type": "string"
+        },
+        {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      ]
+    },
+    "axis": {
+      "description": "the mirror plane's world normal (SketchUp's Flip Along); exactly one of axis and plane",
+      "enum": [
+        "x",
+        "y",
+        "z"
+      ],
+      "type": "string"
+    },
+    "copy": {
+      "additionalProperties": false,
+      "description": "one mirrored copy instead of flipping in place; a linked copy is another placement at a mirrored pose",
+      "properties": {
+        "linked": {
+          "default": true,
+          "description": "true (the default on the bus, whatever the app's preference): each object or group copied becomes a set of linked copies, its copies placements of one shared solid; false: independent geometry",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ids": {
+      "description": "world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "plane": {
+      "additionalProperties": false,
+      "description": "the mirror plane in world coordinates; takes no about",
+      "properties": {
+        "normal": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "point": {
+          "description": "a point on the plane: [x, y, z] or a derived-point locator (§5.3)"
+        }
+      },
+      "required": [
+        "point",
+        "normal"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "ids"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "{} for a flip in place",
+  "properties": {
+    "ids": {
+      "description": "with copy: the mirrored copies (placements for a linked copy)",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "linked": {
+      "description": "present whenever copy was given: each object or group the copy wrapped as a linked set (it keeps its id, now inside definition, placed by instance in its old spot); empty for linked: false or when every root already was a placement",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "instance",
+          "definition"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `sketch_copy_unsupported`
+- `empty_selection` — The selection has nothing visible to transform — everything in it is hidden or empty. Unhide its contents, or select something visible.
+- `duplicate_member` — The same object is in the selection twice. Reselect and try again.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+- `singular` — That transform would scale the object down to nothing, so it was refused.
+- `degenerate_axis` — The rotation axis needs two distinct points. Pick a second point further from the first.
+- `degenerate_texture_frame` — That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch.
+
 ### `hew.entity.move`
 
 - **Version:** 1
@@ -4976,6 +5248,11 @@ Translate (with copy/array forms) by vector or from→to points; ids may be path
           "maxItems": 3,
           "minItems": 1,
           "type": "array"
+        },
+        "linked": {
+          "default": true,
+          "description": "true (the default on the bus, whatever the app's preference): each object or group copied becomes a set of linked copies, its copies placements of one shared solid; false: independent geometry",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -5032,9 +5309,33 @@ Translate (with copy/array forms) by vector or from→to points; ids may be path
 {
   "properties": {
     "ids": {
-      "description": "the copies, placement-major, each placement's block in ids order",
+      "description": "the copies, placement-major, each placement's block in ids order; a linked copy's are placements (ins_)",
       "items": {
         "type": "string"
+      },
+      "type": "array"
+    },
+    "linked": {
+      "description": "present whenever copy was given: each object or group the copy wrapped as a linked set (it keeps its id, now inside definition, placed by instance in its old spot); empty for linked: false or when every root already was a placement",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "instance",
+          "definition"
+        ],
+        "type": "object"
       },
       "type": "array"
     }
@@ -5148,6 +5449,11 @@ Rotate about a pivot and axis by an angle; ids may be paths to members of one de
           "maximum": 1000,
           "minimum": 1,
           "type": "integer"
+        },
+        "linked": {
+          "default": true,
+          "description": "true (the default on the bus, whatever the app's preference): each object or group copied becomes a set of linked copies, its copies placements of one shared solid; false: independent geometry",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -5200,6 +5506,30 @@ Rotate about a pivot and axis by an angle; ids may be paths to members of one de
     "ids": {
       "items": {
         "type": "string"
+      },
+      "type": "array"
+    },
+    "linked": {
+      "description": "present whenever copy was given: each object or group the copy wrapped as a linked set (it keeps its id, now inside definition, placed by instance in its old spot); empty for linked: false or when every root already was a placement",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "instance",
+          "definition"
+        ],
+        "type": "object"
       },
       "type": "array"
     }
@@ -6998,7 +7328,9 @@ Paint a face or entity.
 {
   "additionalProperties": false,
   "properties": {
-    "face": {},
+    "face": {
+      "description": "a face locator {object | path, at} | {object | path, ray} | {\"$face\"}; through a path the definition's face is painted, so every copy shows it"
+    },
     "id": {
       "description": "an object (its base material), an instance (the placement's own material), or a definition (every object it owns)",
       "type": "string"
@@ -7045,6 +7377,9 @@ Paint a face or entity.
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
 - `locator_missed`
 - `ambiguous_locator`
+- `unknown_occurrence`
+- `not_an_object`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.material.position_texture`
 
@@ -7916,11 +8251,47 @@ What changed since a history generation: the union of the change sets since then
           },
           "type": "array"
         },
+        "copied_from": {
+          "description": "[new, source] pairs of public ids for entities copied in the range",
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": "array"
+        },
         "document": {
           "type": "boolean"
         },
         "full": {
           "type": "boolean"
+        },
+        "linked": {
+          "description": "linked-copy wraps made in the range: the source, the placement that now stands for it, and the shared definition",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "definition": {
+                "type": "string"
+              },
+              "instance": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "instance",
+              "definition"
+            ],
+            "type": "object"
+          },
+          "type": "array"
         },
         "modified": {
           "items": {
@@ -7941,7 +8312,9 @@ What changed since a history generation: the union of the change sets since then
         "modified",
         "attrs",
         "document",
-        "full"
+        "full",
+        "linked",
+        "copied_from"
       ],
       "type": "object"
     },
@@ -8207,9 +8580,30 @@ Distances between points, edges, and faces; or the volume, area, and bounding bo
     {
       "additionalProperties": false,
       "properties": {
+        "exclude": {
+          "description": "Object ids, each one of the target's own members, left out of the frame and the measures (needs scope \"own\"); an id that is not an own member is -32602",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "id": {
           "description": "a world object, group, or instance; a definition member needs path",
           "type": "string"
+        },
+        "scope": {
+          "default": "all",
+          "description": "all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same",
+          "enum": [
+            "own",
+            "all"
+          ],
+          "type": "string"
+        },
+        "solids_only": {
+          "default": false,
+          "description": "true leaves out Objects that are not closed solids (stray faces, imported surfaces; the ones hew.query.occurrences reports as solid: false) from the frame and the measures. Works with any scope and composes with exclude; when nothing is left it answers as exclude does when it leaves nothing",
+          "type": "boolean"
         }
       },
       "required": [
@@ -8220,6 +8614,13 @@ Distances between points, edges, and faces; or the volume, area, and bounding bo
     {
       "additionalProperties": false,
       "properties": {
+        "exclude": {
+          "description": "Object ids, each one of the target's own members, left out of the frame and the measures (needs scope \"own\"); an id that is not an own member is -32602",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "path": {
           "description": "an occurrence path [...instances, node]",
           "items": {
@@ -8227,6 +8628,20 @@ Distances between points, edges, and faces; or the volume, area, and bounding bo
           },
           "minItems": 1,
           "type": "array"
+        },
+        "scope": {
+          "default": "all",
+          "description": "all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same",
+          "enum": [
+            "own",
+            "all"
+          ],
+          "type": "string"
+        },
+        "solids_only": {
+          "default": false,
+          "description": "true leaves out Objects that are not closed solids (stray faces, imported surfaces; the ones hew.query.occurrences reports as solid: false) from the frame and the measures. Works with any scope and composes with exclude; when nothing is left it answers as exclude does when it leaves nothing",
+          "type": "boolean"
         }
       },
       "required": [
@@ -8571,6 +8986,20 @@ Every placement in the model with its path and world pose: objects, groups, and 
             "minimum": 0,
             "type": "integer"
           },
+          "family": {
+            "description": "object rows only: the seam family index in hew.doc.health's families, valid for the same document state; null when the object is in no family",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "family_closed": {
+            "description": "object rows only: every shared rim of the family can take a cap; null exactly when family is null",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "hidden": {
             "description": "effective: the node's own flag and tags, its groups', and every instance on the path",
             "type": "boolean"
@@ -8586,6 +9015,10 @@ Every placement in the model with its path and world pose: objects, groups, and 
             ],
             "type": "string"
           },
+          "linked": {
+            "description": "instance rows only: the definition is a set of linked copies (hew / linked)",
+            "type": "boolean"
+          },
           "material": {
             "description": "an object's base material, an instance's own; null for a group",
             "type": [
@@ -8599,6 +9032,36 @@ Every placement in the model with its path and world pose: objects, groups, and 
               "string",
               "null"
             ]
+          },
+          "members": {
+            "additionalProperties": false,
+            "description": "the node's direct members by kind, in member order: a group's members, an instance's definition's members, three empty lists for an object. Hidden members are left out unless include_hidden",
+            "properties": {
+              "groups": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "instances": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "objects": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "objects",
+              "groups",
+              "instances"
+            ],
+            "type": "object"
           },
           "mirrored": {
             "type": "boolean"
@@ -8621,6 +9084,10 @@ Every placement in the model with its path and world pose: objects, groups, and 
               "type": "string"
             },
             "type": "array"
+          },
+          "solid": {
+            "description": "object rows only: the health verdict is solid (closed and manifold)",
+            "type": "boolean"
           },
           "tags": {
             "items": {
@@ -8659,7 +9126,8 @@ Every placement in the model with its path and world pose: objects, groups, and 
           "tags",
           "name",
           "definition_name",
-          "depth"
+          "depth",
+          "members"
         ],
         "type": "object"
       },
@@ -8697,6 +9165,13 @@ A part measured along its own axes: origin, axes, and extents of one placement.
 {
   "additionalProperties": false,
   "properties": {
+    "exclude": {
+      "description": "Object ids, each one of the target's own members, left out of the frame and the measures (needs scope \"own\"); an id that is not an own member is -32602",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "id": {
       "description": "a world node's public id",
       "type": "string"
@@ -8708,6 +9183,20 @@ A part measured along its own axes: origin, axes, and extents of one placement.
       },
       "minItems": 1,
       "type": "array"
+    },
+    "scope": {
+      "default": "all",
+      "description": "all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same",
+      "enum": [
+        "own",
+        "all"
+      ],
+      "type": "string"
+    },
+    "solids_only": {
+      "default": false,
+      "description": "true leaves out Objects that are not closed solids (stray faces, imported surfaces; the ones hew.query.occurrences reports as solid: false) from the frame and the measures. Works with any scope and composes with exclude; when nothing is left it answers as exclude does when it leaves nothing",
+      "type": "boolean"
     }
   },
   "type": "object"
@@ -8900,7 +9389,7 @@ First hit along a ray, or every crossing, through any depth of nesting — the p
           "type": "integer"
         },
         "face": {
-          "description": "a face locator {object, at} with at in the leaf Object's own frame; feed it to hew.query.resolve, hew.material.paint, or hew.solid.push_pull",
+          "description": "a face locator {object, at} with at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement; feed it to hew.query.resolve, hew.material.paint, or hew.solid.push_pull",
           "type": "object"
         },
         "generation": {
@@ -8972,7 +9461,7 @@ First hit along a ray, or every crossing, through any depth of nesting — the p
                 "type": "number"
               },
               "face": {
-                "description": "a face locator {object, at} with at in the leaf Object's own frame; feed it to hew.query.resolve, hew.material.paint, or hew.solid.push_pull",
+                "description": "a face locator {object, at} with at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement; feed it to hew.query.resolve, hew.material.paint, or hew.solid.push_pull",
                 "type": "object"
               },
               "hidden": {
@@ -9070,7 +9559,7 @@ Resolve any locator (point, face, edge) to its concrete value without mutating.
     },
     "face": {},
     "occurrence": {
-      "description": "an occurrence locator {path: [instance, …, leaf]}; answers {occurrence: OccurrenceJson}",
+      "description": "an occurrence locator {path: [instance, …, leaf]}; answers {occurrence: OccurrenceJson without members, solid, family, or linked}",
       "type": "object"
     },
     "point": {}
@@ -9184,6 +9673,142 @@ The document tree with per-entity summaries.
 ```
 
 **Refusals:** none.
+
+### `hew.query.signature`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Whether two objects are the same part or mirrored twins: one object's shape and mirror hashes, and its part frame.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "a world node's public id",
+      "type": "string"
+    },
+    "path": {
+      "description": "an occurrence path, instances first and the node last",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "frame": {
+      "additionalProperties": false,
+      "description": "the part's face frame (l ≥ w ≥ t, right-handed), as hew.query.part_frame reports it without a hew.part / frame override; origin is the part's minimum corner in that frame and extents its size along x, y, z, so the frame's center is origin + extents / 2 along the axes",
+      "properties": {
+        "extents": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "origin": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "x": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "y": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "z": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin",
+        "x",
+        "y",
+        "z",
+        "extents"
+      ],
+      "type": "object"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "mirror": {
+      "description": "the shape hash of the object's mirror image: a.shape == b.mirror means a and b are mirrored twins",
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "shape": {
+      "description": "SHA-256, lowercase hex",
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "symmetric": {
+      "description": "shape == mirror: the part is its own mirror image",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "shape",
+    "mirror",
+    "symmetric",
+    "frame",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `no_part_frame` — That part has no faces to measure.
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
 
 ### `hew.query.topology`
 
@@ -12623,7 +13248,7 @@ Remove faces from an open object; islands cut loose become objects of their own.
     "faces": {
       "description": "faces of that object; omitted = every face, which deletes the object (a component member too, unless it is its component's last object: last_definition_member)",
       "items": {
-        "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}",
+        "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}; with a path through a placement, at and ray are read in the leaf's frame (the definition's coordinates), not world coordinates",
         "type": "object"
       },
       "minItems": 1,
@@ -13200,12 +13825,16 @@ Boolean intersection of two or more solids: the material in all of them.
       ]
     },
     "operands": {
-      "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand and a transient cutter take a and b",
+      "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand, a transient cutter and unlink take a and b",
       "items": {
         "type": "string"
       },
       "minItems": 2,
       "type": "array"
+    },
+    "unlink": {
+      "description": "true: a placement operand (an instance, a member by path, or a group holding one) is unlinked and exploded into plain solids, then joined; its other copies keep the shared solid. Without it such an operand refuses would_unlink. Ignored when no operand is a placement, and in a call with three or more operands, where a placement refuses boolean_operand_has_instance",
+      "type": "boolean"
     }
   },
   "type": "object"
@@ -13219,6 +13848,13 @@ Boolean intersection of two or more solids: the material in all of them.
   "properties": {
     "result": {
       "type": "string"
+    },
+    "unlinked": {
+      "description": "present when unlink: true split placements off: the placements exploded",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     }
   },
   "required": [
@@ -13243,6 +13879,7 @@ Boolean intersection of two or more solids: the material in all of them.
 - `unknown_occurrence`
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `would_unlink`
 
 ### `hew.solid.mark_surface`
 
@@ -13582,7 +14219,7 @@ Push/pull a face of a solid with the tool's full semantics.
       "type": "number"
     },
     "face": {
-      "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}; object may be {path: [instance, …, object]} to reach a definition member through a placement (at and ray stay in the object's own frame)",
+      "description": "HEW_API.md §5.2 face locator: {object | path, at} | {object | path, ray} | {\"$face\":\"label#key\"}; path (or object as {path: [...]}) is an occurrence path [instance, …, object] that reaches a definition member through a placement, every placement following (at and ray stay in the leaf's frame, the definition's coordinates, not world coordinates)",
       "type": "object"
     }
   },
@@ -13636,6 +14273,7 @@ Push/pull a face of a solid with the tool's full semantics.
 - `face_token_stale`
 - `unknown_occurrence`
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `not_an_object`
 
 ### `hew.solid.rotate_imprint`
 
@@ -14006,7 +14644,7 @@ Boolean subtraction: the first solid minus every other one; a may be a path to a
       ]
     },
     "operands": {
-      "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand and a transient cutter take a and b",
+      "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand, a transient cutter and unlink take a and b",
       "items": {
         "type": "string"
       },
@@ -14189,12 +14827,16 @@ Boolean union of two or more solids: the material in any of them.
       ]
     },
     "operands": {
-      "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand and a transient cutter take a and b",
+      "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand, a transient cutter and unlink take a and b",
       "items": {
         "type": "string"
       },
       "minItems": 2,
       "type": "array"
+    },
+    "unlink": {
+      "description": "true: a placement operand (an instance, a member by path, or a group holding one) is unlinked and exploded into plain solids, then joined; its other copies keep the shared solid. Without it such an operand refuses would_unlink. Ignored when no operand is a placement, and in a call with three or more operands, where a placement refuses boolean_operand_has_instance",
+      "type": "boolean"
     }
   },
   "type": "object"
@@ -14208,6 +14850,13 @@ Boolean union of two or more solids: the material in any of them.
   "properties": {
     "result": {
       "type": "string"
+    },
+    "unlinked": {
+      "description": "present when unlink: true split placements off: the placements exploded",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     }
   },
   "required": [
@@ -14232,6 +14881,7 @@ Boolean union of two or more solids: the material in any of them.
 - `unknown_occurrence`
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `would_unlink`
 
 ## hew.tag
 
@@ -15038,6 +15688,15 @@ Hidden-line drawing of the visible document, or of a selection, from a camera (c
       "description": "a Scene's id: its camera and hidden sets, as hew.view.snapshot",
       "type": "string"
     },
+    "scope": {
+      "default": "all",
+      "description": "all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same",
+      "enum": [
+        "own",
+        "all"
+      ],
+      "type": "string"
+    },
     "selection": {
       "description": "draw only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its leaves at the identity pose)",
       "items": {
@@ -15355,12 +16014,30 @@ Render the attached document to PNG, rendered by the host's software rasterizer,
       "description": "defaults to false; when true, also returns a camera-space normals pass as an RGB PNG: (n * 0.5 + 0.5) * 255 per axis, x right, y up, z toward the viewer, background (128, 128, 255)",
       "type": "boolean"
     },
+    "orient": {
+      "default": "world",
+      "description": "part renders the one selection root in its part frame: the named view (iso when none) means the frame's axes, front looking along the frame's +y, top along -z, right along -x. Needs a selection of exactly one entity and no camera",
+      "enum": [
+        "world",
+        "part"
+      ],
+      "type": "string"
+    },
     "path": {
       "description": "when given, the PNG is written here instead of returned inline, honored by hosts with filesystem access and refused typed elsewhere (mirrors hew.doc.export)",
       "type": "string"
     },
     "scene": {
       "description": "a Scene's id: renders through its resolved camera and hidden sets (Document::resolve_scene) instead of the document's own — falls back to the usual cameraless resolution when the Scene captures no camera. Mutually exclusive with camera and view. The Scene's section plane, if any, is NOT rendered headlessly at 1.0.",
+      "type": "string"
+    },
+    "scope": {
+      "default": "all",
+      "description": "all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same",
+      "enum": [
+        "own",
+        "all"
+      ],
       "type": "string"
     },
     "selection": {
@@ -15496,6 +16173,7 @@ Render the attached document to PNG, rendered by the host's software rasterizer,
 - `unknown_occurrence`
 - `unknown_scene` — That Scene no longer exists — it may have been deleted.
 - `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+- `no_part_frame` — That part has no faces to measure.
 
 ### `hew.view.units`
 

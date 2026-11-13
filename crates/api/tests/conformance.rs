@@ -49,6 +49,72 @@ struct Transcript {
     frames: Vec<Frame>,
 }
 
+/// An open half-box `[x0, x1] x [0, 1] x [0, 1]` without its x = x1 side
+/// (`open_side` 3) or its x = x0 side (5).
+fn seam_half(name: &str, x0: f64, x1: f64, open_side: usize) -> kernel::MeshRecipe {
+    let p = |x: f64, y: f64, z: f64| kernel::Point3::new(x, y, z);
+    let positions = vec![
+        p(x0, 0.0, 0.0),
+        p(x1, 0.0, 0.0),
+        p(x1, 1.0, 0.0),
+        p(x0, 1.0, 0.0),
+        p(x0, 0.0, 1.0),
+        p(x1, 0.0, 1.0),
+        p(x1, 1.0, 1.0),
+        p(x0, 1.0, 1.0),
+    ];
+    let faces: Vec<Vec<usize>> = [
+        vec![0, 3, 2, 1],
+        vec![4, 5, 6, 7],
+        vec![0, 1, 5, 4],
+        vec![1, 2, 6, 5],
+        vec![2, 3, 7, 6],
+        vec![3, 0, 4, 7],
+    ]
+    .into_iter()
+    .enumerate()
+    .filter(|(i, _)| *i != open_side)
+    .map(|(_, f)| f)
+    .collect();
+    let n = faces.len();
+    kernel::MeshRecipe {
+        name: name.into(),
+        positions,
+        faces,
+        face_materials: vec![kernel::NO_MATERIAL; n],
+        face_uv_frames: vec![None; n],
+        face_holes: vec![Vec::new(); n],
+        base_material: kernel::NO_MATERIAL,
+        tags: Vec::new(),
+        extra: Default::default(),
+    }
+}
+
+fn apply_fixture(name: &str, doc: &mut kernel::Document) {
+    match name {
+        "seam_halves" => {
+            let scene = kernel::ImportScene {
+                geo: None,
+                materials: Vec::new(),
+                defs: Vec::new(),
+                roots: vec![
+                    kernel::ImportNode::Mesh(seam_half("Left", 3.0, 4.0, 3)),
+                    kernel::ImportNode::Mesh(seam_half("Right", 4.0, 5.0, 5)),
+                ],
+                guides: Vec::new(),
+                tags: Vec::new(),
+                camera: None,
+                scenes: Vec::new(),
+                section: None,
+                view_style: None,
+                extra: Default::default(),
+            };
+            doc.ingest(scene, Vec::new()).expect("fixture ingests");
+        }
+        other => panic!("unknown fixture {other}"),
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct TranscriptPlugin {
     id: String,
@@ -58,6 +124,11 @@ struct TranscriptPlugin {
 #[derive(serde::Deserialize)]
 struct Frame {
     note: String,
+    /// Built into the document just before this frame runs, for what the
+    /// bus cannot make: `"seam_halves"` ingests two open half-boxes that
+    /// share a rim (one seam family), named Left and Right.
+    #[serde(default)]
+    fixture: Option<String>,
     request: serde_json::Value,
     /// Present when the request must forward: `expect` is compared to the
     /// ForwardRequest's `{plugin, local, params, mutating}` and `reply` is
@@ -137,6 +208,9 @@ fn replay(path: &str) {
     let mut doc = kernel::Document::new();
     let mut host = api::NoHost;
     for (i, frame) in transcript.frames.iter().enumerate() {
+        if let Some(name) = &frame.fixture {
+            apply_fixture(name, &mut doc);
+        }
         let request: Request =
             serde_json::from_value(frame.request.clone()).expect("request parses");
         let outcome = conn.dispatch(&registry, &mut doc, &mut host, request);
@@ -345,6 +419,30 @@ fn occurrences_transcript_matches_the_golden() {
     replay(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/transcripts/occurrences.json"
+    ));
+}
+
+/// The part-model reads (docs/agents/PLUGINS.md "What a row says about a
+/// part"): rows with members, solid, family, and linked; a door's own
+/// objects measured and framed apart from its hinge's; a board's
+/// signature and the refusal for a group.
+#[test]
+fn part_model_transcript_matches_the_golden() {
+    replay(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/transcripts/part_model.json"
+    ));
+}
+
+/// Linked copies on the bus (docs/agents/PLUGINS.md "Linked copies"): a
+/// copy that links by default and its change set, an independent copy,
+/// make unique by path with its remap, promote, would_unlink, and a
+/// mirrored linked copy from a flip.
+#[test]
+fn linked_copies_transcript_matches_the_golden() {
+    replay(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/transcripts/linked_copies.json"
     ));
 }
 

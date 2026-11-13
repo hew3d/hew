@@ -1601,8 +1601,9 @@ below.
   occurrence path and reports every id the fork created
   (`Document::make_unique_by_path`: with the cascade, only that placement
   diverges; `deep` forks the nested definitions too; one undo entry),
-  exported to the app as `make_unique_by_path_json`; its bus command
-  (`hew.component.make_unique` by path) is still to come. The kernel's
+  exported to the app as `make_unique_by_path_json` and on the bus as
+  `hew.component.make_unique { instance | path, cascade, deep }` with a
+  flat old-to-new `remap`. The kernel's
   copies link when the caller asks for it (`LinkPolicy::Linked` on
   `duplicate_node`, `duplicate_nodes_array`, and
   `duplicate_nodes_placements`): each Object or Group copied is wrapped
@@ -1613,8 +1614,27 @@ below.
   surface exports `wrap_linked`, `is_linked`, `set_linked`,
   `owner_definition`, `duplicate_selection_array_linked`, and
   `duplicate_selection_placements` (with a `_linked` sibling that reports
-  the wraps; the Move grid, recorded as one call). The bus still copies
-  independently. `hew-cli --version` and `hew-relay --version` report the release
+  the wraps; the Move grid, recorded as one call). On the bus
+  a copy links by default (`copy.linked`, `true` whatever the app's
+  preference; the result lists the wraps in `linked`), a linked set
+  becomes a named component with `hew.component.promote`, face and edge
+  locators take an occurrence `path` in place of `object` so an edit
+  through any copy edits them all, `hew.solid.union` and `intersect` with
+  a placement operand refuse `would_unlink` unless `unlink: true`, and
+  `document_changed` and `hew.query.changes_since` change sets carry
+  `linked` and `copied_from` (HEW_API.md §4.5, §7). Occurrence rows carry
+  the facts a part rule needs: `members` on every row, `solid`, `family`,
+  and `family_closed` on objects, `linked` on instances; `scope: "own"`
+  on `part_frame`, `measure`, `snapshot`, and `line_drawing` takes a
+  container's own objects, never a nested instance's; a snapshot renders
+  one part in its own frame with `orient: "part"`; and
+  `hew.query.signature` hashes an object's shape and its mirror image so
+  identical parts and left-right twins can be found (HEW_API.md §7.4).
+  A part's frame through a placement honors its definition member's
+  frame override. `hew.entity.flip` mirrors a selection across a plane
+  on the bus, with an optional linked mirrored copy. Still to come on the
+  bus: `hew.solid.rejoin` (Model Health's "Rejoin as one solid" in one
+  undo entry). `hew-cli --version` and `hew-relay --version` report the release
   tag's version on a tag build; the `core` ceiling grants `hew.view.hide`,
   `show`, `show_all`, and `hidden` without a window; `hew_query` admits every
   command that does not change the document; `hew.entity.rotate`'s angle is
