@@ -551,20 +551,29 @@ jobs:
             exit 0
           fi
           cp shells/web/_headers shells/web/dist/_headers
-          # A pre-release tag must never replace production: deploy it to
-          # the `preview` branch, which Pages serves at its own URL.
-          branch=main
-          if [[ "$TAG" == *-pre.* ]]; then
-            branch=preview
-          fi
+          # A pre-release tag must never replace production. Each effort
+          # that cuts pre-releases deploys to its own Pages branch, which
+          # Pages serves at its own URL and which a custom domain can be
+          # pointed at. Separate hosts keep the efforts' browser storage
+          # apart, since their document formats differ. A pre-release tag
+          # of an unknown effort deploys nowhere.
+          case "$TAG" in
+            *-pre.plugin-*) branch=preview-plugins ;;
+            *-pre.curves-*) branch=preview-curves ;;
+            *-pre.*)
+              echo "::warning::No preview branch is mapped for $TAG; skipping the web deploy."
+              exit 0
+              ;;
+            *) branch=main ;;
+          esac
           npx wrangler@4 pages deploy shells/web/dist \
             --project-name=hew-app --branch="$branch" --commit-dirty=true
-          if [ "$branch" = preview ]; then
+          if [ "$branch" != main ]; then
             {
               echo "### Pre-release web preview"
               echo
-              echo "Deployed to the Pages \`preview\` branch, not production:"
-              echo "https://preview.hew3d.com (needs the custom domain on the hew-app Pages project; the always-available URL is https://preview.hew-app.pages.dev)"
+              echo "Deployed to the Pages \`$branch\` branch, not production:"
+              echo "https://$branch.hew3d.com (custom domain), also https://$branch.hew-app.pages.dev"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
