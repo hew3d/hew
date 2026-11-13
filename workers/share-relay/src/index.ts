@@ -13,6 +13,7 @@ import { handleRequest } from './handlers.ts'
 import type { DropEnv } from './types.ts'
 
 export { ShareDrop } from './shareDrop.ts'
+export { UploadBudget } from './uploadBudget.ts'
 
 export default {
   fetch(request: Request, env: DropEnv): Promise<Response> {

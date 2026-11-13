@@ -39,6 +39,7 @@ import {
   handleRequest,
 } from './handlers.ts'
 import { DropStore, RPC_BATCH_CHUNKS, TTL_MS } from './dropStore.ts'
+import { UploadBudgetStore } from './uploadBudgetStore.ts'
 import { FakeDurableObjectNamespace, type FakeDurableObjectStorage } from './testSupport/fakeDurableObject.ts'
 import type { DropEnv, ShareDropStub } from './types.ts'
 
@@ -49,6 +50,7 @@ import type { DropEnv, ShareDropStub } from './types.ts'
 function makeEnv(): DropEnv {
   const env = {} as DropEnv
   env.SHARE_DROP = new FakeDurableObjectNamespace<ShareDropStub>((state) => new DropStore(state.storage))
+  env.UPLOAD_BUDGET = new FakeDurableObjectNamespace((state) => new UploadBudgetStore(state.storage))
   return env
 }
 
@@ -404,6 +406,122 @@ describe('handleIdentity', () => {
 // ---------------------------------------------------------------------------
 
 describe('handlePutDrop', () => {
+  test('limits repeated uploads from one client without blocking another client', async () => {
+    const env = makeEnv()
+    const upload = (ip: string) => handlePutDrop(new Request('https://x/drop', {
+      method: 'PUT', headers: { 'cf-connecting-ip': ip }, body: new Uint8Array([1]).buffer,
+    }), env)
+    for (let i = 0; i < 60; i++) assert.equal((await upload('192.0.2.1')).status, 200)
+    assert.equal((await upload('192.0.2.1')).status, 429)
+    assert.equal((await upload('192.0.2.2')).status, 200)
+  })
+
+  test('fails closed when admission storage is unavailable', async () => {
+    const env = makeEnv()
+    env.UPLOAD_BUDGET = { idFromName: () => { throw new Error('unavailable') }, get: () => { throw new Error('unavailable') } }
+    const response = await handlePutDrop(new Request('https://x/drop', {
+      method: 'PUT', body: new Uint8Array([1]).buffer,
+    }), env)
+    assert.equal(response.status, 503)
+  })
+
+  test('rejects excess in-flight uploads before any drop is persisted', async () => {
+    const env = makeEnv()
+    const budget = env.UPLOAD_BUDGET.get(env.UPLOAD_BUDGET.idFromName('global'))
+    for (let i = 0; i < 8; i++) await budget.reserve(`t-${i}`, `client-${i}`, MAX_BYTES)
+    const response = await handlePutDrop(new Request('https://x/drop', {
+      method: 'PUT', body: new Uint8Array([1]).buffer,
+    }), env)
+    assert.equal(response.status, 503)
+  })
+
+  test('failed bodies return their reserved capacity', async () => {
+    const env = makeEnv()
+    for (let i = 0; i < 10; i++) {
+      const response = await handlePutDrop(new Request('https://x/drop', {
+        method: 'PUT', body: new ArrayBuffer(0),
+      }), env)
+      assert.equal(response.status, 400)
+    }
+    const response = await handlePutDrop(new Request('https://x/drop', {
+      method: 'PUT', body: new Uint8Array([1]).buffer,
+    }), env)
+    assert.equal(response.status, 200)
+  })
+
+  test('times out a stalled body and returns its reserved capacity', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const env = makeEnv()
+    let reading!: () => void
+    const started = new Promise<void>((resolve) => { reading = resolve })
+    const body = new ReadableStream<Uint8Array>({ pull() { reading() } }, { highWaterMark: 0 })
+    const pending = handlePutDrop(new Request('https://x/drop', {
+      method: 'PUT', body, duplex: 'half',
+    } as RequestInit), env)
+    await started
+    t.mock.timers.tick(180_000)
+    assert.equal((await pending).status, 408)
+    const budget = env.UPLOAD_BUDGET.get(env.UPLOAD_BUDGET.idFromName('global'))
+    for (let i = 0; i < 8; i++) assert.deepEqual(await budget.reserve(`fresh-${i}`, `c-${i}`, MAX_BYTES), { ok: true })
+  })
+
+  test('accepts a valid upload that takes longer than thirty seconds', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    const env = makeEnv()
+    let controller!: ReadableStreamDefaultController<Uint8Array>
+    let reading!: () => void
+    let cancelled = false
+    const started = new Promise<void>((resolve) => { reading = resolve })
+    const body = new ReadableStream<Uint8Array>({
+      start(value) { controller = value },
+      pull() { reading() },
+      cancel() { cancelled = true },
+    }, { highWaterMark: 0 })
+    const pending = handlePutDrop(new Request('https://x/drop', {
+      method: 'PUT', body, duplex: 'half',
+    } as RequestInit), env)
+    await started
+    t.mock.timers.tick(31_000)
+    if (!cancelled) { controller.enqueue(new Uint8Array([1])); controller.close() }
+    assert.equal((await pending).status, 200)
+  })
+
+  test('times out stalled persistence and refuses a write delivered after cleanup', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    let now = Date.UTC(2026, 10, 3, 12)
+    t.mock.method(Date, 'now', () => now)
+    const env = makeEnv()
+    const realGet = env.SHARE_DROP.get.bind(env.SHARE_DROP)
+    let reached!: () => void
+    let resume!: () => void
+    let drop!: ShareDropStub
+    let delayedWrite!: Promise<void>
+    const started = new Promise<void>((resolve) => { reached = resolve })
+    const delivery = new Promise<void>((resolve) => { resume = resolve })
+    env.SHARE_DROP.get = (id) => {
+      drop = realGet(id)
+      const store = drop.store.bind(drop)
+      drop.store = (...args) => {
+        reached()
+        delayedWrite = delivery.then(() => store(...args))
+        return delayedWrite
+      }
+      return drop
+    }
+    const pending = handlePutDrop(new Request('https://x/drop', {
+      method: 'PUT', body: new Uint8Array([1]).buffer,
+    }), env)
+    await started
+    now += 180_000
+    t.mock.timers.tick(180_000)
+    assert.equal((await pending).status, 408)
+    resume()
+    await assert.rejects(delayedWrite, /deadline exceeded/)
+    assert.deepEqual(await drop.peek(), { exists: false })
+    const budget = env.UPLOAD_BUDGET.get(env.UPLOAD_BUDGET.idFromName('global'))
+    for (let i = 0; i < 8; i++) assert.deepEqual(await budget.reserve(`fresh-${i}`, `c-${i}`, MAX_BYTES), { ok: true })
+  })
+
   test('stores the body under a fresh token', async () => {
     const env = makeEnv()
     const body = new Uint8Array([1, 2, 3, 4]).buffer
@@ -536,6 +654,21 @@ async function putAndGet(env: DropEnv, body: Uint8Array): Promise<Uint8Array> {
 }
 
 describe('handleGetDrop', () => {
+  test('successful consume releases its reserved bytes only after the stored body is removed', async () => {
+    const env = makeEnv()
+    const response = await handlePutDrop(new Request('https://x/drop', {
+      method: 'PUT', body: new Uint8Array([1]).buffer,
+    }), env)
+    const { token } = await response.json() as { token: string }
+    const budget = env.UPLOAD_BUDGET.get(env.UPLOAD_BUDGET.idFromName('global'))
+    for (let i = 0; i < 7; i++) await budget.reserve(`t-${i}`, `c-${i}`, MAX_BYTES)
+    await budget.reserve('last', 'last-client', MAX_BYTES - 1)
+    assert.deepEqual(await budget.reserve('full', 'other', 1), { ok: false, reason: 'full' })
+    assert.equal((await handleGetDrop(token, env)).status, 200)
+    assert.deepEqual(await budget.reserve('available', 'other', 1), { ok: true })
+    assert.equal((await handlePeek(token, env)).status, 404)
+  })
+
   test('round-trips the exact bytes for a fresh token', async () => {
     const env = makeEnv()
     const bytes = await putAndGet(env, new Uint8Array([5, 6, 7]))
@@ -710,6 +843,20 @@ describe('handlePeek', () => {
 // ---------------------------------------------------------------------------
 
 describe('handleDeleteDrop', () => {
+  test('deleting a drop releases its reserved bytes', async () => {
+    const env = makeEnv()
+    const response = await handlePutDrop(new Request('https://x/drop', {
+      method: 'PUT', body: new Uint8Array([1]).buffer,
+    }), env)
+    const { token } = await response.json() as { token: string }
+    const budget = env.UPLOAD_BUDGET.get(env.UPLOAD_BUDGET.idFromName('global'))
+    for (let i = 0; i < 7; i++) await budget.reserve(`t-${i}`, `c-${i}`, MAX_BYTES)
+    await budget.reserve('last', 'last-client', MAX_BYTES - 1)
+    assert.deepEqual(await budget.reserve('full', 'other', 1), { ok: false, reason: 'full' })
+    assert.equal((await handleDeleteDrop(token, env)).status, 204)
+    assert.deepEqual(await budget.reserve('available', 'other', 1), { ok: true })
+  })
+
   test('deletes an existing token and returns 204; a follow-up GET 404s', async () => {
     const env = makeEnv()
     const putRes = await handlePutDrop(
@@ -882,6 +1029,7 @@ describe('unknown tokens leave no Durable Object storage behind', () => {
   function makeEnvCapturingDrops(): { env: DropEnv; dropStorages: FakeDurableObjectStorage[] } {
     const dropStorages: FakeDurableObjectStorage[] = []
     const env = {} as DropEnv
+    env.UPLOAD_BUDGET = new FakeDurableObjectNamespace((state) => new UploadBudgetStore(state.storage))
     env.SHARE_DROP = new FakeDurableObjectNamespace<ShareDropStub>((state) => {
       dropStorages.push(state.storage as FakeDurableObjectStorage)
       return new DropStore(state.storage)
