@@ -10638,15 +10638,17 @@ impl Scene {
     /// stored facets).
     ///
     /// Returns `None` — never a refusal — when nothing survives the
-    /// traversal (an empty document, or every object collapsing to
-    /// degenerate triangles): the same "nothing to export" the app's own
-    /// retired writers reported, now [`mesh_export::ExportError::NothingToExport`]
+    /// traversal (an empty document, or no included objects): the same
+    /// "nothing to export" the app's retired writers reported, now
+    /// [`mesh_export::ExportError::NothingToExport`]
     /// underneath. Passes `solids_only: false` (`crates/mesh-export`'s
     /// module doc, "Non-solid inclusion"): the app's own solid-gating
     /// dialog (`collectNonSolidObjects`, `app/src/App.tsx`) warns about
     /// non-solid objects before an STL/3MF export, but the export itself
     /// has always included them regardless — this keeps that exact
     /// behavior rather than starting to silently drop geometry.
+    /// Unsafe STL precision/topology now returns `export_failed` instead
+    /// of silently omitting triangles. No partial file is returned.
     ///
     /// wasm-bindgen marshals `Option<Vec<u8>>` to `Uint8Array | undefined`.
     pub fn export(

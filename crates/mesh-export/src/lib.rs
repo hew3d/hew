@@ -92,11 +92,14 @@ use std::io::Cursor;
 /// [`message`](ExportError::message).
 #[derive(Debug)]
 pub enum ExportError {
-    /// No watertight solid survived the traversal — an empty document, or
-    /// every solid tessellating to nothing.
+    /// No object survived the traversal (an empty document, or every
+    /// object excluded by solids_only).
     NothingToExport,
     /// Re-faceting a solid failed outright.
     Failed(tessellate::TessellateError),
+    /// STL cannot preserve finite, oriented triangles and a solid's topology
+    /// at its millimeter f32 precision. No partial file is returned.
+    StlIntegrity(&'static str),
     /// [`export`]'s format dispatch saw a `format` none of the writers
     /// recognize.
     UnsupportedFormat(String),
@@ -110,6 +113,7 @@ impl ExportError {
         match self {
             ExportError::NothingToExport => "nothing_to_export",
             ExportError::Failed(_) => "export_failed",
+            ExportError::StlIntegrity(_) => "export_failed",
             ExportError::UnsupportedFormat(_) => "host_capability_missing",
         }
     }
@@ -121,6 +125,10 @@ impl ExportError {
                 "This document has no watertight solids to export. Check the Object Info panel for open (non-watertight) objects.".to_string()
             }
             ExportError::Failed(e) => format!("re-faceting object failed: {e}"),
+            ExportError::StlIntegrity(reason) => format!(
+                "STL export cannot preserve this mesh: {reason}. No file was produced. \
+                 Check the geometry, move the model closer to the origin, or use a higher-precision format such as 3MF."
+            ),
             ExportError::UnsupportedFormat(format) => {
                 format!("Unrecognized export format \"{format}\".")
             }
@@ -404,8 +412,14 @@ pub fn export_stl(
     let doc: &Document = &normalized;
 
     let mut soup: Vec<f64> = Vec::new();
+    // Validate each claimed solid independently: STL flattens the scene,
+    // and independent objects/placements may legitimately share coordinates.
+    let mut closed_ranges = Vec::new();
 
-    let export_object = |soup: &mut Vec<f64>, id: kernel::ObjectId| -> Result<bool, ExportError> {
+    let export_object = |soup: &mut Vec<f64>,
+                         closed_ranges: &mut Vec<std::ops::Range<usize>>,
+                         id: kernel::ObjectId|
+     -> Result<bool, ExportError> {
         if solids_only && !doc.object_solid(id) {
             return Ok(false);
         }
@@ -414,13 +428,17 @@ pub fn export_stl(
         };
         let triangles =
             tessellate::export_triangles(obj, segments_per_turn).map_err(ExportError::Failed)?;
+        let start = soup.len() / 9;
         soup.extend(triangles);
+        if doc.object_solid(id) {
+            closed_ranges.push(start..soup.len() / 9);
+        }
         Ok(true)
     };
 
     let mut any_solid = false;
     for id in doc.visible_object_ids() {
-        any_solid |= export_object(&mut soup, id)?;
+        any_solid |= export_object(&mut soup, &mut closed_ranges, id)?;
     }
 
     for instance in doc.instance_ids() {
@@ -442,6 +460,7 @@ pub fn export_stl(
             let triangles = tessellate::export_triangles(obj, segments_per_turn)
                 .map_err(ExportError::Failed)?;
             any_solid = true;
+            let start = soup.len() / 9;
             for tri in triangles.chunks(9) {
                 let verts = [
                     Point3::new(tri[0], tri[1], tri[2]),
@@ -456,6 +475,9 @@ pub fn export_stl(
                     soup.push(p.z);
                 }
             }
+            if doc.object_solid(member) {
+                closed_ranges.push(start..soup.len() / 9);
+            }
         }
     }
 
@@ -463,56 +485,63 @@ pub fn export_stl(
         return Err(ExportError::NothingToExport);
     }
 
-    Ok(write_binary_stl(&soup))
+    write_binary_stl(&soup, &closed_ranges)
 }
 
 /// Millimeter-scale binary STL layout (docs/design/api-kernel-map.md §6.3;
 /// mirrors `app/src/io/exporters/stlExport.ts`'s `writeBinaryStl`): an
 /// 80-byte header, a `u32` triangle count, then 50 bytes per triangle (3×f32
-/// normal, 3×3×f32 vertices, a zero `u16` attribute count). Degenerate
-/// (near-zero-area) triangles are skipped, never emitted with a fabricated
-/// normal, and so is a triangle whose winding does not survive the
-/// rounding of its millimeter corners to `f32` ([`writes_forward`]): its
-/// stored normal, computed in `f64`, would otherwise contradict the
-/// vertices a slicer reads back. `soup` is meters, 9 `f64`s per triangle,
-/// CCW from outside.
-fn write_binary_stl(soup: &[f64]) -> Vec<u8> {
+/// normal, 3×3×f32 vertices, a zero `u16` attribute count). Preserve every
+/// triangle, however small, if its finite corners and winding survive f32
+/// conversion; otherwise refuse the entire file. Normals come from those
+/// serialized corners. Each range names one claimed solid, checked AFTER
+/// conversion for closed oriented edges and manifold vertex fans. Explicit
+/// open surfaces retain the interactive export's existing inclusion policy.
+/// `soup` is meters, 9 f64s per triangle, CCW from outside.
+fn write_binary_stl(
+    soup: &[f64],
+    closed_ranges: &[std::ops::Range<usize>],
+) -> Result<Vec<u8>, ExportError> {
     const HEADER_BYTES: usize = 80;
     const METERS_TO_MM: f64 = 1000.0;
-    // Degeneracy gate on the squared winding-cross length, in mm^4 — the
-    // same threshold the TypeScript writer uses.
-    const DEGENERATE_CROSS_LENGTH_SQ_MM4: f64 = 1e-12;
-
-    let mut kept: Vec<([f32; 3], [f32; 9])> = Vec::new();
-    for tri in soup.chunks(9) {
-        let mm: Vec<f64> = tri.iter().map(|v| v * METERS_TO_MM).collect();
-        let (ax, ay, az) = (mm[0], mm[1], mm[2]);
-        let (bx, by, bz) = (mm[3], mm[4], mm[5]);
-        let (cx, cy, cz) = (mm[6], mm[7], mm[8]);
-        let (ux, uy, uz) = (bx - ax, by - ay, bz - az);
-        let (vx, vy, vz) = (cx - ax, cy - ay, cz - az);
-        let nx = uy * vz - uz * vy;
-        let ny = uz * vx - ux * vz;
-        let nz = ux * vy - uy * vx;
-        let len_sq = nx * nx + ny * ny + nz * nz;
-        if len_sq <= DEGENERATE_CROSS_LENGTH_SQ_MM4 {
-            continue;
+    if !soup.len().is_multiple_of(9) {
+        return Err(ExportError::StlIntegrity("incomplete triangle data"));
+    }
+    let mut kept: Vec<([f32; 3], [f32; 9])> = Vec::with_capacity(soup.len() / 9);
+    for tri in soup.chunks_exact(9) {
+        let mm: [f64; 9] = std::array::from_fn(|i| tri[i] * METERS_TO_MM);
+        let verts: [f32; 9] = std::array::from_fn(|i| mm[i] as f32);
+        if mm.iter().any(|v| !v.is_finite()) || verts.iter().any(|v| !v.is_finite()) {
+            return Err(ExportError::StlIntegrity(
+                "non-finite or overflowing coordinates",
+            ));
         }
         if !writes_forward(&mm) {
-            continue;
+            return Err(ExportError::StlIntegrity(
+                "a triangle is degenerate or reverses at STL precision",
+            ));
         }
-        let inv_len = 1.0 / len_sq.sqrt();
+        let point = |i: usize| {
+            Point3::new(
+                f64::from(verts[i]),
+                f64::from(verts[i + 1]),
+                f64::from(verts[i + 2]),
+            )
+        };
+        let cross = (point(3) - point(0)).cross(point(6) - point(0));
+        let length = cross.length();
         let normal = [
-            (nx * inv_len) as f32,
-            (ny * inv_len) as f32,
-            (nz * inv_len) as f32,
-        ];
-        let verts = [
-            ax as f32, ay as f32, az as f32, bx as f32, by as f32, bz as f32, cx as f32, cy as f32,
-            cz as f32,
+            (cross.x / length) as f32,
+            (cross.y / length) as f32,
+            (cross.z / length) as f32,
         ];
         kept.push((normal, verts));
     }
+    for range in closed_ranges {
+        validate_stl_solid(&kept[range.clone()])?;
+    }
+    let count = u32::try_from(kept.len())
+        .map_err(|_| ExportError::StlIntegrity("too many triangles for binary STL"))?;
 
     let version = env!("CARGO_PKG_VERSION");
     let header_text = format!("Hew {version} binary STL, millimeters");
@@ -521,9 +550,16 @@ fn write_binary_stl(soup: &[f64]) -> Vec<u8> {
         header[i] = b & 0x7f;
     }
 
-    let mut out = Vec::with_capacity(HEADER_BYTES + 4 + kept.len() * 50);
+    let bytes = kept
+        .len()
+        .checked_mul(50)
+        .and_then(|n| n.checked_add(HEADER_BYTES + 4))
+        .ok_or(ExportError::StlIntegrity(
+            "binary STL exceeds the addressable file size",
+        ))?;
+    let mut out = Vec::with_capacity(bytes);
     out.extend_from_slice(&header);
-    out.extend_from_slice(&(kept.len() as u32).to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
     for (normal, verts) in &kept {
         for c in normal {
             out.extend_from_slice(&c.to_le_bytes());
@@ -533,7 +569,97 @@ fn write_binary_stl(soup: &[f64]) -> Vec<u8> {
         }
         out.extend_from_slice(&0u16.to_le_bytes());
     }
-    out
+    Ok(out)
+}
+
+/// Exact serialized f32 positions are the matching policy, with signed
+/// zero canonicalized. No epsilon welding or topology repair is performed.
+fn validate_stl_solid(triangles: &[([f32; 3], [f32; 9])]) -> Result<(), ExportError> {
+    type Vertex = [u32; 3];
+    let mut edges = BTreeMap::<(Vertex, Vertex), (Option<usize>, Option<usize>)>::new();
+    if triangles.is_empty() {
+        return Err(ExportError::StlIntegrity("a solid has no triangles"));
+    }
+    for (face, (_, corners)) in triangles.iter().enumerate() {
+        let vertex = |i: usize| -> Vertex {
+            std::array::from_fn(|j| {
+                let v = corners[i * 3 + j];
+                if v == 0.0 { 0 } else { v.to_bits() }
+            })
+        };
+        let vertices: [Vertex; 3] = [vertex(0), vertex(1), vertex(2)];
+        for i in 0..3 {
+            let (a, b) = (vertices[i], vertices[(i + 1) % 3]);
+            let (key, forward) = if a < b {
+                ((a, b), true)
+            } else {
+                ((b, a), false)
+            };
+            let uses = edges.entry(key).or_default();
+            let slot = if forward { &mut uses.0 } else { &mut uses.1 };
+            if slot.replace(face).is_some() {
+                return Err(ExportError::StlIntegrity(
+                    "non-manifold or inconsistently oriented edges",
+                ));
+            }
+        }
+    }
+    let mut links = BTreeMap::<Vertex, Vec<(usize, usize)>>::new();
+    for ((a, b), (forward, reverse)) in edges {
+        let (Some(f), Some(r)) = (forward, reverse) else {
+            return Err(ExportError::StlIntegrity(
+                "a solid has unmatched boundary edges after conversion",
+            ));
+        };
+        for vertex in [a, b] {
+            links.entry(vertex).or_default().push((f, r));
+        }
+    }
+    for pairs in links.values() {
+        let mut neighbors = BTreeMap::<usize, Vec<usize>>::new();
+        for &(a, b) in pairs {
+            neighbors.entry(a).or_default().push(b);
+            neighbors.entry(b).or_default().push(a);
+        }
+        let mut pending = vec![pairs[0].0];
+        let mut visited = BTreeSet::new();
+        while let Some(face) = pending.pop() {
+            if visited.insert(face) {
+                pending.extend(&neighbors[&face]);
+            }
+        }
+        if visited.len() != neighbors.len() {
+            return Err(ExportError::StlIntegrity(
+                "non-manifold vertex contact after conversion",
+            ));
+        }
+    }
+    // A tetrahedral shell can flatten after rounding without collapsing
+    // any individual triangle. Check oriented volume in a local frame as
+    // well as incidence; do not accept a zero-volume or inside-out solid.
+    let first = &triangles[0].1;
+    let origin = Point3::new(
+        f64::from(first[0]),
+        f64::from(first[1]),
+        f64::from(first[2]),
+    );
+    let mut six_volume = 0.0;
+    for (_, corners) in triangles {
+        let p = |i: usize| {
+            Point3::new(
+                f64::from(corners[i]),
+                f64::from(corners[i + 1]),
+                f64::from(corners[i + 2]),
+            ) - origin
+        };
+        six_volume += p(0).dot(p(3).cross(p(6)));
+    }
+    if !six_volume.is_finite() || six_volume <= 0.0 {
+        return Err(ExportError::StlIntegrity(
+            "a solid has no positive volume at STL precision",
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a triangle (9 `f64`s, in the coordinates the writer is about to
@@ -549,14 +675,16 @@ fn write_binary_stl(soup: &[f64]) -> Vec<u8> {
 /// scale: 2e-4 mm at 2000 mm). STL, GLB, and USDZ all store `f32`; such a
 /// sliver, written, winds backwards or collapses — an STL facet whose
 /// normal contradicts its vertices, a glTF triangle facing into the solid.
-/// It is left out instead: its footprint is below what the file can hold,
-/// so after rounding its two neighbours already cover it between them.
+/// GLB and USDZ leave it out instead: its footprint is below what the file
+/// can hold, so after rounding its two neighbours already cover it between them.
 /// (Its three edges are then unmatched in the file by exact endpoint, as
 /// at a T-junction; the gap they bound is below the file's resolution,
 /// where the written sliver would have been a fold of the same size.)
+/// STL instead refuses the export: silently dropping a facet can open a solid.
 /// Only the sign of the rounded winding decides — a triangle with any
-/// representable altitude passes — so a normal export is byte-for-byte
-/// what it was. 3MF needs no such gate: it writes `f64` decimal text
+/// representable altitude passes. GLB/USDZ retain their existing output;
+/// STL derives its normal from the rounded corners it actually writes.
+/// 3MF needs no such gate: it writes `f64` decimal text
 /// (`format_coord`), which round-trips exactly.
 ///
 /// The scale matters: STL rounds millimeters, GLB and USDZ meters, and
@@ -1911,14 +2039,11 @@ mod tests {
         assert_eq!(err.name(), "nothing_to_export");
     }
 
-    /// A zero-area (degenerate) triangle carries no meaningful normal and
-    /// is skipped rather than emitted with a fabricated one
-    /// (`write_binary_stl`'s doc comment) — ported from the retired
-    /// `stlExport.test.ts`'s "skips zero-area (degenerate) triangles and
-    /// counts them", which exercised the pure writer directly on a
-    /// synthetic soup the same way.
+    /// A degenerate facet refuses the whole file: skipping it could open a
+    /// solid. The previous test expected silent omission; this is the
+    /// intentional compatibility change, not a relaxed geometry assertion.
     #[test]
-    fn write_binary_stl_skips_degenerate_triangles() {
+    fn write_binary_stl_refuses_degenerate_triangles_without_partial_output() {
         #[rustfmt::skip]
         let soup = [
             // One real triangle in the XY plane (unit right triangle).
@@ -1926,9 +2051,190 @@ mod tests {
             // One degenerate (collinear, zero-area) triangle.
             0.0, 0.0, 0.0,  1.0, 0.0, 0.0,  2.0, 0.0, 0.0,
         ];
-        let bytes = write_binary_stl(&soup);
-        let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap());
-        assert_eq!(count, 1, "the degenerate triangle is skipped, not repaired");
+        let error = write_binary_stl(&soup, &[]).unwrap_err();
+        assert!(matches!(error, ExportError::StlIntegrity(_)));
+        assert_eq!(error.name(), "export_failed");
+        assert!(error.message().contains("degenerate"));
+    }
+
+    fn tetra_soup(points: [Point3; 4]) -> Vec<f64> {
+        [[0, 2, 1], [0, 3, 2], [0, 1, 3], [1, 2, 3]]
+            .into_iter()
+            .flat_map(|face| {
+                face.into_iter().flat_map(|i| {
+                    let p = points[i];
+                    [p.x, p.y, p.z]
+                })
+            })
+            .collect()
+    }
+
+    fn decoded_closed_stl_volume(bytes: &[u8]) -> f64 {
+        let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
+        assert_eq!(bytes.len(), 84 + count * 50);
+        let mut edges = BTreeMap::new();
+        let mut six_volume = 0.0;
+        for triangle in bytes[84..].chunks_exact(50) {
+            let read = |i| f64::from(f32::from_le_bytes(triangle[i..i + 4].try_into().unwrap()));
+            let point = |i| Point3::new(read(i), read(i + 4), read(i + 8));
+            let normal = point(0).to_vec();
+            let vertices = [point(12), point(24), point(36)];
+            let cross = (vertices[1] - vertices[0]).cross(vertices[2] - vertices[0]);
+            assert!(cross.length() > 0.0 && cross.dot(normal) > 0.0);
+            six_volume += vertices[0]
+                .to_vec()
+                .dot(vertices[1].to_vec().cross(vertices[2].to_vec()));
+            let key = |p: Point3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+            for i in 0..3 {
+                *edges
+                    .entry((key(vertices[i]), key(vertices[(i + 1) % 3])))
+                    .or_insert(0) += 1;
+            }
+        }
+        for ((a, b), uses) in &edges {
+            assert_eq!(*uses, 1);
+            assert_eq!(edges.get(&(*b, *a)), Some(&1));
+        }
+        six_volume / 6.0 / 1e9 // mm³ to m³
+    }
+
+    #[test]
+    fn stl_preserves_a_closed_tetrahedron_of_small_valid_triangles() {
+        // Every facet was below the old fixed area threshold. All are
+        // representable, including their normals and exact shared corners.
+        let side = 1e-7;
+        let soup = tetra_soup([
+            Point3::ORIGIN,
+            Point3::new(side, 0.0, 0.0),
+            Point3::new(0.0, side, 0.0),
+            Point3::new(0.0, 0.0, side),
+        ]);
+        let bytes = write_binary_stl(&soup, std::slice::from_ref(&(0..4))).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[80..84].try_into().unwrap()), 4);
+        let actual = decoded_closed_stl_volume(&bytes);
+        let expected = side * side * side / 6.0;
+        assert!((actual - expected).abs() <= expected * 8.0 * f64::from(f32::EPSILON));
+    }
+
+    #[test]
+    fn stl_refuses_nonfinite_overflow_and_collapsed_coordinates() {
+        for coordinate in [f64::NAN, f64::INFINITY, f64::MAX, 1e38] {
+            let soup = [coordinate, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+            assert!(matches!(
+                write_binary_stl(&soup, &[]),
+                Err(ExportError::StlIntegrity(_))
+            ));
+        }
+        // At 100 km, mm-f32 cannot distinguish these 1 mm offsets.
+        let soup = [
+            100_000.0,
+            100_000.0,
+            0.0,
+            100_000.001,
+            100_000.0,
+            0.0,
+            100_000.0,
+            100_000.001,
+            0.0,
+        ];
+        assert!(matches!(
+            write_binary_stl(&soup, &[]),
+            Err(ExportError::StlIntegrity(_))
+        ));
+    }
+
+    #[test]
+    fn stl_refuses_a_triangle_whose_winding_flips_after_rounding() {
+        // At 1000 mm one f32 ULP is 1/16384 mm. The original signed
+        // area is positive (1.3 - 2*0.6 ULP); rounded it is negative
+        // (1 - 2*1 ULP). This is not a zero-area input triangle.
+        let ulp = 1.0 / 16384.0;
+        let soup = [
+            1.0,
+            1.0,
+            0.0,
+            1.001,
+            (1000.0 + 0.6 * ulp) / 1000.0,
+            0.0,
+            1.002,
+            (1000.0 + 1.3 * ulp) / 1000.0,
+            0.0,
+        ];
+        let mm: Vec<_> = soup.iter().map(|v| v * 1000.0).collect();
+        let signed = |p: &[f64]| (p[3] - p[0]) * (p[7] - p[1]) - (p[4] - p[1]) * (p[6] - p[0]);
+        assert!(signed(&mm) > 0.0);
+        let rounded: Vec<_> = mm.iter().map(|v| f64::from(*v as f32)).collect();
+        assert!(signed(&rounded) < 0.0);
+        let error = write_binary_stl(&soup, &[]).unwrap_err();
+        assert!(error.message().contains("reverses"));
+        assert_eq!(error.name(), "export_failed");
+    }
+
+    #[test]
+    fn stl_refuses_missing_faces_and_nonmanifold_vertex_contacts() {
+        let soup = tetra_soup([
+            Point3::ORIGIN,
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+        ]);
+        assert!(
+            write_binary_stl(&soup[..27], std::slice::from_ref(&(0..3)))
+                .unwrap_err()
+                .message()
+                .contains("boundary")
+        );
+        let other = tetra_soup([
+            Point3::ORIGIN,
+            Point3::new(-1.0, 0.0, 0.0),
+            Point3::new(0.0, -1.0, 0.0),
+            Point3::new(0.0, 0.0, -1.0),
+        ]);
+        let both: Vec<_> = soup.iter().copied().chain(other).collect();
+        assert!(
+            write_binary_stl(&both, std::slice::from_ref(&(0..8)))
+                .unwrap_err()
+                .message()
+                .contains("vertex")
+        );
+        // Separate objects are independent even at coincident positions.
+        let duplicate: Vec<_> = soup.iter().chain(&soup).copied().collect();
+        write_binary_stl(&duplicate, &[0..4, 4..8]).unwrap();
+    }
+
+    #[test]
+    fn stl_refuses_a_shell_that_flattens_without_degenerate_triangles() {
+        let soup = tetra_soup([
+            Point3::new(0.0, 0.0, 100_000.0),
+            Point3::new(1.0, 0.0, 100_000.0),
+            Point3::new(0.0, 1.0, 100_000.0),
+            Point3::new(0.25, 0.25, 100_000.001),
+        ]);
+        let error = write_binary_stl(&soup, std::slice::from_ref(&(0..4))).unwrap_err();
+        assert!(error.message().contains("volume"));
+    }
+
+    #[test]
+    fn unsafe_stl_failure_propagates_through_the_public_dispatch() {
+        let mut doc = box_document();
+        let id = doc.visible_object_ids()[0];
+        doc.transform_object(id, &kernel::Transform::uniform_scale(0.001))
+            .unwrap();
+        doc.transform_object(
+            id,
+            &kernel::Transform::translation(kernel::Vec3::new(100_000.0, 100_000.0, 100_000.0)),
+        )
+        .unwrap();
+        let before = doc.save();
+        for error in [
+            export_stl(&doc, 0, true).unwrap_err(),
+            export(&doc, "stl", 0, true).unwrap_err(),
+        ] {
+            assert!(matches!(error, ExportError::StlIntegrity(_)));
+            assert_eq!(error.name(), "export_failed");
+            assert!(error.message().contains("No file was produced"));
+        }
+        assert_eq!(doc.save(), before);
     }
 
     /// A mirrored (negative-determinant) instance pose flips triangle
@@ -2126,6 +2432,10 @@ mod tests {
     #[test]
     fn export_error_names_are_pinned() {
         assert_eq!(ExportError::NothingToExport.name(), "nothing_to_export");
+        assert_eq!(
+            ExportError::StlIntegrity("unsafe mesh").name(),
+            "export_failed"
+        );
         assert_eq!(
             ExportError::Failed(tessellate::TessellateError::DegenerateFace {
                 face: kernel::FaceId::default()

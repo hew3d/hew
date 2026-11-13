@@ -2,9 +2,8 @@
 //! its coordinates winds backwards or collapses once rounded (the render
 //! path's `tessellate::tri_winds_forward_in_f32` says how ear clipping
 //! makes one: the last fan triangle before a vertex's tangent to a hole).
-//! STL, GLB, and USDZ leave such a triangle out rather than write it with
-//! a normal that contradicts its vertices; a triangle with any
-//! representable altitude is written as before.
+//! STL refuses such an export; GLB and USDZ retain their existing omission
+//! policy. A triangle with any representable altitude is written as before.
 //!
 //! The configuration is the one the tessellation's property test first
 //! found (`crates/tessellate/tests/touching_hole_specs.rs`,
