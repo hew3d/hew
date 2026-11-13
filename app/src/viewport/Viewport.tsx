@@ -31,6 +31,8 @@ import { Line2 } from 'three/examples/jsm/lines/Line2.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js'
 import { updateFatLineResolutions } from './fatLine'
+import { type PartFrame, buildPartAxes, editedInstance, disposePartAxes, framesForSelection, setPartAxesResolution, updatePartAxesScale } from './partAxes'
+import { getShowPartAxes } from '../settings/view'
 import { RenderScheduler } from './renderScheduler'
 import {
   renderPrintPages as runPrintPass,
@@ -1274,6 +1276,10 @@ export interface ViewportApi {
   invertSelection: () => void
   /** Show/hide the origin axes (View ▸ Axes). */
   setAxesVisible: (visible: boolean) => void
+  /** Show/hide the part-axes overlay (View ▸ Part Axes). */
+  setPartAxesVisible: (visible: boolean) => void
+  /** The part-axes overlay as drawn now: its visibility and each triad's origin (test accessor). */
+  getPartAxesInfo: () => { visible: boolean; origins: [number, number, number][] }
   /** Show/hide the ground grid (View ▸ Grid). */
   setGridVisible: (visible: boolean) => void
   /**
@@ -1765,6 +1771,7 @@ function clampOriginAxes(group: THREE.Group, rig: CameraRig, viewportHeightPx: n
   }
 }
 const _axisView = new THREE.Matrix4()
+const _partAxesPoint = new THREE.Vector3()
 
 function buildOriginAxes(theme: 'light' | 'dark', halfLength: number = AXIS_HALF_LENGTH_DEFAULT): THREE.Group {
   const group = new THREE.Group()
@@ -2812,6 +2819,8 @@ export default function Viewport({
 
   const sceneRendererRef = useRef<SceneRenderer | null>(null)
   const scheduleRenderRef = useRef<() => void>(() => { /* filled in effect */ })
+  /** Rebuilds the part-axes overlay from the current selection and context (filled in effect). */
+  const rebuildPartAxesRef = useRef<() => void>(() => { /* filled in effect */ })
   // The drawing-plane cue layer is created inside the setup effect's closure
   // (keyed to `wasmScene`); this ref lets the separate activeContext-change
   // effect below reach it too, to clear a stale cue on context change
@@ -3072,6 +3081,15 @@ export default function Viewport({
     // render frame (see fatLine.ts's module doc comment).
     updateFatLineResolutions(el.clientWidth, el.clientHeight)
     threeScene.add(originAxes)
+    // Part axes (View ▸ Part Axes): the frame of the selected or edited
+    // component. `partAxesRoot` is a stable container so the print pass can
+    // hide it by reference; its child group is rebuilt on a selection,
+    // document, session, or theme change and rescaled every rendered frame.
+    const partAxesRoot = new THREE.Group()
+    partAxesRoot.name = 'PartAxesRoot'
+    partAxesRoot.visible = getShowPartAxes()
+    threeScene.add(partAxesRoot)
+    let partAxesGroup: THREE.Group | null = null
     const initialGridColors = GROUND_GRID_COLORS[currentTheme]
     // `originAxes.visible` (set from `showAxes` just above) seeds the grid's
     // own through-origin-line suppression so the two start in sync;
@@ -3114,6 +3132,7 @@ export default function Viewport({
       updateAxisResolution(originAxes, el.clientWidth, el.clientHeight)
       originAxes.visible = wasVisible
       threeScene.add(originAxes)
+      rebuildPartAxes()
     }
 
     // Live theme reactivity: Settings > Theme can change at any time while
@@ -5248,6 +5267,7 @@ export default function Viewport({
       // need the SAME breadth of coverage guides never did, since guides
       // are never re-anchored).
       sceneRenderer.refreshAnnotations()
+      rebuildPartAxes()
       // While an explode session is open, every commit can grow the
       // session's scope (drawing a new solid mid-session folds in at close,
       // so it is session geometry from birth) — re-derive the pick-scope
@@ -5922,6 +5942,7 @@ export default function Viewport({
       sessionStackRef.current = stack
       const innermost = stack.length > 0 ? stack[stack.length - 1] : null
       explodeSessionInstanceRef.current = innermost?.kind === 'instance' ? innermost.id : null
+      rebuildPartAxes()
 
       if (innermost === null) {
         sessionScopeKeysRef.current = null
@@ -6766,7 +6787,7 @@ export default function Viewport({
           dirLight,
           lightRig: MODEL_LIGHT_RIG.light,
           gridAxes: [infiniteGrid.mesh, originAxes],
-          hideAlways: [cueLayer.group, drawPlaneCueLayer.group, previewGroup, siblingPreviewGroup, sceneRenderer.sectionGroup],
+          hideAlways: [partAxesRoot, cueLayer.group, drawPlaneCueLayer.group, previewGroup, siblingPreviewGroup, sceneRenderer.sectionGroup],
           viewportCssSize: () => ({ width: el.clientWidth, height: el.clientHeight }),
           liveTheme: () => readAppliedTheme(),
           liveSection: () => getSectionState(),
@@ -6853,6 +6874,7 @@ export default function Viewport({
       // frame is exactly what the loop would put on screen for this pose.
       const effDist = rig.projection === 'parallel' ? rig.effectiveDistance(controls.getDistance()) : null
       infiniteGrid.update(camera.position, effDist)
+      updatePartAxesFrame()
       updateOriginAxesFrame(originAxes, wasmScene)
       clampOriginAxes(originAxes, rig, el.clientHeight)
       syncGuides(rig.effectiveDistance(controls.getDistance()))
@@ -7281,6 +7303,8 @@ export default function Viewport({
       }
       // A hovered target hidden (or one shown) under a parked cursor: re-pick.
       queueHoverRepick()
+      // A part hidden, shown, or isolated away loses or regains its triad.
+      rebuildPartAxes()
       scheduleRender()
     }
 
@@ -7289,7 +7313,7 @@ export default function Viewport({
       // The user's own hidden leaves are never drawn as faded context, so a
       // change to them changes what the isolation fades.
       isolationCtl.rebase()
-      applyHidden(opts)
+      applyHidden(opts) // also rebuilds the part axes: a hidden component keeps no triad
     }
 
     function getEffectiveHiddenIds(): { objects: bigint[]; instances: bigint[] } {
@@ -7342,6 +7366,53 @@ export default function Viewport({
     function refreshIsolation(): boolean {
       return isolationCtl.refresh()
     }
+
+    function rebuildPartAxes(): void {
+      if (partAxesGroup !== null) {
+        partAxesRoot.remove(partAxesGroup)
+        disposePartAxes(partAxesGroup)
+        partAxesGroup = null
+      }
+      // Nothing is read or built while the overlay is off.
+      if (!partAxesRoot.visible) return
+      const ctx = activeContextRef.current
+      const editing = editedInstance(ctx, explodeSessionInstanceRef.current)
+      // What the renderer leaves undrawn: the user's hidden leaves and the
+      // ones an isolation hides (`applyHidden` keeps these two sets).
+      const frames = framesForSelection(wasmScene, selectedIdsRef.current, editing, {
+        objects: hiddenObjectIdsRef.current,
+        instances: hiddenInstanceIdsRef.current,
+      })
+      if (frames.length === 0) {
+        scheduleRender()
+        return
+      }
+      partAxesGroup = buildPartAxes(frames, getResolvedTheme())
+      setPartAxesResolution(partAxesGroup, el.clientWidth, el.clientHeight)
+      updatePartAxesFrame()
+      partAxesRoot.add(partAxesGroup)
+      scheduleRender()
+    }
+
+    /** Per-frame screen-constant sizing of the part-axes arms. */
+    function updatePartAxesFrame(): void {
+      if (partAxesGroup === null || !partAxesRoot.visible) return
+      updatePartAxesScale(partAxesGroup, ([ox, oy, oz]) =>
+        rig.worldPerPixel(camera.position.distanceTo(_partAxesPoint.set(ox, oy, oz)), el.clientHeight))
+    }
+
+    function getPartAxesInfo(): { visible: boolean; origins: [number, number, number][] } {
+      const origins: [number, number, number][] = partAxesGroup === null
+        ? []
+        : partAxesGroup.children.map((c) => [...(c.userData.frame as PartFrame).origin] as [number, number, number])
+      return { visible: partAxesRoot.visible, origins }
+    }
+
+    function setPartAxesVisible(visible: boolean): void {
+      partAxesRoot.visible = visible
+      rebuildPartAxes()
+    }
+    rebuildPartAxesRef.current = rebuildPartAxes
 
     function setAxesVisible(visible: boolean): void {
       originAxes.visible = visible
@@ -7718,7 +7789,7 @@ export default function Viewport({
       apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runFlipAlong, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setViewDirection, orbitDrag, endOrbitDrag, subscribeCameraOrientation, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => {
         const isolation = isolationCtl.state()
         return isolation === null ? null : [...isolation.targets]
-      }, collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getInstanceRenderedInherited: (id: bigint) => sceneRenderer.debugInstanceInherited(id), getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      }, collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setPartAxesVisible, getPartAxesInfo, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getInstanceRenderedInherited: (id: bigint) => sceneRenderer.debugInstanceInherited(id), getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -9950,6 +10021,7 @@ export default function Viewport({
         // Orient the origin-axes gizmo to the document's current movable
         // drawing axes (tool-parity §4) before clamping — cheap, so this
         // runs unconditionally every frame rather than only on a change.
+        updatePartAxesFrame()
         updateOriginAxesFrame(originAxes, wasmScene)
         // Re-clip the axis halves to the enlarged frustum (float64 — see
         // clampOriginAxes; the fat-line shader's own handling of extreme
@@ -12217,6 +12289,7 @@ export default function Viewport({
       rig.setAspect(w / h)
       renderer.setSize(w, h)
       updateAxisResolution(originAxes, w, h)
+      if (partAxesGroup !== null) setPartAxesResolution(partAxesGroup, w, h)
       // Keep every fat line (sketch edges, tool-preview rubber-bands) sized
       // to the new canvas — resize is the only time the resolution uniform
       // actually changes (the registry replaces the old per-frame traverse).
@@ -12324,6 +12397,8 @@ export default function Viewport({
       unsubscribeToolPointer()
       unsubscribeLengthUnit()
       disposeOriginAxes(originAxes)
+      if (partAxesGroup !== null) disposePartAxes(partAxesGroup)
+      rebuildPartAxesRef.current = () => { /* unmounted */ }
       infiniteGrid.dispose()
       shopGradientTexture?.dispose()
       controls.dispose()
@@ -12497,6 +12572,7 @@ export default function Viewport({
     sceneRendererRef.current?.setSelectedSketchInstance(
       activeInstance,
     )
+    rebuildPartAxesRef.current()
     // A selection now present ends the transform tools' hover; one cleared
     // brings it back under a resting cursor.
     refreshAcquireHoverRef.current?.()

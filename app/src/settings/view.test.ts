@@ -20,6 +20,9 @@ import {
   setMeasurementsPosition,
   subscribeMeasurementsPosition,
   mayReapplyToolCursor,
+  getShowPartAxes,
+  setShowPartAxes,
+  subscribeShowPartAxes,
 } from './view'
 
 
@@ -86,7 +89,7 @@ describe('settings-changed from another window (desktop shell)', () => {
     })
     vi.resetModules()
     const fresh = await import('./view')
-    await vi.waitFor(() => expect(callbacks).toHaveLength(6))
+    await vi.waitFor(() => expect(callbacks).toHaveLength(7))
     const handlers = callbacks
     expect(handlers.length).toBeGreaterThan(0)
     const cb = vi.fn()
@@ -100,6 +103,8 @@ describe('settings-changed from another window (desktop shell)', () => {
     expect(fresh.getSmoothCamera()).toBe(false)
     expect(fresh.getMeasurementsPosition()).toBe('bottom-right')
     expect(fresh.getShowToolHints()).toBe(false)
+    send({ showPartAxes: true })
+    expect(fresh.getShowPartAxes()).toBe(true)
     send({ outlinerSort: 'name' })
     expect(fresh.getOutlinerSort()).toBe('name')
     send({ outlinerSort: 'sideways' })
@@ -196,5 +201,33 @@ describe('measurements position', () => {
     expect(getZoomWheelStop()).toBe(4)
     window.dispatchEvent(new StorageEvent('storage', { key: 'hew.settings.smoothCamera', newValue: 'false' }))
     expect(getSmoothCamera()).toBe(false)
+  })
+})
+
+describe('part axes setting', () => {
+  it('part_axes_default_off_and_persist_and_sync', async () => {
+    localStorage.clear()
+    vi.resetModules()
+    const fresh = await import('./view')
+    expect(fresh.getShowPartAxes()).toBe(false)
+
+    const cb = vi.fn()
+    const off = subscribeShowPartAxes(cb)
+    setShowPartAxes(true)
+    expect(cb).toHaveBeenCalledWith(true)
+    expect(localStorage.getItem('hew.settings.showPartAxes')).toBe('true')
+    off()
+
+    // A reload over the stored value starts on.
+    vi.resetModules()
+    const reloaded = await import('./view')
+    expect(reloaded.getShowPartAxes()).toBe(true)
+
+    // Another tab's change arrives through the storage event; garbage is ignored.
+    window.dispatchEvent(new StorageEvent('storage', { key: 'hew.settings.showPartAxes', newValue: 'false' }))
+    expect(reloaded.getShowPartAxes()).toBe(false)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'hew.settings.showPartAxes', newValue: 'junk' }))
+    expect(reloaded.getShowPartAxes()).toBe(false)
+    reloaded.setShowPartAxes(false)
   })
 })

@@ -225,6 +225,7 @@ function actionEntries(): PaletteEntry[] {
     { id: 'edit-subtract', label: t`Subtract`, description: t`Cut every later selected solid out of the first (boolean difference).`, group: 'Actions', synonyms: [t`boolean`, t`difference`, t`cut`, t`carve`], gate: 'canBoolean' },
     { id: 'edit-intersect', label: t`Intersect`, description: t`Keep only the volume all the selected solids share (boolean intersection).`, group: 'Actions', synonyms: [t`boolean`, t`common`, t`overlap`], gate: 'canBoolean' },
     { id: 'toggle-axes', label: t`Toggle Axes`, description: t`Show or hide the world axes.`, group: 'Actions' },
+    { id: 'toggle-part-axes', label: t`Toggle Part Axes`, description: t`Show or hide the axes of the selected components and parts.`, group: 'Actions' },
     { id: 'reset-axes', label: t`Reset Drawing Axes`, description: t`Reset the movable drawing axes back to world identity.`, group: 'Actions', synonyms: [t`drawing axes`, t`origin`, t`reset axes`] },
     { id: 'toggle-grid', label: t`Toggle Grid`, description: t`Show or hide the ground grid.`, group: 'Actions' },
     { id: 'toggle-guides', label: t`Toggle Guides`, description: t`Show or hide construction guides.`, group: 'Actions' },

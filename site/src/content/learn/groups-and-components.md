@@ -126,3 +126,5 @@ Editing drills down the same way it does for groups. Double-click a component to
 A definition can't contain itself, directly or through some chain of nested definitions, and nesting is bounded to 64 levels deep — both refused outright rather than silently truncated.
 
 Explode and Make Unique treat nesting differently. Exploding an assembly surfaces its nested components as ordinary instances in the right place, each sharing geometry with its own definition. Make Unique only copies one level: the copy's own nested instances share their inner definitions with the original, the same as SketchUp.
+
+To see which way a component is turned, switch on View ▸ Part Axes: a red, green, and blue triad marks the selected or open component's own axes.

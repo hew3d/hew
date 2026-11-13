@@ -7695,6 +7695,16 @@ impl Scene {
         Ok(self.doc.node_user_hidden(node))
     }
 
+    /// Whether a node is hidden by anything the person set: its own
+    /// user-hidden flag, a group above it, or a hidden tag on it or on any
+    /// ancestor ([`kernel::Document::node_effectively_hidden`]). Read-only.
+    ///
+    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    pub fn node_effectively_hidden(&self, kind: u8, id: u64) -> Result<bool, ApiError> {
+        let node = node_id(kind, id)?;
+        Ok(self.doc.node_effectively_hidden(node))
+    }
+
     /// Sets a node's USER-hidden flag (persisted view state, not
     /// undoable — matching [`Scene::set_tag_hidden`]).
     ///

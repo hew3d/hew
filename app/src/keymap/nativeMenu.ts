@@ -79,7 +79,7 @@ export const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   'sent-reports',
   'edit-flip-blue', 'edit-flip-green', 'edit-flip-red',
   'edit-paste-independent', 'edit-paste-linked', 'edit-select-all-copies',
-  'edit-unlink', 'edit-unlink-all', 'tool-flip',
+  'edit-unlink', 'edit-unlink-all', 'toggle-part-axes', 'tool-flip',
   'toggle-axes', 'toggle-changes', 'toggle-compact-rail', 'toggle-components',
   'toggle-debug-log', 'toggle-dock', 'toggle-fly', 'toggle-grid',
   'toggle-guides', 'toggle-library', 'toggle-materials', 'toggle-model-info',

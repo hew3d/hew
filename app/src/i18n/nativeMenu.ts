@@ -116,6 +116,7 @@ export const NATIVE_MENU_LABELS: Record<string, MessageDescriptor> = {
 
   // View
   'view-axes': msg`Axes`,
+  'view-part-axes': msg`Part Axes`,
   'view-grid': msg`Grid`,
   'view-guides': msg`Guides`,
   'view-section-plane': msg`Section Cut`,

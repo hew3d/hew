@@ -267,6 +267,8 @@ export interface HewTestHarness {
    * `ViewportApi.setAxesVisible` the menu item calls.
    */
   setAxesVisible(visible: boolean): void
+  /** The part-axes overlay as drawn now: whether View ▸ Part Axes is on, and each triad's origin. */
+  getPartAxesInfo(): { visible: boolean; origins: [number, number, number][] }
   /** Show/hide the ground grid (View ▸ Grid). Same rationale as setAxesVisible. */
   setGridVisible(visible: boolean): void
   /** Show/hide all construction guides (View ▸ Guides). */
@@ -1661,6 +1663,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       api.setAxesVisible(visible)
+    },
+
+    getPartAxesInfo: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getPartAxesInfo()
     },
 
     setGridVisible: (visible) => {

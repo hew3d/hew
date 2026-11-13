@@ -176,7 +176,7 @@ import { SettingsWindow } from './settings/SettingsWindow'
 import { FluentSettingsPage } from './settings/FluentSettingsPage'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
 import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
-import { getMeasurementsPosition, subscribeMeasurementsPosition } from './settings/view'
+import { getMeasurementsPosition, subscribeMeasurementsPosition, getShowPartAxes, setShowPartAxes, subscribeShowPartAxes } from './settings/view'
 import { useViewSetting } from './settings/useViewSetting'
 import { getSceneTransitions, setSceneTransitions, subscribe as subscribeSceneTransitions } from './settings/sceneTransitions'
 import { useScenesController } from './scenes/useScenesController'
@@ -1185,6 +1185,8 @@ export default function App() {
   // duration; this is only the menu/palette checkmark's own render cache.
   const measurementsPosition = useViewSetting(getMeasurementsPosition, subscribeMeasurementsPosition)
   const copiesLinked = useViewSetting(getCopiesLinked, subscribeCopiesLinked)
+  /** View ▸ Part Axes: an app-wide setting kept in localStorage and synced across windows (settings/view.ts). */
+  const showPartAxes = useViewSetting(getShowPartAxes, subscribeShowPartAxes)
   const [sceneTransitionsOn, setSceneTransitionsOn] = useState(() => getSceneTransitions())
   useEffect(() => subscribeSceneTransitions(setSceneTransitionsOn), [])
 
@@ -6100,6 +6102,7 @@ export default function App() {
       case 'toggle-dock':         toggleDock(); break
       case 'toggle-debug-log':    setShowDebugLog((v) => !v); break
       case 'toggle-axes':         setShowAxes((v) => !v); break
+      case 'toggle-part-axes':    setShowPartAxes(!getShowPartAxes()); break
       case 'reset-axes':         viewportApi.current?.resetAxes(); break
       case 'toggle-grid':         setShowGrid((v) => !v); break
       case 'toggle-xray':         toggleXray(); break
@@ -6665,6 +6668,7 @@ export default function App() {
     }
   }, [showAxes])
   useEffect(() => { viewportApi.current?.setGridVisible(showGrid) }, [showGrid])
+  useEffect(() => { viewportApi.current?.setPartAxesVisible(showPartAxes) }, [showPartAxes])
   useEffect(() => { viewportApi.current?.setRenderMode(renderMode) }, [renderMode])
   useEffect(() => { viewportApi.current?.setGuidesVisible(showGuides) }, [showGuides])
 
@@ -6702,6 +6706,7 @@ export default function App() {
     if (!isTauri || !isMac) return
     const checked: Record<string, boolean> = {
       'view-axes': showAxes,
+      'view-part-axes': showPartAxes,
       'view-grid': showGrid,
       'view-xray': xrayOn,
       'view-wireframe': wireframeOn,
@@ -6780,6 +6785,7 @@ export default function App() {
   }, [
     activeTool,
     showAxes,
+    showPartAxes,
     showGrid,
     xrayOn,
     wireframeOn,
@@ -7593,6 +7599,8 @@ export default function App() {
           if (sceneRef.current?.busy()) return
           setShowAxes((v) => !v)
         }}
+        showPartAxes={showPartAxes}
+        onTogglePartAxes={() => setShowPartAxes(!getShowPartAxes())}
         onResetAxes={() => menuActionRef.current('reset-axes')}
         onToggleGrid={() => setShowGrid((v) => !v)}
         xray={xrayOn}
