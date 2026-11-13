@@ -14,9 +14,11 @@ import {
   deleteFacesOp,
   failureLine,
   familyCascade,
+  familyRejoinSolidOps,
   familyRepairOps,
   groupBatchButtons,
   refusalReason,
+  rejoinSolidOp,
   markOp,
   markableRows,
   runBatch,
@@ -224,5 +226,56 @@ describe('plans and words', () => {
       'hew.solid.cap',
       'hew.solid.mark_surface',
     ])
+  })
+})
+
+describe('runBatch — rejoin as one solid', () => {
+  const family = rows(['1', { family: 4 }], ['2', { family: 4 }], ['3', { family: 4 }])
+
+  it('the rejoin frame is exactly { family: <index>, as } with no object and no member ids', () => {
+    const { scene, frames } = fakeScene()
+    runBatch(scene, () => 'L', [rejoinSolidOp(family)])
+    expect(frames[2].params.commands).toEqual([{ method: 'hew.solid.rejoin', params: { family: 4, as: 'one_solid' } }])
+  })
+
+  it('the whole wizard run with rejoin ops is one transaction', () => {
+    const { scene, frames } = fakeScene()
+    const [a, b] = rows(['7'], ['8'])
+    const result = runBatch(scene, () => 'Make Solid', [rejoinSolidOp(family), capOp(a), thickenOp(b, 0.02, false)])
+    const transacts = frames.filter((f) => f.method === 'hew.doc.transact')
+    expect(transacts).toHaveLength(1)
+    expect(transacts[0].params.commands!.map((c) => c.method)).toEqual(['hew.solid.rejoin', 'hew.solid.cap', 'hew.solid.thicken'])
+    expect(result.done).toHaveLength(3)
+  })
+
+  it('a refused family is reported and left untouched, the rest re-runs without it', () => {
+    const { scene, frames } = fakeScene((_f, call) => (call === 0 ? { index: 0, explanation: 'has an opening' } : null))
+    const [a] = rows(['7'])
+    const result = runBatch(scene, () => 'L', [rejoinSolidOp(family), capOp(a)])
+    const transacts = frames.filter((f) => f.method === 'hew.doc.transact')
+    expect(transacts).toHaveLength(2)
+    expect(transacts[1].params.commands!.map((c) => c.method)).toEqual(['hew.solid.cap'])
+    expect(result.failed).toEqual([{ object: 1n, method: 'hew.solid.rejoin', explanation: 'has an opening' }])
+  })
+
+  it('a family with a member that is gone fails as stale and never reaches the frame', () => {
+    const { scene, frames } = fakeScene(() => null, [3n])
+    const result = runBatch(scene, () => 'L', [rejoinSolidOp(family)])
+    expect(frames.some((f) => f.method === 'hew.doc.transact')).toBe(false)
+    expect(result.failed).toEqual([{ object: 1n, method: 'hew.solid.rejoin', explanation: i18n._(STALE_OBJECT_EXPLANATION) }])
+  })
+
+  it('a rejoin-as-one-solid batch has its own failure and toast wording', () => {
+    expect(failureLine('rejoinSolid', 'has an opening')).toBe("Couldn't rejoin: has an opening")
+    expect(batchSummary('rejoinSolid', { done: [], failed: [{ object: 1n, method: 'hew.solid.rejoin', explanation: 'x' }] })).toBe(
+      "Nothing was rejoined. 1 couldn't be rejoined; see the list.",
+    )
+    expect(batchLabel('rejoinSolid', 1)).toBe('Rejoin as one solid')
+  })
+
+  it('the panel button needs two pieces: one piece plus a wall offers no rejoin', () => {
+    const wall = { verdict: { kind: 'flat_sheet', holes: 0 }, family: 4 }
+    expect(familyRejoinSolidOps(rows(['1', { family: 4 }], ['2', wall]))).toEqual([])
+    expect(familyRejoinSolidOps(rows(['1', { family: 4 }], ['2', { family: 4 }], ['3', wall]))).toHaveLength(1)
   })
 })

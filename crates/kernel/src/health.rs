@@ -416,7 +416,7 @@ fn newell(points: &[Point3]) -> Vec3 {
 
 /// The face islands: each face's island index, and how many there are.
 /// Faces are joined through twinned half-edges.
-fn face_components(obj: &Object) -> (BTreeMap<crate::ids::FaceId, usize>, usize) {
+pub(crate) fn face_components(obj: &Object) -> (BTreeMap<crate::ids::FaceId, usize>, usize) {
     let faces: Vec<crate::ids::FaceId> = obj.faces().iter().map(|(id, _)| id).collect();
     let index: BTreeMap<crate::ids::FaceId, usize> =
         faces.iter().enumerate().map(|(i, &f)| (f, i)).collect();

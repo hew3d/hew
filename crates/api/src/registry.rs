@@ -854,6 +854,13 @@ impl Registry {
             "Pull a flat surface into a solid of the given thickness.",
         );
         add(
+            "hew.solid.rejoin",
+            M,
+            Kernel,
+            Std,
+            "Rejoin one seam family of split pieces as a single solid (Model Health's Rejoin as one solid); one undo entry.",
+        );
+        add(
             "hew.solid.from_faces",
             M,
             Kernel,
@@ -2709,6 +2716,44 @@ impl Registry {
                 "weld_flattens_object",
                 "non_manifold_rim",
                 "rim_not_planar",
+            ];
+
+            let cmd = commands
+                .get_mut("hew.solid.rejoin")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "family": { "type": "integer", "minimum": 0, "description": "index into the families of hew.doc.health over the whole model (the family a hew.query.occurrences row reports), resolved when the call runs; an index read from a hew.doc.health call with an objects scope may name a different family" },
+                    "as": { "type": "string", "enum": ["one_solid"] }
+                },
+                "required": ["family", "as"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "obj_ id of the joined solid; it keeps the largest piece's name, tags, and attributes" }
+                },
+                "required": ["object"]
+            });
+            cmd.refusals = vec![
+                "unknown_family",
+                "not_cappable",
+                "rejoin_not_possible",
+                "rim_not_planar",
+                "rim_self_intersecting",
+                "cap_would_be_coplanar",
+                "non_manifold_rim",
+                "caps_overlap",
+                "invalid",
+                "degenerate_contact",
+                "boolean_operand_not_solid",
+                "boolean_operand_empty",
+                "unknown_object",
+                "unknown_component",
+                "explode_session_scope",
             ];
 
             let cmd = commands
@@ -7044,6 +7089,7 @@ pub fn permission_table() -> Vec<(&'static str, Permission)> {
                 "hew.solid.mark_surface",
                 "hew.solid.move_imprint",
                 "hew.solid.push_pull",
+                "hew.solid.rejoin",
                 "hew.solid.rotate_imprint",
                 "hew.solid.scale_imprint",
                 "hew.solid.slice",

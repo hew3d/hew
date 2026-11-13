@@ -2239,6 +2239,22 @@ export interface SolidPushPullResult {
 }
 
 /**
+ * `hew.solid.rejoin` (v1) — Rejoin one seam family of split pieces as a single solid (Model Health's Rejoin as one solid); one undo entry.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_family, not_cappable, rejoin_not_possible, rim_not_planar, rim_self_intersecting, cap_would_be_coplanar, non_manifold_rim, caps_overlap, invalid, degenerate_contact, boolean_operand_not_solid, boolean_operand_empty, unknown_object, unknown_component, explode_session_scope
+ */
+export interface SolidRejoinParams {
+  as: "one_solid"
+  /** index into the families of hew.doc.health over the whole model (the family a hew.query.occurrences row reports), resolved when the call runs; an index read from a hew.doc.health call with an objects scope may name a different family */
+  family: number
+}
+
+export interface SolidRejoinResult {
+  /** obj_ id of the joined solid; it keeps the largest piece's name, tags, and attributes */
+  object: string
+}
+
+/**
  * `hew.solid.rotate_imprint` (v1) — Kept for compatibility: turn a drawn shape about its plane's normal through a pivot; hew.sketch.rotate is the general form.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: not_in_plane, not_an_imprint, draft_boundary_edge_touched, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, no_such_point
@@ -2884,6 +2900,7 @@ export class HewApiClient {
     mend: (params: SolidMendParams): Promise<SolidMendResult> => this.mutate('hew.solid.mend', params),
     moveImprint: (params: SolidMoveImprintParams): Promise<SolidMoveImprintResult> => this.mutate('hew.solid.move_imprint', params),
     pushPull: (params: SolidPushPullParams): Promise<SolidPushPullResult> => this.mutate('hew.solid.push_pull', params),
+    rejoin: (params: SolidRejoinParams): Promise<SolidRejoinResult> => this.mutate('hew.solid.rejoin', params),
     rotateImprint: (params: SolidRotateImprintParams): Promise<SolidRotateImprintResult> => this.mutate('hew.solid.rotate_imprint', params),
     scaleImprint: (params: SolidScaleImprintParams): Promise<SolidScaleImprintResult> => this.mutate('hew.solid.scale_imprint', params),
     slice: (params: SolidSliceParams): Promise<SolidSliceResult> => this.mutate('hew.solid.slice', params),

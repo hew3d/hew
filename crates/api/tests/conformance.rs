@@ -90,6 +90,23 @@ fn seam_half(name: &str, x0: f64, x1: f64, open_side: usize) -> kernel::MeshReci
     }
 }
 
+fn ingest_roots(doc: &mut kernel::Document, meshes: Vec<kernel::MeshRecipe>) {
+    let scene = kernel::ImportScene {
+        geo: None,
+        materials: Vec::new(),
+        defs: Vec::new(),
+        roots: meshes.into_iter().map(kernel::ImportNode::Mesh).collect(),
+        guides: Vec::new(),
+        tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
+        view_style: None,
+        extra: Default::default(),
+    };
+    doc.ingest(scene, Vec::new()).expect("fixture ingests");
+}
+
 fn apply_fixture(name: &str, doc: &mut kernel::Document) {
     match name {
         "seam_halves" => {
@@ -111,6 +128,28 @@ fn apply_fixture(name: &str, doc: &mut kernel::Document) {
             };
             doc.ingest(scene, Vec::new()).expect("fixture ingests");
         }
+        // Two open halves whose shared rim is warped: one family that
+        // cannot take a cap.
+        "bent_halves" => {
+            let mut left = seam_half("BentLeft", 10.0, 11.0, 3);
+            left.positions[2].x += 0.1;
+            let mut right = seam_half("BentRight", 11.0, 12.0, 5);
+            right.positions[3].x += 0.1;
+            ingest_roots(doc, vec![left, right]);
+        }
+        // One open half and the flat wall that closes it: a family of one
+        // piece, which the kernel refuses to rejoin.
+        "half_with_wall" => {
+            let left = seam_half("WallLeft", 20.0, 21.0, 3);
+            let p = |y: f64, z: f64| kernel::Point3::new(21.0, y, z);
+            let mut wall = seam_half("Wall", 20.0, 21.0, 3);
+            wall.positions = vec![p(0.0, 0.0), p(1.0, 0.0), p(1.0, 1.0), p(0.0, 1.0)];
+            wall.faces = vec![vec![0, 1, 2, 3]];
+            wall.face_materials.truncate(1);
+            wall.face_uv_frames.truncate(1);
+            wall.face_holes.truncate(1);
+            ingest_roots(doc, vec![left, wall]);
+        }
         other => panic!("unknown fixture {other}"),
     }
 }
@@ -126,7 +165,9 @@ struct Frame {
     note: String,
     /// Built into the document just before this frame runs, for what the
     /// bus cannot make: `"seam_halves"` ingests two open half-boxes that
-    /// share a rim (one seam family), named Left and Right.
+    /// share a rim (one seam family), named Left and Right; `"bent_halves"`
+    /// adds two whose shared rim is warped (a family that cannot take a
+    /// cap); `"half_with_wall"` adds one open half and its closing wall.
     #[serde(default)]
     fixture: Option<String>,
     request: serde_json::Value,
@@ -443,6 +484,17 @@ fn linked_copies_transcript_matches_the_golden() {
     replay(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/transcripts/linked_copies.json"
+    ));
+}
+
+/// Rejoin a split shape (HEW_API.md §7): a seam family read from
+/// `hew.doc.health`, an unknown family and a bad `as` refused, and the
+/// family rejoined as one solid with nothing left open.
+#[test]
+fn rejoin_transcript_matches_the_golden() {
+    replay(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/transcripts/rejoin.json"
     ));
 }
 

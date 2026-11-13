@@ -8064,6 +8064,30 @@ impl Scene {
         Ok(split_off.iter().map(|o| o.data().as_ffi()).collect())
     }
 
+    /// Rejoin one seam family into a single solid: Model Health's "Rejoin
+    /// as one solid" ([`kernel::Document::rejoin_as_one_solid`]). `ids` are
+    /// every member Object handle of one family (as
+    /// [`Scene::health_report_json`] lists it; a subset refuses); each piece is capped at its shared rims, the inside
+    /// walls are deleted, and the pieces are unioned, keeping the largest
+    /// piece's name, tags, attributes, and group. One undo step. Returns
+    /// the result Object's handle.
+    ///
+    /// # Errors
+    /// `RejoinNotPossible` (not one whole family, fewer than two pieces,
+    /// members under different parents, a shape that stays open, or pieces
+    /// that meet only through a wall),
+    /// `UnknownObject`, `UnknownComponent`, `ExplodeSessionScope`, a cap
+    /// refusal (`RimNotPlanar`, …), or a boolean refusal. On any error the
+    /// document is untouched.
+    pub fn rejoin_as_one_solid(&mut self, ids: &[u64]) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        let members: Vec<ObjectId> = ids.iter().map(|&h| object_id(h)).collect();
+        let (result, change) = self.doc.rejoin_as_one_solid(&members).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::RejoinAsOneSolid { ids: ids.to_vec() });
+        Ok(result.data().as_ffi())
+    }
+
     /// [`Scene::thicken_sheet`] for a definition member picked through
     /// `instance` — the Push/Pull tool pulling a flat surface inside a
     /// component: `distance` is the WORLD drag distance, mapped through the
@@ -13108,6 +13132,9 @@ impl Scene {
                 } => {
                     self.thicken_sheet_in_instance(instance, object, distance)?;
                 }
+                RejoinAsOneSolid { ids } => {
+                    self.rejoin_as_one_solid(&ids)?;
+                }
                 DeleteDefinition { component } => {
                     self.delete_definition(component)?;
                 }
@@ -16671,6 +16698,182 @@ mod tests {
         let golden = scene.state_hash();
         let json = scene.take_recording();
         assert!(json.contains("flip_selection"));
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        recording::reset();
+    }
+
+    /// ASCII STLs of the box from x = 0 to 2 split at x = 1, as the
+    /// importer's split leaves it: the two open halves and the partition
+    /// sheet, one file each (one seam family once imported).
+    fn split_box_stls() -> Vec<Vec<u8>> {
+        let p = |x: f64, y: f64, z: f64| [x, y, z];
+        let half = |x0: f64, x1: f64, end: f64| {
+            let mut quads = vec![
+                [
+                    p(x0, 0.0, 0.0),
+                    p(x0, 1.0, 0.0),
+                    p(x1, 1.0, 0.0),
+                    p(x1, 0.0, 0.0),
+                ],
+                [
+                    p(x0, 0.0, 1.0),
+                    p(x1, 0.0, 1.0),
+                    p(x1, 1.0, 1.0),
+                    p(x0, 1.0, 1.0),
+                ],
+                [
+                    p(x0, 0.0, 0.0),
+                    p(x1, 0.0, 0.0),
+                    p(x1, 0.0, 1.0),
+                    p(x0, 0.0, 1.0),
+                ],
+                [
+                    p(x1, 1.0, 0.0),
+                    p(x0, 1.0, 0.0),
+                    p(x0, 1.0, 1.0),
+                    p(x1, 1.0, 1.0),
+                ],
+            ];
+            quads.push(if end == 0.0 {
+                [
+                    p(0.0, 1.0, 0.0),
+                    p(0.0, 0.0, 0.0),
+                    p(0.0, 0.0, 1.0),
+                    p(0.0, 1.0, 1.0),
+                ]
+            } else {
+                [
+                    p(2.0, 0.0, 0.0),
+                    p(2.0, 1.0, 0.0),
+                    p(2.0, 1.0, 1.0),
+                    p(2.0, 0.0, 1.0),
+                ]
+            });
+            quads
+        };
+        let wall = vec![[
+            p(1.0, 0.0, 0.0),
+            p(1.0, 1.0, 0.0),
+            p(1.0, 1.0, 1.0),
+            p(1.0, 0.0, 1.0),
+        ]];
+        [half(0.0, 1.0, 0.0), half(1.0, 2.0, 2.0), wall]
+            .into_iter()
+            .map(stl_of)
+            .collect()
+    }
+
+    /// An ASCII STL of `quads`, two triangles each.
+    fn stl_of(quads: Vec<[[f64; 3]; 4]>) -> Vec<u8> {
+        let mut s = String::from("solid split\n");
+        for q in quads {
+            for t in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
+                s.push_str("facet normal 0 0 0\nouter loop\n");
+                for v in t {
+                    s.push_str(&format!("vertex {} {} {}\n", v[0], v[1], v[2]));
+                }
+                s.push_str("endloop\nendfacet\n");
+            }
+        }
+        s.push_str("endsolid split\n");
+        s.into_bytes()
+    }
+
+    /// [`split_box_stls`] imported; returns the family's member handles.
+    fn import_split_box(scene: &mut Scene) -> Vec<u64> {
+        for (bytes, name) in split_box_stls().iter().zip(["Left", "Right", "Wall"]) {
+            scene
+                .import_stl_core(bytes, 1.0, Some(name.into()))
+                .unwrap();
+        }
+        let report = scene.doc.health_report(None);
+        assert_eq!(report.families.len(), 1, "the import is one split shape");
+        assert_eq!(report.families[0].members.len(), 3);
+        report.families[0]
+            .members
+            .iter()
+            .map(|o| o.data().as_ffi())
+            .collect()
+    }
+
+    #[test]
+    fn rejoin_as_one_solid_returns_the_result_handle() {
+        let mut scene = Scene::new();
+        let members = import_split_box(&mut scene);
+        let depth = scene.undo_depth();
+        let result = scene.rejoin_as_one_solid(&members).unwrap();
+        let id = object_id(result);
+        let obj = scene.doc.object(id).expect("the handle is the live result");
+        assert_eq!(obj.watertight(), kernel::WatertightState::Watertight);
+        assert!((obj.volume().unwrap() - 2.0).abs() < 1e-9);
+        assert_eq!(scene.doc.live_object_ids(), vec![id]);
+        assert_eq!(scene.undo_depth(), depth + 1);
+        scene.scene_undo().unwrap();
+        assert!(scene.doc.object(id).is_none());
+        assert_eq!(scene.doc.health_report(None).families.len(), 1);
+    }
+
+    #[test]
+    fn rejoin_refusal_leaves_the_document_untouched() {
+        let mut scene = Scene::new();
+        let members = import_split_box(&mut scene);
+        let (before, depth) = (scene.state_hash(), scene.undo_depth());
+        // One piece and the wall are not two pieces.
+        let walls: Vec<u64> = members
+            .iter()
+            .copied()
+            .filter(|&m| {
+                scene.doc.object_health(object_id(m)).unwrap().verdict
+                    == kernel::health::Verdict::FlatSheet { holes: 0 }
+            })
+            .collect();
+        assert_eq!(walls.len(), 1);
+        let piece = *members.iter().find(|m| !walls.contains(m)).unwrap();
+        let err = scene.rejoin_as_one_solid(&[piece, walls[0]]).unwrap_err();
+        assert!(err.0.starts_with("RejoinNotPossible"), "got {}", err.0);
+        // A stale handle refuses typed too.
+        let err = scene.rejoin_as_one_solid(&[piece, u64::MAX]).unwrap_err();
+        assert!(err.0.starts_with("UnknownObject"), "got {}", err.0);
+        assert_eq!((scene.state_hash(), scene.undo_depth()), (before, depth));
+    }
+
+    #[test]
+    fn a_rejoin_recording_replays_to_the_same_state_hash() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let members = import_split_box(&mut scene);
+        scene.rejoin_as_one_solid(&members).unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("rejoin_as_one_solid"));
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        recording::reset();
+    }
+
+    #[test]
+    fn a_rejoin_over_the_bus_replays_to_the_same_state_hash() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        import_split_box(&mut scene);
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                r#"{"jsonrpc":"2.0","id":2,"method":"hew.solid.rejoin","params":{"family":0,"as":"one_solid"}}"#,
+            )
+            .expect("rejoin replies");
+        assert!(reply.contains("\"result\""), "rejoin succeeds: {reply}");
+        assert_eq!(scene.doc.live_object_ids().len(), 1);
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("hew.solid.rejoin"));
         let mut replayed = Scene::new();
         assert_eq!(replayed.replay(&json).unwrap(), golden);
         recording::reset();

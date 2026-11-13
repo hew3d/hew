@@ -242,6 +242,7 @@ longer replay.
 | `boolean_nodes_many` | `op`, `kinds[]`/`ids[]` (parallel node lists) | combine two or more tree nodes as one step: a union of all, the first minus the union of the rest, the intersection of all; the route a UI boolean of more than two takes |
 | `boolean_in_component_many` | `component`, `op`, `ids[]` | the same over members of one component definition |
 | `boolean_through_placement` | `path[]` (instances, outermost first), `host` (omitted: the definition's only part), `tool`, `op` (as `boolean`; only 1=subtract runs, union and intersect refuse `BooleanOperandHasInstance`) | subtract a world tool Object from a definition member seen through a placement; every placement shows the result |
+| `rejoin_as_one_solid` | `ids[]` (every member Object of one seam family) | Model Health's "Rejoin as one solid": cap each piece at its shared rims, delete the inside walls, and union the pieces largest first into one solid, one undo step |
 | `cap_rims` | `object`, `rims[]` (optional) | Model Health's cap: close the object's open rims with faces; without `rims`, every rim that can take a face is closed |
 | `delete_faces` | `object`, `faces[]` | Model Health's face removal: delete the listed faces from an object |
 | `set_accepted_surface` | `object`, `accepted` | Model Health's mark: set whether an object's surface is accepted |

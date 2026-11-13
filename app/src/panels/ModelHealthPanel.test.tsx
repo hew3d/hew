@@ -803,6 +803,38 @@ describe('ModelHealthPanel — Stage 3 batches', () => {
       ])
     })
 
+    it('a split shape has a Rejoin as one solid button that runs one rejoin command in one transaction', async () => {
+      const { scene, transacts } = batchScene(famRows, () => null, families)
+      const { props } = setup({ scene })
+      expect(batchBtn('family-0', 'Rejoin')).toBeInTheDocument()
+      fireEvent.click(batchBtn('family-0', 'Rejoin as one solid'))
+      await waitFor(() => expect(props.onGeometryChanged).toHaveBeenCalled())
+      expect(transacts()).toHaveLength(1)
+      expect(transacts()[0].params.label).toBe('Rejoin as one solid')
+      expect(transacts()[0].params.commands).toEqual([
+        { method: 'hew.solid.rejoin', params: { family: 0, as: 'one_solid' } },
+      ])
+    })
+
+    it('"Keep the inside walls" ticked does not change Rejoin as one solid: one rejoin op, no mark ops', async () => {
+      const { scene, transacts } = batchScene(famRows, () => null, families)
+      const { props } = setup({ scene })
+      fireEvent.click(within(group('family-0')).getByRole('checkbox', { name: 'Keep the inside walls' }))
+      fireEvent.click(batchBtn('family-0', 'Rejoin as one solid'))
+      await waitFor(() => expect(props.onGeometryChanged).toHaveBeenCalled())
+      expect(transacts()).toHaveLength(1)
+      expect(transacts()[0].params.commands).toEqual([{ method: 'hew.solid.rejoin', params: { family: 0, as: 'one_solid' } }])
+    })
+
+    it('a refused rejoin warns on its row with the explanation and changes nothing else', async () => {
+      const { scene, transacts } = batchScene(famRows, () => ({ index: 0, explanation: 'no go' }), families)
+      const { props } = setup({ scene })
+      fireEvent.click(batchBtn('family-0', 'Rejoin as one solid'))
+      await waitFor(() => expect(within(rowEl('1')).getByText("Couldn't rejoin: no go")).toBeInTheDocument())
+      expect(transacts()).toHaveLength(1)
+      expect(props.onGeometryChanged).not.toHaveBeenCalled()
+    })
+
     it('"Keep the inside walls" keeps the wall instead of deleting it', async () => {
       const { scene, transacts } = batchScene(famRows, () => null, families)
       const { props } = setup({ scene })

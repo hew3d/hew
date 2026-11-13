@@ -3735,6 +3735,13 @@ pub enum DocumentError {
     /// asked to wrap something other than an Object or a Group: an
     /// instance is already a placement. The document is untouched.
     NotWrappable,
+    /// [`Document::rejoin_as_one_solid`] refused: the members are not one
+    /// seam family, their pieces (the members that are not flat sheets)
+    /// are fewer than two or do not share one parent, or the pieces do not
+    /// close into one watertight solid (a shape drawn with an opening stays
+    /// open; rejoining it as pieces is the choice for it). The document is
+    /// untouched.
+    RejoinNotPossible,
 }
 
 impl std::fmt::Display for DocumentError {
@@ -3966,6 +3973,9 @@ impl std::fmt::Display for DocumentError {
                 f,
                 "only an Object or a Group can be wrapped as a linked copy; an instance is already a placement"
             ),
+            DocumentError::RejoinNotPossible => {
+                write!(f, "these pieces can't be rejoined into one solid")
+            }
             DocumentError::GroupCycle => write!(
                 f,
                 "a group can't be moved into itself or into one of its own members"
@@ -15317,6 +15327,189 @@ impl Document {
         let change = self.commit_repair(object, RepairKind::Thicken, first, solids);
         let split_off = change.objects_touched[1..].to_vec();
         Ok((split_off, change))
+    }
+
+    /// Rejoin one reported seam family into a single solid Object (Model
+    /// Health's "Rejoin as one solid"). `members` are the family's Objects,
+    /// as [`crate::health::HealthReport::families`] lists them. The
+    /// sequence, all inside one transaction bracket:
+    ///
+    /// 1. The family is read again with [`Document::health_report`] over
+    ///    the whole model: `members` (each once, in any order) must be
+    ///    exactly one family's Objects, every piece and every wall.
+    /// 2. Each piece (a member that is not a flat sheet) is capped at
+    ///    exactly its shared rims ([`Document::cap_rims`]); a rim the shape
+    ///    was drawn open with stays open, and every piece must then be a
+    ///    solid.
+    /// 3. Each inside wall (a flat-sheet member) loses every face, which
+    ///    deletes it ([`Document::delete_faces`]).
+    /// 4. The pieces are unioned pairwise, largest volume first, with the
+    ///    running result as operand `a` ([`Document::boolean`], or
+    ///    [`Document::boolean_in_component`] for a definition's pieces), so
+    ///    the result keeps the largest piece's name, tags, and attributes
+    ///    by the boolean's own rule. The boolean resolves the coincident
+    ///    caps where two pieces meet; nothing is snapped or merged by hand.
+    /// 5. Pieces inside a group are moved out to the top level for the
+    ///    unions and the result is moved back in ([`Document::reparent_nodes`]),
+    ///    so the result keeps the pieces' group.
+    ///
+    /// One undo entry labeled "Rejoin as one solid"; redo replays it to the
+    /// identical state.
+    ///
+    /// # Errors
+    /// - [`DocumentError::RejoinNotPossible`] — the members are not one
+    ///   whole family (a subset, or members of several), fewer than two
+    ///   are pieces, the members (walls included) do not share one parent
+    ///   (a group, the top level, or one definition's top level), a capped
+    ///   piece or the union is not watertight, or the union is not one
+    ///   connected solid (pieces that met only through a wall).
+    /// - [`DocumentError::UnknownObject`], [`DocumentError::UnknownComponent`],
+    ///   [`DocumentError::ExplodeSessionScope`] — as [`Document::cap_rims`].
+    /// - [`DocumentError::Repair`] — a shared rim cannot take a cap.
+    /// - [`DocumentError::Boolean`] — the union refused.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn rejoin_as_one_solid(
+        &mut self,
+        members: &[ObjectId],
+    ) -> Result<(ObjectId, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "rejoin_as_one_solid", members = members.len());
+        // Each member once, in the caller's order (the tie-break below).
+        let mut ids: Vec<ObjectId> = Vec::with_capacity(members.len());
+        for &m in members {
+            if !ids.contains(&m) {
+                ids.push(m);
+            }
+        }
+        for &m in &ids {
+            self.repair_target(m)?;
+        }
+        // 1. Exactly one whole family: the members are every Object of one
+        // family of the whole model's report, no more and no fewer (a
+        // subset would leave the rest of the shape, a wall or a piece,
+        // open beside the result).
+        let report = self.health_report(None);
+        let Some(k) = report
+            .families
+            .iter()
+            .position(|f| ids.first().is_some_and(|m| f.members.contains(m)))
+        else {
+            return Err(DocumentError::RejoinNotPossible);
+        };
+        let whole = &report.families[k].members;
+        if whole.len() != ids.len() || ids.iter().any(|m| !whole.contains(m)) {
+            return Err(DocumentError::RejoinNotPossible);
+        }
+        let mut cells: Vec<(ObjectId, Vec<usize>)> = Vec::new();
+        let mut walls: Vec<ObjectId> = Vec::new();
+        for &m in &ids {
+            let row = report
+                .rows
+                .iter()
+                .find(|r| r.object == m)
+                .expect("every member has a row");
+            match row.diagnosis.verdict {
+                crate::health::Verdict::FlatSheet { .. } => walls.push(m),
+                _ => cells.push((m, row.shared_rims.clone())),
+            }
+        }
+        if cells.len() < 2 {
+            return Err(DocumentError::RejoinNotPossible);
+        }
+        // 5. One parent for every member, walls included: a world group or
+        // the top level, or one definition's top level
+        // (`boolean_in_component` has no group case, and a definition's
+        // group is reached through its session). A wall elsewhere would
+        // be deleted out of a group the result does not go back into.
+        let owner = self.objects[cells[0].0].owner;
+        if ids.iter().any(|&m| self.objects[m].owner != owner) {
+            return Err(DocumentError::RejoinNotPossible);
+        }
+        let (component, group) = match owner {
+            ObjectOwner::World { parent } => (None, parent),
+            ObjectOwner::Definition { def, parent: None } => (Some(def), None),
+            ObjectOwner::Definition {
+                parent: Some(_), ..
+            } => {
+                return Err(DocumentError::RejoinNotPossible);
+            }
+        };
+
+        let txn = self.begin_transaction();
+        let mut change = DocChange::default();
+        let result = (|| {
+            // 2. Cap each piece at exactly its seams.
+            for (cell, rims) in &cells {
+                let (_, c) = self.cap_rims(*cell, Some(rims))?;
+                merge_doc_change(&mut change, c);
+                if self.objects[*cell].object.watertight() != WatertightState::Watertight {
+                    return Err(DocumentError::RejoinNotPossible);
+                }
+            }
+            // 3. The inside walls go.
+            for &wall in &walls {
+                let faces: Vec<crate::ids::FaceId> =
+                    self.objects[wall].object.faces().keys().collect();
+                let (_, c) = self.delete_faces(wall, &faces)?;
+                merge_doc_change(&mut change, c);
+            }
+            // 4. Largest first; equal volumes keep the caller's order.
+            let mut order: Vec<(ObjectId, f64)> = cells
+                .iter()
+                .map(|&(c, _)| {
+                    let v = self.objects[c].object.volume().unwrap_or(0.0);
+                    (c, v)
+                })
+                .collect();
+            order.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let order: Vec<ObjectId> = order.into_iter().map(|(c, _)| c).collect();
+            if group.is_some() {
+                let nodes: Vec<NodeId> = order.iter().map(|&c| NodeId::Object(c)).collect();
+                merge_doc_change(&mut change, self.reparent_nodes(&nodes, None)?);
+            }
+            let mut running = order[0];
+            for &next in &order[1..] {
+                let (id, c) = match component {
+                    None => self.boolean(BooleanOp::Union, running, next)?,
+                    Some(def) => self.boolean_in_component(def, running, next, BooleanOp::Union)?,
+                };
+                merge_doc_change(&mut change, c);
+                running = id;
+            }
+            // One watertight, connected solid: pieces that met only
+            // through a wall union to disjoint boxes, which is not one
+            // shape rejoined.
+            let joined = &self.objects[running].object;
+            if joined.watertight() != WatertightState::Watertight
+                || crate::health::face_components(joined).1 != 1
+            {
+                return Err(DocumentError::RejoinNotPossible);
+            }
+            if let Some(g) = group {
+                merge_doc_change(
+                    &mut change,
+                    self.reparent_nodes(&[NodeId::Object(running)], Some(g))?,
+                );
+            }
+            Ok(running)
+        })();
+        match result {
+            Ok(id) => {
+                self.commit_transaction(
+                    txn,
+                    CompoundMeta {
+                        label: "Rejoin as one solid".to_string(),
+                        origin: HistoryOrigin::User,
+                        coalesce: None,
+                    },
+                )?;
+                Ok((id, change))
+            }
+            Err(e) => {
+                self.abort_transaction(txn);
+                Err(e)
+            }
+        }
     }
 
     /// Mend a visible object (Model Health, the mesh-repair design;

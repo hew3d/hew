@@ -944,6 +944,10 @@ pub enum RecordedCall {
         object: u64,
         distance: f64,
     },
+    /// `rejoin_as_one_solid(ids)` — Model Health's "Rejoin as one solid":
+    /// one seam family capped, its walls deleted, and its pieces unioned,
+    /// one undo step. Additive variant (the same posture as the others).
+    RejoinAsOneSolid { ids: Vec<u64> },
     /// `delete_definition(component)` — deletes a component definition and
     /// every instance that places it (v1.1 assets lane). Additive variant
     /// (the [`RecordedCall::SketchBeginCurveWith`] posture): old recordings

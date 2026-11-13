@@ -14275,6 +14275,77 @@ Push/pull a face of a solid with the tool's full semantics.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `not_an_object`
 
+### `hew.solid.rejoin`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Rejoin one seam family of split pieces as a single solid (Model Health's Rejoin as one solid); one undo entry.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "as": {
+      "enum": [
+        "one_solid"
+      ],
+      "type": "string"
+    },
+    "family": {
+      "description": "index into the families of hew.doc.health over the whole model (the family a hew.query.occurrences row reports), resolved when the call runs; an index read from a hew.doc.health call with an objects scope may name a different family",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "family",
+    "as"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object": {
+      "description": "obj_ id of the joined solid; it keeps the largest piece's name, tags, and attributes",
+      "type": "string"
+    }
+  },
+  "required": [
+    "object"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_family`
+- `not_cappable`
+- `rejoin_not_possible` — These pieces can't be joined into one solid. An opening may keep the result open, there may be only one piece, the pieces may sit in different groups, they may not fit together into one solid, or they may be in a group inside a component, which Hew can't rejoin yet. Use Rejoin to close each piece instead.
+- `rim_not_planar` — This opening isn't flat, so one face can't close it. Mend in Model Health can fill small ones; otherwise draw faces across it by hand.
+- `rim_self_intersecting` — The edge of this opening crosses itself, so one face can't close it. Draw faces across it by hand.
+- `cap_would_be_coplanar` — This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid.
+- `non_manifold_rim` — The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first.
+- `caps_overlap` — A face here would overlap another part of this object. Close all of the object's openings together, or draw faces across this one by hand.
+- `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
+- `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
+- `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
+- `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+
 ### `hew.solid.rotate_imprint`
 
 - **Version:** 1

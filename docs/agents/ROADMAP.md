@@ -1161,6 +1161,23 @@ below.
   included, by running the Mend on a copy; hovering shows the points
   merged (red) and split (blue) and the gaps filled (green). A row whose
   every opening is warped offers Mend, not Close.
+- Rejoin as one solid (`Document::rejoin_as_one_solid`; wasm
+  `rejoin_as_one_solid`, recorded): one split shape's pieces are capped at
+  their shared rims, its inside walls deleted, and the pieces unioned
+  largest first into one watertight Object that keeps the largest piece's
+  name, tags, attributes, and group, as one undo step labeled "Rejoin as
+  one solid". It takes one whole family, every piece and wall; a part of
+  a family, a shape drawn with an opening, pieces or walls under
+  different parents, pieces that meet only through a wall, or a seam that
+  cannot take a cap refuses typed (`RejoinNotPossible`, or the cap's own
+  refusal) and leaves the model as it was. Pieces in a group inside a
+  component refuse for now. The `hew.solid.rejoin` bus command
+  (`{family, as: "one_solid"}`, family resolved from the current
+  whole-model health report) exists; Model Health carries a "Rejoin as
+  one solid" button beside "Rejoin", and the Make Solid wizard's split
+  page a fourth radio. Both send one `hew.solid.rejoin` command (a
+  `BatchOp` addressed by family index), inside the same transaction as
+  the other repairs
 - Make Solid also takes
   selected **sketches**: it runs the close pass over every line of the
   selection, then the closed-faces search (see Drawing) seeded by every
@@ -1632,9 +1649,9 @@ below.
   identical parts and left-right twins can be found (HEW_API.md §7.4).
   A part's frame through a placement honors its definition member's
   frame override. `hew.entity.flip` mirrors a selection across a plane
-  on the bus, with an optional linked mirrored copy. Still to come on the
-  bus: `hew.solid.rejoin` (Model Health's "Rejoin as one solid" in one
-  undo entry). `hew-cli --version` and `hew-relay --version` report the release
+  on the bus, with an optional linked mirrored copy. `hew.solid.rejoin`
+  (Model Health's "Rejoin as one solid" in one undo entry) rejoins a seam
+  family. `hew-cli --version` and `hew-relay --version` report the release
   tag's version on a tag build; the `core` ceiling grants `hew.view.hide`,
   `show`, `show_all`, and `hidden` without a window; `hew_query` admits every
   command that does not change the document; `hew.entity.rotate`'s angle is

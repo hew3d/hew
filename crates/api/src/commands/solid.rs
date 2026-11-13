@@ -52,6 +52,7 @@ pub fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.solid.extrude" => extrude,
         "hew.solid.push_pull" => push_pull,
+        "hew.solid.rejoin" => rejoin,
         "hew.solid.union" => union,
         "hew.solid.subtract" => subtract,
         "hew.solid.intersect" => intersect,
@@ -782,6 +783,81 @@ fn subtract_transient(
 
 pub(super) fn union(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     boolean_op(ctx, params, kernel::BooleanOp::Union)
+}
+
+/// `hew.solid.rejoin { family, as: "one_solid" }`: Model Health's one-entry
+/// rejoin of a seam family. The members are the family's Objects in the
+/// current health report; the kernel refuses a partial family, so a stale
+/// index cannot join a subset. A seam rim that cannot take a cap refuses
+/// `not_cappable`, and the model is left as it was. `family` is numbered
+/// over the whole-model health report.
+pub(super) fn rejoin(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        family: usize,
+        #[serde(rename = "as")]
+        as_: String,
+    }
+    let p: P = parse_params(params)?;
+    if p.as_ != "one_solid" {
+        return Err(CmdError::Params(format!(
+            "unknown \"as\" value \"{}\"; expected one_solid",
+            p.as_
+        )));
+    }
+    let report = ctx.doc.health_report(None);
+    let Some(family) = report.families.get(p.family) else {
+        return Err(CmdError::Refusal(
+            Refusal::api(
+                "unknown_family",
+                &format!(
+                    "The model has no seam family {}; hew.doc.health lists {}.",
+                    p.family,
+                    report.families.len()
+                ),
+            )
+            .with_detail(json!({ "family": p.family, "families": report.families.len() })),
+        ));
+    };
+    // The pieces are capped at their shared rims; a flat wall between them
+    // is deleted, never capped, so only the pieces' rims must take a cap.
+    let cappable = report
+        .rows
+        .iter()
+        .filter(|row| {
+            row.seam_family == Some(p.family)
+                && !matches!(
+                    row.diagnosis.verdict,
+                    kernel::health::Verdict::FlatSheet { .. }
+                )
+        })
+        .all(|row| {
+            ctx.doc.object(row.object).is_some_and(|o| {
+                row.shared_rims
+                    .iter()
+                    .all(|&i| kernel::repair::rim_is_cappable(o, &row.diagnosis, i))
+            })
+        });
+    let members = family.members.clone();
+    // The kernel runs its own structural checks first (too few pieces,
+    // members under different parents), so those refuse
+    // `rejoin_not_possible` even beside a seam that cannot take a cap; a
+    // cap refusal on a family with such a seam is `not_cappable`.
+    let (result, _change) = match ctx.doc.rejoin_as_one_solid(&members) {
+        Ok(done) => done,
+        Err(kernel::DocumentError::Repair(_)) if !cappable => {
+            return Err(CmdError::Refusal(
+                Refusal::api(
+                    "not_cappable",
+                    "A seam between these pieces cannot take a cap, so they cannot be joined into one solid.",
+                )
+                .with_detail(json!({ "family": p.family })),
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok(json!({ "object": public_id_of(ctx, EntityRef::Object(result)) }))
 }
 
 pub(super) fn subtract(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
