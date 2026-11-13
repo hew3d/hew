@@ -293,6 +293,21 @@ pub enum RecordedCall {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         linked: bool,
     },
+    /// `flip_selection(kinds, ids, sketch_ids, normal, about_kind, about, copy)`
+    /// — Flip: the selection mirrored across a plane (`normal` is the
+    /// plane's normal; `about_kind` 0 center, 1 origin, 2 the point
+    /// `about`), in place (`copy` 0) or as a linked (1) or independent (2)
+    /// mirrored copy, one undo step. Additive variant (same posture as the
+    /// others).
+    FlipSelection {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        sketch_ids: Vec<u64>,
+        normal: [f64; 3],
+        about_kind: u8,
+        about: [f64; 3],
+        copy: u8,
+    },
     /// `wrap_linked(kind, id)` — one Object or Group wrapped as a linked
     /// set. Additive variant (same posture as the others).
     WrapLinked { kind: u8, id: u64 },

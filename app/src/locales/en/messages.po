@@ -335,8 +335,8 @@ msgid "{kind} is on — click to set the center of rotation. Tap {COPY_MODIFIER_
 msgstr "{kind} is on — click to set the center of rotation. Tap {COPY_MODIFIER_LABEL} to {next}."
 
 #: src/tools/FlipTool.ts
-#~ msgid "{kind} is on. Click a square or a face to place a mirrored copy. Tap {COPY_MODIFIER_LABEL} to change."
-#~ msgstr "{kind} is on. Click a square or a face to place a mirrored copy. Tap {COPY_MODIFIER_LABEL} to change."
+msgid "{kind} is on. Click a square or a face to place a mirrored copy. Tap {COPY_MODIFIER_LABEL} to change."
+msgstr "{kind} is on. Click a square or a face to place a mirrored copy. Tap {COPY_MODIFIER_LABEL} to change."
 
 #: src/panels/PrintDialog.tsx
 msgid "{label} (fit)"
@@ -1042,8 +1042,8 @@ msgid "A line needs a length. Type a length other than 0."
 msgstr "A line needs a length. Type a length other than 0."
 
 #: src/tools/FlipTool.ts
-#~ msgid "A mirrored copy can't be made while you're editing inside a component. Close the component first, or flip in place."
-#~ msgstr "A mirrored copy can't be made while you're editing inside a component. Close the component first, or flip in place."
+msgid "A mirrored copy can't be made while you're editing inside a component. Close the component first, or flip in place."
+msgstr "A mirrored copy can't be made while you're editing inside a component. Close the component first, or flip in place."
 
 #: src/kernelErrors.ts
 #~ msgid "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
@@ -1468,6 +1468,8 @@ msgid "blue"
 msgstr "blue"
 
 #. Color of the Z axis at the start of a status-bar sentence
+#: src/i18n/nativeMenu.ts
+#: src/panels/MenuBar.tsx
 #: src/tools/moveInput.ts
 msgid "Blue"
 msgstr "Blue"
@@ -1819,8 +1821,8 @@ msgid "Click a solid to cut it along the plane — arrow keys aim the plane alon
 msgstr "Click a solid to cut it along the plane — arrow keys aim the plane along an axis, hovering a face aligns to it, or type an offset."
 
 #: src/tools/FlipTool.ts
-#~ msgid "Click a square to flip across that plane, or click a face to flip across it. Tap {COPY_MODIFIER_LABEL} to make a mirrored copy."
-#~ msgstr "Click a square to flip across that plane, or click a face to flip across it. Tap {COPY_MODIFIER_LABEL} to make a mirrored copy."
+msgid "Click a square to flip across that plane, or click a face to flip across it. Tap {COPY_MODIFIER_LABEL} to make a mirrored copy."
+msgstr "Click a square to flip across that plane, or click a face to flip across it. Tap {COPY_MODIFIER_LABEL} to make a mirrored copy."
 
 #: src/tools/RotateTool.ts
 msgid "Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis."
@@ -1839,8 +1841,8 @@ msgid "Click a textured face to position its texture."
 msgstr "Click a textured face to position its texture."
 
 #: src/tools/FlipTool.ts
-#~ msgid "Click an object to flip it"
-#~ msgstr "Click an object to flip it"
+msgid "Click an object to flip it"
+msgstr "Click an object to flip it"
 
 #: src/tools/MoveTool.ts
 msgid "Click an object to move it"
@@ -2015,8 +2017,8 @@ msgid "Click two endpoints, then pull out the bulge. Alt cycles open · pie · s
 msgstr "Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment. Ctrl detaches the shape from the face."
 
 #: src/tools/FlipTool.ts
-#~ msgid "Click what you want to flip."
-#~ msgstr "Click what you want to flip."
+msgid "Click what you want to flip."
+msgstr "Click what you want to flip."
 
 #: src/tools/MoveTool.ts
 msgid "Click where the copy lands — type an exact distance, arrow keys lock an axis, tap {COPY_MODIFIER_LABEL} to {next}."
@@ -3692,43 +3694,43 @@ msgstr "Flat panels"
 
 #: src/i18n/nativeMenu.ts
 #: src/tools/toolRegistry.ts
-#~ msgctxt "tool"
-#~ msgid "Flip"
-#~ msgstr "Flip"
+msgctxt "tool"
+msgid "Flip"
+msgstr "Flip"
 
 #: src/tools/FlipTool.ts
-#~ msgctxt "undo verb"
-#~ msgid "Flip"
-#~ msgstr "Flip"
+msgctxt "undo verb"
+msgid "Flip"
+msgstr "Flip"
 
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
-#~ msgid "Flip Along"
-#~ msgstr "Flip Along"
+msgid "Flip Along"
+msgstr "Flip Along"
 
 #: src/palette/registry.ts
-#~ msgid "Flip Along Blue"
-#~ msgstr "Flip Along Blue"
+msgid "Flip Along Blue"
+msgstr "Flip Along Blue"
 
 #: src/palette/registry.ts
-#~ msgid "Flip Along Green"
-#~ msgstr "Flip Along Green"
+msgid "Flip Along Green"
+msgstr "Flip Along Green"
 
 #: src/palette/registry.ts
-#~ msgid "Flip Along Red"
-#~ msgstr "Flip Along Red"
+msgid "Flip Along Red"
+msgstr "Flip Along Red"
 
 #: src/palette/registry.ts
-#~ msgid "flip x"
-#~ msgstr "flip x"
+msgid "flip x"
+msgstr "flip x"
 
 #: src/palette/registry.ts
-#~ msgid "flip y"
-#~ msgstr "flip y"
+msgid "flip y"
+msgstr "flip y"
 
 #: src/palette/registry.ts
-#~ msgid "flip z"
-#~ msgstr "flip z"
+msgid "flip z"
+msgstr "flip z"
 
 #: src/palette/registry.ts
 msgid "floating toolbar"
@@ -3939,6 +3941,8 @@ msgid "green"
 msgstr "green"
 
 #. Color of the Y axis at the start of a status-bar sentence
+#: src/i18n/nativeMenu.ts
+#: src/panels/MenuBar.tsx
 #: src/tools/moveInput.ts
 msgid "Green"
 msgstr "Green"
@@ -4242,8 +4246,8 @@ msgid "Hew's own request to the model kernel carried a malformed direction. If t
 msgstr "Hew's own request to the model kernel carried a malformed direction. If this keeps happening, use Report Bug."
 
 #: src/kernelErrors.ts
-#~ msgid "Hew's own request to the model kernel carried a malformed flip plane or copy choice. If this keeps happening, use Report Bug."
-#~ msgstr "Hew's own request to the model kernel carried a malformed flip plane or copy choice. If this keeps happening, use Report Bug."
+msgid "Hew's own request to the model kernel carried a malformed flip plane or copy choice. If this keeps happening, use Report Bug."
+msgstr "Hew's own request to the model kernel carried a malformed flip plane or copy choice. If this keeps happening, use Report Bug."
 
 #: src/kernelErrors.ts
 msgid "Hew's own request to the model kernel carried a malformed move, rotate, or scale. If this keeps happening, use Report Bug."
@@ -4535,6 +4539,7 @@ msgstr "independent"
 msgid "independent copies"
 msgstr "independent copies"
 
+#: src/tools/FlipTool.ts
 #: src/tools/MoveTool.ts
 #: src/tools/RotateTool.ts
 msgid "Independent copy"
@@ -5004,6 +5009,7 @@ msgid "Linked copies: {count}"
 msgstr "Linked copies: {count}"
 
 #: src/panels/ObjectInfoPanel.tsx
+#: src/tools/FlipTool.ts
 #: src/tools/MoveTool.ts
 #: src/tools/RotateTool.ts
 msgid "Linked copy"
@@ -5405,24 +5411,24 @@ msgid "Minimize"
 msgstr "Minimize"
 
 #: src/palette/registry.ts
-#~ msgid "mirror"
-#~ msgstr "mirror"
+msgid "mirror"
+msgstr "mirror"
 
 #: src/palette/registry.ts
-#~ msgid "Mirror the selection across a plane through its center or across a face, in place or as a copy."
-#~ msgstr "Mirror the selection across a plane through its center or across a face, in place or as a copy."
+msgid "Mirror the selection across a plane through its center or across a face, in place or as a copy."
+msgstr "Mirror the selection across a plane through its center or across a face, in place or as a copy."
 
 #: src/palette/registry.ts
-#~ msgid "Mirror the selection across the plane through its center, across the blue axis."
-#~ msgstr "Mirror the selection across the plane through its center, across the blue axis."
+msgid "Mirror the selection across the plane through its center, across the blue axis."
+msgstr "Mirror the selection across the plane through its center, across the blue axis."
 
 #: src/palette/registry.ts
-#~ msgid "Mirror the selection across the plane through its center, across the green axis."
-#~ msgstr "Mirror the selection across the plane through its center, across the green axis."
+msgid "Mirror the selection across the plane through its center, across the green axis."
+msgstr "Mirror the selection across the plane through its center, across the green axis."
 
 #: src/palette/registry.ts
-#~ msgid "Mirror the selection across the plane through its center, across the red axis."
-#~ msgstr "Mirror the selection across the plane through its center, across the red axis."
+msgid "Mirror the selection across the plane through its center, across the red axis."
+msgstr "Mirror the selection across the plane through its center, across the red axis."
 
 #: src/health/healthCopy.ts
 msgid "Missing textures ({textures})"
@@ -5938,8 +5944,8 @@ msgid "Nothing to export — the model has nothing visible."
 msgstr "Nothing to export — the model has nothing visible."
 
 #: src/viewport/Viewport.tsx
-#~ msgid "Nothing to flip"
-#~ msgstr "Nothing to flip"
+msgid "Nothing to flip"
+msgstr "Nothing to flip"
 
 #: src/kernelErrors.ts
 msgid "Nothing to mend here: no nearby points, touching parts or small gaps."
@@ -7210,6 +7216,8 @@ msgid "red"
 msgstr "red"
 
 #. Color of the X axis at the start of a status-bar sentence
+#: src/i18n/nativeMenu.ts
+#: src/panels/MenuBar.tsx
 #: src/tools/moveInput.ts
 msgid "Red"
 msgstr "Red"

@@ -693,6 +693,28 @@ pub enum LinkPolicy {
     Independent,
 }
 
+/// Where the mirror plane of a flip ([`Document::flip_matrix`]) passes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FlipAbout {
+    /// Through the center of the selection's world bounding box.
+    Center,
+    /// Through the world origin.
+    Origin,
+    /// Through a given world point.
+    Point(Point3),
+}
+
+/// `acc` grown to hold `p`.
+fn grow_bounds(acc: Option<(Point3, Point3)>, p: Point3) -> (Point3, Point3) {
+    match acc {
+        None => (p, p),
+        Some((lo, hi)) => (
+            Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)),
+            Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z)),
+        ),
+    }
+}
+
 /// One wrap a call made: `source` (an Object or Group, same id before and
 /// after) is now the only member of `definition`, placed by `instance` in
 /// the spot `source` held. A holder of `source`'s id selects `instance`.
@@ -18750,6 +18772,171 @@ impl Document {
             instances_touched: vec![instance],
             ..Default::default()
         })
+    }
+
+    /// World axis-aligned bounds `(low, high)` of the leaf geometry under
+    /// `nodes`: world objects, every group's subtree, and every instance's
+    /// expansion through its pose (nested definitions included). Members a
+    /// user has hidden count, since a flip or move carries them too. Stale
+    /// or non-world handles contribute nothing; `None` when nothing listed
+    /// has geometry (or a walk passes [`MAX_OCCURRENCES`]).
+    pub fn world_bounds(&self, nodes: &[NodeId]) -> Option<(Point3, Point3)> {
+        self.world_bounds_checked(nodes).ok().flatten()
+    }
+
+    /// [`Document::world_bounds`], with the walk's cap reported.
+    fn world_bounds_checked(
+        &self,
+        nodes: &[NodeId],
+    ) -> Result<Option<(Point3, Point3)>, DocumentError> {
+        let roots: Vec<(Vec<InstanceId>, NodeId)> = nodes
+            .iter()
+            .filter(|&&n| self.node_is_live(n))
+            .map(|&n| (Vec::new(), n))
+            .collect();
+        if roots.is_empty() {
+            return Ok(None);
+        }
+        let rows = self.occurrences(Some(&roots), true)?;
+        let mut acc: Option<(Point3, Point3)> = None;
+        for r in rows {
+            let NodeId::Object(o) = r.node else {
+                continue;
+            };
+            let Some(obj) = self.object(o) else {
+                continue;
+            };
+            for v in obj.vertices().values() {
+                acc = Some(grow_bounds(acc, r.pose.apply_point(v.position)));
+            }
+        }
+        Ok(acc)
+    }
+
+    /// The reflection a flip applies: across the plane with normal
+    /// `normal` (the plane's normal, as SketchUp's Flip Along names it)
+    /// through the point `about` picks. [`FlipAbout::Center`] is the center
+    /// of the selection's bounds: [`Document::world_bounds`] of `nodes`
+    /// together with the vertices of the listed `sketches`.
+    ///
+    /// # Errors
+    /// - [`DocumentError::EmptySelection`] — nothing listed, or (for
+    ///   `Center`) nothing listed has geometry.
+    /// - [`DocumentError::UnknownObject`] / `UnknownGroup` /
+    ///   `UnknownInstance` / `UnknownSketch` — a listed handle is stale,
+    ///   deleted, or not a world node.
+    /// - [`DocumentError::Transform`] — `normal` is zero or not finite, or
+    ///   the `about` point is not finite.
+    /// - [`DocumentError::TooManyOccurrences`] — an instance expands past
+    ///   [`MAX_OCCURRENCES`].
+    pub fn flip_matrix(
+        &self,
+        nodes: &[NodeId],
+        sketches: &[SketchId],
+        normal: Vec3,
+        about: FlipAbout,
+    ) -> Result<Transform, DocumentError> {
+        if nodes.is_empty() && sketches.is_empty() {
+            return Err(DocumentError::EmptySelection);
+        }
+        for &n in nodes {
+            if !self.node_is_live(n) {
+                return Err(match n {
+                    NodeId::Object(_) => DocumentError::UnknownObject,
+                    NodeId::Group(_) => DocumentError::UnknownGroup,
+                    NodeId::Instance(_) => DocumentError::UnknownInstance,
+                });
+            }
+        }
+        for &s in sketches {
+            if self.sketch(s).is_none() {
+                return Err(DocumentError::UnknownSketch);
+            }
+        }
+        let point = match about {
+            FlipAbout::Origin => Point3::ORIGIN,
+            FlipAbout::Point(p) => p,
+            FlipAbout::Center => {
+                let mut acc = self.world_bounds_checked(nodes)?;
+                for &s in sketches {
+                    if let Some(sk) = self.sketch(s) {
+                        for v in sk.vertices().values() {
+                            acc = Some(grow_bounds(acc, v.position));
+                        }
+                    }
+                }
+                let (lo, hi) = acc.ok_or(DocumentError::EmptySelection)?;
+                Point3::new(
+                    (lo.x + hi.x) * 0.5,
+                    (lo.y + hi.y) * 0.5,
+                    (lo.z + hi.z) * 0.5,
+                )
+            }
+        };
+        Transform::reflection(point, normal).map_err(DocumentError::Transform)
+    }
+
+    /// Mirror a selection in place across the plane
+    /// [`Document::flip_matrix`] names: exactly
+    /// [`Document::transform_selection`] with that matrix. Objects and
+    /// sketches bake the reflection (every face turned over, so a solid
+    /// stays right side out); instances keep their geometry and take a
+    /// mirrored pose (determinant < 0); a group bakes into its leaf objects
+    /// and composes into its instances. One undo entry; all handles stay.
+    ///
+    /// # Errors
+    /// As [`Document::flip_matrix`], then as
+    /// [`Document::transform_selection`] (a face too small to reopen after
+    /// the map is [`DocumentError::Transform`]). On `Err` the document is
+    /// untouched.
+    pub fn flip_nodes(
+        &mut self,
+        nodes: &[NodeId],
+        sketches: &[SketchId],
+        normal: Vec3,
+        about: FlipAbout,
+    ) -> Result<DocChange, DocumentError> {
+        info!(target: "kernel::op", op = "flip_nodes", nodes = nodes.len(), sketches = sketches.len());
+        let m = self.flip_matrix(nodes, sketches, normal, about)?;
+        self.transform_selection(nodes, sketches, &m)
+    }
+
+    /// A mirrored copy of `nodes` across the plane
+    /// [`Document::flip_matrix`] names (center from `nodes` alone):
+    /// [`Document::duplicate_nodes_placements`] with that one matrix. With
+    /// [`LinkPolicy::Linked`] each Object or Group is wrapped as its own
+    /// linked set and the copy is another placement at the mirrored pose,
+    /// so nothing bakes and the shared member is untouched; an Instance's
+    /// copy is another placement of its own definition at the composed
+    /// pose. [`LinkPolicy::Independent`] bakes a mirrored copy. Returns the
+    /// new roots (placements under `Linked`); [`DocChange::linked`] lists
+    /// the wraps. One undo entry, which returns a wrapped node exactly.
+    ///
+    /// # Errors
+    /// As [`Document::flip_matrix`]; [`DocumentError::DuplicateMember`]
+    /// for a node listed beside a group that contains it, under either
+    /// policy; then as [`Document::duplicate_nodes_placements`]. On `Err`
+    /// the document is untouched.
+    pub fn flip_copy(
+        &mut self,
+        nodes: &[NodeId],
+        normal: Vec3,
+        about: FlipAbout,
+        policy: LinkPolicy,
+    ) -> Result<(Vec<NodeId>, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "flip_copy", nodes = nodes.len(), policy = ?policy);
+        if nodes.is_empty() {
+            return Err(DocumentError::EmptySelection);
+        }
+        let m = self.flip_matrix(nodes, &[], normal, about)?;
+        // A node listed beside a group that holds it would be copied twice
+        // (Independent) or refused (Linked); refuse it the same way for both.
+        for &n in nodes {
+            if nodes.iter().any(|&o| o != n && self.node_is_inside(n, o)) {
+                return Err(DocumentError::DuplicateMember);
+            }
+        }
+        self.duplicate_nodes_placements(nodes, &[m], policy)
     }
 
     /// Edit the shared geometry of a definition by applying a per-Object op to

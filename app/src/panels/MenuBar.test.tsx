@@ -353,6 +353,30 @@ describe('MenuBar', () => {
     expect(onEditAction).not.toHaveBeenCalled()
   })
 
+  it('flip_along_items_are_gated_by_selection', () => {
+    const onEditAction = vi.fn()
+    const { rerender } = render(<MenuBar {...defaultProps} editGates={{ ...openGates, canFlip: false }} onEditAction={onEditAction} />)
+    const openFlipAlong = () => {
+      if (screen.queryByText('Flip Along') === null) fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+      fireEvent.mouseEnter(screen.getByText('Flip Along'))
+    }
+    openFlipAlong()
+    for (const label of ['Red', 'Green', 'Blue']) fireEvent.mouseDown(screen.getByText(label))
+    expect(onEditAction).not.toHaveBeenCalled()
+
+    rerender(<MenuBar {...defaultProps} editGates={{ ...openGates, canFlip: true }} onEditAction={onEditAction} />)
+    const commands: Array<[string, string]> = [
+      ['Red', 'edit-flip-red'],
+      ['Green', 'edit-flip-green'],
+      ['Blue', 'edit-flip-blue'],
+    ]
+    for (const [label, action] of commands) {
+      if (screen.queryByText(label) === null) openFlipAlong()
+      fireEvent.mouseDown(screen.getByText(label))
+      expect(onEditAction).toHaveBeenLastCalledWith(action)
+    }
+  })
+
   it('Paste independent is always offered; Paste linked joins it only while copies default to independent', () => {
     const onEditAction = vi.fn()
     const gates = { ...openGates, clipboardHasContent: true }

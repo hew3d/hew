@@ -14,9 +14,9 @@ describe('toolRegistry', () => {
     expect(toolSpec('Select').actionId).toBe('tool-select')
   })
 
-  it('groups the 03_tool_rail.md tools plus Arc, Polygon, Follow Me, Dimension, and Section Plane', () => {
+  it('groups the 03_tool_rail.md tools plus Arc, Polygon, Follow Me, Flip, Dimension, and Section Plane', () => {
     expect(toolsInGroup('Draw').map((t) => t.name)).toEqual(['Select', 'Line', 'Rectangle', 'Circle', 'Polygon', 'Arc'])
-    expect(toolsInGroup('Modify').map((t) => t.name)).toEqual(['Push/Pull', 'Follow Me', 'Offset', 'Move', 'Rotate', 'Scale'])
+    expect(toolsInGroup('Modify').map((t) => t.name)).toEqual(['Push/Pull', 'Follow Me', 'Offset', 'Move', 'Rotate', 'Scale', 'Flip'])
     expect(toolsInGroup('Inspect').map((t) => t.name)).toEqual(['Tape Measure', 'Dimension', 'Paint', 'Section Plane'])
   })
 

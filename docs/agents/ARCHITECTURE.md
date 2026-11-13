@@ -501,17 +501,17 @@ its parent (a group, or an outer definition for a node reached by path).
 The duplicating ops take a `LinkPolicy`: with `Linked`, each Object or
 Group root is wrapped as its own set and every copy is a further placement
 of it, so a reflecting step makes a mirrored placement instead of baked
-geometry; the wraps and the copies are one undo entry, and undoing it
-returns the loose node exactly. A set reduced to one placement stays a
-set (only undoing the wrap itself restores the loose node), and a linked
-set goes with its last live placement — deleting, exploding, or unlinking
-it hides the definition and its members, and undo brings them back. The
-rule is transitive: a set placed only by instances among those hidden
-members goes too, as does one placed only inside a deleted definition —
-while
-a named component stays available with no placements. Removing the
-attribute (`promote_linked`) turns a set into a named component; the
-reverse does not exist.
+geometry (a linked mirrored copy from Flip is such a placement, its pose
+the reflection across the chosen plane); the wraps and the copies are one
+undo entry, and undoing it returns the loose node exactly. A set reduced
+to one placement stays a set (only undoing the wrap itself restores the
+loose node), and a linked set goes with its last live placement —
+deleting, exploding, or unlinking it hides the definition and its members,
+and undo brings them back. The rule is transitive: a set placed only by
+instances among those hidden members goes too, as does one placed only
+inside a deleted definition — while a named component stays available with
+no placements. Removing the attribute (`promote_linked`) turns a set into
+a named component; the reverse does not exist.
 
 The app presents a linked set as copies, never as a definition: Move,
 Rotate, arrays, and Paste link by default (a preference), the Outliner and

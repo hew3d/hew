@@ -21,13 +21,14 @@ Tool shortcuts are plain letters, the same on every platform, matching SketchUp'
 | Move | `M` |
 | Rotate | `Q` |
 | Scale | `S` |
+| Flip | — |
 | Tape Measure | `T` |
 | Paint | `B` |
 | Orbit | `O` |
 | Pan | `H` |
 | Zoom | `Z` |
 
-Polygon, Follow Me, Dimension, Protractor, Slice, Section Plane, and Edit Vertex have no default key, same as in SketchUp — reach them via the Draw/Tools menu or the command palette, or give them one in Settings ▸ Controls. On the macOS desktop app the tools also answer to SketchUp for Mac's `⌘`-combinations (`⌘K` Rectangle, `⌘D` Tape Measure, `⌘B` Orbit, …); those work too, but the letters above are the ones worth learning.
+Polygon, Flip, Follow Me, Dimension, Protractor, Slice, Section Plane, and Edit Vertex have no default key, same as in SketchUp — reach them via the Draw/Tools menu or the command palette, or give them one in Settings ▸ Controls. On the macOS desktop app the tools also answer to SketchUp for Mac's `⌘`-combinations (`⌘K` Rectangle, `⌘D` Tape Measure, `⌘B` Orbit, …); those work too, but the letters above are the ones worth learning.
 
 ## Commands
 

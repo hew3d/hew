@@ -57,9 +57,9 @@ pub use document::{
     AttrTarget, Axis, CellDecline, CellDeclineReason, CellOutcome, CellScope, CellSeed,
     ClosingEdge, CompoundMeta, CompoundOutcome, CompoundToken, DocChange, DocTransaction, Document,
     DocumentError, DraftCurveRun, DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore,
-    DraftUnit, EntityRef, FollowMePath, HEW_ATTR_NS, HistoryArg, HistoryEntries, HistoryEntryInfo,
-    HistoryKind, HistoryOrigin, IngestJob, IngestProgress, InsertOptions, InsertReport,
-    LINKED_ATTR_KEY, LibraryProvenance, LinkPolicy, LinkedWrap, MAX_COMPONENT_DEPTH,
+    DraftUnit, EntityRef, FlipAbout, FollowMePath, HEW_ATTR_NS, HistoryArg, HistoryEntries,
+    HistoryEntryInfo, HistoryKind, HistoryOrigin, IngestJob, IngestProgress, InsertOptions,
+    InsertReport, LINKED_ATTR_KEY, LibraryProvenance, LinkPolicy, LinkedWrap, MAX_COMPONENT_DEPTH,
     MAX_OCCURRENCES, MaterialScope, NodeId, Occurrence, OpenEdges, PendingActionKind, PlaneListing,
     PlaneUnits, PurgeReport, Remap, RenderRoot, WRAPPED_DEF_SID,
 };

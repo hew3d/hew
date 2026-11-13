@@ -124,6 +124,45 @@ impl Transform {
         })
     }
 
+    /// Reflection across the plane through `point` with normal `normal`:
+    /// `p ↦ p − 2((p − point)·n)n` with `n` the unit normal. Every point of
+    /// the plane stays put, the normal reverses, and the determinant is −1.
+    /// `normal` need not be unit length, and any nonzero finite normal
+    /// works however large or small: it is divided by its largest component
+    /// before it is normalized. A zero normal is
+    /// [`TransformError::Singular`] (the mirror has no plane), as is a
+    /// non-finite input.
+    pub fn reflection(point: Point3, normal: Vec3) -> Result<Transform, TransformError> {
+        if ![point.x, point.y, point.z, normal.x, normal.y, normal.z]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err(TransformError::Singular);
+        }
+        // Divide by the largest component first, so a normal whose squared
+        // length would overflow (or underflow) still names its direction.
+        let big = normal.x.abs().max(normal.y.abs()).max(normal.z.abs());
+        if big == 0.0 {
+            return Err(TransformError::Singular);
+        }
+        let n = Vec3::new(normal.x / big, normal.y / big, normal.z / big)
+            .normalized()
+            .map_err(|_| TransformError::Singular)?;
+        let k = [n.x, n.y, n.z];
+        let mut linear = [[0.0; 3]; 3];
+        for (i, row) in linear.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                let id = if i == j { 1.0 } else { 0.0 };
+                *cell = id - 2.0 * k[i] * k[j];
+            }
+        }
+        let d = 2.0 * point.to_vec().dot(n);
+        Ok(Transform {
+            linear,
+            translation: Vec3::new(d * n.x, d * n.y, d * n.z),
+        })
+    }
+
     /// Builds an affine transform from a row-major 3×4 matrix
     /// `[m00 m01 m02 tx, m10 m11 m12 ty, m20 m21 m22 tz]`: the first three
     /// entries of each row are the linear part, the fourth is the translation.

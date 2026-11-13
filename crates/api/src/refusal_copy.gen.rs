@@ -512,6 +512,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "BadCount" => {
             "Hew's own request to the model kernel asked for an invalid copy count. If this keeps happening, use Report Bug."
         }
+        "BadFlip" => {
+            "Hew's own request to the model kernel carried a malformed flip plane or copy choice. If this keeps happening, use Report Bug."
+        }
         "BadAnchor" => {
             "Hew's own request to the model kernel carried a malformed snap point. If this keeps happening, use Report Bug."
         }

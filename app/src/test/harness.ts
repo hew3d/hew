@@ -857,6 +857,9 @@ export interface HewTestHarness {
   /** The definition an instance places, or `null` if the handle is stale. */
   getInstanceDef(instance: string): string | null
 
+  /** An instance's pose as a row-major 3x4 affine, or `null` if stale. */
+  getInstancePose(instance: string): number[] | null
+
   /** Every visible instance of a definition, as decimal handle strings. */
   getInstancesOf(component: string): string[]
 
@@ -2453,6 +2456,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     getInstanceDef: (instance) =>
       query((s) => s.instance_def(BigInt(instance))?.toString() ?? null),
+
+    getInstancePose: (instance) =>
+      query((s) => {
+        const p = s.instance_pose(BigInt(instance))
+        return p === undefined ? null : Array.from(p)
+      }),
 
     getInstancesOf: (component) =>
       query((s) => Array.from(s.instances_of(BigInt(component))).map(String)),

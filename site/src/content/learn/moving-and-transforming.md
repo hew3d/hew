@@ -93,13 +93,28 @@ Hovering a grip highlights it together with the point it scales about, joined by
    - A **corner grip** scales all three axes together — uniform scale, like SketchUp's own corner handles.
 2. **Click again** to commit. The live readout shows the factor (`×1.50`) tagged with the axis for a face grip, both axes' factors for an edge grip.
 
-By default the grip **opposite** the one you grabbed stays anchored — grab the top face and the bottom stays put, so the object grows upward from there. Tap `Control` to durably anchor at the box's **center** instead, so both sides move symmetrically; tap it again to go back to the opposite-grip anchor. Dragging a grip past its anchor never flips the object inside out — it clamps at a tiny minimum size instead (mirroring is a separate tool).
+By default the grip **opposite** the one you grabbed stays anchored — grab the top face and the bottom stays put, so the object grows upward from there. Tap `Control` to durably anchor at the box's **center** instead, so both sides move symmetrically; tap it again to go back to the opposite-grip anchor. Dragging a grip through its anchor to the far side mirrors the object, as SketchUp's Scale does; it stays a solid, right side out. To mirror across a plane in one click, use [Flip](#flip).
 
 **Exact values:** type a plain number (`0.5`, `2.54`) and press `Enter` for a factor on the driven axis or axes — a corner grip's one typed value drives all three. Type a length instead (`50mm`, `8"`) and Hew reads it as a **target dimension**: the driven axis scales to land at exactly that size, computed against the box's current extent.
 
 **Retyping after the commit:** once a grip-drag click commits, type another factor or dimension and press `Enter` — the scale redoes about the same pivot and the same driven axis or axes, measuring a typed dimension against the box's size *before* that first scale, so `50mm` means exactly what it would have meant mid-drag. Repeat as many times as you like, until you drag a different grip, press `Esc`, or switch tools; one `Undo` removes the whole scale.
 
 Scaling a component instance scales that instance alone — the shared definition and every sibling instance are untouched, even for a non-uniform stretch.
+
+## Flip
+
+Flip mirrors the selection across a plane. Pick **Flip** in the Tools menu or the Modify group of the tool rail (it has no shortcut), and three see-through squares appear through the middle of the selection's bounding box, one per axis. Each square is colored by the axis that runs straight through it: the red square mirrors left to right along the red axis, the green one along green, the blue one top to bottom.
+
+1. Hover a square. It brightens and a ghost shows where the selection would land.
+2. Click it. The selection mirrors across that plane, in place, as one undo step.
+
+To mirror across a face of the model instead, hover that face (any face that is not part of the selection) and click: the selection mirrors across the face's plane, so a side panel flips over to the far side of a divider. `Esc` drops the ghost. With nothing selected, the first click selects what is under the cursor, as Move's does, and the next click flips it.
+
+A flipped solid stays a solid, with every face the right way out. A component instance keeps its shared shape and takes a mirrored placement instead, so its other copies are untouched. A group mirrors with everything in it, drawn lines included.
+
+**Mirrored copies:** tap `Option` (Mac) / `Ctrl` (Windows, Linux) before clicking, as in Move, and Flip leaves the original where it is and places a mirrored copy. By default it is a **linked copy**: a left-hand and a right-hand side of a cabinet share one shape, so a Push/Pull on either one changes both, each the mirror of the other. Tap again for an independent copy; tap once more to go back to flipping in place. The copy becomes the selection.
+
+**Object ▸ Flip Along ▸ Red / Green / Blue** mirrors the selection across its own center in one step, without switching tools. It always flips in place; for a copy, use the Flip tool.
 
 ## What transforms apply to
 

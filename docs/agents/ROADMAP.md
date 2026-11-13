@@ -462,6 +462,15 @@ below.
   or any combination — as one shared transform and one undo step; a scaled
   component instance carries the (possibly non-uniform) scale in its own
   pose, leaving the shared definition and every sibling instance untouched
+- Flip: three axis squares through the selection's bounding-box center
+  (or a hovered model face) mirror the selection in one click and one undo
+  step, with a hover ghost; objects and drawing bake the mirror, instances
+  take a mirrored pose. The copy toggle makes a mirrored copy, linked by
+  default (a placement with a reflected pose). Object ▸ Flip Along ▸ Red /
+  Green / Blue flips in place without a tool change. Kernel
+  `Transform::reflection`, `Document::world_bounds`, `flip_matrix`,
+  `flip_nodes`, `flip_copy`; wasm `flip_matrix`, `flip_selection`
+  (recorded). No shortcut, as in SketchUp
 - Delete for objects, groups, instances, and guides
 - Drawing directly on a solid's face splits it and supports bosses/recesses,
   following the same "sticky geometry" rules SketchUp users already know

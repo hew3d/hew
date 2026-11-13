@@ -56,6 +56,9 @@ export const TOOL_REGISTRY: readonly ToolSpec[] = [
   { name: 'Move', label: msg({ context: 'tool', message: 'Move' }), group: 'Modify', actionId: 'tool-move' },
   { name: 'Rotate', label: msg({ context: 'tool', message: 'Rotate' }), group: 'Modify', actionId: 'tool-rotate' },
   { name: 'Scale', label: msg({ context: 'tool', message: 'Scale' }), group: 'Modify', actionId: 'tool-scale' },
+  // Flip: SketchUp has no Flip tool key (Flip Along lives on the context
+  // menu), so none here either.
+  { name: 'Flip', label: msg({ context: 'tool', message: 'Flip' }), group: 'Modify', actionId: 'tool-flip' },
   // ---- Inspect ----
   { name: 'Tape Measure', label: msg`Tape Measure`, group: 'Inspect', actionId: 'tool-tape-measure' },
   { name: 'Dimension', label: msg({ context: 'tool', message: 'Dimension' }), group: 'Inspect', actionId: 'tool-dimension' },

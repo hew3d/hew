@@ -221,6 +221,8 @@ export interface MenuBarProps {
     canUnlinkAll?: boolean
     /** Make component can promote the selected linked copy. */
     canPromote?: boolean
+    /** Something that can be mirrored is selected (Flip Along). */
+    canFlip?: boolean
     canBoolean: boolean
     /** One object, group, or instance selected, with a library backend —
      *  Object ▸ Save Selection to Library… (also the dock's verb). Defaults
@@ -343,6 +345,7 @@ const T = {
   Rectangle: 'Rectangle' as ToolName,
   Rotate: 'Rotate' as ToolName,
   Scale: 'Scale' as ToolName,
+  Flip: 'Flip' as ToolName,
   SectionPlane: 'Section Plane' as ToolName,
   Select: 'Select' as ToolName,
   Slice: 'Slice' as ToolName,
@@ -1099,6 +1102,23 @@ export function MenuBar({
               disabled={!(editGates?.canUnlinkAll ?? false)}
               onClick={withClose(() => onEditAction?.('edit-select-all-copies'))}
             />
+            <SubMenu label={t`Flip Along`}>
+              <MenuItem
+                label={t`Red`}
+                disabled={!(editGates?.canFlip ?? false)}
+                onClick={withClose(() => onEditAction?.('edit-flip-red'))}
+              />
+              <MenuItem
+                label={t`Green`}
+                disabled={!(editGates?.canFlip ?? false)}
+                onClick={withClose(() => onEditAction?.('edit-flip-green'))}
+              />
+              <MenuItem
+                label={t`Blue`}
+                disabled={!(editGates?.canFlip ?? false)}
+                onClick={withClose(() => onEditAction?.('edit-flip-blue'))}
+              />
+            </SubMenu>
             <MenuItem
               label={t`Place Copy`}
               shortcut={sc('edit-place-copy')}
@@ -1494,6 +1514,11 @@ export function MenuBar({
               shortcut={keyFor(T.Scale)}
               checked={activeTool === T.Scale}
               onClick={withClose(() => onSelectTool?.(T.Scale))}
+            />
+            <CheckMenuItem
+              label={toolLabel(T.Flip)}
+              checked={activeTool === T.Flip}
+              onClick={withClose(() => onSelectTool?.(T.Flip))}
             />
             <div style={SEPARATOR_STYLE} />
             <CheckMenuItem

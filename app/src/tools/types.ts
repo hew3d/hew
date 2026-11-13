@@ -337,6 +337,14 @@ export interface Tool {
   onViewChanged?(ray: Ray | undefined): void
 
   /**
+   * (optional) True while the pointer is over something of the tool's own
+   * that takes the click without snapping a point (Flip's gizmo squares).
+   * The Viewport then shows no snap chip, dot, or guide line: the inference
+   * underneath is the ray's ground hit, not a point the click will use.
+   */
+  hidesSnapCue?(): boolean
+
+  /**
    * (optional) The pointer left the canvas. A tool that memoizes anything
    * about what is hovered (`hoverHint`'s refusal line, a draw tool's idle
    * plane patch) drops it here, so the status bar and the drawing-plane cue

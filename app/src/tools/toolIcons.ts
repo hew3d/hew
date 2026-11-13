@@ -42,6 +42,7 @@ import controlCameraSvg from '@material-symbols/svg-400/outlined/control_camera.
 import lineAxisSvg from '@material-symbols/svg-400/outlined/line_axis.svg?raw'
 import squareFootSvg from '@material-symbols/svg-400/outlined/square_foot.svg?raw'
 import textFieldsSvg from '@material-symbols/svg-400/outlined/text_fields.svg?raw'
+import flipSvg from '@material-symbols/svg-400/outlined/flip.svg?raw'
 
 /** Keep in sync with the `ToolName` union in App.tsx (not imported here to
  * avoid a UI-module -> App.tsx dependency edge; the key set is asserted by
@@ -61,6 +62,7 @@ export type ToolName =
   | 'Move'
   | 'Rotate'
   | 'Scale'
+  | 'Flip'
   | 'Tape Measure'
   | 'Dimension'
   | 'Protractor'
@@ -93,6 +95,7 @@ export const TOOL_ICON_SVG: Record<ToolName, string> = {
   'Move': openWithSvg,
   'Rotate': rotateRightSvg,
   'Scale': aspectRatioSvg,
+  'Flip': flipSvg,
   'Tape Measure': straightenSvg,
   'Dimension': squareFootSvg,
   'Protractor': architectureSvg,
@@ -128,6 +131,7 @@ const CURSOR_HOTSPOT: Record<ToolName, { x: number; y: number }> = {
   'Move': { x: 0.5, y: 0.5 },
   'Rotate': { x: 0.5, y: 0.5 },
   'Scale': { x: 0.5, y: 0.5 },
+  'Flip': { x: 0.5, y: 0.5 },
   'Tape Measure': { x: 0.1, y: 0.9 },
   'Dimension': { x: 0.1, y: 0.9 },
   'Protractor': { x: 0.1, y: 0.9 },

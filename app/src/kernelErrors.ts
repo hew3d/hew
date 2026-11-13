@@ -414,6 +414,8 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`Hew's own request to the model kernel carried a malformed selection. If this keeps happening, use Report Bug.`,
   BadCount:
     msg`Hew's own request to the model kernel asked for an invalid copy count. If this keeps happening, use Report Bug.`,
+  BadFlip:
+    msg`Hew's own request to the model kernel carried a malformed flip plane or copy choice. If this keeps happening, use Report Bug.`,
   BadAnchor:
     msg`Hew's own request to the model kernel carried a malformed snap point. If this keeps happening, use Report Bug.`,
   BadAxis:
