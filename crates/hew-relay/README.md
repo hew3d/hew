@@ -31,7 +31,11 @@ which is how the shipped `hew-relay.service` unit configures it (through
 - `--upload-key` makes `PUT` require `Authorization: Bearer <key>` (the
   desktop setting sends it); reads stay keyless because the token is the
   capability. Set it if the relay is reachable from the internet.
-- `--max-total-bytes` bounds memory: past it, uploads get
+- `--max-total-bytes` bounds allocated upload-buffer capacity, including
+  spare capacity, in-flight uploads and outgoing response buffers until the
+  transport releases them. The relay also permits at most 1,024 combined
+  in-flight uploads, stored drops and outgoing response buffers, independently
+  bounding token and map overhead for tiny uploads. Past either limit, uploads get
   `503 {"error":"relay full"}` with `Retry-After` and the desktop says so.
 - `--allow-origin` is only for a phone app served from a DIFFERENT origin
   than the relay; same-origin (the recommended layout) never needs it.
