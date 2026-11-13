@@ -7,8 +7,9 @@
 // built, while skipping the ~30s rebuild when nothing in the kernel changed.
 //
 // Staleness rule: rebuild if the output is absent, or if any Rust source
-// (*.rs, Cargo.toml/lock, rust-toolchain.toml) is newer than the built
-// wasm_api.js. Pure-UI edits leave the WASM untouched and start instantly.
+// (*.rs, Cargo.toml/lock, rust-toolchain.toml) or this script is newer than
+// the built wasm_api.js, or any other generated file is missing from the
+// package directory. Pure-UI edits leave the WASM untouched and start instantly.
 
 import { spawnSync } from "node:child_process";
 import { readdirSync, statSync } from "node:fs";
@@ -34,6 +35,7 @@ function mtime(path) {
 // Newest mtime among the kernel's build inputs.
 function newestSourceMtime() {
   let newest = Math.max(
+    mtime(fileURLToPath(import.meta.url)),
     mtime(join(repoRoot, "Cargo.toml")),
     mtime(join(repoRoot, "Cargo.lock")),
     mtime(join(repoRoot, "rust-toolchain.toml")),
@@ -62,7 +64,10 @@ function newestSourceMtime() {
 }
 
 const built = mtime(outFile);
-if (built !== 0 && built >= newestSourceMtime()) {
+const packageDir = dirname(outFile);
+const outputsPresent = ["wasm_api.js", "wasm_api.d.ts", "wasm_api_bg.wasm", "wasm_api_bg.wasm.d.ts", "package.json"]
+  .every(name => mtime(join(packageDir, name)) !== 0);
+if (outputsPresent && built >= newestSourceMtime()) {
   console.log("[build-wasm] kernel WASM is up to date — skipping build");
   process.exit(0);
 }
